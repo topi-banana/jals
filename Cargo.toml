@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["jals-cli", "jals-syntax"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+jals-syntax = { path = "jals-syntax" }
+logos = { version = "0.16.1" }
