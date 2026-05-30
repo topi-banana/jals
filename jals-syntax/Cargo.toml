@@ -4,3 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+logos.workspace = true
+text-size.workspace = true
+
+[dev-dependencies]
+proptest = "1"

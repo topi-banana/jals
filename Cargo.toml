@@ -10,3 +10,4 @@ edition = "2024"
 clap = { version = "4.6.1", features = ["derive"] }
 jals-syntax = { path = "jals-syntax" }
 logos = { version = "0.16.1" }
+text-size = { version = "1.1.1" }
