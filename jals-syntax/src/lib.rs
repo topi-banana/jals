@@ -3,7 +3,7 @@
 //! `jals-fmt` / `jals-lint` / `jals-lsp` の共通基盤。CLI を除き
 //! `wasm32-unknown-unknown` でのビルドを必須とする。
 //!
-//! 現状はマイルストーン A: `logos` による lexer のみ(`rowan` 依存なし)。
+//! マイルストーン B 進行中: `logos` による lexer + `rowan` による CST parser。
 //!
 //! # 例
 //!
@@ -17,10 +17,16 @@
 //! assert_eq!(joined, "int x = 1;");
 //! ```
 
+pub mod language;
 pub mod lexer;
+mod parser;
+pub mod syntax_error;
 pub mod syntax_kind;
 pub mod token;
 
+pub use language::{JavaLanguage, SyntaxElement, SyntaxNode, SyntaxToken};
 pub use lexer::{LexedToken, Lexer, tokenize};
+pub use parser::{Parse, parse};
+pub use syntax_error::SyntaxError;
 pub use syntax_kind::SyntaxKind;
 pub use token::TokenKind;
