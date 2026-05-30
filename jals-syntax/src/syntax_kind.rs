@@ -4,10 +4,13 @@
 //! バイトの受け皿)」のみを持つ。ノード種別と `EOF` は、parser が構築する
 //! マイルストーン B で追加する(未構築 variant による `dead_code` を避けるため)。
 
+use num_derive::{FromPrimitive, ToPrimitive};
+
 use crate::token::TokenKind;
 
-/// 字句・構文の種別。`rowan` 導入時に `#[repr(u16)]` と数値変換(`num-derive`)を付与する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// 字句・構文の種別。`rowan` の `SyntaxKind`(u16)へ `num-derive` 経由で変換する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromPrimitive, ToPrimitive)]
+#[repr(u16)]
 #[allow(non_camel_case_types)]
 pub enum SyntaxKind {
     // ===== トリビア =====
@@ -137,7 +140,73 @@ pub enum SyntaxKind {
 
     // ===== センチネル =====
     /// 字句解析で未一致だったバイト列(lossless を保つための受け皿)。
+    /// パーサではノード種別としても使い、予期せぬトークンを包む。
     ERROR,
+    /// 入力終端。パーサ内部の番兵で、構文木には現れない。
+    EOF,
+
+    // ===== 昇格キーワード(字句上は IDENT。パーサが文脈で付け替える) =====
+    VAR_KW,
+    YIELD_KW,
+    RECORD_KW,
+    SEALED_KW,
+    PERMITS_KW,
+    WHEN_KW,
+    MODULE_KW,
+    OPEN_KW,
+    OPENS_KW,
+    REQUIRES_KW,
+    TRANSITIVE_KW,
+    EXPORTS_KW,
+    TO_KW,
+    PROVIDES_KW,
+    USES_KW,
+    WITH_KW,
+
+    // ===== ノード =====
+    /// コンパイル単位(ファイル全体)。
+    SOURCE_FILE,
+    PACKAGE_DECL,
+    IMPORT_DECL,
+    /// ドット連結の名前(`a.b.c`、import の `a.b.*` を含む)。
+    QUALIFIED_NAME,
+    CLASS_DECL,
+    MODIFIERS,
+    ANNOTATION,
+    TYPE_PARAMS,
+    TYPE_PARAM,
+    EXTENDS_CLAUSE,
+    IMPLEMENTS_CLAUSE,
+    PERMITS_CLAUSE,
+    THROWS_CLAUSE,
+    /// `non-sealed`(`IDENT("non") MINUS IDENT("sealed")` を再結合したノード)。
+    NON_SEALED_KW,
+    CLASS_BODY,
+    FIELD_DECL,
+    METHOD_DECL,
+    CONSTRUCTOR_DECL,
+    PARAM_LIST,
+    PARAM,
+    BLOCK,
+    LOCAL_VAR_DECL,
+    EXPR_STMT,
+    RETURN_STMT,
+    IF_STMT,
+    WHILE_STMT,
+    TYPE,
+    TYPE_ARGS,
+    /// 式中の名前参照(単一識別子・`this`・`super`)。
+    NAME_REF,
+    LITERAL,
+    BINARY_EXPR,
+    UNARY_EXPR,
+    POSTFIX_EXPR,
+    PAREN_EXPR,
+    CALL_EXPR,
+    FIELD_ACCESS,
+    INDEX_EXPR,
+    NEW_EXPR,
+    ARG_LIST,
 }
 
 impl SyntaxKind {
