@@ -1877,8 +1877,11 @@ fn lambda_params(p: &mut Parser) {
         }
         p.expect(RPAREN);
     } else {
-        // Single bare identifier.
+        // Single bare identifier — wrap it in a PARAM node so the tree is uniform with the
+        // parenthesized form (`(x) -> ...` and `x -> ...` both expose a PARAM).
+        let pm = p.start();
         p.expect(IDENT);
+        pm.complete(p, PARAM);
     }
     m.complete(p, LAMBDA_PARAMS);
 }

@@ -1614,7 +1614,8 @@ mod tests {
                                 LPAREN@22..23 "("
                                 LAMBDA_EXPR@23..33
                                   LAMBDA_PARAMS@23..24
-                                    IDENT@23..24 "x"
+                                    PARAM@23..24
+                                      IDENT@23..24 "x"
                                   WHITESPACE@24..25 " "
                                   ARROW@25..27 "->"
                                   BINARY_EXPR@27..33
