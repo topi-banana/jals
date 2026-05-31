@@ -669,6 +669,9 @@ dependencies = [
 name = "jals-playground"
 version = "0.1.0"
 dependencies = [
+ "jals-fmt",
+ "jals-syntax",
+ "web-sys",
  "yew",
 ]
 
