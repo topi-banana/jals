@@ -1,0 +1,7 @@
+[package]
+name = "jals-playground"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }

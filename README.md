@@ -24,19 +24,21 @@ and a language server.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of three crates:
+`jals` is a Cargo workspace of three core crates plus a browser playground:
 
 | Crate | Description |
 | --- | --- |
 | [`jals-syntax`](jals-syntax) | A lossless Java 26 lexer (`logos`) and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
 | [`jals-cli`](jals-cli) | The `jals` command-line binary. |
+| [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the `jals-syntax`/`jals-fmt` layers entirely in the browser. |
 
 ```
 jals/
-├── jals-syntax/   # lexer + CST parser + typed AST  (wasm-compatible)
-├── jals-fmt/      # formatter (CST -> Doc IR -> text)
-└── jals-cli/      # `jals` binary
+├── jals-syntax/      # lexer + CST parser + typed AST  (wasm-compatible)
+├── jals-fmt/         # formatter (CST -> Doc IR -> text)
+├── jals-cli/         # `jals` binary
+└── jals-playground/  # browser playground (Yew + Trunk -> wasm)
 ```
 
 ## Installation
@@ -143,6 +145,25 @@ public class Foo {
     }
 }
 ```
+
+## Playground
+
+`jals-playground` is a small browser app ([Yew](https://yew.rs), built and served with
+[Trunk](https://trunkrs.dev)) that runs the `wasm32`-compiled syntax and formatting layers
+client-side, with no server round-trip.
+
+```sh
+# One-time setup: the wasm target and Trunk
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+
+# Serve with live reload (defaults to http://0.0.0.0:8000)
+cd jals-playground
+trunk serve
+```
+
+The browser bundle is produced by Trunk (`wasm32`). As a regular workspace member,
+`jals-playground` is also compiled by the host `cargo build`, `clippy`, and `test` jobs.
 
 ## Using the crates as libraries
 

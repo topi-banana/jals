@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["jals-cli", "jals-fmt", "jals-syntax"]
+members = ["jals-cli", "jals-fmt", "jals-playground", "jals-syntax"]
 
 [workspace.package]
 version = "0.1.0"

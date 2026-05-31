@@ -10,7 +10,9 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). A lint
 are intended future consumers of the syntax layer.
 
 - Edition 2024, resolver 3, workspace version `0.1.0`. Needs Rust 1.85+.
-- Crate graph: `jals-cli` → `jals-fmt` → `jals-syntax`.
+- Crate graph: `jals-cli` → `jals-fmt` → `jals-syntax`. `jals-playground` is a separate
+  Yew/Trunk browser app that runs `jals-fmt`/`jals-syntax` in the browser. It targets `wasm32`
+  but also compiles on the host, so `--workspace` build/clippy/test all include it.
 
 ## Architecture map
 
@@ -24,6 +26,7 @@ are intended future consumers of the syntax layer.
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
 | CLI | `jals-cli/src/main.rs` | `jals fmt`; config discovery memoized per directory. |
+| Playground | `jals-playground/` | Yew (CSR) browser app served by Trunk (`Trunk.toml`, tailwind); compiles to `wasm32`. Runs the syntax/formatter in-browser. |
 
 ## Commands
 
@@ -31,6 +34,7 @@ are intended future consumers of the syntax layer.
 cargo build --workspace
 cargo test  --workspace --all-features
 cargo run -p jals-cli -- fmt <paths>       # or: echo '...' | cargo run -p jals-cli -- fmt
+(cd jals-playground && trunk serve)        # run the browser playground (needs trunk + the wasm32 target)
 ```
 
 Before considering a change done, run the **exact CI checks** (see

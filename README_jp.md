@@ -23,19 +23,21 @@
 
 ## ワークスペース構成
 
-`jals` は 3 つの crate からなる Cargo ワークスペースです。
+`jals` は 3 つのコア crate とブラウザ向け playground からなる Cargo ワークスペースです。
 
 | Crate | 説明 |
 | --- | --- |
 | [`jals-syntax`](jals-syntax) | 無損失な Java 26 lexer（`logos`）とエラー耐性のある CST parser（`rowan`）、および CST 上の型付き AST 層。すべてのツールの共通基盤です。 |
 | [`jals-fmt`](jals-fmt) | `jals-syntax` の CST を入力とする Wadler/Prettier 方式の pretty-printer。 |
 | [`jals-cli`](jals-cli) | `jals` コマンドラインバイナリ。 |
+| [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、`jals-syntax` / `jals-fmt` をブラウザ上だけで動かします。 |
 
 ```
 jals/
-├── jals-syntax/   # lexer + CST parser + 型付き AST  (wasm 対応)
-├── jals-fmt/      # フォーマッタ (CST -> Doc IR -> テキスト)
-└── jals-cli/      # `jals` バイナリ
+├── jals-syntax/      # lexer + CST parser + 型付き AST  (wasm 対応)
+├── jals-fmt/         # フォーマッタ (CST -> Doc IR -> テキスト)
+├── jals-cli/         # `jals` バイナリ
+└── jals-playground/  # ブラウザ playground (Yew + Trunk -> wasm)
 ```
 
 ## インストール
@@ -141,6 +143,25 @@ public class Foo {
     }
 }
 ```
+
+## Playground
+
+`jals-playground` は小さなブラウザアプリ（[Yew](https://yew.rs) 製、[Trunk](https://trunkrs.dev)
+でビルド・配信）で、`wasm32` にコンパイルした構文層・フォーマット層を、サーバを介さずブラウザ上
+だけで動かします。
+
+```sh
+# 初回のみ: wasm ターゲットと Trunk を用意
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+
+# ライブリロード付きで配信（デフォルトは http://0.0.0.0:8000）
+cd jals-playground
+trunk serve
+```
+
+ブラウザ向けバンドルは Trunk が `wasm32` 向けに生成します。`jals-playground` は通常の
+ワークスペースメンバーでもあるため、ホスト向けの `cargo build` / `clippy` / `test` でもビルドされます。
 
 ## ライブラリとして使う
 
