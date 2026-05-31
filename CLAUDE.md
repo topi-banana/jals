@@ -78,6 +78,9 @@ When touching the lexer, parser, or formatter, prefer adding a snapshot test
 - Config keys are kebab-case and every key is optional with a default in `Config::default`.
 - Keep `SyntaxKind` variants in sync between the enum, the `From<TokenKind>` mapping, and the
   parser/AST that construct them.
+- In `jals-playground`, implement every Yew component as a `struct` definition plus an
+  `impl yew::Component` block (struct components) — do not use `#[function_component]` or
+  other function-component styles.
 
 ## Repository notes
 
