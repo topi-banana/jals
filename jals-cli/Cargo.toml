@@ -3,4 +3,14 @@ name = "jals-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "jals"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+jals-fmt.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
