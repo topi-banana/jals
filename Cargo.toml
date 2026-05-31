@@ -1,16 +1,21 @@
 [workspace]
 resolver = "3"
-members = ["jals-cli", "jals-syntax"]
+members = ["jals-cli", "jals-fmt", "jals-syntax"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+anyhow = { version = "1.0.99" }
 clap = { version = "4.6.1", features = ["derive"] }
+jals-fmt = { path = "jals-fmt" }
 jals-syntax = { path = "jals-syntax" }
 logos = { version = "0.16.1" }
 num-derive = { version = "0.4.2" }
 num-traits = { version = "0.2.19" }
 rowan = { version = "0.16.1" }
+serde = { version = "1.0.219", features = ["derive"] }
 text-size = { version = "1.1.1" }
+toml = { version = "0.9.5" }
+unicode-width = { version = "0.2.1" }
