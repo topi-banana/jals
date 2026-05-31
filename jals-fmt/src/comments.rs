@@ -1,0 +1,234 @@
+//! Comment attachment.
+//!
+//! Comments are trivia tokens interleaved in the CST. A single pre-pass over the token
+//! stream classifies each comment relative to its neighbouring significant tokens and
+//! anchors it to one of them:
+//!
+//! - **trailing**: on the same line as the preceding significant token (no newline
+//!   between) — anchored to that token, emitted at the end of its line.
+//! - **leading**: starts its own line — anchored to the following significant token,
+//!   emitted on its own line(s) above it.
+//!
+//! Every comment is anchored exactly once, so as long as every significant token is
+//! emitted exactly once through [`CommentMap::token`], no comment is dropped or
+//! duplicated. Classification uses the fact that `WHITESPACE` never contains a newline
+//! and `NEWLINE` is a standalone token (CRLF is one token).
+
+use std::collections::HashMap;
+
+use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+
+use crate::doc::{Doc, blank_line, concat, hardline, line_suffix, nil, raw, text};
+
+struct Comment {
+    kind: SyntaxKind,
+    text: String,
+    /// Whether at least one blank line precedes this comment in the source.
+    blank_before: bool,
+}
+
+/// Comments anchored to significant tokens by source byte offset.
+pub(crate) struct CommentMap {
+    leading: HashMap<usize, Vec<Comment>>,
+    /// Same-line trailing comments (emitted as line suffixes).
+    trailing_inline: HashMap<usize, Vec<Comment>>,
+    /// Own-line comments after the last significant token (emitted on their own lines so
+    /// consecutive line comments are not merged).
+    trailing_below: HashMap<usize, Vec<Comment>>,
+    /// Comments in a file with no significant tokens at all (nothing to anchor to).
+    orphans: Vec<Comment>,
+}
+
+/// Build the comment map for a tree.
+pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
+    let mut leading: HashMap<usize, Vec<Comment>> = HashMap::new();
+    let mut trailing_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
+    let mut trailing_below: HashMap<usize, Vec<Comment>> = HashMap::new();
+
+    let mut last_sig: Option<usize> = None;
+    let mut newlines: u32 = 0; // newlines since the last significant token or comment
+    let mut pending: Vec<Comment> = Vec::new();
+
+    for tok in root
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        let kind = tok.kind();
+        if is_comment(kind) {
+            let comment = Comment {
+                kind,
+                text: content(&tok),
+                blank_before: newlines >= 2,
+            };
+            match last_sig {
+                Some(anchor) if newlines == 0 && pending.is_empty() => {
+                    trailing_inline.entry(anchor).or_default().push(comment);
+                }
+                _ => pending.push(comment),
+            }
+            newlines = 0;
+        } else if kind == SyntaxKind::NEWLINE {
+            newlines += 1;
+        } else if !kind.is_trivia() {
+            let offset = usize::from(tok.text_range().start());
+            if !pending.is_empty() {
+                leading.insert(offset, std::mem::take(&mut pending));
+            }
+            last_sig = Some(offset);
+            newlines = 0;
+        }
+    }
+    // Comments after the last significant token (e.g. end of file): keep them on the last
+    // token, each on its own line so they are never merged or lost. If the file has no
+    // significant tokens at all, keep them as orphans (emitted at the root).
+    let mut orphans = Vec::new();
+    if !pending.is_empty() {
+        match last_sig {
+            Some(off) => trailing_below.entry(off).or_default().extend(pending),
+            None => orphans = pending,
+        }
+    }
+
+    CommentMap {
+        leading,
+        trailing_inline,
+        trailing_below,
+        orphans,
+    }
+}
+
+impl CommentMap {
+    /// The document for a significant token, with its leading comments above and its
+    /// trailing comments deferred to the end of the line. Blank lines *before* the first
+    /// leading comment are emitted by the caller (see [`CommentMap::blank_before_first`]);
+    /// here leading comments are simply separated by single line breaks.
+    pub(crate) fn token(&self, tok: &SyntaxToken, token_doc: Doc) -> Doc {
+        let offset = usize::from(tok.text_range().start());
+        let mut parts = Vec::new();
+        if let Some(lead) = self.leading.get(&offset) {
+            // A break before each leading comment (so it is always on its own line) plus a
+            // break before the token. Redundant breaks coalesce in the renderer, so this is
+            // safe whether or not the caller already broke the line.
+            for c in lead {
+                parts.push(if c.blank_before {
+                    blank_line()
+                } else {
+                    hardline()
+                });
+                parts.push(comment_body(c));
+            }
+            parts.push(hardline());
+        }
+        parts.push(token_doc);
+        if let Some(trail) = self.trailing_inline.get(&offset) {
+            let mut force_break = false;
+            for c in trail {
+                parts.push(line_suffix(concat(vec![text("  "), comment_body(c)])));
+                // A `//` comment runs to end of line, so the next token must start a new
+                // line; force a break (it coalesces with any following break).
+                if c.kind == SyntaxKind::LINE_COMMENT {
+                    force_break = true;
+                }
+            }
+            if force_break {
+                parts.push(hardline());
+            }
+        }
+        if let Some(trail) = self.trailing_below.get(&offset) {
+            for c in trail {
+                parts.push(hardline());
+                parts.push(comment_body(c));
+            }
+        }
+        concat(parts)
+    }
+
+    /// The document for orphan comments (a file with no significant tokens), one per line.
+    pub(crate) fn orphan_doc(&self) -> Doc {
+        if self.orphans.is_empty() {
+            return nil();
+        }
+        let mut parts = Vec::new();
+        for (i, c) in self.orphans.iter().enumerate() {
+            if i > 0 {
+                parts.push(hardline());
+            }
+            parts.push(comment_body(c));
+        }
+        concat(parts)
+    }
+
+    /// Whether the token has any leading comments.
+    pub(crate) fn has_leading(&self, tok: &SyntaxToken) -> bool {
+        let offset = usize::from(tok.text_range().start());
+        self.leading.contains_key(&offset)
+    }
+
+    /// Whether a blank line should precede this token's first leading comment (or the
+    /// token itself, when it has none).
+    pub(crate) fn blank_before_first(&self, tok: &SyntaxToken) -> bool {
+        let offset = usize::from(tok.text_range().start());
+        match self.leading.get(&offset) {
+            Some(lead) if !lead.is_empty() => lead[0].blank_before,
+            _ => false,
+        }
+    }
+
+    /// The same-line trailing comments of a token, as line suffixes (no leading comments).
+    pub(crate) fn trailing_doc(&self, tok: &SyntaxToken) -> Doc {
+        let offset = usize::from(tok.text_range().start());
+        match self.trailing_inline.get(&offset) {
+            None => nil(),
+            Some(trail) => concat(
+                trail
+                    .iter()
+                    .map(|c| line_suffix(concat(vec![text("  "), comment_body(c)])))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The document for comments dangling before a token (e.g. inside an otherwise empty
+    /// block, anchored as leading comments of the closing brace).
+    pub(crate) fn dangling(&self, tok: &SyntaxToken) -> Doc {
+        let offset = usize::from(tok.text_range().start());
+        match self.leading.get(&offset) {
+            None => nil(),
+            Some(lead) => {
+                let mut parts = Vec::new();
+                for (i, c) in lead.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(hardline());
+                    }
+                    parts.push(comment_body(c));
+                }
+                concat(parts)
+            }
+        }
+    }
+}
+
+/// Is this token kind a comment?
+pub(crate) fn is_comment(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
+    )
+}
+
+/// Lightly normalize comment text: line comments have trailing whitespace stripped;
+/// block/doc comments are kept verbatim (their interior alignment is preserved).
+fn content(tok: &SyntaxToken) -> String {
+    match tok.kind() {
+        SyntaxKind::LINE_COMMENT => tok.text().trim_end().to_string(),
+        _ => tok.text().to_string(),
+    }
+}
+
+/// The document for a comment's text (raw for multi-line block/doc comments).
+fn comment_body(c: &Comment) -> Doc {
+    match c.kind {
+        SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT => raw(c.text.clone()),
+        _ => text(c.text.clone()),
+    }
+}

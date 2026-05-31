@@ -1,0 +1,43 @@
+//! The result of formatting: the rendered text plus any warnings.
+
+use std::ops::Range;
+
+use jals_syntax::SyntaxError;
+
+/// A non-fatal diagnostic surfaced while formatting.
+///
+/// Currently these are the syntax errors recorded by the parser; formatting still
+/// proceeds best-effort because the CST is lossless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Warning {
+    /// Human-readable message.
+    pub message: String,
+    /// Byte range in the original source.
+    pub range: Range<usize>,
+}
+
+impl Warning {
+    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Warning {
+        let range = err.range();
+        Warning {
+            message: err.message().to_string(),
+            range: usize::from(range.start())..usize::from(range.end()),
+        }
+    }
+}
+
+/// The output of [`format_source`](crate::format_source).
+#[derive(Debug, Clone)]
+pub struct FormatOutput {
+    /// The formatted source text.
+    pub formatted: String,
+    /// Warnings collected during formatting.
+    pub warnings: Vec<Warning>,
+}
+
+impl FormatOutput {
+    /// Whether any warnings were produced.
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+}

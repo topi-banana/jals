@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 169b1fceb60833f4e0b6ecdc51fc1cc33526f3629869c2fd4fe1a701b8bf0905 # shrinks to src = "class{"
+cc d4a89027016625091b326f6f2efcf91d2941a2fb71f9117022dae578e9be668d # shrinks to src = "{class"
+cc a507b7bbd88f1eefd75a1cd378a52f5d424f9bd93122a8b7252e775615255c6b # shrinks to src = "classclass// c\n// c\n"
+cc 0b875a91648a8f90d87ae02245c3d05cb068289087543fa7ca2d84f4c0e41c46 # shrinks to src = "@("
+cc 749d6c627bcd58808ff28a195c22cd104bf9981b8373fe7c08332076bd8c57b9 # shrinks to src = "// c\n"
+cc da2bdf2d7ab63f1af6a9b7a7492faff48fd073bb031df939279dc42ef90580a1 # shrinks to src = "class{{new(x=class,"
+cc 39b09ea56e9ca1f81d498bcccae4279679d01a429b6ef039ca8c72926290a804 # shrinks to src = "class{-/* b */>=+"
+cc 67f9273d3df17e98300f61285c7dc29ac08386957fc90dd5609f62b0eb7c5c8b # shrinks to src = "{public// c\n// c\n@"
