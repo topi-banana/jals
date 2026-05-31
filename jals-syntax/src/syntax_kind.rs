@@ -1,31 +1,31 @@
-//! 構文木のノード/トークン種別。将来 `rowan` の `SyntaxKind`(u16)へ対応させる統一種別。
+//! Node/token kinds for the syntax tree. A unified kind that maps to `rowan`'s `SyntaxKind`(u16).
 //!
-//! マイルストーン A では「終端トークン種別 + `DOC_COMMENT`(Javadoc)+ `ERROR`(未一致
-//! バイトの受け皿)」のみを持つ。ノード種別と `EOF` は、parser が構築する
-//! マイルストーン B で追加する(未構築 variant による `dead_code` を避けるため)。
+//! Milestone A contains only terminal token kinds, `DOC_COMMENT` (Javadoc), and `ERROR`
+//! (a catch-all for unmatched bytes). Node kinds and `EOF` are added in Milestone B,
+//! where the parser builds the tree (to avoid `dead_code` from unconstructed variants).
 
 use num_derive::{FromPrimitive, ToPrimitive};
 
 use crate::token::TokenKind;
 
-/// 字句・構文の種別。`rowan` の `SyntaxKind`(u16)へ `num-derive` 経由で変換する。
+/// Lexical and syntactic kind. Converted to `rowan`'s `SyntaxKind`(u16) via `num-derive`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromPrimitive, ToPrimitive)]
 #[repr(u16)]
 #[allow(non_camel_case_types)]
 pub enum SyntaxKind {
-    // ===== トリビア =====
+    // ===== Trivia =====
     WHITESPACE,
     NEWLINE,
     LINE_COMMENT,
     BLOCK_COMMENT,
-    /// Javadoc コメント `/** ... */`(`/**/` を除く)。
+    /// Javadoc comment `/** ... */` (excluding `/**/`).
     DOC_COMMENT,
 
-    // ===== 識別子 =====
+    // ===== Identifiers =====
     IDENT,
     UNDERSCORE,
 
-    // ===== 予約語(50) =====
+    // ===== Keywords (50) =====
     ABSTRACT_KW,
     ASSERT_KW,
     BOOLEAN_KW,
@@ -77,19 +77,19 @@ pub enum SyntaxKind {
     VOLATILE_KW,
     WHILE_KW,
 
-    // ===== リテラルキーワード =====
+    // ===== Literal keywords =====
     TRUE_KW,
     FALSE_KW,
     NULL_KW,
 
-    // ===== リテラル =====
+    // ===== Literals =====
     INT_LITERAL,
     FLOAT_LITERAL,
     CHAR_LITERAL,
     STRING_LITERAL,
     TEXT_BLOCK,
 
-    // ===== 区切り子 =====
+    // ===== Delimiters =====
     LPAREN,
     RPAREN,
     LBRACE,
@@ -103,7 +103,7 @@ pub enum SyntaxKind {
     AT,
     COLON_COLON,
 
-    // ===== 演算子 =====
+    // ===== Operators =====
     EQ,
     LT,
     GT,
@@ -138,14 +138,14 @@ pub enum SyntaxKind {
     CARET_EQ,
     PERCENT_EQ,
 
-    // ===== センチネル =====
-    /// 字句解析で未一致だったバイト列(lossless を保つための受け皿)。
-    /// パーサではノード種別としても使い、予期せぬトークンを包む。
+    // ===== Sentinels =====
+    /// Unmatched bytes from lexing (a catch-all to preserve losslessness).
+    /// Also used as a node kind in the parser to wrap unexpected tokens.
     ERROR,
-    /// 入力終端。パーサ内部の番兵で、構文木には現れない。
+    /// End of input. An internal sentinel in the parser; does not appear in the syntax tree.
     EOF,
 
-    // ===== 昇格キーワード(字句上は IDENT。パーサが文脈で付け替える) =====
+    // ===== Promoted keywords (lexed as IDENT, reclassified by context in the parser) =====
     VAR_KW,
     YIELD_KW,
     RECORD_KW,
@@ -163,12 +163,12 @@ pub enum SyntaxKind {
     USES_KW,
     WITH_KW,
 
-    // ===== ノード =====
-    /// コンパイル単位(ファイル全体)。
+    // ===== Nodes =====
+    /// Compilation unit (the whole file).
     SOURCE_FILE,
     PACKAGE_DECL,
     IMPORT_DECL,
-    /// ドット連結の名前(`a.b.c`、import の `a.b.*` を含む)。
+    /// Dotted name (`a.b.c`, including `a.b.*` in imports).
     QUALIFIED_NAME,
     CLASS_DECL,
     MODIFIERS,
@@ -179,7 +179,7 @@ pub enum SyntaxKind {
     IMPLEMENTS_CLAUSE,
     PERMITS_CLAUSE,
     THROWS_CLAUSE,
-    /// `non-sealed`(`IDENT("non") MINUS IDENT("sealed")` を再結合したノード)。
+    /// `non-sealed` (a node that re-joins `IDENT("non") MINUS IDENT("sealed")`).
     NON_SEALED_KW,
     CLASS_BODY,
     FIELD_DECL,
@@ -195,7 +195,7 @@ pub enum SyntaxKind {
     WHILE_STMT,
     TYPE,
     TYPE_ARGS,
-    /// 式中の名前参照(単一識別子・`this`・`super`)。
+    /// Name reference in an expression (single identifier, `this`, or `super`).
     NAME_REF,
     LITERAL,
     BINARY_EXPR,
@@ -207,13 +207,91 @@ pub enum SyntaxKind {
     INDEX_EXPR,
     NEW_EXPR,
     ARG_LIST,
+
+    // ===== Nodes (Milestone B extensions) =====
+    // --- Type declarations and members ---
+    INTERFACE_DECL,
+    ENUM_DECL,
+    RECORD_DECL,
+    /// `@interface` (annotation type declaration).
+    ANNOTATION_TYPE_DECL,
+    /// enum body (constants + optional members).
+    ENUM_BODY,
+    /// enum constant (`NAME(args) { body }`).
+    ENUM_CONSTANT,
+    /// record header (`(components)`).
+    RECORD_HEADER,
+    RECORD_COMPONENT,
+    /// Initializer block (`{ ... }` / `static { ... }`).
+    INITIALIZER,
+    /// Default value of an annotation element (`default value`).
+    ANNOTATION_DEFAULT,
+
+    // --- Annotation arguments ---
+    /// Argument list of an annotation use (`(...)`).
+    ANNOTATION_ARG_LIST,
+    /// Element = value pair (`name = value`).
+    ANNOTATION_PAIR,
+
+    // --- Statements ---
+    FOR_STMT,
+    FOR_EACH_STMT,
+    DO_WHILE_STMT,
+    BREAK_STMT,
+    CONTINUE_STMT,
+    THROW_STMT,
+    YIELD_STMT,
+    ASSERT_STMT,
+    SYNCHRONIZED_STMT,
+    TRY_STMT,
+    /// The resource list of a try-with-resources (`(...)`).
+    RESOURCE_LIST,
+    RESOURCE,
+    CATCH_CLAUSE,
+    FINALLY_CLAUSE,
+    SWITCH_STMT,
+    /// switch body (`{ ... }`).
+    SWITCH_BLOCK,
+    /// Arrow-form rule (`case L -> ...`).
+    SWITCH_RULE,
+    /// Colon-form group (`case L: stmts`).
+    SWITCH_GROUP,
+    /// `case ...` / `default` label.
+    SWITCH_LABEL,
+    /// Labeled statement (`label: stmt`).
+    LABELED_STMT,
+    /// Empty statement (`;`).
+    EMPTY_STMT,
+
+    // --- Expressions ---
+    ASSIGNMENT_EXPR,
+    /// Ternary conditional expression (`c ? a : b`).
+    TERNARY_EXPR,
+    LAMBDA_EXPR,
+    LAMBDA_PARAMS,
+    /// Method reference (`Type::method` / `expr::method` / `Type::new`).
+    METHOD_REF_EXPR,
+    CAST_EXPR,
+    /// Array initializer (`{ a, b, c }`).
+    ARRAY_INIT,
+    SWITCH_EXPR,
+    /// Class literal (`Type.class`).
+    CLASS_LITERAL,
+
+    // --- Patterns ---
+    /// Type pattern (`Type id`).
+    TYPE_PATTERN,
+    /// Record pattern (`Type(subpatterns)`).
+    RECORD_PATTERN,
+    /// Pattern guard (`when expr`).
+    GUARD,
 }
 
 impl SyntaxKind {
-    /// `TokenKind` と元テキストから `SyntaxKind` を決定する。
+    /// Determines a `SyntaxKind` from a `TokenKind` and the original source text.
     ///
-    /// `BLOCK_COMMENT` のうち Javadoc(`/**` で始まり `/**/` ではないもの)は
-    /// `DOC_COMMENT` に振り分ける。それ以外は [`From<TokenKind>`] と同じ。
+    /// `BLOCK_COMMENT` tokens that are Javadoc comments (starting with `/**` but not `/**/`)
+    /// are classified as `DOC_COMMENT`. Everything else behaves the same as [`From<TokenKind>`].
     pub(crate) fn from_token(token: TokenKind, text: &str) -> SyntaxKind {
         match token {
             TokenKind::BLOCK_COMMENT if is_doc_comment(text) => SyntaxKind::DOC_COMMENT,
@@ -221,7 +299,7 @@ impl SyntaxKind {
         }
     }
 
-    /// トリビア(空白・改行・コメント)か。
+    /// Returns whether this kind is trivia (whitespace, newlines, or comments).
     pub fn is_trivia(self) -> bool {
         matches!(
             self,
@@ -350,7 +428,7 @@ impl From<TokenKind> for SyntaxKind {
     }
 }
 
-/// Javadoc コメントか(`/**` で始まり、空コメント `/**/` ではない)。
+/// Returns whether the text is a Javadoc comment (starts with `/**` and is not the empty comment `/**/`).
 fn is_doc_comment(text: &str) -> bool {
     text.starts_with("/**") && text != "/**/"
 }

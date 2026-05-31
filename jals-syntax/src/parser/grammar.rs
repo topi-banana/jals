@@ -1,18 +1,26 @@
-//! Java の文法(再帰下降)。マイルストーン B の vertical slice。
+//! Java grammar (recursive descent). The Milestone B extension.
 //!
-//! 対応範囲: package / import(static・`*`)/ クラス宣言(修飾子・型引数・extends・
-//! implements)/ フィールド・メソッド・コンストラクタ / ブロックと文(局所変数(`var`
-//! 昇格)・return・if・while・式文)/ 式(リテラル・名前・括弧・単項・二項(優先順位)・
-//! 後置 `.`/呼び出し/添字)/ 型(`List<Map<K, V>>`、配列)。`>` 系は隣接判定で合成する。
+//! Coverage: package / import / type declaration (class / interface / enum / record / `@interface`,
+//! modifier, type argument, extends, implements, sealed/permits/non-sealed) / member (field,
+//! method, constructor, initializer, nested type, annotation element) / annotation argument /
+//! statement (block, local variable, local type, return, if, while, do-while, for / for-each, break, continue,
+//! throw, yield, assert, synchronized, try/catch/finally, switch (pattern), labeled, expression statement) /
+//! expression (assignment, ternary, lambda, method reference, cast, instanceof pattern, switch expression, new, array initializer,
+//! class literal, binary/unary/postfix via precedence climbing) / type (`List<Map<K, V>>`, array).
+//! `>` family tokens are fused via adjacency checks.
 //!
-//! 壊れた入力でも panic せず木を返す。各所に回復集合を置き、`err_and_bump` で前進を保証する。
+//! Returns a tree without panicking even on broken input. Recovery sets are placed throughout,
+//! and `err_and_bump` guarantees progress.
+//! lambda / cast / for-each / switch / pattern disambiguation uses bounded lookahead that consumes no fuel
+//! ([`Parser::nth_nofuel`]) and always terminates within the input length.
 
 use super::Parser;
-use super::marker::CompletedMarker;
+use super::marker::{CompletedMarker, Marker};
 use super::token_set::TokenSet;
+use crate::syntax_kind::SyntaxKind;
 use crate::syntax_kind::SyntaxKind::*;
 
-/// クラス本体メンバの開始になりうるトークン(回復に使う)。
+/// Tokens that can begin a class body member (used for recovery).
 const MEMBER_RECOVERY: TokenSet = TokenSet::new(&[
     AT,
     PUBLIC_KW,
@@ -26,23 +34,38 @@ const MEMBER_RECOVERY: TokenSet = TokenSet::new(&[
     TRANSIENT_KW,
     VOLATILE_KW,
     STRICTFP_KW,
+    DEFAULT_KW,
     CLASS_KW,
     INTERFACE_KW,
     ENUM_KW,
     RBRACE,
 ]);
 
-/// 文の開始になりうるトークン(回復に使う)。
+/// Tokens that can begin a statement (used for recovery).
 const STMT_RECOVERY: TokenSet = TokenSet::new(&[
-    LBRACE, RBRACE, SEMICOLON, IF_KW, WHILE_KW, FOR_KW, RETURN_KW, DO_KW, SWITCH_KW, TRY_KW,
+    LBRACE,
+    RBRACE,
+    SEMICOLON,
+    IF_KW,
+    WHILE_KW,
+    FOR_KW,
+    RETURN_KW,
+    DO_KW,
+    SWITCH_KW,
+    TRY_KW,
+    THROW_KW,
+    BREAK_KW,
+    CONTINUE_KW,
+    ASSERT_KW,
+    SYNCHRONIZED_KW,
 ]);
 
-/// プリミティブ型キーワード。
+/// Primitive type keywords.
 const PRIMITIVE_TYPE: TokenSet = TokenSet::new(&[
     BOOLEAN_KW, BYTE_KW, SHORT_KW, INT_KW, LONG_KW, CHAR_KW, FLOAT_KW, DOUBLE_KW, VOID_KW,
 ]);
 
-/// 修飾子キーワード(`non-sealed` は別途扱う)。
+/// Modifier keywords (`non-sealed` is handled separately).
 const MODIFIER_KW: TokenSet = TokenSet::new(&[
     PUBLIC_KW,
     PROTECTED_KW,
@@ -58,7 +81,7 @@ const MODIFIER_KW: TokenSet = TokenSet::new(&[
     DEFAULT_KW,
 ]);
 
-/// リテラルトークン。
+/// Literal tokens.
 const LITERAL_TOKEN: TokenSet = TokenSet::new(&[
     INT_LITERAL,
     FLOAT_LITERAL,
@@ -70,10 +93,78 @@ const LITERAL_TOKEN: TokenSet = TokenSet::new(&[
     NULL_KW,
 ]);
 
-/// エントリポイント。コンパイル単位をパースする。
+/// Tokens that can start a unary expression following a primitive scalar cast `(int) x` (including `+`/`-`).
+const CAST_FOLLOW_PRIMITIVE: TokenSet = TokenSet::new(&[
+    IDENT,
+    INT_LITERAL,
+    FLOAT_LITERAL,
+    CHAR_LITERAL,
+    STRING_LITERAL,
+    TEXT_BLOCK,
+    TRUE_KW,
+    FALSE_KW,
+    NULL_KW,
+    LPAREN,
+    BANG,
+    TILDE,
+    PLUS,
+    MINUS,
+    PLUS_PLUS,
+    MINUS_MINUS,
+    NEW_KW,
+    THIS_KW,
+    SUPER_KW,
+    SWITCH_KW,
+]);
+
+/// Tokens that can start a unary expression following a reference type cast `(Foo) x` (excluding `+`/`-`/`++`/`--`).
+/// This constraint ensures `(a) - b` is treated as subtraction, not a cast.
+const CAST_FOLLOW_REF: TokenSet = TokenSet::new(&[
+    IDENT,
+    INT_LITERAL,
+    FLOAT_LITERAL,
+    CHAR_LITERAL,
+    STRING_LITERAL,
+    TEXT_BLOCK,
+    TRUE_KW,
+    FALSE_KW,
+    NULL_KW,
+    LPAREN,
+    BANG,
+    TILDE,
+    NEW_KW,
+    THIS_KW,
+    SUPER_KW,
+    SWITCH_KW,
+]);
+
+/// Token set that can begin an expression (for lookahead only).
+const EXPR_START: TokenSet = TokenSet::new(&[
+    INT_LITERAL,
+    FLOAT_LITERAL,
+    CHAR_LITERAL,
+    STRING_LITERAL,
+    TEXT_BLOCK,
+    TRUE_KW,
+    FALSE_KW,
+    NULL_KW,
+    IDENT,
+    LPAREN,
+    THIS_KW,
+    SUPER_KW,
+    NEW_KW,
+    SWITCH_KW,
+    BANG,
+    TILDE,
+    PLUS,
+    MINUS,
+    PLUS_PLUS,
+    MINUS_MINUS,
+]);
+
+/// Entry point. Parses a compilation unit.
 pub(super) fn root(p: &mut Parser) {
     let m = p.start();
-    // 注: package のアノテーション(package-info)は将来対応。今は素の package のみ。
     if p.at(PACKAGE_KW) {
         package_decl(p);
     }
@@ -83,9 +174,9 @@ pub(super) fn root(p: &mut Parser) {
     while !p.at_eof() {
         let before = p.pos();
         type_decl(p);
-        // 前進保証(最終防衛線)。
+        // Progress guarantee (last-resort safeguard).
         if p.pos() == before {
-            p.err_and_bump("予期しないトークンです");
+            p.err_and_bump("unexpected token");
         }
     }
     m.complete(p, SOURCE_FILE);
@@ -108,7 +199,7 @@ fn import_decl(p: &mut Parser) {
     m.complete(p, IMPORT_DECL);
 }
 
-/// ドット連結の名前。`allow_star` が真なら末尾 `.*` を許す(import 用)。
+/// Dotted name. If `allow_star` is true, allows a trailing `.*` (for imports).
 fn qualified_name(p: &mut Parser, allow_star: bool) {
     let m = p.start();
     p.expect(IDENT);
@@ -127,19 +218,32 @@ fn qualified_name(p: &mut Parser, allow_star: bool) {
     m.complete(p, QUALIFIED_NAME);
 }
 
-/// 型宣言(現状はクラスのみ。それ以外は ERROR で1つ読み飛ばして回復)。
+// ===== Type declarations =====
+
+/// Whether this is the start of `record Foo(...)` / `record Foo<T>(...)` (`record` is a contextual keyword).
+/// Requires `(` or `<` after the name to distinguish from variable declarations like `record r = 1;`.
+fn at_record_decl(p: &Parser) -> bool {
+    p.at_contextual_kw("record") && p.nth_at(1, IDENT) && (p.nth_at(2, LPAREN) || p.nth_at(2, LT))
+}
+
+/// Type declaration (class / interface / enum / record / `@interface`).
 fn type_decl(p: &mut Parser) {
     let m = p.start();
     modifiers(p);
-    if p.at(CLASS_KW) {
-        class_rest(p, m);
-    } else {
-        m.abandon(p);
-        p.err_and_bump("型宣言を期待しました");
+    match p.current() {
+        CLASS_KW => class_rest(p, m),
+        INTERFACE_KW => interface_rest(p, m),
+        ENUM_KW => enum_rest(p, m),
+        AT if p.nth_at(1, INTERFACE_KW) => annotation_type_rest(p, m),
+        _ if at_record_decl(p) => record_rest(p, m),
+        _ => {
+            m.abandon(p);
+            p.err_and_bump("expected a type declaration");
+        }
     }
 }
 
-/// 修飾子列(アノテーション・修飾子キーワード・`non-sealed`)。常にノードを作る。
+/// Modifier sequence (annotations, modifier keywords, `sealed`, `non-sealed`). Always creates a node.
 fn modifiers(p: &mut Parser) {
     let m = p.start();
     loop {
@@ -163,14 +267,68 @@ fn annotation(p: &mut Parser) {
     p.bump(AT);
     qualified_name(p, false);
     if p.at(LPAREN) {
-        // 注: アノテーション引数は素通し(中身は後で精密化)。括弧の対応だけ取る。
-        arg_list(p);
+        annotation_arg_list(p);
     }
     m.complete(p, ANNOTATION);
 }
 
-/// `non-sealed`(`IDENT("non") MINUS IDENT("sealed")` が隣接)を判定する。
-fn at_non_sealed(p: &mut Parser) -> bool {
+/// Annotation argument list (`(value)` / `(name = value, ...)`).
+fn annotation_arg_list(p: &mut Parser) {
+    let m = p.start();
+    p.bump(LPAREN);
+    while !p.at(RPAREN) && !p.at_eof() {
+        let before = p.pos();
+        if p.at(IDENT) && p.nth_at(1, EQ) {
+            let pair = p.start();
+            p.bump(IDENT);
+            p.bump(EQ);
+            element_value(p);
+            pair.complete(p, ANNOTATION_PAIR);
+        } else {
+            element_value(p);
+        }
+        if p.pos() == before {
+            p.err_and_bump("unexpected argument");
+        }
+        if !p.eat(COMMA) {
+            break;
+        }
+    }
+    p.expect(RPAREN);
+    m.complete(p, ANNOTATION_ARG_LIST);
+}
+
+/// Annotation element value or array initializer element (expression / nested annotation / array).
+fn element_value(p: &mut Parser) {
+    if p.at(LBRACE) {
+        array_init(p);
+    } else if p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+        annotation(p);
+    } else {
+        expr(p);
+    }
+}
+
+/// Array initializer `{ a, b, c }` (nested, trailing comma allowed).
+fn array_init(p: &mut Parser) {
+    let m = p.start();
+    p.bump(LBRACE);
+    while !p.at(RBRACE) && !p.at_eof() {
+        let before = p.pos();
+        element_value(p);
+        if p.pos() == before {
+            p.err_and_bump("unexpected element");
+        }
+        if !p.eat(COMMA) {
+            break;
+        }
+    }
+    p.expect(RBRACE);
+    m.complete(p, ARRAY_INIT);
+}
+
+/// Detects `non-sealed` (`IDENT("non") MINUS IDENT("sealed")` adjacent).
+fn at_non_sealed(p: &Parser) -> bool {
     p.at_contextual_kw("non")
         && p.nth_at(1, MINUS)
         && p.nth_adjacent(0)
@@ -179,7 +337,7 @@ fn at_non_sealed(p: &mut Parser) -> bool {
         && p.nth_text(2) == "sealed"
 }
 
-/// `non-sealed` を1つの `NON_SEALED_KW` ノードに再結合する。
+/// Re-combines `non-sealed` into a single `NON_SEALED_KW` node.
 fn non_sealed(p: &mut Parser) {
     let m = p.start();
     p.bump_any(); // non
@@ -188,39 +346,181 @@ fn non_sealed(p: &mut Parser) {
     m.complete(p, NON_SEALED_KW);
 }
 
-/// `class` 以降(修飾子は呼び出し側が読み済み、`m` はそれを含む開始マーカ)。
-fn class_rest(p: &mut Parser, m: super::marker::Marker) {
+/// After `class` (modifiers already consumed by the caller, `m` is the enclosing start marker).
+fn class_rest(p: &mut Parser, m: Marker) {
     p.bump(CLASS_KW);
     p.expect(IDENT);
     if p.at(LT) {
         type_params(p);
     }
     if p.at(EXTENDS_KW) {
-        let c = p.start();
-        p.bump(EXTENDS_KW);
-        type_(p);
-        c.complete(p, EXTENDS_CLAUSE);
+        extends_clause(p, false);
     }
     if p.at(IMPLEMENTS_KW) {
-        let c = p.start();
-        p.bump(IMPLEMENTS_KW);
-        type_(p);
-        while p.eat(COMMA) {
-            type_(p);
-        }
-        c.complete(p, IMPLEMENTS_CLAUSE);
+        implements_clause(p);
     }
     if p.at_contextual_kw("permits") {
-        let c = p.start();
-        p.bump_remap(PERMITS_KW);
-        type_(p);
-        while p.eat(COMMA) {
-            type_(p);
-        }
-        c.complete(p, PERMITS_CLAUSE);
+        permits_clause(p);
     }
     class_body(p);
     m.complete(p, CLASS_DECL);
+}
+
+/// After `interface`.
+fn interface_rest(p: &mut Parser, m: Marker) {
+    p.bump(INTERFACE_KW);
+    p.expect(IDENT);
+    if p.at(LT) {
+        type_params(p);
+    }
+    if p.at(EXTENDS_KW) {
+        // interfaces can extend multiple types.
+        extends_clause(p, true);
+    }
+    if p.at_contextual_kw("permits") {
+        permits_clause(p);
+    }
+    class_body(p);
+    m.complete(p, INTERFACE_DECL);
+}
+
+/// After `enum`.
+fn enum_rest(p: &mut Parser, m: Marker) {
+    p.bump(ENUM_KW);
+    p.expect(IDENT);
+    if p.at(IMPLEMENTS_KW) {
+        implements_clause(p);
+    }
+    enum_body(p);
+    m.complete(p, ENUM_DECL);
+}
+
+fn enum_body(p: &mut Parser) {
+    let m = p.start();
+    if !p.expect(LBRACE) {
+        m.complete(p, ENUM_BODY);
+        return;
+    }
+    // Constant list (up to `;` or `}`).
+    while !p.at(RBRACE) && !p.at(SEMICOLON) && !p.at_eof() {
+        let before = p.pos();
+        if p.at(IDENT) || p.at(AT) {
+            enum_constant(p);
+        } else {
+            p.err_and_bump("expected an enum constant");
+        }
+        if p.pos() == before {
+            p.err_and_bump("unexpected token");
+        }
+        if !p.eat(COMMA) {
+            break;
+        }
+    }
+    // Optional `;` followed by members.
+    if p.eat(SEMICOLON) {
+        while !p.at(RBRACE) && !p.at_eof() {
+            let before = p.pos();
+            member(p);
+            if p.pos() == before {
+                p.err_and_bump("unexpected token");
+            }
+        }
+    }
+    p.expect(RBRACE);
+    m.complete(p, ENUM_BODY);
+}
+
+fn enum_constant(p: &mut Parser) {
+    let m = p.start();
+    while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+        annotation(p);
+    }
+    p.expect(IDENT);
+    if p.at(LPAREN) {
+        arg_list(p);
+    }
+    if p.at(LBRACE) {
+        // Class body specific to this constant.
+        class_body(p);
+    }
+    m.complete(p, ENUM_CONSTANT);
+}
+
+/// After `record`.
+fn record_rest(p: &mut Parser, m: Marker) {
+    p.bump_remap(RECORD_KW);
+    p.expect(IDENT);
+    if p.at(LT) {
+        type_params(p);
+    }
+    record_header(p);
+    if p.at(IMPLEMENTS_KW) {
+        implements_clause(p);
+    }
+    class_body(p);
+    m.complete(p, RECORD_DECL);
+}
+
+fn record_header(p: &mut Parser) {
+    let m = p.start();
+    if !p.expect(LPAREN) {
+        m.complete(p, RECORD_HEADER);
+        return;
+    }
+    while !p.at(RPAREN) && !p.at_eof() {
+        let comp = p.start();
+        modifiers(p);
+        type_(p);
+        p.eat(ELLIPSIS);
+        p.expect(IDENT);
+        comp.complete(p, RECORD_COMPONENT);
+        if !p.eat(COMMA) {
+            break;
+        }
+    }
+    p.expect(RPAREN);
+    m.complete(p, RECORD_HEADER);
+}
+
+/// After `@interface` (annotation type declaration).
+fn annotation_type_rest(p: &mut Parser, m: Marker) {
+    p.bump(AT);
+    p.bump(INTERFACE_KW);
+    p.expect(IDENT);
+    class_body(p);
+    m.complete(p, ANNOTATION_TYPE_DECL);
+}
+
+fn extends_clause(p: &mut Parser, multi: bool) {
+    let c = p.start();
+    p.bump(EXTENDS_KW);
+    type_(p);
+    if multi {
+        while p.eat(COMMA) {
+            type_(p);
+        }
+    }
+    c.complete(p, EXTENDS_CLAUSE);
+}
+
+fn implements_clause(p: &mut Parser) {
+    let c = p.start();
+    p.bump(IMPLEMENTS_KW);
+    type_(p);
+    while p.eat(COMMA) {
+        type_(p);
+    }
+    c.complete(p, IMPLEMENTS_CLAUSE);
+}
+
+fn permits_clause(p: &mut Parser) {
+    let c = p.start();
+    p.bump_remap(PERMITS_KW);
+    type_(p);
+    while p.eat(COMMA) {
+        type_(p);
+    }
+    c.complete(p, PERMITS_CLAUSE);
 }
 
 fn type_params(p: &mut Parser) {
@@ -228,6 +528,10 @@ fn type_params(p: &mut Parser) {
     p.bump(LT);
     while !p.at(GT) && !p.at_eof() {
         let tp = p.start();
+        // Type parameters may also carry annotations.
+        while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+            annotation(p);
+        }
         p.expect(IDENT);
         if p.at(EXTENDS_KW) {
             p.bump(EXTENDS_KW);
@@ -242,7 +546,7 @@ fn type_params(p: &mut Parser) {
             break;
         }
     }
-    p.expect(GT);
+    expect_gt(p);
     m.complete(p, TYPE_PARAMS);
 }
 
@@ -255,27 +559,58 @@ fn class_body(p: &mut Parser) {
     while !p.at(RBRACE) && !p.at_eof() {
         let before = p.pos();
         member(p);
-        // 前進保証: member が1トークンも消費しなければ強制的に1つ ERROR で包む。
-        // 回復集合の取りこぼしによる無限ループを防ぐ最終防衛線。
+        // Progress guarantee: if member consumed no tokens, force-wrap one token as ERROR.
         if p.pos() == before {
-            p.err_and_bump("予期しないトークンです");
+            p.err_and_bump("unexpected token");
         }
     }
     p.expect(RBRACE);
     m.complete(p, CLASS_BODY);
 }
 
-/// クラスメンバ(フィールド/メソッド/コンストラクタ)。
+/// Member of class / interface / enum / `@interface`.
 fn member(p: &mut Parser) {
     if p.at(SEMICOLON) {
-        // 空メンバ。
+        // Empty member.
         p.bump(SEMICOLON);
         return;
     }
     let m = p.start();
     modifiers(p);
 
-    // コンストラクタ: IDENT '(' で型がない(簡易判定)。
+    // Nested type declaration.
+    match p.current() {
+        CLASS_KW => return class_rest(p, m),
+        INTERFACE_KW => return interface_rest(p, m),
+        ENUM_KW => return enum_rest(p, m),
+        AT if p.nth_at(1, INTERFACE_KW) => return annotation_type_rest(p, m),
+        _ => {}
+    }
+    if at_record_decl(p) {
+        return record_rest(p, m);
+    }
+
+    // Initializer block (`{ ... }` / `static { ... }`).
+    if p.at(LBRACE) {
+        block(p);
+        m.complete(p, INITIALIZER);
+        return;
+    }
+
+    // Type arguments for generic methods/constructors.
+    if p.at(LT) {
+        type_params(p);
+    }
+
+    // Compact canonical constructor (record): `Name { ... }`.
+    if p.at(IDENT) && p.nth_at(1, LBRACE) {
+        p.bump(IDENT);
+        block(p);
+        m.complete(p, CONSTRUCTOR_DECL);
+        return;
+    }
+
+    // Constructor: `Name ( ... )`.
     if p.at(IDENT) && p.nth_at(1, LPAREN) {
         p.bump(IDENT);
         param_list(p);
@@ -291,19 +626,31 @@ fn member(p: &mut Parser) {
         return;
     }
 
-    // それ以外は型から始まる(フィールド or メソッド)。
+    // Otherwise starts with a type (field or method).
     if !at_type_start(p) {
         m.abandon(p);
-        p.err_recover("メンバ宣言を期待しました", MEMBER_RECOVERY);
+        p.err_recover("expected a member declaration", MEMBER_RECOVERY);
         return;
     }
     type_(p);
     p.expect(IDENT);
     if p.at(LPAREN) {
-        // メソッド。
+        // Method (including annotation elements).
         param_list(p);
+        // Old-style return-type array dimensions `m()[]`.
+        while p.at(LBRACK) && p.nth_at(1, RBRACK) {
+            p.bump(LBRACK);
+            p.bump(RBRACK);
+        }
         if p.at(THROWS_KW) {
             throws_clause(p);
+        }
+        if p.at(DEFAULT_KW) {
+            // Default value for annotation element.
+            let d = p.start();
+            p.bump(DEFAULT_KW);
+            element_value(p);
+            d.complete(p, ANNOTATION_DEFAULT);
         }
         if p.at(LBRACE) {
             block(p);
@@ -312,18 +659,42 @@ fn member(p: &mut Parser) {
         }
         m.complete(p, METHOD_DECL);
     } else {
-        // フィールド(複数宣言子は簡易対応: `= expr` と `,` を読む)。
-        if p.eat(EQ) {
-            expr(p);
-        }
-        while p.eat(COMMA) {
-            p.expect(IDENT);
-            if p.eat(EQ) {
-                expr(p);
-            }
-        }
+        // Field (supports multiple declarators, array dimensions, and array initializers).
+        field_tail(p);
         p.expect(SEMICOLON);
         m.complete(p, FIELD_DECL);
+    }
+}
+
+/// Remainder of a field/local variable declarator (the first name is already consumed).
+fn field_tail(p: &mut Parser) {
+    dims(p);
+    if p.eat(EQ) {
+        var_init(p);
+    }
+    while p.eat(COMMA) {
+        p.expect(IDENT);
+        dims(p);
+        if p.eat(EQ) {
+            var_init(p);
+        }
+    }
+}
+
+/// Skips a sequence of `[]` (array dimensions).
+fn dims(p: &mut Parser) {
+    while p.at(LBRACK) && p.nth_at(1, RBRACK) {
+        p.bump(LBRACK);
+        p.bump(RBRACK);
+    }
+}
+
+/// Variable initializer (array initializer `{...}` or an expression).
+fn var_init(p: &mut Parser) {
+    if p.at(LBRACE) {
+        array_init(p);
+    } else {
+        expr(p);
     }
 }
 
@@ -344,8 +715,14 @@ fn param_list(p: &mut Parser) {
         let param = p.start();
         modifiers(p);
         type_(p);
-        p.eat(ELLIPSIS); // 可変長引数。
-        p.expect(IDENT);
+        p.eat(ELLIPSIS); // varargs.
+        // Also allows a `this` receiver parameter (`Foo this`).
+        if p.at(THIS_KW) {
+            p.bump(THIS_KW);
+        } else {
+            p.expect(IDENT);
+            dims(p);
+        }
         param.complete(p, PARAM);
         if !p.eat(COMMA) {
             break;
@@ -355,21 +732,25 @@ fn param_list(p: &mut Parser) {
     m.complete(p, PARAM_LIST);
 }
 
-// ===== 型 =====
+// ===== Types =====
 
-/// 型の開始になりうるか。
-fn at_type_start(p: &mut Parser) -> bool {
+/// Whether this can begin a type.
+fn at_type_start(p: &Parser) -> bool {
     p.at_ts(PRIMITIVE_TYPE) || p.at(IDENT) || p.at_contextual_kw("var")
 }
 
 fn type_(p: &mut Parser) {
     let m = p.start();
+    // Annotations on types.
+    while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+        annotation(p);
+    }
     if p.at_contextual_kw("var") {
         p.bump_remap(VAR_KW);
     } else if p.at_ts(PRIMITIVE_TYPE) {
         p.bump_any();
     } else {
-        // 参照型: 名前 + 任意の型引数 + ドット連結。
+        // Reference type: name + optional type arguments + dotted continuation.
         p.expect(IDENT);
         if p.at(LT) {
             type_args(p);
@@ -382,11 +763,7 @@ fn type_(p: &mut Parser) {
             }
         }
     }
-    // 配列次元。
-    while p.at(LBRACK) && p.nth_at(1, RBRACK) {
-        p.bump(LBRACK);
-        p.bump(RBRACK);
-    }
+    dims(p);
     m.complete(p, TYPE);
 }
 
@@ -399,14 +776,13 @@ fn type_args(p: &mut Parser) {
             type_arg(p);
         }
     }
-    // ネストした型引数の閉じは `>` の連続。隣接する `GT` を1つだけ消費する。
     expect_gt(p);
     m.complete(p, TYPE_ARGS);
 }
 
 fn type_arg(p: &mut Parser) {
     if p.at(QUESTION) {
-        // ワイルドカード `? extends T` / `? super T`。
+        // Wildcard `? extends T` / `? super T`.
         p.bump(QUESTION);
         if p.at(EXTENDS_KW) || p.at(SUPER_KW) {
             p.bump_any();
@@ -417,15 +793,60 @@ fn type_arg(p: &mut Parser) {
     }
 }
 
-/// 型引数を閉じる `>` を1つ消費する。`>>` などは隣接した複数の `GT` トークンなので、
-/// ここでは常に単一の `GT` だけを食べる(残りは外側の `type_args` が食べる)。
+/// Consumes one `>` that closes a type argument/type parameter. `>>` and similar are
+/// represented as adjacent `GT` tokens, so this always consumes only a single `GT` (the rest is consumed by the outer caller).
 fn expect_gt(p: &mut Parser) {
     if !p.eat(GT) {
-        p.error("`>` を期待しました");
+        p.error("expected `>`");
     }
 }
 
-// ===== 文 =====
+/// Skips one type starting at `start` using fuel-free lookahead, returning the offset immediately after it.
+/// Returns `None` if the tokens cannot be interpreted as a type. Used for lambda/cast/pattern/local variable disambiguation.
+fn skip_type(p: &Parser, start: usize) -> Option<usize> {
+    let mut i = start;
+    if PRIMITIVE_TYPE.contains(p.nth_nofuel(i)) {
+        i += 1;
+    } else if p.nth_nofuel(i) == IDENT {
+        i += 1;
+        loop {
+            if p.nth_nofuel(i) == LT {
+                // Skip a balanced `<...>` (`>` is a single GT, `>>` is two GTs).
+                let mut depth = 0i32;
+                loop {
+                    match p.nth_nofuel(i) {
+                        LT => {
+                            depth += 1;
+                            i += 1;
+                        }
+                        GT => {
+                            depth -= 1;
+                            i += 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        EOF | SEMICOLON | LBRACE | RBRACE => return None,
+                        _ => i += 1,
+                    }
+                }
+            }
+            if p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == IDENT {
+                i += 2;
+                continue;
+            }
+            break;
+        }
+    } else {
+        return None;
+    }
+    while p.nth_nofuel(i) == LBRACK && p.nth_nofuel(i + 1) == RBRACK {
+        i += 2;
+    }
+    Some(i)
+}
+
+// ===== Statements =====
 
 fn block(p: &mut Parser) {
     let m = p.start();
@@ -433,9 +854,9 @@ fn block(p: &mut Parser) {
     while !p.at(RBRACE) && !p.at_eof() {
         let before = p.pos();
         stmt(p);
-        // 前進保証(class_body と同様の最終防衛線)。
+        // Progress guarantee (last-resort safeguard).
         if p.pos() == before {
-            p.err_and_bump("予期しないトークンです");
+            p.err_and_bump("unexpected token");
         }
     }
     p.expect(RBRACE);
@@ -445,28 +866,42 @@ fn block(p: &mut Parser) {
 fn stmt(p: &mut Parser) {
     match p.current() {
         LBRACE => block(p),
-        SEMICOLON => p.bump(SEMICOLON),
-        RETURN_KW => {
+        SEMICOLON => {
             let m = p.start();
-            p.bump(RETURN_KW);
-            if !p.at(SEMICOLON) {
-                expr(p);
-            }
-            p.expect(SEMICOLON);
-            m.complete(p, RETURN_STMT);
+            p.bump(SEMICOLON);
+            m.complete(p, EMPTY_STMT);
         }
         IF_KW => if_stmt(p),
-        WHILE_KW => {
-            let m = p.start();
-            p.bump(WHILE_KW);
-            p.expect(LPAREN);
-            expr(p);
-            p.expect(RPAREN);
-            stmt(p);
-            m.complete(p, WHILE_STMT);
-        }
+        WHILE_KW => while_stmt(p),
+        DO_KW => do_while_stmt(p),
+        FOR_KW => for_stmt(p),
+        RETURN_KW => return_stmt(p),
+        THROW_KW => throw_stmt(p),
+        BREAK_KW => break_or_continue(p, BREAK_KW, BREAK_STMT),
+        CONTINUE_KW => break_or_continue(p, CONTINUE_KW, CONTINUE_STMT),
+        ASSERT_KW => assert_stmt(p),
+        SYNCHRONIZED_KW => synchronized_stmt(p),
+        TRY_KW => try_stmt(p),
+        SWITCH_KW => switch_stmt(p),
+        CLASS_KW | INTERFACE_KW | ENUM_KW => type_decl(p),
+        AT if p.nth_at(1, INTERFACE_KW) => type_decl(p),
         _ => {
-            // 局所変数宣言か式文。型 + IDENT で始まれば局所変数宣言とみなす。
+            // Labeled statement (`label:`). Distinguishable from ternary `?:` by the absence of `?`.
+            if p.at(IDENT) && p.nth_at(1, COLON) {
+                return labeled_stmt(p);
+            }
+            // Local record declaration.
+            if at_record_decl(p) {
+                return type_decl(p);
+            }
+            // yield statement (inside a switch expression).
+            if at_yield_stmt(p) {
+                return yield_stmt(p);
+            }
+            // Local type declaration with modifiers/annotations.
+            if (p.at_ts(MODIFIER_KW) || p.at(AT)) && at_local_type_decl(p) {
+                return type_decl(p);
+            }
             if at_local_var_decl(p) {
                 local_var_decl(p);
             } else if at_expr_start(p) {
@@ -475,10 +910,182 @@ fn stmt(p: &mut Parser) {
                 p.expect(SEMICOLON);
                 m.complete(p, EXPR_STMT);
             } else {
-                p.err_recover("文を期待しました", STMT_RECOVERY);
+                p.err_recover("expected a statement", STMT_RECOVERY);
             }
         }
     }
+}
+
+fn labeled_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(IDENT);
+    p.bump(COLON);
+    stmt(p);
+    m.complete(p, LABELED_STMT);
+}
+
+fn return_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(RETURN_KW);
+    if !p.at(SEMICOLON) {
+        expr(p);
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, RETURN_STMT);
+}
+
+fn throw_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(THROW_KW);
+    expr(p);
+    p.expect(SEMICOLON);
+    m.complete(p, THROW_STMT);
+}
+
+fn break_or_continue(p: &mut Parser, kw: SyntaxKind, node: SyntaxKind) {
+    let m = p.start();
+    p.bump(kw);
+    if p.at(IDENT) {
+        p.bump(IDENT); // label.
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, node);
+}
+
+fn assert_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(ASSERT_KW);
+    expr(p);
+    if p.eat(COLON) {
+        expr(p);
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, ASSERT_STMT);
+}
+
+fn synchronized_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(SYNCHRONIZED_KW);
+    p.expect(LPAREN);
+    expr(p);
+    p.expect(RPAREN);
+    if p.at(LBRACE) {
+        block(p);
+    }
+    m.complete(p, SYNCHRONIZED_STMT);
+}
+
+fn yield_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump_remap(YIELD_KW);
+    expr(p);
+    p.expect(SEMICOLON);
+    m.complete(p, YIELD_STMT);
+}
+
+fn try_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(TRY_KW);
+    if p.at(LPAREN) {
+        resource_list(p);
+    }
+    if p.at(LBRACE) {
+        block(p);
+    }
+    while p.at(CATCH_KW) {
+        catch_clause(p);
+    }
+    if p.at(FINALLY_KW) {
+        finally_clause(p);
+    }
+    m.complete(p, TRY_STMT);
+}
+
+fn resource_list(p: &mut Parser) {
+    let m = p.start();
+    p.bump(LPAREN);
+    while !p.at(RPAREN) && !p.at_eof() {
+        let before = p.pos();
+        resource(p);
+        if p.pos() == before {
+            p.err_and_bump("unexpected token");
+        }
+        if !p.eat(SEMICOLON) {
+            break;
+        }
+    }
+    p.expect(RPAREN);
+    m.complete(p, RESOURCE_LIST);
+}
+
+fn resource(p: &mut Parser) {
+    let m = p.start();
+    if at_local_var_decl(p) {
+        // Resource variable declaration: {modifiers} Type id = expr
+        modifiers(p);
+        type_(p);
+        p.expect(IDENT);
+        p.expect(EQ);
+        expr(p);
+    } else {
+        // Reference to an existing variable (Java 9+).
+        expr(p);
+    }
+    m.complete(p, RESOURCE);
+}
+
+fn catch_clause(p: &mut Parser) {
+    let m = p.start();
+    p.bump(CATCH_KW);
+    p.expect(LPAREN);
+    modifiers(p);
+    type_(p);
+    while p.at(PIPE) {
+        // Multi-catch `A | B`.
+        p.bump(PIPE);
+        type_(p);
+    }
+    p.expect(IDENT);
+    p.expect(RPAREN);
+    if p.at(LBRACE) {
+        block(p);
+    }
+    m.complete(p, CATCH_CLAUSE);
+}
+
+fn finally_clause(p: &mut Parser) {
+    let m = p.start();
+    p.bump(FINALLY_KW);
+    if p.at(LBRACE) {
+        block(p);
+    }
+    m.complete(p, FINALLY_CLAUSE);
+}
+
+/// Whether to treat `yield` as a statement (when followed by an unambiguous expression start). Cases like `yield = 3;` (variable) are sent to expression statement.
+fn at_yield_stmt(p: &Parser) -> bool {
+    if !p.at_contextual_kw("yield") {
+        return false;
+    }
+    matches!(
+        p.nth_nofuel(1),
+        IDENT
+            | INT_LITERAL
+            | FLOAT_LITERAL
+            | CHAR_LITERAL
+            | STRING_LITERAL
+            | TEXT_BLOCK
+            | TRUE_KW
+            | FALSE_KW
+            | NULL_KW
+            | BANG
+            | TILDE
+            | NEW_KW
+            | THIS_KW
+            | SUPER_KW
+            | SWITCH_KW
+            | LPAREN
+    )
 }
 
 fn if_stmt(p: &mut Parser) {
@@ -495,59 +1102,457 @@ fn if_stmt(p: &mut Parser) {
     m.complete(p, IF_STMT);
 }
 
-/// 局所変数宣言の開始か(`var x` / プリミティブ + IDENT / IDENT…IDENT)。
-/// 簡易ヒューリスティック: `var`、またはプリミティブ型の後に IDENT。
-fn at_local_var_decl(p: &mut Parser) -> bool {
+fn while_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(WHILE_KW);
+    p.expect(LPAREN);
+    expr(p);
+    p.expect(RPAREN);
+    stmt(p);
+    m.complete(p, WHILE_STMT);
+}
+
+fn do_while_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(DO_KW);
+    stmt(p);
+    p.expect(WHILE_KW);
+    p.expect(LPAREN);
+    expr(p);
+    p.expect(RPAREN);
+    p.expect(SEMICOLON);
+    m.complete(p, DO_WHILE_STMT);
+}
+
+fn for_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(FOR_KW);
+    p.expect(LPAREN);
+    if at_for_each(p) {
+        // for-each: {modifiers} Type id : expr
+        modifiers(p);
+        type_(p);
+        p.expect(IDENT);
+        p.expect(COLON);
+        expr(p);
+        p.expect(RPAREN);
+        stmt(p);
+        m.complete(p, FOR_EACH_STMT);
+    } else {
+        // C-style for: init ; cond ; update
+        for_init(p);
+        p.expect(SEMICOLON);
+        if !p.at(SEMICOLON) {
+            expr(p);
+        }
+        p.expect(SEMICOLON);
+        if !p.at(RPAREN) {
+            expr(p);
+            while p.eat(COMMA) {
+                expr(p);
+            }
+        }
+        p.expect(RPAREN);
+        stmt(p);
+        m.complete(p, FOR_STMT);
+    }
+}
+
+/// Whether the for header is a for-each (`:` appears at depth 0 before `;`) — fuel-free lookahead.
+fn at_for_each(p: &Parser) -> bool {
+    let mut depth = 0i32;
+    let mut ternary = 0i32;
+    let mut i = 0usize;
+    loop {
+        match p.nth_nofuel(i) {
+            LPAREN | LBRACK | LBRACE => depth += 1,
+            RPAREN | RBRACK | RBRACE => {
+                if depth == 0 {
+                    return false; // End of the header: no `:` found.
+                }
+                depth -= 1;
+            }
+            SEMICOLON if depth == 0 && ternary == 0 => return false,
+            QUESTION if depth == 0 => ternary += 1,
+            COLON if depth == 0 => {
+                if ternary > 0 {
+                    ternary -= 1;
+                } else {
+                    return true;
+                }
+            }
+            EOF => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+fn for_init(p: &mut Parser) {
+    if p.at(SEMICOLON) {
+        return; // empty.
+    }
+    if (p.at_ts(MODIFIER_KW) || p.at(AT)) && at_local_type_decl(p) {
+        // A local type in for-init is unusual, but treat it as a declaration if it appears.
+        type_decl(p);
+        return;
+    }
+    if at_local_var_decl(p) {
+        let m = p.start();
+        var_decl_inner(p);
+        m.complete(p, LOCAL_VAR_DECL);
+    } else {
+        expr(p);
+        while p.eat(COMMA) {
+            expr(p);
+        }
+    }
+}
+
+/// Whether this is the start of a local variable declaration.
+fn at_local_var_decl(p: &Parser) -> bool {
+    if p.at_ts(MODIFIER_KW) {
+        return true; // final etc. (local types are filtered out by the caller first).
+    }
+    if p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+        return true; // Annotated local variable.
+    }
     if p.at_contextual_kw("var") {
         return true;
     }
     if p.at_ts(PRIMITIVE_TYPE) {
         return true;
     }
-    // `IDENT IDENT` または `IDENT< ... >` で宣言とみなす素朴な判定。
-    p.at(IDENT) && p.nth_at(1, IDENT)
+    if p.at(IDENT) {
+        // Type + binding name (`Foo x` / `List<T> x` / `a.B c` / `int[] a`).
+        if let Some(i) = skip_type(p, 0) {
+            return p.nth_nofuel(i) == IDENT;
+        }
+    }
+    false
+}
+
+/// Whether the token after skipping modifiers/annotations is a type declaration keyword — fuel-free lookahead.
+fn at_local_type_decl(p: &Parser) -> bool {
+    let i = skip_modifiers_lookahead(p, 0);
+    if i == 0 {
+        return false;
+    }
+    matches!(p.nth_nofuel(i), CLASS_KW | INTERFACE_KW | ENUM_KW)
+        || (p.nth_nofuel(i) == AT && p.nth_nofuel(i + 1) == INTERFACE_KW)
+}
+
+/// Skips modifier keywords and annotations (including `@Name(...)`) and returns the next offset.
+fn skip_modifiers_lookahead(p: &Parser, start: usize) -> usize {
+    let mut i = start;
+    loop {
+        let k = p.nth_nofuel(i);
+        if MODIFIER_KW.contains(k) {
+            i += 1;
+            continue;
+        }
+        if k == AT && p.nth_nofuel(i + 1) != INTERFACE_KW {
+            i += 1; // @
+            if p.nth_nofuel(i) == IDENT {
+                i += 1;
+            }
+            while p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == IDENT {
+                i += 2;
+            }
+            if p.nth_nofuel(i) == LPAREN {
+                let mut depth = 0i32;
+                loop {
+                    match p.nth_nofuel(i) {
+                        LPAREN => {
+                            depth += 1;
+                            i += 1;
+                        }
+                        RPAREN => {
+                            depth -= 1;
+                            i += 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        EOF => return i,
+                        _ => i += 1,
+                    }
+                }
+            }
+            continue;
+        }
+        break;
+    }
+    i
 }
 
 fn local_var_decl(p: &mut Parser) {
     let m = p.start();
-    type_(p);
-    p.expect(IDENT);
-    if p.eat(EQ) {
-        expr(p);
-    }
-    while p.eat(COMMA) {
-        p.expect(IDENT);
-        if p.eat(EQ) {
-            expr(p);
-        }
-    }
+    var_decl_inner(p);
     p.expect(SEMICOLON);
     m.complete(p, LOCAL_VAR_DECL);
 }
 
-// ===== 式(優先順位登攀) =====
-
-fn at_expr_start(p: &mut Parser) -> bool {
-    p.at_ts(LITERAL_TOKEN)
-        || p.at(IDENT)
-        || p.at(LPAREN)
-        || p.at(THIS_KW)
-        || p.at(SUPER_KW)
-        || p.at(NEW_KW)
-        || p.at(BANG)
-        || p.at(TILDE)
-        || p.at(PLUS)
-        || p.at(MINUS)
-        || p.at(PLUS_PLUS)
-        || p.at(MINUS_MINUS)
+/// Body of a local variable declaration (does not consume `;`). Also used in for-init.
+fn var_decl_inner(p: &mut Parser) {
+    modifiers(p);
+    type_(p);
+    p.expect(IDENT);
+    field_tail(p);
 }
 
-/// 式をパースする(エントリ)。
+// ===== switch (shared body for statement and expression) =====
+
+fn switch_stmt(p: &mut Parser) {
+    let m = p.start();
+    p.bump(SWITCH_KW);
+    p.expect(LPAREN);
+    expr(p);
+    p.expect(RPAREN);
+    switch_block(p);
+    m.complete(p, SWITCH_STMT);
+}
+
+fn switch_block(p: &mut Parser) {
+    let m = p.start();
+    if !p.expect(LBRACE) {
+        m.complete(p, SWITCH_BLOCK);
+        return;
+    }
+    while !p.at(RBRACE) && !p.at_eof() {
+        let before = p.pos();
+        switch_entry(p);
+        if p.pos() == before {
+            p.err_and_bump("unexpected token");
+        }
+    }
+    p.expect(RBRACE);
+    m.complete(p, SWITCH_BLOCK);
+}
+
+fn switch_entry(p: &mut Parser) {
+    if !(p.at(CASE_KW) || p.at(DEFAULT_KW)) {
+        p.err_and_bump("expected `case` or `default`");
+        return;
+    }
+    if label_is_arrow(p) {
+        // Arrow rule: label -> (block | throw | expr ;)
+        let m = p.start();
+        switch_label(p);
+        p.expect(ARROW);
+        if p.at(LBRACE) {
+            block(p);
+        } else if p.at(THROW_KW) {
+            throw_stmt(p);
+        } else {
+            expr(p);
+            p.expect(SEMICOLON);
+        }
+        m.complete(p, SWITCH_RULE);
+    } else {
+        // Colon group: label: (label:)* statements
+        let m = p.start();
+        switch_label(p);
+        p.expect(COLON);
+        while p.at(CASE_KW) || p.at(DEFAULT_KW) {
+            switch_label(p);
+            p.expect(COLON);
+        }
+        while !p.at(RBRACE) && !p.at(CASE_KW) && !p.at(DEFAULT_KW) && !p.at_eof() {
+            let before = p.pos();
+            stmt(p);
+            if p.pos() == before {
+                break;
+            }
+        }
+        m.complete(p, SWITCH_GROUP);
+    }
+}
+
+/// Whether this label is in arrow form (`->` appears at depth 0 before `:`). Fuel-free lookahead.
+fn label_is_arrow(p: &Parser) -> bool {
+    let mut depth = 0i32;
+    let mut ternary = 0i32;
+    let mut i = 0usize;
+    loop {
+        match p.nth_nofuel(i) {
+            LPAREN | LBRACK => depth += 1,
+            RPAREN | RBRACK => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            ARROW if depth == 0 => return true,
+            QUESTION if depth == 0 => ternary += 1,
+            COLON if depth == 0 => {
+                if ternary > 0 {
+                    ternary -= 1;
+                } else {
+                    return false;
+                }
+            }
+            SEMICOLON if depth == 0 => return false,
+            RBRACE | EOF => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+fn switch_label(p: &mut Parser) {
+    let m = p.start();
+    if p.at(DEFAULT_KW) {
+        p.bump(DEFAULT_KW);
+    } else {
+        p.bump(CASE_KW);
+        switch_case_item(p);
+        while p.eat(COMMA) {
+            switch_case_item(p);
+        }
+    }
+    m.complete(p, SWITCH_LABEL);
+}
+
+fn switch_case_item(p: &mut Parser) {
+    if p.at(DEFAULT_KW) {
+        // `case null, default`.
+        p.bump(DEFAULT_KW);
+        return;
+    }
+    if at_pattern(p) {
+        pattern(p);
+        if p.at_contextual_kw("when") {
+            guard(p);
+        }
+    } else {
+        expr(p);
+    }
+}
+
+fn guard(p: &mut Parser) {
+    let m = p.start();
+    p.bump_remap(WHEN_KW);
+    expr(p);
+    m.complete(p, GUARD);
+}
+
+// ===== Patterns (instanceof / switch) =====
+
+/// Whether this is the start of a type pattern / record pattern (type followed by a binding name `IDENT` or `(`).
+fn at_pattern(p: &Parser) -> bool {
+    if !(p.at(IDENT) || p.at_ts(PRIMITIVE_TYPE)) {
+        return false;
+    }
+    let Some(i) = skip_type(p, 0) else {
+        return false;
+    };
+    matches!(p.nth_nofuel(i), IDENT | LPAREN)
+}
+
+fn pattern(p: &mut Parser) {
+    let m = p.start();
+    type_(p);
+    if p.at(LPAREN) {
+        // Record pattern: Type(subpatterns)
+        p.bump(LPAREN);
+        while !p.at(RPAREN) && !p.at_eof() {
+            let before = p.pos();
+            if at_pattern(p) {
+                pattern(p);
+            } else if p.at_contextual_kw("var") {
+                // `var x` binding.
+                let vm = p.start();
+                type_(p);
+                p.expect(IDENT);
+                vm.complete(p, TYPE_PATTERN);
+            } else {
+                p.err_and_bump("expected a pattern");
+            }
+            if p.pos() == before {
+                p.err_and_bump("unexpected token");
+            }
+            if !p.eat(COMMA) {
+                break;
+            }
+        }
+        p.expect(RPAREN);
+        m.complete(p, RECORD_PATTERN);
+    } else {
+        // Type pattern: Type id
+        p.expect(IDENT);
+        m.complete(p, TYPE_PATTERN);
+    }
+}
+
+// ===== Expressions (assignment -> ternary -> binary via precedence climbing -> unary -> postfix -> primary) =====
+
+fn at_expr_start(p: &Parser) -> bool {
+    p.at_ts(EXPR_START)
+}
+
+/// Parses an expression (entry point).
 fn expr(p: &mut Parser) {
-    expr_bp(p, 0);
+    let _ = expr_opt(p);
 }
 
-/// 最小束縛力 `min_bp` で式をパースする(優先順位登攀)。
+fn expr_opt(p: &mut Parser) -> Option<CompletedMarker> {
+    if at_lambda(p) {
+        return Some(lambda_expr(p));
+    }
+    assignment_expr(p)
+}
+
+/// Assignment expression (right-associative). Handles `=` / `+=` etc., including fused `>>=` / `>>>=`.
+fn assignment_expr(p: &mut Parser) -> Option<CompletedMarker> {
+    let lhs = ternary_expr(p)?;
+    if let Some(len) = at_assign_op(p) {
+        let m = lhs.precede(p);
+        for _ in 0..len {
+            p.bump_any();
+        }
+        expr(p); // right-associative: allows lambda/ternary/nested assignment.
+        return Some(m.complete(p, ASSIGNMENT_EXPR));
+    }
+    Some(lhs)
+}
+
+/// Length (token count) of an assignment operator. `>>=` is GT GT EQ = 3, `>>>=` is 4.
+fn at_assign_op(p: &Parser) -> Option<u8> {
+    match p.current() {
+        EQ | PLUS_EQ | MINUS_EQ | STAR_EQ | SLASH_EQ | PERCENT_EQ | AMP_EQ | PIPE_EQ | CARET_EQ
+        | LSHIFT_EQ => Some(1),
+        GT => {
+            if p.nth_at(1, GT) && p.nth_adjacent(0) {
+                if p.nth_at(2, GT) && p.nth_adjacent(1) {
+                    if p.nth_at(3, EQ) && p.nth_adjacent(2) {
+                        return Some(4); // >>>=
+                    }
+                    return None;
+                }
+                if p.nth_at(2, EQ) && p.nth_adjacent(1) {
+                    return Some(3); // >>=
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn ternary_expr(p: &mut Parser) -> Option<CompletedMarker> {
+    let cond = expr_bp(p, 0)?;
+    if p.at(QUESTION) {
+        let m = cond.precede(p);
+        p.bump(QUESTION);
+        expr(p); // then
+        p.expect(COLON);
+        expr(p); // else (right-associative)
+        return Some(m.complete(p, TERNARY_EXPR));
+    }
+    Some(cond)
+}
+
+/// Parses a binary expression with minimum binding power `min_bp` (precedence climbing).
 fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
     let mut lhs = unary_expr(p)?;
 
@@ -557,11 +1562,14 @@ fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
         }
         let m = lhs.precede(p);
         if p.at(INSTANCEOF_KW) {
-            // `instanceof` の右辺は式ではなく型(パターンは将来対応)。
+            // Right-hand side of `instanceof` is a type or pattern (`o instanceof String s`).
             p.bump(INSTANCEOF_KW);
-            type_(p);
+            if at_pattern(p) {
+                pattern(p);
+            } else {
+                type_(p);
+            }
         } else {
-            // 演算子トークンを消費する(合成 `>>`/`>>>` は複数の GT を読む)。
             consume_bin_op(p, op_len);
             let next_min = if right_assoc { op_bp } else { op_bp + 1 };
             expr_bp(p, next_min);
@@ -571,8 +1579,9 @@ fn expr_bp(p: &mut Parser, min_bp: u8) -> Option<CompletedMarker> {
     Some(lhs)
 }
 
-/// 次の二項演算子の (束縛力, トークン長, 右結合か) を返す。`>` 系の合成を含む。
-fn peek_bin_op(p: &mut Parser) -> Option<(u8, u8, bool)> {
+/// Returns (binding power, token length, is right-associative) for the next binary operator, including fused `>` family.
+/// Returns `None` for `>>=` / `>>>=` (assignment), deferring to the assignment layer.
+fn peek_bin_op(p: &Parser) -> Option<(u8, u8, bool)> {
     let bp = match p.current() {
         PIPE_PIPE => return Some((1, 1, false)),
         AMP_AMP => return Some((2, 1, false)),
@@ -582,10 +1591,15 @@ fn peek_bin_op(p: &mut Parser) -> Option<(u8, u8, bool)> {
         EQ_EQ | BANG_EQ => return Some((6, 1, false)),
         LT | LT_EQ | INSTANCEOF_KW => return Some((7, 1, false)),
         GT => {
-            // `>>>` `>>` `>=` `>` の合成。隣接する GT/EQ を数える。
             if p.nth_at(1, GT) && p.nth_adjacent(0) {
                 if p.nth_at(2, GT) && p.nth_adjacent(1) {
+                    if p.nth_at(3, EQ) && p.nth_adjacent(2) {
+                        return None; // >>>= is assignment.
+                    }
                     return Some((8, 3, false)); // >>>
+                }
+                if p.nth_at(2, EQ) && p.nth_adjacent(1) {
+                    return None; // >>= is assignment.
                 }
                 return Some((8, 2, false)); // >>
             }
@@ -602,7 +1616,7 @@ fn peek_bin_op(p: &mut Parser) -> Option<(u8, u8, bool)> {
     Some((bp, 1, false))
 }
 
-/// 二項演算子トークンを `len` 個消費する(合成演算子 `>>`/`>>>`/`>=` のため)。
+/// Consumes `len` binary operator tokens (for fused operators `>>`/`>>>`/`>=`).
 fn consume_bin_op(p: &mut Parser, len: u8) {
     for _ in 0..len {
         p.bump_any();
@@ -610,6 +1624,9 @@ fn consume_bin_op(p: &mut Parser, len: u8) {
 }
 
 fn unary_expr(p: &mut Parser) -> Option<CompletedMarker> {
+    if at_cast(p) {
+        return Some(cast_expr(p));
+    }
     match p.current() {
         BANG | TILDE | PLUS | MINUS | PLUS_PLUS | MINUS_MINUS => {
             let m = p.start();
@@ -621,15 +1638,75 @@ fn unary_expr(p: &mut Parser) -> Option<CompletedMarker> {
     }
 }
 
+/// Whether `( Type ) operand` is a cast — fuel-free lookahead. Lambda is already disambiguated before this call.
+fn at_cast(p: &Parser) -> bool {
+    if !p.at(LPAREN) {
+        return false;
+    }
+    let prim_first = PRIMITIVE_TYPE.contains(p.nth_nofuel(1));
+    let Some(mut i) = skip_type(p, 1) else {
+        return false;
+    };
+    // Intersection type `(A & B)`.
+    while p.nth_nofuel(i) == AMP {
+        match skip_type(p, i + 1) {
+            Some(j) => i = j,
+            None => return false,
+        }
+    }
+    if p.nth_nofuel(i) != RPAREN {
+        return false;
+    }
+    let after = p.nth_nofuel(i + 1);
+    let pure_primitive = prim_first && i == 2;
+    if pure_primitive {
+        CAST_FOLLOW_PRIMITIVE.contains(after)
+    } else {
+        CAST_FOLLOW_REF.contains(after)
+    }
+}
+
+fn cast_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(LPAREN);
+    type_(p);
+    while p.at(AMP) {
+        p.bump(AMP);
+        type_(p);
+    }
+    p.expect(RPAREN);
+    unary_expr(p);
+    m.complete(p, CAST_EXPR)
+}
+
 fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
     let mut lhs = primary_expr(p)?;
     loop {
         match p.current() {
-            DOT if p.nth_at(1, IDENT) => {
+            DOT if p.nth_at(1, CLASS_KW) => {
                 let m = lhs.precede(p);
                 p.bump(DOT);
-                p.bump(IDENT);
+                p.bump(CLASS_KW);
+                lhs = m.complete(p, CLASS_LITERAL);
+            }
+            DOT if p.nth_at(1, IDENT) || p.nth_at(1, THIS_KW) || p.nth_at(1, SUPER_KW) => {
+                let m = lhs.precede(p);
+                p.bump(DOT);
+                p.bump_any(); // IDENT / this / super
                 lhs = m.complete(p, FIELD_ACCESS);
+            }
+            COLON_COLON => {
+                let m = lhs.precede(p);
+                p.bump(COLON_COLON);
+                if p.at(LT) {
+                    type_args(p);
+                }
+                if p.at(NEW_KW) {
+                    p.bump(NEW_KW);
+                } else {
+                    p.expect(IDENT);
+                }
+                lhs = m.complete(p, METHOD_REF_EXPR);
             }
             LPAREN => {
                 let m = lhs.precede(p);
@@ -679,12 +1756,23 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             m.complete(p, PAREN_EXPR)
         }
         NEW_KW => new_expr(p),
+        SWITCH_KW => switch_expr(p),
         _ => {
-            p.err_and_bump("式を期待しました");
+            p.err_and_bump("expected an expression");
             return None;
         }
     };
     Some(cm)
+}
+
+fn switch_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(SWITCH_KW);
+    p.expect(LPAREN);
+    expr(p);
+    p.expect(RPAREN);
+    switch_block(p);
+    m.complete(p, SWITCH_EXPR)
 }
 
 fn new_expr(p: &mut Parser) -> CompletedMarker {
@@ -693,8 +1781,12 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
     type_(p);
     if p.at(LPAREN) {
         arg_list(p);
+        if p.at(LBRACE) {
+            // Anonymous class body.
+            class_body(p);
+        }
     } else if p.at(LBRACK) {
-        // 配列生成 `new int[n]`。
+        // Array creation `new int[n]` / `new int[n][]`.
         while p.at(LBRACK) {
             p.bump(LBRACK);
             if !p.at(RBRACK) {
@@ -702,6 +1794,12 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
             }
             p.expect(RBRACK);
         }
+        if p.at(LBRACE) {
+            array_init(p);
+        }
+    } else if p.at(LBRACE) {
+        // `new int[]{...}` (the type side already consumed `[]`).
+        array_init(p);
     }
     m.complete(p, NEW_EXPR)
 }
@@ -710,11 +1808,91 @@ fn arg_list(p: &mut Parser) {
     let m = p.start();
     p.bump(LPAREN);
     while !p.at(RPAREN) && !p.at_eof() {
+        let before = p.pos();
         expr(p);
+        if p.pos() == before {
+            p.err_and_bump("unexpected argument");
+        }
         if !p.eat(COMMA) {
             break;
         }
     }
     p.expect(RPAREN);
     m.complete(p, ARG_LIST);
+}
+
+// ===== lambda =====
+
+/// Whether this is the start of a lambda (`id ->` or `( ... ) ->`). Matches `)` using fuel-free lookahead.
+fn at_lambda(p: &Parser) -> bool {
+    if p.at(IDENT) && p.nth_at(1, ARROW) {
+        return true;
+    }
+    if p.at(LPAREN) {
+        let mut depth = 0i32;
+        let mut i = 0usize;
+        loop {
+            match p.nth_nofuel(i) {
+                LPAREN => depth += 1,
+                RPAREN => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return p.nth_nofuel(i + 1) == ARROW;
+                    }
+                }
+                EOF => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+fn lambda_expr(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    lambda_params(p);
+    p.expect(ARROW);
+    if p.at(LBRACE) {
+        block(p);
+    } else {
+        expr(p);
+    }
+    m.complete(p, LAMBDA_EXPR)
+}
+
+fn lambda_params(p: &mut Parser) {
+    let m = p.start();
+    if p.at(LPAREN) {
+        p.bump(LPAREN);
+        while !p.at(RPAREN) && !p.at_eof() {
+            let before = p.pos();
+            lambda_param(p);
+            if p.pos() == before {
+                p.err_and_bump("unexpected argument");
+            }
+            if !p.eat(COMMA) {
+                break;
+            }
+        }
+        p.expect(RPAREN);
+    } else {
+        // Single bare identifier.
+        p.expect(IDENT);
+    }
+    m.complete(p, LAMBDA_PARAMS);
+}
+
+fn lambda_param(p: &mut Parser) {
+    let pm = p.start();
+    if p.at(IDENT) && (p.nth_at(1, COMMA) || p.nth_at(1, RPAREN)) {
+        // Bare untyped parameter.
+        p.bump(IDENT);
+    } else {
+        // Typed parameter (including `var`).
+        modifiers(p);
+        type_(p);
+        p.expect(IDENT);
+    }
+    pm.complete(p, PARAM);
 }
