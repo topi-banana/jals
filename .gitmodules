@@ -1,0 +1,3 @@
+[submodule "jals-tests/sources/openjdk"]
+	path = jals-tests/sources/openjdk
+	url = https://github.com/openjdk/jdk
