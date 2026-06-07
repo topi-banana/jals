@@ -1,0 +1,21 @@
+[package]
+name = "jals-tests"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "jals_tests"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jals-tests"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+jals-syntax.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

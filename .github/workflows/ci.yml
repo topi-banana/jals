@@ -99,3 +99,28 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+
+  parse-soundness:
+    name: parse soundness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run parse-soundness check
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo run --release -p jals-tests -- --markdown | tee soundness.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment parse rate on PR
+        if: always() && github.event_name == 'pull_request' && hashFiles('soundness.md') != ''
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: parse-soundness
+          path: soundness.md
