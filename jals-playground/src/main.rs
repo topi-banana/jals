@@ -1,10 +1,13 @@
 //! `jals-playground`: a browser playground for the `jals` formatter and syntax tree.
 //!
 //! A two-pane editor — type Java/JALS source on the left, then run the formatter or dump
-//! the lossless syntax tree on the right with the buttons in the top-right. Everything runs
-//! in the browser via `wasm32`; there is no server round-trip.
+//! the lossless syntax tree on the right with the buttons in the top-right. The settings
+//! bar under the header configures the `jals-fmt` [`Config`]; while formatted output is
+//! showing, changing a setting re-formats live. Everything runs in the browser via
+//! `wasm32`; there is no server round-trip.
 
-use web_sys::HtmlTextAreaElement;
+use jals_fmt::{Config, IndentStyle, LineEnding};
+use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
 /// Which tool produced the current output.
@@ -31,6 +34,8 @@ enum Msg {
     Input(String),
     /// Run a tool over the current input.
     Run(Mode),
+    /// Replace the formatter config (sent by the settings bar).
+    SetConfig(Config),
 }
 
 /// A small (deliberately unformatted) sample so the playground does something on first load.
@@ -51,6 +56,8 @@ struct App {
     diagnostics: Vec<String>,
     /// The tool that produced `output`, once one has run.
     mode: Option<Mode>,
+    /// Current formatter configuration.
+    config: Config,
 }
 
 impl App {
@@ -58,7 +65,7 @@ impl App {
     fn run(&mut self, mode: Mode) {
         match mode {
             Mode::Format => {
-                let out = jals_fmt::format_source(&self.input, &jals_fmt::Config::default());
+                let out = jals_fmt::format_source(&self.input, &self.config);
                 self.output = out.formatted;
                 self.diagnostics = out
                     .warnings
@@ -94,6 +101,109 @@ impl App {
             </div>
         }
     }
+
+    /// The formatter settings bar. Each control emits a fresh [`Config`] via
+    /// [`Msg::SetConfig`]; `onchange` (not `oninput`) keeps the numeric fields stable while
+    /// typing. Parse failures leave the field unchanged.
+    fn view_settings(&self, ctx: &Context<Self>) -> Html {
+        let link = ctx.link();
+        let cfg = &self.config;
+
+        // A change callback for one `usize` field, identified by a setter closure.
+        let usize_cb = |set: fn(&mut Config, usize)| {
+            let config = cfg.clone();
+            link.callback(move |e: Event| {
+                let el: HtmlInputElement = e.target_unchecked_into();
+                let mut c = config.clone();
+                if let Ok(value) = el.value().parse::<usize>() {
+                    set(&mut c, value);
+                }
+                Msg::SetConfig(c)
+            })
+        };
+
+        let on_indent_style = {
+            let config = cfg.clone();
+            link.callback(move |e: Event| {
+                let el: HtmlSelectElement = e.target_unchecked_into();
+                let mut c = config.clone();
+                c.indent_style = if el.value() == "tab" {
+                    IndentStyle::Tab
+                } else {
+                    IndentStyle::Space
+                };
+                Msg::SetConfig(c)
+            })
+        };
+        let on_indent_width = usize_cb(|c, v| c.indent_width = v.max(1));
+        let on_max_width = usize_cb(|c, v| c.max_width = v.max(1));
+        let on_comment_width = usize_cb(|c, v| c.comment_width = v.max(1));
+        let on_max_blank_lines = usize_cb(|c, v| c.max_blank_lines = v);
+        let on_line_ending = {
+            let config = cfg.clone();
+            link.callback(move |e: Event| {
+                let el: HtmlSelectElement = e.target_unchecked_into();
+                let mut c = config.clone();
+                c.line_ending = if el.value() == "crlf" {
+                    LineEnding::Crlf
+                } else {
+                    LineEnding::Lf
+                };
+                Msg::SetConfig(c)
+            })
+        };
+        let on_final_newline = {
+            let config = cfg.clone();
+            link.callback(move |e: Event| {
+                let el: HtmlInputElement = e.target_unchecked_into();
+                let mut c = config.clone();
+                c.insert_final_newline = el.checked();
+                Msg::SetConfig(c)
+            })
+        };
+
+        let field = "flex items-center gap-1.5";
+        let lbl = "font-mono text-xs text-mute";
+        let num = "h-7 w-14 rounded-md border border-hairline bg-canvas px-2 text-xs text-ink outline-none";
+        let sel =
+            "h-7 rounded-md border border-hairline bg-canvas px-1 text-xs text-ink outline-none";
+
+        html! {
+            <div class="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-hairline bg-canvas-soft px-6 py-2">
+                <label class={field}>
+                    <span class={lbl}>{ "Indent" }</span>
+                    <select class={sel} onchange={on_indent_style}>
+                        <option value="space" selected={cfg.indent_style == IndentStyle::Space}>{ "Spaces" }</option>
+                        <option value="tab" selected={cfg.indent_style == IndentStyle::Tab}>{ "Tabs" }</option>
+                    </select>
+                    <input class={num} type="number" min="1" value={cfg.indent_width.to_string()} onchange={on_indent_width} />
+                </label>
+                <label class={field}>
+                    <span class={lbl}>{ "Max width" }</span>
+                    <input class={num} type="number" min="1" value={cfg.max_width.to_string()} onchange={on_max_width} />
+                </label>
+                <label class={field}>
+                    <span class={lbl}>{ "Comment width" }</span>
+                    <input class={num} type="number" min="1" value={cfg.comment_width.to_string()} onchange={on_comment_width} />
+                </label>
+                <label class={field}>
+                    <span class={lbl}>{ "Blank lines" }</span>
+                    <input class={num} type="number" min="0" value={cfg.max_blank_lines.to_string()} onchange={on_max_blank_lines} />
+                </label>
+                <label class={field}>
+                    <span class={lbl}>{ "Line ending" }</span>
+                    <select class={sel} onchange={on_line_ending}>
+                        <option value="lf" selected={cfg.line_ending == LineEnding::Lf}>{ "LF" }</option>
+                        <option value="crlf" selected={cfg.line_ending == LineEnding::Crlf}>{ "CRLF" }</option>
+                    </select>
+                </label>
+                <label class="flex cursor-pointer items-center gap-1.5">
+                    <input type="checkbox" class="h-3.5 w-3.5 accent-ink" checked={cfg.insert_final_newline} onchange={on_final_newline} />
+                    <span class={lbl}>{ "Final newline" }</span>
+                </label>
+            </div>
+        }
+    }
 }
 
 impl Component for App {
@@ -106,6 +216,7 @@ impl Component for App {
             output: String::new(),
             diagnostics: Vec::new(),
             mode: None,
+            config: Config::default(),
         };
         app.run(Mode::Format);
         app
@@ -121,6 +232,14 @@ impl Component for App {
             }
             Msg::Run(mode) => {
                 self.run(mode);
+                true
+            }
+            Msg::SetConfig(config) => {
+                self.config = config;
+                // Apply the change live while formatted output is on screen.
+                if self.mode == Some(Mode::Format) {
+                    self.run(Mode::Format);
+                }
                 true
             }
         }
@@ -161,6 +280,7 @@ impl Component for App {
                         </button>
                     </div>
                 </header>
+                { self.view_settings(ctx) }
                 <main class="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-2">
                     <section class="flex min-h-0 flex-col border-b border-hairline md:border-b-0 md:border-r">
                         <div class={label}>{ "Input" }</div>
