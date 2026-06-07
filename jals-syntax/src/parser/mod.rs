@@ -2097,6 +2097,210 @@ mod tests {
     }
 
     #[test]
+    fn annotated_array_dims() {
+        // Standard JLS type annotations on array dimensions: `Type @A []`.
+        check(
+            "class C { Document @Readonly [] docs1; Document[] @Readonly [] docs2; }",
+            expect![[r#"
+                SOURCE_FILE@0..71
+                  CLASS_DECL@0..71
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..71
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      FIELD_DECL@9..38
+                        MODIFIERS@9..9
+                        TYPE@9..31
+                          WHITESPACE@9..10 " "
+                          IDENT@10..18 "Document"
+                          ANNOTATION@18..28
+                            WHITESPACE@18..19 " "
+                            AT@19..20 "@"
+                            QUALIFIED_NAME@20..28
+                              IDENT@20..28 "Readonly"
+                          WHITESPACE@28..29 " "
+                          LBRACK@29..30 "["
+                          RBRACK@30..31 "]"
+                        WHITESPACE@31..32 " "
+                        IDENT@32..37 "docs1"
+                        SEMICOLON@37..38 ";"
+                      FIELD_DECL@38..69
+                        MODIFIERS@38..38
+                        TYPE@38..62
+                          WHITESPACE@38..39 " "
+                          IDENT@39..47 "Document"
+                          LBRACK@47..48 "["
+                          RBRACK@48..49 "]"
+                          ANNOTATION@49..59
+                            WHITESPACE@49..50 " "
+                            AT@50..51 "@"
+                            QUALIFIED_NAME@51..59
+                              IDENT@51..59 "Readonly"
+                          WHITESPACE@59..60 " "
+                          LBRACK@60..61 "["
+                          RBRACK@61..62 "]"
+                        WHITESPACE@62..63 " "
+                        IDENT@63..68 "docs2"
+                        SEMICOLON@68..69 ";"
+                      WHITESPACE@69..70 " "
+                      RBRACE@70..71 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn annotated_array_dims_variants() {
+        // Multiple annotations on one dimension, annotation arguments, and an old-style
+        // annotated return-type dimension (`m() @A []`).
+        check(
+            "class C { int @A @B [] f; String m() @Size(max = 3) [] { return null; } }",
+            expect![[r#"
+                SOURCE_FILE@0..73
+                  CLASS_DECL@0..73
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..73
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      FIELD_DECL@9..25
+                        MODIFIERS@9..9
+                        TYPE@9..22
+                          WHITESPACE@9..10 " "
+                          INT_KW@10..13 "int"
+                          ANNOTATION@13..16
+                            WHITESPACE@13..14 " "
+                            AT@14..15 "@"
+                            QUALIFIED_NAME@15..16
+                              IDENT@15..16 "A"
+                          ANNOTATION@16..19
+                            WHITESPACE@16..17 " "
+                            AT@17..18 "@"
+                            QUALIFIED_NAME@18..19
+                              IDENT@18..19 "B"
+                          WHITESPACE@19..20 " "
+                          LBRACK@20..21 "["
+                          RBRACK@21..22 "]"
+                        WHITESPACE@22..23 " "
+                        IDENT@23..24 "f"
+                        SEMICOLON@24..25 ";"
+                      METHOD_DECL@25..71
+                        MODIFIERS@25..25
+                        TYPE@25..32
+                          WHITESPACE@25..26 " "
+                          IDENT@26..32 "String"
+                        WHITESPACE@32..33 " "
+                        IDENT@33..34 "m"
+                        PARAM_LIST@34..36
+                          LPAREN@34..35 "("
+                          RPAREN@35..36 ")"
+                        ANNOTATION@36..51
+                          WHITESPACE@36..37 " "
+                          AT@37..38 "@"
+                          QUALIFIED_NAME@38..42
+                            IDENT@38..42 "Size"
+                          ANNOTATION_ARG_LIST@42..51
+                            LPAREN@42..43 "("
+                            ANNOTATION_PAIR@43..50
+                              IDENT@43..46 "max"
+                              WHITESPACE@46..47 " "
+                              EQ@47..48 "="
+                              LITERAL@48..50
+                                WHITESPACE@48..49 " "
+                                INT_LITERAL@49..50 "3"
+                            RPAREN@50..51 ")"
+                        WHITESPACE@51..52 " "
+                        LBRACK@52..53 "["
+                        RBRACK@53..54 "]"
+                        BLOCK@54..71
+                          WHITESPACE@54..55 " "
+                          LBRACE@55..56 "{"
+                          RETURN_STMT@56..69
+                            WHITESPACE@56..57 " "
+                            RETURN_KW@57..63 "return"
+                            LITERAL@63..68
+                              WHITESPACE@63..64 " "
+                              NULL_KW@64..68 "null"
+                            SEMICOLON@68..69 ";"
+                          WHITESPACE@69..70 " "
+                          RBRACE@70..71 "}"
+                      WHITESPACE@71..72 " "
+                      RBRACE@72..73 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn new_array_with_annotated_dim() {
+        // Array creation with an annotated dimension expression: `new T[n] @A [m]`.
+        check(
+            "class C { void m() { var x = new Document[2] @Readonly [12]; } }",
+            expect![[r#"
+                SOURCE_FILE@0..64
+                  CLASS_DECL@0..64
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..64
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..62
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..18
+                          LPAREN@16..17 "("
+                          RPAREN@17..18 ")"
+                        BLOCK@18..62
+                          WHITESPACE@18..19 " "
+                          LBRACE@19..20 "{"
+                          LOCAL_VAR_DECL@20..60
+                            MODIFIERS@20..20
+                            TYPE@20..24
+                              WHITESPACE@20..21 " "
+                              VAR_KW@21..24 "var"
+                            WHITESPACE@24..25 " "
+                            IDENT@25..26 "x"
+                            WHITESPACE@26..27 " "
+                            EQ@27..28 "="
+                            NEW_EXPR@28..59
+                              WHITESPACE@28..29 " "
+                              NEW_KW@29..32 "new"
+                              TYPE@32..41
+                                WHITESPACE@32..33 " "
+                                IDENT@33..41 "Document"
+                              LBRACK@41..42 "["
+                              LITERAL@42..43
+                                INT_LITERAL@42..43 "2"
+                              RBRACK@43..44 "]"
+                              ANNOTATION@44..54
+                                WHITESPACE@44..45 " "
+                                AT@45..46 "@"
+                                QUALIFIED_NAME@46..54
+                                  IDENT@46..54 "Readonly"
+                              WHITESPACE@54..55 " "
+                              LBRACK@55..56 "["
+                              LITERAL@56..58
+                                INT_LITERAL@56..58 "12"
+                              RBRACK@58..59 "]"
+                            SEMICOLON@59..60 ";"
+                          WHITESPACE@60..61 " "
+                          RBRACE@61..62 "}"
+                      WHITESPACE@62..63 " "
+                      RBRACE@63..64 "}"
+            "#]],
+        );
+    }
+
+    #[test]
     fn misc_statements() {
         check(
             "class C { void m() { outer: do { if (x) continue; break outer; } while (c); assert x : \"m\"; synchronized (lock) { } throw e; } }",

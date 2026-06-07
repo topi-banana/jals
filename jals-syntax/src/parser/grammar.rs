@@ -637,11 +637,8 @@ fn member(p: &mut Parser) {
     if p.at(LPAREN) {
         // Method (including annotation elements).
         param_list(p);
-        // Old-style return-type array dimensions `m()[]`.
-        while p.at(LBRACK) && p.nth_at(1, RBRACK) {
-            p.bump(LBRACK);
-            p.bump(RBRACK);
-        }
+        // Old-style return-type array dimensions `m()[]` (each optionally annotated).
+        dims(p);
         if p.at(THROWS_KW) {
             throws_clause(p);
         }
@@ -681,11 +678,29 @@ fn field_tail(p: &mut Parser) {
     }
 }
 
-/// Skips a sequence of `[]` (array dimensions).
+/// Skips a sequence of array dimensions (`[]`), each optionally annotated (`String @A []`).
 fn dims(p: &mut Parser) {
-    while p.at(LBRACK) && p.nth_at(1, RBRACK) {
-        p.bump(LBRACK);
-        p.bump(RBRACK);
+    loop {
+        // An annotation here belongs to a dimension only if `[]` follows it
+        // (`String @A []`); otherwise leave it for whatever comes next.
+        if p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+            let i = skip_annotations_lookahead(p, 0);
+            if p.nth_nofuel(i) == LBRACK && p.nth_nofuel(i + 1) == RBRACK {
+                while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+                    annotation(p);
+                }
+                p.bump(LBRACK);
+                p.bump(RBRACK);
+                continue;
+            }
+            break;
+        }
+        if p.at(LBRACK) && p.nth_at(1, RBRACK) {
+            p.bump(LBRACK);
+            p.bump(RBRACK);
+            continue;
+        }
+        break;
     }
 }
 
@@ -1252,38 +1267,62 @@ fn skip_modifiers_lookahead(p: &Parser, start: usize) -> usize {
             continue;
         }
         if k == AT && p.nth_nofuel(i + 1) != INTERFACE_KW {
-            i += 1; // @
-            if p.nth_nofuel(i) == IDENT {
-                i += 1;
-            }
-            while p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == IDENT {
-                i += 2;
-            }
-            if p.nth_nofuel(i) == LPAREN {
-                let mut depth = 0i32;
-                loop {
-                    match p.nth_nofuel(i) {
-                        LPAREN => {
-                            depth += 1;
-                            i += 1;
-                        }
-                        RPAREN => {
-                            depth -= 1;
-                            i += 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        EOF => return i,
-                        _ => i += 1,
-                    }
-                }
-            }
+            i = skip_one_annotation_lookahead(p, i);
             continue;
         }
         break;
     }
     i
+}
+
+/// Skips a run of annotations (each not `@interface`) starting at `start`, returning the next offset.
+fn skip_annotations_lookahead(p: &Parser, start: usize) -> usize {
+    let mut i = start;
+    while p.nth_nofuel(i) == AT && p.nth_nofuel(i + 1) != INTERFACE_KW {
+        i = skip_one_annotation_lookahead(p, i);
+    }
+    i
+}
+
+/// Skips a single annotation (`@Name`, `@a.b.Name`, or `@Name(...)`) whose `@` is at offset `i`,
+/// returning the offset just past it.
+fn skip_one_annotation_lookahead(p: &Parser, i: usize) -> usize {
+    let mut i = i + 1; // `@`
+    if p.nth_nofuel(i) == IDENT {
+        i += 1;
+    }
+    while p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == IDENT {
+        i += 2;
+    }
+    if p.nth_nofuel(i) == LPAREN {
+        let mut depth = 0i32;
+        loop {
+            match p.nth_nofuel(i) {
+                LPAREN => {
+                    depth += 1;
+                    i += 1;
+                }
+                RPAREN => {
+                    depth -= 1;
+                    i += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                EOF => return i,
+                _ => i += 1,
+            }
+        }
+    }
+    i
+}
+
+/// Whether the parser is positioned at an annotated array dimension (`@A [` …), as can begin a
+/// dimension in an array creation expression (`new int @A [n]`).
+fn at_annotated_dim(p: &Parser) -> bool {
+    p.at(AT)
+        && !p.nth_at(1, INTERFACE_KW)
+        && p.nth_nofuel(skip_annotations_lookahead(p, 0)) == LBRACK
 }
 
 fn local_var_decl(p: &mut Parser) {
@@ -1785,10 +1824,13 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
             // Anonymous class body.
             class_body(p);
         }
-    } else if p.at(LBRACK) {
-        // Array creation `new int[n]` / `new int[n][]`.
-        while p.at(LBRACK) {
-            p.bump(LBRACK);
+    } else if p.at(LBRACK) || at_annotated_dim(p) {
+        // Array creation `new int[n]` / `new int[n][]` / `new int @A [n]`.
+        while p.at(LBRACK) || at_annotated_dim(p) {
+            while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+                annotation(p);
+            }
+            p.expect(LBRACK);
             if !p.at(RBRACK) {
                 expr(p);
             }
