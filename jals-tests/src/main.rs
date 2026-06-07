@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use jals_tests::{ALL_SOURCES, Source, SourceReport, first_error, run_source, source_by_name};
+use jals_tests::{
+    ALL_SOURCES, Source, SourceReport, first_error, markdown_report, run_source, source_by_name,
+};
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +39,10 @@ struct Cli {
     /// Number of parallel worker threads (defaults to the number of logical CPUs).
     #[arg(short = 'j', long, value_name = "N")]
     jobs: Option<usize>,
+
+    /// Emit a GitHub-flavored Markdown summary (parse-rate table) instead of plain text.
+    #[arg(long)]
+    markdown: bool,
 }
 
 /// CLI-facing source names. Kept in sync with [`jals_tests::ALL_SOURCES`].
@@ -76,6 +82,7 @@ fn main() -> ExitCode {
 
     let mut any_missing = false;
     let mut any_violation = false;
+    let mut reports = Vec::new();
 
     for source in selected {
         let root = sources_dir.join(source.root_rel);
@@ -91,9 +98,17 @@ fn main() -> ExitCode {
 
         eprintln!("parsing `{}` under {} ...", source.name, root.display());
         let report = run_source(source.name, &root);
-        print_report(source, &report, &cli);
         any_violation |= report.has_invariant_violations();
-        println!();
+        if cli.markdown {
+            reports.push(report);
+        } else {
+            print_report(source, &report, &cli);
+            println!();
+        }
+    }
+
+    if cli.markdown {
+        print!("{}", markdown_report(&reports));
     }
 
     if any_missing {

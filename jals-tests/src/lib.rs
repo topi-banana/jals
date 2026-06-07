@@ -201,6 +201,32 @@ pub fn run_source(name: &str, root: &Path) -> SourceReport {
     report
 }
 
+/// Render the reports as a GitHub-flavored Markdown summary: a parse-rate table,
+/// suitable for a CI step summary or a pull-request comment.
+pub fn markdown_report(reports: &[SourceReport]) -> String {
+    let mut out = String::from("## jals parse soundness\n\n");
+    out.push_str("Parse rate of `jals_syntax::parse` over real Java corpora.\n\n");
+    out.push_str(
+        "| source | files | ok | parse rate | syntax errors | non-lossless | panicked |\n",
+    );
+    out.push_str("| --- | --: | --: | --: | --: | --: | --: |\n");
+    for r in reports {
+        let rate = if r.total == 0 {
+            0.0
+        } else {
+            r.ok as f64 * 100.0 / r.total as f64
+        };
+        out.push_str(&format!(
+            "| {} | {} | {} | {:.2}% | {} | {} | {} |\n",
+            r.name, r.total, r.ok, rate, r.syntax_errors, r.non_lossless, r.panicked
+        ));
+    }
+    if reports.iter().any(SourceReport::has_invariant_violations) {
+        out.push_str("\n⚠️ **Invariant violation**: `non-lossless` and `panicked` must be 0.\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +272,16 @@ mod tests {
         assert_eq!(report.panicked, 0);
         assert_eq!(report.failures.len(), 1);
         assert!(!report.has_invariant_violations());
+    }
+
+    #[test]
+    fn markdown_report_has_a_row_per_source() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("A.java"), "class A {}").unwrap();
+        let report = run_source("openjdk", dir.path());
+        let md = markdown_report(std::slice::from_ref(&report));
+        assert!(md.contains("| source |"), "missing header:\n{md}");
+        assert!(md.contains("openjdk"), "missing source row:\n{md}");
+        assert!(md.contains("100.00%"), "missing parse rate:\n{md}");
     }
 }
