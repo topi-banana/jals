@@ -8,6 +8,10 @@ fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted
 }
 
+fn fmt_with(src: &str, config: &Config) -> String {
+    format_source(src, config).formatted
+}
+
 /// The sequence of non-trivia tokens (kind + text) of `src`.
 fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
     parse(src)
@@ -120,5 +124,22 @@ proptest! {
     #[test]
     fn never_panics(src in ".*") {
         let _ = fmt(&src);
+    }
+
+    /// Formatting stays idempotent under any blank-line upper bound.
+    #[test]
+    fn idempotent_under_blank_bound(src in javaish(), bound in 0usize..4) {
+        let cfg = Config { max_blank_lines: bound, ..Config::default() };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// The significant-token sequence is preserved under any blank-line upper bound.
+    #[test]
+    fn preserves_significant_tokens_under_blank_bound(src in javaish(), bound in 0usize..4) {
+        let cfg = Config { max_blank_lines: bound, ..Config::default() };
+        let out = fmt_with(&src, &cfg);
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
     }
 }

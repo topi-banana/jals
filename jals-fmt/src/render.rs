@@ -35,15 +35,19 @@ struct Out<'c> {
     col: usize,
     /// Whether the current line already has visible content.
     line_has_content: bool,
-    /// Newlines buffered before the next content (0 = none, 1 = break, 2 = blank line).
+    /// Newlines buffered before the next content (0 = none, 1 = plain break, `n` = `n - 1`
+    /// blank lines).
     pending_newlines: usize,
     /// Indentation level for the line after the pending break.
     pending_indent: usize,
 }
 
 impl Out<'_> {
-    fn request_break(&mut self, indent: usize, want_blank: bool) {
-        let n = if want_blank { 2 } else { 1 };
+    /// Buffer a line break before the next content. `blank_lines` is the run of blank lines
+    /// the source had (0 for a plain break); it is clamped to `max_blank_lines` here, making
+    /// the renderer the single place that enforces the blank-line policy.
+    fn request_break(&mut self, indent: usize, blank_lines: usize) {
+        let n = blank_lines.min(self.cfg.max_blank_lines) + 1;
         self.pending_newlines = self.pending_newlines.max(n);
         self.pending_indent = indent;
     }
@@ -160,22 +164,22 @@ pub(crate) fn print(root: &Doc, cfg: &Config) -> String {
                 if mode == Mode::Flat {
                     out.space();
                 } else if !flush_suffixes(&mut stack, &mut suffixes, cmd) {
-                    out.request_break(indent, false);
+                    out.request_break(indent, 0);
                 }
             }
             Doc::SoftLine => {
                 if mode == Mode::Break && !flush_suffixes(&mut stack, &mut suffixes, cmd) {
-                    out.request_break(indent, false);
+                    out.request_break(indent, 0);
                 }
             }
             Doc::HardLine => {
                 if !flush_suffixes(&mut stack, &mut suffixes, cmd) {
-                    out.request_break(indent, false);
+                    out.request_break(indent, 0);
                 }
             }
-            Doc::BlankLine => {
+            Doc::BlankLine(blank_lines) => {
                 if !flush_suffixes(&mut stack, &mut suffixes, cmd) {
-                    out.request_break(indent, true);
+                    out.request_break(indent, *blank_lines);
                 }
             }
             Doc::LineSuffix(d) => suffixes.push(Cmd {
@@ -318,7 +322,7 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
                     return true;
                 }
             }
-            Doc::HardLine | Doc::BlankLine => return true,
+            Doc::HardLine | Doc::BlankLine(_) => return true,
             Doc::LineSuffix(_) => {}
         }
     }
