@@ -2067,6 +2067,94 @@ mod tests {
     }
 
     #[test]
+    fn qualified_new_inner_class() {
+        check(
+            "class C { void m() { var a = outer.new Inner(); var b = x.new B().new C(); } }",
+            expect![[r#"
+                SOURCE_FILE@0..78
+                  CLASS_DECL@0..78
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..78
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..76
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..18
+                          LPAREN@16..17 "("
+                          RPAREN@17..18 ")"
+                        BLOCK@18..76
+                          WHITESPACE@18..19 " "
+                          LBRACE@19..20 "{"
+                          LOCAL_VAR_DECL@20..47
+                            MODIFIERS@20..20
+                            TYPE@20..24
+                              WHITESPACE@20..21 " "
+                              VAR_KW@21..24 "var"
+                            WHITESPACE@24..25 " "
+                            IDENT@25..26 "a"
+                            WHITESPACE@26..27 " "
+                            EQ@27..28 "="
+                            NEW_EXPR@28..46
+                              NAME_REF@28..34
+                                WHITESPACE@28..29 " "
+                                IDENT@29..34 "outer"
+                              DOT@34..35 "."
+                              NEW_KW@35..38 "new"
+                              TYPE@38..44
+                                WHITESPACE@38..39 " "
+                                IDENT@39..44 "Inner"
+                              ARG_LIST@44..46
+                                LPAREN@44..45 "("
+                                RPAREN@45..46 ")"
+                            SEMICOLON@46..47 ";"
+                          LOCAL_VAR_DECL@47..74
+                            MODIFIERS@47..47
+                            TYPE@47..51
+                              WHITESPACE@47..48 " "
+                              VAR_KW@48..51 "var"
+                            WHITESPACE@51..52 " "
+                            IDENT@52..53 "b"
+                            WHITESPACE@53..54 " "
+                            EQ@54..55 "="
+                            NEW_EXPR@55..73
+                              NEW_EXPR@55..65
+                                NAME_REF@55..57
+                                  WHITESPACE@55..56 " "
+                                  IDENT@56..57 "x"
+                                DOT@57..58 "."
+                                NEW_KW@58..61 "new"
+                                TYPE@61..63
+                                  WHITESPACE@61..62 " "
+                                  IDENT@62..63 "B"
+                                ARG_LIST@63..65
+                                  LPAREN@63..64 "("
+                                  RPAREN@64..65 ")"
+                              DOT@65..66 "."
+                              NEW_KW@66..69 "new"
+                              TYPE@69..71
+                                WHITESPACE@69..70 " "
+                                IDENT@70..71 "C"
+                              ARG_LIST@71..73
+                                LPAREN@71..72 "("
+                                RPAREN@72..73 ")"
+                            SEMICOLON@73..74 ";"
+                          WHITESPACE@74..75 " "
+                          RBRACE@75..76 "}"
+                      WHITESPACE@76..77 " "
+                      RBRACE@77..78 "}"
+            "#]],
+        );
+    }
+
+    #[test]
     fn new_array_and_anonymous() {
         check(
             "class C { void m() { var a = new int[]{1, 2}; var b = new Runnable() { public void run() {} }; var c = new ArrayList<>(); } }",

@@ -1849,6 +1849,26 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
                 p.bump_any(); // IDENT / this / super
                 lhs = m.complete(p, FIELD_ACCESS);
             }
+            DOT if p.nth_at(1, NEW_KW) => {
+                // Qualified class instance creation for an inner class:
+                // `outer.new Inner(...)`, chained as `a.new B().new C()`. The qualifier is
+                // the current `lhs`; the rest mirrors the constructor-call form of `new_expr`
+                // (no array creation is legal here).
+                let m = lhs.precede(p);
+                p.bump(DOT);
+                p.bump(NEW_KW);
+                if p.at(LT) {
+                    type_args(p);
+                }
+                type_(p);
+                if p.at(LPAREN) {
+                    arg_list(p);
+                    if p.at(LBRACE) {
+                        class_body(p);
+                    }
+                }
+                lhs = m.complete(p, NEW_EXPR);
+            }
             COLON_COLON => {
                 let m = lhs.precede(p);
                 p.bump(COLON_COLON);
