@@ -222,4 +222,22 @@ proptest! {
         let twice = fmt_with(&once, &cfg);
         prop_assert_eq!(&once, &twice);
     }
+
+    /// Next-line brace style keeps formatting idempotent.
+    #[test]
+    fn next_line_brace_idempotent(src in javaish()) {
+        let cfg = Config { brace_style: jals_fmt::BraceStyle::NextLine, ..Config::default() };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Next-line brace style preserves the significant-token sequence (it only moves the
+    /// whitespace around a brace).
+    #[test]
+    fn next_line_brace_preserves_significant_tokens(src in javaish()) {
+        let cfg = Config { brace_style: jals_fmt::BraceStyle::NextLine, ..Config::default() };
+        let out = fmt_with(&src, &cfg);
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
 }

@@ -19,14 +19,14 @@ mod output;
 mod render;
 mod wrap;
 
-pub use config::{Config, ConfigError, IndentStyle, LineEnding};
+pub use config::{BraceStyle, Config, ConfigError, IndentStyle, LineEnding};
 pub use output::{FormatOutput, Warning};
 
 /// Format `src` according to `config`.
 pub fn format_source(src: &str, config: &Config) -> FormatOutput {
     let parse = jals_syntax::parse(src);
     let root = parse.syntax();
-    let doc = lower::lower_root(&root);
+    let doc = lower::lower_root(&root, config);
     let formatted = render::print(&doc, config, src);
     let warnings = parse
         .errors()
