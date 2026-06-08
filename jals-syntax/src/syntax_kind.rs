@@ -285,6 +285,22 @@ pub enum SyntaxKind {
     RECORD_PATTERN,
     /// Pattern guard (`when expr`).
     GUARD,
+
+    // --- Module declarations (`module-info.java`) ---
+    /// `{Annotation} [open] module Name { directives }`.
+    MODULE_DECL,
+    /// Module body (`{ directives }`).
+    MODULE_BODY,
+    /// `requires {transitive|static} ModuleName ;`.
+    REQUIRES_DIRECTIVE,
+    /// `exports PackageName [to ModuleName, ...] ;`.
+    EXPORTS_DIRECTIVE,
+    /// `opens PackageName [to ModuleName, ...] ;`.
+    OPENS_DIRECTIVE,
+    /// `uses TypeName ;`.
+    USES_DIRECTIVE,
+    /// `provides TypeName with TypeName, ... ;`.
+    PROVIDES_DIRECTIVE,
 }
 
 impl SyntaxKind {

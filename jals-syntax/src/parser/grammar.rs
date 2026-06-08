@@ -235,12 +235,127 @@ fn type_decl(p: &mut Parser) {
         INTERFACE_KW => interface_rest(p, m),
         ENUM_KW => enum_rest(p, m),
         AT if p.nth_at(1, INTERFACE_KW) => annotation_type_rest(p, m),
+        _ if at_module_decl(p) => module_rest(p, m),
         _ if at_record_decl(p) => record_rest(p, m),
         _ => {
             m.abandon(p);
             p.err_and_bump("expected a type declaration");
         }
     }
+}
+
+// ===== Module declarations (`module-info.java`) =====
+
+/// Whether this is the start of a module declaration (`module Name {` / `open module Name {`).
+/// `module` and `open` are restricted keywords (lexed as `IDENT`); at the top level a name
+/// following `module` is unambiguous because only type/module declarations appear there.
+fn at_module_decl(p: &Parser) -> bool {
+    (p.at_contextual_kw("module") && p.nth_at(1, IDENT))
+        || (p.at_contextual_kw("open")
+            && p.nth_at(1, IDENT)
+            && p.nth_text(1) == "module"
+            && p.nth_at(2, IDENT))
+}
+
+/// Module declaration (`m` is the enclosing start marker; modifiers/annotations already consumed).
+fn module_rest(p: &mut Parser, m: Marker) {
+    if p.at_contextual_kw("open") {
+        p.bump_remap(OPEN_KW);
+    }
+    p.bump_remap(MODULE_KW);
+    qualified_name(p, false);
+    module_body(p);
+    m.complete(p, MODULE_DECL);
+}
+
+/// Module body (`{ directive* }`).
+fn module_body(p: &mut Parser) {
+    let m = p.start();
+    if !p.expect(LBRACE) {
+        m.complete(p, MODULE_BODY);
+        return;
+    }
+    while !p.at(RBRACE) && !p.at_eof() {
+        let before = p.pos();
+        module_directive(p);
+        if p.pos() == before {
+            p.err_and_bump("unexpected token");
+        }
+    }
+    p.expect(RBRACE);
+    m.complete(p, MODULE_BODY);
+}
+
+/// A single module directive (`requires` / `exports` / `opens` / `uses` / `provides`).
+fn module_directive(p: &mut Parser) {
+    if p.at_contextual_kw("requires") {
+        requires_directive(p);
+    } else if p.at_contextual_kw("exports") {
+        exports_opens_directive(p, EXPORTS_KW, EXPORTS_DIRECTIVE);
+    } else if p.at_contextual_kw("opens") {
+        exports_opens_directive(p, OPENS_KW, OPENS_DIRECTIVE);
+    } else if p.at_contextual_kw("uses") {
+        uses_provides_directive(p, USES_KW, USES_DIRECTIVE);
+    } else if p.at_contextual_kw("provides") {
+        uses_provides_directive(p, PROVIDES_KW, PROVIDES_DIRECTIVE);
+    } else {
+        p.err_and_bump("expected a module directive");
+    }
+}
+
+/// `requires {transitive | static} ModuleName ;`. `transitive` is itself a valid module name,
+/// so it is a modifier only when another name part or `static` follows.
+fn requires_directive(p: &mut Parser) {
+    let m = p.start();
+    p.bump_remap(REQUIRES_KW);
+    loop {
+        if p.at_contextual_kw("transitive") && (p.nth_at(1, IDENT) || p.nth_at(1, STATIC_KW)) {
+            p.bump_remap(TRANSITIVE_KW);
+        } else if p.at(STATIC_KW) {
+            p.bump(STATIC_KW);
+        } else {
+            break;
+        }
+    }
+    qualified_name(p, false);
+    p.expect(SEMICOLON);
+    m.complete(p, REQUIRES_DIRECTIVE);
+}
+
+/// `exports PackageName [to ModuleName {, ModuleName}] ;` (and the identical `opens` form).
+fn exports_opens_directive(p: &mut Parser, kw: SyntaxKind, node: SyntaxKind) {
+    let m = p.start();
+    p.bump_remap(kw);
+    qualified_name(p, false);
+    if p.at_contextual_kw("to") {
+        p.bump_remap(TO_KW);
+        qualified_name(p, false);
+        while p.eat(COMMA) {
+            qualified_name(p, false);
+        }
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, node);
+}
+
+/// `uses TypeName ;` and `provides TypeName with TypeName {, TypeName} ;`.
+fn uses_provides_directive(p: &mut Parser, kw: SyntaxKind, node: SyntaxKind) {
+    let m = p.start();
+    p.bump_remap(kw);
+    qualified_name(p, false);
+    if kw == PROVIDES_KW {
+        if p.at_contextual_kw("with") {
+            p.bump_remap(WITH_KW);
+            qualified_name(p, false);
+            while p.eat(COMMA) {
+                qualified_name(p, false);
+            }
+        } else {
+            p.error("expected `with`");
+        }
+    }
+    p.expect(SEMICOLON);
+    m.complete(p, node);
 }
 
 /// Modifier sequence (annotations, modifier keywords, `sealed`, `non-sealed`). Always creates a node.
