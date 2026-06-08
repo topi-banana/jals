@@ -1,10 +1,11 @@
 # jalsfmt.toml — every key is optional; values below are the defaults.
-indent-style = "space"      # "space" | "tab"
+indent-style = "space"            # "space" | "tab"
 indent-width = 4
-max-blank-lines = 1         # collapse runs of blank lines down to this many
-line-ending = "lf"          # "lf" | "crlf"
+max-blank-lines = 1               # collapse runs of blank lines down to this many
+line-ending = "lf"                # "lf" | "crlf"
 insert-final-newline = true
-max-width = 100             # code wrap target (columns)
-brace-style = "same-line"   # "same-line" (K&R) | "next-line" (Allman); declaration bodies only
-wrap-comments = false       # reflow comments/Javadoc to comment-width (off by default)
-comment-width = 80          # comment / Javadoc reflow target (columns); needs wrap-comments
+max-width = 100                   # code wrap target (columns)
+brace-style = "same-line"         # "same-line" (K&R) | "next-line" (Allman); declaration bodies only
+control-brace-style = "same-line" # "same-line" | "next-line"; control-flow/switch braces & } else
+wrap-comments = false             # reflow comments/Javadoc to comment-width (off by default)
+comment-width = 80                # comment / Javadoc reflow target (columns); needs wrap-comments
