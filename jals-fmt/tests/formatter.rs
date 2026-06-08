@@ -1,7 +1,7 @@
 //! Snapshot tests for the formatter.
 
 use expect_test::{Expect, expect};
-use jals_fmt::{Config, format_source};
+use jals_fmt::{Config, LineEnding, format_source};
 
 fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted
@@ -353,4 +353,81 @@ fn wrapped_comments_are_idempotent() {
     let once = fmt_wrapped(src, 28);
     let twice = fmt_wrapped(&once, 28);
     assert_eq!(once, twice, "wrapped formatting must be idempotent");
+}
+
+// --- line-ending -----------------------------------------------------------
+
+fn fmt_le(src: &str, line_ending: LineEnding) -> String {
+    let cfg = Config {
+        line_ending,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// Every `\n` in `s` is part of a `\r\n` (no bare LF slipped through).
+fn all_crlf(s: &str) -> bool {
+    !s.replace("\r\n", "").contains('\n')
+}
+
+#[test]
+fn crlf_line_ending_emitted() {
+    let out = fmt_le("class C{int x=1;}", LineEnding::Crlf);
+    assert_eq!(out, "class C {\r\n    int x = 1;\r\n}\r\n");
+}
+
+#[test]
+fn auto_preserves_lf_input() {
+    // The input's first break is a bare LF, so the output stays LF.
+    let out = fmt_le("class C{\nint x=1;}", LineEnding::Auto);
+    assert_eq!(out, "class C {\n    int x = 1;\n}\n");
+}
+
+#[test]
+fn auto_preserves_crlf_input() {
+    // The input's first break is a CRLF, so the whole output is CRLF — even the breaks the
+    // renderer introduces around the (originally one-line) body.
+    let out = fmt_le("class C{\r\nint x=1;}", LineEnding::Auto);
+    assert_eq!(out, "class C {\r\n    int x = 1;\r\n}\r\n");
+    assert!(all_crlf(&out));
+}
+
+#[test]
+fn auto_first_break_wins_on_mixed_input() {
+    // Mixed endings: the first break (CRLF) decides for the entire output.
+    let out = fmt_le("class C{\r\nint x=1;\nint y=2;}", LineEnding::Auto);
+    assert!(
+        all_crlf(&out),
+        "first break is CRLF, so output is all CRLF: {out:?}"
+    );
+}
+
+#[test]
+fn auto_without_break_uses_native() {
+    // A source with no line break formats the same as Native (platform terminator).
+    let out_auto = fmt_le("class C{int x=1;}", LineEnding::Auto);
+    let out_native = fmt_le("class C{int x=1;}", LineEnding::Native);
+    assert_eq!(out_auto, out_native);
+}
+
+#[test]
+fn native_matches_platform_line_ending() {
+    let out = fmt_le("class C{int x=1;}", LineEnding::Native);
+    let expected = if cfg!(windows) {
+        "class C {\r\n    int x = 1;\r\n}\r\n"
+    } else {
+        "class C {\n    int x = 1;\n}\n"
+    };
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn auto_is_idempotent_on_crlf() {
+    let once = fmt_le(
+        "class C{\r\nint x=1;\r\n\r\n\r\nint y=2;}",
+        LineEnding::Auto,
+    );
+    let twice = fmt_le(&once, LineEnding::Auto);
+    assert_eq!(once, twice, "auto formatting must be idempotent");
+    assert!(all_crlf(&once));
 }

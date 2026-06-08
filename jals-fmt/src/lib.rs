@@ -27,7 +27,7 @@ pub fn format_source(src: &str, config: &Config) -> FormatOutput {
     let parse = jals_syntax::parse(src);
     let root = parse.syntax();
     let doc = lower::lower_root(&root);
-    let formatted = render::print(&doc, config);
+    let formatted = render::print(&doc, config, src);
     let warnings = parse
         .errors()
         .iter()
