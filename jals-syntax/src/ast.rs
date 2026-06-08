@@ -1351,6 +1351,12 @@ impl FieldAccess {
             .last()
             .map(|t| t.text().to_string())
     }
+
+    /// The explicit type arguments of a type witness (`recv.<String>method`), if present.
+    /// Only method-call selectors carry these; a plain field access returns `None`.
+    pub fn type_args(&self) -> Option<TypeArgs> {
+        support::child(&self.syntax)
+    }
 }
 
 ast_node!(IndexExpr, INDEX_EXPR);

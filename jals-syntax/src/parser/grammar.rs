@@ -1843,6 +1843,17 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
                 p.bump(CLASS_KW);
                 lhs = m.complete(p, CLASS_LITERAL);
             }
+            DOT if p.nth_at(1, LT) => {
+                // Explicit type arguments (a "type witness") on a method call:
+                // `recv.<Type>method(...)`, e.g. `List.<String>of()`. The `<Type>method`
+                // selector folds into a FIELD_ACCESS; the trailing argument list is then
+                // consumed by the LPAREN arm on the next iteration to form the CALL_EXPR.
+                let m = lhs.precede(p);
+                p.bump(DOT);
+                type_args(p);
+                p.expect(IDENT);
+                lhs = m.complete(p, FIELD_ACCESS);
+            }
             DOT if p.nth_at(1, IDENT) || p.nth_at(1, THIS_KW) || p.nth_at(1, SUPER_KW) => {
                 let m = lhs.precede(p);
                 p.bump(DOT);

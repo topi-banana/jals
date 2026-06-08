@@ -1892,6 +1892,91 @@ mod tests {
     }
 
     #[test]
+    fn explicit_type_witness() {
+        check(
+            "class C { void m() { List.<String>of(); obj.<Map<K, V>>build().run(); } }",
+            expect![[r#"
+                SOURCE_FILE@0..73
+                  CLASS_DECL@0..73
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..73
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..71
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..18
+                          LPAREN@16..17 "("
+                          RPAREN@17..18 ")"
+                        BLOCK@18..71
+                          WHITESPACE@18..19 " "
+                          LBRACE@19..20 "{"
+                          EXPR_STMT@20..39
+                            CALL_EXPR@20..38
+                              FIELD_ACCESS@20..36
+                                NAME_REF@20..25
+                                  WHITESPACE@20..21 " "
+                                  IDENT@21..25 "List"
+                                DOT@25..26 "."
+                                TYPE_ARGS@26..34
+                                  LT@26..27 "<"
+                                  TYPE@27..33
+                                    IDENT@27..33 "String"
+                                  GT@33..34 ">"
+                                IDENT@34..36 "of"
+                              ARG_LIST@36..38
+                                LPAREN@36..37 "("
+                                RPAREN@37..38 ")"
+                            SEMICOLON@38..39 ";"
+                          EXPR_STMT@39..69
+                            CALL_EXPR@39..68
+                              FIELD_ACCESS@39..66
+                                CALL_EXPR@39..62
+                                  FIELD_ACCESS@39..60
+                                    NAME_REF@39..43
+                                      WHITESPACE@39..40 " "
+                                      IDENT@40..43 "obj"
+                                    DOT@43..44 "."
+                                    TYPE_ARGS@44..55
+                                      LT@44..45 "<"
+                                      TYPE@45..54
+                                        IDENT@45..48 "Map"
+                                        TYPE_ARGS@48..54
+                                          LT@48..49 "<"
+                                          TYPE@49..50
+                                            IDENT@49..50 "K"
+                                          COMMA@50..51 ","
+                                          TYPE@51..53
+                                            WHITESPACE@51..52 " "
+                                            IDENT@52..53 "V"
+                                          GT@53..54 ">"
+                                      GT@54..55 ">"
+                                    IDENT@55..60 "build"
+                                  ARG_LIST@60..62
+                                    LPAREN@60..61 "("
+                                    RPAREN@61..62 ")"
+                                DOT@62..63 "."
+                                IDENT@63..66 "run"
+                              ARG_LIST@66..68
+                                LPAREN@66..67 "("
+                                RPAREN@67..68 ")"
+                            SEMICOLON@68..69 ";"
+                          WHITESPACE@69..70 " "
+                          RBRACE@70..71 "}"
+                      WHITESPACE@71..72 " "
+                      RBRACE@72..73 "}"
+            "#]],
+        );
+    }
+
+    #[test]
     fn ternary_and_assignment() {
         check(
             "class C { void m() { x = a ? b : c; y += 1; z >>= 2; } }",
