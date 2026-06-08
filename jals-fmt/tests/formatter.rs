@@ -1,7 +1,7 @@
 //! Snapshot tests for the formatter.
 
 use expect_test::{Expect, expect};
-use jals_fmt::{BraceStyle, Config, LineEnding, format_source};
+use jals_fmt::{BraceStyle, Config, ControlBraceStyle, LineEnding, format_source};
 
 fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted
@@ -445,6 +445,152 @@ fn brace_style_next_line_is_idempotent() {
     let once = fmt_next_line("class C{void m(){foo();bar();}static{go();}}");
     let twice = fmt_next_line(&once);
     assert_eq!(once, twice, "next-line brace style must be idempotent");
+}
+
+// --- control-brace-style ---------------------------------------------------
+
+/// Format with `control-brace-style = next-line` (declaration braces left at the default K&R).
+fn fmt_ctrl_next_line(src: &str) -> String {
+    let cfg = Config {
+        control_brace_style: ControlBraceStyle::NextLine,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// Format in full Allman: both `brace-style` and `control-brace-style` break onto their lines.
+fn fmt_full_allman(src: &str) -> String {
+    let cfg = Config {
+        brace_style: BraceStyle::NextLine,
+        control_brace_style: ControlBraceStyle::NextLine,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn control_brace_style_next_line_moves_control_braces_only() {
+    // The mirror image of `brace_style_next_line_moves_declaration_braces`: the type and
+    // method braces stay K&R, while the `if`/`else` control-flow braces and the `else`
+    // continuation break onto their own lines.
+    expect![[r#"
+        class Foo {
+            void m(int a) {
+                if (a > 0)
+                {
+                    foo();
+                }
+                else
+                {
+                    bar();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ctrl_next_line(
+        "class Foo{void m(int a){if(a>0){foo();}else{bar();}}}",
+    ));
+}
+
+#[test]
+fn control_brace_style_next_line_try_catch_finally() {
+    expect![[r#"
+        class C {
+            void m() {
+                try
+                {
+                    a();
+                }
+                catch (E e)
+                {
+                    b();
+                }
+                finally
+                {
+                    c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ctrl_next_line(
+        "class C{void m(){try{a();}catch(E e){b();}finally{c();}}}",
+    ));
+}
+
+#[test]
+fn control_brace_style_next_line_loops() {
+    // A `while` loop's opening brace breaks (via the block), and a `do`-`while`'s trailing
+    // `while` breaks (via the continuation).
+    expect![[r#"
+        class C {
+            void m() {
+                while (x)
+                {
+                    a();
+                }
+                do
+                {
+                    b();
+                }
+                while (y);
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ctrl_next_line(
+        "class C{void m(){while(x){a();}do{b();}while(y);}}",
+    ));
+}
+
+#[test]
+fn control_brace_style_does_not_touch_declaration_braces() {
+    // With only `control-brace-style` set, declaration bodies stay K&R; an empty method body
+    // still collapses to `{}`.
+    expect![[r#"
+        class C {
+            void m() {}
+        }
+    "#]]
+    .assert_eq(&fmt_ctrl_next_line("class C{void m(){}}"));
+}
+
+#[test]
+fn full_allman_breaks_every_brace() {
+    expect![[r#"
+        class Foo
+        {
+            void m(int a)
+            {
+                if (a > 0)
+                {
+                    foo();
+                }
+                else
+                {
+                    bar();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_full_allman(
+        "class Foo{void m(int a){if(a>0){foo();}else{bar();}}}",
+    ));
+}
+
+#[test]
+fn control_brace_style_next_line_is_idempotent() {
+    let once = fmt_ctrl_next_line("class C{void m(){try{a();}catch(E e){b();}finally{c();}}}");
+    let twice = fmt_ctrl_next_line(&once);
+    assert_eq!(
+        once, twice,
+        "next-line control brace style must be idempotent"
+    );
+}
+
+#[test]
+fn full_allman_is_idempotent() {
+    let once = fmt_full_allman("class C{void m(){if(a){x();}else{y();}do{z();}while(p);}}");
+    let twice = fmt_full_allman(&once);
+    assert_eq!(once, twice, "full Allman must be idempotent");
 }
 
 // --- line-ending -----------------------------------------------------------

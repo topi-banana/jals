@@ -75,6 +75,31 @@ pub enum BraceStyle {
     NextLine,
 }
 
+/// How control-flow brace styling is laid out — the complement of [`BraceStyle`], covering
+/// everything `brace-style` deliberately leaves alone. It governs two coupled junctions:
+/// the opening brace of a control-flow block (`if`/`for`/`while`/`do`/`try`/`catch`/`finally`/
+/// `synchronized`), a `switch` block, a lambda body, or a bare block; and the continuation
+/// keyword that follows a closing brace (`} else`, `} catch`, `} finally`, `} while`).
+/// Mirrors rustfmt's `control_brace_style`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlBraceStyle {
+    /// K&R: opening braces hug the header and continuations cuddle the closing brace
+    /// (`if (x) {`, `} else {`). The default.
+    SameLine,
+    /// Allman: opening braces and continuations each take their own line:
+    ///
+    /// ```text
+    /// if (x)
+    /// {
+    ///     …
+    /// }
+    /// else
+    /// {
+    /// ```
+    NextLine,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -93,9 +118,13 @@ pub struct Config {
     pub max_width: usize,
     /// Placement of the opening brace of a declaration body (type, method, constructor, or
     /// initializer): same line (K&R) or next line (Allman). Control-flow blocks
-    /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are unaffected — their
-    /// brace placement is reserved for a future `control-brace-style`.
+    /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are governed separately by
+    /// [`control_brace_style`](Config::control_brace_style).
     pub brace_style: BraceStyle,
+    /// Layout of control-flow brace styling: the opening brace of a control-flow / `switch` /
+    /// lambda / bare block, and the `} else` / `} catch` / `} finally` / `} while`
+    /// continuations. Same line (K&R) or next line (Allman).
+    pub control_brace_style: ControlBraceStyle,
     /// Reflow comments so no line exceeds [`comment_width`](Config::comment_width).
     /// Off by default; [`comment_width`](Config::comment_width) has no effect unless this
     /// is enabled (mirrors rustfmt's `wrap_comments`).
@@ -115,6 +144,7 @@ impl Default for Config {
             insert_final_newline: true,
             max_width: 100,
             brace_style: BraceStyle::SameLine,
+            control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
         }
@@ -229,8 +259,9 @@ mod tests {
         assert!(c.insert_final_newline);
         // Comment reflow is opt-in, mirroring rustfmt's `wrap_comments`.
         assert!(!c.wrap_comments);
-        // K&R braces by default.
+        // K&R braces by default, for both declaration and control-flow braces.
         assert_eq!(c.brace_style, BraceStyle::SameLine);
+        assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
     }
 
     #[test]
@@ -239,6 +270,14 @@ mod tests {
         assert_eq!(c.brace_style, BraceStyle::NextLine);
         let c: Config = toml::from_str("brace-style = \"same-line\"\n").unwrap();
         assert_eq!(c.brace_style, BraceStyle::SameLine);
+    }
+
+    #[test]
+    fn control_brace_style_parses_kebab_values() {
+        let c: Config = toml::from_str("control-brace-style = \"next-line\"\n").unwrap();
+        assert_eq!(c.control_brace_style, ControlBraceStyle::NextLine);
+        let c: Config = toml::from_str("control-brace-style = \"same-line\"\n").unwrap();
+        assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
     }
 
     #[test]

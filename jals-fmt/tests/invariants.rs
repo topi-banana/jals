@@ -240,4 +240,30 @@ proptest! {
         let out = fmt_with(&src, &cfg);
         prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
     }
+
+    /// Full Allman (both `brace-style` and `control-brace-style` on `next-line`) stays
+    /// idempotent.
+    #[test]
+    fn full_allman_idempotent(src in javaish()) {
+        let cfg = Config {
+            brace_style: jals_fmt::BraceStyle::NextLine,
+            control_brace_style: jals_fmt::ControlBraceStyle::NextLine,
+            ..Config::default()
+        };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Full Allman preserves the significant-token sequence.
+    #[test]
+    fn full_allman_preserves_significant_tokens(src in javaish()) {
+        let cfg = Config {
+            brace_style: jals_fmt::BraceStyle::NextLine,
+            control_brace_style: jals_fmt::ControlBraceStyle::NextLine,
+            ..Config::default()
+        };
+        let out = fmt_with(&src, &cfg);
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
 }
