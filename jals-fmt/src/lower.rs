@@ -170,12 +170,25 @@ fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
 fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
+    // A `.<T>` / `::<T>` explicit type witness hugs the method name that follows it
+    // (`List.<String>of()`, `Foo::<String>bar`), unlike a type's own `<...>` (`List<T> x`).
+    let mut hug_witness = false;
 
     for el in node.children_with_tokens() {
         if let Some(child) = el.as_node() {
             if let Some(first) = first_sig_token(child) {
-                parts.push(sep(prev.as_ref(), &first));
+                let s = if hug_witness {
+                    nil()
+                } else {
+                    sep(prev.as_ref(), &first)
+                };
+                parts.push(s);
             }
+            hug_witness = child.kind() == S::TYPE_ARGS
+                && matches!(
+                    prev.as_ref().map(|t| t.kind()),
+                    Some(S::DOT | S::COLON_COLON)
+                );
             parts.push(lower(child, ctx));
             if let Some(last) = last_sig_token(child) {
                 prev = Some(last);
@@ -184,7 +197,13 @@ fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             if t.kind().is_trivia() {
                 continue;
             }
-            parts.push(sep(prev.as_ref(), t));
+            let s = if hug_witness {
+                nil()
+            } else {
+                sep(prev.as_ref(), t)
+            };
+            parts.push(s);
+            hug_witness = false;
             parts.push(tok(t, ctx));
             prev = Some(t.clone());
         }
