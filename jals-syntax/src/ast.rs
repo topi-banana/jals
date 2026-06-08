@@ -137,6 +137,11 @@ impl SourceFile {
     pub fn decls(&self) -> AstChildren<Decl> {
         support::children(&self.syntax)
     }
+
+    /// The module declaration, if this is a `module-info.java`.
+    pub fn module(&self) -> Option<ModuleDecl> {
+        support::child(&self.syntax)
+    }
 }
 
 ast_node!(
@@ -185,6 +190,159 @@ impl QualifiedName {
     /// Whether the name ends in `.*` (on-demand import).
     pub fn is_wildcard(&self) -> bool {
         support::token(&self.syntax, STAR).is_some()
+    }
+}
+
+// ===== Module declarations =====
+
+ast_node!(
+    /// `{@Anno} [open] module a.b.c { directives }` (the contents of a `module-info.java`).
+    ModuleDecl,
+    MODULE_DECL
+);
+
+impl ModuleDecl {
+    /// The modifier list (annotations on the module), always present, possibly empty.
+    pub fn modifiers(&self) -> Option<Modifiers> {
+        support::child(&self.syntax)
+    }
+
+    /// Whether the module is `open`.
+    pub fn is_open(&self) -> bool {
+        support::token(&self.syntax, OPEN_KW).is_some()
+    }
+
+    /// The module name (`a.b.c`).
+    pub fn name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+
+    /// The module body.
+    pub fn body(&self) -> Option<ModuleBody> {
+        support::child(&self.syntax)
+    }
+}
+
+ast_node!(
+    /// The `{ ... }` body of a module declaration.
+    ModuleBody,
+    MODULE_BODY
+);
+
+impl ModuleBody {
+    /// The directives, in source order.
+    pub fn directives(&self) -> AstChildren<Directive> {
+        support::children(&self.syntax)
+    }
+}
+
+ast_enum!(
+    /// Any module directive.
+    Directive {
+        Requires(RequiresDirective),
+        Exports(ExportsDirective),
+        Opens(OpensDirective),
+        Uses(UsesDirective),
+        Provides(ProvidesDirective),
+    }
+);
+
+ast_node!(
+    /// `requires {transitive | static} ModuleName ;`
+    RequiresDirective,
+    REQUIRES_DIRECTIVE
+);
+
+impl RequiresDirective {
+    /// Whether the `transitive` modifier is present.
+    pub fn is_transitive(&self) -> bool {
+        support::token(&self.syntax, TRANSITIVE_KW).is_some()
+    }
+
+    /// Whether the `static` modifier is present.
+    pub fn is_static(&self) -> bool {
+        support::token(&self.syntax, STATIC_KW).is_some()
+    }
+
+    /// The required module name.
+    pub fn module_name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+}
+
+ast_node!(
+    /// `exports PackageName [to ModuleName, ...] ;`
+    ExportsDirective,
+    EXPORTS_DIRECTIVE
+);
+
+impl ExportsDirective {
+    /// The exported package name.
+    pub fn package_name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+
+    /// The target modules of a qualified `exports ... to ...`, if any.
+    pub fn to_modules(&self) -> impl Iterator<Item = QualifiedName> {
+        self.syntax
+            .children()
+            .filter_map(QualifiedName::cast)
+            .skip(1)
+    }
+}
+
+ast_node!(
+    /// `opens PackageName [to ModuleName, ...] ;`
+    OpensDirective,
+    OPENS_DIRECTIVE
+);
+
+impl OpensDirective {
+    /// The opened package name.
+    pub fn package_name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+
+    /// The target modules of a qualified `opens ... to ...`, if any.
+    pub fn to_modules(&self) -> impl Iterator<Item = QualifiedName> {
+        self.syntax
+            .children()
+            .filter_map(QualifiedName::cast)
+            .skip(1)
+    }
+}
+
+ast_node!(
+    /// `uses TypeName ;`
+    UsesDirective,
+    USES_DIRECTIVE
+);
+
+impl UsesDirective {
+    /// The used service type.
+    pub fn type_name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+}
+
+ast_node!(
+    /// `provides TypeName with TypeName, ... ;`
+    ProvidesDirective,
+    PROVIDES_DIRECTIVE
+);
+
+impl ProvidesDirective {
+    /// The provided service type.
+    pub fn service(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+
+    /// The implementation types listed after `with`.
+    pub fn providers(&self) -> impl Iterator<Item = QualifiedName> {
+        self.syntax
+            .children()
+            .filter_map(QualifiedName::cast)
+            .skip(1)
     }
 }
 
