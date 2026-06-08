@@ -79,6 +79,22 @@ fn nested_generics() {
 }
 
 #[test]
+fn explicit_type_witness_hugs_method_name() {
+    check(
+        "class C{void m(){var a=List.<String>of();var b=Collections.<File>emptyList();var c=Foo::<String>bar;}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    var a = List.<String>of();
+                    var b = Collections.<File>emptyList();
+                    var c = Foo::<String>bar;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn long_param_list_wraps() {
     check(
         "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){}}",
