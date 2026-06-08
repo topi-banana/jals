@@ -55,7 +55,12 @@ pub struct Config {
     pub insert_final_newline: bool,
     /// Target line width for wrapping code.
     pub max_width: usize,
-    /// Target line width for reflowing Javadoc prose.
+    /// Reflow comments so no line exceeds [`comment_width`](Config::comment_width).
+    /// Off by default; [`comment_width`](Config::comment_width) has no effect unless this
+    /// is enabled (mirrors rustfmt's `wrap_comments`).
+    pub wrap_comments: bool,
+    /// Target line width for reflowing comment / Javadoc prose, including indentation.
+    /// Only consulted when [`wrap_comments`](Config::wrap_comments) is enabled.
     pub comment_width: usize,
 }
 
@@ -68,6 +73,7 @@ impl Default for Config {
             line_ending: LineEnding::Lf,
             insert_final_newline: true,
             max_width: 100,
+            wrap_comments: false,
             comment_width: 80,
         }
     }
@@ -179,6 +185,15 @@ mod tests {
         assert_eq!(c.comment_width, 80);
         assert_eq!(c.max_blank_lines, 1);
         assert!(c.insert_final_newline);
+        // Comment reflow is opt-in, mirroring rustfmt's `wrap_comments`.
+        assert!(!c.wrap_comments);
+    }
+
+    #[test]
+    fn wrap_comments_parses() {
+        let c: Config = toml::from_str("wrap-comments = true\ncomment-width = 60\n").unwrap();
+        assert!(c.wrap_comments);
+        assert_eq!(c.comment_width, 60);
     }
 
     #[test]

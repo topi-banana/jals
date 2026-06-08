@@ -29,8 +29,11 @@ The current formatter is intentionally minimal. It performs:
   expressions are **not** wrapped across lines.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
   net so operator fusion (`>>`, `->`, …) is never introduced or changed.
-- **Comment placement** — leading / trailing / dangling comments are anchored and re-emitted,
-  but their text is **not reflowed** (see below).
+- **Comment placement** — leading / trailing / dangling comments are anchored and re-emitted.
+- **Comment reflow** — with `wrap-comments` enabled, standalone line and block/Javadoc
+  comments are rewrapped to `comment-width` at their indentation. Lines are wrapped
+  independently (never merged), preformatted regions (`<pre>`, fenced code) are left intact,
+  and same-line trailing comments are never wrapped. Off by default; see below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -48,7 +51,8 @@ are kebab-case.
 | `line-ending` | `"lf"` \| `"crlf"` | `"lf"` | ✅ wired (no `auto`/`native` detection) |
 | `insert-final-newline` | bool | `true` | ✅ wired |
 | `max-width` | integer | `100` | ✅ wired |
-| `comment-width` | integer | `80` | ⚠️ **not wired** — declared but never read; comment/Javadoc reflow is unimplemented |
+| `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
+| `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
 
 ---
 
@@ -65,7 +69,6 @@ step.
 
 | jals key | Gap | rustfmt equivalent |
 | --- | --- | --- |
-| `comment-width` | Declared but unused; no comment reflow at all | `wrap_comments` + `comment_width` |
 | `line-ending` | No `auto`/`native` (detect existing line endings) | `newline_style` (`Auto`/`Native`/`Unix`/`Windows`) |
 | *(none)* | No lower bound for blank lines between items | `blank_lines_lower_bound` |
 
@@ -112,9 +115,11 @@ step.
 
 ## 5. Comments
 
+Reflow comments/Javadoc to `comment-width` (`wrap_comments`) is **implemented** — see
+[What it does today](#what-it-does-today). Remaining:
+
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Reflow comments/Javadoc to `comment-width` | `wrap_comments` |
 | Normalize `/* */` ↔ `//` | `normalize_comments` |
 | Format code blocks inside Javadoc | `format_code_in_doc_comments`, `doc_comment_code_block_width` |
 
@@ -187,5 +192,5 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 By Java-user impact: **(1)** `brace_style` / `control_brace_style` → **(2)** import
 organization (`reorder_imports` family) → **(3)** width heuristics (`chain_width`,
-`fn_call_width`, `array_width`) → **(4)** comment reflow (wire up `comment-width` via
-`wrap_comments`) → **(5)** `trailing_comma`.
+`fn_call_width`, `array_width`) → **(4)** `trailing_comma`. (Comment reflow — `comment-width`
+via `wrap_comments` — is done.)

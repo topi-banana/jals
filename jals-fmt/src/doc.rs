@@ -4,6 +4,17 @@
 //! (`render.rs`) turns a [`Doc`] into the formatted string, choosing for each
 //! [`Doc::Group`] whether it fits flat on the current line or must break.
 
+/// The flavour of a comment, controlling how it reflows under `wrap-comments`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommentKind {
+    /// `// ...` line comment.
+    Line,
+    /// `/* ... */` block comment.
+    Block,
+    /// `/** ... */` documentation comment (Javadoc).
+    Doc,
+}
+
 /// A formatting document.
 #[derive(Debug)]
 pub(crate) enum Doc {
@@ -12,6 +23,14 @@ pub(crate) enum Doc {
     /// Verbatim text that may contain newlines (string literals, text blocks,
     /// block-comment bodies). The renderer never reindents its interior.
     RawText(Box<str>),
+    /// A standalone comment, emitted verbatim unless `wrap-comments` is on, in which case
+    /// the renderer reflows it to `comment-width` at the current indentation.
+    Comment {
+        /// Which comment flavour this is.
+        kind: CommentKind,
+        /// The comment's source text (`//`, `/* */`, or `/** */`, verbatim).
+        text: Box<str>,
+    },
     /// A sequence of documents.
     Concat(Vec<Doc>),
     /// A space when flat; a newline + indent when broken.
@@ -50,6 +69,14 @@ pub(crate) fn text<S: Into<Box<str>>>(s: S) -> Doc {
 /// Verbatim text that may contain newlines, never reflowed or reindented.
 pub(crate) fn raw<S: Into<Box<str>>>(s: S) -> Doc {
     Doc::RawText(s.into())
+}
+
+/// A comment that the renderer reflows to `comment-width` when `wrap-comments` is on.
+pub(crate) fn comment<S: Into<Box<str>>>(kind: CommentKind, s: S) -> Doc {
+    Doc::Comment {
+        kind,
+        text: s.into(),
+    }
 }
 
 /// Concatenate documents.
@@ -127,6 +154,10 @@ fn clone_doc(doc: &Doc) -> Doc {
     match doc {
         Doc::Text(s) => Doc::Text(s.clone()),
         Doc::RawText(s) => Doc::RawText(s.clone()),
+        Doc::Comment { kind, text } => Doc::Comment {
+            kind: *kind,
+            text: text.clone(),
+        },
         Doc::Concat(v) => Doc::Concat(v.iter().map(clone_doc).collect()),
         Doc::Line => Doc::Line,
         Doc::SoftLine => Doc::SoftLine,

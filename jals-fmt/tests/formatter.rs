@@ -15,6 +15,20 @@ fn check(src: &str, expected: Expect) {
     expected.assert_eq(&fmt(src));
 }
 
+/// Format with comment reflow enabled at a narrow `comment-width` so wrapping is visible.
+fn fmt_wrapped(src: &str, comment_width: usize) -> String {
+    let cfg = Config {
+        wrap_comments: true,
+        comment_width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_wrapped(src: &str, comment_width: usize, expected: Expect) {
+    expected.assert_eq(&fmt_wrapped(src, comment_width));
+}
+
 #[test]
 fn simple_class() {
     check(
@@ -234,4 +248,109 @@ fn blank_lines_custom_bound_is_idempotent() {
         once, twice,
         "format must be idempotent under a custom bound"
     );
+}
+
+// --- wrap-comments (comment reflow) ----------------------------------------
+
+#[test]
+fn comments_not_reflowed_by_default() {
+    // Without `wrap-comments`, an over-long comment is left exactly as written.
+    check(
+        "class C{\n// aaaa bbbb cccc dddd eeee ffff gggg hhhh\nvoid m(){}}",
+        expect![[r#"
+            class C {
+                // aaaa bbbb cccc dddd eeee ffff gggg hhhh
+                void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn long_line_comment_wraps() {
+    // Indented one level (4 cols); avail = 20 - 4 - 3 = 13 columns of prose per line.
+    check_wrapped(
+        "class C{\n// aaaa bbbb cccc dddd eeee ffff\nvoid m(){}}",
+        20,
+        expect![[r#"
+            class C {
+                // aaaa bbbb
+                // cccc dddd
+                // eeee ffff
+                void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn short_comment_unchanged_when_wrapping() {
+    check_wrapped(
+        "class C{\n// short note\nvoid m(){}}",
+        40,
+        expect![[r#"
+            class C {
+                // short note
+                void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn single_line_javadoc_expands_when_too_long() {
+    check_wrapped(
+        "class C{\n/** Summary that is quite long indeed today. */\nvoid m(){}}",
+        30,
+        expect![[r#"
+            class C {
+                /**
+                 * Summary that is quite
+                 * long indeed today.
+                 */
+                void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn multiline_javadoc_reflows_and_keeps_tags() {
+    check_wrapped(
+        "class C{\n/**\n * A description long enough to need wrapping here.\n * @param x the x value\n */\nvoid m(int x){}}",
+        30,
+        expect![[r#"
+            class C {
+                /**
+                 * A description long
+                 * enough to need wrapping
+                 * here.
+                 * @param x the x value
+                 */
+                void m(int x) {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn trailing_comment_is_never_wrapped() {
+    // Same-line trailing comments stay on their line regardless of width.
+    check_wrapped(
+        "class C{int x=1;// aaaa bbbb cccc dddd eeee ffff gggg\n}",
+        20,
+        expect![[r#"
+            class C {
+                int x = 1;  // aaaa bbbb cccc dddd eeee ffff gggg
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn wrapped_comments_are_idempotent() {
+    let src = "class C{\n// aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii\n/** Long javadoc summary that certainly needs to wrap around. */\nvoid m(){}}";
+    let once = fmt_wrapped(src, 28);
+    let twice = fmt_wrapped(&once, 28);
+    assert_eq!(once, twice, "wrapped formatting must be idempotent");
 }

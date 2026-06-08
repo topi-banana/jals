@@ -12,7 +12,8 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
-use crate::doc::Doc;
+use crate::doc::{CommentKind, Doc};
+use crate::wrap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -56,11 +57,18 @@ impl Out<'_> {
         if self.pending_newlines == 0 {
             return;
         }
-        // Number of '\n' still to write: when the line already has content we write all of
-        // them; when we are already at line start one '\n' is implicitly present.
-        let already = if self.line_has_content { 0 } else { 1 };
         trim_trailing_blanks(&mut self.buf);
-        for _ in 0..self.pending_newlines.saturating_sub(already) {
+        // Number of '\n' still to write: when the line already has content we write all of
+        // them; when we are already at line start one '\n' is implicitly present. At the
+        // very start of the output there is no preceding line at all, so leading blank
+        // lines (e.g. from a blank-before comment on the first item) are suppressed.
+        let already = if self.line_has_content { 0 } else { 1 };
+        let newlines = if self.buf.is_empty() {
+            0
+        } else {
+            self.pending_newlines.saturating_sub(already)
+        };
+        for _ in 0..newlines {
             self.buf.push_str(self.cfg.newline());
         }
         push_indent(&mut self.buf, self.pending_indent, self.cfg);
@@ -134,6 +142,7 @@ pub(crate) fn print(root: &Doc, cfg: &Config) -> String {
         match doc {
             Doc::Text(s) => out.text(s),
             Doc::RawText(s) => out.raw(s),
+            Doc::Comment { kind, text } => render_comment(&mut out, indent, *kind, text),
             Doc::Concat(v) => {
                 for d in v.iter().rev() {
                     stack.push(Cmd {
@@ -198,6 +207,7 @@ pub(crate) fn print(root: &Doc, cfg: &Config) -> String {
         match cmd.doc {
             Doc::Text(s) => out.text(s),
             Doc::RawText(s) => out.raw(s),
+            Doc::Comment { kind, text } => render_comment(&mut out, cmd.indent, *kind, text),
             Doc::Concat(v) => {
                 for d in v.iter().rev() {
                     stack.push(Cmd { doc: d, ..cmd });
@@ -225,6 +235,33 @@ fn flush_suffixes<'a>(
         stack.push(s);
     }
     true
+}
+
+/// Emit a comment at indentation level `indent`. With `wrap-comments` off this reproduces
+/// the verbatim rendering (line comments as text, block comments raw); with it on the
+/// comment is reflowed to `comment-width` at this indentation.
+fn render_comment(out: &mut Out<'_>, indent: usize, kind: CommentKind, text: &str) {
+    if !out.cfg.wrap_comments {
+        match kind {
+            CommentKind::Line => out.text(text),
+            CommentKind::Block | CommentKind::Doc => out.raw(text),
+        }
+        return;
+    }
+    let indent_str = out.cfg.indent_unit().repeat(indent);
+    let indent_cols = indent * out.cfg.indent_cols();
+    let newline = out.cfg.newline();
+    let width = out.cfg.comment_width;
+    let reflowed = match kind {
+        CommentKind::Line => wrap::reflow_line(text, &indent_str, indent_cols, newline, width),
+        CommentKind::Block => {
+            wrap::reflow_block(text, false, &indent_str, indent_cols, newline, width)
+        }
+        CommentKind::Doc => {
+            wrap::reflow_block(text, true, &indent_str, indent_cols, newline, width)
+        }
+    };
+    out.raw(&reflowed);
 }
 
 fn push_indent(out: &mut String, indent: usize, cfg: &Config) {
@@ -290,6 +327,18 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
                     return remaining >= 0;
                 }
                 remaining -= UnicodeWidthStr::width(&**s) as isize;
+                if remaining < 0 {
+                    return false;
+                }
+            }
+            // Measure a comment by its first line, like `RawText`. Exact when reflow is off;
+            // when on, comments are surrounded by forced breaks so this never drives layout.
+            Doc::Comment { text, .. } => {
+                if let Some(pos) = text.find('\n') {
+                    remaining -= UnicodeWidthStr::width(&text[..pos]) as isize;
+                    return remaining >= 0;
+                }
+                remaining -= UnicodeWidthStr::width(&**text) as isize;
                 if remaining < 0 {
                     return false;
                 }

@@ -12,6 +12,34 @@ fn fmt_with(src: &str, config: &Config) -> String {
     format_source(src, config).formatted
 }
 
+/// Config with comment reflow on at a narrow width, so the property tests exercise wrapping.
+fn wrap_config() -> Config {
+    Config {
+        wrap_comments: true,
+        comment_width: 12,
+        ..Config::default()
+    }
+}
+
+/// The prose "skeleton" of all comments: every character that is not whitespace and not a
+/// comment marker (`/` or `*`), in document order. Reflow only changes whitespace and
+/// markers and never splits or reorders a word, so this sequence is invariant under it.
+fn comment_skeleton(src: &str) -> String {
+    parse(src)
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| {
+            matches!(
+                t.kind(),
+                SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
+            )
+        })
+        .flat_map(|t| t.text().chars().collect::<Vec<_>>())
+        .filter(|c| !c.is_whitespace() && *c != '/' && *c != '*')
+        .collect()
+}
+
 /// The sequence of non-trivia tokens (kind + text) of `src`.
 fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
     parse(src)
@@ -88,6 +116,10 @@ fn javaish() -> impl Strategy<Value = String> {
             Just("\"s\""),
             Just("// c\n"),
             Just("/* b */"),
+            // Multi-word comments so reflow (`wrap-comments`) actually wraps.
+            Just("// alpha beta gamma delta epsilon\n"),
+            Just("/** one two three four five six seven */"),
+            Just("/*\n * alpha beta gamma\n * delta epsilon\n */"),
             Just("\n"),
             Just(" "),
             Just("\t"),
@@ -141,5 +173,33 @@ proptest! {
         let cfg = Config { max_blank_lines: bound, ..Config::default() };
         let out = fmt_with(&src, &cfg);
         prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Reflow keeps formatting idempotent.
+    #[test]
+    fn wrap_idempotent(src in javaish()) {
+        let once = fmt_with(&src, &wrap_config());
+        let twice = fmt_with(&once, &wrap_config());
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Reflow never touches significant tokens (comments are trivia).
+    #[test]
+    fn wrap_preserves_significant_tokens(src in javaish()) {
+        let out = fmt_with(&src, &wrap_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Reflow preserves comment prose exactly (no word added, dropped, split, or reordered).
+    #[test]
+    fn wrap_preserves_comment_prose(src in javaish()) {
+        let out = fmt_with(&src, &wrap_config());
+        prop_assert_eq!(comment_skeleton(&src), comment_skeleton(&out));
+    }
+
+    /// Reflow never panics on arbitrary Unicode input.
+    #[test]
+    fn wrap_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &wrap_config());
     }
 }
