@@ -15,7 +15,7 @@
 use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
-use crate::config::{BraceStyle, Config};
+use crate::config::{BraceStyle, Config, ControlBraceStyle};
 use crate::doc::{
     Doc, blank_line, concat, group, hardline, indent, line, nil, raw, softline, text,
 };
@@ -46,6 +46,7 @@ fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         S::PARAM_LIST | S::ARG_LIST | S::RECORD_HEADER | S::ANNOTATION_ARG_LIST | S::ARRAY_INIT => {
             lower_delimited(node, ctx)
         }
+        S::IF_STMT | S::TRY_STMT | S::DO_WHILE_STMT => lower_control_flow(node, ctx),
         S::BINARY_EXPR => lower_binary(node, ctx),
         S::UNARY_EXPR => lower_unary(node, ctx),
         _ => lower_generic(node, ctx),
@@ -168,6 +169,22 @@ fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
 /// spaces per [`want_space`]. Whitespace, newlines, and comment trivia are skipped here
 /// (comments are injected via [`tok`]).
 fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    lower_inline(node, ctx, false)
+}
+
+/// Lay out a control-flow statement (`if` / `try` / `do-while`) inline, honoring
+/// [`ControlBraceStyle`]: under `next-line`, a continuation that directly follows a closing
+/// brace (`} else`, `} catch`, `} finally`, `} while`) moves onto its own line. (The opening
+/// brace of each block is handled separately, by [`lower_braced`] via [`opens_on_next_line`].)
+/// With the default `same-line` it is byte-for-byte identical to [`lower_generic`].
+fn lower_control_flow(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    lower_inline(node, ctx, true)
+}
+
+/// Shared core of [`lower_generic`] and [`lower_control_flow`]. When `control_flow` is set,
+/// the separator before a `}`-anchored continuation becomes a forced break under
+/// `control-brace-style = next-line` (see [`flow_sep`]).
+fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
     // A `.<T>` / `::<T>` explicit type witness hugs the method name that follows it
@@ -180,7 +197,7 @@ fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
                 let s = if hug_witness {
                     nil()
                 } else {
-                    sep(prev.as_ref(), &first)
+                    flow_sep(ctx, control_flow, prev.as_ref(), child.kind(), &first)
                 };
                 parts.push(s);
             }
@@ -200,7 +217,7 @@ fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             let s = if hug_witness {
                 nil()
             } else {
-                sep(prev.as_ref(), t)
+                flow_sep(ctx, control_flow, prev.as_ref(), t.kind(), t)
             };
             parts.push(s);
             hug_witness = false;
@@ -209,6 +226,36 @@ fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         }
     }
     concat(parts)
+}
+
+/// Whether `kind` identifies a control-flow continuation that `control-brace-style` may push
+/// to the next line: the `else` / `while` token of an `if` / `do-while`, or a `catch` /
+/// `finally` clause node of a `try`.
+fn is_continuation(kind: S) -> bool {
+    matches!(
+        kind,
+        S::ELSE_KW | S::WHILE_KW | S::CATCH_CLAUSE | S::FINALLY_CLAUSE
+    )
+}
+
+/// The separator before a child element (`next`, of kind `next_kind`). When `control_flow`
+/// is set, `control-brace-style = next-line` forces a break before a continuation that
+/// directly follows a closing brace; otherwise the normal token spacing from [`sep`].
+fn flow_sep(
+    ctx: &Ctx<'_>,
+    control_flow: bool,
+    prev: Option<&SyntaxToken>,
+    next_kind: S,
+    next: &SyntaxToken,
+) -> Doc {
+    if control_flow
+        && ctx.cfg.control_brace_style == ControlBraceStyle::NextLine
+        && is_continuation(next_kind)
+        && prev.map(|p| p.kind()) == Some(S::RBRACE)
+    {
+        return hardline();
+    }
+    sep(prev, next)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,9 +300,9 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         body.push(dangling);
     }
 
-    // Under `next-line` brace style a (non-empty) declaration body opens its brace on its
-    // own line. The leading break renders at the header's indentation; the separating space
-    // the parent emitted before the brace is then trimmed away by the renderer.
+    // Under a `next-line` style a (non-empty) body opens its brace on its own line. The
+    // leading break renders at the header's indentation; the separating space the parent
+    // emitted before the brace is then trimmed away by the renderer.
     let lead = if opens_on_next_line(node, ctx.cfg) {
         hardline()
     } else {
@@ -265,24 +312,26 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     concat(vec![lead, open, indent(concat(body)), hardline(), close])
 }
 
-/// Whether the opening brace of braced declaration body `node` should sit on its own line
-/// under the active `brace-style`. Only declaration bodies are affected: every type body
-/// (`CLASS_BODY` — class / interface / enum-constant / record / anonymous class) and the
-/// block of a method, constructor, or initializer. Control-flow blocks, `switch` blocks,
-/// lambda bodies, and bare statement blocks keep their brace on the header's line; their
-/// placement is reserved for the (not-yet-implemented) `control-brace-style`.
+/// Whether the opening brace of braced `node` should sit on its own line. Declaration bodies
+/// — every type body (`CLASS_BODY`) and the block of a method, constructor, or initializer —
+/// follow [`BraceStyle`]; control-flow blocks, `switch` blocks, lambda bodies, and bare
+/// statement blocks follow [`ControlBraceStyle`].
 fn opens_on_next_line(node: &SyntaxNode, cfg: &Config) -> bool {
-    if cfg.brace_style != BraceStyle::NextLine {
-        return false;
-    }
     match node.kind() {
-        S::CLASS_BODY => true,
-        S::BLOCK => matches!(
-            node.parent().map(|p| p.kind()),
-            Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL | S::INITIALIZER)
-        ),
+        S::CLASS_BODY => cfg.brace_style == BraceStyle::NextLine,
+        S::BLOCK if is_declaration_body(node) => cfg.brace_style == BraceStyle::NextLine,
+        S::BLOCK | S::SWITCH_BLOCK => cfg.control_brace_style == ControlBraceStyle::NextLine,
         _ => false,
     }
+}
+
+/// Whether `node` (a `BLOCK`) is a declaration body — the block of a method, constructor, or
+/// initializer — as opposed to a control-flow block, lambda body, or bare block.
+fn is_declaration_body(node: &SyntaxNode) -> bool {
+    matches!(
+        node.parent().map(|p| p.kind()),
+        Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL | S::INITIALIZER)
+    )
 }
 
 /// Build the inner document for a sequence of item nodes. Returns the content and whether

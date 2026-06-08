@@ -19,7 +19,7 @@ mod output;
 mod render;
 mod wrap;
 
-pub use config::{BraceStyle, Config, ConfigError, IndentStyle, LineEnding};
+pub use config::{BraceStyle, Config, ConfigError, ControlBraceStyle, IndentStyle, LineEnding};
 pub use output::{FormatOutput, Warning};
 
 /// Format `src` according to `config`.
