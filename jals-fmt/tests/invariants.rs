@@ -202,4 +202,24 @@ proptest! {
     fn wrap_never_panics(src in ".*") {
         let _ = fmt_with(&src, &wrap_config());
     }
+
+    /// A CRLF line ending keeps formatting idempotent. (Line endings apply to the breaks the
+    /// renderer emits; the interiors of multi-line tokens — string literals, text blocks,
+    /// block comments — are preserved verbatim, so they may legitimately keep a bare LF.)
+    #[test]
+    fn crlf_idempotent(src in javaish()) {
+        let cfg = Config { line_ending: jals_fmt::LineEnding::Crlf, ..Config::default() };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(&once, &twice);
+    }
+
+    /// Auto line-ending detection keeps formatting idempotent.
+    #[test]
+    fn auto_idempotent(src in javaish()) {
+        let cfg = Config { line_ending: jals_fmt::LineEnding::Auto, ..Config::default() };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(&once, &twice);
+    }
 }

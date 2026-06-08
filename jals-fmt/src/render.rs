@@ -32,6 +32,8 @@ struct Cmd<'a> {
 /// line breaks (which are only written once content arrives).
 struct Out<'c> {
     cfg: &'c Config,
+    /// The resolved line terminator (`Auto`/`Native` already decided against the input).
+    newline: &'static str,
     buf: String,
     col: usize,
     /// Whether the current line already has visible content.
@@ -69,7 +71,7 @@ impl Out<'_> {
             self.pending_newlines.saturating_sub(already)
         };
         for _ in 0..newlines {
-            self.buf.push_str(self.cfg.newline());
+            self.buf.push_str(self.newline);
         }
         push_indent(&mut self.buf, self.pending_indent, self.cfg);
         self.col = self.pending_indent * self.cfg.indent_cols();
@@ -120,10 +122,13 @@ impl Out<'_> {
     }
 }
 
-/// Render `root` into a formatted string.
-pub(crate) fn print(root: &Doc, cfg: &Config) -> String {
+/// Render `root` into a formatted string. `src` is the original input, consulted once to
+/// resolve an `Auto`/`Native` line ending.
+pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
+    let newline = cfg.newline(src);
     let mut out = Out {
         cfg,
+        newline,
         buf: String::new(),
         col: 0,
         line_has_content: false,
@@ -217,7 +222,7 @@ pub(crate) fn print(root: &Doc, cfg: &Config) -> String {
         }
     }
 
-    finalize(out.buf, cfg)
+    finalize(out.buf, cfg, newline)
 }
 
 /// Push the current break command back and queue pending line suffixes ahead of it.
@@ -250,7 +255,7 @@ fn render_comment(out: &mut Out<'_>, indent: usize, kind: CommentKind, text: &st
     }
     let indent_str = out.cfg.indent_unit().repeat(indent);
     let indent_cols = indent * out.cfg.indent_cols();
-    let newline = out.cfg.newline();
+    let newline = out.newline;
     let width = out.cfg.comment_width;
     let reflowed = match kind {
         CommentKind::Line => wrap::reflow_line(text, &indent_str, indent_cols, newline, width),
@@ -280,7 +285,7 @@ fn trim_trailing_blanks(out: &mut String) {
 }
 
 /// Apply the final-newline policy.
-fn finalize(mut out: String, cfg: &Config) -> String {
+fn finalize(mut out: String, cfg: &Config, newline: &str) -> String {
     trim_trailing_blanks(&mut out);
     while out.ends_with('\n') {
         out.pop();
@@ -290,7 +295,7 @@ fn finalize(mut out: String, cfg: &Config) -> String {
         trim_trailing_blanks(&mut out);
     }
     if cfg.insert_final_newline && !out.is_empty() {
-        out.push_str(cfg.newline());
+        out.push_str(newline);
     }
     out
 }

@@ -27,14 +27,39 @@ pub enum LineEnding {
     Lf,
     /// `\r\n`.
     Crlf,
+    /// Detect from the input: the first line break in the source decides (`\r\n` ⇒ Windows,
+    /// a bare `\n` ⇒ Unix). A source with no line break falls back to
+    /// [`Native`](Self::Native). Mirrors rustfmt's `newline_style = "Auto"`.
+    Auto,
+    /// The host platform's native terminator (`\r\n` on Windows, `\n` elsewhere). Mirrors
+    /// rustfmt's `newline_style = "Native"`.
+    Native,
 }
 
 impl LineEnding {
-    /// The terminator string for this line ending.
-    pub(crate) fn as_str(self) -> &'static str {
+    /// Resolve to a concrete terminator string, consulting `src` for [`Auto`](Self::Auto).
+    pub(crate) fn resolve(self, src: &str) -> &'static str {
         match self {
             LineEnding::Lf => "\n",
             LineEnding::Crlf => "\r\n",
+            LineEnding::Native => Self::native(),
+            LineEnding::Auto => Self::detect(src),
+        }
+    }
+
+    /// The host platform's native terminator. Compile-time `cfg`, so `wasm32` (which is not
+    /// Windows) resolves to `\n` without any platform IO.
+    fn native() -> &'static str {
+        if cfg!(windows) { "\r\n" } else { "\n" }
+    }
+
+    /// Auto-detect from `src`: the first `\n` decides (`\r\n` ⇒ Windows, a bare `\n` ⇒ Unix).
+    /// A source with no `\n` falls back to the platform native terminator.
+    fn detect(src: &str) -> &'static str {
+        match src.find('\n') {
+            Some(pos) if src.as_bytes()[..pos].last() == Some(&b'\r') => "\r\n",
+            Some(_) => "\n",
+            None => Self::native(),
         }
     }
 }
@@ -93,9 +118,9 @@ impl Config {
         self.indent_width.max(1)
     }
 
-    /// The configured line terminator.
-    pub(crate) fn newline(&self) -> &'static str {
-        self.line_ending.as_str()
+    /// The resolved line terminator for input `src`, honoring `Auto`/`Native`.
+    pub(crate) fn newline(&self, src: &str) -> &'static str {
+        self.line_ending.resolve(src)
     }
 
     /// Load and parse a specific `jalsfmt.toml` file.
@@ -217,7 +242,55 @@ mod tests {
         assert_eq!(c.indent_style, IndentStyle::Tab);
         assert_eq!(c.line_ending, LineEnding::Crlf);
         assert_eq!(c.indent_unit(), "\t");
-        assert_eq!(c.newline(), "\r\n");
+        // A fixed line ending ignores the source text.
+        assert_eq!(c.newline("a\nb"), "\r\n");
+    }
+
+    #[test]
+    fn auto_and_native_parse() {
+        let c: Config = toml::from_str("line-ending = \"auto\"\n").unwrap();
+        assert_eq!(c.line_ending, LineEnding::Auto);
+        let c: Config = toml::from_str("line-ending = \"native\"\n").unwrap();
+        assert_eq!(c.line_ending, LineEnding::Native);
+    }
+
+    #[test]
+    fn auto_detects_from_first_line_break() {
+        let auto = Config {
+            line_ending: LineEnding::Auto,
+            ..Config::default()
+        };
+        // The first line break decides: CRLF stays CRLF, a bare LF stays LF.
+        assert_eq!(auto.newline("a\r\nb\nc"), "\r\n");
+        assert_eq!(auto.newline("a\nb\r\nc"), "\n");
+        assert_eq!(auto.newline("only one\nbreak"), "\n");
+        assert_eq!(auto.newline("\r\n"), "\r\n");
+        assert_eq!(auto.newline("\n"), "\n");
+    }
+
+    #[test]
+    fn auto_without_line_break_falls_back_to_native() {
+        let auto = Config {
+            line_ending: LineEnding::Auto,
+            ..Config::default()
+        };
+        let native = Config {
+            line_ending: LineEnding::Native,
+            ..Config::default()
+        };
+        // No `\n` anywhere ⇒ same answer as Native (platform-dependent, so compare the two).
+        assert_eq!(auto.newline("no breaks here"), native.newline(""));
+        assert_eq!(auto.newline(""), native.newline(""));
+    }
+
+    #[test]
+    fn native_matches_platform() {
+        let native = Config {
+            line_ending: LineEnding::Native,
+            ..Config::default()
+        };
+        let expected = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(native.newline(""), expected);
     }
 
     #[test]

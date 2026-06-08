@@ -34,6 +34,11 @@ The current formatter is intentionally minimal. It performs:
   comments are rewrapped to `comment-width` at their indentation. Lines are wrapped
   independently (never merged), preformatted regions (`<pre>`, fenced code) are left intact,
   and same-line trailing comments are never wrapped. Off by default; see below.
+- **Line endings** — `lf` / `crlf`, or `auto` (match the source's first line break, falling
+  back to the host terminator when the source has none) / `native` (the host's terminator).
+  This governs the breaks the formatter emits; the interior of multi-line tokens (text blocks,
+  string literals, verbatim comments) is preserved byte-for-byte to keep significant tokens
+  unchanged, so such tokens may retain their original line breaks.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -48,7 +53,7 @@ are kebab-case.
 | `indent-style` | `"space"` \| `"tab"` | `"space"` | ✅ wired |
 | `indent-width` | integer | `4` | ✅ wired |
 | `max-blank-lines` | integer | `1` | ✅ wired — runs of blank lines are clamped to this many (`0` removes them) |
-| `line-ending` | `"lf"` \| `"crlf"` | `"lf"` | ✅ wired (no `auto`/`native` detection) |
+| `line-ending` | `"lf"` \| `"crlf"` \| `"auto"` \| `"native"` | `"lf"` | ✅ wired — `auto` matches the source's first line break, `native` uses the host terminator |
 | `insert-final-newline` | bool | `true` | ✅ wired |
 | `max-width` | integer | `100` | ✅ wired |
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
@@ -69,7 +74,6 @@ step.
 
 | jals key | Gap | rustfmt equivalent |
 | --- | --- | --- |
-| `line-ending` | No `auto`/`native` (detect existing line endings) | `newline_style` (`Auto`/`Native`/`Unix`/`Windows`) |
 | *(none)* | No lower bound for blank lines between items | `blank_lines_lower_bound` |
 
 ## 1. Brace & control-flow style (highest-demand for Java)
