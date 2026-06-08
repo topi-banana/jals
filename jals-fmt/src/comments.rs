@@ -18,7 +18,9 @@ use std::collections::HashMap;
 
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
-use crate::doc::{Doc, blank_line, concat, hardline, line_suffix, nil, raw, text};
+use crate::doc::{
+    CommentKind, Doc, blank_line, comment, concat, hardline, line_suffix, nil, raw, text,
+};
 
 struct Comment {
     kind: SyntaxKind,
@@ -115,7 +117,7 @@ impl CommentMap {
                 } else {
                     hardline()
                 });
-                parts.push(comment_body(c));
+                parts.push(comment_doc(c));
             }
             parts.push(hardline());
         }
@@ -123,7 +125,7 @@ impl CommentMap {
         if let Some(trail) = self.trailing_inline.get(&offset) {
             let mut force_break = false;
             for c in trail {
-                parts.push(line_suffix(concat(vec![text("  "), comment_body(c)])));
+                parts.push(line_suffix(concat(vec![text("  "), comment_inline(c)])));
                 // A `//` comment runs to end of line, so the next token must start a new
                 // line; force a break (it coalesces with any following break).
                 if c.kind == SyntaxKind::LINE_COMMENT {
@@ -137,7 +139,7 @@ impl CommentMap {
         if let Some(trail) = self.trailing_below.get(&offset) {
             for c in trail {
                 parts.push(hardline());
-                parts.push(comment_body(c));
+                parts.push(comment_doc(c));
             }
         }
         concat(parts)
@@ -153,7 +155,7 @@ impl CommentMap {
             if i > 0 {
                 parts.push(hardline());
             }
-            parts.push(comment_body(c));
+            parts.push(comment_doc(c));
         }
         concat(parts)
     }
@@ -182,7 +184,7 @@ impl CommentMap {
             Some(trail) => concat(
                 trail
                     .iter()
-                    .map(|c| line_suffix(concat(vec![text("  "), comment_body(c)])))
+                    .map(|c| line_suffix(concat(vec![text("  "), comment_inline(c)])))
                     .collect(),
             ),
         }
@@ -200,7 +202,7 @@ impl CommentMap {
                     if i > 0 {
                         parts.push(hardline());
                     }
-                    parts.push(comment_body(c));
+                    parts.push(comment_doc(c));
                 }
                 concat(parts)
             }
@@ -225,8 +227,21 @@ fn content(tok: &SyntaxToken) -> String {
     }
 }
 
-/// The document for a comment's text (raw for multi-line block/doc comments).
-fn comment_body(c: &Comment) -> Doc {
+/// The document for a standalone comment (leading, dangling, orphan, or own-line
+/// trailing). These are reflowable: under `wrap-comments` the renderer rewraps them to
+/// `comment-width` at their final indentation.
+fn comment_doc(c: &Comment) -> Doc {
+    let kind = match c.kind {
+        SyntaxKind::DOC_COMMENT => CommentKind::Doc,
+        SyntaxKind::BLOCK_COMMENT => CommentKind::Block,
+        _ => CommentKind::Line,
+    };
+    comment(kind, c.text.clone())
+}
+
+/// The document for a same-line trailing comment, emitted verbatim as a line suffix. These
+/// are never reflowed: they sit after code, so wrapping them onto new lines is ambiguous.
+fn comment_inline(c: &Comment) -> Doc {
     match c.kind {
         SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT => raw(c.text.clone()),
         _ => text(c.text.clone()),

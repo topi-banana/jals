@@ -17,6 +17,7 @@ mod doc;
 mod lower;
 mod output;
 mod render;
+mod wrap;
 
 pub use config::{Config, ConfigError, IndentStyle, LineEnding};
 pub use output::{FormatOutput, Warning};

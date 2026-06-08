@@ -161,6 +161,15 @@ impl App {
                 Msg::SetConfig(c)
             })
         };
+        let on_wrap_comments = {
+            let config = cfg.clone();
+            link.callback(move |e: Event| {
+                let el: HtmlInputElement = e.target_unchecked_into();
+                let mut c = config.clone();
+                c.wrap_comments = el.checked();
+                Msg::SetConfig(c)
+            })
+        };
 
         let field = "flex items-center gap-1.5";
         let lbl = "font-mono text-xs text-mute";
@@ -181,6 +190,10 @@ impl App {
                 <label class={field}>
                     <span class={lbl}>{ "Max width" }</span>
                     <input class={num} type="number" min="1" value={cfg.max_width.to_string()} onchange={on_max_width} />
+                </label>
+                <label class="flex cursor-pointer items-center gap-1.5">
+                    <input type="checkbox" class="h-3.5 w-3.5 accent-ink" checked={cfg.wrap_comments} onchange={on_wrap_comments} />
+                    <span class={lbl}>{ "Wrap comments" }</span>
                 </label>
                 <label class={field}>
                     <span class={lbl}>{ "Comment width" }</span>
