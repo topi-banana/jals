@@ -1365,6 +1365,12 @@ impl IndexExpr {
 ast_node!(NewExpr, NEW_EXPR);
 
 impl NewExpr {
+    /// The qualifying expression of a qualified inner-class creation
+    /// (`qualifier.new Inner()`), or `None` for an unqualified `new`.
+    pub fn qualifier(&self) -> Option<Expr> {
+        support::child(&self.syntax)
+    }
+
     /// The created type.
     pub fn ty(&self) -> Option<Type> {
         support::child(&self.syntax)
