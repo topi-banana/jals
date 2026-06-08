@@ -23,8 +23,8 @@ use crate::doc::{Doc, blank_line, concat, hardline, line_suffix, nil, raw, text}
 struct Comment {
     kind: SyntaxKind,
     text: String,
-    /// Whether at least one blank line precedes this comment in the source.
-    blank_before: bool,
+    /// The number of blank lines preceding this comment in the source.
+    blank_lines_before: usize,
 }
 
 /// Comments anchored to significant tokens by source byte offset.
@@ -46,7 +46,7 @@ pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
     let mut trailing_below: HashMap<usize, Vec<Comment>> = HashMap::new();
 
     let mut last_sig: Option<usize> = None;
-    let mut newlines: u32 = 0; // newlines since the last significant token or comment
+    let mut newlines: usize = 0; // newlines since the last significant token or comment
     let mut pending: Vec<Comment> = Vec::new();
 
     for tok in root
@@ -58,7 +58,7 @@ pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
             let comment = Comment {
                 kind,
                 text: content(&tok),
-                blank_before: newlines >= 2,
+                blank_lines_before: newlines.saturating_sub(1),
             };
             match last_sig {
                 Some(anchor) if newlines == 0 && pending.is_empty() => {
@@ -110,8 +110,8 @@ impl CommentMap {
             // break before the token. Redundant breaks coalesce in the renderer, so this is
             // safe whether or not the caller already broke the line.
             for c in lead {
-                parts.push(if c.blank_before {
-                    blank_line()
+                parts.push(if c.blank_lines_before > 0 {
+                    blank_line(c.blank_lines_before)
                 } else {
                     hardline()
                 });
@@ -164,13 +164,13 @@ impl CommentMap {
         self.leading.contains_key(&offset)
     }
 
-    /// Whether a blank line should precede this token's first leading comment (or the
-    /// token itself, when it has none).
-    pub(crate) fn blank_before_first(&self, tok: &SyntaxToken) -> bool {
+    /// The number of blank lines that should precede this token's first leading comment (or
+    /// the token itself, when it has none).
+    pub(crate) fn blank_lines_before_first(&self, tok: &SyntaxToken) -> usize {
         let offset = usize::from(tok.text_range().start());
         match self.leading.get(&offset) {
-            Some(lead) if !lead.is_empty() => lead[0].blank_before,
-            _ => false,
+            Some(lead) if !lead.is_empty() => lead[0].blank_lines_before,
+            _ => 0,
         }
     }
 

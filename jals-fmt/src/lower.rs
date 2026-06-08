@@ -268,41 +268,41 @@ fn lower_items(node: &SyntaxNode, ctx: &Ctx) -> (Doc, bool) {
     (concat(parts), saw)
 }
 
-/// The line break before an item node: a blank line when the source had one, else a
-/// plain line break.
+/// The line break before an item node: the source's blank-line run (clamped to
+/// `max_blank_lines` by the renderer) when it had one, else a plain line break.
 fn item_separator(node: &SyntaxNode, ctx: &Ctx) -> Doc {
     match first_sig_token(node) {
         Some(t) => {
-            let blank = if ctx.comments.has_leading(&t) {
-                ctx.comments.blank_before_first(&t)
+            let blanks = if ctx.comments.has_leading(&t) {
+                ctx.comments.blank_lines_before_first(&t)
             } else {
-                blank_before(&t)
+                blank_lines_before(&t)
             };
-            if blank { blank_line() } else { hardline() }
+            if blanks > 0 {
+                blank_line(blanks)
+            } else {
+                hardline()
+            }
         }
         None => hardline(),
     }
 }
 
-/// Whether at least one blank line (two consecutive newlines) precedes `tok` in the
-/// source. A comment between stops the run, so a lone comment line is not a blank line.
-fn blank_before(tok: &SyntaxToken) -> bool {
-    let mut count = 0;
+/// The number of blank lines preceding `tok` in the source (0 when it is on the next line,
+/// or on the same line as the previous token). A run of `n` consecutive newlines is `n - 1`
+/// blank lines. A comment between stops the run, so a lone comment line is not a blank line.
+fn blank_lines_before(tok: &SyntaxToken) -> usize {
+    let mut newlines = 0usize;
     let mut cur = tok.prev_token();
     while let Some(t) = cur {
         match t.kind() {
-            S::NEWLINE => {
-                count += 1;
-                if count >= 2 {
-                    return true;
-                }
-            }
+            S::NEWLINE => newlines += 1,
             S::WHITESPACE => {}
-            _ => return false,
+            _ => break,
         }
         cur = t.prev_token();
     }
-    false
+    newlines.saturating_sub(1)
 }
 
 // ---------------------------------------------------------------------------

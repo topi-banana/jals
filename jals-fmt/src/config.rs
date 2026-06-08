@@ -177,7 +177,14 @@ mod tests {
         assert_eq!(c.indent_width, 4);
         assert_eq!(c.max_width, 100);
         assert_eq!(c.comment_width, 80);
+        assert_eq!(c.max_blank_lines, 1);
         assert!(c.insert_final_newline);
+    }
+
+    #[test]
+    fn max_blank_lines_parses_kebab_key() {
+        let c: Config = toml::from_str("max-blank-lines = 2\n").unwrap();
+        assert_eq!(c.max_blank_lines, 2);
     }
 
     #[test]

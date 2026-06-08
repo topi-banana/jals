@@ -20,8 +20,9 @@ pub(crate) enum Doc {
     SoftLine,
     /// Always a newline + indent. Forces every enclosing group to break.
     HardLine,
-    /// A blank line (clamped to `max_blank_lines`). Forces enclosing groups to break.
-    BlankLine,
+    /// One or more blank lines (the source count; the renderer clamps it to
+    /// `max_blank_lines`). Forces enclosing groups to break.
+    BlankLine(usize),
     /// Increase the indentation level of the child by one.
     Indent(Box<Doc>),
     /// A break point: render flat if it fits, otherwise broken.
@@ -71,9 +72,9 @@ pub(crate) fn hardline() -> Doc {
     Doc::HardLine
 }
 
-/// A forced blank line.
-pub(crate) fn blank_line() -> Doc {
-    Doc::BlankLine
+/// A forced run of `count` blank lines (clamped to `max_blank_lines` when rendered).
+pub(crate) fn blank_line(count: usize) -> Doc {
+    Doc::BlankLine(count)
 }
 
 /// Indent a document by one level.
@@ -113,7 +114,7 @@ pub(crate) fn join(sep: Doc, items: Vec<Doc>) -> Doc {
 /// inside a nested group). Used to precompute `Group::should_break`.
 fn contains_forced_break(doc: &Doc) -> bool {
     match doc {
-        Doc::HardLine | Doc::BlankLine => true,
+        Doc::HardLine | Doc::BlankLine(_) => true,
         Doc::Concat(v) => v.iter().any(contains_forced_break),
         Doc::Indent(d) | Doc::LineSuffix(d) => contains_forced_break(d),
         Doc::Group { should_break, .. } => *should_break,
@@ -130,7 +131,7 @@ fn clone_doc(doc: &Doc) -> Doc {
         Doc::Line => Doc::Line,
         Doc::SoftLine => Doc::SoftLine,
         Doc::HardLine => Doc::HardLine,
-        Doc::BlankLine => Doc::BlankLine,
+        Doc::BlankLine(n) => Doc::BlankLine(*n),
         Doc::Indent(d) => Doc::Indent(Box::new(clone_doc(d))),
         Doc::Group { doc, should_break } => Doc::Group {
             doc: Box::new(clone_doc(doc)),
