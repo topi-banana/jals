@@ -1,7 +1,7 @@
 //! Snapshot tests for the formatter.
 
 use expect_test::{Expect, expect};
-use jals_fmt::{Config, LineEnding, format_source};
+use jals_fmt::{BraceStyle, Config, LineEnding, format_source};
 
 fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted
@@ -353,6 +353,98 @@ fn wrapped_comments_are_idempotent() {
     let once = fmt_wrapped(src, 28);
     let twice = fmt_wrapped(&once, 28);
     assert_eq!(once, twice, "wrapped formatting must be idempotent");
+}
+
+// --- brace-style -----------------------------------------------------------
+
+fn fmt_next_line(src: &str) -> String {
+    let cfg = Config {
+        brace_style: BraceStyle::NextLine,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn brace_style_next_line_moves_declaration_braces() {
+    // Type and method bodies open on the next line; the control-flow `if`/`else` braces stay
+    // on the header's line (those are governed by the future `control-brace-style`).
+    expect![[r#"
+        class Foo
+        {
+            void m(int a)
+            {
+                if (a > 0) {
+                    foo();
+                } else {
+                    bar();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_next_line(
+        "class Foo{void m(int a){if(a>0){foo();}else{bar();}}}",
+    ));
+}
+
+#[test]
+fn brace_style_next_line_keeps_empty_body_inline() {
+    // An empty body stays `{}` on the header's line; only the (non-empty) class body breaks.
+    expect![[r#"
+        class Foo
+        {
+            void m() {}
+        }
+    "#]]
+    .assert_eq(&fmt_next_line("class Foo{void m(){}}"));
+}
+
+#[test]
+fn brace_style_next_line_covers_constructor_and_initializer() {
+    expect![[r#"
+        class C
+        {
+            static
+            {
+                init();
+            }
+            C()
+            {
+                this.x = 1;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_next_line("class C{static{init();}C(){this.x=1;}}"));
+}
+
+#[test]
+fn brace_style_next_line_wraps_param_list_then_breaks_brace() {
+    // When the signature wraps, the brace still lands on its own line under the header.
+    expect![[r#"
+        class C
+        {
+            void method(
+                int aaaaaaaaaaaaaaaa,
+                int bbbbbbbbbbbbbbbb,
+                int cccccccccccccccc,
+                int dddddddddddddddd,
+                int eeeeeeeeeeeeeeee
+            )
+            {
+                foo();
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_next_line(
+        "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){foo();}}",
+    ));
+}
+
+#[test]
+fn brace_style_next_line_is_idempotent() {
+    let once = fmt_next_line("class C{void m(){foo();bar();}static{go();}}");
+    let twice = fmt_next_line(&once);
+    assert_eq!(once, twice, "next-line brace style must be idempotent");
 }
 
 // --- line-ending -----------------------------------------------------------

@@ -64,6 +64,17 @@ impl LineEnding {
     }
 }
 
+/// Where the opening brace of a declaration body is placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BraceStyle {
+    /// K&R: the opening brace stays on the header's line (`class Foo {`). The default.
+    SameLine,
+    /// Allman: the opening brace goes on its own line, aligned under the header
+    /// (`class Foo` then `{`). Mirrors rustfmt's `brace_style = "AlwaysNextLine"`.
+    NextLine,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -80,6 +91,11 @@ pub struct Config {
     pub insert_final_newline: bool,
     /// Target line width for wrapping code.
     pub max_width: usize,
+    /// Placement of the opening brace of a declaration body (type, method, constructor, or
+    /// initializer): same line (K&R) or next line (Allman). Control-flow blocks
+    /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are unaffected — their
+    /// brace placement is reserved for a future `control-brace-style`.
+    pub brace_style: BraceStyle,
     /// Reflow comments so no line exceeds [`comment_width`](Config::comment_width).
     /// Off by default; [`comment_width`](Config::comment_width) has no effect unless this
     /// is enabled (mirrors rustfmt's `wrap_comments`).
@@ -98,6 +114,7 @@ impl Default for Config {
             line_ending: LineEnding::Lf,
             insert_final_newline: true,
             max_width: 100,
+            brace_style: BraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
         }
@@ -212,6 +229,16 @@ mod tests {
         assert!(c.insert_final_newline);
         // Comment reflow is opt-in, mirroring rustfmt's `wrap_comments`.
         assert!(!c.wrap_comments);
+        // K&R braces by default.
+        assert_eq!(c.brace_style, BraceStyle::SameLine);
+    }
+
+    #[test]
+    fn brace_style_parses_kebab_values() {
+        let c: Config = toml::from_str("brace-style = \"next-line\"\n").unwrap();
+        assert_eq!(c.brace_style, BraceStyle::NextLine);
+        let c: Config = toml::from_str("brace-style = \"same-line\"\n").unwrap();
+        assert_eq!(c.brace_style, BraceStyle::SameLine);
     }
 
     #[test]

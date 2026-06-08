@@ -15,19 +15,22 @@
 use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
+use crate::config::{BraceStyle, Config};
 use crate::doc::{
     Doc, blank_line, concat, group, hardline, indent, line, nil, raw, softline, text,
 };
 
 /// Lowering context shared (immutably) across the walk.
-struct Ctx {
+struct Ctx<'a> {
     comments: CommentMap,
+    cfg: &'a Config,
 }
 
 /// Lower the whole tree.
-pub(crate) fn lower_root(root: &SyntaxNode) -> Doc {
+pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
     let ctx = Ctx {
         comments: comments::build(root),
+        cfg,
     };
     let body = lower(root, &ctx);
     // Append any orphan comments (a file containing only comments has no token to anchor
@@ -36,7 +39,7 @@ pub(crate) fn lower_root(root: &SyntaxNode) -> Doc {
 }
 
 /// Lower a node, dispatching on its kind.
-fn lower(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match node.kind() {
         S::SOURCE_FILE => lower_items(node, ctx).0,
         S::CLASS_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
@@ -63,7 +66,7 @@ fn token_text(tok: &SyntaxToken) -> Doc {
 }
 
 /// A significant token with its attached comments.
-fn tok(tok: &SyntaxToken, ctx: &Ctx) -> Doc {
+fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
     ctx.comments.token(tok, token_text(tok))
 }
 
@@ -164,7 +167,7 @@ fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
 /// Lay a node out inline: child nodes are recursed, tokens are separated by single
 /// spaces per [`want_space`]. Whitespace, newlines, and comment trivia are skipped here
 /// (comments are injected via [`tok`]).
-fn lower_generic(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
 
@@ -194,7 +197,7 @@ fn lower_generic(node: &SyntaxNode, ctx: &Ctx) -> Doc {
 // ---------------------------------------------------------------------------
 
 /// Lower a `{ ... }` node (block, class body, switch body) with one indentation level.
-fn lower_braced(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let tokens: Vec<SyntaxToken> = node
         .children_with_tokens()
         .filter_map(|e| e.into_token())
@@ -214,6 +217,8 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx) -> Doc {
     let dangling = ctx.comments.dangling(rbrace);
     let close = concat(vec![text("}"), ctx.comments.trailing_doc(rbrace)]);
 
+    // An empty body collapses to `{}` on the header's line regardless of brace style
+    // (cf. rustfmt's `empty_item_single_line`), so `next-line` never strands a lone `{}`.
     if !any && !has_dangling {
         return concat(vec![open, close]);
     }
@@ -229,13 +234,42 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx) -> Doc {
         body.push(dangling);
     }
 
-    concat(vec![open, indent(concat(body)), hardline(), close])
+    // Under `next-line` brace style a (non-empty) declaration body opens its brace on its
+    // own line. The leading break renders at the header's indentation; the separating space
+    // the parent emitted before the brace is then trimmed away by the renderer.
+    let lead = if opens_on_next_line(node, ctx.cfg) {
+        hardline()
+    } else {
+        nil()
+    };
+
+    concat(vec![lead, open, indent(concat(body)), hardline(), close])
+}
+
+/// Whether the opening brace of braced declaration body `node` should sit on its own line
+/// under the active `brace-style`. Only declaration bodies are affected: every type body
+/// (`CLASS_BODY` — class / interface / enum-constant / record / anonymous class) and the
+/// block of a method, constructor, or initializer. Control-flow blocks, `switch` blocks,
+/// lambda bodies, and bare statement blocks keep their brace on the header's line; their
+/// placement is reserved for the (not-yet-implemented) `control-brace-style`.
+fn opens_on_next_line(node: &SyntaxNode, cfg: &Config) -> bool {
+    if cfg.brace_style != BraceStyle::NextLine {
+        return false;
+    }
+    match node.kind() {
+        S::CLASS_BODY => true,
+        S::BLOCK => matches!(
+            node.parent().map(|p| p.kind()),
+            Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL | S::INITIALIZER)
+        ),
+        _ => false,
+    }
 }
 
 /// Build the inner document for a sequence of item nodes. Returns the content and whether
 /// any item was emitted. Braces are skipped (a brace wrapper adds them); blank lines from
 /// the source are preserved (clamped by the renderer).
-fn lower_items(node: &SyntaxNode, ctx: &Ctx) -> (Doc, bool) {
+fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
     let mut parts: Vec<Doc> = Vec::new();
     let mut saw = false;
 
@@ -270,7 +304,7 @@ fn lower_items(node: &SyntaxNode, ctx: &Ctx) -> (Doc, bool) {
 
 /// The line break before an item node: the source's blank-line run (clamped to
 /// `max_blank_lines` by the renderer) when it had one, else a plain line break.
-fn item_separator(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match first_sig_token(node) {
         Some(t) => {
             let blanks = if ctx.comments.has_leading(&t) {
@@ -312,7 +346,7 @@ fn blank_lines_before(tok: &SyntaxToken) -> usize {
 /// Lower a comma-separated, delimited list that wraps all-or-nothing. Each item carries
 /// its own trailing comma (so a trailing comma in the source is preserved), and items are
 /// separated by a soft line that becomes a space when flat and a break when wrapped.
-fn lower_delimited(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Never synthesize a delimiter that the source lacks (error recovery): start empty
     // and fill from the real tokens so the significant-token sequence is preserved.
     let mut open_doc = nil();
@@ -370,7 +404,7 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx) -> Doc {
 
 /// Lower a binary expression as `lhs op rhs`, joining a run of operator tokens (e.g. the
 /// two `>` of `>>`) tightly and surrounding the whole operator with single spaces.
-fn lower_binary(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut pending_op: Vec<Doc> = Vec::new();
 
@@ -399,7 +433,7 @@ fn flush_operator(parts: &mut Vec<Doc>, pending_op: &mut Vec<Doc>) {
 
 /// Lower a unary expression tight (`-x`), inserting a space only when the operator and
 /// operand would otherwise fuse (`- -x`, `+ +x`).
-fn lower_unary(node: &SyntaxNode, ctx: &Ctx) -> Doc {
+fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
     for el in node.children_with_tokens() {

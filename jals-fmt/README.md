@@ -20,8 +20,10 @@ The current formatter is intentionally minimal. It performs:
 
 - **Indentation** — spaces or a tab, configurable width.
 - **Block layout** — class bodies, blocks, and switch blocks (`{ … }`) are laid out
-  multi-line. The opening brace is **K&R (same-line) only** — there is no Allman/next-line
-  option yet.
+  multi-line. The opening brace of a **declaration body** (type, method, constructor, or
+  initializer) follows `brace-style`: K&R same-line (default) or Allman next-line. An empty
+  body stays `{}` on the header's line either way. Control-flow (`if`/`for`/`while`/`try`/…)
+  and `switch` braces are still K&R-only (reserved for `control-brace-style`).
 - **Delimited lists** — parameter lists, argument lists, record headers, annotation argument
   lists, and array initializers wrap **all-or-nothing** against `max-width`. There are no
   finer per-construct width heuristics.
@@ -56,6 +58,7 @@ are kebab-case.
 | `line-ending` | `"lf"` \| `"crlf"` \| `"auto"` \| `"native"` | `"lf"` | ✅ wired — `auto` matches the source's first line break, `native` uses the host terminator |
 | `insert-final-newline` | bool | `true` | ✅ wired |
 | `max-width` | integer | `100` | ✅ wired |
+| `brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens type/method/constructor/initializer bodies on their own line; control-flow & `switch` unaffected |
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
 | `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
 
@@ -78,10 +81,13 @@ step.
 
 ## 1. Brace & control-flow style (highest-demand for Java)
 
+Opening brace on same line (K&R) vs. next line (Allman) for declaration bodies
+(`brace_style`) is **implemented** — see [What it does today](#what-it-does-today).
+Remaining:
+
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Opening brace on same line (K&R) vs. next line (Allman) | `brace_style` |
-| `} else {` / `} catch {` / `} finally {` same-line vs. broken | `control_brace_style` |
+| `} else {` / `} catch {` / `} finally {` same-line vs. broken; opening brace of control-flow blocks | `control_brace_style` |
 | Collapse empty method/class bodies to `{}` (currently fixed, not configurable) | `empty_item_single_line` |
 | Keep single-statement methods on one line | `fn_single_line` |
 | Force every block multi-line | `force_multiline_blocks` |
@@ -194,7 +200,7 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 ## Suggested priority
 
-By Java-user impact: **(1)** `brace_style` / `control_brace_style` → **(2)** import
-organization (`reorder_imports` family) → **(3)** width heuristics (`chain_width`,
-`fn_call_width`, `array_width`) → **(4)** `trailing_comma`. (Comment reflow — `comment-width`
-via `wrap_comments` — is done.)
+By Java-user impact: **(1)** `control_brace_style` (the control-flow half of brace styling)
+→ **(2)** import organization (`reorder_imports` family) → **(3)** width heuristics
+(`chain_width`, `fn_call_width`, `array_width`) → **(4)** `trailing_comma`. (Declaration
+`brace_style` and comment reflow — `comment-width` via `wrap_comments` — are done.)
