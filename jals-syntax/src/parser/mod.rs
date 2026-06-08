@@ -339,6 +339,100 @@ mod tests {
     }
 
     #[test]
+    fn module_info_directives() {
+        check(
+            "open module a.b {\n  requires transitive java.base;\n  exports p.q to m.n;\n  uses p.S;\n  provides p.S with p.Impl;\n}\n",
+            expect![[r#"
+                SOURCE_FILE@0..115
+                  MODULE_DECL@0..114
+                    MODIFIERS@0..0
+                    OPEN_KW@0..4 "open"
+                    WHITESPACE@4..5 " "
+                    MODULE_KW@5..11 "module"
+                    QUALIFIED_NAME@11..15
+                      WHITESPACE@11..12 " "
+                      IDENT@12..13 "a"
+                      DOT@13..14 "."
+                      IDENT@14..15 "b"
+                    MODULE_BODY@15..114
+                      WHITESPACE@15..16 " "
+                      LBRACE@16..17 "{"
+                      REQUIRES_DIRECTIVE@17..50
+                        NEWLINE@17..18 "\n"
+                        WHITESPACE@18..20 "  "
+                        REQUIRES_KW@20..28 "requires"
+                        WHITESPACE@28..29 " "
+                        TRANSITIVE_KW@29..39 "transitive"
+                        QUALIFIED_NAME@39..49
+                          WHITESPACE@39..40 " "
+                          IDENT@40..44 "java"
+                          DOT@44..45 "."
+                          IDENT@45..49 "base"
+                        SEMICOLON@49..50 ";"
+                      EXPORTS_DIRECTIVE@50..72
+                        NEWLINE@50..51 "\n"
+                        WHITESPACE@51..53 "  "
+                        EXPORTS_KW@53..60 "exports"
+                        QUALIFIED_NAME@60..64
+                          WHITESPACE@60..61 " "
+                          IDENT@61..62 "p"
+                          DOT@62..63 "."
+                          IDENT@63..64 "q"
+                        WHITESPACE@64..65 " "
+                        TO_KW@65..67 "to"
+                        QUALIFIED_NAME@67..71
+                          WHITESPACE@67..68 " "
+                          IDENT@68..69 "m"
+                          DOT@69..70 "."
+                          IDENT@70..71 "n"
+                        SEMICOLON@71..72 ";"
+                      USES_DIRECTIVE@72..84
+                        NEWLINE@72..73 "\n"
+                        WHITESPACE@73..75 "  "
+                        USES_KW@75..79 "uses"
+                        QUALIFIED_NAME@79..83
+                          WHITESPACE@79..80 " "
+                          IDENT@80..81 "p"
+                          DOT@81..82 "."
+                          IDENT@82..83 "S"
+                        SEMICOLON@83..84 ";"
+                      PROVIDES_DIRECTIVE@84..112
+                        NEWLINE@84..85 "\n"
+                        WHITESPACE@85..87 "  "
+                        PROVIDES_KW@87..95 "provides"
+                        QUALIFIED_NAME@95..99
+                          WHITESPACE@95..96 " "
+                          IDENT@96..97 "p"
+                          DOT@97..98 "."
+                          IDENT@98..99 "S"
+                        WHITESPACE@99..100 " "
+                        WITH_KW@100..104 "with"
+                        QUALIFIED_NAME@104..111
+                          WHITESPACE@104..105 " "
+                          IDENT@105..106 "p"
+                          DOT@106..107 "."
+                          IDENT@107..111 "Impl"
+                        SEMICOLON@111..112 ";"
+                      NEWLINE@112..113 "\n"
+                      RBRACE@113..114 "}"
+                  NEWLINE@114..115 "\n"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn module_lossless_edge_cases() {
+        // `transitive` / `to` / `with` are restricted keywords: also valid as names.
+        assert_lossless("@Deprecated module m {}\n");
+        assert_lossless("module m { requires transitive; }\n"); // module *named* transitive
+        assert_lossless("module m { requires static a.b; }\n");
+        assert_lossless("module foo.bar { opens a.b to c.d, e.f; }\n");
+        assert_lossless("module m { exports to.pkg to other.mod; }\n");
+        // `module` / `requires` remain ordinary identifiers outside module context.
+        assert_lossless("class C { int module = 1; void requires() {} }\n");
+    }
+
+    #[test]
     fn class_with_field_and_method() {
         check(
             "public final class Foo<T> extends Bar implements I {\n  private int x = 1;\n  void m(int a) { return; }\n}\n",
