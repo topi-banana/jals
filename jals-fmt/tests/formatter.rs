@@ -685,3 +685,130 @@ fn auto_is_idempotent_on_crlf() {
     assert_eq!(once, twice, "auto formatting must be idempotent");
     assert!(all_crlf(&once));
 }
+
+// ---------------------------------------------------------------------------
+// Method chains (`chain-width`)
+// ---------------------------------------------------------------------------
+
+fn fmt_chain(src: &str, chain_width: usize) -> String {
+    let cfg = Config {
+        chain_width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn short_chain_stays_inline() {
+    check(
+        "class A{void m(){foo.bar().baz();}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    foo.bar().baz();
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn long_chain_breaks_one_call_per_line() {
+    check(
+        "class A{void m(){result=source.stream().filter(x->x.isActive()).map(Item::getName).sorted().collect(Collectors.toList());}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    result = source.stream()
+                        .filter(x -> x.isActive())
+                        .map(Item::getName)
+                        .sorted()
+                        .collect(Collectors.toList());
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn leading_field_path_hugs_head() {
+    check(
+        "class A{void m(){this.config.getServiceRegistry().lookupByName(\"primary\").resolveAndConnect();}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    this.config.getServiceRegistry()
+                        .lookupByName("primary")
+                        .resolveAndConnect();
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn field_only_path_stays_inline() {
+    // No calls: a pure field path is never broken, even past max-width.
+    check(
+        "class A{void m(){x=a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.aa.bb.cc.dd.ee.ff.gg.hh;}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    x = a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.aa.bb.cc.dd.ee.ff.gg.hh;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn type_witness_preserved_in_broken_chain() {
+    check(
+        "class A{void m(){result=obj.<String>alpha().<Integer>beta().gamma().delta().epsilon();}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    result = obj.<String>alpha()
+                        .<Integer>beta()
+                        .gamma()
+                        .delta()
+                        .epsilon();
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn chain_width_forces_break_below_max_width() {
+    // Fits max-width(100) but exceeds the narrow chain-width, so it still breaks.
+    expect![[r#"
+        class A {
+            void m() {
+                v = alpha.beta()
+                    .gamma()
+                    .delta();
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_chain(
+        "class A{void m(){v=alpha.beta().gamma().delta();}}",
+        20,
+    ));
+}
+
+#[test]
+fn chain_width_generous_keeps_inline() {
+    // A generous chain-width keeps the same chain on one line.
+    expect![[r#"
+        class A {
+            void m() {
+                v = alpha.beta().gamma().delta();
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_chain(
+        "class A{void m(){v=alpha.beta().gamma().delta();}}",
+        200,
+    ));
+}
