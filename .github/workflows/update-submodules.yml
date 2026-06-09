@@ -1,0 +1,64 @@
+name: Update submodules
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-submodules
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update OpenJDK submodule
+    runs-on: ubuntu-latest
+    steps:
+      # The OpenJDK submodule (openjdk/jdk) is huge, so don't check it out here.
+      # The next step initializes it and fetches only the latest commit
+      # (--depth 1) of its tracked branch instead of the full history.
+      - uses: actions/checkout@v6
+
+      - name: Update submodule to upstream
+        id: update
+        env:
+          SUBMODULE: jals-tests/sources/openjdk
+        run: |
+          old="$(git rev-parse "HEAD:$SUBMODULE")"
+
+          # Shallow-fetch the tip of the submodule's tracked branch (master).
+          git submodule update --remote --init --depth 1 -- "$SUBMODULE"
+
+          new="$(git -C "$SUBMODULE" rev-parse HEAD)"
+
+          if [ "$old" = "$new" ]; then
+            echo "Submodule already up to date ($old)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Updated OpenJDK submodule"
+              echo ""
+              echo "\`$SUBMODULE\`: \`${old:0:12}\` → \`${new:0:12}\`"
+              echo ""
+              echo "[Compare on GitHub](https://github.com/openjdk/jdk/compare/${old}...${new})"
+            } > submodule-summary.md
+            cat submodule-summary.md
+          fi
+
+      - name: Create pull request
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: chore/update-openjdk-submodule
+          delete-branch: true
+          commit-message: "chore: update OpenJDK submodule to upstream"
+          title: "chore: update OpenJDK submodule to upstream"
+          body-path: submodule-summary.md
+          labels: dependencies
+          add-paths: jals-tests/sources/openjdk
