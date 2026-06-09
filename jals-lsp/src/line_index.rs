@@ -57,6 +57,35 @@ impl LineIndex {
             end: self.position(text, range.end()),
         }
     }
+
+    /// Convert an LSP `Position` to a byte offset (the inverse of `position`).
+    ///
+    /// Lines past the end of the document, and characters past the end of a line, are
+    /// clamped; a character column that would land inside a multi-byte char stops at that
+    /// char's start. So this never panics and never returns a non-boundary offset.
+    pub(crate) fn offset(&self, text: &str, position: Position) -> TextSize {
+        let Some(&line_start) = self.line_starts.get(position.line as usize) else {
+            return TextSize::from(self.len); // line past EOF -> clamp to end of document
+        };
+        let line_start = line_start as usize;
+        let line_end = self
+            .line_starts
+            .get(position.line as usize + 1)
+            .map_or(self.len as usize, |&s| s as usize);
+
+        // Walk UTF-16 columns from the line start until `character` units are consumed.
+        let mut remaining = position.character;
+        let mut off = line_start;
+        for c in text[line_start..line_end].chars() {
+            let w = c.len_utf16() as u32;
+            if remaining < w {
+                break; // not enough columns left to step over this char
+            }
+            remaining -= w;
+            off += c.len_utf8();
+        }
+        TextSize::from(off as u32)
+    }
 }
 
 /// Round `off` down to the nearest UTF-8 char boundary in `text`.
@@ -143,5 +172,41 @@ mod tests {
         let r = idx.range(text, TextRange::new(TextSize::from(1), TextSize::from(3)));
         assert_eq!((r.start.line, r.start.character), (0, 1)); // 'b'
         assert_eq!((r.end.line, r.end.character), (1, 0)); // 'c'
+    }
+
+    /// Helper: (line, character) -> byte offset.
+    fn off(idx: &LineIndex, text: &str, line: u32, character: u32) -> u32 {
+        u32::from(idx.offset(text, Position { line, character }))
+    }
+
+    #[test]
+    fn offset_round_trips_with_position() {
+        let text = "abc\ndef\nghi";
+        let idx = LineIndex::new(text);
+        for o in 0..=text.len() as u32 {
+            let p = idx.position(text, TextSize::from(o));
+            assert_eq!(off(&idx, text, p.line, p.character), o, "offset {o}");
+        }
+    }
+
+    #[test]
+    fn offset_counts_utf16_columns() {
+        // 'あ' = 3 UTF-8 bytes / 1 UTF-16 unit; '😀' = 4 bytes / 2 units.
+        let text = "aあ😀b";
+        let idx = LineIndex::new(text);
+        assert_eq!(off(&idx, text, 0, 0), 0); // before 'a'
+        assert_eq!(off(&idx, text, 0, 1), 1); // after 'a'
+        assert_eq!(off(&idx, text, 0, 2), 4); // after 'あ'
+        assert_eq!(off(&idx, text, 0, 4), 8); // after '😀' (2 UTF-16 units)
+        assert_eq!(off(&idx, text, 0, 5), 9); // after 'b'
+    }
+
+    #[test]
+    fn offset_clamps_out_of_range() {
+        let text = "ab\ncd";
+        let idx = LineIndex::new(text);
+        assert_eq!(off(&idx, text, 0, 2), 2); // exact end of line 0 content
+        assert_eq!(off(&idx, text, 0, 99), 3); // past line 0 -> clamps to its end
+        assert_eq!(off(&idx, text, 9, 0), 5); // line past EOF -> end of document
     }
 }
