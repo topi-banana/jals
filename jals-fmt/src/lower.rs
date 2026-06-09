@@ -556,7 +556,8 @@ fn blank_lines_before(tok: &SyntaxToken) -> usize {
 /// Lower a comma-separated, delimited list that wraps all-or-nothing. Each item carries
 /// its own trailing comma (so a trailing comma in the source is preserved), and items are
 /// separated by a soft line that becomes a space when flat and a break when wrapped. An
-/// argument list (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`.
+/// argument list (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`,
+/// and an array initializer (`ARRAY_INIT`) when it exceeds `array-width`.
 fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Never synthesize a delimiter that the source lacks (error recovery): start empty
     // and fill from the real tokens so the significant-token sequence is preserved.
@@ -607,10 +608,13 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         softline(),
         close_doc,
     ]);
-    // A call's argument list (`ARG_LIST`) honors `fn-call-width`; other delimited lists
-    // (params, array initializers, …) only break against `max-width`.
+    // A call's argument list (`ARG_LIST`) honors `fn-call-width` and an array initializer
+    // (`ARRAY_INIT`) honors `array-width`; other delimited lists (params, …) only break
+    // against `max-width`.
     if node.kind() == S::ARG_LIST {
         group_within(doc, ctx.cfg.fn_call_width)
+    } else if node.kind() == S::ARRAY_INIT {
+        group_within(doc, ctx.cfg.array_width)
     } else {
         group(doc)
     }
