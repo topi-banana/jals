@@ -27,8 +27,8 @@ The current formatter is intentionally minimal. It performs:
   body stays `{}` on the header's line either way.
 - **Delimited lists** — parameter lists, argument lists, record headers, annotation argument
   lists, and array initializers wrap **all-or-nothing** against `max-width`. Call argument
-  lists additionally honor `fn-call-width` (see below); the other lists have no finer
-  per-construct width heuristics yet.
+  lists additionally honor `fn-call-width` and array initializers `array-width` (see below);
+  the other lists have no finer per-construct width heuristics yet.
 - **Method chains** — a `a.b().c().d()` chain with at least two calls is laid out one call per
   line when its flat width exceeds `chain-width` or the line would overflow `max-width`. The
   receiver and any leading field accesses stay on the first line and the first call hugs them
@@ -37,6 +37,9 @@ The current formatter is intentionally minimal. It performs:
 - **Call arguments** — a function or method call (`f(a, b, c)`) whose argument list's flat
   width exceeds `fn-call-width` is laid out one argument per line, even when the line would
   otherwise fit `max-width`. Method-definition parameter lists are unaffected.
+- **Array initializers** — an array initializer (`{a, b, c}`, including `new T[]{…}`) whose
+  flat width exceeds `array-width` is laid out one element per line, even when the line would
+  otherwise fit `max-width`. Argument and parameter lists are unaffected.
 - **Operator spacing** — binary and unary expressions get canonical spacing. Binary
   expressions are **not** wrapped across lines.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
@@ -70,6 +73,7 @@ are kebab-case.
 | `max-width` | integer | `100` | ✅ wired |
 | `chain-width` | integer | `60` | ✅ wired — a method chain (`a.b().c()`) with ≥2 calls wraps one call per line when its flat width exceeds this or the line overflows `max-width`; mirrors rustfmt's `chain_width` |
 | `fn-call-width` | integer | `60` | ✅ wired — a function/method call whose argument list's flat width exceeds this wraps one argument per line, even when it fits `max-width`; mirrors rustfmt's `fn_call_width` |
+| `array-width` | integer | `60` | ✅ wired — an array initializer (`{a, b, c}`) whose flat width exceeds this wraps one element per line, even when it fits `max-width`; mirrors rustfmt's `array_width` |
 | `brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens type/method/constructor/initializer bodies on their own line; control-flow & `switch` are governed by `control-brace-style` |
 | `control-brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens control-flow / `switch` / lambda / bare block braces on their own line and breaks `} else` / `} catch` / `} finally` / `} while`; mirrors rustfmt's `control_brace_style` |
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
@@ -106,16 +110,15 @@ Opening-brace placement is **implemented** for both halves — declaration bodie
 | Force every block multi-line | `force_multiline_blocks` |
 | Keep a `throws` clause / type bounds on one line | `where_single_line` (analogue) |
 
-## 2. Width-based heuristics (jals has `max-width`, `chain-width`, and `fn-call-width`)
+## 2. Width-based heuristics (jals has `max-width`, `chain-width`, `fn-call-width`, and `array-width`)
 
-**Method-chain** wrap width (`chain_width`) and **method-call argument** wrap width
-(`fn_call_width`) are **implemented** — see [What it does today](#what-it-does-today).
-Remaining:
+**Method-chain** wrap width (`chain_width`), **method-call argument** wrap width
+(`fn_call_width`), and **array-initializer** wrap width (`array_width`) are **implemented** —
+see [What it does today](#what-it-does-today). Remaining:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Preset bundle for all width thresholds (Default/Off/Max) | `use_small_heuristics` |
-| Array-initializer wrap width | `array_width` |
 | Keep a ternary / `if-else` on one line up to width | `single_line_if_else_max_width` |
 | Annotation wrap widths | `attr_fn_like_width`, `inline_attribute_width` |
 | Pack short array elements | `short_array_element_width_threshold` |
@@ -215,8 +218,8 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 ## Suggested priority
 
-By Java-user impact: **(1)** import organization (`reorder_imports` family) → **(2)** the
-remaining width heuristics (`array_width`) → **(3)** `trailing_comma`.
+By Java-user impact: **(1)** import organization (`reorder_imports` family) → **(2)**
+`trailing_comma`.
 (Brace styling — `brace_style` and `control_brace_style` — comment reflow — `comment-width`
-via `wrap_comments` — method-chain wrapping — `chain_width` — and call-argument wrapping —
-`fn_call_width` — are done.)
+via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
+`fn_call_width` — and array-initializer wrapping — `array_width` — are done.)
