@@ -3,8 +3,10 @@
 
 mod diagnostics;
 mod formatting;
+mod semantic_tokens;
 mod symbols;
 
 pub(crate) use diagnostics::compute_diagnostics;
 pub(crate) use formatting::formatting_edits;
+pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
 pub(crate) use symbols::document_symbols;
