@@ -1283,6 +1283,140 @@ mod tests {
     }
 
     #[test]
+    fn for_each_wildcard_type() {
+        check(
+            "class C { void m(Map<K, V> mm) { for (Map.Entry<? extends K, ? super V> e : mm.entrySet()) g(e); for (List<?> x : xs) h(x); } }",
+            expect![[r#"
+                SOURCE_FILE@0..127
+                  CLASS_DECL@0..127
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..127
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..125
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..30
+                          LPAREN@16..17 "("
+                          PARAM@17..29
+                            MODIFIERS@17..17
+                            TYPE@17..26
+                              IDENT@17..20 "Map"
+                              TYPE_ARGS@20..26
+                                LT@20..21 "<"
+                                TYPE@21..22
+                                  IDENT@21..22 "K"
+                                COMMA@22..23 ","
+                                TYPE@23..25
+                                  WHITESPACE@23..24 " "
+                                  IDENT@24..25 "V"
+                                GT@25..26 ">"
+                            WHITESPACE@26..27 " "
+                            IDENT@27..29 "mm"
+                          RPAREN@29..30 ")"
+                        BLOCK@30..125
+                          WHITESPACE@30..31 " "
+                          LBRACE@31..32 "{"
+                          FOR_EACH_STMT@32..96
+                            WHITESPACE@32..33 " "
+                            FOR_KW@33..36 "for"
+                            WHITESPACE@36..37 " "
+                            LPAREN@37..38 "("
+                            MODIFIERS@38..38
+                            TYPE@38..71
+                              IDENT@38..41 "Map"
+                              DOT@41..42 "."
+                              IDENT@42..47 "Entry"
+                              TYPE_ARGS@47..71
+                                LT@47..48 "<"
+                                QUESTION@48..49 "?"
+                                WHITESPACE@49..50 " "
+                                EXTENDS_KW@50..57 "extends"
+                                TYPE@57..59
+                                  WHITESPACE@57..58 " "
+                                  IDENT@58..59 "K"
+                                COMMA@59..60 ","
+                                WHITESPACE@60..61 " "
+                                QUESTION@61..62 "?"
+                                WHITESPACE@62..63 " "
+                                SUPER_KW@63..68 "super"
+                                TYPE@68..70
+                                  WHITESPACE@68..69 " "
+                                  IDENT@69..70 "V"
+                                GT@70..71 ">"
+                            WHITESPACE@71..72 " "
+                            IDENT@72..73 "e"
+                            WHITESPACE@73..74 " "
+                            COLON@74..75 ":"
+                            CALL_EXPR@75..89
+                              FIELD_ACCESS@75..87
+                                NAME_REF@75..78
+                                  WHITESPACE@75..76 " "
+                                  IDENT@76..78 "mm"
+                                DOT@78..79 "."
+                                IDENT@79..87 "entrySet"
+                              ARG_LIST@87..89
+                                LPAREN@87..88 "("
+                                RPAREN@88..89 ")"
+                            RPAREN@89..90 ")"
+                            EXPR_STMT@90..96
+                              CALL_EXPR@90..95
+                                NAME_REF@90..92
+                                  WHITESPACE@90..91 " "
+                                  IDENT@91..92 "g"
+                                ARG_LIST@92..95
+                                  LPAREN@92..93 "("
+                                  NAME_REF@93..94
+                                    IDENT@93..94 "e"
+                                  RPAREN@94..95 ")"
+                              SEMICOLON@95..96 ";"
+                          FOR_EACH_STMT@96..123
+                            WHITESPACE@96..97 " "
+                            FOR_KW@97..100 "for"
+                            WHITESPACE@100..101 " "
+                            LPAREN@101..102 "("
+                            MODIFIERS@102..102
+                            TYPE@102..109
+                              IDENT@102..106 "List"
+                              TYPE_ARGS@106..109
+                                LT@106..107 "<"
+                                QUESTION@107..108 "?"
+                                GT@108..109 ">"
+                            WHITESPACE@109..110 " "
+                            IDENT@110..111 "x"
+                            WHITESPACE@111..112 " "
+                            COLON@112..113 ":"
+                            NAME_REF@113..116
+                              WHITESPACE@113..114 " "
+                              IDENT@114..116 "xs"
+                            RPAREN@116..117 ")"
+                            EXPR_STMT@117..123
+                              CALL_EXPR@117..122
+                                NAME_REF@117..119
+                                  WHITESPACE@117..118 " "
+                                  IDENT@118..119 "h"
+                                ARG_LIST@119..122
+                                  LPAREN@119..120 "("
+                                  NAME_REF@120..121
+                                    IDENT@120..121 "x"
+                                  RPAREN@121..122 ")"
+                              SEMICOLON@122..123 ";"
+                          WHITESPACE@123..124 " "
+                          RBRACE@124..125 "}"
+                      WHITESPACE@125..126 " "
+                      RBRACE@126..127 "}"
+            "#]],
+        );
+    }
+
+    #[test]
     fn try_catch_finally_resources() {
         check(
             "class C { void m() { try (var r = open()) { use(r); } catch (IOException | E e) { } finally { } } }",
