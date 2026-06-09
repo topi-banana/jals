@@ -1643,6 +1643,121 @@ mod tests {
     }
 
     #[test]
+    fn switch_arrow_bare_and_multiple_enum_labels() {
+        // Arrow switch with bare/multiple constant labels (`case A, B ->`) and a
+        // guarded label (`case C when b ->`). The trailing `->` must stay the
+        // rule arrow (not a lambda), and `when` must start a guard (not a binding).
+        check(
+            "class C { int m(E e, boolean b) { return switch (e) { case A, B -> 1; case C when b -> 2; default -> 0; }; } }",
+            expect![[r#"
+                SOURCE_FILE@0..110
+                  CLASS_DECL@0..110
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..110
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..108
+                        MODIFIERS@9..9
+                        TYPE@9..13
+                          WHITESPACE@9..10 " "
+                          INT_KW@10..13 "int"
+                        WHITESPACE@13..14 " "
+                        IDENT@14..15 "m"
+                        PARAM_LIST@15..31
+                          LPAREN@15..16 "("
+                          PARAM@16..19
+                            MODIFIERS@16..16
+                            TYPE@16..17
+                              IDENT@16..17 "E"
+                            WHITESPACE@17..18 " "
+                            IDENT@18..19 "e"
+                          COMMA@19..20 ","
+                          PARAM@20..30
+                            MODIFIERS@20..20
+                            TYPE@20..28
+                              WHITESPACE@20..21 " "
+                              BOOLEAN_KW@21..28 "boolean"
+                            WHITESPACE@28..29 " "
+                            IDENT@29..30 "b"
+                          RPAREN@30..31 ")"
+                        BLOCK@31..108
+                          WHITESPACE@31..32 " "
+                          LBRACE@32..33 "{"
+                          RETURN_STMT@33..106
+                            WHITESPACE@33..34 " "
+                            RETURN_KW@34..40 "return"
+                            SWITCH_EXPR@40..105
+                              WHITESPACE@40..41 " "
+                              SWITCH_KW@41..47 "switch"
+                              WHITESPACE@47..48 " "
+                              LPAREN@48..49 "("
+                              NAME_REF@49..50
+                                IDENT@49..50 "e"
+                              RPAREN@50..51 ")"
+                              SWITCH_BLOCK@51..105
+                                WHITESPACE@51..52 " "
+                                LBRACE@52..53 "{"
+                                SWITCH_RULE@53..69
+                                  SWITCH_LABEL@53..63
+                                    WHITESPACE@53..54 " "
+                                    CASE_KW@54..58 "case"
+                                    NAME_REF@58..60
+                                      WHITESPACE@58..59 " "
+                                      IDENT@59..60 "A"
+                                    COMMA@60..61 ","
+                                    NAME_REF@61..63
+                                      WHITESPACE@61..62 " "
+                                      IDENT@62..63 "B"
+                                  WHITESPACE@63..64 " "
+                                  ARROW@64..66 "->"
+                                  LITERAL@66..68
+                                    WHITESPACE@66..67 " "
+                                    INT_LITERAL@67..68 "1"
+                                  SEMICOLON@68..69 ";"
+                                SWITCH_RULE@69..89
+                                  SWITCH_LABEL@69..83
+                                    WHITESPACE@69..70 " "
+                                    CASE_KW@70..74 "case"
+                                    NAME_REF@74..76
+                                      WHITESPACE@74..75 " "
+                                      IDENT@75..76 "C"
+                                    GUARD@76..83
+                                      WHITESPACE@76..77 " "
+                                      WHEN_KW@77..81 "when"
+                                      NAME_REF@81..83
+                                        WHITESPACE@81..82 " "
+                                        IDENT@82..83 "b"
+                                  WHITESPACE@83..84 " "
+                                  ARROW@84..86 "->"
+                                  LITERAL@86..88
+                                    WHITESPACE@86..87 " "
+                                    INT_LITERAL@87..88 "2"
+                                  SEMICOLON@88..89 ";"
+                                SWITCH_RULE@89..103
+                                  SWITCH_LABEL@89..97
+                                    WHITESPACE@89..90 " "
+                                    DEFAULT_KW@90..97 "default"
+                                  WHITESPACE@97..98 " "
+                                  ARROW@98..100 "->"
+                                  LITERAL@100..102
+                                    WHITESPACE@100..101 " "
+                                    INT_LITERAL@101..102 "0"
+                                  SEMICOLON@102..103 ";"
+                                WHITESPACE@103..104 " "
+                                RBRACE@104..105 "}"
+                            SEMICOLON@105..106 ";"
+                          WHITESPACE@106..107 " "
+                          RBRACE@107..108 "}"
+                      WHITESPACE@108..109 " "
+                      RBRACE@109..110 "}"
+            "#]],
+        );
+    }
+
+    #[test]
     fn switch_expression_with_yield() {
         check(
             "class C { int m(int x) { return switch (x) { case 1: yield 10; default: yield 0; }; } }",

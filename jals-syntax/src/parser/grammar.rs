@@ -1577,22 +1577,28 @@ fn switch_case_item(p: &mut Parser) {
     if p.at(DEFAULT_KW) {
         // `case null, default`.
         p.bump(DEFAULT_KW);
-        return;
-    }
-    if at_pattern(p) {
+    } else if at_pattern(p) {
         pattern(p);
-        if p.at_contextual_kw("when") {
-            guard(p);
-        }
     } else {
-        expr(p);
+        // A case constant is an expression, but in an arrow rule the trailing
+        // `->` is the rule arrow, not a lambda: `case A -> ...` is the label `A`
+        // followed by the arrow, never the lambda `A -> ...`. Parse just below
+        // the lambda layer so the arrow is left for the rule.
+        let _ = assignment_expr(p);
+    }
+    // A guard (`when <expr>`) may follow a pattern or — leniently, for error
+    // resilience — a bare constant label.
+    if p.at_contextual_kw("when") {
+        guard(p);
     }
 }
 
 fn guard(p: &mut Parser) {
     let m = p.start();
     p.bump_remap(WHEN_KW);
-    expr(p);
+    // The guard is a boolean expression; like a case constant, it must not eat
+    // the rule's trailing `->` as a lambda arrow, so parse below the lambda layer.
+    let _ = assignment_expr(p);
     m.complete(p, GUARD);
 }
 
@@ -1606,7 +1612,14 @@ fn at_pattern(p: &Parser) -> bool {
     let Some(i) = skip_type(p, 0) else {
         return false;
     };
-    matches!(p.nth_nofuel(i), IDENT | LPAREN)
+    match p.nth_nofuel(i) {
+        LPAREN => true,
+        // A type pattern's binding is a plain identifier. The contextual keyword
+        // `when` instead begins a guard, so `Type when ...` is a bare constant
+        // label with a guard, not a `Type binding` pattern.
+        IDENT => p.nth_text(i) != "when",
+        _ => false,
+    }
 }
 
 fn pattern(p: &mut Parser) {
