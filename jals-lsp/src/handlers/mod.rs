@@ -2,11 +2,13 @@
 //! I/O or async. This is the unit-testable core of the server.
 
 mod diagnostics;
+mod folding_range;
 mod formatting;
 mod semantic_tokens;
 mod symbols;
 
 pub(crate) use diagnostics::compute_diagnostics;
+pub(crate) use folding_range::folding_range;
 pub(crate) use formatting::formatting_edits;
 pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
 pub(crate) use symbols::document_symbols;
