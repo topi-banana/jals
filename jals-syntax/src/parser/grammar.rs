@@ -1292,6 +1292,7 @@ fn for_stmt(p: &mut Parser) {
 fn at_for_each(p: &Parser) -> bool {
     let mut depth = 0i32;
     let mut ternary = 0i32;
+    let mut angle = 0i32;
     let mut i = 0usize;
     loop {
         match p.nth_nofuel(i) {
@@ -1302,9 +1303,14 @@ fn at_for_each(p: &Parser) -> bool {
                 }
                 depth -= 1;
             }
+            // Track generic `<...>` nesting so a wildcard `?` (e.g. `<? extends T>`) is not
+            // mistaken for a ternary `?`, nor a closing `>` for the for-each separator search.
+            // A bare `GT` at `angle == 0` is a comparison/shift `>`, so it is ignored.
+            LT => angle += 1,
+            GT if angle > 0 => angle -= 1,
             SEMICOLON if depth == 0 && ternary == 0 => return false,
-            QUESTION if depth == 0 => ternary += 1,
-            COLON if depth == 0 => {
+            QUESTION if depth == 0 && angle == 0 => ternary += 1,
+            COLON if depth == 0 && angle == 0 => {
                 if ternary > 0 {
                     ternary -= 1;
                 } else {
