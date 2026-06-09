@@ -116,6 +116,11 @@ pub struct Config {
     pub insert_final_newline: bool,
     /// Target line width for wrapping code.
     pub max_width: usize,
+    /// Maximum width of a method chain (`a.b().c().d()`) kept on a single line. A chain with
+    /// at least two calls whose flat width exceeds this is laid out one call per line (it also
+    /// wraps when it would overflow [`max_width`](Config::max_width)). Mirrors rustfmt's
+    /// `chain_width`.
+    pub chain_width: usize,
     /// Placement of the opening brace of a declaration body (type, method, constructor, or
     /// initializer): same line (K&R) or next line (Allman). Control-flow blocks
     /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are governed separately by
@@ -143,6 +148,7 @@ impl Default for Config {
             line_ending: LineEnding::Lf,
             insert_final_newline: true,
             max_width: 100,
+            chain_width: 60,
             brace_style: BraceStyle::SameLine,
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
@@ -254,6 +260,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.indent_width, 4);
         assert_eq!(c.max_width, 100);
+        assert_eq!(c.chain_width, 60);
         assert_eq!(c.comment_width, 80);
         assert_eq!(c.max_blank_lines, 1);
         assert!(c.insert_final_newline);
@@ -285,6 +292,12 @@ mod tests {
         let c: Config = toml::from_str("wrap-comments = true\ncomment-width = 60\n").unwrap();
         assert!(c.wrap_comments);
         assert_eq!(c.comment_width, 60);
+    }
+
+    #[test]
+    fn chain_width_parses_kebab_key() {
+        let c: Config = toml::from_str("chain-width = 40\n").unwrap();
+        assert_eq!(c.chain_width, 40);
     }
 
     #[test]

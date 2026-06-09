@@ -28,6 +28,11 @@ The current formatter is intentionally minimal. It performs:
 - **Delimited lists** — parameter lists, argument lists, record headers, annotation argument
   lists, and array initializers wrap **all-or-nothing** against `max-width`. There are no
   finer per-construct width heuristics.
+- **Method chains** — a `a.b().c().d()` chain with at least two calls is laid out one call per
+  line when its flat width exceeds `chain-width` or the line would overflow `max-width`. The
+  receiver and any leading field accesses stay on the first line and the first call hugs them
+  (`source.stream()`, then `.filter(…)` / `.map(…)` on following lines); a lone call or a pure
+  field path (`a.b.c`) is never broken.
 - **Operator spacing** — binary and unary expressions get canonical spacing. Binary
   expressions are **not** wrapped across lines.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
@@ -59,6 +64,7 @@ are kebab-case.
 | `line-ending` | `"lf"` \| `"crlf"` \| `"auto"` \| `"native"` | `"lf"` | ✅ wired — `auto` matches the source's first line break, `native` uses the host terminator |
 | `insert-final-newline` | bool | `true` | ✅ wired |
 | `max-width` | integer | `100` | ✅ wired |
+| `chain-width` | integer | `60` | ✅ wired — a method chain (`a.b().c()`) with ≥2 calls wraps one call per line when its flat width exceeds this or the line overflows `max-width`; mirrors rustfmt's `chain_width` |
 | `brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens type/method/constructor/initializer bodies on their own line; control-flow & `switch` are governed by `control-brace-style` |
 | `control-brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens control-flow / `switch` / lambda / bare block braces on their own line and breaks `} else` / `} catch` / `} finally` / `} while`; mirrors rustfmt's `control_brace_style` |
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
@@ -95,14 +101,16 @@ Opening-brace placement is **implemented** for both halves — declaration bodie
 | Force every block multi-line | `force_multiline_blocks` |
 | Keep a `throws` clause / type bounds on one line | `where_single_line` (analogue) |
 
-## 2. Width-based heuristics (jals only has the single `max-width`)
+## 2. Width-based heuristics (jals has `max-width` and `chain-width`)
+
+**Method-chain** wrap width (`chain_width`) is **implemented** — see
+[What it does today](#what-it-does-today). Remaining:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Preset bundle for all width thresholds (Default/Off/Max) | `use_small_heuristics` |
 | Method-call argument wrap width | `fn_call_width` |
 | Array-initializer wrap width | `array_width` |
-| **Method-chain** (`a.b().c().d()`) wrap width — chain formatting does not exist yet | `chain_width` |
 | Keep a ternary / `if-else` on one line up to width | `single_line_if_else_max_width` |
 | Annotation wrap widths | `attr_fn_like_width`, `inline_attribute_width` |
 | Pack short array elements | `short_array_element_width_threshold` |
@@ -202,7 +210,7 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 ## Suggested priority
 
-By Java-user impact: **(1)** import organization (`reorder_imports` family) → **(2)** width
-heuristics (`chain_width`, `fn_call_width`, `array_width`) → **(3)** `trailing_comma`.
-(Brace styling — `brace_style` and `control_brace_style` — and comment reflow —
-`comment-width` via `wrap_comments` — are done.)
+By Java-user impact: **(1)** import organization (`reorder_imports` family) → **(2)** the
+remaining width heuristics (`fn_call_width`, `array_width`) → **(3)** `trailing_comma`.
+(Brace styling — `brace_style` and `control_brace_style` — comment reflow — `comment-width`
+via `wrap_comments` — and method-chain wrapping — `chain_width` — are done.)

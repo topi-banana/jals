@@ -4,6 +4,8 @@
 //! (`render.rs`) turns a [`Doc`] into the formatted string, choosing for each
 //! [`Doc::Group`] whether it fits flat on the current line or must break.
 
+use unicode_width::UnicodeWidthStr;
+
 /// The flavour of a comment, controlling how it reflows under `wrap-comments`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommentKind {
@@ -116,6 +118,64 @@ pub(crate) fn group(doc: Doc) -> Doc {
         doc: Box::new(doc),
         should_break,
     }
+}
+
+/// Group a document under a flat-width budget narrower than `max-width`: it is forced broken
+/// when its flat width would exceed `max_flat` (or it cannot be laid out flat at all). Within
+/// the budget it still renders flat only if it also fits `max-width` at its position, exactly
+/// like [`group`]. Used for `chain-width`.
+pub(crate) fn group_within(doc: Doc, max_flat: usize) -> Doc {
+    let should_break = match flat_width(&doc) {
+        Some(w) => w > max_flat,
+        None => true,
+    };
+    Doc::Group {
+        doc: Box::new(doc),
+        should_break,
+    }
+}
+
+/// The display width of `doc` laid out fully flat, or `None` when it cannot be flat — it
+/// contains a forced break (hard/blank line or an already-breaking group) or a multi-line
+/// raw token. `Line` counts as one space, `SoftLine` as nothing, mirroring the renderer's
+/// flat mode.
+fn flat_width(doc: &Doc) -> Option<usize> {
+    let w = match doc {
+        Doc::Text(s) => UnicodeWidthStr::width(&**s),
+        Doc::RawText(s) => {
+            if s.contains('\n') {
+                return None;
+            }
+            UnicodeWidthStr::width(&**s)
+        }
+        Doc::Comment { text, .. } => {
+            if text.contains('\n') {
+                return None;
+            }
+            UnicodeWidthStr::width(&**text)
+        }
+        Doc::Concat(v) => {
+            let mut total = 0;
+            for d in v {
+                total += flat_width(d)?;
+            }
+            total
+        }
+        Doc::Line => 1,
+        Doc::SoftLine => 0,
+        Doc::HardLine | Doc::BlankLine(_) => return None,
+        Doc::Indent(d) => flat_width(d)?,
+        Doc::Group { doc, should_break } => {
+            if *should_break {
+                return None;
+            }
+            flat_width(doc)?
+        }
+        // Line suffixes (trailing comments) are deferred past the next break; they never
+        // contribute to the flat width of the line they ride on.
+        Doc::LineSuffix(_) => 0,
+    };
+    Some(w)
 }
 
 /// Defer content to the end of the current line.

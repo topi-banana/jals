@@ -12,12 +12,12 @@
 //! canonical operator spacing; everything else falls back to [`lower_generic`], which lays
 //! a node out inline with normalized spacing.
 
-use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
 use crate::config::{BraceStyle, Config, ControlBraceStyle};
 use crate::doc::{
-    Doc, blank_line, concat, group, hardline, indent, line, nil, raw, softline, text,
+    Doc, blank_line, concat, group, group_within, hardline, indent, line, nil, raw, softline, text,
 };
 
 /// Lowering context shared (immutably) across the walk.
@@ -49,6 +49,7 @@ fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         S::IF_STMT | S::TRY_STMT | S::DO_WHILE_STMT => lower_control_flow(node, ctx),
         S::BINARY_EXPR => lower_binary(node, ctx),
         S::UNARY_EXPR => lower_unary(node, ctx),
+        S::CALL_EXPR | S::FIELD_ACCESS => lower_chain(node, ctx),
         _ => lower_generic(node, ctx),
     }
 }
@@ -185,13 +186,25 @@ fn lower_control_flow(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// the separator before a `}`-anchored continuation becomes a forced break under
 /// `control-brace-style = next-line` (see [`flow_sep`]).
 fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
+    lower_elements(node.children_with_tokens(), ctx, control_flow)
+}
+
+/// Lay out an arbitrary run of CST elements inline. The element loop is shared between
+/// [`lower_inline`] (a whole node's children) and chain-selector emission, which feeds it a
+/// `FIELD_ACCESS`'s children minus the receiver (see [`lower_after_first_node`]); routing both
+/// through here keeps the type-witness hug below in one place.
+fn lower_elements(
+    els: impl Iterator<Item = SyntaxElement>,
+    ctx: &Ctx<'_>,
+    control_flow: bool,
+) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
     // A `.<T>` / `::<T>` explicit type witness hugs the method name that follows it
     // (`List.<String>of()`, `Foo::<String>bar`), unlike a type's own `<...>` (`List<T> x`).
     let mut hug_witness = false;
 
-    for el in node.children_with_tokens() {
+    for el in els {
         if let Some(child) = el.as_node() {
             if let Some(first) = first_sig_token(child) {
                 let s = if hug_witness {
@@ -256,6 +269,135 @@ fn flow_sep(
         return hardline();
     }
     sep(prev, next)
+}
+
+// ---------------------------------------------------------------------------
+// Method chains (`a.b().c().d()`)
+// ---------------------------------------------------------------------------
+
+/// One `.selector` step of a method chain. `callee` is the `FIELD_ACCESS` carrying the dot,
+/// optional type witness, and member name; `call` is the enclosing `CALL_EXPR` when the step
+/// is a method invocation (it holds the `ARG_LIST`), or `None` for a plain field access.
+struct ChainLink {
+    callee: SyntaxNode,
+    call: Option<SyntaxNode>,
+}
+
+impl ChainLink {
+    fn is_call(&self) -> bool {
+        self.call.is_some()
+    }
+}
+
+/// Lower a `FIELD_ACCESS` / `CALL_EXPR`. A chain with at least two method calls is laid out
+/// breakable: the receiver and any leading field accesses stay on the first line, the first
+/// call hugs them, and each later `.call()` / `.field` wraps onto its own indented line when
+/// the chain does not fit `max-width` or its flat width exceeds `chain-width`. Anything else
+/// (a lone call, a pure field path `a.b.c`, a malformed node) falls back to inline emission,
+/// byte-for-byte unchanged.
+fn lower_chain(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    let Some((head, links)) = flatten_chain(node) else {
+        return lower_inline(node, ctx, false);
+    };
+    // Count every method invocation in the chain — the head itself if it is a call/`new`, plus
+    // each call link — so `a.b.c` (no calls) and `foo.bar()` (one) stay inline.
+    let calls = links.iter().filter(|l| l.is_call()).count()
+        + usize::from(matches!(head.kind(), S::CALL_EXPR | S::NEW_EXPR));
+    if calls < 2 {
+        return lower_inline(node, ctx, false);
+    }
+
+    // Leading field accesses (before the first call) ride on the head's line, so
+    // `this.config.foo().bar()` keeps `this.config` together instead of breaking every dot.
+    let first_call = links.iter().position(ChainLink::is_call).unwrap_or(0);
+    let (lead, rest) = links.split_at(first_call);
+
+    let mut head_line = vec![lower(&head, ctx)];
+    for link in lead {
+        head_line.push(lower_link(link, ctx));
+    }
+    // The first call hugs the head; subsequent steps wrap one per line.
+    let mut rest = rest.iter();
+    if let Some(first) = rest.next() {
+        head_line.push(lower_link(first, ctx));
+    }
+    let mut wrapped: Vec<Doc> = Vec::new();
+    for link in rest {
+        wrapped.push(softline());
+        wrapped.push(lower_link(link, ctx));
+    }
+
+    let doc = concat(vec![concat(head_line), indent(concat(wrapped))]);
+    group_within(doc, ctx.cfg.chain_width)
+}
+
+/// Lower one chain step: its `.selector`, plus the argument list when it is a call.
+fn lower_link(link: &ChainLink, ctx: &Ctx<'_>) -> Doc {
+    let selector = lower_after_first_node(&link.callee, ctx);
+    match &link.call {
+        Some(call) => concat(vec![selector, lower_after_first_node(call, ctx)]),
+        None => selector,
+    }
+}
+
+/// Flatten a left-nested chain into its head (base) expression and the `.selector` steps in
+/// source order. Returns `None` when `node` applies no `.`-selector to a receiver (so it is
+/// not a chain), letting the caller fall back to inline emission.
+fn flatten_chain(node: &SyntaxNode) -> Option<(SyntaxNode, Vec<ChainLink>)> {
+    let mut links: Vec<ChainLink> = Vec::new();
+    let mut cur = node.clone();
+    let head = loop {
+        match cur.kind() {
+            S::FIELD_ACCESS => {
+                let recv = first_child_node(&cur)?;
+                links.push(ChainLink {
+                    callee: cur.clone(),
+                    call: None,
+                });
+                cur = recv;
+            }
+            S::CALL_EXPR => {
+                let callee = first_child_node(&cur)?;
+                // `foo(...)` (callee is a bare name, not `recv.method`) is the chain head.
+                if callee.kind() != S::FIELD_ACCESS {
+                    break cur;
+                }
+                let recv = first_child_node(&callee)?;
+                links.push(ChainLink {
+                    callee,
+                    call: Some(cur.clone()),
+                });
+                cur = recv;
+            }
+            _ => break cur,
+        }
+    };
+    if links.is_empty() {
+        return None;
+    }
+    links.reverse();
+    Some((head, links))
+}
+
+/// The first child node (skipping tokens) of `node`.
+fn first_child_node(node: &SyntaxNode) -> Option<SyntaxNode> {
+    node.children().next()
+}
+
+/// Lower every child of `node` except its first child node, reusing the inline element loop.
+/// For a chain step the dropped child is the receiver / callee (the spine continuation, lowered
+/// separately), so the emitted part is exactly this step's `.`, type witness, name, and — for a
+/// `CALL_EXPR` — its argument list. Every token is still emitted exactly once.
+fn lower_after_first_node(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    let mut dropped = false;
+    let els = node.children_with_tokens().filter(move |el| {
+        if !dropped && el.as_node().is_some() {
+            dropped = true;
+            return false;
+        }
+        true
+    });
+    lower_elements(els, ctx, false)
 }
 
 // ---------------------------------------------------------------------------
