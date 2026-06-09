@@ -10,9 +10,10 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
         (comments.rs attaches comments to significant tokens)
 ```
 
-It upholds the workspace formatter invariants: the significant-token sequence is never
-changed, comments are never dropped or reordered, and formatting is idempotent
-(`format(format(x)) == format(x)`).
+It upholds the workspace formatter invariants: comments are never dropped and formatting is
+idempotent (`format(format(x)) == format(x)`); the significant-token sequence is preserved
+exactly unless an opt-in reordering option (`reorder-imports`, off by default) is enabled, in
+which case the token *multiset* is preserved (see [Configuration](#configuration)).
 
 ## What it does today
 
@@ -54,6 +55,9 @@ The current formatter is intentionally minimal. It performs:
   This governs the breaks the formatter emits; the interior of multi-line tokens (text blocks,
   string literals, verbatim comments) is preserved byte-for-byte to keep significant tokens
   unchanged, so such tokens may retain their original line breaks.
+- **Import sorting** — with `reorder-imports` enabled, the leading `import` block is sorted
+  (non-static first, then static, each alphabetical by qualified name); blank lines inside the
+  block are collapsed and comments attached to an import move with it. Off by default; see below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -78,6 +82,7 @@ are kebab-case.
 | `control-brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens control-flow / `switch` / lambda / bare block braces on their own line and breaks `} else` / `} catch` / `} finally` / `} while`; mirrors rustfmt's `control_brace_style` |
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
 | `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
+| `reorder-imports` | bool | `false` | ✅ wired — sort the leading `import` block (non-static first, then static, each alphabetical by qualified name); blank lines inside the block collapse and comments attached to an import move with it. Off by default; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `reorder_imports` |
 
 ---
 
@@ -155,7 +160,7 @@ Reflow comments/Javadoc to `comment-width` (`wrap_comments`) is **implemented** 
 
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Sort imports | `reorder_imports` |
+| Sort imports | `reorder_imports` ✅ |
 | Group imports into blocks (e.g. java./javax./external) | `group_imports` |
 | Granularity: collapse to `import a.b.*` vs. explicit single imports | `imports_granularity` |
 | Wrapping layout/indent of import lists | `imports_indent`, `imports_layout` |
@@ -218,8 +223,9 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 ## Suggested priority
 
-By Java-user impact: **(1)** import organization (`reorder_imports` family) → **(2)**
-`trailing_comma`.
+By Java-user impact: **(1)** the rest of the import-organization family (`group_imports`,
+`imports_granularity`) → **(2)** `trailing_comma`.
 (Brace styling — `brace_style` and `control_brace_style` — comment reflow — `comment-width`
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
-`fn_call_width` — and array-initializer wrapping — `array_width` — are done.)
+`fn_call_width` — array-initializer wrapping — `array_width` — and import sorting —
+`reorder_imports` — are done.)
