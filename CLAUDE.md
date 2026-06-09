@@ -6,11 +6,12 @@ Guidance for Claude Code (and other agents) working in this repository.
 
 `jals` is a Rust workspace providing Java tooling built on a **lossless, error-resilient**
 syntax tree. A `logos` lexer and `rowan` CST parser (`jals-syntax`) feed a Wadler/Prettier
-pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). A linter and LSP
-are intended future consumers of the syntax layer.
+pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP server
+(`jals-lsp`, run via `jals lsp`) is another consumer; a linter is an intended future one.
 
 - Edition 2024, resolver 3, workspace version `0.1.0`. Needs Rust 1.85+.
-- Crate graph: `jals-cli` → `jals-fmt` → `jals-syntax`. `jals-playground` is a separate
+- Crate graph: `jals-cli` → `{jals-fmt, jals-lsp}`; `jals-lsp`/`jals-fmt` → `jals-syntax`.
+  `jals-playground` is a separate
   Yew/Trunk browser app that runs `jals-fmt`/`jals-syntax` in the browser. It targets `wasm32`
   but also compiles on the host, so `--workspace` build/clippy/test all include it.
 
@@ -25,7 +26,8 @@ are intended future consumers of the syntax layer.
 | Formatter pipeline | `jals-fmt/src/lower.rs` → `doc.rs` → `render.rs` | CST → `Doc` IR → text. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
-| CLI | `jals-cli/src/main.rs` | `jals fmt`; config discovery memoized per directory. |
+| CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lsp`; config discovery memoized per directory. |
+| LSP | `jals-lsp/src/` | `async-lsp` server (`jals lsp`): diagnostics, document symbols, formatting. Pure handlers + UTF-16 `LineIndex`. Host-only (tokio/stdio). |
 | Playground | `jals-playground/` | Yew (CSR) browser app served by Trunk (`Trunk.toml`, tailwind); compiles to `wasm32`. Runs the syntax/formatter in-browser. |
 
 ## Commands
@@ -34,6 +36,7 @@ are intended future consumers of the syntax layer.
 cargo build --workspace
 cargo test  --workspace --all-features
 cargo run -p jals-cli -- fmt <paths>       # or: echo '...' | cargo run -p jals-cli -- fmt
+cargo run -p jals-cli -- lsp               # run the language server over stdio (for editors)
 (cd jals-playground && trunk serve)        # run the browser playground (needs trunk + the wasm32 target)
 ```
 
@@ -62,9 +65,10 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
 4. **Formatter fidelity.** The significant-token sequence (non-trivia tokens) is unchanged,
    comments are never dropped or reordered, and formatting is idempotent
    (`format(format(x)) == format(x)`).
-5. **`wasm32` compatibility.** Everything except `jals-cli` must build for
-   `wasm32-unknown-unknown`. Do not add non-wasm-compatible deps or `std::fs`/process/IO
-   usage to `jals-syntax` or `jals-fmt`; keep filesystem and process work in `jals-cli`.
+5. **`wasm32` compatibility.** Everything except `jals-cli` and `jals-lsp` must build for
+   `wasm32-unknown-unknown` (both are host-only: `jals-cli` does filesystem/process work,
+   `jals-lsp` uses tokio/stdio). Do not add non-wasm-compatible deps or `std::fs`/process/IO
+   usage to `jals-syntax` or `jals-fmt`; keep that work in `jals-cli`/`jals-lsp`.
 
 When touching the lexer, parser, or formatter, prefer adding a snapshot test
 (`expect-test`) and confirm the property tests still pass.
