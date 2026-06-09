@@ -812,3 +812,57 @@ fn chain_width_generous_keeps_inline() {
         200,
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Function calls (`fn-call-width`)
+// ---------------------------------------------------------------------------
+
+fn fmt_fn_call(src: &str, fn_call_width: usize) -> String {
+    let cfg = Config {
+        fn_call_width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn fn_call_width_forces_break_below_max_width() {
+    // Fits max-width(100) but exceeds the narrow fn-call-width, so the args break.
+    expect![[r#"
+        class A {
+            void m() {
+                foo(
+                    alpha,
+                    beta,
+                    gamma
+                );
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_call("class A{void m(){foo(alpha,beta,gamma);}}", 10));
+}
+
+#[test]
+fn fn_call_width_generous_keeps_inline() {
+    // A generous fn-call-width keeps the call on one line.
+    expect![[r#"
+        class A {
+            void m() {
+                foo(alpha, beta, gamma);
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_call("class A{void m(){foo(alpha,beta,gamma);}}", 200));
+}
+
+#[test]
+fn fn_call_width_leaves_param_list_inline() {
+    // fn-call-width targets call argument lists (ARG_LIST), not method-definition
+    // parameter lists (PARAM_LIST), which stay inline under a narrow fn-call-width.
+    expect![[r#"
+        class A {
+            void method(int alpha, int beta, int gamma) {}
+        }
+    "#]]
+    .assert_eq(&fmt_fn_call("class A{void method(int alpha,int beta,int gamma){}}", 5));
+}
