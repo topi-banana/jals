@@ -875,3 +875,59 @@ fn fn_call_width_leaves_param_list_inline() {
         5,
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Array initializers (`array-width`)
+// ---------------------------------------------------------------------------
+
+fn fmt_array_init(src: &str, array_width: usize) -> String {
+    let cfg = Config {
+        array_width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn array_width_forces_break_below_max_width() {
+    // Fits max-width(100) but exceeds the narrow array-width, so the elements break.
+    expect![[r#"
+        class A {
+            int [] x = {
+                alpha,
+                beta,
+                gamma
+            };
+        }
+    "#]]
+    .assert_eq(&fmt_array_init("class A{int[] x={alpha,beta,gamma};}", 10));
+}
+
+#[test]
+fn array_width_generous_keeps_inline() {
+    // A generous array-width keeps the initializer on one line.
+    expect![[r#"
+        class A {
+            int [] x = {alpha, beta, gamma};
+        }
+    "#]]
+    .assert_eq(&fmt_array_init("class A{int[] x={alpha,beta,gamma};}", 200));
+}
+
+#[test]
+fn array_width_breaks_new_array_creation() {
+    // `new T[]{…}` carries the same ARRAY_INIT node, so it honors array-width too.
+    expect![[r#"
+        class A {
+            int [] x = new int [] {
+                alpha,
+                beta,
+                gamma
+            };
+        }
+    "#]]
+    .assert_eq(&fmt_array_init(
+        "class A{int[] x=new int[]{alpha,beta,gamma};}",
+        10,
+    ));
+}
