@@ -29,6 +29,19 @@ fn check_wrapped(src: &str, comment_width: usize, expected: Expect) {
     expected.assert_eq(&fmt_wrapped(src, comment_width));
 }
 
+/// Format with `reorder-imports` enabled.
+fn fmt_reorder(src: &str) -> String {
+    let cfg = Config {
+        reorder_imports: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_reorder(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_reorder(src));
+}
+
 #[test]
 fn simple_class() {
     check(
@@ -930,4 +943,132 @@ fn array_width_breaks_new_array_creation() {
         "class A{int[] x=new int[]{alpha,beta,gamma};}",
         10,
     ));
+}
+
+// ===== reorder-imports =====
+
+#[test]
+fn reorder_imports_sorts_basic() {
+    check_reorder(
+        "package a.b;import java.util.Map;import java.util.List;class C{}",
+        expect![[r#"
+            package a.b;
+            import java.util.List;
+            import java.util.Map;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_static_to_end() {
+    // Non-static imports first (alphabetical), then static imports (alphabetical).
+    check_reorder(
+        "import static a.Z.z;import b.A;import static a.A.a;import b.B;class C{}",
+        expect![[r#"
+            import b.A;
+            import b.B;
+            import static a.A.a;
+            import static a.Z.z;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_normalizes_blank_lines() {
+    // Blank lines between imports are dropped; the package->block and block->class gaps stay.
+    check_reorder(
+        "package p;\n\nimport c.C;\n\nimport a.A;\nimport b.B;\n\nclass C {}\n",
+        expect![[r#"
+            package p;
+
+            import a.A;
+            import b.B;
+            import c.C;
+
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_comments_follow() {
+    // A leading and a trailing comment glued to an import move with it when it is reordered.
+    check_reorder(
+        "import b.B;\n// lead for a\nimport a.A; // trail for a\nclass C {}\n",
+        expect![[r#"
+            // lead for a
+            import a.A;  // trail for a
+            import b.B;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_wildcard() {
+    // `*` (0x2A) sorts before `.` (0x2E), so `a.b.*` precedes `a.b.C`. Locks the chosen order.
+    check_reorder(
+        "import a.b.C;import a.b.*;class X{}",
+        expect![[r#"
+            import a.b.*;
+            import a.b.C;
+            class X {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_no_package_imports_first() {
+    // No package decl: the file starts with imports; no leading blank line is introduced.
+    check_reorder(
+        "import c.C;import a.A;class X{}",
+        expect![[r#"
+        import a.A;
+        import c.C;
+        class X {}
+    "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_off_by_default_preserves_order() {
+    // With the default config the import order is preserved exactly (strict-sequence invariant).
+    check(
+        "import java.util.Map;import java.util.List;class C{}",
+        expect![[r#"
+            import java.util.Map;
+            import java.util.List;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_single_import_unchanged() {
+    // A single import has nothing to sort (the `< 2` guard); output is unchanged.
+    check_reorder(
+        "import java.util.List;class C{}",
+        expect![[r#"
+        import java.util.List;
+        class C {}
+    "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_already_sorted_is_idempotent() {
+    let once = fmt_reorder("import a.A;\nimport b.B;\nclass C {}\n");
+    let twice = fmt_reorder(&once);
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn reorder_imports_idempotent_when_scrambled() {
+    let once = fmt_reorder(
+        "package p;\n\nimport c.C;\nimport a.A;\nimport static z.Z.z;\nimport b.B;\nclass C {}\n",
+    );
+    let twice = fmt_reorder(&once);
+    assert_eq!(once, twice);
 }

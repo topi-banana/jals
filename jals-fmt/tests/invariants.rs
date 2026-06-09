@@ -129,6 +129,49 @@ fn javaish() -> impl Strategy<Value = String> {
     .prop_map(|parts| parts.concat())
 }
 
+/// Config with import reordering on.
+fn reorder_config() -> Config {
+    Config {
+        reorder_imports: true,
+        ..Config::default()
+    }
+}
+
+/// A compilation unit with a random, possibly-unsorted import block: a package decl, then
+/// random imports (static / non-static / wildcard, some with leading or trailing comments or
+/// trailing blank lines), then a trivial class. Newline-joined so a trailing `//` comment
+/// never swallows the next import.
+fn java_with_imports() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("import a.b.C;"),
+            Just("import a.b.A;"),
+            Just("import a.b.*;"),
+            Just("import x.Y;"),
+            Just("import static a.b.Z.z;"),
+            Just("import static a.A.a;"),
+            Just("// lead\nimport a.b.D;"),
+            Just("import a.b.E; // trail"),
+            Just("import a.b.F;\n"),
+        ],
+        0..8,
+    )
+    .prop_map(|imps| format!("package p.q;\n{}\nclass C {{}}\n", imps.join("\n")))
+}
+
+/// The `(is_static, dotted-name)` key of each import in `src`, in document order. Mirrors the
+/// formatter's internal `import_sort_key` so a sorted output can be asserted.
+fn import_keys(src: &str) -> Vec<(bool, String)> {
+    use jals_syntax::ast::{AstNode, SourceFile};
+    let file = SourceFile::cast(parse(src).syntax()).expect("parse yields a source file");
+    file.imports()
+        .map(|imp| {
+            let name = imp.name().map(|n| n.text()).unwrap_or_default();
+            (imp.is_static(), name)
+        })
+        .collect()
+}
+
 proptest! {
     /// Formatting is idempotent.
     #[test]
@@ -265,5 +308,55 @@ proptest! {
         };
         let out = fmt_with(&src, &cfg);
         prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Reorder preserves the *multiset* of significant tokens (the sequence may change, but no
+    /// token is added, dropped, or altered). This is the relaxed form of the strict-sequence
+    /// invariant that applies when `reorder-imports` is on.
+    #[test]
+    fn reorder_preserves_significant_token_multiset(src in java_with_imports()) {
+        let out = fmt_with(&src, &reorder_config());
+        let mut before = sig_tokens(&src);
+        let mut after = sig_tokens(&out);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// Reorder keeps formatting idempotent.
+    #[test]
+    fn reorder_idempotent(src in java_with_imports()) {
+        let once = fmt_with(&src, &reorder_config());
+        let twice = fmt_with(&once, &reorder_config());
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Reorder preserves comment *contents* as a multiset (none dropped or mangled). Their
+    /// order may change, since each comment moves with the import it is glued to.
+    #[test]
+    fn reorder_preserves_comments(src in java_with_imports()) {
+        let out = fmt_with(&src, &reorder_config());
+        let mut before = comment_contents(&src);
+        let mut after = comment_contents(&out);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// Reorder never panics on arbitrary Unicode input.
+    #[test]
+    fn reorder_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &reorder_config());
+    }
+
+    /// The emitted import block is actually sorted: non-static first, then static, each
+    /// alphabetical by qualified name.
+    #[test]
+    fn reorder_actually_sorts(src in java_with_imports()) {
+        let out = fmt_with(&src, &reorder_config());
+        let keys = import_keys(&out);
+        let mut sorted = keys.clone();
+        sorted.sort();
+        prop_assert_eq!(keys, sorted);
     }
 }
