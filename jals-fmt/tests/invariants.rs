@@ -1,6 +1,6 @@
 //! Property tests for the formatter's correctness invariants.
 
-use jals_fmt::{Config, format_source};
+use jals_fmt::{Config, TrailingComma, format_source};
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
 
@@ -135,6 +135,25 @@ fn reorder_config() -> Config {
         reorder_imports: true,
         ..Config::default()
     }
+}
+
+/// Config with a given trailing-comma policy and a narrow `array-width`, so array initializers
+/// are pushed into the vertical (broken) layout where `vertical` adds its comma.
+fn trailing_config(trailing_comma: TrailingComma) -> Config {
+    Config {
+        trailing_comma,
+        array_width: 8,
+        ..Config::default()
+    }
+}
+
+/// The non-trivia tokens of `src` with every `,` removed. The trailing-comma modes may add or
+/// drop array-initializer commas, but must leave every other token (and their order) intact.
+fn sig_tokens_without_commas(src: &str) -> Vec<(SyntaxKind, String)> {
+    sig_tokens(src)
+        .into_iter()
+        .filter(|(k, _)| *k != SyntaxKind::COMMA)
+        .collect()
 }
 
 /// A compilation unit with a random, possibly-unsorted import block: a package decl, then
@@ -358,5 +377,58 @@ proptest! {
         let mut sorted = keys.clone();
         sorted.sort();
         prop_assert_eq!(keys, sorted);
+    }
+
+    /// Each trailing-comma mode keeps formatting idempotent.
+    #[test]
+    fn trailing_comma_idempotent(
+        src in javaish(),
+        mode in prop_oneof![
+            Just(TrailingComma::Always),
+            Just(TrailingComma::Never),
+            Just(TrailingComma::Vertical),
+        ],
+    ) {
+        let cfg = trailing_config(mode);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Trailing-comma modes preserve every non-comma significant token, in order. Only `,`
+    /// tokens (and only those of array initializers) may be added or dropped.
+    #[test]
+    fn trailing_comma_preserves_non_comma_tokens(
+        src in javaish(),
+        mode in prop_oneof![
+            Just(TrailingComma::Always),
+            Just(TrailingComma::Never),
+            Just(TrailingComma::Vertical),
+        ],
+    ) {
+        let out = fmt_with(&src, &trailing_config(mode));
+        prop_assert_eq!(sig_tokens_without_commas(&src), sig_tokens_without_commas(&out));
+    }
+
+    /// Trailing-comma modes never drop or mangle a comment (a comma carrying one is kept).
+    #[test]
+    fn trailing_comma_preserves_comments(
+        src in javaish(),
+        mode in prop_oneof![
+            Just(TrailingComma::Always),
+            Just(TrailingComma::Never),
+            Just(TrailingComma::Vertical),
+        ],
+    ) {
+        let out = fmt_with(&src, &trailing_config(mode));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Trailing-comma modes never panic on arbitrary Unicode input.
+    #[test]
+    fn trailing_comma_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &trailing_config(TrailingComma::Always));
+        let _ = fmt_with(&src, &trailing_config(TrailingComma::Never));
+        let _ = fmt_with(&src, &trailing_config(TrailingComma::Vertical));
     }
 }
