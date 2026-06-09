@@ -166,6 +166,16 @@ impl CommentMap {
         self.leading.contains_key(&offset)
     }
 
+    /// Whether the token has any attached comment at all — leading, same-line trailing, or
+    /// own-line trailing. Used to keep a trailing comma that carries a comment when the
+    /// `trailing-comma` policy would otherwise drop it (comments are never dropped).
+    pub(crate) fn has_comments(&self, tok: &SyntaxToken) -> bool {
+        let offset = usize::from(tok.text_range().start());
+        self.leading.contains_key(&offset)
+            || self.trailing_inline.contains_key(&offset)
+            || self.trailing_below.contains_key(&offset)
+    }
+
     /// The number of blank lines that should precede this token's first leading comment (or
     /// the token itself, when it has none).
     pub(crate) fn blank_lines_before_first(&self, tok: &SyntaxToken) -> usize {

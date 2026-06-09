@@ -7,11 +7,14 @@
 //!
 //! Invariants the formatter upholds:
 //! - **Significant tokens are preserved.** The sequence of non-trivia tokens of the output
-//!   equals that of the input (only whitespace/comment layout changes) — unless an opt-in
-//!   reordering option ([`Config::reorder_imports`], off by default) is enabled, which may
-//!   reorder tokens; the *multiset* of significant tokens is preserved either way.
+//!   equals that of the input (only whitespace/comment layout changes), with two opt-in
+//!   exceptions, each off by default: [`Config::reorder_imports`] may reorder import
+//!   declarations (the token *multiset* is still preserved), and [`Config::trailing_comma`]
+//!   (when not [`Preserve`](TrailingComma::Preserve)) may add or drop the single trailing comma
+//!   of an array initializer.
 //! - **Comments are never dropped.** Each stays glued to its anchoring token, so a comment
-//!   moves with its token when that token is reordered.
+//!   moves with its token when that token is reordered; a dropped trailing comma that carries a
+//!   comment is kept.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 
 mod comments;
@@ -22,7 +25,9 @@ mod output;
 mod render;
 mod wrap;
 
-pub use config::{BraceStyle, Config, ConfigError, ControlBraceStyle, IndentStyle, LineEnding};
+pub use config::{
+    BraceStyle, Config, ConfigError, ControlBraceStyle, IndentStyle, LineEnding, TrailingComma,
+};
 pub use output::{FormatOutput, Warning};
 
 /// Format `src` according to `config`.

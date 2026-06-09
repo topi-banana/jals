@@ -201,6 +201,11 @@ pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
                 mode,
                 doc: d,
             }),
+            Doc::IfBreak { broken, flat } => stack.push(Cmd {
+                indent,
+                mode,
+                doc: if mode == Mode::Break { broken } else { flat },
+            }),
         }
     }
 
@@ -378,6 +383,9 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
             }
             Doc::HardLine | Doc::BlankLine(_) => return true,
             Doc::LineSuffix(_) => {}
+            Doc::IfBreak { broken, flat } => {
+                work.push((ind, mode, if mode == Mode::Break { broken } else { flat }));
+            }
         }
     }
     remaining >= 0

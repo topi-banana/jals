@@ -56,6 +56,14 @@ pub(crate) enum Doc {
     /// Content appended at the end of the current line, after any following break.
     /// Used for trailing comments so they stay on their line even when a group breaks.
     LineSuffix(Box<Doc>),
+    /// Render `broken` when the enclosing group breaks, `flat` when it is laid out flat. Lets a
+    /// trailing comma appear only in the vertical (broken) layout (`trailing-comma = vertical`).
+    IfBreak {
+        /// Emitted when the enclosing group renders broken.
+        broken: Box<Doc>,
+        /// Emitted when the enclosing group renders flat.
+        flat: Box<Doc>,
+    },
 }
 
 /// Empty document.
@@ -174,6 +182,8 @@ fn flat_width(doc: &Doc) -> Option<usize> {
         // Line suffixes (trailing comments) are deferred past the next break; they never
         // contribute to the flat width of the line they ride on.
         Doc::LineSuffix(_) => 0,
+        // Laid out flat, an `IfBreak` renders its flat branch.
+        Doc::IfBreak { flat, .. } => flat_width(flat)?,
     };
     Some(w)
 }
@@ -181,6 +191,15 @@ fn flat_width(doc: &Doc) -> Option<usize> {
 /// Defer content to the end of the current line.
 pub(crate) fn line_suffix(doc: Doc) -> Doc {
     Doc::LineSuffix(Box::new(doc))
+}
+
+/// Content that renders as `broken` when its enclosing group breaks and as `flat` when the
+/// group is laid out flat.
+pub(crate) fn if_break(broken: Doc, flat: Doc) -> Doc {
+    Doc::IfBreak {
+        broken: Box::new(broken),
+        flat: Box::new(flat),
+    }
 }
 
 /// Interleave `sep` between `items`.
@@ -229,5 +248,9 @@ fn clone_doc(doc: &Doc) -> Doc {
             should_break: *should_break,
         },
         Doc::LineSuffix(d) => Doc::LineSuffix(Box::new(clone_doc(d))),
+        Doc::IfBreak { broken, flat } => Doc::IfBreak {
+            broken: Box::new(clone_doc(broken)),
+            flat: Box::new(clone_doc(flat)),
+        },
     }
 }
