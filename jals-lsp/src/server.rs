@@ -9,7 +9,8 @@ use async_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
     FoldingRangeParams, FoldingRangeProviderCapability, InitializeParams, InitializeResult, OneOf,
-    PublishDiagnosticsParams, SemanticTokensFullOptions, SemanticTokensOptions,
+    PublishDiagnosticsParams, SelectionRange, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
     SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
     ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
     notification,
@@ -173,6 +174,18 @@ impl LanguageServer for ServerState {
             async move { Ok(doc.map(|doc| handlers::folding_range(&doc.text, &doc.line_index))) },
         )
     }
+
+    fn selection_range(
+        &mut self,
+        params: SelectionRangeParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<SelectionRange>>, Self::Error>> {
+        let doc = self.store.get(&params.text_document.uri);
+        Box::pin(async move {
+            Ok(doc.map(|doc| {
+                handlers::selection_ranges(&doc.text, &doc.line_index, &params.positions)
+            }))
+        })
+    }
 }
 
 /// The capabilities advertised to the client during `initialize`.
@@ -182,6 +195,7 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: handlers::semantic_tokens_legend(),

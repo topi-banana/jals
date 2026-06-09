@@ -4,11 +4,13 @@
 mod diagnostics;
 mod folding_range;
 mod formatting;
+mod selection_range;
 mod semantic_tokens;
 mod symbols;
 
 pub(crate) use diagnostics::compute_diagnostics;
 pub(crate) use folding_range::folding_range;
 pub(crate) use formatting::formatting_edits;
+pub(crate) use selection_range::selection_ranges;
 pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
 pub(crate) use symbols::document_symbols;

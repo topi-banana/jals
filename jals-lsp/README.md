@@ -29,6 +29,7 @@ Server capabilities advertised on `initialize`:
 | Document symbols | `textDocument/documentSymbol` | typed AST | Hierarchical: types → members (fields, methods, constructors, nested types, enum constants). |
 | Semantic tokens | `textDocument/semanticTokens/full` | CST + parent context | Whole-document highlighting: keywords, types, declarations, name/field/call references, annotations, comments, literals. Best-effort without name resolution, but the lossless tree resolves contextual keywords (`var`, `record`, `sealed`, module directives) that TextMate grammars miss. |
 | Code folding | `textDocument/foldingRange` | CST | Folds class/enum/module bodies, blocks (control-flow & lambdas included), switch blocks, array initializers, multi-line block/doc comments, and import groups. The closing brace stays visible; multi-line spans only. |
+| Selection range | `textDocument/selectionRange` | CST | Expand/shrink: nests the token under each cursor up through its ancestor nodes to the file root. Syntax-only; multiple positions per request. |
 | Formatting | `textDocument/formatting` | `jals_fmt::format_source` | Whole-document: one full-range edit, or none if already formatted. |
 | Text sync | `didOpen` / `didChange` / `didClose` | — | Full document sync (`TextDocumentSyncKind::FULL`). |
 | Lifecycle | `initialize` / `shutdown` / `exit` | — | Managed by async-lsp's `LifecycleLayer`. |
@@ -122,7 +123,6 @@ future work by what each capability requires.
 | Capability | LSP method |
 | --- | --- |
 | Semantic tokens: incremental + range | `textDocument/semanticTokens/{full/delta,range}` (the `full` variant already ships — see above) |
-| Expand/shrink selection | `textDocument/selectionRange` |
 | Lexical occurrence highlight | `textDocument/documentHighlight` |
 | Document links (imports) | `textDocument/documentLink` |
 | Workspace symbols | `workspace/symbol` |
@@ -154,7 +154,7 @@ gated on a future analysis crate (`jals-hir` or similar):
 ## Suggested priority
 
 By editor-user impact: **(1)** config hot-reload + incremental sync (correctness and ergonomics
-for the features that already exist) → **(2)** selection range (high value, still
-syntax-only) → **(3)** range / on-type formatting → **(4)** the semantic-analysis features,
-once an analysis layer lands. Code folding and semantic tokens (`full`) already ship; the
-latter's `delta`/`range` variants are a later optimization.
+for the features that already exist) → **(2)** range / on-type formatting → **(3)** the
+semantic-analysis features, once an analysis layer lands. Code folding, selection range, and
+semantic tokens (`full`) already ship; the latter's `delta`/`range` variants are a later
+optimization.
