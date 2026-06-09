@@ -147,6 +147,11 @@ pub struct Config {
     /// Target line width for reflowing comment / Javadoc prose, including indentation.
     /// Only consulted when [`wrap_comments`](Config::wrap_comments) is enabled.
     pub comment_width: usize,
+    /// Sort `import` declarations: non-static imports first (alphabetical by qualified name),
+    /// then static imports (alphabetical). Off by default; opt-in like
+    /// [`wrap_comments`](Config::wrap_comments). When enabled the formatter's significant-token
+    /// *sequence* may change (the multiset is preserved); mirrors rustfmt's `reorder_imports`.
+    pub reorder_imports: bool,
 }
 
 impl Default for Config {
@@ -165,6 +170,7 @@ impl Default for Config {
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
+            reorder_imports: false,
         }
     }
 }
@@ -282,6 +288,8 @@ mod tests {
         // K&R braces by default, for both declaration and control-flow braces.
         assert_eq!(c.brace_style, BraceStyle::SameLine);
         assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
+        // Import sorting is opt-in; off by default to preserve the significant-token sequence.
+        assert!(!c.reorder_imports);
     }
 
     #[test]
@@ -305,6 +313,12 @@ mod tests {
         let c: Config = toml::from_str("wrap-comments = true\ncomment-width = 60\n").unwrap();
         assert!(c.wrap_comments);
         assert_eq!(c.comment_width, 60);
+    }
+
+    #[test]
+    fn reorder_imports_parses() {
+        let c: Config = toml::from_str("reorder-imports = true\n").unwrap();
+        assert!(c.reorder_imports);
     }
 
     #[test]

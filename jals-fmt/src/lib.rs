@@ -6,9 +6,12 @@
 //! errors are surfaced as [`Warning`]s.
 //!
 //! Invariants the formatter upholds:
-//! - **Significant tokens are preserved.** The sequence of non-trivia tokens of the
-//!   output equals that of the input (only whitespace/comment layout changes).
-//! - **Comments are never dropped or reordered.**
+//! - **Significant tokens are preserved.** The sequence of non-trivia tokens of the output
+//!   equals that of the input (only whitespace/comment layout changes) — unless an opt-in
+//!   reordering option ([`Config::reorder_imports`], off by default) is enabled, which may
+//!   reorder tokens; the *multiset* of significant tokens is preserved either way.
+//! - **Comments are never dropped.** Each stays glued to its anchoring token, so a comment
+//!   moves with its token when that token is reordered.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 
 mod comments;

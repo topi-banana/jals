@@ -62,9 +62,14 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
    Unicode); unmatched bytes become `SyntaxKind::ERROR`. The formatter never panics either.
 3. **Always a tree.** The parser recovers from errors and records `SyntaxError`s rather than
    aborting.
-4. **Formatter fidelity.** The significant-token sequence (non-trivia tokens) is unchanged,
-   comments are never dropped or reordered, and formatting is idempotent
-   (`format(format(x)) == format(x)`).
+4. **Formatter fidelity.** Comments are never dropped, and formatting is idempotent
+   (`format(format(x)) == format(x)`). The significant-token *sequence* (non-trivia tokens) is
+   preserved exactly **unless** an explicitly opt-in reordering option is enabled — currently
+   only `reorder-imports`, off by default. When such an option is on, the guarantee weakens to:
+   the *multiset* of significant tokens is preserved (none added, dropped, or altered), each
+   comment stays glued to its anchoring token (so a comment moves, with its token, when that
+   token is reordered), and idempotency still holds. With every reordering option off (the
+   default), the exact-sequence guarantee is in full force.
 5. **`wasm32` compatibility.** Everything except `jals-cli` and `jals-lsp` must build for
    `wasm32-unknown-unknown` (both are host-only: `jals-cli` does filesystem/process work,
    `jals-lsp` uses tokio/stdio). Do not add non-wasm-compatible deps or `std::fs`/process/IO
