@@ -839,7 +839,10 @@ fn fn_call_width_forces_break_below_max_width() {
             }
         }
     "#]]
-    .assert_eq(&fmt_fn_call("class A{void m(){foo(alpha,beta,gamma);}}", 10));
+    .assert_eq(&fmt_fn_call(
+        "class A{void m(){foo(alpha,beta,gamma);}}",
+        10,
+    ));
 }
 
 #[test]
@@ -852,7 +855,10 @@ fn fn_call_width_generous_keeps_inline() {
             }
         }
     "#]]
-    .assert_eq(&fmt_fn_call("class A{void m(){foo(alpha,beta,gamma);}}", 200));
+    .assert_eq(&fmt_fn_call(
+        "class A{void m(){foo(alpha,beta,gamma);}}",
+        200,
+    ));
 }
 
 #[test]
@@ -864,5 +870,8 @@ fn fn_call_width_leaves_param_list_inline() {
             void method(int alpha, int beta, int gamma) {}
         }
     "#]]
-    .assert_eq(&fmt_fn_call("class A{void method(int alpha,int beta,int gamma){}}", 5));
+    .assert_eq(&fmt_fn_call(
+        "class A{void method(int alpha,int beta,int gamma){}}",
+        5,
+    ));
 }
