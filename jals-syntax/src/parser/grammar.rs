@@ -1784,8 +1784,8 @@ fn consume_bin_op(p: &mut Parser, len: u8) {
 }
 
 fn unary_expr(p: &mut Parser) -> Option<CompletedMarker> {
-    if at_cast(p) {
-        return Some(cast_expr(p));
+    if let Some(pure_primitive) = cast_kind(p) {
+        return Some(cast_expr(p, pure_primitive));
     }
     match p.current() {
         BANG | TILDE | PLUS | MINUS | PLUS_PLUS | MINUS_MINUS => {
@@ -1798,35 +1798,34 @@ fn unary_expr(p: &mut Parser) -> Option<CompletedMarker> {
     }
 }
 
-/// Whether `( Type ) operand` is a cast — fuel-free lookahead. Lambda is already disambiguated before this call.
-fn at_cast(p: &Parser) -> bool {
+/// Classifies `( ... ) operand` as a cast (fuel-free lookahead). `Some(true)` = a single
+/// primitive type (`(int)`), where a lambda operand is illegal; `Some(false)` = a reference or
+/// intersection type, where a lambda operand is allowed (JLS §15.16); `None` = not a cast.
+/// A top-level lambda is already disambiguated before this call (in `expr_opt`).
+fn cast_kind(p: &Parser) -> Option<bool> {
     if !p.at(LPAREN) {
-        return false;
+        return None;
     }
     let prim_first = PRIMITIVE_TYPE.contains(p.nth_nofuel(1));
-    let Some(mut i) = skip_type(p, 1) else {
-        return false;
-    };
+    let mut i = skip_type(p, 1)?;
     // Intersection type `(A & B)`.
     while p.nth_nofuel(i) == AMP {
-        match skip_type(p, i + 1) {
-            Some(j) => i = j,
-            None => return false,
-        }
+        i = skip_type(p, i + 1)?;
     }
     if p.nth_nofuel(i) != RPAREN {
-        return false;
+        return None;
     }
     let after = p.nth_nofuel(i + 1);
     let pure_primitive = prim_first && i == 2;
-    if pure_primitive {
+    let ok = if pure_primitive {
         CAST_FOLLOW_PRIMITIVE.contains(after)
     } else {
         CAST_FOLLOW_REF.contains(after)
-    }
+    };
+    ok.then_some(pure_primitive)
 }
 
-fn cast_expr(p: &mut Parser) -> CompletedMarker {
+fn cast_expr(p: &mut Parser, pure_primitive: bool) -> CompletedMarker {
     let m = p.start();
     p.bump(LPAREN);
     type_(p);
@@ -1835,7 +1834,13 @@ fn cast_expr(p: &mut Parser) -> CompletedMarker {
         type_(p);
     }
     p.expect(RPAREN);
-    unary_expr(p);
+    // A lambda operand is legal only after a reference/intersection type (JLS §15.16);
+    // a pure primitive cast keeps the unary-operand path.
+    if !pure_primitive && at_lambda(p) {
+        lambda_expr(p);
+    } else {
+        unary_expr(p);
+    }
     m.complete(p, CAST_EXPR)
 }
 

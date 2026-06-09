@@ -2286,6 +2286,245 @@ mod tests {
     }
 
     #[test]
+    fn cast_to_lambda() {
+        check(
+            "class C { void m() { Runnable r = (Runnable) () -> {}; Comparator<String> c = (Comparator<String>) (a, b) -> a.compareTo(b); Object o = (Runnable & Serializable) () -> {}; Runnable s = (Runnable) x -> x; } }",
+            expect![[r#"
+                SOURCE_FILE@0..207
+                  CLASS_DECL@0..207
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..207
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..205
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..18
+                          LPAREN@16..17 "("
+                          RPAREN@17..18 ")"
+                        BLOCK@18..205
+                          WHITESPACE@18..19 " "
+                          LBRACE@19..20 "{"
+                          LOCAL_VAR_DECL@20..54
+                            MODIFIERS@20..20
+                            TYPE@20..29
+                              WHITESPACE@20..21 " "
+                              IDENT@21..29 "Runnable"
+                            WHITESPACE@29..30 " "
+                            IDENT@30..31 "r"
+                            WHITESPACE@31..32 " "
+                            EQ@32..33 "="
+                            CAST_EXPR@33..53
+                              WHITESPACE@33..34 " "
+                              LPAREN@34..35 "("
+                              TYPE@35..43
+                                IDENT@35..43 "Runnable"
+                              RPAREN@43..44 ")"
+                              LAMBDA_EXPR@44..53
+                                LAMBDA_PARAMS@44..47
+                                  WHITESPACE@44..45 " "
+                                  LPAREN@45..46 "("
+                                  RPAREN@46..47 ")"
+                                WHITESPACE@47..48 " "
+                                ARROW@48..50 "->"
+                                BLOCK@50..53
+                                  WHITESPACE@50..51 " "
+                                  LBRACE@51..52 "{"
+                                  RBRACE@52..53 "}"
+                            SEMICOLON@53..54 ";"
+                          LOCAL_VAR_DECL@54..124
+                            MODIFIERS@54..54
+                            TYPE@54..73
+                              WHITESPACE@54..55 " "
+                              IDENT@55..65 "Comparator"
+                              TYPE_ARGS@65..73
+                                LT@65..66 "<"
+                                TYPE@66..72
+                                  IDENT@66..72 "String"
+                                GT@72..73 ">"
+                            WHITESPACE@73..74 " "
+                            IDENT@74..75 "c"
+                            WHITESPACE@75..76 " "
+                            EQ@76..77 "="
+                            CAST_EXPR@77..123
+                              WHITESPACE@77..78 " "
+                              LPAREN@78..79 "("
+                              TYPE@79..97
+                                IDENT@79..89 "Comparator"
+                                TYPE_ARGS@89..97
+                                  LT@89..90 "<"
+                                  TYPE@90..96
+                                    IDENT@90..96 "String"
+                                  GT@96..97 ">"
+                              RPAREN@97..98 ")"
+                              LAMBDA_EXPR@98..123
+                                LAMBDA_PARAMS@98..105
+                                  WHITESPACE@98..99 " "
+                                  LPAREN@99..100 "("
+                                  PARAM@100..101
+                                    IDENT@100..101 "a"
+                                  COMMA@101..102 ","
+                                  PARAM@102..104
+                                    WHITESPACE@102..103 " "
+                                    IDENT@103..104 "b"
+                                  RPAREN@104..105 ")"
+                                WHITESPACE@105..106 " "
+                                ARROW@106..108 "->"
+                                CALL_EXPR@108..123
+                                  FIELD_ACCESS@108..120
+                                    NAME_REF@108..110
+                                      WHITESPACE@108..109 " "
+                                      IDENT@109..110 "a"
+                                    DOT@110..111 "."
+                                    IDENT@111..120 "compareTo"
+                                  ARG_LIST@120..123
+                                    LPAREN@120..121 "("
+                                    NAME_REF@121..122
+                                      IDENT@121..122 "b"
+                                    RPAREN@122..123 ")"
+                            SEMICOLON@123..124 ";"
+                          LOCAL_VAR_DECL@124..171
+                            MODIFIERS@124..124
+                            TYPE@124..131
+                              WHITESPACE@124..125 " "
+                              IDENT@125..131 "Object"
+                            WHITESPACE@131..132 " "
+                            IDENT@132..133 "o"
+                            WHITESPACE@133..134 " "
+                            EQ@134..135 "="
+                            CAST_EXPR@135..170
+                              WHITESPACE@135..136 " "
+                              LPAREN@136..137 "("
+                              TYPE@137..145
+                                IDENT@137..145 "Runnable"
+                              WHITESPACE@145..146 " "
+                              AMP@146..147 "&"
+                              TYPE@147..160
+                                WHITESPACE@147..148 " "
+                                IDENT@148..160 "Serializable"
+                              RPAREN@160..161 ")"
+                              LAMBDA_EXPR@161..170
+                                LAMBDA_PARAMS@161..164
+                                  WHITESPACE@161..162 " "
+                                  LPAREN@162..163 "("
+                                  RPAREN@163..164 ")"
+                                WHITESPACE@164..165 " "
+                                ARROW@165..167 "->"
+                                BLOCK@167..170
+                                  WHITESPACE@167..168 " "
+                                  LBRACE@168..169 "{"
+                                  RBRACE@169..170 "}"
+                            SEMICOLON@170..171 ";"
+                          LOCAL_VAR_DECL@171..203
+                            MODIFIERS@171..171
+                            TYPE@171..180
+                              WHITESPACE@171..172 " "
+                              IDENT@172..180 "Runnable"
+                            WHITESPACE@180..181 " "
+                            IDENT@181..182 "s"
+                            WHITESPACE@182..183 " "
+                            EQ@183..184 "="
+                            CAST_EXPR@184..202
+                              WHITESPACE@184..185 " "
+                              LPAREN@185..186 "("
+                              TYPE@186..194
+                                IDENT@186..194 "Runnable"
+                              RPAREN@194..195 ")"
+                              LAMBDA_EXPR@195..202
+                                LAMBDA_PARAMS@195..197
+                                  PARAM@195..197
+                                    WHITESPACE@195..196 " "
+                                    IDENT@196..197 "x"
+                                WHITESPACE@197..198 " "
+                                ARROW@198..200 "->"
+                                NAME_REF@200..202
+                                  WHITESPACE@200..201 " "
+                                  IDENT@201..202 "x"
+                            SEMICOLON@202..203 ";"
+                          WHITESPACE@203..204 " "
+                          RBRACE@204..205 "}"
+                      WHITESPACE@205..206 " "
+                      RBRACE@206..207 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn primitive_cast_rejects_lambda() {
+        check(
+            "class C { void m() { Object o = (int) () -> {}; } }",
+            expect![[r#"
+                SOURCE_FILE@0..51
+                  CLASS_DECL@0..51
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..51
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..49
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..18
+                          LPAREN@16..17 "("
+                          RPAREN@17..18 ")"
+                        BLOCK@18..49
+                          WHITESPACE@18..19 " "
+                          LBRACE@19..20 "{"
+                          LOCAL_VAR_DECL@20..40
+                            MODIFIERS@20..20
+                            TYPE@20..27
+                              WHITESPACE@20..21 " "
+                              IDENT@21..27 "Object"
+                            WHITESPACE@27..28 " "
+                            IDENT@28..29 "o"
+                            WHITESPACE@29..30 " "
+                            EQ@30..31 "="
+                            CAST_EXPR@31..40
+                              WHITESPACE@31..32 " "
+                              LPAREN@32..33 "("
+                              TYPE@33..36
+                                INT_KW@33..36 "int"
+                              RPAREN@36..37 ")"
+                              PAREN_EXPR@37..40
+                                WHITESPACE@37..38 " "
+                                LPAREN@38..39 "("
+                                ERROR@39..40
+                                  RPAREN@39..40 ")"
+                          ERROR@40..43
+                            WHITESPACE@40..41 " "
+                            ARROW@41..43 "->"
+                          BLOCK@43..46
+                            WHITESPACE@43..44 " "
+                            LBRACE@44..45 "{"
+                            RBRACE@45..46 "}"
+                          EMPTY_STMT@46..47
+                            SEMICOLON@46..47 ";"
+                          WHITESPACE@47..48 " "
+                          RBRACE@48..49 "}"
+                      WHITESPACE@49..50 " "
+                      RBRACE@50..51 "}"
+                error 39..39: expected an expression
+                error 40..40: expected RPAREN
+                error 40..40: expected SEMICOLON
+                error 40..40: expected a statement
+            "#]],
+        );
+    }
+
+    #[test]
     fn qualified_new_inner_class() {
         check(
             "class C { void m() { var a = outer.new Inner(); var b = x.new B().new C(); } }",
