@@ -1,0 +1,11 @@
+# Configuration for `typos` (https://github.com/crate-ci/typos).
+
+[files]
+# `jals-tests/sources/` holds vendored upstream code (the openjdk submodule)
+# used only as parser test fixtures; don't spell-check third-party code.
+extend-exclude = ["jals-tests/sources/"]
+
+[default.extend-words]
+# Unicode general category short names appear in lexer regexes (e.g. \p{Nd});
+# they are not typos of English words such as "And".
+Nd = "Nd"
