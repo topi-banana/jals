@@ -137,6 +137,14 @@ fn reorder_config() -> Config {
     }
 }
 
+/// Config with import grouping on (default `import-groups`).
+fn group_config() -> Config {
+    Config {
+        group_imports: true,
+        ..Config::default()
+    }
+}
+
 /// Config with a given trailing-comma policy and a narrow `array-width`, so array initializers
 /// are pushed into the vertical (broken) layout where `vertical` adds its comma.
 fn trailing_config(trailing_comma: TrailingComma) -> Config {
@@ -172,6 +180,8 @@ fn java_with_imports() -> impl Strategy<Value = String> {
             Just("// lead\nimport a.b.D;"),
             Just("import a.b.E; // trail"),
             Just("import a.b.F;\n"),
+            Just("import java.util.List;"),
+            Just("import javax.swing.JButton;"),
         ],
         0..8,
     )
@@ -187,6 +197,34 @@ fn import_keys(src: &str) -> Vec<(bool, String)> {
         .map(|imp| {
             let name = imp.name().map(|n| n.text()).unwrap_or_default();
             (imp.is_static(), name)
+        })
+        .collect()
+}
+
+/// The group rank of an import under the default `import-groups` (`["java.", "javax.", "*",
+/// "static"]`). Mirrors the formatter's `import_group_rank` for those groups: java. = 0,
+/// javax. = 1, catch-all = 2, static = 3.
+fn default_group_rank(is_static: bool, name: &str) -> usize {
+    if is_static {
+        3
+    } else if name.starts_with("java.") {
+        0
+    } else if name.starts_with("javax.") {
+        1
+    } else {
+        2
+    }
+}
+
+/// The `(group_rank, dotted-name)` key of each import in `src`, in document order — the ordering
+/// the formatter's `group-imports` should produce under the default `import-groups`.
+fn import_group_keys(src: &str) -> Vec<(usize, String)> {
+    use jals_syntax::ast::{AstNode, SourceFile};
+    let file = SourceFile::cast(parse(src).syntax()).expect("parse yields a source file");
+    file.imports()
+        .map(|imp| {
+            let name = imp.name().map(|n| n.text()).unwrap_or_default();
+            (default_group_rank(imp.is_static(), &name), name)
         })
         .collect()
 }
@@ -377,6 +415,67 @@ proptest! {
         let mut sorted = keys.clone();
         sorted.sort();
         prop_assert_eq!(keys, sorted);
+    }
+
+    /// `group-imports` keeps formatting idempotent.
+    #[test]
+    fn group_idempotent(src in java_with_imports()) {
+        let once = fmt_with(&src, &group_config());
+        let twice = fmt_with(&once, &group_config());
+        prop_assert_eq!(once, twice);
+    }
+
+    /// `group-imports` preserves the multiset of significant tokens (only their order may change).
+    #[test]
+    fn group_preserves_significant_token_multiset(src in java_with_imports()) {
+        let out = fmt_with(&src, &group_config());
+        let mut before = sig_tokens(&src);
+        let mut after = sig_tokens(&out);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// `group-imports` never drops a comment (they move with their anchoring import, so document
+    /// order may change). Compare the multiset.
+    #[test]
+    fn group_preserves_comments(src in java_with_imports()) {
+        let out = fmt_with(&src, &group_config());
+        let mut before = comment_contents(&src);
+        let mut after = comment_contents(&out);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// `group-imports` never panics on arbitrary input.
+    #[test]
+    fn group_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &group_config());
+    }
+
+    /// `group-imports` stays idempotent under any blank-line upper bound (the inter-group blank
+    /// is clamped like any other run, and collapses to none at bound 0).
+    #[test]
+    fn group_idempotent_under_blank_bound(src in java_with_imports(), bound in 0usize..4) {
+        let cfg = Config { group_imports: true, max_blank_lines: bound, ..Config::default() };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// With `group-imports`, the emitted imports are grouped: group ranks never decrease across
+    /// the block, and within one group the names are sorted.
+    #[test]
+    fn group_actually_groups(src in java_with_imports()) {
+        let out = fmt_with(&src, &group_config());
+        let keys = import_group_keys(&out);
+        for w in keys.windows(2) {
+            prop_assert!(w[0].0 <= w[1].0, "group ranks must be non-decreasing: {:?}", keys);
+            if w[0].0 == w[1].0 {
+                prop_assert!(w[0].1 <= w[1].1, "names within a group must be sorted: {:?}", keys);
+            }
+        }
     }
 
     /// Each trailing-comma mode keeps formatting idempotent.

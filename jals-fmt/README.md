@@ -64,6 +64,10 @@ The current formatter is intentionally minimal. It performs:
 - **Import sorting** — with `reorder-imports` enabled, the leading `import` block is sorted
   (non-static first, then static, each alphabetical by qualified name); blank lines inside the
   block are collapsed and comments attached to an import move with it. Off by default; see below.
+- **Import grouping** — with `group-imports` enabled, the leading `import` block is partitioned
+  into the prefix groups of `import-groups` (e.g. `java.` / `javax.` / others / `static`), each
+  group sorted alphabetically and separated by one blank line. Overrides `reorder-imports`. Off
+  by default; see below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -90,6 +94,8 @@ are kebab-case.
 | `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
 | `reorder-imports` | bool | `false` | ✅ wired — sort the leading `import` block (non-static first, then static, each alphabetical by qualified name); blank lines inside the block collapse and comments attached to an import move with it. Off by default; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `reorder_imports` |
 | `trailing-comma` | `"preserve"` \| `"always"` \| `"never"` \| `"vertical"` | `"preserve"` | ✅ wired — trailing comma of an **array initializer** only (`{1, 2, 3,}`): `preserve` keeps the source's, `always`/`never` force it on/off, `vertical` adds it only when the initializer breaks one element per line. Non-`preserve` may add or drop that one comma (a comma carrying a comment is kept); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `trailing_comma` |
+| `group-imports` | bool | `false` | ✅ wired — partition the leading `import` block into the prefix groups of `import-groups`, each group sorted and separated by one blank line. Overrides `reorder-imports`; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `group_imports` |
+| `import-groups` | array of strings | `["java.", "javax.", "*", "static"]` | ✅ wired — ordered prefix groups for `group-imports`: a non-static import joins its *longest* matching prefix, `"*"` is the catch-all for the rest, and `"static"` groups all static imports. A missing `"*"` / `"static"` becomes an implicit trailing group. Only consulted when `group-imports` is enabled |
 
 ---
 
@@ -168,7 +174,7 @@ Reflow comments/Javadoc to `comment-width` (`wrap_comments`) is **implemented** 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Sort imports | `reorder_imports` ✅ |
-| Group imports into blocks (e.g. java./javax./external) | `group_imports` |
+| Group imports into blocks (e.g. java./javax./external) | `group_imports` ✅ |
 | Granularity: collapse to `import a.b.*` vs. explicit single imports | `imports_granularity` |
 | Wrapping layout/indent of import lists | `imports_indent`, `imports_layout` |
 
@@ -230,9 +236,9 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 ## Suggested priority
 
-By Java-user impact: the rest of the import-organization family (`group_imports`,
-`imports_granularity`).
+By Java-user impact: the remaining import-organization option (`imports_granularity`).
 (Brace styling — `brace_style` and `control_brace_style` — comment reflow — `comment-width`
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
 `fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
-`reorder_imports` — and trailing commas — `trailing_comma` — are done.)
+`reorder_imports` — import grouping — `group_imports` — and trailing commas —
+`trailing_comma` — are done.)

@@ -178,6 +178,21 @@ pub struct Config {
     /// modes may add or drop that single comma, weakening the strict significant-token invariant
     /// (a comma carrying a comment is never dropped). Mirrors rustfmt's `trailing_comma`.
     pub trailing_comma: TrailingComma,
+    /// Group `import` declarations into prefix-defined blocks separated by a blank line, each
+    /// block sorted alphabetically by qualified name. The groups and their order come from
+    /// [`import_groups`](Config::import_groups). Off by default; opt-in like
+    /// [`reorder_imports`](Config::reorder_imports), preserving the significant-token *multiset*
+    /// while the *sequence* may change. Implies and overrides
+    /// [`reorder_imports`](Config::reorder_imports) — grouping sorts within each block. Mirrors
+    /// rustfmt's `group_imports`.
+    pub group_imports: bool,
+    /// The ordered import groups consulted when [`group_imports`](Config::group_imports) is on:
+    /// a list of name prefixes. A non-static import joins the group of its *longest* matching
+    /// prefix (ties broken by list order); `"*"` is the catch-all for non-static imports matching
+    /// no prefix, and `"static"` is the group of every static import (regardless of its name).
+    /// A missing `"*"` / `"static"` becomes an implicit trailing group (catch-all, then static).
+    /// Consulted only when `group_imports` is enabled.
+    pub import_groups: Vec<String>,
 }
 
 impl Default for Config {
@@ -198,6 +213,13 @@ impl Default for Config {
             comment_width: 80,
             reorder_imports: false,
             trailing_comma: TrailingComma::Preserve,
+            group_imports: false,
+            import_groups: vec![
+                "java.".to_string(),
+                "javax.".to_string(),
+                "*".to_string(),
+                "static".to_string(),
+            ],
         }
     }
 }
@@ -319,6 +341,9 @@ mod tests {
         assert!(!c.reorder_imports);
         // Trailing-comma handling defaults to preserve, keeping the source comma exactly.
         assert_eq!(c.trailing_comma, TrailingComma::Preserve);
+        // Import grouping is opt-in; off by default, with a JDK / others / static default order.
+        assert!(!c.group_imports);
+        assert_eq!(c.import_groups, ["java.", "javax.", "*", "static"]);
     }
 
     #[test]
@@ -360,6 +385,19 @@ mod tests {
         assert_eq!(c.trailing_comma, TrailingComma::Vertical);
         let c: Config = toml::from_str("trailing-comma = \"preserve\"\n").unwrap();
         assert_eq!(c.trailing_comma, TrailingComma::Preserve);
+    }
+
+    #[test]
+    fn group_imports_parses() {
+        let c: Config = toml::from_str("group-imports = true\n").unwrap();
+        assert!(c.group_imports);
+    }
+
+    #[test]
+    fn import_groups_parses() {
+        // The Vec<String> key parses from a TOML array (no other Vec field exists yet).
+        let c: Config = toml::from_str("import-groups = [\"java.\", \"*\"]\n").unwrap();
+        assert_eq!(c.import_groups, ["java.", "*"]);
     }
 
     #[test]

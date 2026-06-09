@@ -555,20 +555,24 @@ fn blank_lines_before(tok: &SyntaxToken) -> usize {
 // Import reordering (`reorder-imports`)
 // ---------------------------------------------------------------------------
 
-/// Lower the compilation unit. With `reorder-imports` off this is exactly [`lower_items`].
-/// With it on, the leading run of `import` declarations is sorted (non-static first, then
-/// static, each alphabetical by qualified name); blank lines *between* imports are dropped,
-/// while the gap before the block and the gap after it (to the first type decl) are preserved.
+/// Lower the compilation unit. With both `reorder-imports` and `group-imports` off this is
+/// exactly [`lower_items`]. With `reorder-imports` on, the leading run of `import` declarations
+/// is sorted (non-static first, then static, each alphabetical by qualified name). With
+/// `group-imports` on (which overrides `reorder-imports`), the run is partitioned into the
+/// prefix groups of [`Config::import_groups`], each group sorted alphabetically and separated
+/// from the next by a single blank line. In both modes blank lines *between* the imports of one
+/// group are dropped, while the gap before the block and the gap after it (to the first type
+/// decl) are preserved.
 ///
 /// Sorting reuses the original import nodes, so every token keeps its byte offset and its
 /// attached comments follow it automatically; the significant-token *multiset* is preserved.
 fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-    if !ctx.cfg.reorder_imports {
+    if !ctx.cfg.reorder_imports && !ctx.cfg.group_imports {
         return lower_items(node, ctx).0;
     }
     let els: Vec<SyntaxElement> = node.children_with_tokens().collect();
     let Some((start, end)) = import_run(&els) else {
-        // Nothing to sort (zero or one import), or — defensively — a non-contiguous run.
+        // Nothing to sort/group (zero or one import), or — defensively — a non-contiguous run.
         return lower_items(node, ctx).0;
     };
     // The blank lines before the whole block come from the import that was originally first
@@ -587,22 +591,50 @@ fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
                 .clone()
         })
         .collect();
-    run.sort_by_cached_key(import_sort_key);
+
+    // Order the imports and, for each resulting slot, whether it begins a new group (and so
+    // earns a blank line before it). With `group-imports` on, sort by (group rank, name) and
+    // break at every rank change. Otherwise (`reorder-imports` only) sort by (is_static, name)
+    // as a single group with no boundaries, so the emitted Doc — and thus the output — is
+    // byte-identical to the reorder-only behavior.
+    let new_group: Vec<bool> = if ctx.cfg.group_imports {
+        let groups = &ctx.cfg.import_groups;
+        let mut keyed: Vec<(usize, String, SyntaxNode)> = run
+            .into_iter()
+            .map(|n| (import_group_rank(&n, groups), import_name(&n), n))
+            .collect();
+        keyed.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        let flags = (0..keyed.len())
+            .map(|k| k > 0 && keyed[k].0 != keyed[k - 1].0)
+            .collect();
+        run = keyed.into_iter().map(|(_, _, n)| n).collect();
+        flags
+    } else {
+        run.sort_by_cached_key(import_sort_key);
+        vec![false; run.len()]
+    };
 
     let mut parts: Vec<Doc> = Vec::new();
     let mut saw = false;
     let mut emitted_import = false;
     for (i, el) in els.iter().enumerate() {
         if (start..=end).contains(&i) {
-            // The sorted import for this positional slot.
-            let import = &run[i - start];
+            // The reordered import for this positional slot.
+            let k = i - start;
+            let import = &run[k];
             if saw {
-                parts.push(if emitted_import {
-                    // Normalize: never keep blank lines between sorted imports.
-                    hardline()
-                } else if block_lead_blanks > 0 {
-                    blank_line(block_lead_blanks)
+                parts.push(if !emitted_import {
+                    // Before the first emitted import: the block's leading gap.
+                    if block_lead_blanks > 0 {
+                        blank_line(block_lead_blanks)
+                    } else {
+                        hardline()
+                    }
+                } else if new_group[k] {
+                    // A group boundary: exactly one blank line between groups.
+                    blank_line(1)
                 } else {
+                    // Within a group: never keep blank lines between sorted imports.
                     hardline()
                 });
             }
@@ -666,17 +698,55 @@ fn import_block_lead_blanks(first_import: &SyntaxNode, ctx: &Ctx<'_>) -> usize {
     }
 }
 
-/// The total, deterministic sort key for an import: non-static (`false`) before static
-/// (`true`), then the dotted name text in lexicographic order. A malformed import with no
-/// name sorts first within its group via the empty string; duplicates are kept (stable sort).
-fn import_sort_key(node: &SyntaxNode) -> (bool, String) {
-    let imp = ImportDecl::cast(node.clone());
-    let is_static = imp.as_ref().is_some_and(|i| i.is_static());
-    let name = imp
+/// The qualified name of an import as written (`a.b.C`, or `a.b.*`), or the empty string for a
+/// malformed import with no name (so it sorts first within its group).
+fn import_name(node: &SyntaxNode) -> String {
+    ImportDecl::cast(node.clone())
         .and_then(|i| i.name())
         .map(|n| n.text())
-        .unwrap_or_default();
-    (is_static, name)
+        .unwrap_or_default()
+}
+
+/// The total, deterministic sort key for an import under `reorder-imports`: non-static (`false`)
+/// before static (`true`), then the dotted name text in lexicographic order. Duplicates are kept
+/// (stable sort).
+fn import_sort_key(node: &SyntaxNode) -> (bool, String) {
+    let is_static = ImportDecl::cast(node.clone()).is_some_and(|i| i.is_static());
+    (is_static, import_name(node))
+}
+
+/// The group rank of an import under `groups` (the `import-groups` list); lower ranks emit first.
+/// A non-static import takes the index of its *longest* matching prefix (ties broken by list
+/// order — the earliest such prefix wins); failing that, the catch-all `"*"`'s index, or
+/// `groups.len()` when the list has no `"*"`. A static import takes `"static"`'s index, or
+/// `groups.len() + 1` (after the catch-all) when the list has no `"static"`. The literals `"*"`
+/// and `"static"` are never matched as textual prefixes (`static` is a Java keyword, so it can
+/// never be a real name segment).
+fn import_group_rank(node: &SyntaxNode, groups: &[String]) -> usize {
+    if ImportDecl::cast(node.clone()).is_some_and(|i| i.is_static()) {
+        return groups
+            .iter()
+            .position(|g| g.as_str() == "static")
+            .unwrap_or(groups.len() + 1);
+    }
+    let name = import_name(node);
+    let mut best_len = 0usize;
+    let mut best_idx: Option<usize> = None;
+    for (i, g) in groups.iter().enumerate() {
+        if matches!(g.as_str(), "*" | "static") {
+            continue;
+        }
+        if g.len() > best_len && name.starts_with(g.as_str()) {
+            best_len = g.len();
+            best_idx = Some(i);
+        }
+    }
+    best_idx.unwrap_or_else(|| {
+        groups
+            .iter()
+            .position(|g| g.as_str() == "*")
+            .unwrap_or(groups.len())
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -42,6 +42,29 @@ fn check_reorder(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_reorder(src));
 }
 
+/// Format with `group-imports` enabled (default `import-groups`).
+fn fmt_group(src: &str) -> String {
+    let cfg = Config {
+        group_imports: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_group(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_group(src));
+}
+
+/// Format with `group-imports` enabled and a custom `import-groups` list.
+fn fmt_group_with(src: &str, import_groups: &[&str]) -> String {
+    let cfg = Config {
+        group_imports: true,
+        import_groups: import_groups.iter().map(|s| s.to_string()).collect(),
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
 #[test]
 fn simple_class() {
     check(
@@ -1261,4 +1284,157 @@ fn reorder_imports_idempotent_when_scrambled() {
     );
     let twice = fmt_reorder(&once);
     assert_eq!(once, twice);
+}
+
+// ===== group-imports =====
+
+#[test]
+fn group_imports_basic() {
+    // Default groups: java. / javax. / others (`*`) / static — each block sorted, blank-separated.
+    check_group(
+        "import com.foo.Bar;import java.util.List;import static org.junit.Assert.assertEquals;import javax.annotation.Nullable;class C{}",
+        expect![[r#"
+            import java.util.List;
+
+            import javax.annotation.Nullable;
+
+            import com.foo.Bar;
+
+            import static org.junit.Assert.assertEquals;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_catch_all_block() {
+    // Imports matching no prefix cluster in the `*` block, sorted, after the java./javax. blocks.
+    check_group(
+        "import org.b.B;import com.a.A;import java.util.List;class C{}",
+        expect![[r#"
+            import java.util.List;
+
+            import com.a.A;
+            import org.b.B;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_static_block_last() {
+    // Every static import clusters in the trailing `static` block, sorted by qualified name.
+    check_group(
+        "import static b.B.b;import static a.A.a;import java.util.List;class C{}",
+        expect![[r#"
+            import java.util.List;
+
+            import static a.A.a;
+            import static b.B.b;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_empty_group_no_blank() {
+    // No javax. import: a single blank separates java. from the catch-all (no stray blank line).
+    check_group(
+        "import com.x.X;import java.util.List;class C{}",
+        expect![[r#"
+            import java.util.List;
+
+            import com.x.X;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_comment_follows() {
+    // A leading and trailing comment glued to an import move with it into its group.
+    check_group(
+        "import com.b.B;\n// lead\nimport java.a.A; // trail\nclass C {}\n",
+        expect![[r#"
+            // lead
+            import java.a.A;  // trail
+
+            import com.b.B;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_independent_of_reorder() {
+    // group-imports works on its own; it does not require reorder-imports to be enabled.
+    let cfg = Config {
+        group_imports: true,
+        reorder_imports: false,
+        ..Config::default()
+    };
+    let out = format_source("import b.B;import a.A;class C{}", &cfg).formatted;
+    expect![[r#"
+        import a.A;
+        import b.B;
+        class C {}
+    "#]]
+    .assert_eq(&out);
+}
+
+#[test]
+fn group_imports_off_by_default_preserves_order() {
+    // The default config leaves import order untouched (strict-sequence invariant).
+    check(
+        "import com.b.B;import java.a.A;class C{}",
+        expect![[r#"
+            import com.b.B;
+            import java.a.A;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_idempotent() {
+    let once = fmt_group(
+        "package p;\n\nimport c.C;\nimport java.util.List;\nimport static z.Z.z;\nimport javax.x.X;\nclass C {}\n",
+    );
+    let twice = fmt_group(&once);
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn group_imports_custom_longest_prefix_wins() {
+    // With ["java.", "java.util.", "*"], java.util.List joins the longer "java.util." group, not
+    // "java." — locking longest-match (list-order first-match would merge it with java.io.File).
+    let out = fmt_group_with(
+        "import java.io.File;import java.util.List;import com.x.X;class C{}",
+        &["java.", "java.util.", "*"],
+    );
+    expect![[r#"
+        import java.io.File;
+
+        import java.util.List;
+
+        import com.x.X;
+        class C {}
+    "#]]
+    .assert_eq(&out);
+}
+
+#[test]
+fn group_imports_overrides_reorder() {
+    // With both on, group-imports wins: output equals group-only (the reorder value is irrelevant).
+    let src = "import static a.Z.z;import b.B;import java.util.List;class C{}";
+    let group_only = fmt_group(src);
+    let both = {
+        let cfg = Config {
+            group_imports: true,
+            reorder_imports: true,
+            ..Config::default()
+        };
+        format_source(src, &cfg).formatted
+    };
+    assert_eq!(group_only, both);
 }
