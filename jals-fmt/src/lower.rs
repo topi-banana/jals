@@ -12,6 +12,7 @@
 //! canonical operator spacing; everything else falls back to [`lower_generic`], which lays
 //! a node out inline with normalized spacing.
 
+use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
@@ -41,7 +42,7 @@ pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
 /// Lower a node, dispatching on its kind.
 fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match node.kind() {
-        S::SOURCE_FILE => lower_items(node, ctx).0,
+        S::SOURCE_FILE => lower_source_file(node, ctx),
         S::CLASS_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
         S::PARAM_LIST | S::ARG_LIST | S::RECORD_HEADER | S::ANNOTATION_ARG_LIST | S::ARRAY_INIT => {
             lower_delimited(node, ctx)
@@ -547,6 +548,134 @@ fn blank_lines_before(tok: &SyntaxToken) -> usize {
         cur = t.prev_token();
     }
     newlines.saturating_sub(1)
+}
+
+// ---------------------------------------------------------------------------
+// Import reordering (`reorder-imports`)
+// ---------------------------------------------------------------------------
+
+/// Lower the compilation unit. With `reorder-imports` off this is exactly [`lower_items`].
+/// With it on, the leading run of `import` declarations is sorted (non-static first, then
+/// static, each alphabetical by qualified name); blank lines *between* imports are dropped,
+/// while the gap before the block and the gap after it (to the first type decl) are preserved.
+///
+/// Sorting reuses the original import nodes, so every token keeps its byte offset and its
+/// attached comments follow it automatically; the significant-token *multiset* is preserved.
+fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    if !ctx.cfg.reorder_imports {
+        return lower_items(node, ctx).0;
+    }
+    let els: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    let Some((start, end)) = import_run(&els) else {
+        // Nothing to sort (zero or one import), or — defensively — a non-contiguous run.
+        return lower_items(node, ctx).0;
+    };
+    // The blank lines before the whole block come from the import that was originally first
+    // (its gap from the package decl). Capture it before sorting so the value is positional,
+    // not tied to whichever import sorts to the front — this keeps formatting idempotent.
+    let first = els[start]
+        .as_node()
+        .expect("import run index points at a node");
+    let block_lead_blanks = import_block_lead_blanks(first, ctx);
+
+    let mut run: Vec<SyntaxNode> = (start..=end)
+        .map(|i| {
+            els[i]
+                .as_node()
+                .expect("import run index points at a node")
+                .clone()
+        })
+        .collect();
+    run.sort_by_cached_key(import_sort_key);
+
+    let mut parts: Vec<Doc> = Vec::new();
+    let mut saw = false;
+    let mut emitted_import = false;
+    for (i, el) in els.iter().enumerate() {
+        if (start..=end).contains(&i) {
+            // The sorted import for this positional slot.
+            let import = &run[i - start];
+            if saw {
+                parts.push(if emitted_import {
+                    // Normalize: never keep blank lines between sorted imports.
+                    hardline()
+                } else if block_lead_blanks > 0 {
+                    blank_line(block_lead_blanks)
+                } else {
+                    hardline()
+                });
+            }
+            parts.push(lower(import, ctx));
+            saw = true;
+            emitted_import = true;
+            continue;
+        }
+        // Outside the import run: the original `lower_items` logic. A following type decl's
+        // separator reads its own (unmoved) leading trivia, so its gap stays stable.
+        if let Some(child) = el.as_node() {
+            if first_sig_token(child).is_none() {
+                continue;
+            }
+            if saw {
+                parts.push(item_separator(child, ctx));
+            }
+            parts.push(lower(child, ctx));
+            saw = true;
+        } else if let Some(t) = el.as_token() {
+            let kind = t.kind();
+            if kind == S::LBRACE || kind == S::RBRACE || kind.is_trivia() {
+                continue;
+            }
+            if saw {
+                parts.push(text(" "));
+            }
+            parts.push(tok(t, ctx));
+            saw = true;
+        }
+    }
+    concat(parts)
+}
+
+/// The inclusive index range of the contiguous leading run of `import` declarations among the
+/// source file's children, or `None` when there are fewer than two to sort (or — defensively —
+/// the `IMPORT_DECL` children are not contiguous, which the grammar should never produce).
+fn import_run(els: &[SyntaxElement]) -> Option<(usize, usize)> {
+    let idx: Vec<usize> = els
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.as_node().is_some_and(|n| n.kind() == S::IMPORT_DECL))
+        .map(|(i, _)| i)
+        .collect();
+    if idx.len() < 2 {
+        return None;
+    }
+    if !idx.windows(2).all(|w| w[1] == w[0] + 1) {
+        return None;
+    }
+    Some((idx[0], idx[idx.len() - 1]))
+}
+
+/// The blank lines preceding the import block — the value [`item_separator`] would compute for
+/// the originally-first import (its gap from the package decl or file start).
+fn import_block_lead_blanks(first_import: &SyntaxNode, ctx: &Ctx<'_>) -> usize {
+    match first_sig_token(first_import) {
+        Some(t) if ctx.comments.has_leading(&t) => ctx.comments.blank_lines_before_first(&t),
+        Some(t) => blank_lines_before(&t),
+        None => 0,
+    }
+}
+
+/// The total, deterministic sort key for an import: non-static (`false`) before static
+/// (`true`), then the dotted name text in lexicographic order. A malformed import with no
+/// name sorts first within its group via the empty string; duplicates are kept (stable sort).
+fn import_sort_key(node: &SyntaxNode) -> (bool, String) {
+    let imp = ImportDecl::cast(node.clone());
+    let is_static = imp.as_ref().is_some_and(|i| i.is_static());
+    let name = imp
+        .and_then(|i| i.name())
+        .map(|n| n.text())
+        .unwrap_or_default();
+    (is_static, name)
 }
 
 // ---------------------------------------------------------------------------
