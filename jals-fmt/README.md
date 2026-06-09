@@ -11,9 +11,10 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
 ```
 
 It upholds the workspace formatter invariants: comments are never dropped and formatting is
-idempotent (`format(format(x)) == format(x)`); the significant-token sequence is preserved
-exactly unless an opt-in reordering option (`reorder-imports`, off by default) is enabled, in
-which case the token *multiset* is preserved (see [Configuration](#configuration)).
+idempotent (`format(format(x)) == format(x)`); by default the significant-token sequence is
+preserved exactly. Two opt-in options relax this (see [Configuration](#configuration)):
+`reorder-imports` preserves the token *multiset* instead, and `trailing-comma` may add or drop
+the single trailing comma of an array initializer.
 
 ## What it does today
 
@@ -41,6 +42,11 @@ The current formatter is intentionally minimal. It performs:
 - **Array initializers** — an array initializer (`{a, b, c}`, including `new T[]{…}`) whose
   flat width exceeds `array-width` is laid out one element per line, even when the line would
   otherwise fit `max-width`. Argument and parameter lists are unaffected.
+- **Trailing commas** — the trailing comma of an array initializer follows `trailing-comma`:
+  `preserve` (default, keep the source's), `always`, `never`, or `vertical` (present only when
+  the initializer breaks one element per line). Only array initializers are governed — Java
+  permits a trailing comma only there and in enum constant lists — and a comma carrying a
+  comment is never dropped. Off by default (`preserve`); see below.
 - **Operator spacing** — binary and unary expressions get canonical spacing. Binary
   expressions are **not** wrapped across lines.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
@@ -83,6 +89,7 @@ are kebab-case.
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
 | `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
 | `reorder-imports` | bool | `false` | ✅ wired — sort the leading `import` block (non-static first, then static, each alphabetical by qualified name); blank lines inside the block collapse and comments attached to an import move with it. Off by default; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `reorder_imports` |
+| `trailing-comma` | `"preserve"` \| `"always"` \| `"never"` \| `"vertical"` | `"preserve"` | ✅ wired — trailing comma of an **array initializer** only (`{1, 2, 3,}`): `preserve` keeps the source's, `always`/`never` force it on/off, `vertical` adds it only when the initializer breaks one element per line. Non-`preserve` may add or drop that one comma (a comma carrying a comment is kept); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `trailing_comma` |
 
 ---
 
@@ -135,7 +142,7 @@ see [What it does today](#what-it-does-today). Remaining:
 | Parameter/argument layout: Tall / Compressed / **Vertical (one per line)** | `fn_params_layout`, `fn_args_layout` |
 | Wrap binary expressions; operator at line-start (Front) vs. line-end (Back) | `binop_separator` |
 | Let the last argument (lambda/array) overflow the call parentheses | `overflow_delimited_expr` |
-| Trailing comma: Always / Never / Vertical (currently only **preserved**) | `trailing_comma` |
+| Trailing comma: Always / Never / Vertical (array initializers) | `trailing_comma` ✅ |
 | Combine a control expression with its argument | `combine_control_expr` |
 
 ## 4. Spacing
@@ -223,9 +230,9 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 ## Suggested priority
 
-By Java-user impact: **(1)** the rest of the import-organization family (`group_imports`,
-`imports_granularity`) → **(2)** `trailing_comma`.
+By Java-user impact: the rest of the import-organization family (`group_imports`,
+`imports_granularity`).
 (Brace styling — `brace_style` and `control_brace_style` — comment reflow — `comment-width`
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
-`fn_call_width` — array-initializer wrapping — `array_width` — and import sorting —
-`reorder_imports` — are done.)
+`fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
+`reorder_imports` — and trailing commas — `trailing_comma` — are done.)
