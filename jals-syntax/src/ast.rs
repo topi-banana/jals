@@ -1180,6 +1180,7 @@ ast_enum!(
     Pattern {
         Type(TypePattern),
         Record(RecordPattern),
+        Unnamed(UnnamedPattern),
     }
 );
 
@@ -1208,6 +1209,12 @@ impl RecordPattern {
         support::children(&self.syntax)
     }
 }
+
+ast_node!(
+    /// An unnamed pattern (`_`), appearing as a record-pattern component.
+    UnnamedPattern,
+    UNNAMED_PATTERN
+);
 
 ast_node!(
     /// A `when` guard following a pattern.
