@@ -16,9 +16,10 @@ use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
-use crate::config::{BraceStyle, Config, ControlBraceStyle};
+use crate::config::{BraceStyle, Config, ControlBraceStyle, TrailingComma};
 use crate::doc::{
-    Doc, blank_line, concat, group, group_within, hardline, indent, line, nil, raw, softline, text,
+    Doc, blank_line, concat, group, group_within, hardline, if_break, indent, line, nil, raw,
+    softline, text,
 };
 
 /// Lowering context shared (immutably) across the walk.
@@ -682,17 +683,22 @@ fn import_sort_key(node: &SyntaxNode) -> (bool, String) {
 // Delimited lists (params, args, array initializers)
 // ---------------------------------------------------------------------------
 
-/// Lower a comma-separated, delimited list that wraps all-or-nothing. Each item carries
-/// its own trailing comma (so a trailing comma in the source is preserved), and items are
-/// separated by a soft line that becomes a space when flat and a break when wrapped. An
-/// argument list (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`,
-/// and an array initializer (`ARRAY_INIT`) when it exceeds `array-width`.
+/// Lower a comma-separated, delimited list that wraps all-or-nothing. Items are separated by a
+/// soft line that becomes a space when flat and a break when wrapped. An argument list
+/// (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`, and an array
+/// initializer (`ARRAY_INIT`) when it exceeds `array-width`.
+///
+/// Inter-item commas are emitted verbatim. The final item's trailing comma is preserved by
+/// default; for an array initializer it instead follows the `trailing-comma` policy (see
+/// [`trailing_comma_doc`]) — the only Java list where adding or dropping it is legal.
 fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Never synthesize a delimiter that the source lacks (error recovery): start empty
     // and fill from the real tokens so the significant-token sequence is preserved.
     let mut open_doc = nil();
     let mut close_doc = nil();
-    let mut items: Vec<Doc> = Vec::new();
+    // Each row is one item's content plus the comma token that follows it (if any). The comma
+    // of the final row is the list's (optional) trailing comma.
+    let mut rows: Vec<(Doc, Option<SyntaxToken>)> = Vec::new();
     let mut current: Vec<Doc> = Vec::new();
     let mut cur_prev: Option<SyntaxToken> = None;
 
@@ -709,9 +715,9 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
                 S::LPAREN | S::LBRACE | S::LBRACK => open_doc = tok(t, ctx),
                 S::RPAREN | S::RBRACE | S::RBRACK => close_doc = tok(t, ctx),
                 S::COMMA => {
-                    // The comma ends the current item; items are joined by a soft line.
-                    current.push(tok(t, ctx));
-                    items.push(concat(std::mem::take(&mut current)));
+                    // The comma ends the current item; keep it so the trailing one can follow
+                    // the `trailing-comma` policy while inter-item commas stay verbatim.
+                    rows.push((concat(std::mem::take(&mut current)), Some(t.clone())));
                     cur_prev = None;
                 }
                 _ if kind.is_trivia() => {}
@@ -724,12 +730,37 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         }
     }
     if !current.is_empty() {
-        items.push(concat(std::mem::take(&mut current)));
+        rows.push((concat(std::mem::take(&mut current)), None));
     }
 
-    if items.is_empty() {
+    if rows.is_empty() {
         return concat(vec![open_doc, close_doc]);
     }
+
+    // Only an array initializer honors `trailing-comma`; every other delimited list preserves
+    // the source exactly (a trailing comma elsewhere is invalid Java, reachable only via error
+    // recovery, so dropping/adding one is never appropriate).
+    let policy = if node.kind() == S::ARRAY_INIT {
+        ctx.cfg.trailing_comma
+    } else {
+        TrailingComma::Preserve
+    };
+
+    let last = rows.len() - 1;
+    let items: Vec<Doc> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (content, comma))| {
+            let comma_doc = if i == last {
+                trailing_comma_doc(policy, comma.as_ref(), ctx)
+            } else {
+                // An inter-item comma is required; emit it verbatim. A missing one (malformed
+                // input) is never synthesized.
+                comma.map_or_else(nil, |t| tok(&t, ctx))
+            };
+            concat(vec![content, comma_doc])
+        })
+        .collect();
 
     let doc = concat(vec![
         open_doc,
@@ -746,6 +777,30 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         group_within(doc, ctx.cfg.array_width)
     } else {
         group(doc)
+    }
+}
+
+/// The document for the trailing comma of a delimited list's last item, per the
+/// [`TrailingComma`] policy. `comma` is the source's trailing comma token when it had one.
+///
+/// A source comma that carries a comment is always kept verbatim — even when the policy would
+/// drop it — so no comment is lost. Under [`Vertical`](TrailingComma::Vertical) the comma is an
+/// [`if_break`]: it materializes only when the enclosing list breaks across lines.
+fn trailing_comma_doc(policy: TrailingComma, comma: Option<&SyntaxToken>, ctx: &Ctx<'_>) -> Doc {
+    // A commented comma can't be conditionally dropped without losing the comment; preserve it.
+    if let Some(t) = comma
+        && ctx.comments.has_comments(t)
+        && matches!(policy, TrailingComma::Never | TrailingComma::Vertical)
+    {
+        return tok(t, ctx);
+    }
+    match policy {
+        TrailingComma::Preserve => comma.map_or_else(nil, |t| tok(t, ctx)),
+        TrailingComma::Always => comma.map_or_else(|| text(","), |t| tok(t, ctx)),
+        TrailingComma::Never => nil(),
+        // The comma exists only in the broken layout. Any source comma reaching here is
+        // comment-free (the early return handled commented ones), so a plain `,` reproduces it.
+        TrailingComma::Vertical => if_break(text(","), nil()),
     }
 }
 

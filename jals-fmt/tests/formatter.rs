@@ -1,7 +1,7 @@
 //! Snapshot tests for the formatter.
 
 use expect_test::{Expect, expect};
-use jals_fmt::{BraceStyle, Config, ControlBraceStyle, LineEnding, format_source};
+use jals_fmt::{BraceStyle, Config, ControlBraceStyle, LineEnding, TrailingComma, format_source};
 
 fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted
@@ -943,6 +943,196 @@ fn array_width_breaks_new_array_creation() {
         "class A{int[] x=new int[]{alpha,beta,gamma};}",
         10,
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Trailing comma (`trailing-comma`)
+// ---------------------------------------------------------------------------
+
+fn fmt_trailing(src: &str, trailing_comma: TrailingComma) -> String {
+    let cfg = Config {
+        trailing_comma,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// Format with a `trailing-comma` policy and a narrow `array-width`, so the initializer breaks
+/// one element per line — exercising the layout-sensitive `vertical` mode.
+fn fmt_trailing_narrow(src: &str, trailing_comma: TrailingComma) -> String {
+    let cfg = Config {
+        trailing_comma,
+        array_width: 10,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn trailing_comma_preserve_keeps_source_absent() {
+    // Preserve (the default): an absent trailing comma stays absent.
+    expect![[r#"
+        class A {
+            int [] x = {a, b, c};
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{int[] x={a,b,c};}",
+        TrailingComma::Preserve,
+    ));
+}
+
+#[test]
+fn trailing_comma_preserve_keeps_source_present() {
+    // Preserve: a present trailing comma stays present.
+    expect![[r#"
+        class A {
+            int [] x = {a, b, c,};
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{int[] x={a,b,c,};}",
+        TrailingComma::Preserve,
+    ));
+}
+
+#[test]
+fn trailing_comma_always_adds_when_absent() {
+    expect![[r#"
+        class A {
+            int [] x = {a, b, c,};
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{int[] x={a,b,c};}",
+        TrailingComma::Always,
+    ));
+}
+
+#[test]
+fn trailing_comma_never_drops_when_present() {
+    expect![[r#"
+        class A {
+            int [] x = {a, b, c};
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{int[] x={a,b,c,};}",
+        TrailingComma::Never,
+    ));
+}
+
+#[test]
+fn trailing_comma_vertical_omits_when_flat() {
+    // Fits on one line, so the comma is omitted — even though the source had one.
+    expect![[r#"
+        class A {
+            int [] x = {a, b, c};
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{int[] x={a,b,c,};}",
+        TrailingComma::Vertical,
+    ));
+}
+
+#[test]
+fn trailing_comma_vertical_adds_when_broken() {
+    // Broken one element per line, so the comma is added.
+    expect![[r#"
+        class A {
+            int [] x = {
+                alpha,
+                beta,
+                gamma,
+            };
+        }
+    "#]]
+    .assert_eq(&fmt_trailing_narrow(
+        "class A{int[] x={alpha,beta,gamma};}",
+        TrailingComma::Vertical,
+    ));
+}
+
+#[test]
+fn trailing_comma_never_omits_even_when_broken() {
+    // `never` keeps no trailing comma regardless of layout.
+    expect![[r#"
+        class A {
+            int [] x = {
+                alpha,
+                beta,
+                gamma
+            };
+        }
+    "#]]
+    .assert_eq(&fmt_trailing_narrow(
+        "class A{int[] x={alpha,beta,gamma,};}",
+        TrailingComma::Never,
+    ));
+}
+
+#[test]
+fn trailing_comma_always_when_broken() {
+    expect![[r#"
+        class A {
+            int [] x = {
+                alpha,
+                beta,
+                gamma,
+            };
+        }
+    "#]]
+    .assert_eq(&fmt_trailing_narrow(
+        "class A{int[] x={alpha,beta,gamma};}",
+        TrailingComma::Always,
+    ));
+}
+
+#[test]
+fn trailing_comma_only_touches_array_initializers() {
+    // `trailing-comma` governs array initializers only; a call's argument list is never given a
+    // trailing comma (it would be invalid Java).
+    expect![[r#"
+        class A {
+            void m() {
+                foo(a, b, c);
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{void m(){foo(a,b,c);}}",
+        TrailingComma::Always,
+    ));
+}
+
+#[test]
+fn trailing_comma_never_keeps_commented_comma() {
+    // A comment glued to the trailing comma is never dropped: `never` keeps the comma so the
+    // comment survives.
+    expect![[r#"
+        class A {
+            int [] x = {a, b, c,};  /* keep */
+        }
+    "#]]
+    .assert_eq(&fmt_trailing(
+        "class A{int[] x={a,b,c, /* keep */};}",
+        TrailingComma::Never,
+    ));
+}
+
+#[test]
+fn trailing_comma_modes_are_idempotent() {
+    for mode in [
+        TrailingComma::Always,
+        TrailingComma::Never,
+        TrailingComma::Vertical,
+    ] {
+        let src = "class A{int[] x={alpha,beta,gamma};int[] y={p,q,};}";
+        let once = fmt_trailing_narrow(src, mode);
+        let twice = fmt_trailing_narrow(&once, mode);
+        assert_eq!(once, twice, "trailing-comma {mode:?} must be idempotent");
+    }
 }
 
 // ===== reorder-imports =====

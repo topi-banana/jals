@@ -100,6 +100,27 @@ pub enum ControlBraceStyle {
     NextLine,
 }
 
+/// How the formatter treats the optional trailing comma of an array initializer (`{1, 2, 3,}`).
+/// Mirrors rustfmt's `trailing_comma`, plus a [`Preserve`](Self::Preserve) default (rustfmt has
+/// no such mode) that keeps the source comma exactly, so the strict significant-token invariant
+/// holds unless this is opted into. Only array initializers are affected — the sole Java
+/// delimited list, besides enum constants, where a trailing comma is legal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrailingComma {
+    /// Keep the source's trailing comma exactly (present stays present, absent stays absent).
+    /// The default; preserves the significant-token sequence.
+    Preserve,
+    /// Always emit a trailing comma, adding one when the source lacks it.
+    Always,
+    /// Never emit a trailing comma, dropping one the source has — unless it carries a comment,
+    /// which is kept so no comment is lost.
+    Never,
+    /// Emit a trailing comma only when the initializer is laid out vertically (one element per
+    /// line), and omit it when the initializer fits on one line. Mirrors rustfmt's default.
+    Vertical,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -152,6 +173,11 @@ pub struct Config {
     /// [`wrap_comments`](Config::wrap_comments). When enabled the formatter's significant-token
     /// *sequence* may change (the multiset is preserved); mirrors rustfmt's `reorder_imports`.
     pub reorder_imports: bool,
+    /// How to treat the trailing comma of an array initializer (`{1, 2, 3,}`). Defaults to
+    /// [`Preserve`](TrailingComma::Preserve), which keeps the source comma exactly; the other
+    /// modes may add or drop that single comma, weakening the strict significant-token invariant
+    /// (a comma carrying a comment is never dropped). Mirrors rustfmt's `trailing_comma`.
+    pub trailing_comma: TrailingComma,
 }
 
 impl Default for Config {
@@ -171,6 +197,7 @@ impl Default for Config {
             wrap_comments: false,
             comment_width: 80,
             reorder_imports: false,
+            trailing_comma: TrailingComma::Preserve,
         }
     }
 }
@@ -290,6 +317,8 @@ mod tests {
         assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
         // Import sorting is opt-in; off by default to preserve the significant-token sequence.
         assert!(!c.reorder_imports);
+        // Trailing-comma handling defaults to preserve, keeping the source comma exactly.
+        assert_eq!(c.trailing_comma, TrailingComma::Preserve);
     }
 
     #[test]
@@ -319,6 +348,18 @@ mod tests {
     fn reorder_imports_parses() {
         let c: Config = toml::from_str("reorder-imports = true\n").unwrap();
         assert!(c.reorder_imports);
+    }
+
+    #[test]
+    fn trailing_comma_parses_kebab_values() {
+        let c: Config = toml::from_str("trailing-comma = \"always\"\n").unwrap();
+        assert_eq!(c.trailing_comma, TrailingComma::Always);
+        let c: Config = toml::from_str("trailing-comma = \"never\"\n").unwrap();
+        assert_eq!(c.trailing_comma, TrailingComma::Never);
+        let c: Config = toml::from_str("trailing-comma = \"vertical\"\n").unwrap();
+        assert_eq!(c.trailing_comma, TrailingComma::Vertical);
+        let c: Config = toml::from_str("trailing-comma = \"preserve\"\n").unwrap();
+        assert_eq!(c.trailing_comma, TrailingComma::Preserve);
     }
 
     #[test]
