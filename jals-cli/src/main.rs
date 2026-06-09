@@ -20,6 +20,8 @@ struct Cli {
 enum Commands {
     /// Format JALS/Java source files.
     Fmt(FmtArgs),
+    /// Run the language server (LSP) over stdio.
+    Lsp(LspArgs),
 }
 
 #[derive(Args)]
@@ -42,10 +44,18 @@ struct FmtArgs {
     config: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct LspArgs {
+    /// Accepted for editor compatibility; the stdio transport is always used.
+    #[arg(long)]
+    stdio: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Fmt(args) => run_fmt(args),
+        Commands::Lsp(args) => run_lsp(args),
     };
     match result {
         Ok(code) => code,
@@ -114,6 +124,12 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Runs the language server over stdio until the client disconnects.
+fn run_lsp(_args: LspArgs) -> Result<ExitCode> {
+    jals_lsp::run()?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Resolves the config for a directory, either from an explicit `--config` (used for all

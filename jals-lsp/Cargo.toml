@@ -1,0 +1,14 @@
+[package]
+name = "jals-lsp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-lsp = { workspace = true, features = ["tokio"] }
+futures.workspace = true
+jals-fmt.workspace = true
+jals-syntax.workspace = true
+text-size.workspace = true
+tokio.workspace = true
+tower.workspace = true

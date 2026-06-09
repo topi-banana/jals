@@ -6,8 +6,8 @@ A Java toolchain written in Rust, built on a **lossless** syntax tree.
 
 `jals` parses Java source into a full-fidelity concrete syntax tree (CST) — every byte,
 including whitespace and comments, is preserved — and uses that tree to power source
-tooling. Today it ships a code formatter; the same foundation is designed to host a linter
-and a language server.
+tooling. Today it ships a code formatter and a language server (LSP); the same foundation is
+designed to host a linter too.
 
 > 日本語版の README は [README_jp.md](README_jp.md) にあります。
 
@@ -24,12 +24,13 @@ and a language server.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of three core crates plus a browser playground:
+`jals` is a Cargo workspace of four core crates plus a browser playground:
 
 | Crate | Description |
 | --- | --- |
 | [`jals-syntax`](jals-syntax) | A lossless Java 26 lexer (`logos`) and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
+| [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, and formatting from the same CST. Host-only. |
 | [`jals-cli`](jals-cli) | The `jals` command-line binary. |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the `jals-syntax`/`jals-fmt` layers entirely in the browser. |
 
@@ -37,6 +38,7 @@ and a language server.
 jals/
 ├── jals-syntax/      # lexer + CST parser + typed AST  (wasm-compatible)
 ├── jals-fmt/         # formatter (CST -> Doc IR -> text)
+├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)
 ├── jals-cli/         # `jals` binary
 └── jals-playground/  # browser playground (Yew + Trunk -> wasm)
 ```
@@ -58,7 +60,7 @@ The release binary is produced at `target/release/jals`.
 
 ## Usage
 
-`jals` is invoked through subcommands. The only subcommand today is `fmt`.
+`jals` is invoked through subcommands: `fmt` (format source) and `lsp` (language server).
 
 ### Format files in place
 
@@ -94,6 +96,16 @@ Pass `-D warnings` to make any syntax error fail the run:
 
 ```sh
 jals fmt -D warnings src/
+```
+
+### Run the language server
+
+`jals lsp` starts an LSP server over stdio for editor integration — diagnostics, document
+symbols, and whole-document formatting, all driven by the same CST. It is launched by an
+editor rather than run by hand; see [`jals-lsp`](jals-lsp/README.md) for editor setup.
+
+```sh
+jals lsp
 ```
 
 ### Options
@@ -253,9 +265,9 @@ for any change to the syntax or formatting layers:
 
 ## Status
 
-Early stage (`0.1.0`). The formatter is functional and the syntax layer covers a broad
-slice of Java 26, but APIs may change. A linter (`jals-lint`) and language server
-(`jals-lsp`) are the intended next consumers of the syntax layer.
+Early stage (`0.1.0`). The formatter and language server are functional and the syntax layer
+covers a broad slice of Java 26, but APIs may change. A linter (`jals-lint`) is the intended
+next consumer of the syntax layer.
 
 ## License
 
