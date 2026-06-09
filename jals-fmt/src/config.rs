@@ -121,6 +121,11 @@ pub struct Config {
     /// wraps when it would overflow [`max_width`](Config::max_width)). Mirrors rustfmt's
     /// `chain_width`.
     pub chain_width: usize,
+    /// Maximum width of a function or method call's argument list (`f(a, b, c)`) kept on a
+    /// single line. A call whose argument list's flat width exceeds this is laid out one
+    /// argument per line (it also wraps when it would overflow [`max_width`](Config::max_width)).
+    /// Mirrors rustfmt's `fn_call_width`.
+    pub fn_call_width: usize,
     /// Placement of the opening brace of a declaration body (type, method, constructor, or
     /// initializer): same line (K&R) or next line (Allman). Control-flow blocks
     /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are governed separately by
@@ -149,6 +154,7 @@ impl Default for Config {
             insert_final_newline: true,
             max_width: 100,
             chain_width: 60,
+            fn_call_width: 60,
             brace_style: BraceStyle::SameLine,
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
@@ -261,6 +267,7 @@ mod tests {
         assert_eq!(c.indent_width, 4);
         assert_eq!(c.max_width, 100);
         assert_eq!(c.chain_width, 60);
+        assert_eq!(c.fn_call_width, 60);
         assert_eq!(c.comment_width, 80);
         assert_eq!(c.max_blank_lines, 1);
         assert!(c.insert_final_newline);
@@ -298,6 +305,12 @@ mod tests {
     fn chain_width_parses_kebab_key() {
         let c: Config = toml::from_str("chain-width = 40\n").unwrap();
         assert_eq!(c.chain_width, 40);
+    }
+
+    #[test]
+    fn fn_call_width_parses_kebab_key() {
+        let c: Config = toml::from_str("fn-call-width = 40\n").unwrap();
+        assert_eq!(c.fn_call_width, 40);
     }
 
     #[test]

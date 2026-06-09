@@ -555,7 +555,8 @@ fn blank_lines_before(tok: &SyntaxToken) -> usize {
 
 /// Lower a comma-separated, delimited list that wraps all-or-nothing. Each item carries
 /// its own trailing comma (so a trailing comma in the source is preserved), and items are
-/// separated by a soft line that becomes a space when flat and a break when wrapped.
+/// separated by a soft line that becomes a space when flat and a break when wrapped. An
+/// argument list (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`.
 fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Never synthesize a delimiter that the source lacks (error recovery): start empty
     // and fill from the real tokens so the significant-token sequence is preserved.
@@ -600,12 +601,19 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         return concat(vec![open_doc, close_doc]);
     }
 
-    group(concat(vec![
+    let doc = concat(vec![
         open_doc,
         indent(concat(vec![softline(), crate::doc::join(line(), items)])),
         softline(),
         close_doc,
-    ]))
+    ]);
+    // A call's argument list (`ARG_LIST`) honors `fn-call-width`; other delimited lists
+    // (params, array initializers, …) only break against `max-width`.
+    if node.kind() == S::ARG_LIST {
+        group_within(doc, ctx.cfg.fn_call_width)
+    } else {
+        group(doc)
+    }
 }
 
 // ---------------------------------------------------------------------------
