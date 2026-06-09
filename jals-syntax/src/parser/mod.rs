@@ -1922,6 +1922,566 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_variables_in_statements() {
+        check(
+            "class C { void m(int[] a) { int _ = 0, _ = 1; for (var _ : a) {} try (Lock _ = null) {} catch (Exception | Error _) {} } }",
+            expect![[r#"
+                SOURCE_FILE@0..122
+                  CLASS_DECL@0..122
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..122
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..120
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..25
+                          LPAREN@16..17 "("
+                          PARAM@17..24
+                            MODIFIERS@17..17
+                            TYPE@17..22
+                              INT_KW@17..20 "int"
+                              LBRACK@20..21 "["
+                              RBRACK@21..22 "]"
+                            WHITESPACE@22..23 " "
+                            IDENT@23..24 "a"
+                          RPAREN@24..25 ")"
+                        BLOCK@25..120
+                          WHITESPACE@25..26 " "
+                          LBRACE@26..27 "{"
+                          LOCAL_VAR_DECL@27..45
+                            MODIFIERS@27..27
+                            TYPE@27..31
+                              WHITESPACE@27..28 " "
+                              INT_KW@28..31 "int"
+                            WHITESPACE@31..32 " "
+                            UNDERSCORE@32..33 "_"
+                            WHITESPACE@33..34 " "
+                            EQ@34..35 "="
+                            LITERAL@35..37
+                              WHITESPACE@35..36 " "
+                              INT_LITERAL@36..37 "0"
+                            COMMA@37..38 ","
+                            WHITESPACE@38..39 " "
+                            UNDERSCORE@39..40 "_"
+                            WHITESPACE@40..41 " "
+                            EQ@41..42 "="
+                            LITERAL@42..44
+                              WHITESPACE@42..43 " "
+                              INT_LITERAL@43..44 "1"
+                            SEMICOLON@44..45 ";"
+                          FOR_EACH_STMT@45..64
+                            WHITESPACE@45..46 " "
+                            FOR_KW@46..49 "for"
+                            WHITESPACE@49..50 " "
+                            LPAREN@50..51 "("
+                            MODIFIERS@51..51
+                            TYPE@51..54
+                              VAR_KW@51..54 "var"
+                            WHITESPACE@54..55 " "
+                            UNDERSCORE@55..56 "_"
+                            WHITESPACE@56..57 " "
+                            COLON@57..58 ":"
+                            NAME_REF@58..60
+                              WHITESPACE@58..59 " "
+                              IDENT@59..60 "a"
+                            RPAREN@60..61 ")"
+                            BLOCK@61..64
+                              WHITESPACE@61..62 " "
+                              LBRACE@62..63 "{"
+                              RBRACE@63..64 "}"
+                          TRY_STMT@64..118
+                            WHITESPACE@64..65 " "
+                            TRY_KW@65..68 "try"
+                            RESOURCE_LIST@68..84
+                              WHITESPACE@68..69 " "
+                              LPAREN@69..70 "("
+                              RESOURCE@70..83
+                                MODIFIERS@70..70
+                                TYPE@70..74
+                                  IDENT@70..74 "Lock"
+                                WHITESPACE@74..75 " "
+                                UNDERSCORE@75..76 "_"
+                                WHITESPACE@76..77 " "
+                                EQ@77..78 "="
+                                LITERAL@78..83
+                                  WHITESPACE@78..79 " "
+                                  NULL_KW@79..83 "null"
+                              RPAREN@83..84 ")"
+                            BLOCK@84..87
+                              WHITESPACE@84..85 " "
+                              LBRACE@85..86 "{"
+                              RBRACE@86..87 "}"
+                            CATCH_CLAUSE@87..118
+                              WHITESPACE@87..88 " "
+                              CATCH_KW@88..93 "catch"
+                              WHITESPACE@93..94 " "
+                              LPAREN@94..95 "("
+                              MODIFIERS@95..95
+                              TYPE@95..104
+                                IDENT@95..104 "Exception"
+                              WHITESPACE@104..105 " "
+                              PIPE@105..106 "|"
+                              TYPE@106..112
+                                WHITESPACE@106..107 " "
+                                IDENT@107..112 "Error"
+                              WHITESPACE@112..113 " "
+                              UNDERSCORE@113..114 "_"
+                              RPAREN@114..115 ")"
+                              BLOCK@115..118
+                                WHITESPACE@115..116 " "
+                                LBRACE@116..117 "{"
+                                RBRACE@117..118 "}"
+                          WHITESPACE@118..119 " "
+                          RBRACE@119..120 "}"
+                      WHITESPACE@120..121 " "
+                      RBRACE@121..122 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn unnamed_lambda_parameters() {
+        check(
+            "class C { void m() { f((_, _) -> {}); g((var _, var _) -> {}); h((int _, int b) -> {}); } }",
+            expect![[r#"
+                SOURCE_FILE@0..91
+                  CLASS_DECL@0..91
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..91
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..89
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..18
+                          LPAREN@16..17 "("
+                          RPAREN@17..18 ")"
+                        BLOCK@18..89
+                          WHITESPACE@18..19 " "
+                          LBRACE@19..20 "{"
+                          EXPR_STMT@20..37
+                            CALL_EXPR@20..36
+                              NAME_REF@20..22
+                                WHITESPACE@20..21 " "
+                                IDENT@21..22 "f"
+                              ARG_LIST@22..36
+                                LPAREN@22..23 "("
+                                LAMBDA_EXPR@23..35
+                                  LAMBDA_PARAMS@23..29
+                                    LPAREN@23..24 "("
+                                    PARAM@24..25
+                                      UNDERSCORE@24..25 "_"
+                                    COMMA@25..26 ","
+                                    PARAM@26..28
+                                      WHITESPACE@26..27 " "
+                                      UNDERSCORE@27..28 "_"
+                                    RPAREN@28..29 ")"
+                                  WHITESPACE@29..30 " "
+                                  ARROW@30..32 "->"
+                                  BLOCK@32..35
+                                    WHITESPACE@32..33 " "
+                                    LBRACE@33..34 "{"
+                                    RBRACE@34..35 "}"
+                                RPAREN@35..36 ")"
+                            SEMICOLON@36..37 ";"
+                          EXPR_STMT@37..62
+                            CALL_EXPR@37..61
+                              NAME_REF@37..39
+                                WHITESPACE@37..38 " "
+                                IDENT@38..39 "g"
+                              ARG_LIST@39..61
+                                LPAREN@39..40 "("
+                                LAMBDA_EXPR@40..60
+                                  LAMBDA_PARAMS@40..54
+                                    LPAREN@40..41 "("
+                                    PARAM@41..46
+                                      MODIFIERS@41..41
+                                      TYPE@41..44
+                                        VAR_KW@41..44 "var"
+                                      WHITESPACE@44..45 " "
+                                      UNDERSCORE@45..46 "_"
+                                    COMMA@46..47 ","
+                                    PARAM@47..53
+                                      MODIFIERS@47..47
+                                      TYPE@47..51
+                                        WHITESPACE@47..48 " "
+                                        VAR_KW@48..51 "var"
+                                      WHITESPACE@51..52 " "
+                                      UNDERSCORE@52..53 "_"
+                                    RPAREN@53..54 ")"
+                                  WHITESPACE@54..55 " "
+                                  ARROW@55..57 "->"
+                                  BLOCK@57..60
+                                    WHITESPACE@57..58 " "
+                                    LBRACE@58..59 "{"
+                                    RBRACE@59..60 "}"
+                                RPAREN@60..61 ")"
+                            SEMICOLON@61..62 ";"
+                          EXPR_STMT@62..87
+                            CALL_EXPR@62..86
+                              NAME_REF@62..64
+                                WHITESPACE@62..63 " "
+                                IDENT@63..64 "h"
+                              ARG_LIST@64..86
+                                LPAREN@64..65 "("
+                                LAMBDA_EXPR@65..85
+                                  LAMBDA_PARAMS@65..79
+                                    LPAREN@65..66 "("
+                                    PARAM@66..71
+                                      MODIFIERS@66..66
+                                      TYPE@66..69
+                                        INT_KW@66..69 "int"
+                                      WHITESPACE@69..70 " "
+                                      UNDERSCORE@70..71 "_"
+                                    COMMA@71..72 ","
+                                    PARAM@72..78
+                                      MODIFIERS@72..72
+                                      TYPE@72..76
+                                        WHITESPACE@72..73 " "
+                                        INT_KW@73..76 "int"
+                                      WHITESPACE@76..77 " "
+                                      IDENT@77..78 "b"
+                                    RPAREN@78..79 ")"
+                                  WHITESPACE@79..80 " "
+                                  ARROW@80..82 "->"
+                                  BLOCK@82..85
+                                    WHITESPACE@82..83 " "
+                                    LBRACE@83..84 "{"
+                                    RBRACE@84..85 "}"
+                                RPAREN@85..86 ")"
+                            SEMICOLON@86..87 ";"
+                          WHITESPACE@87..88 " "
+                          RBRACE@88..89 "}"
+                      WHITESPACE@89..90 " "
+                      RBRACE@90..91 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn unnamed_and_record_patterns_in_instanceof() {
+        check(
+            "class C { void m(Object o) { if (o instanceof R _) {} if (o instanceof R(_)) {} } }",
+            expect![[r#"
+                SOURCE_FILE@0..83
+                  CLASS_DECL@0..83
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..83
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..81
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..26
+                          LPAREN@16..17 "("
+                          PARAM@17..25
+                            MODIFIERS@17..17
+                            TYPE@17..23
+                              IDENT@17..23 "Object"
+                            WHITESPACE@23..24 " "
+                            IDENT@24..25 "o"
+                          RPAREN@25..26 ")"
+                        BLOCK@26..81
+                          WHITESPACE@26..27 " "
+                          LBRACE@27..28 "{"
+                          IF_STMT@28..53
+                            WHITESPACE@28..29 " "
+                            IF_KW@29..31 "if"
+                            WHITESPACE@31..32 " "
+                            LPAREN@32..33 "("
+                            BINARY_EXPR@33..49
+                              NAME_REF@33..34
+                                IDENT@33..34 "o"
+                              WHITESPACE@34..35 " "
+                              INSTANCEOF_KW@35..45 "instanceof"
+                              TYPE_PATTERN@45..49
+                                TYPE@45..47
+                                  WHITESPACE@45..46 " "
+                                  IDENT@46..47 "R"
+                                WHITESPACE@47..48 " "
+                                UNDERSCORE@48..49 "_"
+                            RPAREN@49..50 ")"
+                            BLOCK@50..53
+                              WHITESPACE@50..51 " "
+                              LBRACE@51..52 "{"
+                              RBRACE@52..53 "}"
+                          IF_STMT@53..79
+                            WHITESPACE@53..54 " "
+                            IF_KW@54..56 "if"
+                            WHITESPACE@56..57 " "
+                            LPAREN@57..58 "("
+                            BINARY_EXPR@58..75
+                              NAME_REF@58..59
+                                IDENT@58..59 "o"
+                              WHITESPACE@59..60 " "
+                              INSTANCEOF_KW@60..70 "instanceof"
+                              RECORD_PATTERN@70..75
+                                TYPE@70..72
+                                  WHITESPACE@70..71 " "
+                                  IDENT@71..72 "R"
+                                LPAREN@72..73 "("
+                                UNNAMED_PATTERN@73..74
+                                  UNDERSCORE@73..74 "_"
+                                RPAREN@74..75 ")"
+                            RPAREN@75..76 ")"
+                            BLOCK@76..79
+                              WHITESPACE@76..77 " "
+                              LBRACE@77..78 "{"
+                              RBRACE@78..79 "}"
+                          WHITESPACE@79..80 " "
+                          RBRACE@80..81 "}"
+                      WHITESPACE@81..82 " "
+                      RBRACE@82..83 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn switch_patterns_unnamed_and_modifiers() {
+        check(
+            "class C { int m(Object o) { return switch (o) { case Float _ -> 1; case R1 _, R2 _ -> 2; case ARecord(final String s) -> 3; case R(@A var x) -> 4; default -> 0; }; } }",
+            expect![[r#"
+                SOURCE_FILE@0..167
+                  CLASS_DECL@0..167
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..167
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..165
+                        MODIFIERS@9..9
+                        TYPE@9..13
+                          WHITESPACE@9..10 " "
+                          INT_KW@10..13 "int"
+                        WHITESPACE@13..14 " "
+                        IDENT@14..15 "m"
+                        PARAM_LIST@15..25
+                          LPAREN@15..16 "("
+                          PARAM@16..24
+                            MODIFIERS@16..16
+                            TYPE@16..22
+                              IDENT@16..22 "Object"
+                            WHITESPACE@22..23 " "
+                            IDENT@23..24 "o"
+                          RPAREN@24..25 ")"
+                        BLOCK@25..165
+                          WHITESPACE@25..26 " "
+                          LBRACE@26..27 "{"
+                          RETURN_STMT@27..163
+                            WHITESPACE@27..28 " "
+                            RETURN_KW@28..34 "return"
+                            SWITCH_EXPR@34..162
+                              WHITESPACE@34..35 " "
+                              SWITCH_KW@35..41 "switch"
+                              WHITESPACE@41..42 " "
+                              LPAREN@42..43 "("
+                              NAME_REF@43..44
+                                IDENT@43..44 "o"
+                              RPAREN@44..45 ")"
+                              SWITCH_BLOCK@45..162
+                                WHITESPACE@45..46 " "
+                                LBRACE@46..47 "{"
+                                SWITCH_RULE@47..66
+                                  SWITCH_LABEL@47..60
+                                    WHITESPACE@47..48 " "
+                                    CASE_KW@48..52 "case"
+                                    TYPE_PATTERN@52..60
+                                      TYPE@52..58
+                                        WHITESPACE@52..53 " "
+                                        IDENT@53..58 "Float"
+                                      WHITESPACE@58..59 " "
+                                      UNDERSCORE@59..60 "_"
+                                  WHITESPACE@60..61 " "
+                                  ARROW@61..63 "->"
+                                  LITERAL@63..65
+                                    WHITESPACE@63..64 " "
+                                    INT_LITERAL@64..65 "1"
+                                  SEMICOLON@65..66 ";"
+                                SWITCH_RULE@66..88
+                                  SWITCH_LABEL@66..82
+                                    WHITESPACE@66..67 " "
+                                    CASE_KW@67..71 "case"
+                                    TYPE_PATTERN@71..76
+                                      TYPE@71..74
+                                        WHITESPACE@71..72 " "
+                                        IDENT@72..74 "R1"
+                                      WHITESPACE@74..75 " "
+                                      UNDERSCORE@75..76 "_"
+                                    COMMA@76..77 ","
+                                    TYPE_PATTERN@77..82
+                                      TYPE@77..80
+                                        WHITESPACE@77..78 " "
+                                        IDENT@78..80 "R2"
+                                      WHITESPACE@80..81 " "
+                                      UNDERSCORE@81..82 "_"
+                                  WHITESPACE@82..83 " "
+                                  ARROW@83..85 "->"
+                                  LITERAL@85..87
+                                    WHITESPACE@85..86 " "
+                                    INT_LITERAL@86..87 "2"
+                                  SEMICOLON@87..88 ";"
+                                SWITCH_RULE@88..123
+                                  SWITCH_LABEL@88..117
+                                    WHITESPACE@88..89 " "
+                                    CASE_KW@89..93 "case"
+                                    RECORD_PATTERN@93..117
+                                      TYPE@93..101
+                                        WHITESPACE@93..94 " "
+                                        IDENT@94..101 "ARecord"
+                                      LPAREN@101..102 "("
+                                      TYPE_PATTERN@102..116
+                                        MODIFIERS@102..107
+                                          FINAL_KW@102..107 "final"
+                                        TYPE@107..114
+                                          WHITESPACE@107..108 " "
+                                          IDENT@108..114 "String"
+                                        WHITESPACE@114..115 " "
+                                        IDENT@115..116 "s"
+                                      RPAREN@116..117 ")"
+                                  WHITESPACE@117..118 " "
+                                  ARROW@118..120 "->"
+                                  LITERAL@120..122
+                                    WHITESPACE@120..121 " "
+                                    INT_LITERAL@121..122 "3"
+                                  SEMICOLON@122..123 ";"
+                                SWITCH_RULE@123..146
+                                  SWITCH_LABEL@123..140
+                                    WHITESPACE@123..124 " "
+                                    CASE_KW@124..128 "case"
+                                    RECORD_PATTERN@128..140
+                                      TYPE@128..130
+                                        WHITESPACE@128..129 " "
+                                        IDENT@129..130 "R"
+                                      LPAREN@130..131 "("
+                                      TYPE_PATTERN@131..139
+                                        TYPE@131..137
+                                          ANNOTATION@131..133
+                                            AT@131..132 "@"
+                                            QUALIFIED_NAME@132..133
+                                              IDENT@132..133 "A"
+                                          WHITESPACE@133..134 " "
+                                          VAR_KW@134..137 "var"
+                                        WHITESPACE@137..138 " "
+                                        IDENT@138..139 "x"
+                                      RPAREN@139..140 ")"
+                                  WHITESPACE@140..141 " "
+                                  ARROW@141..143 "->"
+                                  LITERAL@143..145
+                                    WHITESPACE@143..144 " "
+                                    INT_LITERAL@144..145 "4"
+                                  SEMICOLON@145..146 ";"
+                                SWITCH_RULE@146..160
+                                  SWITCH_LABEL@146..154
+                                    WHITESPACE@146..147 " "
+                                    DEFAULT_KW@147..154 "default"
+                                  WHITESPACE@154..155 " "
+                                  ARROW@155..157 "->"
+                                  LITERAL@157..159
+                                    WHITESPACE@157..158 " "
+                                    INT_LITERAL@158..159 "0"
+                                  SEMICOLON@159..160 ";"
+                                WHITESPACE@160..161 " "
+                                RBRACE@161..162 "}"
+                            SEMICOLON@162..163 ";"
+                          WHITESPACE@163..164 " "
+                          RBRACE@164..165 "}"
+                      WHITESPACE@165..166 " "
+                      RBRACE@166..167 "}"
+            "#]],
+        );
+    }
+
+    #[test]
+    fn instanceof_annotated_type_without_binding_is_a_type() {
+        // Regression: a leading type-use annotation with no binding stays a plain type
+        // (`TYPE`, no `TYPE_PATTERN`/`MODIFIERS`), not a pattern.
+        check(
+            "class C { void m(Object o) { if (o instanceof @DA String) {} } }",
+            expect![[r#"
+                SOURCE_FILE@0..64
+                  CLASS_DECL@0..64
+                    MODIFIERS@0..0
+                    CLASS_KW@0..5 "class"
+                    WHITESPACE@5..6 " "
+                    IDENT@6..7 "C"
+                    CLASS_BODY@7..64
+                      WHITESPACE@7..8 " "
+                      LBRACE@8..9 "{"
+                      METHOD_DECL@9..62
+                        MODIFIERS@9..9
+                        TYPE@9..14
+                          WHITESPACE@9..10 " "
+                          VOID_KW@10..14 "void"
+                        WHITESPACE@14..15 " "
+                        IDENT@15..16 "m"
+                        PARAM_LIST@16..26
+                          LPAREN@16..17 "("
+                          PARAM@17..25
+                            MODIFIERS@17..17
+                            TYPE@17..23
+                              IDENT@17..23 "Object"
+                            WHITESPACE@23..24 " "
+                            IDENT@24..25 "o"
+                          RPAREN@25..26 ")"
+                        BLOCK@26..62
+                          WHITESPACE@26..27 " "
+                          LBRACE@27..28 "{"
+                          IF_STMT@28..60
+                            WHITESPACE@28..29 " "
+                            IF_KW@29..31 "if"
+                            WHITESPACE@31..32 " "
+                            LPAREN@32..33 "("
+                            BINARY_EXPR@33..56
+                              NAME_REF@33..34
+                                IDENT@33..34 "o"
+                              WHITESPACE@34..35 " "
+                              INSTANCEOF_KW@35..45 "instanceof"
+                              TYPE@45..56
+                                ANNOTATION@45..49
+                                  WHITESPACE@45..46 " "
+                                  AT@46..47 "@"
+                                  QUALIFIED_NAME@47..49
+                                    IDENT@47..49 "DA"
+                                WHITESPACE@49..50 " "
+                                IDENT@50..56 "String"
+                            RPAREN@56..57 ")"
+                            BLOCK@57..60
+                              WHITESPACE@57..58 " "
+                              LBRACE@58..59 "{"
+                              RBRACE@59..60 "}"
+                          WHITESPACE@60..61 " "
+                          RBRACE@61..62 "}"
+                      WHITESPACE@62..63 " "
+                      RBRACE@63..64 "}"
+            "#]],
+        );
+    }
+
+    #[test]
     fn lambda_forms() {
         check(
             "class C { void m() { f(x -> x + 1); g((a, b) -> a * b); h(() -> { return 0; }); i((int z) -> z); } }",

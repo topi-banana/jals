@@ -283,6 +283,8 @@ pub enum SyntaxKind {
     TYPE_PATTERN,
     /// Record pattern (`Type(subpatterns)`).
     RECORD_PATTERN,
+    /// Unnamed pattern (`_`), valid only as a record-pattern component.
+    UNNAMED_PATTERN,
     /// Pattern guard (`when expr`).
     GUARD,
 

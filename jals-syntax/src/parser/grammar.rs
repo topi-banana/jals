@@ -785,7 +785,7 @@ fn field_tail(p: &mut Parser) {
         var_init(p);
     }
     while p.eat(COMMA) {
-        p.expect(IDENT);
+        binding_name(p);
         dims(p);
         if p.eat(EQ) {
             var_init(p);
@@ -1154,7 +1154,7 @@ fn resource(p: &mut Parser) {
         // Resource variable declaration: {modifiers} Type id = expr
         modifiers(p);
         type_(p);
-        p.expect(IDENT);
+        binding_name(p);
         p.expect(EQ);
         expr(p);
     } else {
@@ -1175,7 +1175,7 @@ fn catch_clause(p: &mut Parser) {
         p.bump(PIPE);
         type_(p);
     }
-    p.expect(IDENT);
+    binding_name(p);
     p.expect(RPAREN);
     if p.at(LBRACE) {
         block(p);
@@ -1262,7 +1262,7 @@ fn for_stmt(p: &mut Parser) {
         // for-each: {modifiers} Type id : expr
         modifiers(p);
         type_(p);
-        p.expect(IDENT);
+        binding_name(p);
         p.expect(COLON);
         expr(p);
         p.expect(RPAREN);
@@ -1360,9 +1360,9 @@ fn at_local_var_decl(p: &Parser) -> bool {
         return true;
     }
     if p.at(IDENT) {
-        // Type + binding name (`Foo x` / `List<T> x` / `a.B c` / `int[] a`).
+        // Type + binding name (`Foo x` / `List<T> x` / `a.B c` / `int[] a` / `Lock _`).
         if let Some(i) = skip_type(p, 0) {
-            return p.nth_nofuel(i) == IDENT;
+            return matches!(p.nth_nofuel(i), IDENT | UNDERSCORE);
         }
     }
     false
@@ -1457,7 +1457,7 @@ fn local_var_decl(p: &mut Parser) {
 fn var_decl_inner(p: &mut Parser) {
     modifiers(p);
     type_(p);
-    p.expect(IDENT);
+    binding_name(p);
     field_tail(p);
 }
 
@@ -1604,43 +1604,60 @@ fn guard(p: &mut Parser) {
 
 // ===== Patterns (instanceof / switch) =====
 
-/// Whether this is the start of a type pattern / record pattern (type followed by a binding name `IDENT` or `(`).
+/// Whether this is the start of a type pattern / record pattern: optional variable modifiers
+/// (`final`, annotations) and a type, followed by a binding name (`IDENT` / `_`) or `(` (record).
 fn at_pattern(p: &Parser) -> bool {
-    if !(p.at(IDENT) || p.at_ts(PRIMITIVE_TYPE)) {
+    // A keyword modifier (`final`) can only begin a pattern's variable modifiers here; in both
+    // caller contexts (instanceof RHS, switch case label) it never starts a type or constant.
+    // (`default` is filtered by the switch label callers before `at_pattern` is reached.)
+    if p.at_ts(MODIFIER_KW) {
+        return true;
+    }
+    // Leading annotations may be type-use annotations (`@DA String`, still a plain type) or
+    // variable modifiers (`@DA String s`), so they alone are not decisive: skip them and require
+    // a binding / record `(` after the type.
+    let after_anno = skip_annotations_lookahead(p, 0);
+    let k = p.nth_nofuel(after_anno);
+    if !(k == IDENT || PRIMITIVE_TYPE.contains(k)) {
         return false;
     }
-    let Some(i) = skip_type(p, 0) else {
+    let Some(i) = skip_type(p, after_anno) else {
         return false;
     };
     match p.nth_nofuel(i) {
-        LPAREN => true,
-        // A type pattern's binding is a plain identifier. The contextual keyword
-        // `when` instead begins a guard, so `Type when ...` is a bare constant
-        // label with a guard, not a `Type binding` pattern.
+        // `Type(...)` is a record pattern; `Type _` is a type pattern with an unnamed binding.
+        LPAREN | UNDERSCORE => true,
+        // A type pattern's binding is a plain identifier. The contextual keyword `when` instead
+        // begins a guard, so `Type when ...` is a bare constant label with a guard.
         IDENT => p.nth_text(i) != "when",
         _ => false,
     }
 }
 
+/// Consumes a binding name: an identifier or the unnamed-variable marker `_` (Java 21+).
+fn binding_name(p: &mut Parser) -> bool {
+    if p.eat(UNDERSCORE) {
+        true
+    } else {
+        p.expect(IDENT)
+    }
+}
+
 fn pattern(p: &mut Parser) {
     let m = p.start();
+    // A type pattern may carry variable modifiers (`final`). Annotations are consumed by `type_`,
+    // so only a keyword modifier needs `modifiers` here (keeps annotation placement symmetric with
+    // the binding-less type case and avoids an empty `MODIFIERS` node on the common path).
+    if p.at_ts(MODIFIER_KW) {
+        modifiers(p);
+    }
     type_(p);
     if p.at(LPAREN) {
-        // Record pattern: Type(subpatterns)
+        // Record pattern: Type(component, ...)
         p.bump(LPAREN);
         while !p.at(RPAREN) && !p.at_eof() {
             let before = p.pos();
-            if at_pattern(p) {
-                pattern(p);
-            } else if p.at_contextual_kw("var") {
-                // `var x` binding.
-                let vm = p.start();
-                type_(p);
-                p.expect(IDENT);
-                vm.complete(p, TYPE_PATTERN);
-            } else {
-                p.err_and_bump("expected a pattern");
-            }
+            record_component(p);
             if p.pos() == before {
                 p.err_and_bump("unexpected token");
             }
@@ -1651,9 +1668,21 @@ fn pattern(p: &mut Parser) {
         p.expect(RPAREN);
         m.complete(p, RECORD_PATTERN);
     } else {
-        // Type pattern: Type id
-        p.expect(IDENT);
+        // Type pattern: {modifier} Type binding
+        binding_name(p);
         m.complete(p, TYPE_PATTERN);
+    }
+}
+
+/// One component of a record pattern: the unnamed pattern `_`, or a nested pattern
+/// (type pattern, `var`/annotated binding, or another record pattern).
+fn record_component(p: &mut Parser) {
+    if p.at(UNDERSCORE) {
+        let m = p.start();
+        p.bump(UNDERSCORE);
+        m.complete(p, UNNAMED_PATTERN);
+    } else {
+        pattern(p);
     }
 }
 
@@ -2037,7 +2066,7 @@ fn arg_list(p: &mut Parser) {
 
 /// Whether this is the start of a lambda (`id ->` or `( ... ) ->`). Matches `)` using fuel-free lookahead.
 fn at_lambda(p: &Parser) -> bool {
-    if p.at(IDENT) && p.nth_at(1, ARROW) {
+    if (p.at(IDENT) || p.at(UNDERSCORE)) && p.nth_at(1, ARROW) {
         return true;
     }
     if p.at(LPAREN) {
@@ -2092,7 +2121,7 @@ fn lambda_params(p: &mut Parser) {
         // Single bare identifier — wrap it in a PARAM node so the tree is uniform with the
         // parenthesized form (`(x) -> ...` and `x -> ...` both expose a PARAM).
         let pm = p.start();
-        p.expect(IDENT);
+        binding_name(p);
         pm.complete(p, PARAM);
     }
     m.complete(p, LAMBDA_PARAMS);
@@ -2100,14 +2129,14 @@ fn lambda_params(p: &mut Parser) {
 
 fn lambda_param(p: &mut Parser) {
     let pm = p.start();
-    if p.at(IDENT) && (p.nth_at(1, COMMA) || p.nth_at(1, RPAREN)) {
-        // Bare untyped parameter.
-        p.bump(IDENT);
+    if (p.at(IDENT) || p.at(UNDERSCORE)) && (p.nth_at(1, COMMA) || p.nth_at(1, RPAREN)) {
+        // Bare untyped parameter (`x` / `_`).
+        p.bump_any();
     } else {
         // Typed parameter (including `var`).
         modifiers(p);
         type_(p);
-        p.expect(IDENT);
+        binding_name(p);
     }
     pm.complete(p, PARAM);
 }
