@@ -11,12 +11,12 @@ separate analysis pass.
 ```
 editor ◀── stdio (LSP) ──▶ jals lsp
                               │
-                ┌─────────────┼──────────────┐
-                ▼             ▼               ▼
-          diagnostics   documentSymbol    formatting
-        (SyntaxErrors)   (typed AST)     (jals-fmt)
-                └─────────────┴──────────────┘
-                   byte offsets ──▶ UTF-16 positions (LineIndex)
+            ┌─────────────┬───┴─────────┬──────────────┐
+            ▼             ▼             ▼               ▼
+      diagnostics   documentSymbol  semanticTokens  formatting
+    (SyntaxErrors)   (typed AST)    (CST classify)  (jals-fmt)
+            └─────────────┴─────────────┴──────────────┘
+                 byte offsets ──▶ UTF-16 positions (LineIndex)
 ```
 
 ## What it does today
@@ -27,6 +27,7 @@ Server capabilities advertised on `initialize`:
 | --- | --- | --- | --- |
 | Diagnostics | `textDocument/publishDiagnostics` | parser `SyntaxError`s | Pushed on open/change; `ERROR` severity, `source: "jals"`. Cleared on close. |
 | Document symbols | `textDocument/documentSymbol` | typed AST | Hierarchical: types → members (fields, methods, constructors, nested types, enum constants). |
+| Semantic tokens | `textDocument/semanticTokens/full` | CST + parent context | Whole-document highlighting: keywords, types, declarations, name/field/call references, annotations, comments, literals. Best-effort without name resolution, but the lossless tree resolves contextual keywords (`var`, `record`, `sealed`, module directives) that TextMate grammars miss. |
 | Formatting | `textDocument/formatting` | `jals_fmt::format_source` | Whole-document: one full-range edit, or none if already formatted. |
 | Text sync | `didOpen` / `didChange` / `didClose` | — | Full document sync (`TextDocumentSyncKind::FULL`). |
 | Lifecycle | `initialize` / `shutdown` / `exit` | — | Managed by async-lsp's `LifecycleLayer`. |
@@ -66,7 +67,7 @@ The crate splits into a pure, unit-tested core and a thin async server shell:
 
 | Module | Role |
 | --- | --- |
-| `handlers/{diagnostics,symbols,formatting}.rs` | Pure functions `(text [, config], &LineIndex) -> LSP payload`. No I/O, no async — the testable core. |
+| `handlers/{diagnostics,symbols,semantic_tokens,formatting}.rs` | Pure functions `(text [, config], &LineIndex) -> LSP payload`. No I/O, no async — the testable core. |
 | `line_index.rs` | Converts `jals-syntax` UTF-8 byte offsets to LSP UTF-16 `Position`s. |
 | `state.rs` | `DocumentStore` (open documents, full text sync) and memoized config `Discovery`. |
 | `server.rs` | `LanguageServer` impl + advertised capabilities; glue that calls the pure handlers. |
@@ -119,7 +120,7 @@ future work by what each capability requires.
 
 | Capability | LSP method |
 | --- | --- |
-| Syntax highlighting | `textDocument/semanticTokens/*` |
+| Semantic tokens: incremental + range | `textDocument/semanticTokens/{full/delta,range}` (the `full` variant already ships — see above) |
 | Code folding | `textDocument/foldingRange` |
 | Expand/shrink selection | `textDocument/selectionRange` |
 | Lexical occurrence highlight | `textDocument/documentHighlight` |
@@ -153,6 +154,7 @@ gated on a future analysis crate (`jals-hir` or similar):
 ## Suggested priority
 
 By editor-user impact: **(1)** config hot-reload + incremental sync (correctness and ergonomics
-for the features that already exist) → **(2)** semantic tokens + folding (high value, still
+for the features that already exist) → **(2)** folding + selection range (high value, still
 syntax-only) → **(3)** range / on-type formatting → **(4)** the semantic-analysis features,
-once an analysis layer lands.
+once an analysis layer lands. Semantic tokens (`full`) already ship; their `delta`/`range`
+variants are a later optimization.

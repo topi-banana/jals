@@ -8,8 +8,10 @@ use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, InitializeParams,
-    InitializeResult, OneOf, PublishDiagnosticsParams, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, notification,
+    InitializeResult, OneOf, PublishDiagnosticsParams, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, notification,
 };
 use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
@@ -148,6 +150,18 @@ impl LanguageServer for ServerState {
             Ok(doc.map(|doc| handlers::formatting_edits(&doc.text, &config, &doc.line_index)))
         })
     }
+
+    fn semantic_tokens_full(
+        &mut self,
+        params: SemanticTokensParams,
+    ) -> BoxFuture<'static, Result<Option<SemanticTokensResult>, Self::Error>> {
+        let doc = self.store.get(&params.text_document.uri);
+        Box::pin(async move {
+            Ok(doc.map(|doc| {
+                SemanticTokensResult::Tokens(handlers::semantic_tokens(&doc.text, &doc.line_index))
+            }))
+        })
+    }
 }
 
 /// The capabilities advertised to the client during `initialize`.
@@ -156,6 +170,14 @@ fn server_capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: handlers::semantic_tokens_legend(),
+                range: Some(false),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                ..SemanticTokensOptions::default()
+            },
+        )),
         ..ServerCapabilities::default()
     }
 }
