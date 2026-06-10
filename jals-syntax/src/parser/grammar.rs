@@ -970,10 +970,17 @@ fn skip_type(p: &Parser, start: usize) -> Option<usize> {
     } else {
         return None;
     }
+    Some(skip_bracket_pairs(p, i))
+}
+
+/// Skips a run of plain `[` `]` pairs starting at `start` using fuel-free lookahead,
+/// returning the offset immediately after them.
+fn skip_bracket_pairs(p: &Parser, start: usize) -> usize {
+    let mut i = start;
     while p.nth_nofuel(i) == LBRACK && p.nth_nofuel(i + 1) == RBRACK {
         i += 2;
     }
-    Some(i)
+    i
 }
 
 // ===== Statements =====
@@ -1357,7 +1364,8 @@ fn at_local_var_decl(p: &Parser) -> bool {
         return true;
     }
     if p.at_ts(PRIMITIVE_TYPE) {
-        return true;
+        // `int.class` / `int[].class` starts an expression, not a declaration.
+        return p.nth_nofuel(skip_bracket_pairs(p, 1)) != DOT;
     }
     if p.at(IDENT) {
         // Type + binding name (`Foo x` / `List<T> x` / `a.B c` / `int[] a` / `Lock _`).
@@ -1689,7 +1697,10 @@ fn record_component(p: &mut Parser) {
 // ===== Expressions (assignment -> ternary -> binary via precedence climbing -> unary -> postfix -> primary) =====
 
 fn at_expr_start(p: &Parser) -> bool {
+    // A primitive type keyword can begin an expression only as a class literal
+    // (`int.class`, `boolean[].class`).
     p.at_ts(EXPR_START)
+        || (p.at_ts(PRIMITIVE_TYPE) && p.nth_nofuel(skip_bracket_pairs(p, 1)) == DOT)
 }
 
 /// Parses an expression (entry point).
@@ -1886,6 +1897,12 @@ fn cast_expr(p: &mut Parser, pure_primitive: bool) -> CompletedMarker {
     m.complete(p, CAST_EXPR)
 }
 
+/// Whether `[ ]`+ `. class` follows — the tail of an array class literal.
+fn at_array_class_literal(p: &Parser) -> bool {
+    let i = skip_bracket_pairs(p, 0);
+    i > 0 && p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == CLASS_KW
+}
+
 fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
     let mut lhs = primary_expr(p)?;
     loop {
@@ -1951,6 +1968,20 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
                 arg_list(p);
                 lhs = m.complete(p, CALL_EXPR);
             }
+            LBRACK if at_array_class_literal(p) => {
+                // `String[].class` / `a.b.C[][].class` (JLS 15.8.2 `TypeName {[]} . class`).
+                // Unlike the primitive form (which wraps its type in a TYPE node via
+                // `primary_expr`), the lhs here is an already-completed NAME_REF /
+                // FIELD_ACCESS, so the dimension tokens sit directly under CLASS_LITERAL.
+                let m = lhs.precede(p);
+                while p.at(LBRACK) && p.nth_at(1, RBRACK) {
+                    p.bump(LBRACK);
+                    p.bump(RBRACK);
+                }
+                p.bump(DOT);
+                p.bump(CLASS_KW);
+                lhs = m.complete(p, CLASS_LITERAL);
+            }
             LBRACK => {
                 let m = lhs.precede(p);
                 p.bump(LBRACK);
@@ -1995,6 +2026,15 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         }
         NEW_KW => new_expr(p),
         SWITCH_KW => switch_expr(p),
+        _ if p.at_ts(PRIMITIVE_TYPE) && p.nth_nofuel(skip_bracket_pairs(p, 1)) == DOT => {
+            // Class literal `int.class` / `boolean[].class` / `void.class` (JLS 15.8.2) —
+            // the only expression that can begin with a primitive type keyword.
+            let m = p.start();
+            type_(p); // keyword + `[]` dims → TYPE node
+            p.expect(DOT); // guaranteed by the gate above
+            p.expect(CLASS_KW);
+            m.complete(p, CLASS_LITERAL)
+        }
         _ => {
             p.err_and_bump("expected an expression");
             return None;

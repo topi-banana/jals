@@ -1497,8 +1497,16 @@ impl SwitchExpr {
 ast_node!(ClassLiteral, CLASS_LITERAL);
 
 impl ClassLiteral {
-    /// The expression before `.class`.
+    /// The expression before `.class` in a reference form (`String.class`,
+    /// `a.b.C.class`). For an array form like `String[].class` this is the part
+    /// before the dimensions (`String`). `None` for primitive forms (see [`Self::ty`]).
     pub fn expr(&self) -> Option<Expr> {
+        support::child(&self.syntax)
+    }
+
+    /// The type of a primitive or primitive-array class literal (`int.class`,
+    /// `long[].class`, `void.class`). `None` for reference forms (see [`Self::expr`]).
+    pub fn ty(&self) -> Option<Type> {
         support::child(&self.syntax)
     }
 }

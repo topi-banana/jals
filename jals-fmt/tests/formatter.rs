@@ -103,6 +103,24 @@ fn method_with_statements() {
 }
 
 #[test]
+fn class_literals() {
+    check(
+        "class A{void m(){f(int.class);f(void.class);f(int[].class);f(String[].class);f(java.lang.String[][].class);}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    f(int.class);
+                    f(void.class);
+                    f(int [].class);
+                    f(String [].class);
+                    f(java.lang.String [] [].class);
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn nested_generics() {
     check(
         "class C{Map<K,List<Map<K2,V2>>> f(){return null;}}",
