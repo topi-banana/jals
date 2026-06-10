@@ -24,6 +24,7 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Parser | `jals-syntax/src/parser/` | Recursive descent. `grammar.rs` is the rules; `mod.rs` the core; `event.rs`/`sink.rs` build the green tree. Error-resilient. |
 | Typed AST | `jals-syntax/src/ast.rs` | Hand-written zero-cost newtype views over the CST. Accessors return `Option`/iterators, never panic. |
 | Formatter pipeline | `jals-fmt/src/lower.rs` → `doc.rs` → `render.rs` | CST → `Doc` IR → text. |
+| Import layout | `jals-fmt/src/imports.rs` | Pure ordering/grouping of the leading import run (`reorder-imports` / `group-imports`) + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
 | CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lsp`; config discovery memoized per directory. |
