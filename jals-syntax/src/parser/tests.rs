@@ -2470,6 +2470,362 @@ fn method_reference_and_class_literal() {
 }
 
 #[test]
+fn primitive_class_literals() {
+    check(
+        "class C { void m() { f(int.class); g(void.class); h(boolean.class); } }",
+        expect![[r#"
+            SOURCE_FILE@0..71
+              CLASS_DECL@0..71
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..71
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..69
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..69
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..34
+                        CALL_EXPR@20..33
+                          NAME_REF@20..22
+                            WHITESPACE@20..21 " "
+                            IDENT@21..22 "f"
+                          ARG_LIST@22..33
+                            LPAREN@22..23 "("
+                            CLASS_LITERAL@23..32
+                              TYPE@23..26
+                                INT_KW@23..26 "int"
+                              DOT@26..27 "."
+                              CLASS_KW@27..32 "class"
+                            RPAREN@32..33 ")"
+                        SEMICOLON@33..34 ";"
+                      EXPR_STMT@34..49
+                        CALL_EXPR@34..48
+                          NAME_REF@34..36
+                            WHITESPACE@34..35 " "
+                            IDENT@35..36 "g"
+                          ARG_LIST@36..48
+                            LPAREN@36..37 "("
+                            CLASS_LITERAL@37..47
+                              TYPE@37..41
+                                VOID_KW@37..41 "void"
+                              DOT@41..42 "."
+                              CLASS_KW@42..47 "class"
+                            RPAREN@47..48 ")"
+                        SEMICOLON@48..49 ";"
+                      EXPR_STMT@49..67
+                        CALL_EXPR@49..66
+                          NAME_REF@49..51
+                            WHITESPACE@49..50 " "
+                            IDENT@50..51 "h"
+                          ARG_LIST@51..66
+                            LPAREN@51..52 "("
+                            CLASS_LITERAL@52..65
+                              TYPE@52..59
+                                BOOLEAN_KW@52..59 "boolean"
+                              DOT@59..60 "."
+                              CLASS_KW@60..65 "class"
+                            RPAREN@65..66 ")"
+                        SEMICOLON@66..67 ";"
+                      WHITESPACE@67..68 " "
+                      RBRACE@68..69 "}"
+                  WHITESPACE@69..70 " "
+                  RBRACE@70..71 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn array_class_literals() {
+    check(
+        "class C { void m() { f(int[].class); g(long[][][].class); h(String[].class); i(java.lang.String[][].class); } }",
+        expect![[r#"
+            SOURCE_FILE@0..111
+              CLASS_DECL@0..111
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..111
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..109
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..109
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..36
+                        CALL_EXPR@20..35
+                          NAME_REF@20..22
+                            WHITESPACE@20..21 " "
+                            IDENT@21..22 "f"
+                          ARG_LIST@22..35
+                            LPAREN@22..23 "("
+                            CLASS_LITERAL@23..34
+                              TYPE@23..28
+                                INT_KW@23..26 "int"
+                                LBRACK@26..27 "["
+                                RBRACK@27..28 "]"
+                              DOT@28..29 "."
+                              CLASS_KW@29..34 "class"
+                            RPAREN@34..35 ")"
+                        SEMICOLON@35..36 ";"
+                      EXPR_STMT@36..57
+                        CALL_EXPR@36..56
+                          NAME_REF@36..38
+                            WHITESPACE@36..37 " "
+                            IDENT@37..38 "g"
+                          ARG_LIST@38..56
+                            LPAREN@38..39 "("
+                            CLASS_LITERAL@39..55
+                              TYPE@39..49
+                                LONG_KW@39..43 "long"
+                                LBRACK@43..44 "["
+                                RBRACK@44..45 "]"
+                                LBRACK@45..46 "["
+                                RBRACK@46..47 "]"
+                                LBRACK@47..48 "["
+                                RBRACK@48..49 "]"
+                              DOT@49..50 "."
+                              CLASS_KW@50..55 "class"
+                            RPAREN@55..56 ")"
+                        SEMICOLON@56..57 ";"
+                      EXPR_STMT@57..76
+                        CALL_EXPR@57..75
+                          NAME_REF@57..59
+                            WHITESPACE@57..58 " "
+                            IDENT@58..59 "h"
+                          ARG_LIST@59..75
+                            LPAREN@59..60 "("
+                            CLASS_LITERAL@60..74
+                              NAME_REF@60..66
+                                IDENT@60..66 "String"
+                              LBRACK@66..67 "["
+                              RBRACK@67..68 "]"
+                              DOT@68..69 "."
+                              CLASS_KW@69..74 "class"
+                            RPAREN@74..75 ")"
+                        SEMICOLON@75..76 ";"
+                      EXPR_STMT@76..107
+                        CALL_EXPR@76..106
+                          NAME_REF@76..78
+                            WHITESPACE@76..77 " "
+                            IDENT@77..78 "i"
+                          ARG_LIST@78..106
+                            LPAREN@78..79 "("
+                            CLASS_LITERAL@79..105
+                              FIELD_ACCESS@79..95
+                                FIELD_ACCESS@79..88
+                                  NAME_REF@79..83
+                                    IDENT@79..83 "java"
+                                  DOT@83..84 "."
+                                  IDENT@84..88 "lang"
+                                DOT@88..89 "."
+                                IDENT@89..95 "String"
+                              LBRACK@95..96 "["
+                              RBRACK@96..97 "]"
+                              LBRACK@97..98 "["
+                              RBRACK@98..99 "]"
+                              DOT@99..100 "."
+                              CLASS_KW@100..105 "class"
+                            RPAREN@105..106 ")"
+                        SEMICOLON@106..107 ";"
+                      WHITESPACE@107..108 " "
+                      RBRACE@108..109 "}"
+                  WHITESPACE@109..110 " "
+                  RBRACE@110..111 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn class_literal_statement_position() {
+    // `int.class` at statement start must parse as an expression statement, not be
+    // mistaken for the start of a local variable declaration (javac rejects the
+    // assignment semantically, but it is syntactically well-formed).
+    check(
+        "class C { void f() { int.class = null; } }",
+        expect![[r#"
+        SOURCE_FILE@0..42
+          CLASS_DECL@0..42
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..42
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..40
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "f"
+                PARAM_LIST@16..18
+                  LPAREN@16..17 "("
+                  RPAREN@17..18 ")"
+                BLOCK@18..40
+                  WHITESPACE@18..19 " "
+                  LBRACE@19..20 "{"
+                  EXPR_STMT@20..38
+                    ASSIGNMENT_EXPR@20..37
+                      CLASS_LITERAL@20..30
+                        TYPE@20..24
+                          WHITESPACE@20..21 " "
+                          INT_KW@21..24 "int"
+                        DOT@24..25 "."
+                        CLASS_KW@25..30 "class"
+                      WHITESPACE@30..31 " "
+                      EQ@31..32 "="
+                      LITERAL@32..37
+                        WHITESPACE@32..33 " "
+                        NULL_KW@33..37 "null"
+                    SEMICOLON@37..38 ";"
+                  WHITESPACE@38..39 " "
+                  RBRACE@39..40 "}"
+              WHITESPACE@40..41 " "
+              RBRACE@41..42 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn class_literal_error_recovery() {
+    // `f(int)` and `a[]` keep their pre-existing error recovery; `int.foo` and
+    // `int[].foo` recover as a CLASS_LITERAL missing its `class` keyword.
+    check(
+        "class C { void m() { f(int); g(int.foo); h(int[].foo); var x = a[]; } }",
+        expect![[r#"
+            SOURCE_FILE@0..71
+              CLASS_DECL@0..71
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..71
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..69
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..69
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..28
+                        CALL_EXPR@20..27
+                          NAME_REF@20..22
+                            WHITESPACE@20..21 " "
+                            IDENT@21..22 "f"
+                          ARG_LIST@22..27
+                            LPAREN@22..23 "("
+                            ERROR@23..26
+                              INT_KW@23..26 "int"
+                            RPAREN@26..27 ")"
+                        SEMICOLON@27..28 ";"
+                      EXPR_STMT@28..35
+                        CALL_EXPR@28..35
+                          NAME_REF@28..30
+                            WHITESPACE@28..29 " "
+                            IDENT@29..30 "g"
+                          ARG_LIST@30..35
+                            LPAREN@30..31 "("
+                            CLASS_LITERAL@31..35
+                              TYPE@31..34
+                                INT_KW@31..34 "int"
+                              DOT@34..35 "."
+                      EXPR_STMT@35..38
+                        NAME_REF@35..38
+                          IDENT@35..38 "foo"
+                      ERROR@38..39
+                        RPAREN@38..39 ")"
+                      EMPTY_STMT@39..40
+                        SEMICOLON@39..40 ";"
+                      EXPR_STMT@40..49
+                        CALL_EXPR@40..49
+                          NAME_REF@40..42
+                            WHITESPACE@40..41 " "
+                            IDENT@41..42 "h"
+                          ARG_LIST@42..49
+                            LPAREN@42..43 "("
+                            CLASS_LITERAL@43..49
+                              TYPE@43..48
+                                INT_KW@43..46 "int"
+                                LBRACK@46..47 "["
+                                RBRACK@47..48 "]"
+                              DOT@48..49 "."
+                      EXPR_STMT@49..52
+                        NAME_REF@49..52
+                          IDENT@49..52 "foo"
+                      ERROR@52..53
+                        RPAREN@52..53 ")"
+                      EMPTY_STMT@53..54
+                        SEMICOLON@53..54 ";"
+                      LOCAL_VAR_DECL@54..67
+                        MODIFIERS@54..54
+                        TYPE@54..58
+                          WHITESPACE@54..55 " "
+                          VAR_KW@55..58 "var"
+                        WHITESPACE@58..59 " "
+                        IDENT@59..60 "x"
+                        WHITESPACE@60..61 " "
+                        EQ@61..62 "="
+                        INDEX_EXPR@62..66
+                          NAME_REF@62..64
+                            WHITESPACE@62..63 " "
+                            IDENT@63..64 "a"
+                          LBRACK@64..65 "["
+                          ERROR@65..66
+                            RBRACK@65..66 "]"
+                        SEMICOLON@66..67 ";"
+                      WHITESPACE@67..68 " "
+                      RBRACE@68..69 "}"
+                  WHITESPACE@69..70 " "
+                  RBRACE@70..71 "}"
+            error 23..23: expected an expression
+            error 35..35: expected CLASS_KW
+            error 35..35: expected RPAREN
+            error 35..35: expected SEMICOLON
+            error 38..38: expected SEMICOLON
+            error 38..38: expected a statement
+            error 49..49: expected CLASS_KW
+            error 49..49: expected RPAREN
+            error 49..49: expected SEMICOLON
+            error 52..52: expected SEMICOLON
+            error 52..52: expected a statement
+            error 65..65: expected an expression
+            error 66..66: expected RBRACK
+        "#]],
+    );
+}
+
+#[test]
 fn explicit_type_witness() {
     check(
         "class C { void m() { List.<String>of(); obj.<Map<K, V>>build().run(); } }",
