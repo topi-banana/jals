@@ -1,6 +1,6 @@
 //! Property tests for the formatter's correctness invariants.
 
-use jals_fmt::{Config, TrailingComma, format_source};
+use jals_fmt::{BinopSeparator, Config, TrailingComma, format_source};
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
 
@@ -105,6 +105,9 @@ fn javaish() -> impl Strategy<Value = String> {
             Just(">>"),
             Just(">="),
             Just("&&"),
+            Just("||"),
+            Just("%"),
+            Just("instanceof"),
             Just("->"),
             Just("::"),
             Just("@"),
@@ -151,6 +154,16 @@ fn trailing_config(trailing_comma: TrailingComma) -> Config {
     Config {
         trailing_comma,
         array_width: 8,
+        ..Config::default()
+    }
+}
+
+/// Config with a given binop separator and a narrow `max-width`, so binary expressions are
+/// pushed into the wrapped layout.
+fn binop_config(binop_separator: BinopSeparator) -> Config {
+    Config {
+        binop_separator,
+        max_width: 24,
         ..Config::default()
     }
 }
@@ -529,5 +542,45 @@ proptest! {
         let _ = fmt_with(&src, &trailing_config(TrailingComma::Always));
         let _ = fmt_with(&src, &trailing_config(TrailingComma::Never));
         let _ = fmt_with(&src, &trailing_config(TrailingComma::Vertical));
+    }
+
+    /// Binary-expression wrapping stays idempotent under both operator placements.
+    #[test]
+    fn binop_separator_idempotent(
+        src in javaish(),
+        sep in prop_oneof![Just(BinopSeparator::Front), Just(BinopSeparator::Back)],
+    ) {
+        let cfg = binop_config(sep);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Binary-expression wrapping preserves the significant-token sequence exactly — it only
+    /// moves whitespace around operators.
+    #[test]
+    fn binop_separator_preserves_significant_tokens(
+        src in javaish(),
+        sep in prop_oneof![Just(BinopSeparator::Front), Just(BinopSeparator::Back)],
+    ) {
+        let out = fmt_with(&src, &binop_config(sep));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Binary-expression wrapping never drops or mangles a comment.
+    #[test]
+    fn binop_separator_preserves_comments(
+        src in javaish(),
+        sep in prop_oneof![Just(BinopSeparator::Front), Just(BinopSeparator::Back)],
+    ) {
+        let out = fmt_with(&src, &binop_config(sep));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Binary-expression wrapping never panics on arbitrary Unicode input.
+    #[test]
+    fn binop_separator_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &binop_config(BinopSeparator::Front));
+        let _ = fmt_with(&src, &binop_config(BinopSeparator::Back));
     }
 }

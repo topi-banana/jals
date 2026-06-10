@@ -1,7 +1,9 @@
 //! Snapshot tests for the formatter.
 
 use expect_test::{Expect, expect};
-use jals_fmt::{BraceStyle, Config, ControlBraceStyle, LineEnding, TrailingComma, format_source};
+use jals_fmt::{
+    BinopSeparator, BraceStyle, Config, ControlBraceStyle, LineEnding, TrailingComma, format_source,
+};
 
 fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted
@@ -1437,4 +1439,273 @@ fn group_imports_overrides_reorder() {
         format_source(src, &cfg).formatted
     };
     assert_eq!(group_only, both);
+}
+
+// ---------------------------------------------------------------------------
+// Binary-expression wrapping (`binop-separator`)
+// ---------------------------------------------------------------------------
+
+fn fmt_binop(src: &str, max_width: usize, binop_separator: BinopSeparator) -> String {
+    let cfg = Config {
+        max_width,
+        binop_separator,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn short_binary_stays_flat_in_both_modes() {
+    // The option only governs placement when wrapping happens; a fitting expression is
+    // identical (and unwrapped) under both modes.
+    let src = "class A{int x=a+b*c;}";
+    let front = fmt_binop(src, 100, BinopSeparator::Front);
+    let back = fmt_binop(src, 100, BinopSeparator::Back);
+    assert_eq!(front, back);
+    expect![[r#"
+        class A {
+            int x = a + b * c;
+        }
+    "#]]
+    .assert_eq(&front);
+}
+
+#[test]
+fn long_binary_wraps_operator_front_by_default() {
+    // Past max-width(100) the additive run breaks at every operator, each leading its line.
+    check(
+        "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    result = alphaOperandName
+                        + betaOperandName
+                        + gammaOperandName
+                        + deltaOperandName
+                        + epsilonOperandName;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn long_binary_wraps_operator_back() {
+    // The same source with `binop-separator = back`: each operator ends the broken line.
+    expect![[r#"
+        class A {
+            void m() {
+                result = alphaOperandName +
+                    betaOperandName +
+                    gammaOperandName +
+                    deltaOperandName +
+                    epsilonOperandName;
+            }
+        }
+    "#]].assert_eq(&fmt_binop(
+        "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
+        100,
+        BinopSeparator::Back,
+    ));
+}
+
+#[test]
+fn mixed_precedence_breaks_at_lowest_first() {
+    // Only the `||` level needs to break; the `&&`/`==` operands stay intact on their lines.
+    expect![[r#"
+        class A {
+            void m() {
+                flag = aLongName == bLongName && cLongName == dLongName
+                    || eLongName == fLongName;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}",
+        65,
+        BinopSeparator::Front,
+    ));
+}
+
+#[test]
+fn mixed_precedence_breaks_inner_level_when_narrower() {
+    // Narrower still: the `&&` group also breaks, while each `==` unit stays on one line.
+    expect![[r#"
+        class A {
+            void m() {
+                flag = aLongName == bLongName
+                    && cLongName == dLongName
+                    || eLongName == fLongName;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}",
+        40,
+        BinopSeparator::Front,
+    ));
+}
+
+#[test]
+fn multiplicative_stays_a_unit_when_additive_breaks() {
+    // Breaks at `+` only; the higher-precedence `*` run rides along as one unit.
+    expect![[r#"
+        class A {
+            void m() {
+                total = alphaValue
+                    + betaValue * gammaValue * deltaValue
+                    + epsilonValue;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){total=alphaValue+betaValue*gammaValue*deltaValue+epsilonValue;}}",
+        55,
+        BinopSeparator::Front,
+    ));
+}
+
+#[test]
+fn shift_operators_stay_fused_when_wrapped_front() {
+    // `>>` / `>>>` are runs of `>` tokens; they stay fused at the front of their lines.
+    expect![[r#"
+        class A {
+            void m() {
+                mask = firstLongValue
+                    >> secondShiftAmount
+                    >>> thirdShiftAmount;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){mask=firstLongValue>>secondShiftAmount>>>thirdShiftAmount;}}",
+        40,
+        BinopSeparator::Front,
+    ));
+}
+
+#[test]
+fn shift_operators_stay_fused_when_wrapped_back() {
+    expect![[r#"
+        class A {
+            void m() {
+                mask = firstLongValue >>
+                    secondShiftAmount >>>
+                    thirdShiftAmount;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){mask=firstLongValue>>secondShiftAmount>>>thirdShiftAmount;}}",
+        40,
+        BinopSeparator::Back,
+    ));
+}
+
+#[test]
+fn instanceof_wraps_like_any_operator() {
+    expect![[r#"
+        class A {
+            void m() {
+                flag = someObjectReference
+                    instanceof SomeVeryLongGenericTypeName;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){flag=someObjectReference instanceof SomeVeryLongGenericTypeName;}}",
+        40,
+        BinopSeparator::Front,
+    ));
+}
+
+#[test]
+fn paren_operand_stays_a_unit() {
+    // Parenthesized operands are opaque units; the break lands on the `*` between them.
+    expect![[r#"
+        class A {
+            void m() {
+                area = (widthValue + paddingValue)
+                    * (heightValue + marginValue);
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop(
+        "class A{void m(){area=(widthValue+paddingValue)*(heightValue+marginValue);}}",
+        45,
+        BinopSeparator::Front,
+    ));
+}
+
+#[test]
+fn comment_on_operator_forces_break_front() {
+    // A trailing line comment on the operator forces the whole run broken, and stays
+    // glued to its `+`.
+    let src = "class A{void m(){x = a + // why\nb;}}";
+    let once = fmt_binop(src, 100, BinopSeparator::Front);
+    expect![[r#"
+        class A {
+            void m() {
+                x = a
+                    +  // why
+                    b;
+            }
+        }
+    "#]]
+    .assert_eq(&once);
+    assert_eq!(once, fmt_binop(&once, 100, BinopSeparator::Front));
+}
+
+#[test]
+fn comment_on_operator_forces_break_back() {
+    let src = "class A{void m(){x = a + // why\nb;}}";
+    let once = fmt_binop(src, 100, BinopSeparator::Back);
+    expect![[r#"
+        class A {
+            void m() {
+                x = a +  // why
+                    b;
+            }
+        }
+    "#]]
+    .assert_eq(&once);
+    assert_eq!(once, fmt_binop(&once, 100, BinopSeparator::Back));
+}
+
+#[test]
+fn binary_inside_broken_arg_list_refits_at_its_column() {
+    // The narrow fn-call-width breaks the call one argument per line; the binary argument
+    // is re-measured at its row column and stays flat there.
+    let cfg = Config {
+        fn_call_width: 10,
+        ..Config::default()
+    };
+    expect![[r#"
+        class A {
+            void m() {
+                process(
+                    alphaValue + betaValue,
+                    gammaValue
+                );
+            }
+        }
+    "#]]
+    .assert_eq(
+        &format_source(
+            "class A{void m(){process(alphaValue+betaValue,gammaValue);}}",
+            &cfg,
+        )
+        .formatted,
+    );
+}
+
+#[test]
+fn binop_wrapping_is_idempotent() {
+    let src =
+        "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}";
+    for sep in [BinopSeparator::Front, BinopSeparator::Back] {
+        let once = fmt_binop(src, 40, sep);
+        let twice = fmt_binop(&once, 40, sep);
+        assert_eq!(once, twice, "binop wrapping must be idempotent ({sep:?})");
+    }
 }
