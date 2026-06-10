@@ -78,6 +78,23 @@ impl Discovery {
         self.cache.insert(dir, cfg.clone());
         cfg
     }
+
+    /// Forget all memoized configs, e.g. after a `jalsfmt.toml` changes on disk.
+    /// Discovery reruns lazily on the next request that needs a config.
+    pub(crate) fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
+
+/// File name of the formatter config, mirrored from `jals_fmt::Config::discover`.
+const CONFIG_FILE_NAME: &str = "jalsfmt.toml";
+
+/// Whether a watched-file URI refers to a `jalsfmt.toml` config file.
+pub(crate) fn is_config_file(uri: &Url) -> bool {
+    uri.to_file_path().is_ok_and(|path| {
+        path.file_name()
+            .is_some_and(|name| name == CONFIG_FILE_NAME)
+    })
 }
 
 #[cfg(test)]
@@ -101,5 +118,33 @@ mod tests {
         let mut discovery = Discovery::default();
         let uri = Url::parse("untitled:Untitled-1").unwrap();
         assert_eq!(discovery.for_uri(&uri), Config::default());
+    }
+
+    #[test]
+    fn discovery_clear_picks_up_config_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("jalsfmt.toml");
+        let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
+
+        let mut discovery = Discovery::default();
+        std::fs::write(&config_path, "indent-width = 7\n").unwrap();
+        assert_eq!(discovery.for_uri(&uri).indent_width, 7);
+
+        // The cached config survives an edit on disk until the cache is cleared.
+        std::fs::write(&config_path, "indent-width = 3\n").unwrap();
+        assert_eq!(discovery.for_uri(&uri).indent_width, 7);
+
+        discovery.clear();
+        assert_eq!(discovery.for_uri(&uri).indent_width, 3);
+    }
+
+    #[test]
+    fn is_config_file_matches_only_jalsfmt_toml() {
+        let config = Url::parse("file:///p/jalsfmt.toml").unwrap();
+        assert!(is_config_file(&config));
+        let other = Url::parse("file:///p/other.toml").unwrap();
+        assert!(!is_config_file(&other));
+        let non_file = Url::parse("untitled:jalsfmt.toml").unwrap();
+        assert!(!is_config_file(&non_file));
     }
 }

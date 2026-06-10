@@ -31,12 +31,14 @@ Server capabilities advertised on `initialize`:
 | Code folding | `textDocument/foldingRange` | CST | Folds class/enum/module bodies, blocks (control-flow & lambdas included), switch blocks, array initializers, multi-line block/doc comments, and import groups. The closing brace stays visible; multi-line spans only. |
 | Selection range | `textDocument/selectionRange` | CST | Expand/shrink: nests the token under each cursor up through its ancestor nodes to the file root. Syntax-only; multiple positions per request. |
 | Formatting | `textDocument/formatting` | `jals_fmt::format_source` | Whole-document: one full-range edit, or none if already formatted. |
+| Config hot-reload | `workspace/didChangeWatchedFiles` | — | Dynamically registers a `**/jalsfmt.toml` watcher via `client/registerCapability` (when the client supports dynamic registration); changes clear the config cache so the next format request rediscovers. |
 | Text sync | `didOpen` / `didChange` / `didClose` | — | Full document sync (`TextDocumentSyncKind::FULL`). |
 | Lifecycle | `initialize` / `shutdown` / `exit` | — | Managed by async-lsp's `LifecycleLayer`. |
 
 Formatting config is discovered per document by searching upward for `jalsfmt.toml` from the
 file's directory (memoized), matching the `jals fmt` CLI. Non-`file:` URIs (e.g. `untitled:`)
-fall back to `Config::default()`.
+fall back to `Config::default()`. When the client supports file watching, `jalsfmt.toml` edits
+take effect without a server restart.
 
 ## Usage
 
@@ -112,7 +114,6 @@ future work by what each capability requires.
 
 | Capability | LSP method | Notes |
 | --- | --- | --- |
-| Config hot-reload | `workspace/didChangeWatchedFiles` | Watch `jalsfmt.toml`; clear the `Discovery` cache so edits take effect without a restart. |
 | Range formatting | `textDocument/rangeFormatting` | Format a selection. Needs `jals-fmt` to format a sub-range (today it is whole-document only). |
 | On-type formatting | `textDocument/onTypeFormatting` | Reformat on `}` / `;`. |
 | Incremental sync | — | `TextDocumentSyncKind::INCREMENTAL` to avoid reparsing the whole file on every keystroke. |
@@ -153,7 +154,7 @@ gated on a future analysis crate (`jals-hir` or similar):
 
 ## Suggested priority
 
-By editor-user impact: **(1)** config hot-reload + incremental sync (correctness and ergonomics
+By editor-user impact: **(1)** incremental sync (correctness and ergonomics
 for the features that already exist) → **(2)** range / on-type formatting → **(3)** the
 semantic-analysis features, once an analysis layer lands. Code folding, selection range, and
 semantic tokens (`full`) already ship; the latter's `delta`/`range` variants are a later

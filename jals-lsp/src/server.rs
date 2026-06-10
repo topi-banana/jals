@@ -6,14 +6,18 @@ use std::ops::ControlFlow;
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, FoldingRangeProviderCapability, InitializeParams, InitializeResult, OneOf,
-    PublishDiagnosticsParams, SelectionRange, SelectionRangeParams,
-    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    notification,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, GlobPattern, InitializeParams, InitializeResult,
+    InitializedParams, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
+    SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url,
+    notification::{self, Notification},
+    request,
 };
 use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
@@ -24,7 +28,7 @@ use futures::future::BoxFuture;
 use tower::ServiceBuilder;
 
 use crate::handlers;
-use crate::state::{Discovery, DocumentStore};
+use crate::state::{Discovery, DocumentStore, is_config_file};
 
 /// Build the server and run its stdio event loop until the client disconnects.
 pub(crate) async fn run_server() -> anyhow::Result<()> {
@@ -51,6 +55,9 @@ struct ServerState {
     client: ClientSocket,
     store: DocumentStore,
     discovery: Discovery,
+    /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
+    /// taken from the `initialize` request. Gates the `jalsfmt.toml` watcher registration.
+    config_watch_registration_supported: bool,
 }
 
 impl ServerState {
@@ -59,6 +66,7 @@ impl ServerState {
             client,
             store: DocumentStore::default(),
             discovery: Discovery::default(),
+            config_watch_registration_supported: false,
         }
     }
 
@@ -84,14 +92,52 @@ impl LanguageServer for ServerState {
 
     fn initialize(
         &mut self,
-        _params: InitializeParams,
+        params: InitializeParams,
     ) -> BoxFuture<'static, Result<InitializeResult, Self::Error>> {
+        self.config_watch_registration_supported = params
+            .capabilities
+            .workspace
+            .and_then(|workspace| workspace.did_change_watched_files)
+            .and_then(|caps| caps.dynamic_registration)
+            .unwrap_or(false);
         Box::pin(async move {
             Ok(InitializeResult {
                 capabilities: server_capabilities(),
                 server_info: None,
             })
         })
+    }
+
+    fn initialized(&mut self, _params: InitializedParams) -> Self::NotifyResult {
+        if self.config_watch_registration_supported {
+            let client = self.client.clone();
+            // Notification handlers are sync and run on the main-loop task; send the
+            // client request from a spawned task so the loop stays free to deliver
+            // the response.
+            tokio::spawn(async move {
+                let _ = client
+                    .request::<request::RegisterCapability>(config_watch_registration())
+                    .await;
+            });
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn did_change_watched_files(
+        &mut self,
+        params: DidChangeWatchedFilesParams,
+    ) -> Self::NotifyResult {
+        // A created/changed/deleted jalsfmt.toml can affect discovery for any
+        // directory at or below it (including shadowing); drop the whole memo and
+        // rediscover lazily on the next formatting request.
+        if params
+            .changes
+            .iter()
+            .any(|event| is_config_file(&event.uri))
+        {
+            self.discovery.clear();
+        }
+        ControlFlow::Continue(())
     }
 
     fn did_open(&mut self, params: DidOpenTextDocumentParams) -> Self::NotifyResult {
@@ -188,6 +234,27 @@ impl LanguageServer for ServerState {
     }
 }
 
+/// Ask the client to watch `jalsfmt.toml` files anywhere in the workspace, so config
+/// edits invalidate the discovery cache without a server restart.
+fn config_watch_registration() -> RegistrationParams {
+    let options = DidChangeWatchedFilesRegistrationOptions {
+        watchers: vec![FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/jalsfmt.toml".into()),
+            // `None` means create + change + delete.
+            kind: None,
+        }],
+    };
+    RegistrationParams {
+        registrations: vec![Registration {
+            id: "jals-lsp-config-watch".into(),
+            method: notification::DidChangeWatchedFiles::METHOD.into(),
+            register_options: Some(
+                serde_json::to_value(options).expect("watcher options serialize to JSON"),
+            ),
+        }],
+    }
+}
+
 /// The capabilities advertised to the client during `initialize`.
 fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
@@ -205,5 +272,20 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         ..ServerCapabilities::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_watch_registration_targets_jalsfmt_toml() {
+        let params = config_watch_registration();
+        assert_eq!(params.registrations.len(), 1);
+        let registration = &params.registrations[0];
+        assert_eq!(registration.method, "workspace/didChangeWatchedFiles");
+        let options = registration.register_options.as_ref().unwrap();
+        assert_eq!(options["watchers"][0]["globPattern"], "**/jalsfmt.toml");
     }
 }
