@@ -9,14 +9,15 @@
 //!
 //! Structural nodes (source file, bodies, blocks) get multi-line layout; delimited lists
 //! (params, args, array initializers) wrap all-or-nothing; binary/unary expressions get
-//! canonical operator spacing; everything else falls back to [`lower_generic`], which lays
-//! a node out inline with normalized spacing. Source-file layout, including import
-//! reordering/grouping, lives in [`crate::imports`].
+//! canonical operator spacing, and a binary expression that overflows `max-width` wraps at
+//! its operators (placement per `binop-separator`); everything else falls back to
+//! [`lower_generic`], which lays a node out inline with normalized spacing. Source-file
+//! layout, including import reordering/grouping, lives in [`crate::imports`].
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
-use crate::config::{BraceStyle, Config, ControlBraceStyle, TrailingComma};
+use crate::config::{BinopSeparator, BraceStyle, Config, ControlBraceStyle, TrailingComma};
 use crate::doc::{
     Doc, blank_line, concat, group, group_within, hardline, if_break, indent, line, nil, raw,
     softline, text,
@@ -680,9 +681,105 @@ fn trailing_comma_doc(policy: TrailingComma, comma: Option<&SyntaxToken>, ctx: &
 // Expressions with canonical operator spacing
 // ---------------------------------------------------------------------------
 
-/// Lower a binary expression as `lhs op rhs`, joining a run of operator tokens (e.g. the
-/// two `>` of `>>`) tightly and surrounding the whole operator with single spaces.
+/// The binding power of a binary operator, given its (1–3 adjacent) operator tokens.
+/// Mirrors `peek_bin_op` in `jals-syntax`'s grammar — only the `>` family is multi-token
+/// (`>=` is `GT EQ`, `>>` is `GT GT`, `>>>` is `GT GT GT`; `<=` and `<<` are single
+/// tokens). `None` for a token run that is not a known binary operator (error recovery).
+fn binop_bp(ops: &[SyntaxToken]) -> Option<u8> {
+    use S::*;
+    let kinds: Vec<S> = ops.iter().map(SyntaxToken::kind).collect();
+    Some(match kinds.as_slice() {
+        [PIPE_PIPE] => 1,
+        [AMP_AMP] => 2,
+        [PIPE] => 3,
+        [CARET] => 4,
+        [AMP] => 5,
+        [EQ_EQ] | [BANG_EQ] => 6,
+        [LT] | [LT_EQ] | [GT] | [GT, EQ] | [INSTANCEOF_KW] => 7,
+        [LSHIFT] | [GT, GT] | [GT, GT, GT] => 8,
+        [PLUS] | [MINUS] => 9,
+        [STAR] | [SLASH] | [PERCENT] => 10,
+        _ => return None,
+    })
+}
+
+/// Split a `BINARY_EXPR` into its canonical `lhs op rhs` shape: exactly two child nodes
+/// with the operator-token run between them. `None` for any other shape (error recovery),
+/// in which case the caller falls back to inline emission.
+fn binary_parts(node: &SyntaxNode) -> Option<(SyntaxNode, Vec<SyntaxToken>, SyntaxNode)> {
+    let mut nodes = node.children();
+    let (lhs, rhs) = (nodes.next()?, nodes.next()?);
+    if nodes.next().is_some() {
+        return None;
+    }
+    let ops: Vec<SyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|t| !t.kind().is_trivia())
+        .collect();
+    // The operator must sit between the operands; anything else is malformed.
+    if ops.is_empty()
+        || ops.first()?.text_range().start() < lhs.text_range().end()
+        || ops.last()?.text_range().end() > rhs.text_range().start()
+    {
+        return None;
+    }
+    Some((lhs, ops, rhs))
+}
+
+/// One wrapped step of a flattened binary run: the operator-token run and its right operand.
+type BinopStep = (Vec<SyntaxToken>, SyntaxNode);
+
+/// Flatten the left spine of same-precedence nested `BINARY_EXPR`s into the first operand
+/// and the `(operator run, rhs)` steps in source order. A left child of a *different*
+/// precedence stays a unit (its own group), so `a == b && c == d` breaks at `&&` before
+/// either `==` does. All Java binary operators are left-associative, so the same-precedence
+/// run is always a pure left spine.
+fn flatten_binary(node: &SyntaxNode) -> Option<(SyntaxNode, Vec<BinopStep>)> {
+    let (lhs, ops, rhs) = binary_parts(node)?;
+    let bp = binop_bp(&ops);
+    let mut steps = vec![(ops, rhs)];
+    let mut first = lhs;
+    while first.kind() == S::BINARY_EXPR && bp.is_some() {
+        let Some((lhs2, ops2, rhs2)) = binary_parts(&first) else {
+            break;
+        };
+        if binop_bp(&ops2) != bp {
+            break;
+        }
+        steps.push((ops2, rhs2));
+        first = lhs2;
+    }
+    steps.reverse();
+    Some((first, steps))
+}
+
+/// Lower a binary expression. The same-precedence run is one group with a break point at
+/// every operator: flat it is `a op b op c`; when it overflows `max-width` every step wraps,
+/// the operator leading the continuation line (`binop-separator = front`, the default) or
+/// trailing the broken line (`back`). A run of operator tokens (e.g. the two `>` of `>>`)
+/// is joined tightly so operator fusion is preserved.
 fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    let Some((first, steps)) = flatten_binary(node) else {
+        // Error recovery produced something other than `lhs op rhs`; emit inline with
+        // canonical spacing so every token is preserved verbatim.
+        return lower_binary_inline(node, ctx);
+    };
+    let mut tail: Vec<Doc> = Vec::new();
+    for (ops, rhs) in &steps {
+        let op = concat(ops.iter().map(|t| tok(t, ctx)).collect());
+        match ctx.cfg.binop_separator {
+            BinopSeparator::Front => tail.extend([line(), op, text(" "), lower(rhs, ctx)]),
+            BinopSeparator::Back => tail.extend([text(" "), op, line(), lower(rhs, ctx)]),
+        }
+    }
+    group(concat(vec![lower(&first, ctx), indent(concat(tail))]))
+}
+
+/// Lower a malformed binary expression inline as `lhs op rhs`, joining a run of operator
+/// tokens tightly and surrounding the whole operator with single spaces. Fallback for
+/// error-recovery shapes [`flatten_binary`] cannot handle (e.g. a missing operand).
+fn lower_binary_inline(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut pending_op: Vec<Doc> = Vec::new();
 
