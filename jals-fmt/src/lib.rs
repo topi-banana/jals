@@ -22,6 +22,7 @@
 mod comments;
 mod config;
 mod doc;
+mod imports;
 mod lower;
 mod output;
 mod render;

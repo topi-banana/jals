@@ -10,9 +10,9 @@
 //! Structural nodes (source file, bodies, blocks) get multi-line layout; delimited lists
 //! (params, args, array initializers) wrap all-or-nothing; binary/unary expressions get
 //! canonical operator spacing; everything else falls back to [`lower_generic`], which lays
-//! a node out inline with normalized spacing.
+//! a node out inline with normalized spacing. Source-file layout, including import
+//! reordering/grouping, lives in [`crate::imports`].
 
-use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
@@ -23,9 +23,9 @@ use crate::doc::{
 };
 
 /// Lowering context shared (immutably) across the walk.
-struct Ctx<'a> {
-    comments: CommentMap,
-    cfg: &'a Config,
+pub(crate) struct Ctx<'a> {
+    pub(crate) comments: CommentMap,
+    pub(crate) cfg: &'a Config,
 }
 
 /// Lower the whole tree.
@@ -41,9 +41,9 @@ pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
 }
 
 /// Lower a node, dispatching on its kind.
-fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match node.kind() {
-        S::SOURCE_FILE => lower_source_file(node, ctx),
+        S::SOURCE_FILE => crate::imports::lower_source_file(node, ctx),
         S::CLASS_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
         S::PARAM_LIST | S::ARG_LIST | S::RECORD_HEADER | S::ANNOTATION_ARG_LIST | S::ARRAY_INIT => {
             lower_delimited(node, ctx)
@@ -70,12 +70,12 @@ fn token_text(tok: &SyntaxToken) -> Doc {
 }
 
 /// A significant token with its attached comments.
-fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
     ctx.comments.token(tok, token_text(tok))
 }
 
 /// The first non-trivia token contained in `node`, if any.
-fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub(crate) fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
         .filter_map(|e| e.into_token())
         .find(|t| !t.kind().is_trivia())
@@ -481,7 +481,7 @@ fn is_declaration_body(node: &SyntaxNode) -> bool {
 /// Build the inner document for a sequence of item nodes. Returns the content and whether
 /// any item was emitted. Braces are skipped (a brace wrapper adds them); blank lines from
 /// the source are preserved (clamped by the renderer).
-fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
+pub(crate) fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
     let mut parts: Vec<Doc> = Vec::new();
     let mut saw = false;
 
@@ -516,7 +516,7 @@ fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
 
 /// The line break before an item node: the source's blank-line run (clamped to
 /// `max_blank_lines` by the renderer) when it had one, else a plain line break.
-fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match first_sig_token(node) {
         Some(t) => {
             let blanks = if ctx.comments.has_leading(&t) {
@@ -537,7 +537,7 @@ fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// The number of blank lines preceding `tok` in the source (0 when it is on the next line,
 /// or on the same line as the previous token). A run of `n` consecutive newlines is `n - 1`
 /// blank lines. A comment between stops the run, so a lone comment line is not a blank line.
-fn blank_lines_before(tok: &SyntaxToken) -> usize {
+pub(crate) fn blank_lines_before(tok: &SyntaxToken) -> usize {
     let mut newlines = 0usize;
     let mut cur = tok.prev_token();
     while let Some(t) = cur {
@@ -549,204 +549,6 @@ fn blank_lines_before(tok: &SyntaxToken) -> usize {
         cur = t.prev_token();
     }
     newlines.saturating_sub(1)
-}
-
-// ---------------------------------------------------------------------------
-// Import reordering (`reorder-imports`)
-// ---------------------------------------------------------------------------
-
-/// Lower the compilation unit. With both `reorder-imports` and `group-imports` off this is
-/// exactly [`lower_items`]. With `reorder-imports` on, the leading run of `import` declarations
-/// is sorted (non-static first, then static, each alphabetical by qualified name). With
-/// `group-imports` on (which overrides `reorder-imports`), the run is partitioned into the
-/// prefix groups of [`Config::import_groups`], each group sorted alphabetically and separated
-/// from the next by a single blank line. In both modes blank lines *between* the imports of one
-/// group are dropped, while the gap before the block and the gap after it (to the first type
-/// decl) are preserved.
-///
-/// Sorting reuses the original import nodes, so every token keeps its byte offset and its
-/// attached comments follow it automatically; the significant-token *multiset* is preserved.
-fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-    if !ctx.cfg.reorder_imports && !ctx.cfg.group_imports {
-        return lower_items(node, ctx).0;
-    }
-    let els: Vec<SyntaxElement> = node.children_with_tokens().collect();
-    let Some((start, end)) = import_run(&els) else {
-        // Nothing to sort/group (zero or one import), or — defensively — a non-contiguous run.
-        return lower_items(node, ctx).0;
-    };
-    // The blank lines before the whole block come from the import that was originally first
-    // (its gap from the package decl). Capture it before sorting so the value is positional,
-    // not tied to whichever import sorts to the front — this keeps formatting idempotent.
-    let first = els[start]
-        .as_node()
-        .expect("import run index points at a node");
-    let block_lead_blanks = import_block_lead_blanks(first, ctx);
-
-    let mut run: Vec<SyntaxNode> = (start..=end)
-        .map(|i| {
-            els[i]
-                .as_node()
-                .expect("import run index points at a node")
-                .clone()
-        })
-        .collect();
-
-    // Order the imports and, for each resulting slot, whether it begins a new group (and so
-    // earns a blank line before it). With `group-imports` on, sort by (group rank, name) and
-    // break at every rank change. Otherwise (`reorder-imports` only) sort by (is_static, name)
-    // as a single group with no boundaries, so the emitted Doc — and thus the output — is
-    // byte-identical to the reorder-only behavior.
-    let new_group: Vec<bool> = if ctx.cfg.group_imports {
-        let groups = &ctx.cfg.import_groups;
-        let mut keyed: Vec<(usize, String, SyntaxNode)> = run
-            .into_iter()
-            .map(|n| (import_group_rank(&n, groups), import_name(&n), n))
-            .collect();
-        keyed.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        let flags = (0..keyed.len())
-            .map(|k| k > 0 && keyed[k].0 != keyed[k - 1].0)
-            .collect();
-        run = keyed.into_iter().map(|(_, _, n)| n).collect();
-        flags
-    } else {
-        run.sort_by_cached_key(import_sort_key);
-        vec![false; run.len()]
-    };
-
-    let mut parts: Vec<Doc> = Vec::new();
-    let mut saw = false;
-    let mut emitted_import = false;
-    for (i, el) in els.iter().enumerate() {
-        if (start..=end).contains(&i) {
-            // The reordered import for this positional slot.
-            let k = i - start;
-            let import = &run[k];
-            if saw {
-                parts.push(if !emitted_import {
-                    // Before the first emitted import: the block's leading gap.
-                    if block_lead_blanks > 0 {
-                        blank_line(block_lead_blanks)
-                    } else {
-                        hardline()
-                    }
-                } else if new_group[k] {
-                    // A group boundary: exactly one blank line between groups.
-                    blank_line(1)
-                } else {
-                    // Within a group: never keep blank lines between sorted imports.
-                    hardline()
-                });
-            }
-            parts.push(lower(import, ctx));
-            saw = true;
-            emitted_import = true;
-            continue;
-        }
-        // Outside the import run: the original `lower_items` logic. A following type decl's
-        // separator reads its own (unmoved) leading trivia, so its gap stays stable.
-        if let Some(child) = el.as_node() {
-            if first_sig_token(child).is_none() {
-                continue;
-            }
-            if saw {
-                parts.push(item_separator(child, ctx));
-            }
-            parts.push(lower(child, ctx));
-            saw = true;
-        } else if let Some(t) = el.as_token() {
-            let kind = t.kind();
-            if kind == S::LBRACE || kind == S::RBRACE || kind.is_trivia() {
-                continue;
-            }
-            if saw {
-                parts.push(text(" "));
-            }
-            parts.push(tok(t, ctx));
-            saw = true;
-        }
-    }
-    concat(parts)
-}
-
-/// The inclusive index range of the contiguous leading run of `import` declarations among the
-/// source file's children, or `None` when there are fewer than two to sort (or — defensively —
-/// the `IMPORT_DECL` children are not contiguous, which the grammar should never produce).
-fn import_run(els: &[SyntaxElement]) -> Option<(usize, usize)> {
-    let idx: Vec<usize> = els
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.as_node().is_some_and(|n| n.kind() == S::IMPORT_DECL))
-        .map(|(i, _)| i)
-        .collect();
-    if idx.len() < 2 {
-        return None;
-    }
-    if !idx.windows(2).all(|w| w[1] == w[0] + 1) {
-        return None;
-    }
-    Some((idx[0], idx[idx.len() - 1]))
-}
-
-/// The blank lines preceding the import block — the value [`item_separator`] would compute for
-/// the originally-first import (its gap from the package decl or file start).
-fn import_block_lead_blanks(first_import: &SyntaxNode, ctx: &Ctx<'_>) -> usize {
-    match first_sig_token(first_import) {
-        Some(t) if ctx.comments.has_leading(&t) => ctx.comments.blank_lines_before_first(&t),
-        Some(t) => blank_lines_before(&t),
-        None => 0,
-    }
-}
-
-/// The qualified name of an import as written (`a.b.C`, or `a.b.*`), or the empty string for a
-/// malformed import with no name (so it sorts first within its group).
-fn import_name(node: &SyntaxNode) -> String {
-    ImportDecl::cast(node.clone())
-        .and_then(|i| i.name())
-        .map(|n| n.text())
-        .unwrap_or_default()
-}
-
-/// The total, deterministic sort key for an import under `reorder-imports`: non-static (`false`)
-/// before static (`true`), then the dotted name text in lexicographic order. Duplicates are kept
-/// (stable sort).
-fn import_sort_key(node: &SyntaxNode) -> (bool, String) {
-    let is_static = ImportDecl::cast(node.clone()).is_some_and(|i| i.is_static());
-    (is_static, import_name(node))
-}
-
-/// The group rank of an import under `groups` (the `import-groups` list); lower ranks emit first.
-/// A non-static import takes the index of its *longest* matching prefix (ties broken by list
-/// order — the earliest such prefix wins); failing that, the catch-all `"*"`'s index, or
-/// `groups.len()` when the list has no `"*"`. A static import takes `"static"`'s index, or
-/// `groups.len() + 1` (after the catch-all) when the list has no `"static"`. The literals `"*"`
-/// and `"static"` are never matched as textual prefixes (`static` is a Java keyword, so it can
-/// never be a real name segment).
-fn import_group_rank(node: &SyntaxNode, groups: &[String]) -> usize {
-    if ImportDecl::cast(node.clone()).is_some_and(|i| i.is_static()) {
-        return groups
-            .iter()
-            .position(|g| g.as_str() == "static")
-            .unwrap_or(groups.len() + 1);
-    }
-    let name = import_name(node);
-    let mut best_len = 0usize;
-    let mut best_idx: Option<usize> = None;
-    for (i, g) in groups.iter().enumerate() {
-        if matches!(g.as_str(), "*" | "static") {
-            continue;
-        }
-        if g.len() > best_len && name.starts_with(g.as_str()) {
-            best_len = g.len();
-            best_idx = Some(i);
-        }
-    }
-    best_idx.unwrap_or_else(|| {
-        groups
-            .iter()
-            .position(|g| g.as_str() == "*")
-            .unwrap_or(groups.len())
-    })
 }
 
 // ---------------------------------------------------------------------------
