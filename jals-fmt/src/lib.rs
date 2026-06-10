@@ -29,7 +29,8 @@ mod render;
 mod wrap;
 
 pub use config::{
-    BraceStyle, Config, ConfigError, ControlBraceStyle, IndentStyle, LineEnding, TrailingComma,
+    BinopSeparator, BraceStyle, Config, ConfigError, ControlBraceStyle, IndentStyle, LineEnding,
+    TrailingComma,
 };
 pub use output::{FormatOutput, Warning};
 

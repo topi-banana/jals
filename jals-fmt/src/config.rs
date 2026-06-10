@@ -121,6 +121,19 @@ pub enum TrailingComma {
     Vertical,
 }
 
+/// Where the operator of a binary expression sits when the expression wraps across lines.
+/// Mirrors rustfmt's `binop_separator`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BinopSeparator {
+    /// The operator starts the continuation line (`a` then `+ b`). The default
+    /// (rustfmt's default; also the Google/Sun Java convention of breaking before
+    /// an operator).
+    Front,
+    /// The operator ends the line being broken (`a +` then `b`).
+    Back,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -193,6 +206,11 @@ pub struct Config {
     /// A missing `"*"` / `"static"` becomes an implicit trailing group (catch-all, then static).
     /// Consulted only when `group_imports` is enabled.
     pub import_groups: Vec<String>,
+    /// Placement of a binary operator when a binary expression wraps across lines: at the
+    /// start of the continuation line ([`Front`](BinopSeparator::Front), the default) or at
+    /// the end of the broken line ([`Back`](BinopSeparator::Back)). The wrapping itself is
+    /// driven by [`max_width`](Config::max_width) alone. Mirrors rustfmt's `binop_separator`.
+    pub binop_separator: BinopSeparator,
 }
 
 impl Default for Config {
@@ -220,6 +238,7 @@ impl Default for Config {
                 "*".to_string(),
                 "static".to_string(),
             ],
+            binop_separator: BinopSeparator::Front,
         }
     }
 }
@@ -344,6 +363,8 @@ mod tests {
         // Import grouping is opt-in; off by default, with a JDK / others / static default order.
         assert!(!c.group_imports);
         assert_eq!(c.import_groups, ["java.", "javax.", "*", "static"]);
+        // Wrapped binary operators lead their continuation line by default.
+        assert_eq!(c.binop_separator, BinopSeparator::Front);
     }
 
     #[test]
@@ -385,6 +406,14 @@ mod tests {
         assert_eq!(c.trailing_comma, TrailingComma::Vertical);
         let c: Config = toml::from_str("trailing-comma = \"preserve\"\n").unwrap();
         assert_eq!(c.trailing_comma, TrailingComma::Preserve);
+    }
+
+    #[test]
+    fn binop_separator_parses_kebab_values() {
+        let c: Config = toml::from_str("binop-separator = \"front\"\n").unwrap();
+        assert_eq!(c.binop_separator, BinopSeparator::Front);
+        let c: Config = toml::from_str("binop-separator = \"back\"\n").unwrap();
+        assert_eq!(c.binop_separator, BinopSeparator::Back);
     }
 
     #[test]

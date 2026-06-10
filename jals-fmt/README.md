@@ -12,9 +12,9 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
 
 It upholds the workspace formatter invariants: comments are never dropped and formatting is
 idempotent (`format(format(x)) == format(x)`); by default the significant-token sequence is
-preserved exactly. Two opt-in options relax this (see [Configuration](#configuration)):
-`reorder-imports` preserves the token *multiset* instead, and `trailing-comma` may add or drop
-the single trailing comma of an array initializer.
+preserved exactly. Three opt-in options relax this (see [Configuration](#configuration)):
+`reorder-imports` and `group-imports` preserve the token *multiset* instead, and
+`trailing-comma` may add or drop the single trailing comma of an array initializer.
 
 ## What it does today
 
@@ -47,8 +47,13 @@ The current formatter is intentionally minimal. It performs:
   the initializer breaks one element per line). Only array initializers are governed — Java
   permits a trailing comma only there and in enum constant lists — and a comma carrying a
   comment is never dropped. Off by default (`preserve`); see below.
-- **Operator spacing** — binary and unary expressions get canonical spacing. Binary
-  expressions are **not** wrapped across lines.
+- **Operator spacing** — binary and unary expressions get canonical spacing.
+- **Binary-expression wrapping** — a binary expression that overflows `max-width` breaks at
+  its operators: a same-precedence run wraps together, one operand per line, and
+  lower-precedence operators break first (`a == b && c == d || e == f` breaks at `||`, then
+  `&&`, while each `==` stays on its line). The operator sits at the start of the
+  continuation line (`binop-separator = "front"`, default) or at the end of the broken line
+  (`"back"`). Assignments (`=`) and ternaries are not wrapped yet.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
   net so operator fusion (`>>`, `->`, …) is never introduced or changed.
 - **Comment placement** — leading / trailing / dangling comments are anchored and re-emitted.
@@ -96,6 +101,7 @@ are kebab-case.
 | `trailing-comma` | `"preserve"` \| `"always"` \| `"never"` \| `"vertical"` | `"preserve"` | ✅ wired — trailing comma of an **array initializer** only (`{1, 2, 3,}`): `preserve` keeps the source's, `always`/`never` force it on/off, `vertical` adds it only when the initializer breaks one element per line. Non-`preserve` may add or drop that one comma (a comma carrying a comment is kept); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `trailing_comma` |
 | `group-imports` | bool | `false` | ✅ wired — partition the leading `import` block into the prefix groups of `import-groups`, each group sorted and separated by one blank line. Overrides `reorder-imports`; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `group_imports` |
 | `import-groups` | array of strings | `["java.", "javax.", "*", "static"]` | ✅ wired — ordered prefix groups for `group-imports`: a non-static import joins its *longest* matching prefix, `"*"` is the catch-all for the rest, and `"static"` groups all static imports. A missing `"*"` / `"static"` becomes an implicit trailing group. Only consulted when `group-imports` is enabled |
+| `binop-separator` | `"front"` \| `"back"` | `"front"` | ✅ wired — placement of a binary operator when its expression wraps (driven by `max-width` alone): `front` starts the continuation line with the operator, `back` ends the broken line with it; mirrors rustfmt's `binop_separator` |
 
 ---
 
@@ -141,12 +147,12 @@ see [What it does today](#what-it-does-today). Remaining:
 | Annotation wrap widths | `attr_fn_like_width`, `inline_attribute_width` |
 | Pack short array elements | `short_array_element_width_threshold` |
 
-## 3. Wrapping shape (jals only does "all-or-nothing")
+## 3. Wrapping shape (delimited lists wrap all-or-nothing)
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Parameter/argument layout: Tall / Compressed / **Vertical (one per line)** | `fn_params_layout`, `fn_args_layout` |
-| Wrap binary expressions; operator at line-start (Front) vs. line-end (Back) | `binop_separator` |
+| Wrap binary expressions; operator at line-start (Front) vs. line-end (Back) | `binop_separator` ✅ |
 | Let the last argument (lambda/array) overflow the call parentheses | `overflow_delimited_expr` |
 | Trailing comma: Always / Never / Vertical (array initializers) | `trailing_comma` ✅ |
 | Combine a control expression with its argument | `combine_control_expr` |
@@ -240,5 +246,5 @@ By Java-user impact: the remaining import-organization option (`imports_granular
 (Brace styling — `brace_style` and `control_brace_style` — comment reflow — `comment-width`
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
 `fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
-`reorder_imports` — import grouping — `group_imports` — and trailing commas —
-`trailing_comma` — are done.)
+`reorder_imports` — import grouping — `group_imports` — trailing commas —
+`trailing_comma` — and binary-expression wrapping — `binop_separator` — are done.)
