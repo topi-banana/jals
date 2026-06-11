@@ -32,7 +32,7 @@ Server capabilities advertised on `initialize`:
 | Selection range | `textDocument/selectionRange` | CST | Expand/shrink: nests the token under each cursor up through its ancestor nodes to the file root. Syntax-only; multiple positions per request. |
 | Formatting | `textDocument/formatting` | `jals_fmt::format_source` | Whole-document: one full-range edit, or none if already formatted. |
 | Config hot-reload | `workspace/didChangeWatchedFiles` | — | Dynamically registers a `**/jalsfmt.toml` watcher via `client/registerCapability` (when the client supports dynamic registration); changes clear the config cache so the next format request rediscovers. |
-| Text sync | `didOpen` / `didChange` / `didClose` | — | Full document sync (`TextDocumentSyncKind::FULL`). |
+| Text sync | `didOpen` / `didChange` / `didClose` | — | Incremental sync (`TextDocumentSyncKind::INCREMENTAL`): change events are spliced in order (UTF-16 ranges → byte offsets); full-replacement events are still accepted. |
 | Lifecycle | `initialize` / `shutdown` / `exit` | — | Managed by async-lsp's `LifecycleLayer`. |
 
 Formatting config is discovered per document by searching upward for `jalsfmt.toml` from the
@@ -73,7 +73,7 @@ The crate splits into a pure, unit-tested core and a thin async server shell:
 | --- | --- |
 | `handlers/{diagnostics,symbols,semantic_tokens,folding_range,formatting}.rs` | Pure functions `(text [, config], &LineIndex) -> LSP payload`. No I/O, no async — the testable core. |
 | `line_index.rs` | Converts `jals-syntax` UTF-8 byte offsets to LSP UTF-16 `Position`s. |
-| `state.rs` | `DocumentStore` (open documents, full text sync) and memoized config `Discovery`. |
+| `state.rs` | `DocumentStore` (open documents, incremental text sync via the pure `apply_content_changes`) and memoized config `Discovery`. |
 | `server.rs` | `LanguageServer` impl + advertised capabilities; glue that calls the pure handlers. |
 | `lib.rs` | `run()`: a current-thread tokio runtime driving the async-lsp `MainLoop` over stdio. |
 
@@ -116,7 +116,6 @@ future work by what each capability requires.
 | --- | --- | --- |
 | Range formatting | `textDocument/rangeFormatting` | Format a selection. Needs `jals-fmt` to format a sub-range (today it is whole-document only). |
 | On-type formatting | `textDocument/onTypeFormatting` | Reformat on `}` / `;`. |
-| Incremental sync | — | `TextDocumentSyncKind::INCREMENTAL` to avoid reparsing the whole file on every keystroke. |
 | Integration test | — | Drive async-lsp over an in-memory transport (initialize → didOpen → diagnostics → shutdown) for CI regression coverage. |
 
 ## 2. Mid-term (syntax-based features — CST/AST only, no types)
@@ -154,8 +153,7 @@ gated on a future analysis crate (`jals-hir` or similar):
 
 ## Suggested priority
 
-By editor-user impact: **(1)** incremental sync (correctness and ergonomics
-for the features that already exist) → **(2)** range / on-type formatting → **(3)** the
-semantic-analysis features, once an analysis layer lands. Code folding, selection range, and
-semantic tokens (`full`) already ship; the latter's `delta`/`range` variants are a later
-optimization.
+By editor-user impact: **(1)** range / on-type formatting → **(2)** the
+semantic-analysis features, once an analysis layer lands. Incremental sync, code folding,
+selection range, and semantic tokens (`full`) already ship; the latter's `delta`/`range`
+variants are a later optimization.
