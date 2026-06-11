@@ -46,6 +46,12 @@ pub(crate) enum Doc {
     BlankLine(usize),
     /// Increase the indentation level of the child by one.
     Indent(Box<Doc>),
+    /// Increase the indentation level of the child by one only when the governing group
+    /// renders broken; leave it at the current level when flat. Lets
+    /// `overflow-delimited-expr` place the hanging last argument inside the list indent in
+    /// the vertical layout but at the call's own level in the overflow layout (prettier's
+    /// `indentIfBreak`).
+    IndentIfBreak(Box<Doc>),
     /// A break point: render flat if it fits, otherwise broken.
     Group {
         /// The grouped content.
@@ -119,6 +125,11 @@ pub(crate) fn indent(doc: Doc) -> Doc {
     Doc::Indent(Box::new(doc))
 }
 
+/// Indent a document by one level only when the governing group renders broken.
+fn indent_if_break(doc: Doc) -> Doc {
+    Doc::IndentIfBreak(Box::new(doc))
+}
+
 /// Group a document so it renders flat when it fits, otherwise broken.
 pub(crate) fn group(doc: Doc) -> Doc {
     let should_break = contains_forced_break(&doc);
@@ -141,6 +152,57 @@ pub(crate) fn group_within(doc: Doc, max_flat: usize) -> Doc {
         doc: Box::new(doc),
         should_break,
     }
+}
+
+/// Group an `overflow-delimited-expr` argument list: `head` is the open delimiter plus the
+/// leading items (inside the list `Indent`), `last` the hanging item (indented only when
+/// broken), `tail` the closing softline + delimiter. Forced broken when `head` cannot be
+/// laid out flat — an earlier item or comment forces a break, so the overflow layout is
+/// unavailable — or when the first rendered line of the overflow layout would exceed
+/// `max_flat` (`fn-call-width` for a call; `None` for an annotation list, which breaks
+/// against `max-width` alone like a plain [`group`]). Within budget it still renders flat
+/// only if its first line also fits `max-width` at its position, exactly like [`group`].
+pub(crate) fn group_overflow(head: Doc, last: Doc, tail: Doc, max_flat: Option<usize>) -> Doc {
+    let should_break = match flat_width(&head) {
+        None => true,
+        Some(_) => max_flat.is_some_and(|b| first_line_width(&[&head, &last, &tail]) > b),
+    };
+    Doc::Group {
+        doc: Box::new(Doc::Concat(vec![head, indent_if_break(last), tail])),
+        should_break,
+    }
+}
+
+/// The display width of the first rendered line of `docs`, laid out with every unforced
+/// break flat: the prefix up to the first forced newline (a hard/blank line, a break inside
+/// an already-breaking group, or the first newline of a multi-line raw token / comment), or
+/// the full flat width when nothing forces one. Mirrors the renderer's `fits` measurement,
+/// which also stops at the first forced newline, so the precomputed overflow decision and
+/// the render-time fit never disagree about what lands on the first line.
+fn first_line_width(docs: &[&Doc]) -> usize {
+    let mut width = 0usize;
+    // Worklist of (in-broken-group, doc), LIFO like the renderer's.
+    let mut work: Vec<(bool, &Doc)> = docs.iter().rev().map(|d| (false, *d)).collect();
+    while let Some((broken, doc)) = work.pop() {
+        match doc {
+            Doc::Text(s) => width += UnicodeWidthStr::width(&**s),
+            Doc::RawText(s) | Doc::Comment { text: s, .. } => match s.find('\n') {
+                Some(pos) => return width + UnicodeWidthStr::width(&s[..pos]),
+                None => width += UnicodeWidthStr::width(&**s),
+            },
+            Doc::Concat(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
+            Doc::Indent(d) | Doc::IndentIfBreak(d) => work.push((broken, d)),
+            Doc::Group { doc, should_break } => work.push((*should_break, doc)),
+            Doc::Line if broken => return width,
+            Doc::Line => width += 1,
+            Doc::SoftLine if broken => return width,
+            Doc::SoftLine => {}
+            Doc::HardLine | Doc::BlankLine(_) => return width,
+            Doc::LineSuffix(_) => {}
+            Doc::IfBreak { broken: b, flat } => work.push((broken, if broken { b } else { flat })),
+        }
+    }
+    width
 }
 
 /// The display width of `doc` laid out fully flat, or `None` when it cannot be flat — it
@@ -172,7 +234,7 @@ fn flat_width(doc: &Doc) -> Option<usize> {
         Doc::Line => 1,
         Doc::SoftLine => 0,
         Doc::HardLine | Doc::BlankLine(_) => return None,
-        Doc::Indent(d) => flat_width(d)?,
+        Doc::Indent(d) | Doc::IndentIfBreak(d) => flat_width(d)?,
         Doc::Group { doc, should_break } => {
             if *should_break {
                 return None;
@@ -222,7 +284,7 @@ fn contains_forced_break(doc: &Doc) -> bool {
     match doc {
         Doc::HardLine | Doc::BlankLine(_) => true,
         Doc::Concat(v) => v.iter().any(contains_forced_break),
-        Doc::Indent(d) | Doc::LineSuffix(d) => contains_forced_break(d),
+        Doc::Indent(d) | Doc::IndentIfBreak(d) | Doc::LineSuffix(d) => contains_forced_break(d),
         Doc::Group { should_break, .. } => *should_break,
         _ => false,
     }
@@ -243,6 +305,7 @@ fn clone_doc(doc: &Doc) -> Doc {
         Doc::HardLine => Doc::HardLine,
         Doc::BlankLine(n) => Doc::BlankLine(*n),
         Doc::Indent(d) => Doc::Indent(Box::new(clone_doc(d))),
+        Doc::IndentIfBreak(d) => Doc::IndentIfBreak(Box::new(clone_doc(d))),
         Doc::Group { doc, should_break } => Doc::Group {
             doc: Box::new(clone_doc(doc)),
             should_break: *should_break,

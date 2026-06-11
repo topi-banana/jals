@@ -42,6 +42,13 @@ The current formatter is intentionally minimal. It performs:
 - **Array initializers** — an array initializer (`{a, b, c}`, including `new T[]{…}`) whose
   flat width exceeds `array-width` is laid out one element per line, even when the line would
   otherwise fit `max-width`. Argument and parameter lists are unaffected.
+- **Last-argument overflow** — with `overflow-delimited-expr` enabled, a call or annotation
+  argument list whose last item is a delimited expression — a block-bodied lambda, an
+  anonymous-class `new X() {…}`, or an array initializer (including `new T[]{…}` and
+  `name = {…}` annotation pairs) — hangs that item past the call line (`f(a, () -> {` …
+  `});`) instead of breaking one argument per line, when the first line fits
+  `fn-call-width` and `max-width`. An earlier multi-line argument or a comment among the
+  arguments keeps the all-or-nothing layout. Off by default; see below.
 - **Trailing commas** — the trailing comma of an array initializer follows `trailing-comma`:
   `preserve` (default, keep the source's), `always`, `never`, or `vertical` (present only when
   the initializer breaks one element per line). Only array initializers are governed — Java
@@ -102,6 +109,7 @@ are kebab-case.
 | `group-imports` | bool | `false` | ✅ wired — partition the leading `import` block into the prefix groups of `import-groups`, each group sorted and separated by one blank line. Overrides `reorder-imports`; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `group_imports` |
 | `import-groups` | array of strings | `["java.", "javax.", "*", "static"]` | ✅ wired — ordered prefix groups for `group-imports`: a non-static import joins its *longest* matching prefix, `"*"` is the catch-all for the rest, and `"static"` groups all static imports. A missing `"*"` / `"static"` becomes an implicit trailing group. Only consulted when `group-imports` is enabled |
 | `binop-separator` | `"front"` \| `"back"` | `"front"` | ✅ wired — placement of a binary operator when its expression wraps (driven by `max-width` alone): `front` starts the continuation line with the operator, `back` ends the broken line with it; mirrors rustfmt's `binop_separator` |
+| `overflow-delimited-expr` | bool | `false` | ✅ wired — let the last item of a call / annotation argument list hang past the call line when it is a block-bodied lambda, anonymous-class `new`, or array initializer (`f(a, () -> {` … `});`); falls back to the all-or-nothing layout when an earlier item is multi-line or the first line overflows `fn-call-width`/`max-width`. Layout-only (the significant-token sequence is preserved exactly); mirrors rustfmt's `overflow_delimited_expr` |
 
 ---
 
@@ -153,7 +161,7 @@ see [What it does today](#what-it-does-today). Remaining:
 | --- | --- |
 | Parameter/argument layout: Tall / Compressed / **Vertical (one per line)** | `fn_params_layout`, `fn_args_layout` |
 | Wrap binary expressions; operator at line-start (Front) vs. line-end (Back) | `binop_separator` ✅ |
-| Let the last argument (lambda/array) overflow the call parentheses | `overflow_delimited_expr` |
+| Let the last argument (lambda/array) overflow the call parentheses | `overflow_delimited_expr` ✅ |
 | Trailing comma: Always / Never / Vertical (array initializers) | `trailing_comma` ✅ |
 | Combine a control expression with its argument | `combine_control_expr` |
 
@@ -247,4 +255,5 @@ By Java-user impact: the remaining import-organization option (`imports_granular
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
 `fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
 `reorder_imports` — import grouping — `group_imports` — trailing commas —
-`trailing_comma` — and binary-expression wrapping — `binop_separator` — are done.)
+`trailing_comma` — binary-expression wrapping — `binop_separator` — and last-argument
+overflow — `overflow_delimited_expr` — are done.)

@@ -168,6 +168,18 @@ fn binop_config(binop_separator: BinopSeparator) -> Config {
     }
 }
 
+/// Config with `overflow-delimited-expr` on and narrow widths, so the overflow layout and
+/// each of its fallbacks are exercised by the generator's lambdas, `new`s, and braces.
+fn overflow_config() -> Config {
+    Config {
+        overflow_delimited_expr: true,
+        max_width: 24,
+        fn_call_width: 16,
+        array_width: 8,
+        ..Config::default()
+    }
+}
+
 /// The non-trivia tokens of `src` with every `,` removed. The trailing-comma modes may add or
 /// drop array-initializer commas, but must leave every other token (and their order) intact.
 fn sig_tokens_without_commas(src: &str) -> Vec<(SyntaxKind, String)> {
@@ -582,5 +594,35 @@ proptest! {
     fn binop_separator_never_panics(src in ".*") {
         let _ = fmt_with(&src, &binop_config(BinopSeparator::Front));
         let _ = fmt_with(&src, &binop_config(BinopSeparator::Back));
+    }
+
+    /// Last-argument overflow stays idempotent: re-formatting the hung layout reproduces it.
+    #[test]
+    fn overflow_delimited_expr_idempotent(src in javaish()) {
+        let cfg = overflow_config();
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Last-argument overflow is layout-only: the significant-token sequence is preserved
+    /// exactly (`trailing-comma` stays `preserve`, so the strict invariant is in full force).
+    #[test]
+    fn overflow_delimited_expr_preserves_significant_tokens(src in javaish()) {
+        let out = fmt_with(&src, &overflow_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Last-argument overflow never drops or mangles a comment.
+    #[test]
+    fn overflow_delimited_expr_preserves_comments(src in javaish()) {
+        let out = fmt_with(&src, &overflow_config());
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Last-argument overflow never panics on arbitrary Unicode input.
+    #[test]
+    fn overflow_delimited_expr_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &overflow_config());
     }
 }

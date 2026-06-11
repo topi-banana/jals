@@ -200,6 +200,20 @@ fn comments_kept() {
 }
 
 #[test]
+fn comments_after_final_brace_kept() {
+    // Own-line comments after the file's last significant token survive even when that token
+    // is a closing brace (emitted by `lower_braced`, not the generic token path).
+    check(
+        "class A{} // same\n// below\n/* block */\n",
+        expect![[r#"
+            class A {}  // same
+            // below
+            /* block */
+        "#]],
+    );
+}
+
+#[test]
 fn binary_operators_spaced() {
     check(
         "class C{boolean b=a>>2==c&&d>=e;}",
@@ -1726,4 +1740,338 @@ fn binop_wrapping_is_idempotent() {
         let twice = fmt_binop(&once, 40, sep);
         assert_eq!(once, twice, "binop wrapping must be idempotent ({sep:?})");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Last-argument overflow (`overflow-delimited-expr`)
+// ---------------------------------------------------------------------------
+
+/// Format with `overflow-delimited-expr` enabled.
+fn fmt_overflow(src: &str) -> String {
+    let cfg = Config {
+        overflow_delimited_expr: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_overflow(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_overflow(src));
+}
+
+#[test]
+fn overflow_off_by_default_keeps_vertical_layout() {
+    // Without the option a multi-line trailing lambda still breaks the list all-or-nothing.
+    check(
+        "class A{void m(){executor.submit(task,()->{run();});}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    executor.submit(
+                        task,
+                        () -> {
+                            run();
+                        }
+                    );
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_hangs_trailing_block_lambda() {
+    check_overflow(
+        "class A{void m(){executor.submit(task,()->{run();});}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    executor.submit(task, () -> {
+                        run();
+                    });
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_hangs_sole_lambda_argument() {
+    check_overflow(
+        "class A{void m(){run(()->{go();});}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    run(() -> {
+                        go();
+                    });
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_hangs_trailing_anonymous_class() {
+    check_overflow(
+        "class A{void m(){register(name,new Listener(){public void on(){go();}});}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    register(name, new Listener() {
+                        public void on() {
+                            go();
+                        }
+                    });
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_hangs_trailing_array_creation() {
+    // A trailing `new int[]{…}` broken by a narrow `array-width` hangs past the call line.
+    let cfg = Config {
+        overflow_delimited_expr: true,
+        array_width: 10,
+        ..Config::default()
+    };
+    expect![[r#"
+        class A {
+            void m() {
+                fill(buf, new int [] {
+                    alpha,
+                    beta,
+                    gamma
+                });
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_with(
+        "class A{void m(){fill(buf,new int[]{alpha,beta,gamma});}}",
+        &cfg,
+    ));
+}
+
+#[test]
+fn overflow_array_honors_vertical_trailing_comma() {
+    // The hanging array breaks, so `trailing-comma = vertical` adds the comma; the outer
+    // overflow group staying "flat" does not leak into the inner array's mode.
+    let cfg = Config {
+        overflow_delimited_expr: true,
+        array_width: 10,
+        trailing_comma: TrailingComma::Vertical,
+        ..Config::default()
+    };
+    expect![[r#"
+        class A {
+            void m() {
+                fill(buf, new int [] {
+                    alpha,
+                    beta,
+                    gamma,
+                });
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_with(
+        "class A{void m(){fill(buf,new int[]{alpha,beta,gamma});}}",
+        &cfg,
+    ));
+}
+
+#[test]
+fn overflow_hangs_annotation_array() {
+    let cfg = Config {
+        overflow_delimited_expr: true,
+        array_width: 10,
+        ..Config::default()
+    };
+    expect![[r#"
+        @Foo({
+            alpha,
+            beta,
+            gamma
+        }) class A {}
+    "#]]
+    .assert_eq(&fmt_with("@Foo({alpha,beta,gamma}) class A{}", &cfg));
+}
+
+#[test]
+fn overflow_hangs_annotation_pair_value() {
+    let cfg = Config {
+        overflow_delimited_expr: true,
+        array_width: 10,
+        ..Config::default()
+    };
+    expect![[r#"
+        @Foo(key = {
+            alpha,
+            beta,
+            gamma
+        }) class A {}
+    "#]]
+    .assert_eq(&fmt_with("@Foo(key={alpha,beta,gamma}) class A{}", &cfg));
+}
+
+#[test]
+fn overflow_falls_back_when_earlier_argument_is_multiline() {
+    // An earlier block lambda forces a break before the last item: the overflow layout is
+    // unavailable and the all-or-nothing layout is kept, identical to the option being off.
+    let src = "class A{void m(){foo(()->{a();},()->{b();});}}";
+    let overflowed = fmt_overflow(src);
+    assert_eq!(overflowed, fmt(src));
+    expect![[r#"
+        class A {
+            void m() {
+                foo(
+                    () -> {
+                        a();
+                    },
+                    () -> {
+                        b();
+                    }
+                );
+            }
+        }
+    "#]]
+    .assert_eq(&overflowed);
+}
+
+#[test]
+fn overflow_falls_back_past_fn_call_width() {
+    // The overflow first line `(taskNameLong, () -> {` is 22 columns wide — past a
+    // `fn-call-width` of 16 the list breaks vertically, exactly as without the option.
+    let cfg = Config {
+        overflow_delimited_expr: true,
+        fn_call_width: 16,
+        ..Config::default()
+    };
+    expect![[r#"
+        class A {
+            void m() {
+                submit(
+                    taskNameLong,
+                    () -> {
+                        run();
+                    }
+                );
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_with(
+        "class A{void m(){submit(taskNameLong,()->{run();});}}",
+        &cfg,
+    ));
+}
+
+#[test]
+fn overflow_falls_back_on_comment_between_arguments() {
+    // A comment in the leading items needs its own line; the vertical layout provides it and
+    // the comment is preserved.
+    check_overflow(
+        "class A{void m(){foo(a, // note\n()->{run();});}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    foo(
+                        a,  // note
+                        () -> {
+                            run();
+                        }
+                    );
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_leaves_expression_bodied_lambda_alone() {
+    // Expression-bodied lambdas are not delimited expressions; short calls stay flat and
+    // long ones keep the all-or-nothing layout, identical to the option being off.
+    let short = "class A{void m(){foo(a,x->x+1);}}";
+    assert_eq!(fmt_overflow(short), fmt(short));
+    check_overflow(
+        short,
+        expect![[r#"
+            class A {
+                void m() {
+                    foo(a, x -> x + 1);
+                }
+            }
+        "#]],
+    );
+    let long = "class A{void m(){perform(aVeryLongArgumentName,anotherLongArgumentName,x->aVeryLongCallTarget(x));}}";
+    assert_eq!(fmt_overflow(long), fmt(long));
+}
+
+#[test]
+fn overflow_ignores_non_trailing_lambda() {
+    // Only the LAST argument may hang; a leading block lambda keeps the vertical layout.
+    let src = "class A{void m(){foo(()->{a();},b);}}";
+    assert_eq!(fmt_overflow(src), fmt(src));
+    check_overflow(
+        src,
+        expect![[r#"
+            class A {
+                void m() {
+                    foo(
+                        () -> {
+                            a();
+                        },
+                        b
+                    );
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_nests() {
+    // A hanging lambda body may itself contain an overflowing call.
+    check_overflow(
+        "class A{void m(){outer(a,()->{inner(b,()->{run();});});}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    outer(a, () -> {
+                        inner(b, () -> {
+                            run();
+                        });
+                    });
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_applies_within_broken_chain_links() {
+    // A multi-line lambda still breaks a method chain one call per line; the overflow then
+    // applies within each link, hugging the lambda to its call.
+    check_overflow(
+        "class A{void m(){r=list.stream().map(x->{return x;}).collect(c);}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    r = list.stream()
+                        .map(x -> {
+                            return x;
+                        })
+                        .collect(c);
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn overflow_is_idempotent() {
+    let src = "class A{void m(){executor.submit(task,()->{run();});}}";
+    let once = fmt_overflow(src);
+    let twice = fmt_overflow(&once);
+    assert_eq!(once, twice, "overflow layout must be idempotent");
 }

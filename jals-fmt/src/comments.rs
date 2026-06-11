@@ -186,18 +186,27 @@ impl CommentMap {
         }
     }
 
-    /// The same-line trailing comments of a token, as line suffixes (no leading comments).
+    /// The trailing comments of a token (no leading comments): same-line trailing comments
+    /// as line suffixes, then own-line comments below the file's last significant token on
+    /// their own lines — exactly the trailing halves of [`CommentMap::token`], for callers
+    /// that emit the token text themselves (the closing brace of a braced body).
     pub(crate) fn trailing_doc(&self, tok: &SyntaxToken) -> Doc {
         let offset = usize::from(tok.text_range().start());
-        match self.trailing_inline.get(&offset) {
-            None => nil(),
-            Some(trail) => concat(
+        let mut parts = Vec::new();
+        if let Some(trail) = self.trailing_inline.get(&offset) {
+            parts.extend(
                 trail
                     .iter()
-                    .map(|c| line_suffix(concat(vec![text("  "), comment_inline(c)])))
-                    .collect(),
-            ),
+                    .map(|c| line_suffix(concat(vec![text("  "), comment_inline(c)]))),
+            );
         }
+        if let Some(trail) = self.trailing_below.get(&offset) {
+            for c in trail {
+                parts.push(hardline());
+                parts.push(comment_doc(c));
+            }
+        }
+        concat(parts)
     }
 
     /// The document for comments dangling before a token (e.g. inside an otherwise empty
