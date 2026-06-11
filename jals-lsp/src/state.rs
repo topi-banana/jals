@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_lsp::lsp_types::Url;
+use async_lsp::lsp_types::{TextDocumentContentChangeEvent, Url};
 use jals_fmt::Config;
 
 use crate::line_index::LineIndex;
@@ -31,8 +31,9 @@ impl Document {
     }
 }
 
-/// In-memory store of open documents, keyed by URI. Full text sync, so each update
-/// replaces the whole document and rebuilds its line index.
+/// In-memory store of open documents, keyed by URI. Incremental text sync:
+/// `apply_changes` splices `didChange` events into the stored text and rebuilds the
+/// line index, while `upsert` (didOpen) replaces the document wholesale.
 #[derive(Default)]
 pub(crate) struct DocumentStore {
     docs: HashMap<Url, Document>,
@@ -43,6 +44,27 @@ impl DocumentStore {
         self.docs.insert(uri, Document::new(text, version));
     }
 
+    /// Apply `didChange` content changes to the document at `uri`, recording `version`.
+    ///
+    /// A change for a document that is not open is ignored (client protocol error;
+    /// splicing into a nonexistent base would fabricate text). The version is recorded
+    /// even when `changes` is empty.
+    pub(crate) fn apply_changes(
+        &mut self,
+        uri: &Url,
+        changes: &[TextDocumentContentChangeEvent],
+        version: i32,
+    ) {
+        let Some(doc) = self.docs.get_mut(uri) else {
+            return;
+        };
+        if changes.is_empty() {
+            doc.version = version;
+            return;
+        }
+        *doc = Document::new(apply_content_changes(&doc.text, changes), version);
+    }
+
     /// Snapshot the document for `uri` (cheap `Arc` clones), if open.
     pub(crate) fn get(&self, uri: &Url) -> Option<Document> {
         self.docs.get(uri).cloned()
@@ -51,6 +73,30 @@ impl DocumentStore {
     pub(crate) fn remove(&mut self, uri: &Url) {
         self.docs.remove(uri);
     }
+}
+
+/// Apply LSP `didChange` content changes to `text`, in order.
+///
+/// Per the LSP spec each event's range refers to the document state after the previous
+/// event, so a fresh `LineIndex` is built per ranged event. An event without a range
+/// replaces the whole document. Reversed ranges are normalized and out-of-range
+/// positions are clamped by `LineIndex::offset`, so this never panics.
+pub(crate) fn apply_content_changes(
+    text: &str,
+    changes: &[TextDocumentContentChangeEvent],
+) -> String {
+    let mut text = text.to_owned();
+    for change in changes {
+        let Some(range) = change.range else {
+            text = change.text.clone();
+            continue;
+        };
+        let index = LineIndex::new(&text);
+        let start = u32::from(index.offset(&text, range.start)) as usize;
+        let end = u32::from(index.offset(&text, range.end)) as usize;
+        text.replace_range(start.min(end)..start.max(end), &change.text);
+    }
+    text
 }
 
 /// Resolves a `jals-fmt` `Config` for a document by discovering `jalsfmt.toml` from the
@@ -99,7 +145,143 @@ pub(crate) fn is_config_file(uri: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use async_lsp::lsp_types::{Position, Range};
+
     use super::*;
+
+    /// Helper: a ranged (incremental) change event from (line, character) pairs.
+    fn ranged(start: (u32, u32), end: (u32, u32), text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: Some(Range::new(
+                Position::new(start.0, start.1),
+                Position::new(end.0, end.1),
+            )),
+            range_length: None,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Helper: a full-document replacement event (no range).
+    fn full(text: &str) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn apply_single_insert() {
+        let out = apply_content_changes("class A {}", &[ranged((0, 9), (0, 9), "int x;")]);
+        assert_eq!(out, "class A {int x;}");
+    }
+
+    #[test]
+    fn apply_single_delete() {
+        let out = apply_content_changes("abcdef", &[ranged((0, 1), (0, 4), "")]);
+        assert_eq!(out, "aef");
+    }
+
+    #[test]
+    fn apply_single_replace() {
+        let out = apply_content_changes("abc", &[ranged((0, 1), (0, 2), "XY")]);
+        assert_eq!(out, "aXYc");
+    }
+
+    #[test]
+    fn apply_batch_uses_post_edit_coordinates() {
+        // The second event's range is only meaningful against "aXYb", the state
+        // after the first event: (0,2)..(0,3) deletes the "Y".
+        let changes = [ranged((0, 1), (0, 1), "XY"), ranged((0, 2), (0, 3), "")];
+        assert_eq!(apply_content_changes("ab", &changes), "aXb");
+    }
+
+    #[test]
+    fn apply_counts_utf16_columns() {
+        // '😀' = 4 UTF-8 bytes, 2 UTF-16 units, so 'y' starts at character 3.
+        let out = apply_content_changes("x😀y", &[ranged((0, 1), (0, 3), "Z")]);
+        assert_eq!(out, "xZy");
+        let out = apply_content_changes("x😀y", &[ranged((0, 3), (0, 3), "!")]);
+        assert_eq!(out, "x😀!y");
+    }
+
+    #[test]
+    fn apply_full_replacement_mid_batch() {
+        // A no-range event discards everything before it; later events apply to it.
+        let changes = [
+            ranged((0, 0), (0, 1), "Z"),
+            full("new"),
+            ranged((0, 0), (0, 0), "A"),
+        ];
+        assert_eq!(apply_content_changes("abc", &changes), "Anew");
+    }
+
+    #[test]
+    fn apply_reversed_range_is_normalized() {
+        let out = apply_content_changes("abcde", &[ranged((0, 3), (0, 1), "X")]);
+        assert_eq!(out, "aXde");
+    }
+
+    #[test]
+    fn apply_newline_insert_then_edit_new_line() {
+        // After the first event the document has two lines; the second event
+        // addresses the freshly created line 1.
+        let changes = [ranged((0, 2), (0, 2), "\n"), ranged((1, 1), (1, 1), "X")];
+        assert_eq!(apply_content_changes("abcd", &changes), "ab\ncXd");
+    }
+
+    #[test]
+    fn apply_delete_spanning_newline_joins_lines() {
+        let out = apply_content_changes("ab\ncd", &[ranged((0, 2), (1, 0), "")]);
+        assert_eq!(out, "abcd");
+    }
+
+    #[test]
+    fn apply_range_past_eof_clamps_to_append() {
+        let out = apply_content_changes("ab", &[ranged((5, 0), (5, 0), "!")]);
+        assert_eq!(out, "ab!");
+    }
+
+    #[test]
+    fn apply_empty_changes_keeps_text() {
+        assert_eq!(apply_content_changes("abc", &[]), "abc");
+    }
+
+    #[test]
+    fn store_apply_changes_updates_text_version_and_index() {
+        let mut store = DocumentStore::default();
+        let uri = Url::parse("file:///a/B.java").unwrap();
+        store.upsert(uri.clone(), "ab\ncd".into(), 1);
+        store.apply_changes(&uri, &[ranged((1, 0), (1, 2), "XYZ")], 2);
+        let doc = store.get(&uri).unwrap();
+        assert_eq!(&*doc.text, "ab\nXYZ");
+        assert_eq!(doc.version, 2);
+        // A stale index (built from "ab\ncd") would clamp this to 5.
+        let end = doc.line_index.offset(&doc.text, Position::new(1, 3));
+        assert_eq!(u32::from(end), 6);
+    }
+
+    #[test]
+    fn store_apply_changes_ignores_unopened_document() {
+        let mut store = DocumentStore::default();
+        let uri = Url::parse("file:///a/B.java").unwrap();
+        store.apply_changes(&uri, &[ranged((0, 0), (0, 0), "x")], 1);
+        assert!(store.get(&uri).is_none());
+    }
+
+    #[test]
+    fn store_apply_changes_empty_batch_bumps_version_only() {
+        let mut store = DocumentStore::default();
+        let uri = Url::parse("file:///a/B.java").unwrap();
+        store.upsert(uri.clone(), "abc".into(), 1);
+        let before = store.get(&uri).unwrap();
+        store.apply_changes(&uri, &[], 2);
+        let after = store.get(&uri).unwrap();
+        assert_eq!(&*after.text, "abc");
+        assert_eq!(after.version, 2);
+        // The text and line index are untouched, not rebuilt.
+        assert!(Arc::ptr_eq(&before.line_index, &after.line_index));
+    }
 
     #[test]
     fn store_upsert_get_remove() {

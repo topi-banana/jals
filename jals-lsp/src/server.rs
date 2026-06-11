@@ -148,13 +148,10 @@ impl LanguageServer for ServerState {
         ControlFlow::Continue(())
     }
 
-    fn did_change(&mut self, mut params: DidChangeTextDocumentParams) -> Self::NotifyResult {
+    fn did_change(&mut self, params: DidChangeTextDocumentParams) -> Self::NotifyResult {
         let uri = params.text_document.uri;
-        // Full sync: the last change event carries the entire new document text.
-        if let Some(change) = params.content_changes.pop() {
-            self.store
-                .upsert(uri.clone(), change.text, params.text_document.version);
-        }
+        self.store
+            .apply_changes(&uri, &params.content_changes, params.text_document.version);
         self.publish_diagnostics(&uri);
         ControlFlow::Continue(())
     }
@@ -258,7 +255,9 @@ fn config_watch_registration() -> RegistrationParams {
 /// The capabilities advertised to the client during `initialize`.
 fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
