@@ -162,6 +162,15 @@ pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
                 mode,
                 doc: d,
             }),
+            Doc::IndentIfBreak(d) => stack.push(Cmd {
+                indent: if mode == Mode::Break {
+                    indent + 1
+                } else {
+                    indent
+                },
+                mode,
+                doc: d,
+            }),
             Doc::Group { doc, should_break } => {
                 let m = if *should_break || !fits(&out, indent, doc, &stack) {
                     Mode::Break
@@ -359,6 +368,10 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
                 }
             }
             Doc::Indent(d) => work.push((ind + 1, mode, d)),
+            Doc::IndentIfBreak(d) => {
+                let ind = if mode == Mode::Break { ind + 1 } else { ind };
+                work.push((ind, mode, d));
+            }
             Doc::Group { doc, should_break } => {
                 let m = if *should_break {
                     Mode::Break

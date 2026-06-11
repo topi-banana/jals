@@ -211,6 +211,14 @@ pub struct Config {
     /// the end of the broken line ([`Back`](BinopSeparator::Back)). The wrapping itself is
     /// driven by [`max_width`](Config::max_width) alone. Mirrors rustfmt's `binop_separator`.
     pub binop_separator: BinopSeparator,
+    /// Let the last item of a call argument list or annotation argument list hang past the
+    /// call line when it is a delimited expression — a block-bodied lambda, an
+    /// anonymous-class / array-creating `new`, an array initializer, or a `name = {…}`
+    /// annotation pair: the earlier arguments stay on the call line and only the trailing
+    /// body breaks (`f(a, () -> {` … `});`). Off by default, keeping the all-or-nothing
+    /// layout. Layout-only — the significant-token sequence is preserved exactly. Mirrors
+    /// rustfmt's `overflow_delimited_expr`.
+    pub overflow_delimited_expr: bool,
 }
 
 impl Default for Config {
@@ -239,6 +247,7 @@ impl Default for Config {
                 "static".to_string(),
             ],
             binop_separator: BinopSeparator::Front,
+            overflow_delimited_expr: false,
         }
     }
 }
@@ -365,6 +374,8 @@ mod tests {
         assert_eq!(c.import_groups, ["java.", "javax.", "*", "static"]);
         // Wrapped binary operators lead their continuation line by default.
         assert_eq!(c.binop_separator, BinopSeparator::Front);
+        // Last-argument overflow is opt-in; off by default keeps the all-or-nothing layout.
+        assert!(!c.overflow_delimited_expr);
     }
 
     #[test]
@@ -414,6 +425,12 @@ mod tests {
         assert_eq!(c.binop_separator, BinopSeparator::Front);
         let c: Config = toml::from_str("binop-separator = \"back\"\n").unwrap();
         assert_eq!(c.binop_separator, BinopSeparator::Back);
+    }
+
+    #[test]
+    fn overflow_delimited_expr_parses() {
+        let c: Config = toml::from_str("overflow-delimited-expr = true\n").unwrap();
+        assert!(c.overflow_delimited_expr);
     }
 
     #[test]

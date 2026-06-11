@@ -13,3 +13,4 @@ cc da2bdf2d7ab63f1af6a9b7a7492faff48fd073bb031df939279dc42ef90580a1 # shrinks to
 cc 39b09ea56e9ca1f81d498bcccae4279679d01a429b6ef039ca8c72926290a804 # shrinks to src = "class{-/* b */>=+"
 cc 67f9273d3df17e98300f61285c7dc29ac08386957fc90dd5609f62b0eb7c5c8b # shrinks to src = "{public// c\n// c\n@"
 cc f904afef9c2819f529b86c5c0e7461df032e96b23240b8baf2b09825c8e0115b # shrinks to src = "\n\n// c\nclass"
+cc 34d243e6d8eef08672ee7876cb45d6a2ebf8cb97de5082ee17ef25a44d3a213f # shrinks to src = "class{}\n// c\n"

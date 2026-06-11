@@ -8,7 +8,9 @@
 //! never dropped or duplicated either.
 //!
 //! Structural nodes (source file, bodies, blocks) get multi-line layout; delimited lists
-//! (params, args, array initializers) wrap all-or-nothing; binary/unary expressions get
+//! (params, args, array initializers) wrap all-or-nothing (except that
+//! `overflow-delimited-expr` may hang a call's trailing lambda / anonymous class / array
+//! initializer past the call line); binary/unary expressions get
 //! canonical operator spacing, and a binary expression that overflows `max-width` wraps at
 //! its operators (placement per `binop-separator`); everything else falls back to
 //! [`lower_generic`], which lays a node out inline with normalized spacing. Source-file
@@ -19,8 +21,8 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 use crate::comments::{self, CommentMap};
 use crate::config::{BinopSeparator, BraceStyle, Config, ControlBraceStyle, TrailingComma};
 use crate::doc::{
-    Doc, blank_line, concat, group, group_within, hardline, if_break, indent, line, nil, raw,
-    softline, text,
+    Doc, blank_line, concat, group, group_overflow, group_within, hardline, if_break, indent, line,
+    nil, raw, softline, text,
 };
 
 /// Lowering context shared (immutably) across the walk.
@@ -556,10 +558,76 @@ pub(crate) fn blank_lines_before(tok: &SyntaxToken) -> usize {
 // Delimited lists (params, args, array initializers)
 // ---------------------------------------------------------------------------
 
+/// The node forming the entire final item of a paren-delimited list — `(…, <node>)` with the
+/// node directly between the last comma (or the open paren) and the close paren — plus that
+/// close paren. `None` for any other shape: a trailing comma, stray or missing tokens, or an
+/// empty recovery node; the caller then keeps the all-or-nothing layout.
+fn sole_last_item(list: &SyntaxNode) -> Option<(SyntaxNode, SyntaxToken)> {
+    let sig: Vec<SyntaxElement> = list
+        .children_with_tokens()
+        .filter(|el| match el {
+            SyntaxElement::Node(n) => first_sig_token(n).is_some(),
+            SyntaxElement::Token(t) => !t.kind().is_trivia(),
+        })
+        .collect();
+    let [.., prev, cand, close] = sig.as_slice() else {
+        return None;
+    };
+    let close = close.as_token().filter(|t| t.kind() == S::RPAREN)?.clone();
+    let node = cand.as_node()?.clone();
+    match prev.as_token().map(SyntaxToken::kind)? {
+        S::COMMA | S::LPAREN => Some((node, close)),
+        _ => None,
+    }
+}
+
+/// Whether `node` is a delimited expression that `overflow-delimited-expr` may hang: a
+/// block-bodied lambda, an anonymous-class / array-creating `new`, a bare array initializer,
+/// or — in an annotation argument list — an `ANNOTATION_PAIR` whose value is one of those.
+/// Expression-bodied lambdas are excluded so they keep the all-or-nothing layout exactly.
+fn is_overflowable_expr(node: &SyntaxNode, in_annotation: bool) -> bool {
+    match node.kind() {
+        S::LAMBDA_EXPR => node.children().any(|c| c.kind() == S::BLOCK),
+        S::ARRAY_INIT => true,
+        S::NEW_EXPR => node
+            .children()
+            .any(|c| matches!(c.kind(), S::CLASS_BODY | S::ARRAY_INIT)),
+        S::ANNOTATION_PAIR if in_annotation => node
+            .children()
+            .last()
+            .is_some_and(|v| is_overflowable_expr(&v, false)),
+        _ => false,
+    }
+}
+
+/// Whether `overflow-delimited-expr` applies to this list: the option is on, the list is a
+/// call / annotation argument list, its final item is exactly one overflowable node, and
+/// neither that node's first token nor the close paren carries leading comments — those need
+/// their own line above their anchor, which the vertical layout provides.
+fn overflows_last_item(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
+    if !ctx.cfg.overflow_delimited_expr
+        || !matches!(node.kind(), S::ARG_LIST | S::ANNOTATION_ARG_LIST)
+    {
+        return false;
+    }
+    let Some((cand, close)) = sole_last_item(node) else {
+        return false;
+    };
+    is_overflowable_expr(&cand, node.kind() == S::ANNOTATION_ARG_LIST)
+        && first_sig_token(&cand).is_some_and(|t| !ctx.comments.has_leading(&t))
+        && !ctx.comments.has_leading(&close)
+}
+
 /// Lower a comma-separated, delimited list that wraps all-or-nothing. Items are separated by a
 /// soft line that becomes a space when flat and a break when wrapped. An argument list
 /// (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`, and an array
 /// initializer (`ARRAY_INIT`) when it exceeds `array-width`.
+///
+/// With `overflow-delimited-expr` enabled, a call or annotation argument list whose final
+/// item is a delimited expression (see [`is_overflowable_expr`]) instead hangs that item:
+/// laid out flat, the earlier items stay on the line and only the item's body breaks
+/// (`f(a, () -> {` … `});`); laid out broken, the result is identical to the all-or-nothing
+/// layout.
 ///
 /// Inter-item commas are emitted verbatim. The final item's trailing comma is preserved by
 /// default; for an array initializer it instead follows the `trailing-comma` policy (see
@@ -620,7 +688,7 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     };
 
     let last = rows.len() - 1;
-    let items: Vec<Doc> = rows
+    let mut items: Vec<Doc> = rows
         .into_iter()
         .enumerate()
         .map(|(i, (content, comma))| {
@@ -634,6 +702,24 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             concat(vec![content, comma_doc])
         })
         .collect();
+
+    // `overflow-delimited-expr`: hang the final delimited item past the call line. Laid out
+    // flat, the earlier items stay on the line and only the item's body breaks; laid out
+    // broken, the result is identical to the all-or-nothing layout below, so this structure
+    // strictly generalizes it.
+    if overflows_last_item(node, ctx)
+        && let Some(last_item) = items.pop()
+    {
+        let mut head_inner = vec![softline()];
+        if !items.is_empty() {
+            head_inner.push(crate::doc::join(line(), items));
+            head_inner.push(line());
+        }
+        let head = concat(vec![open_doc, indent(concat(head_inner))]);
+        let tail = concat(vec![softline(), close_doc]);
+        let budget = (node.kind() == S::ARG_LIST).then_some(ctx.cfg.fn_call_width);
+        return group_overflow(head, last_item, tail, budget);
+    }
 
     let doc = concat(vec![
         open_doc,
