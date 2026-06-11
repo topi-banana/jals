@@ -1462,8 +1462,16 @@ impl LambdaParams {
 ast_node!(MethodRefExpr, METHOD_REF_EXPR);
 
 impl MethodRefExpr {
-    /// The qualifier expression (`expr::m`).
+    /// The qualifier expression (`expr::m`). For an array constructor reference
+    /// like `String[]::new` this is the part before the dimensions (`String`).
+    /// `None` for primitive-array forms (see [`Self::ty`]).
     pub fn qualifier(&self) -> Option<Expr> {
+        support::child(&self.syntax)
+    }
+
+    /// The receiver type of a primitive-array constructor reference
+    /// (`int[]::new`). `None` for reference forms (see [`Self::qualifier`]).
+    pub fn ty(&self) -> Option<Type> {
         support::child(&self.syntax)
     }
 }

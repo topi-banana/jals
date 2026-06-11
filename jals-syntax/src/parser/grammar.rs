@@ -1364,8 +1364,8 @@ fn at_local_var_decl(p: &Parser) -> bool {
         return true;
     }
     if p.at_ts(PRIMITIVE_TYPE) {
-        // `int.class` / `int[].class` starts an expression, not a declaration.
-        return p.nth_nofuel(skip_bracket_pairs(p, 1)) != DOT;
+        // `int.class` / `int[].class` / `int[]::new` starts an expression, not a declaration.
+        return !at_primitive_class_literal_or_method_ref(p);
     }
     if p.at(IDENT) {
         // Type + binding name (`Foo x` / `List<T> x` / `a.B c` / `int[] a` / `Lock _`).
@@ -1698,9 +1698,16 @@ fn record_component(p: &mut Parser) {
 
 fn at_expr_start(p: &Parser) -> bool {
     // A primitive type keyword can begin an expression only as a class literal
-    // (`int.class`, `boolean[].class`).
-    p.at_ts(EXPR_START)
-        || (p.at_ts(PRIMITIVE_TYPE) && p.nth_nofuel(skip_bracket_pairs(p, 1)) == DOT)
+    // (`int.class`, `boolean[].class`) or an array constructor reference (`int[]::new`).
+    p.at_ts(EXPR_START) || (p.at_ts(PRIMITIVE_TYPE) && at_primitive_class_literal_or_method_ref(p))
+}
+
+/// Whether a primitive type keyword at the current position begins an expression:
+/// a class literal (`int.class`, `boolean[].class`) or an array constructor
+/// reference (`int[]::new` — at least one `[]` pair; bare `int::new` is not a type).
+fn at_primitive_class_literal_or_method_ref(p: &Parser) -> bool {
+    let i = skip_bracket_pairs(p, 1);
+    p.nth_nofuel(i) == DOT || (i > 1 && p.nth_nofuel(i) == COLON_COLON)
 }
 
 /// Parses an expression (entry point).
@@ -1903,6 +1910,25 @@ fn at_array_class_literal(p: &Parser) -> bool {
     i > 0 && p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == CLASS_KW
 }
 
+/// Whether `[ ]`+ `::` follows — the tail of an array constructor method reference.
+fn at_array_method_ref(p: &Parser) -> bool {
+    let i = skip_bracket_pairs(p, 0);
+    i > 0 && p.nth_nofuel(i) == COLON_COLON
+}
+
+/// Parses the `:: [type_args] (new | ident)` tail of a method reference.
+fn method_ref_tail(p: &mut Parser) {
+    p.bump(COLON_COLON);
+    if p.at(LT) {
+        type_args(p);
+    }
+    if p.at(NEW_KW) {
+        p.bump(NEW_KW);
+    } else {
+        p.expect(IDENT);
+    }
+}
+
 fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
     let mut lhs = primary_expr(p)?;
     loop {
@@ -1952,21 +1978,26 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
             }
             COLON_COLON => {
                 let m = lhs.precede(p);
-                p.bump(COLON_COLON);
-                if p.at(LT) {
-                    type_args(p);
-                }
-                if p.at(NEW_KW) {
-                    p.bump(NEW_KW);
-                } else {
-                    p.expect(IDENT);
-                }
+                method_ref_tail(p);
                 lhs = m.complete(p, METHOD_REF_EXPR);
             }
             LPAREN => {
                 let m = lhs.precede(p);
                 arg_list(p);
                 lhs = m.complete(p, CALL_EXPR);
+            }
+            LBRACK if at_array_method_ref(p) => {
+                // `String[]::new` / `a.b.C[][]::new` (JLS 15.13 `ArrayType :: new`). As
+                // with the array class literal below, the lhs is an already-completed
+                // NAME_REF / FIELD_ACCESS, so the dimension tokens sit directly under
+                // METHOD_REF_EXPR.
+                let m = lhs.precede(p);
+                while p.at(LBRACK) && p.nth_at(1, RBRACK) {
+                    p.bump(LBRACK);
+                    p.bump(RBRACK);
+                }
+                method_ref_tail(p);
+                lhs = m.complete(p, METHOD_REF_EXPR);
             }
             LBRACK if at_array_class_literal(p) => {
                 // `String[].class` / `a.b.C[][].class` (JLS 15.8.2 `TypeName {[]} . class`).
@@ -2026,14 +2057,20 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
         }
         NEW_KW => new_expr(p),
         SWITCH_KW => switch_expr(p),
-        _ if p.at_ts(PRIMITIVE_TYPE) && p.nth_nofuel(skip_bracket_pairs(p, 1)) == DOT => {
-            // Class literal `int.class` / `boolean[].class` / `void.class` (JLS 15.8.2) —
-            // the only expression that can begin with a primitive type keyword.
+        _ if p.at_ts(PRIMITIVE_TYPE) && at_primitive_class_literal_or_method_ref(p) => {
+            // Class literal `int.class` / `boolean[].class` / `void.class` (JLS 15.8.2)
+            // or array constructor reference `int[]::new` (JLS 15.13) — the only
+            // expressions that can begin with a primitive type keyword.
             let m = p.start();
             type_(p); // keyword + `[]` dims → TYPE node
-            p.expect(DOT); // guaranteed by the gate above
-            p.expect(CLASS_KW);
-            m.complete(p, CLASS_LITERAL)
+            if p.at(COLON_COLON) {
+                method_ref_tail(p);
+                m.complete(p, METHOD_REF_EXPR)
+            } else {
+                p.expect(DOT); // guaranteed by the gate above
+                p.expect(CLASS_KW);
+                m.complete(p, CLASS_LITERAL)
+            }
         }
         _ => {
             p.err_and_bump("expected an expression");
