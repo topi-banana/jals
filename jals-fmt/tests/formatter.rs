@@ -121,6 +121,24 @@ fn class_literals() {
 }
 
 #[test]
+fn array_method_refs() {
+    check(
+        "class A{void m(){f(String[]::new);f(int[]::new);f(int[][]::new);f(java.lang.String[][]::new);f(Map.Entry[]::new);}}",
+        expect![[r#"
+            class A {
+                void m() {
+                    f(String []::new);
+                    f(int []::new);
+                    f(int [] []::new);
+                    f(java.lang.String [] []::new);
+                    f(Map.Entry []::new);
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn nested_generics() {
     check(
         "class C{Map<K,List<Map<K2,V2>>> f(){return null;}}",

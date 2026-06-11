@@ -2658,6 +2658,153 @@ fn array_class_literals() {
 }
 
 #[test]
+fn array_method_refs() {
+    check(
+        "class C { void m() { f(String[]::new); g(int[]::new); h(int[][]::new); i(java.lang.String[][]::new); j(Map.Entry[]::new); k(a[0]::toString); } }",
+        expect![[r#"
+            SOURCE_FILE@0..144
+              CLASS_DECL@0..144
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..144
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..142
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..142
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..38
+                        CALL_EXPR@20..37
+                          NAME_REF@20..22
+                            WHITESPACE@20..21 " "
+                            IDENT@21..22 "f"
+                          ARG_LIST@22..37
+                            LPAREN@22..23 "("
+                            METHOD_REF_EXPR@23..36
+                              NAME_REF@23..29
+                                IDENT@23..29 "String"
+                              LBRACK@29..30 "["
+                              RBRACK@30..31 "]"
+                              COLON_COLON@31..33 "::"
+                              NEW_KW@33..36 "new"
+                            RPAREN@36..37 ")"
+                        SEMICOLON@37..38 ";"
+                      EXPR_STMT@38..53
+                        CALL_EXPR@38..52
+                          NAME_REF@38..40
+                            WHITESPACE@38..39 " "
+                            IDENT@39..40 "g"
+                          ARG_LIST@40..52
+                            LPAREN@40..41 "("
+                            METHOD_REF_EXPR@41..51
+                              TYPE@41..46
+                                INT_KW@41..44 "int"
+                                LBRACK@44..45 "["
+                                RBRACK@45..46 "]"
+                              COLON_COLON@46..48 "::"
+                              NEW_KW@48..51 "new"
+                            RPAREN@51..52 ")"
+                        SEMICOLON@52..53 ";"
+                      EXPR_STMT@53..70
+                        CALL_EXPR@53..69
+                          NAME_REF@53..55
+                            WHITESPACE@53..54 " "
+                            IDENT@54..55 "h"
+                          ARG_LIST@55..69
+                            LPAREN@55..56 "("
+                            METHOD_REF_EXPR@56..68
+                              TYPE@56..63
+                                INT_KW@56..59 "int"
+                                LBRACK@59..60 "["
+                                RBRACK@60..61 "]"
+                                LBRACK@61..62 "["
+                                RBRACK@62..63 "]"
+                              COLON_COLON@63..65 "::"
+                              NEW_KW@65..68 "new"
+                            RPAREN@68..69 ")"
+                        SEMICOLON@69..70 ";"
+                      EXPR_STMT@70..100
+                        CALL_EXPR@70..99
+                          NAME_REF@70..72
+                            WHITESPACE@70..71 " "
+                            IDENT@71..72 "i"
+                          ARG_LIST@72..99
+                            LPAREN@72..73 "("
+                            METHOD_REF_EXPR@73..98
+                              FIELD_ACCESS@73..89
+                                FIELD_ACCESS@73..82
+                                  NAME_REF@73..77
+                                    IDENT@73..77 "java"
+                                  DOT@77..78 "."
+                                  IDENT@78..82 "lang"
+                                DOT@82..83 "."
+                                IDENT@83..89 "String"
+                              LBRACK@89..90 "["
+                              RBRACK@90..91 "]"
+                              LBRACK@91..92 "["
+                              RBRACK@92..93 "]"
+                              COLON_COLON@93..95 "::"
+                              NEW_KW@95..98 "new"
+                            RPAREN@98..99 ")"
+                        SEMICOLON@99..100 ";"
+                      EXPR_STMT@100..121
+                        CALL_EXPR@100..120
+                          NAME_REF@100..102
+                            WHITESPACE@100..101 " "
+                            IDENT@101..102 "j"
+                          ARG_LIST@102..120
+                            LPAREN@102..103 "("
+                            METHOD_REF_EXPR@103..119
+                              FIELD_ACCESS@103..112
+                                NAME_REF@103..106
+                                  IDENT@103..106 "Map"
+                                DOT@106..107 "."
+                                IDENT@107..112 "Entry"
+                              LBRACK@112..113 "["
+                              RBRACK@113..114 "]"
+                              COLON_COLON@114..116 "::"
+                              NEW_KW@116..119 "new"
+                            RPAREN@119..120 ")"
+                        SEMICOLON@120..121 ";"
+                      EXPR_STMT@121..140
+                        CALL_EXPR@121..139
+                          NAME_REF@121..123
+                            WHITESPACE@121..122 " "
+                            IDENT@122..123 "k"
+                          ARG_LIST@123..139
+                            LPAREN@123..124 "("
+                            METHOD_REF_EXPR@124..138
+                              INDEX_EXPR@124..128
+                                NAME_REF@124..125
+                                  IDENT@124..125 "a"
+                                LBRACK@125..126 "["
+                                LITERAL@126..127
+                                  INT_LITERAL@126..127 "0"
+                                RBRACK@127..128 "]"
+                              COLON_COLON@128..130 "::"
+                              IDENT@130..138 "toString"
+                            RPAREN@138..139 ")"
+                        SEMICOLON@139..140 ";"
+                      WHITESPACE@140..141 " "
+                      RBRACE@141..142 "}"
+                  WHITESPACE@142..143 " "
+                  RBRACE@143..144 "}"
+        "#]],
+    );
+}
+
+#[test]
 fn class_literal_statement_position() {
     // `int.class` at statement start must parse as an expression statement, not be
     // mistaken for the start of a local variable declaration (javac rejects the
