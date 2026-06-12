@@ -282,6 +282,70 @@ pub enum TokenKind {
     PERCENT_EQ,
 }
 
+/// Maps reserved words (the 50 keywords plus the `true` / `false` / `null` literal
+/// keywords) to their token kinds. Contextual keywords (`var`, `record`, `sealed`, ...)
+/// are not included: they lex as [`IDENT`](TokenKind::IDENT) and the parser promotes them.
+pub(crate) fn keyword_kind(text: &str) -> Option<TokenKind> {
+    use TokenKind::*;
+    let kind = match text {
+        "abstract" => ABSTRACT_KW,
+        "assert" => ASSERT_KW,
+        "boolean" => BOOLEAN_KW,
+        "break" => BREAK_KW,
+        "byte" => BYTE_KW,
+        "case" => CASE_KW,
+        "catch" => CATCH_KW,
+        "char" => CHAR_KW,
+        "class" => CLASS_KW,
+        "const" => CONST_KW,
+        "continue" => CONTINUE_KW,
+        "default" => DEFAULT_KW,
+        "do" => DO_KW,
+        "double" => DOUBLE_KW,
+        "else" => ELSE_KW,
+        "enum" => ENUM_KW,
+        "extends" => EXTENDS_KW,
+        "final" => FINAL_KW,
+        "finally" => FINALLY_KW,
+        "float" => FLOAT_KW,
+        "for" => FOR_KW,
+        "goto" => GOTO_KW,
+        "if" => IF_KW,
+        "implements" => IMPLEMENTS_KW,
+        "import" => IMPORT_KW,
+        "instanceof" => INSTANCEOF_KW,
+        "int" => INT_KW,
+        "interface" => INTERFACE_KW,
+        "long" => LONG_KW,
+        "native" => NATIVE_KW,
+        "new" => NEW_KW,
+        "package" => PACKAGE_KW,
+        "private" => PRIVATE_KW,
+        "protected" => PROTECTED_KW,
+        "public" => PUBLIC_KW,
+        "return" => RETURN_KW,
+        "short" => SHORT_KW,
+        "static" => STATIC_KW,
+        "strictfp" => STRICTFP_KW,
+        "super" => SUPER_KW,
+        "switch" => SWITCH_KW,
+        "synchronized" => SYNCHRONIZED_KW,
+        "this" => THIS_KW,
+        "throw" => THROW_KW,
+        "throws" => THROWS_KW,
+        "transient" => TRANSIENT_KW,
+        "try" => TRY_KW,
+        "void" => VOID_KW,
+        "volatile" => VOLATILE_KW,
+        "while" => WHILE_KW,
+        "true" => TRUE_KW,
+        "false" => FALSE_KW,
+        "null" => NULL_KW,
+        _ => return None,
+    };
+    Some(kind)
+}
+
 /// `//` 以降を改行(`\r` または `\n`)の手前まで消費する。改行自体は `NEWLINE` トークンに残す。
 fn lex_line_comment(lex: &mut logos::Lexer<TokenKind>) {
     let rest = lex.remainder();
