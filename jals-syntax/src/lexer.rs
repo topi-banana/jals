@@ -589,21 +589,11 @@ fn is_ident_continue(c: char) -> bool {
         return c.is_ascii_alphanumeric() || c == '_' || c == '$';
     }
     use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
-    matches!(
-        c.general_category(),
-        GC::UppercaseLetter
-            | GC::LowercaseLetter
-            | GC::TitlecaseLetter
-            | GC::ModifierLetter
-            | GC::OtherLetter
-            | GC::LetterNumber
-            | GC::CurrencySymbol
-            | GC::ConnectorPunctuation
-            | GC::DecimalNumber
-            | GC::NonspacingMark
-            | GC::SpacingMark
-            | GC::Format
-    )
+    is_ident_start(c)
+        || matches!(
+            c.general_category(),
+            GC::DecimalNumber | GC::NonspacingMark | GC::SpacingMark | GC::Format
+        )
 }
 
 #[cfg(test)]
