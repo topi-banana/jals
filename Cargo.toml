@@ -7,6 +7,7 @@ members = [
   "jals-playground",
   "jals-syntax",
   "jals-tests",
+  "xtask",
 ]
 
 [workspace.package]
@@ -28,9 +29,10 @@ rowan = { version = "0.16.1" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0" }
 text-size = { version = "1.1.1" }
-tokio = { version = "1", features = ["rt", "net"] }
+tokio = { version = "1", features = ["net", "rt"] }
 toml = { version = "1.1.2" }
 tower = { version = "0.5" }
+ungrammar = { version = "1.16" }
 # Pinned: 0.1.3 ships Unicode 16.0.0 tables, matching the tables the previous
 # lexer implementation baked in; 0.1.4 moves to Unicode 17.
 unicode-properties = { version = "=0.1.3" }
