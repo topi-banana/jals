@@ -1,0 +1,4 @@
+# Intentionally default (empty). The file exists so rustfmt's config discovery
+# stops at the repo root instead of falling back to a user-level
+# ~/.rustfmt.toml, which would make `cargo run -p xtask -- codegen` output
+# (and `cargo fmt`) machine-dependent.

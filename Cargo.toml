@@ -7,6 +7,7 @@ members = [
   "jals-playground",
   "jals-syntax",
   "jals-tests",
+  "xtask",
 ]
 
 [workspace.package]
@@ -32,5 +33,6 @@ text-size = { version = "1.1.1" }
 tokio = { version = "1", features = ["rt", "net"] }
 toml = { version = "1.1.2" }
 tower = { version = "0.5" }
+ungrammar = { version = "1.16" }
 unicode-width = { version = "0.2.1" }
 walkdir = { version = "2" }

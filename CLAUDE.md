@@ -22,7 +22,7 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Lexer | `jals-syntax/src/lexer.rs`, `token.rs` | `logos`-based, lossless; trivia are real tokens. Context-sensitive keywords lexed as `IDENT`, promoted later. |
 | Token/node kinds | `jals-syntax/src/syntax_kind.rs` | Unified `SyntaxKind` (u16) for `rowan`; `TokenKind` is terminals only. |
 | Parser | `jals-syntax/src/parser/` | Recursive descent. `grammar.rs` is the rules; `mod.rs` the core; `event.rs`/`sink.rs` build the green tree. Error-resilient. |
-| Typed AST | `jals-syntax/src/ast.rs` | Hand-written zero-cost newtype views over the CST. Accessors return `Option`/iterators, never panic. |
+| Typed AST | `jals-syntax/java.ungram`, `jals-syntax/src/ast/` | Zero-cost newtype views over the CST. `ast/generated.rs` is rendered from `java.ungram` by `cargo run -p xtask -- codegen` (committed; CI checks drift); bespoke accessors live in `ast/ext.rs`. Accessors return `Option`/iterators, never panic. |
 | Formatter pipeline | `jals-fmt/src/lower.rs` → `doc.rs` → `render.rs` | CST → `Doc` IR → text. |
 | Import layout | `jals-fmt/src/imports.rs` | Pure ordering/grouping of the leading import run (`reorder-imports` / `group-imports`) + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
@@ -38,6 +38,7 @@ cargo build --workspace
 cargo test  --workspace --all-features
 cargo run -p jals-cli -- fmt <paths>       # or: echo '...' | cargo run -p jals-cli -- fmt
 cargo run -p jals-cli -- lsp               # run the language server over stdio (for editors)
+cargo run -p xtask -- codegen              # regenerate jals-syntax/src/ast/generated.rs from java.ungram
 (cd jals-playground && trunk serve)        # run the browser playground (needs trunk + the wasm32 target)
 ```
 
@@ -51,6 +52,7 @@ cargo test --workspace --all-features
 taplo fmt --check --diff
 cargo machete                                                # no unused deps
 cargo build --release --target wasm32-unknown-unknown -p jals-syntax
+cargo run -p xtask -- codegen --check                        # generated AST is up to date
 ```
 
 ## Invariants — do not break these

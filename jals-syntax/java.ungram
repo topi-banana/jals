@@ -1,0 +1,463 @@
+// Java grammar, as recognized by the error-resilient parser in
+// `jals-syntax/src/parser/grammar.rs`.
+//
+// This file is the source of truth for the typed AST layer:
+// `cargo run -p xtask -- codegen` renders `jals-syntax/src/ast/generated.rs`
+// from it, and `cargo run -p xtask -- codegen --check` (run in CI) verifies
+// that the committed file is up to date.
+//
+// Rule names equal AST struct names; a node's `SyntaxKind` is the
+// SCREAMING_SNAKE_CASE form of its rule name (`ClassDecl` -> `CLASS_DECL`).
+// A rule that is an alternation of plain node references becomes an enum.
+//
+// Only *labeled* elements generate accessors; unlabeled tokens and nodes are
+// documentation. The four accessor forms are:
+//
+//   foo:Bar      -> pub fn foo(&self) -> Option<Bar>       (first Bar child)
+//   foo:Bar*     -> pub fn foo(&self) -> AstChildren<Bar>  (all Bar children;
+//                   also for labeled groups like foo:(Bar (',' Bar)*))
+//   is_x:'kw'    -> pub fn is_x(&self) -> bool             (token presence)
+//   foo:'ident'  -> pub fn foo(&self) -> Option<String>    (first IDENT text)
+//
+// Accessors that don't fit these forms (or that would need two labels with
+// the same node type on one rule) are hand-written in
+// `jals-syntax/src/ast/ext.rs`.
+
+// ===== Source file =====
+
+SourceFile =
+  package:PackageDecl?
+  imports:ImportDecl*
+  (module:ModuleDecl | decls:Decl*)
+
+PackageDecl =
+  'package' name:QualifiedName ';'
+
+ImportDecl =
+  'import' is_static:'static'? name:QualifiedName ';'
+
+QualifiedName =
+  'ident' ('.' 'ident')* ('.' is_wildcard:'*')?
+
+// ===== Module declarations (`module-info.java`) =====
+
+ModuleDecl =
+  modifiers:Modifiers is_open:'open'? 'module' name:QualifiedName body:ModuleBody
+
+ModuleBody =
+  '{' directives:Directive* '}'
+
+Directive =
+  RequiresDirective
+| ExportsDirective
+| OpensDirective
+| UsesDirective
+| ProvidesDirective
+
+RequiresDirective =
+  'requires' is_transitive:'transitive'? is_static:'static'?
+  module_name:QualifiedName ';'
+
+// `ExportsDirective::to_modules` (ext.rs) returns the names after `to`.
+ExportsDirective =
+  'exports' package_name:QualifiedName ('to' QualifiedName (',' QualifiedName)*)? ';'
+
+// `OpensDirective::to_modules` (ext.rs) returns the names after `to`.
+OpensDirective =
+  'opens' package_name:QualifiedName ('to' QualifiedName (',' QualifiedName)*)? ';'
+
+UsesDirective =
+  'uses' type_name:QualifiedName ';'
+
+// `ProvidesDirective::providers` (ext.rs) returns the names after `with`.
+ProvidesDirective =
+  'provides' service:QualifiedName 'with' QualifiedName (',' QualifiedName)* ';'
+
+// ===== Type declarations =====
+
+Decl =
+  ClassDecl
+| InterfaceDecl
+| EnumDecl
+| RecordDecl
+| AnnotationTypeDecl
+
+ClassDecl =
+  modifiers:Modifiers 'class' name:'ident' type_params:TypeParams?
+  extends_clause:ExtendsClause? implements_clause:ImplementsClause?
+  permits_clause:PermitsClause? body:ClassBody
+
+InterfaceDecl =
+  modifiers:Modifiers 'interface' name:'ident' type_params:TypeParams?
+  extends_clause:ExtendsClause? permits_clause:PermitsClause? body:ClassBody
+
+EnumDecl =
+  modifiers:Modifiers 'enum' name:'ident' implements_clause:ImplementsClause?
+  body:EnumBody
+
+RecordDecl =
+  modifiers:Modifiers 'record' name:'ident' type_params:TypeParams?
+  header:RecordHeader implements_clause:ImplementsClause? body:ClassBody
+
+AnnotationTypeDecl =
+  modifiers:Modifiers '@' 'interface' name:'ident' body:ClassBody
+
+// `non-sealed` is re-joined into a single NON_SEALED_KW *node* by the parser;
+// `Modifiers::is_non_sealed` and the keyword query `Modifiers::has` live in
+// ext.rs.
+Modifiers =
+  annotations:Annotation*
+  ( 'public' | 'protected' | 'private' | 'abstract' | 'static' | 'final'
+  | 'native' | 'strictfp' | 'synchronized' | 'transient' | 'volatile'
+  | 'default' | is_sealed:'sealed' | 'non-sealed' )*
+
+Annotation =
+  '@' name:QualifiedName args:AnnotationArgList?
+
+// `(value)` or `(name = value, ...)`. Positional values (an `Expr`, a nested
+// `Annotation`, or an `ArrayInit`) appear as direct children without a pair.
+AnnotationArgList =
+  '(' pairs:(AnnotationPair (',' AnnotationPair)*)? ')'
+
+AnnotationPair =
+  name:'ident' '=' value:Expr
+
+TypeParams =
+  '<' params:(TypeParam (',' TypeParam)*)? '>'
+
+TypeParam =
+  Annotation* name:'ident' ('extends' bounds:(Type ('&' Type)*))?
+
+ExtendsClause =
+  'extends' types:(Type (',' Type)*)
+
+ImplementsClause =
+  'implements' types:(Type (',' Type)*)
+
+PermitsClause =
+  'permits' types:(Type (',' Type)*)
+
+ThrowsClause =
+  'throws' types:(Type (',' Type)*)
+
+RecordHeader =
+  '(' components:(RecordComponent (',' RecordComponent)*)? ')'
+
+RecordComponent =
+  Modifiers ty:Type '...'? name:'ident'
+
+// ===== Class body & members =====
+
+ClassBody =
+  '{' members:Member* '}'
+
+// The constants come first; an optional `;` then introduces the members.
+EnumBody =
+  '{' constants:(EnumConstant (',' EnumConstant)*)? (';' members:Member*)? '}'
+
+EnumConstant =
+  Annotation* name:'ident' args:ArgList? body:ClassBody?
+
+Member =
+  FieldDecl
+| MethodDecl
+| ConstructorDecl
+| Initializer
+| ClassDecl
+| InterfaceDecl
+| EnumDecl
+| RecordDecl
+| AnnotationTypeDecl
+
+// Multiple declarators are flat: `int a = 1, b;` keeps every name and
+// initializer under one node; `name`/`value` expose the first of each.
+// Dimensions (`[]`) may be annotated.
+FieldDecl =
+  modifiers:Modifiers ty:Type name:'ident' ('[' ']')* ('=' value:Expr)?
+  (',' 'ident' ('[' ']')* ('=' Expr)?)* ';'
+
+// An annotation element may carry a `default value` (an ANNOTATION_DEFAULT
+// node in the CST; it has no typed wrapper).
+MethodDecl =
+  modifiers:Modifiers type_params:TypeParams? return_type:Type name:'ident'
+  params:ParamList ('[' ']')* throws_clause:ThrowsClause? (body:Block | ';')
+
+// Also covers the compact canonical constructor of a record (`Name { ... }`,
+// without a parameter list).
+ConstructorDecl =
+  modifiers:Modifiers TypeParams? name:'ident' params:ParamList?
+  throws_clause:ThrowsClause? (body:Block | ';')
+
+Initializer =
+  modifiers:Modifiers block:Block
+
+ParamList =
+  '(' params:(Param (',' Param)*)? ')'
+
+// Also used for lambda parameters, where the modifiers and type may be
+// absent. A receiver parameter uses `this`, an unnamed parameter `_`.
+Param =
+  modifiers:Modifiers? ty:Type? '...'? (name:'ident' | 'this' | '_')
+
+// ===== Types =====
+
+// `int`, `List<T>`, `a.b.C<D>.E`, `int[]`, `var`. Dimensions may be
+// annotated (`String @A []`).
+Type =
+  Annotation*
+  ( 'var'
+  | 'boolean' | 'byte' | 'short' | 'int' | 'long' | 'char' | 'float'
+  | 'double' | 'void'
+  | 'ident' type_args:TypeArgs? ('.' 'ident' TypeArgs?)*
+  )
+  (Annotation* '[' ']')*
+
+// Wildcard arguments (`?` / `? extends T` / `? super T`) keep their bound as
+// a direct `Type` child; the `?` itself is a bare token.
+TypeArgs =
+  '<' args:(Type (',' Type)*)? '>'
+
+// ===== Statements =====
+
+Block =
+  '{' stmts:Stmt* '}'
+
+// Local type declarations (class/interface/enum/record) also appear as
+// block children, but are not part of this enum.
+Stmt =
+  LocalVarDecl
+| Block
+| ExprStmt
+| ReturnStmt
+| IfStmt
+| WhileStmt
+| DoWhileStmt
+| ForStmt
+| ForEachStmt
+| BreakStmt
+| ContinueStmt
+| ThrowStmt
+| YieldStmt
+| AssertStmt
+| SynchronizedStmt
+| TryStmt
+| SwitchStmt
+| LabeledStmt
+| EmptyStmt
+
+// Multiple declarators are flat, as in FieldDecl. The trailing `;` is absent
+// when the declaration is a C-style `for` initializer.
+LocalVarDecl =
+  modifiers:Modifiers ty:Type name:'ident' ('[' ']')* ('=' value:Expr)?
+  (',' 'ident' ('[' ']')* ('=' Expr)?)* ';'?
+
+ExprStmt =
+  expr:Expr ';'
+
+ReturnStmt =
+  'return' expr:Expr? ';'
+
+IfStmt =
+  'if' '(' condition:Expr ')' branches:(Stmt ('else' Stmt)?)
+
+WhileStmt =
+  'while' '(' condition:Expr ')' body:Stmt
+
+DoWhileStmt =
+  'do' body:Stmt 'while' '(' condition:Expr ')' ';'
+
+ForStmt =
+  'for' '(' (LocalVarDecl | Expr (',' Expr)*)? ';' Expr? ';'
+  (Expr (',' Expr)*)? ')' Stmt
+
+ForEachStmt =
+  'for' '(' Modifiers ty:Type name:'ident' ':' iterable:Expr ')' body:Stmt
+
+BreakStmt =
+  'break' 'ident'? ';'
+
+ContinueStmt =
+  'continue' 'ident'? ';'
+
+ThrowStmt =
+  'throw' expr:Expr ';'
+
+YieldStmt =
+  'yield' expr:Expr ';'
+
+AssertStmt =
+  'assert' Expr (':' Expr)? ';'
+
+SynchronizedStmt =
+  'synchronized' '(' lock:Expr ')' body:Block
+
+TryStmt =
+  'try' resources:ResourceList? block:Block catches:CatchClause*
+  finally:FinallyClause?
+
+ResourceList =
+  '(' resources:(Resource (';' Resource)*)? ';'? ')'
+
+Resource =
+  Modifiers Type ('ident' | '_') '=' Expr
+| Expr
+
+CatchClause =
+  'catch' '(' Modifiers ty:Type ('|' Type)* ('ident' | '_') ')' block:Block
+
+FinallyClause =
+  'finally' block:Block
+
+LabeledStmt =
+  label:'ident' ':' stmt:Stmt
+
+EmptyStmt =
+  ';'
+
+// ===== switch (shared by statement and expression) =====
+
+SwitchStmt =
+  'switch' '(' selector:Expr ')' body:SwitchBlock
+
+// Arrow rules and colon groups may in fact be mixed in one block; the two
+// accessors simply filter the children by kind.
+SwitchBlock =
+  '{' rules:SwitchRule* groups:SwitchGroup* '}'
+
+SwitchRule =
+  label:SwitchLabel '->' (Block | ThrowStmt | Expr ';')
+
+SwitchGroup =
+  labels:(SwitchLabel ':')* stmts:Stmt*
+
+// `case` items are patterns or constant expressions, each optionally
+// guarded; `default` also appears inside `case null, default`.
+SwitchLabel =
+  is_default:'default'
+| 'case' (Pattern | Expr) Guard? (',' (Pattern | Expr) Guard?)*
+
+// ===== Patterns =====
+
+Pattern =
+  TypePattern
+| RecordPattern
+| UnnamedPattern
+
+TypePattern =
+  Modifiers? ty:Type (name:'ident' | '_')
+
+RecordPattern =
+  ty:Type '(' components:(Pattern (',' Pattern)*)? ')'
+
+UnnamedPattern =
+  '_'
+
+Guard =
+  'when' condition:Expr
+
+// ===== Expressions =====
+
+Expr =
+  Literal
+| NameRef
+| BinaryExpr
+| UnaryExpr
+| PostfixExpr
+| ParenExpr
+| CallExpr
+| FieldAccess
+| IndexExpr
+| NewExpr
+| AssignmentExpr
+| TernaryExpr
+| LambdaExpr
+| MethodRefExpr
+| CastExpr
+| SwitchExpr
+| ClassLiteral
+| ArrayInit
+
+// `Literal::token`/`Literal::text` (ext.rs) expose the single token.
+Literal =
+  'int_literal' | 'float_literal' | 'char_literal' | 'string_literal'
+| 'text_block' | 'true' | 'false' | 'null'
+
+// `NameRef::text` (ext.rs) exposes the token text.
+NameRef =
+  'ident' | 'this' | 'super'
+
+// Also covers `instanceof`, whose right-hand side is a Type or Pattern child
+// instead of a second operand; `lhs`/`rhs` (ext.rs) pick the operands apart.
+BinaryExpr =
+  operands:Expr*
+
+UnaryExpr =
+  ('!' | '~' | '+' | '-' | '++' | '--') operand:Expr
+
+PostfixExpr =
+  operand:Expr ('++' | '--')
+
+ParenExpr =
+  '(' expr:Expr ')'
+
+CallExpr =
+  callee:Expr args:ArgList
+
+// `receiver.name`, `receiver.this`, `receiver.super`, or a type-witness
+// selector `receiver.<T>method`; `field` (ext.rs) returns the last IDENT.
+FieldAccess =
+  receiver:Expr '.' type_args:TypeArgs? ('ident' | 'this' | 'super')
+
+IndexExpr =
+  parts:(Expr '[' Expr ']')
+
+// Constructor call, anonymous class, qualified inner-class creation
+// (`qualifier.new Inner()`), or array creation (`new int[n]` /
+// `new int[]{...}`, whose initializer is an ArrayInit child).
+NewExpr =
+  (qualifier:Expr '.')? 'new' TypeArgs? ty:Type
+  ( args:ArgList body:ClassBody?
+  | (Annotation* '[' Expr? ']')* ArrayInit?
+  )
+
+ArgList =
+  '(' args:(Expr (',' Expr)*)? ')'
+
+// `target`/`value` (ext.rs) pick the two operands apart.
+AssignmentExpr =
+  parts:(Expr
+    ( '=' | '+=' | '-=' | '*=' | '/=' | '%='
+    | '&=' | '|=' | '^=' | '<<=' | '>>=' | '>>>=' )
+  Expr)
+
+TernaryExpr =
+  parts:(Expr '?' Expr ':' Expr)
+
+LambdaExpr =
+  params:LambdaParams '->' (block_body:Block | expr_body:Expr)
+
+// A bare parameter (`x -> ...`) is still wrapped in a Param node, without
+// the parentheses.
+LambdaParams =
+  '(' params:(Param (',' Param)*)? ')'
+
+// `qualifier` is the receiver expression of a reference form (including
+// `String[]::new`, whose dimension tokens sit directly under this node);
+// `ty` is the receiver type of a primitive-array form (`int[]::new`).
+MethodRefExpr =
+  (qualifier:Expr | ty:Type) ('[' ']')* '::' TypeArgs? ('new' | 'ident')
+
+CastExpr =
+  '(' ty:Type ('&' Type)* ')' expr:Expr
+
+SwitchExpr =
+  'switch' '(' selector:Expr ')' body:SwitchBlock
+
+// `expr` is the part before `.class` of a reference form (including
+// `String[].class`); `ty` is the primitive(-array) form (`int.class`,
+// `long[].class`, `void.class`).
+ClassLiteral =
+  (expr:Expr | ty:Type) ('[' ']')* '.' 'class'
+
+ArrayInit =
+  '{' elements:(Expr (',' Expr)*)? ','? '}'
