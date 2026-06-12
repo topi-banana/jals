@@ -21,7 +21,6 @@ futures = { version = "0.3" }
 jals-fmt = { path = "jals-fmt" }
 jals-lsp = { path = "jals-lsp" }
 jals-syntax = { path = "jals-syntax" }
-logos = { version = "0.16.1" }
 num-derive = { version = "0.4.2" }
 num-traits = { version = "0.2.19" }
 rayon = { version = "1" }

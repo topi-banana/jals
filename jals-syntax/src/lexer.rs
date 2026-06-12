@@ -1,42 +1,40 @@
-//! `logos` をラップした lossless な字句解析器。
+//! A hand-written, lossless lexer.
 //!
-//! [`tokenize`] / [`Lexer`] は入力の全バイトをちょうど 1 トークンに対応させ(各トークンの
-//! `text` を連結すると入力に一致する)、いかなる入力でも panic しない。未一致バイトは
-//! [`SyntaxKind::ERROR`] になる。
+//! [`tokenize`] / [`Lexer`] map every byte of the input to exactly one token (concatenating
+//! each token's `text` reproduces the input) and never panic on any input. Unmatched bytes
+//! become [`SyntaxKind::ERROR`].
 
-use logos::Logos;
 use text_size::{TextRange, TextSize};
 
 use crate::syntax_kind::SyntaxKind;
 use crate::token::{TokenKind, keyword_kind};
 
-/// 字句解析で得られる 1 トークン。
+/// One token produced by lexing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexedToken<'a> {
-    /// トークン種別(`ERROR` を含む統一種別)。
+    /// The token kind (a unified kind that includes `ERROR`).
     pub kind: SyntaxKind,
-    /// このトークンに対応する元テキスト。
+    /// The source text this token covers.
     pub text: &'a str,
-    /// 元テキスト内のバイト範囲。
+    /// The byte range within the source text.
     pub range: TextRange,
 }
 
-/// 入力全体を字句解析してトークン列を返す。
+/// Tokenizes the whole input and returns the token sequence.
 pub fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
     Lexer::new(src).collect()
 }
 
-/// `logos` をラップしたトークンイテレータ。トリビアも含め全トークンを返す。
+/// A token iterator over the input. Yields every token, trivia included.
 pub struct Lexer<'a> {
-    inner: logos::Lexer<'a, TokenKind>,
+    src: &'a str,
+    pos: usize,
 }
 
 impl<'a> Lexer<'a> {
-    /// 入力を受け取って字句解析器を作る。
+    /// Creates a lexer over the given input.
     pub fn new(src: &'a str) -> Self {
-        Lexer {
-            inner: TokenKind::lexer(src),
-        }
+        Lexer { src, pos: 0 }
     }
 }
 
@@ -44,43 +42,24 @@ impl<'a> Iterator for Lexer<'a> {
     type Item = LexedToken<'a>;
 
     fn next(&mut self) -> Option<LexedToken<'a>> {
-        let result = self.inner.next()?;
-        let span = self.inner.span();
-        let text = self.inner.slice();
-        let kind = match result {
-            Ok(token) => SyntaxKind::from_token(token, text),
-            Err(()) => SyntaxKind::ERROR,
-        };
-        let range = TextRange::new(
-            TextSize::from(span.start as u32),
-            TextSize::from(span.end as u32),
-        );
-        Some(LexedToken { kind, text, range })
-    }
-}
-
-/// Hand-written replacement for the `logos` path (Phase A: differential-tested side by
-/// side; Phase B swaps it in). Tokenizes the whole input.
-#[allow(dead_code)]
-fn tokenize_new(src: &str) -> Vec<LexedToken<'_>> {
-    let mut tokens = Vec::new();
-    let mut pos = 0;
-    while pos < src.len() {
-        let (token, end) = scan_token(src, pos);
-        debug_assert!(end > pos, "scan_token must always make progress");
-        let text = &src[pos..end];
+        if self.pos >= self.src.len() {
+            return None;
+        }
+        let start = self.pos;
+        let (token, end) = scan_token(self.src, start);
+        debug_assert!(end > start, "scan_token must always make progress");
+        self.pos = end;
+        let text = &self.src[start..end];
         let kind = match token {
             Ok(token) => SyntaxKind::from_token(token, text),
             Err(()) => SyntaxKind::ERROR,
         };
-        let range = TextRange::new(TextSize::from(pos as u32), TextSize::from(end as u32));
-        tokens.push(LexedToken { kind, text, range });
-        pos = end;
+        let range = TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32));
+        Some(LexedToken { kind, text, range })
     }
-    tokens
 }
 
-// === Hand-written scanner ===
+// === Scanner ===
 
 /// A char cursor over the source text.
 struct Cursor<'a> {
@@ -238,7 +217,11 @@ fn scan_token(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
         }
         '<' => {
             if cursor.eat_if('<') {
-                if cursor.eat_if('=') { LSHIFT_EQ } else { LSHIFT }
+                if cursor.eat_if('=') {
+                    LSHIFT_EQ
+                } else {
+                    LSHIFT
+                }
             } else if cursor.eat_if('=') {
                 LT_EQ
             } else {
@@ -360,7 +343,7 @@ fn scan_text_block(bytes: &[u8], pos: usize) -> usize {
             while j > pos && bytes[j - 1] == b'\\' {
                 j -= 1;
             }
-            if (i - j) % 2 == 0 {
+            if (i - j).is_multiple_of(2) {
                 return i + 3;
             }
         }
@@ -828,168 +811,6 @@ mod prop {
         fn roundtrip_any_string(src in any::<String>()) {
             let joined: String = tokenize(&src).iter().map(|t| t.text).collect();
             prop_assert_eq!(joined, src);
-        }
-    }
-}
-
-/// TEMPORARY (Phase A only): differential tests asserting that the hand-written scanner
-/// produces exactly the `logos` token stream. Deleted when the new scanner is swapped in.
-#[cfg(test)]
-mod differential {
-    use super::*;
-    use proptest::prelude::*;
-
-    fn assert_same(src: &str) {
-        let old = tokenize(src);
-        let new = tokenize_new(src);
-        assert_eq!(old, new, "token streams differ for input: {src:?}");
-    }
-
-    #[test]
-    fn curated_edges() {
-        #[rustfmt::skip]
-        let cases: &[&str] = &[
-            // Keywords, identifiers, underscore.
-            "class", "classes", "class名", "int", "instanceof", "var", "record", "_", "__",
-            "_x", "1_x", "non-sealed", "$x", "€uro", "名前", "true", "false", "null",
-            "truely", "nullx", "a\u{200D}b", "a\u{0301}", "\u{0301}", "\u{2160}", "x\u{FEFF}",
-            "\u{FEFF}", "µ", "क्ष", "_$", "$",
-            // Integer literals.
-            "0", "0L", "0l", "00", "08", "089", "0779", "0_7", "07_l", "0_8", "0_8f", "123",
-            "1_000_000", "1__2", "1_", "1_x", "0x", "0X", "0xFF", "0xCAFE_babeL", "0XFFl",
-            "0x_1", "0b1010", "0b2", "0B0", "0b", "0b1_", "0bl", "0lb", "0777", "0788",
-            // Float literals.
-            "3.14", "3.14f", ".5", ".5f", ".5e2", "1e10", "1e+10", "1e-10", "1.5e-3", "2.0d",
-            "100f", "1.", "1.f", "1.e5", "1..2", "1e", "1e+", "1.5L", "1.5e", "1.5e_3", "0d",
-            "0f", "089f", "08e1", "089.5", "09.5", "0.5", "..5", "...5", ".5...", ".e5",
-            "1.0e5.4", "0_9.5",
-            // Hex floats.
-            "0x1p3", "0x1P3", "0x1p-2", "0x1p+2", "0x1.8p3", "0x1.p3", "0x.8p-2f", "0x1.8",
-            "0x1.", "0x1p", "0x1p+", "0x1.p", "0x.8", "0x.p3", "0xp3", "0x1_p3", "0x1.8p",
-            "0x1p3f", "0x1p3d", "0x1p3l", "0xfp3", "0x1.8p1_0", "0X.Ap2",
-            // Char literals and errors.
-            "'a'", r"'\n'", r"'\''", "''", "'''", "'ab'", "'abc'", "'a", "'", "'\n", "'\r\n",
-            r"'\", "'\\\n", r"'\x", r"'\xy", "'名'", "'名", "'名x", "'\\\r'", "'\\'",
-            // String literals and errors.
-            r#""""#, r#""hello""#, r#""a\"b""#, "\"abc", "\"abc\ndef", "\"abc\rdef", "\"a\\",
-            "\"a\\\nx", "\"a\\\rx", "\"a\"b\"", "\"\\\"", "\"名\"", "\"名",
-            // Text blocks.
-            "\"\"\"\nabc\n\"\"\"", "\"\"\"\"\"\"", "\"\"\"", "\"\"\"x", "\"\"\"\"",
-            "\"\"\"\\\"\"\"x", "\"\"\"\\\\\"\"\"x", "\"\"\"a\"\"x\"\"\"b",
-            // Comments.
-            "// hi", "//", "// a\nb", "//\r\n", "/* b */", "/**/", "/***/", "/** d */",
-            "/*/", "/* unterminated", "/**", "/*a*b*/c",
-            // Operators and separators.
-            ">", ">>", ">>>", ">=", ">>=", ">>>=", "<", "<=", "<<", "<<=", "<<<", "...",
-            "..", ".", "::", ":::", "->", "--", "-=", "-", "&&", "&=", "&", "||", "|=",
-            "++", "+=", "==", "!=", "/=", "a/=b", "a/b", "*=", "^=", "%=", "@", "~", "?",
-            // Whitespace and newlines.
-            " \t\x0C", "\r\n", "\r", "\n", "\r\r\n\n", " \n ", "\x0B",
-            // Unmatched bytes.
-            "#", "`", "\\", "\\\\", "a # b ` c", "\u{00A0}", "😀", "\0",
-            // Realistic snippets.
-            "Map<K,List<V>>",
-            "class A{int x=0xFF;void m(){var s=\"\"\"\n hi\n\"\"\";}}",
-            "a += b ? c :: d -> e",
-        ];
-        for src in cases {
-            assert_same(src);
-        }
-    }
-
-    /// Pins Unicode-table parity: every char, alone and embedded in an identifier-ish
-    /// context, lexes identically in both implementations.
-    #[test]
-    fn exhaustive_chars() {
-        for c in '\0'..=char::MAX {
-            assert_same(&format!("{c}"));
-            assert_same(&format!("a{c}b"));
-        }
-    }
-
-    /// Differential over the OpenJDK corpus, if checked out (skips silently otherwise).
-    #[test]
-    fn corpus() {
-        fn visit(dir: &std::path::Path) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    visit(&path);
-                } else if path.extension().is_some_and(|e| e == "java")
-                    && let Ok(src) = std::fs::read_to_string(&path)
-                {
-                    assert_same(&src);
-                }
-            }
-        }
-        visit(std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../jals-tests/sources"
-        )));
-    }
-
-    /// A Java-biased fragment soup: heavy in quotes, backslashes, digits, operators, and
-    /// the suffix/exponent letters that drive the numeric scanner.
-    fn java_biased() -> impl Strategy<Value = String> {
-        let fragment = prop_oneof![
-            Just("\"".to_string()),
-            Just("\"\"\"".to_string()),
-            Just("'".to_string()),
-            Just("\\".to_string()),
-            Just("\n".to_string()),
-            Just("\r\n".to_string()),
-            Just("\r".to_string()),
-            Just(" ".to_string()),
-            Just("0".to_string()),
-            Just("1".to_string()),
-            Just("9".to_string()),
-            Just("_".to_string()),
-            Just(".".to_string()),
-            Just("x".to_string()),
-            Just("b".to_string()),
-            Just("p".to_string()),
-            Just("e".to_string()),
-            Just("f".to_string()),
-            Just("d".to_string()),
-            Just("L".to_string()),
-            Just("l".to_string()),
-            Just("+".to_string()),
-            Just("-".to_string()),
-            Just("/".to_string()),
-            Just("*".to_string()),
-            Just("*/".to_string()),
-            Just("//".to_string()),
-            Just("<".to_string()),
-            Just(">".to_string()),
-            Just("=".to_string()),
-            Just("&".to_string()),
-            Just("|".to_string()),
-            Just(":".to_string()),
-            Just("a".to_string()),
-            Just("F".to_string()),
-            Just("class".to_string()),
-            Just("名".to_string()),
-            Just("€".to_string()),
-            Just("\u{200D}".to_string()),
-            Just("\u{0301}".to_string()),
-            Just("#".to_string()),
-            proptest::char::any().prop_map(|c| c.to_string()),
-        ];
-        proptest::collection::vec(fragment, 0..48).prop_map(|v| v.concat())
-    }
-
-    proptest! {
-        #[test]
-        fn diff_any_string(src in any::<String>()) {
-            assert_same(&src);
-        }
-
-        #[test]
-        fn diff_java_biased(src in java_biased()) {
-            assert_same(&src);
         }
     }
 }

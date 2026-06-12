@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-logos.workspace = true
 num-derive.workspace = true
 num-traits.workspace = true
 rowan.workspace = true
