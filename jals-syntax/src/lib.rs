@@ -1,9 +1,9 @@
-//! `jals-syntax`: a lossless Java 26 lexer (`logos`) and CST parser (`rowan`).
+//! `jals-syntax`: a lossless hand-written Java 26 lexer and CST parser (`rowan`).
 //!
 //! The shared foundation for `jals-fmt` / `jals-lint` / `jals-lsp`. Everything except the CLI must
 //! build for `wasm32-unknown-unknown`.
 //!
-//! Layers: a `logos` lexer, a `rowan` CST parser, and a typed [`ast`] view over the CST.
+//! Layers: a hand-written lexer, a `rowan` CST parser, and a typed [`ast`] view over the CST.
 //!
 //! # Example
 //!

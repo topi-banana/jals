@@ -5,7 +5,7 @@ Guidance for Claude Code (and other agents) working in this repository.
 ## What this is
 
 `jals` is a Rust workspace providing Java tooling built on a **lossless, error-resilient**
-syntax tree. A `logos` lexer and `rowan` CST parser (`jals-syntax`) feed a Wadler/Prettier
+syntax tree. A hand-written lexer and `rowan` CST parser (`jals-syntax`) feed a Wadler/Prettier
 pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP server
 (`jals-lsp`, run via `jals lsp`) is another consumer; a linter is an intended future one.
 
@@ -19,7 +19,7 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 
 | Area | Where | Notes |
 | --- | --- | --- |
-| Lexer | `jals-syntax/src/lexer.rs`, `token.rs` | `logos`-based, lossless; trivia are real tokens. Context-sensitive keywords lexed as `IDENT`, promoted later. |
+| Lexer | `jals-syntax/src/lexer.rs`, `token.rs` | Hand-written, lossless; trivia are real tokens. Context-sensitive keywords lexed as `IDENT`, promoted later. |
 | Token/node kinds | `jals-syntax/src/syntax_kind.rs` | Unified `SyntaxKind` (u16) for `rowan`; `TokenKind` is terminals only. |
 | Parser | `jals-syntax/src/parser/` | Recursive descent. `grammar.rs` is the rules; `mod.rs` the core; `event.rs`/`sink.rs` build the green tree. Error-resilient. |
 | Typed AST | `jals-syntax/java.ungram`, `jals-syntax/src/ast/` | Zero-cost newtype views over the CST. `ast/generated.rs` is rendered from `java.ungram` by `cargo run -p xtask -- codegen` (committed; CI checks drift); bespoke accessors live in `ast/ext.rs`. Accessors return `Option`/iterators, never panic. |
