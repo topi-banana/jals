@@ -3,7 +3,7 @@
 use expect_test::{Expect, expect};
 use jals_fmt::{
     BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, LineEnding,
-    TrailingComma, format_source,
+    TrailingComma, TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -2215,6 +2215,75 @@ fn colon_spacing_is_idempotent() {
                 "colon spacing must be idempotent (before={before}, after={after})"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type-punctuation density (`type-punctuation-density`)
+// ---------------------------------------------------------------------------
+
+fn fmt_type_punct(src: &str, density: TypePunctuationDensity) -> String {
+    let config = Config {
+        type_punctuation_density: density,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising every intersection-type `&` context — a single-bound and a multi-bound
+/// type parameter, and a cast intersection — alongside a bitwise-AND expression that must stay
+/// untouched.
+const TYPE_PUNCT_SRC: &str = "class C<T extends A & B>{<U extends X & Y & Z> void m(){Object o=(A & B) x;int z=a & b;boolean f=(p && q) & r;}}";
+
+#[test]
+fn type_punctuation_density_wide_keeps_spaces() {
+    // `wide` (the default) keeps a space around every intersection `&`, matching prior behavior.
+    expect![[r#"
+        class C<T extends A & B> {
+            <U extends X & Y & Z> void m() {
+                Object o = (A & B) x;
+                int z = a & b;
+                boolean f = (p && q) & r;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_type_punct(
+        TYPE_PUNCT_SRC,
+        TypePunctuationDensity::Wide,
+    ));
+}
+
+#[test]
+fn type_punctuation_density_compressed_tightens_only_type_amp() {
+    // `compressed` removes the space around `&` in type-parameter bounds and cast
+    // intersections, but never touches the bitwise-AND operator (`a & b`, `(p && q) & r`).
+    expect![[r#"
+        class C<T extends A&B> {
+            <U extends X&Y&Z> void m() {
+                Object o = (A&B) x;
+                int z = a & b;
+                boolean f = (p && q) & r;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_type_punct(
+        TYPE_PUNCT_SRC,
+        TypePunctuationDensity::Compressed,
+    ));
+}
+
+#[test]
+fn type_punctuation_density_is_idempotent() {
+    for density in [
+        TypePunctuationDensity::Wide,
+        TypePunctuationDensity::Compressed,
+    ] {
+        let once = fmt_type_punct(TYPE_PUNCT_SRC, density);
+        let twice = fmt_type_punct(&once, density);
+        assert_eq!(
+            once, twice,
+            "type-punctuation density must be idempotent ({density:?})"
+        );
     }
 }
 

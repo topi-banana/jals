@@ -1,6 +1,8 @@
 //! Property tests for the formatter's correctness invariants.
 
-use jals_fmt::{BinopSeparator, Config, FnParamsLayout, TrailingComma, format_source};
+use jals_fmt::{
+    BinopSeparator, Config, FnParamsLayout, TrailingComma, TypePunctuationDensity, format_source,
+};
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
 
@@ -164,6 +166,14 @@ fn binop_config(binop_separator: BinopSeparator) -> Config {
     Config {
         binop_separator,
         max_width: 24,
+        ..Config::default()
+    }
+}
+
+/// Config with a given intersection-type `&` density.
+fn type_punct_config(type_punctuation_density: TypePunctuationDensity) -> Config {
+    Config {
+        type_punctuation_density,
         ..Config::default()
     }
 }
@@ -613,6 +623,55 @@ proptest! {
     fn binop_separator_never_panics(src in ".*") {
         let _ = fmt_with(&src, &binop_config(BinopSeparator::Front));
         let _ = fmt_with(&src, &binop_config(BinopSeparator::Back));
+    }
+
+    /// Intersection-type `&` density stays idempotent under both densities.
+    #[test]
+    fn type_punctuation_density_idempotent(
+        src in javaish(),
+        density in prop_oneof![
+            Just(TypePunctuationDensity::Wide),
+            Just(TypePunctuationDensity::Compressed),
+        ],
+    ) {
+        let cfg = type_punct_config(density);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Intersection-type `&` density is layout-only: it only moves whitespace around `&`, so the
+    /// significant-token sequence is preserved exactly.
+    #[test]
+    fn type_punctuation_density_preserves_significant_tokens(
+        src in javaish(),
+        density in prop_oneof![
+            Just(TypePunctuationDensity::Wide),
+            Just(TypePunctuationDensity::Compressed),
+        ],
+    ) {
+        let out = fmt_with(&src, &type_punct_config(density));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Intersection-type `&` density never drops or mangles a comment.
+    #[test]
+    fn type_punctuation_density_preserves_comments(
+        src in javaish(),
+        density in prop_oneof![
+            Just(TypePunctuationDensity::Wide),
+            Just(TypePunctuationDensity::Compressed),
+        ],
+    ) {
+        let out = fmt_with(&src, &type_punct_config(density));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Intersection-type `&` density never panics on arbitrary Unicode input.
+    #[test]
+    fn type_punctuation_density_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Wide));
+        let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Compressed));
     }
 
     /// Last-argument overflow stays idempotent: re-formatting the hung layout reproduces it.

@@ -30,7 +30,7 @@ mod wrap;
 
 pub use config::{
     BinopSeparator, BraceStyle, Config, ConfigError, ControlBraceStyle, FnParamsLayout,
-    IndentStyle, LineEnding, TrailingComma,
+    IndentStyle, LineEnding, TrailingComma, TypePunctuationDensity,
 };
 pub use output::{FormatOutput, Warning};
 

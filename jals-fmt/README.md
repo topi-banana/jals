@@ -76,6 +76,11 @@ The current formatter is intentionally minimal. It performs:
   `assert` message (`assert c : m`), and a `switch` `case` / `default` label (`case x:`). The
   defaults give idiomatic `label:` / `case x:` style. The `::` method-reference token is a
   distinct token and is never affected.
+- **Type-punctuation density** — the spacing around the `&` of a Java intersection type follows
+  `type-punctuation-density`: `wide` (default, `A & B`) or `compressed` (`A&B`). It governs both
+  intersection contexts — a type-parameter bound (`<T extends A & B>`) and a cast intersection
+  (`(A & B) x`) — uniformly. The bitwise-AND operator `&` (an expression, `a & b`) is never
+  affected. Layout-only (the significant-token sequence is preserved exactly).
 - **Comment placement** — leading / trailing / dangling comments are anchored and re-emitted.
 - **Comment reflow** — with `wrap-comments` enabled, standalone line and block/Javadoc
   comments are rewrapped to `comment-width` at their indentation. Lines are wrapped
@@ -126,6 +131,7 @@ are kebab-case.
 | `space-before-colon` | bool | `false` | ✅ wired — emit a space before a `:`, applied uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`). Off by default (idiomatic `label:` / `case x:`). `::` is a distinct token and is never affected. Layout-only; mirrors rustfmt's `space_before_colon` |
 | `space-after-colon` | bool | `true` | ✅ wired — emit a space after a `:`, in the same contexts as `space-before-colon`. On by default. `::` is never affected. Layout-only; mirrors rustfmt's `space_after_colon` |
 | `fn-params-layout` | `"tall"` \| `"compressed"` \| `"vertical"` | `"tall"` | ✅ wired — layout of a method / constructor parameter list: `tall` (all-or-nothing), `compressed` (pack as many parameters per line as fit `max-width`), or `vertical` (always one per line, even when it fits). Governs only declaration parameter lists, never call argument lists. Layout-only (the significant-token sequence is preserved exactly). The deprecated key `fn-args-layout` is accepted as an alias. Mirrors rustfmt's `fn_params_layout` |
+| `type-punctuation-density` | `"wide"` \| `"compressed"` | `"wide"` | ✅ wired — spacing around the `&` of a Java intersection type: `wide` (`A & B`) or `compressed` (`A&B`). Governs both a type-parameter bound (`<T extends A & B>`) and a cast intersection (`(A & B) x`); the bitwise-AND operator `&` (`a & b`) is never affected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `type_punctuation_density` |
 
 ---
 
@@ -186,15 +192,17 @@ declaration parameter lists — see [What it does today](#what-it-does-today). R
 
 ## 4. Spacing
 
-Colon spacing (`space_after_colon`, `space_before_colon`) is **implemented**, applied
-uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`,
-`case`/`default`) — see [What it does today](#what-it-does-today). Remaining:
+Colon spacing (`space_after_colon`, `space_before_colon`), applied uniformly to every Java
+colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`), and
+type-punctuation density (`type_punctuation_density`), governing the `&` of an intersection
+type (`T extends A & B` and `(A & B) x`), are both **implemented** — see
+[What it does today](#what-it-does-today). Nothing remains in this section:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Space after `:` (ternary, enhanced-`for`, labels, `case x:`) | `space_after_colon` ✅ |
 | Space before `:` | `space_before_colon` ✅ |
-| Density of type punctuation (`T extends A & B`) | `type_punctuation_density` |
+| Density of type punctuation (`T extends A & B`) | `type_punctuation_density` ✅ |
 
 ## 5. Comments
 
@@ -280,4 +288,5 @@ via `wrap_comments` — method-chain wrapping — `chain_width` — call-argumen
 `reorder_imports` — import grouping — `group_imports` — trailing commas —
 `trailing_comma` — binary-expression wrapping — `binop_separator` — last-argument
 overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon` /
-`space_after_colon` — and parameter-list layout — `fn_params_layout` — are done.)
+`space_after_colon` — parameter-list layout — `fn_params_layout` — and type-punctuation
+density — `type_punctuation_density` — are done.)
