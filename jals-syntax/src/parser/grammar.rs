@@ -1971,6 +1971,49 @@ fn at_array_method_ref(p: &Parser) -> bool {
     i > 0 && p.nth_nofuel(i) == COLON_COLON
 }
 
+/// If the token at `start` is `<`, skips a balanced angle-bracket group — counting each
+/// `>` as closing one level, since `>>`/`>>>` are lexed as adjacent `GT` tokens — and
+/// returns the offset just past the closing `>`. Returns `None` if the brackets do not
+/// balance before a hard delimiter (`;`, `{`, `}`, EOF), matching the angle-skip in
+/// [`skip_type`].
+fn skip_angle_brackets(p: &Parser, start: usize) -> Option<usize> {
+    if p.nth_nofuel(start) != LT {
+        return None;
+    }
+    let mut i = start;
+    let mut depth = 0i32;
+    loop {
+        match p.nth_nofuel(i) {
+            LT => {
+                depth += 1;
+                i += 1;
+            }
+            GT => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            EOF | SEMICOLON | LBRACE | RBRACE => return None,
+            _ => i += 1,
+        }
+    }
+}
+
+/// Whether `<...> ('[' ']')* ::` follows — the tail of a generic-qualified reference whose
+/// receiver is a parameterized type: a method/constructor reference (`Foo<String>::new`,
+/// `a.b.C<X>::method`, JLS 15.13 `ClassType :: ...`) or a generic array constructor
+/// reference (`Foo<?>[]::new`, JLS 15.13 `ArrayType :: new`). The balanced `<...>` (and any
+/// trailing `[]` dimensions) must be followed by `::`, which keeps an ordinary comparison
+/// (`a < b > c`) from matching.
+fn at_generic_method_ref(p: &Parser) -> bool {
+    let Some(i) = skip_angle_brackets(p, 0) else {
+        return false;
+    };
+    p.nth_nofuel(skip_bracket_pairs(p, i)) == COLON_COLON
+}
+
 /// Parses the `:: [type_args] (new | ident)` tail of a method reference.
 fn method_ref_tail(p: &mut Parser) {
     p.bump(COLON_COLON);
@@ -2030,6 +2073,23 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
                     }
                 }
                 lhs = m.complete(p, NEW_EXPR);
+            }
+            LT if at_generic_method_ref(p) => {
+                // Generic-qualified method/constructor reference: the receiver is a
+                // parameterized type (`Foo<String>::new`, `a.b.C<X>::method`, JLS 15.13
+                // `ClassType :: ...`), optionally with array dimensions for a generic array
+                // constructor reference (`Foo<?>[]::new`, `ArrayType :: new`). The lhs is an
+                // already-completed NAME_REF / FIELD_ACCESS receiver, so the TYPE_ARGS node
+                // and any dimension tokens sit directly under METHOD_REF_EXPR, mirroring the
+                // array-dimension tokens of `String[]::new`.
+                let m = lhs.precede(p);
+                type_args(p);
+                while p.at(LBRACK) && p.nth_at(1, RBRACK) {
+                    p.bump(LBRACK);
+                    p.bump(RBRACK);
+                }
+                method_ref_tail(p);
+                lhs = m.complete(p, METHOD_REF_EXPR);
             }
             COLON_COLON => {
                 let m = lhs.precede(p);

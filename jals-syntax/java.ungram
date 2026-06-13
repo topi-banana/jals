@@ -445,10 +445,13 @@ LambdaParams =
   '(' params:(Param (',' Param)*)? ')'
 
 // `qualifier` is the receiver expression of a reference form (including
-// `String[]::new`, whose dimension tokens sit directly under this node);
-// `ty` is the receiver type of a primitive-array form (`int[]::new`).
+// `String[]::new`, whose dimension tokens sit directly under this node, and
+// `Foo<String>::new` / `Foo<?>[]::new`, whose receiver type arguments sit here
+// as a leading TypeArgs node before any dimensions); `ty` is the receiver type
+// of a primitive-array form (`int[]::new`). The optional TypeArgs after `::` is
+// the type witness (`Foo::<String>bar`).
 MethodRefExpr =
-  (qualifier:Expr | ty:Type) ('[' ']')* '::' TypeArgs? ('new' | 'ident')
+  (qualifier:Expr | ty:Type) TypeArgs? ('[' ']')* '::' TypeArgs? ('new' | 'ident')
 
 CastExpr =
   '(' ty:Type ('&' Type)* ')' expr:Expr
