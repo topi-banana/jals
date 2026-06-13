@@ -23,18 +23,6 @@
   e.g. "Related issue: #123" or "Related issue: N/A".
 -->
 
-## Type of Change
-
-<!-- Check all that apply. -->
-
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] Breaking change (fix or feature that changes existing behavior)
-- [ ] Refactor (no behavior change)
-- [ ] Documentation
-- [ ] CI / build / tooling
-- [ ] Other
-
 ## What changed
 
 <!--
