@@ -11,12 +11,12 @@ separate analysis pass.
 ```
 editor ◀── stdio (LSP) ──▶ jals lsp
                               │
-       ┌───────────┬─────────┴─┬──────────────┬─────────────┐
-       ▼           ▼           ▼              ▼             ▼
- diagnostics  documentSymbol semanticTokens foldingRange formatting
-(SyntaxErrors) (typed AST)  (CST classify) (CST braces)  (jals-fmt)
-       └───────────┴───────────┴──────────────┴─────────────┘
-                byte offsets ──▶ UTF-16 positions (LineIndex)
+      ┌─────────────┬─────────┴────┬─────────────┬───────────────┬─────────────┐
+      ▼             ▼              ▼             ▼               ▼             ▼
+ diagnostics  documentSymbol semanticTokens foldingRange documentHighlight formatting
+(SyntaxErrors) (typed AST)   (CST classify) (CST braces)   (CST lexical)   (jals-fmt)
+      └─────────────┴──────────────┴─────────────┴───────────────┴─────────────┘
+                    byte offsets ──▶ UTF-16 positions (LineIndex)
 ```
 
 ## What it does today
@@ -30,6 +30,7 @@ Server capabilities advertised on `initialize`:
 | Semantic tokens | `textDocument/semanticTokens/full` | CST + parent context | Whole-document highlighting: keywords, types, declarations, name/field/call references, annotations, comments, literals. Best-effort without name resolution, but the lossless tree resolves contextual keywords (`var`, `record`, `sealed`, module directives) that TextMate grammars miss. |
 | Code folding | `textDocument/foldingRange` | CST | Folds class/enum/module bodies, blocks (control-flow & lambdas included), switch blocks, array initializers, multi-line block/doc comments, and import groups. The closing brace stays visible; multi-line spans only. |
 | Selection range | `textDocument/selectionRange` | CST | Expand/shrink: nests the token under each cursor up through its ancestor nodes to the file root. Syntax-only; multiple positions per request. |
+| Occurrence highlight | `textDocument/documentHighlight` | CST (lexical) | Highlights every identifier with the same text as the one under the cursor — purely lexical, no name resolution. Declaration/binding names, simple-name assignment targets, and `++`/`--` operands are Write; everything else is Read. |
 | Formatting | `textDocument/formatting` | `jals_fmt::format_source` | Whole-document: one full-range edit, or none if already formatted. |
 | Config hot-reload | `workspace/didChangeWatchedFiles` | — | Dynamically registers a `**/jalsfmt.toml` watcher via `client/registerCapability` (when the client supports dynamic registration); changes clear the config cache so the next format request rediscovers. |
 | Text sync | `didOpen` / `didChange` / `didClose` | — | Incremental sync (`TextDocumentSyncKind::INCREMENTAL`): change events are spliced in order (UTF-16 ranges → byte offsets); full-replacement events are still accepted. |
@@ -71,7 +72,7 @@ The crate splits into a pure, unit-tested core and a thin async server shell:
 
 | Module | Role |
 | --- | --- |
-| `handlers/{diagnostics,symbols,semantic_tokens,folding_range,formatting}.rs` | Pure functions `(text [, config], &LineIndex) -> LSP payload`. No I/O, no async — the testable core. |
+| `handlers/{diagnostics,symbols,semantic_tokens,folding_range,selection_range,document_highlight,formatting}.rs` | Pure functions `(text [, config], &LineIndex) -> LSP payload`. No I/O, no async — the testable core. |
 | `line_index.rs` | Converts `jals-syntax` UTF-8 byte offsets to LSP UTF-16 `Position`s. |
 | `state.rs` | `DocumentStore` (open documents, incremental text sync via the pure `apply_content_changes`) and memoized config `Discovery`. |
 | `server.rs` | `LanguageServer` impl + advertised capabilities; glue that calls the pure handlers. |
@@ -123,7 +124,6 @@ future work by what each capability requires.
 | Capability | LSP method |
 | --- | --- |
 | Semantic tokens: incremental + range | `textDocument/semanticTokens/{full/delta,range}` (the `full` variant already ships — see above) |
-| Lexical occurrence highlight | `textDocument/documentHighlight` |
 | Document links (imports) | `textDocument/documentLink` |
 | Workspace symbols | `workspace/symbol` |
 | Lint diagnostics | merge a future `jals-lint`'s output into `publishDiagnostics` |
@@ -155,5 +155,5 @@ gated on a future analysis crate (`jals-hir` or similar):
 
 By editor-user impact: **(1)** range / on-type formatting → **(2)** the
 semantic-analysis features, once an analysis layer lands. Incremental sync, code folding,
-selection range, and semantic tokens (`full`) already ship; the latter's `delta`/`range`
-variants are a later optimization.
+selection range, occurrence highlight, and semantic tokens (`full`) already ship; the
+latter's `delta`/`range` variants are a later optimization.
