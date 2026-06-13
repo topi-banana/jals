@@ -586,7 +586,7 @@ fn record_header(p: &mut Parser) {
         let comp = p.start();
         modifiers(p);
         type_(p);
-        p.eat(ELLIPSIS);
+        eat_varargs(p);
         p.expect(IDENT);
         comp.complete(p, RECORD_COMPONENT);
         if !p.eat(COMMA) {
@@ -838,6 +838,18 @@ fn throws_clause(p: &mut Parser) {
     m.complete(p, THROWS_CLAUSE);
 }
 
+/// Eats an optional varargs `...`, consuming any type-use annotations on the varargs element
+/// type that `type_` left behind first (`Object @A...`, `String @A [] @B ...`). Such an
+/// annotation is not followed by `[]`, so the array-only `dims` leaves it for this caller.
+fn eat_varargs(p: &mut Parser) {
+    if p.nth_nofuel(skip_annotations_lookahead(p, 0)) == ELLIPSIS {
+        while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+            annotation(p);
+        }
+    }
+    p.eat(ELLIPSIS);
+}
+
 fn param_list(p: &mut Parser) {
     let m = p.start();
     p.bump(LPAREN);
@@ -845,7 +857,7 @@ fn param_list(p: &mut Parser) {
         let param = p.start();
         modifiers(p);
         type_(p);
-        p.eat(ELLIPSIS); // varargs.
+        eat_varargs(p); // varargs.
         // Also allows a `this` receiver parameter (`Foo this`).
         if p.at(THIS_KW) {
             p.bump(THIS_KW);
@@ -864,9 +876,19 @@ fn param_list(p: &mut Parser) {
 
 // ===== Types =====
 
-/// Whether this can begin a type.
+/// Whether this can begin a type. A leading type-use annotation (`@A String`) counts, so a
+/// member return type carrying one after the type parameters (`<T> @A String m()`) is recognized.
 fn at_type_start(p: &Parser) -> bool {
-    p.at_ts(PRIMITIVE_TYPE) || p.at(IDENT) || p.at_contextual_kw("var")
+    p.at_ts(PRIMITIVE_TYPE)
+        || p.at(IDENT)
+        || p.at_contextual_kw("var")
+        || (p.at(AT) && !p.nth_at(1, INTERFACE_KW))
+}
+
+/// Whether a `.` at the current position continues a qualified type: the token after the `.`
+/// (skipping any type-use annotations) is an `IDENT` (`Outer.Inner`, `Outer.@A Inner`).
+fn dot_continues_type(p: &Parser) -> bool {
+    p.at(DOT) && p.nth_nofuel(skip_annotations_lookahead(p, 1)) == IDENT
 }
 
 fn type_(p: &mut Parser) {
@@ -885,8 +907,12 @@ fn type_(p: &mut Parser) {
         if p.at(LT) {
             type_args(p);
         }
-        while p.at(DOT) && p.nth_at(1, IDENT) {
+        while dot_continues_type(p) {
             p.bump(DOT);
+            // Annotations on the inner type (`Outer.@A Inner`).
+            while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+                annotation(p);
+            }
             p.bump(IDENT);
             if p.at(LT) {
                 type_args(p);
@@ -911,7 +937,12 @@ fn type_args(p: &mut Parser) {
 }
 
 fn type_arg(p: &mut Parser) {
-    if p.at(QUESTION) {
+    // A wildcard may carry leading type-use annotations: `@A ?`, `@A ? extends T`. Annotated
+    // non-wildcard arguments (`@A Foo`) are handled by `type_`'s own leading-annotation loop.
+    if p.nth_nofuel(skip_annotations_lookahead(p, 0)) == QUESTION {
+        while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
+            annotation(p);
+        }
         // Wildcard `? extends T` / `? super T`.
         p.bump(QUESTION);
         if p.at(EXTENDS_KW) || p.at(SUPER_KW) {
@@ -934,7 +965,8 @@ fn expect_gt(p: &mut Parser) {
 /// Skips one type starting at `start` using fuel-free lookahead, returning the offset immediately after it.
 /// Returns `None` if the tokens cannot be interpreted as a type. Used for lambda/cast/pattern/local variable disambiguation.
 fn skip_type(p: &Parser, start: usize) -> Option<usize> {
-    let mut i = start;
+    // Skip leading type-use annotations (`(@A Long) x`).
+    let mut i = skip_annotations_lookahead(p, start);
     if PRIMITIVE_TYPE.contains(p.nth_nofuel(i)) {
         i += 1;
     } else if p.nth_nofuel(i) == IDENT {
@@ -961,8 +993,10 @@ fn skip_type(p: &Parser, start: usize) -> Option<usize> {
                     }
                 }
             }
-            if p.nth_nofuel(i) == DOT && p.nth_nofuel(i + 1) == IDENT {
-                i += 2;
+            // Dotted continuation, including inner-type annotations (`Outer.@A Inner`).
+            let after = skip_annotations_lookahead(p, i + 1);
+            if p.nth_nofuel(i) == DOT && p.nth_nofuel(after) == IDENT {
+                i = after + 1;
                 continue;
             }
             break;
@@ -970,7 +1004,7 @@ fn skip_type(p: &Parser, start: usize) -> Option<usize> {
     } else {
         return None;
     }
-    Some(skip_bracket_pairs(p, i))
+    Some(skip_annotated_bracket_pairs(p, i))
 }
 
 /// Skips a run of plain `[` `]` pairs starting at `start` using fuel-free lookahead,
@@ -979,6 +1013,23 @@ fn skip_bracket_pairs(p: &Parser, start: usize) -> usize {
     let mut i = start;
     while p.nth_nofuel(i) == LBRACK && p.nth_nofuel(i + 1) == RBRACK {
         i += 2;
+    }
+    i
+}
+
+/// Like [`skip_bracket_pairs`], but also skips type-use annotations preceding each `[]`
+/// (`String @A [] @B []`). Used by [`skip_type`] so cast/declaration disambiguation handles
+/// annotated array dimensions; the plain `skip_bracket_pairs` is left unchanged for the
+/// expression-context callers, where annotated dimensions cannot appear.
+fn skip_annotated_bracket_pairs(p: &Parser, start: usize) -> usize {
+    let mut i = start;
+    loop {
+        let after = skip_annotations_lookahead(p, i);
+        if p.nth_nofuel(after) == LBRACK && p.nth_nofuel(after + 1) == RBRACK {
+            i = after + 2;
+            continue;
+        }
+        break;
     }
     i
 }
@@ -1866,7 +1917,11 @@ fn cast_kind(p: &Parser) -> Option<bool> {
     if !p.at(LPAREN) {
         return None;
     }
-    let prim_first = PRIMITIVE_TYPE.contains(p.nth_nofuel(1));
+    // A pure primitive cast (`(int) x`) has no annotations and a single primitive token; an
+    // annotated primitive (`(@A int) x`) is treated as a reference-like cast (JLS §15.16), so a
+    // unary `+`/`-` operand is not allowed to follow.
+    let first = skip_annotations_lookahead(p, 1);
+    let prim_first = first == 1 && PRIMITIVE_TYPE.contains(p.nth_nofuel(first));
     let mut i = skip_type(p, 1)?;
     // Intersection type `(A & B)`.
     while p.nth_nofuel(i) == AMP {

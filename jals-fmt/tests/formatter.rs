@@ -2375,3 +2375,61 @@ fn fn_params_layout_modes_are_idempotent() {
         );
     }
 }
+
+#[test]
+fn type_use_annotation_inner_type() {
+    // JSR 308 inner-type annotation: the `.` hugs the following annotation (`Outer.@A Inner`).
+    check(
+        "class C{Outer. @A Inner f(){return null;}}",
+        expect![[r#"
+            class C {
+                Outer.@A Inner f() {
+                    return null;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn type_use_annotation_wildcard() {
+    // JSR 308 annotation before a wildcard `?`.
+    check(
+        "class C{MyList<@A ?> f(){return null;}}",
+        expect![[r#"
+            class C {
+                MyList<@A ?> f() {
+                    return null;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn type_use_annotation_varargs() {
+    // JSR 308 annotation on a varargs element type (`Object @A...`).
+    check(
+        "class C{void m(Object @A ... xs){}}",
+        expect![[r#"
+            class C {
+                void m(Object @A... xs) {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn type_use_annotation_cast() {
+    // JSR 308 annotated type in a cast (`(@A Long) y`).
+    check(
+        "class C{Object m(){return (@A Long) y;}}",
+        expect![[r#"
+            class C {
+                Object m() {
+                    return (@A Long) y;
+                }
+            }
+        "#]],
+    );
+}
