@@ -279,6 +279,14 @@ pub struct Config {
     /// bitwise-AND operator `&` (an expression) is never affected. Layout-only — the
     /// significant-token sequence is preserved exactly. Mirrors rustfmt's `type_punctuation_density`.
     pub type_punctuation_density: TypePunctuationDensity,
+    /// Reorder the keyword modifiers of every declaration (`public`, `static`, `final`, …) into
+    /// a fixed canonical order (JLS / Checkstyle: public, protected, private, abstract, default,
+    /// static, sealed, non-sealed, final, transient, volatile, synchronized, native, strictfp),
+    /// hoisting all annotations to the front (keeping their relative order). Off by default;
+    /// opt-in like [`reorder_imports`](Config::reorder_imports). When enabled the formatter's
+    /// significant-token *sequence* may change (the multiset is preserved, and each comment stays
+    /// glued to its modifier). A Java-specific option with no rustfmt equivalent.
+    pub reorder_modifiers: bool,
 }
 
 impl Default for Config {
@@ -312,6 +320,7 @@ impl Default for Config {
             space_after_colon: true,
             fn_params_layout: FnParamsLayout::Tall,
             type_punctuation_density: TypePunctuationDensity::Wide,
+            reorder_modifiers: false,
         }
     }
 }
@@ -446,6 +455,8 @@ mod tests {
         assert!(c.space_after_colon);
         // Parameter lists default to the all-or-nothing Tall layout (the prior behavior).
         assert_eq!(c.fn_params_layout, FnParamsLayout::Tall);
+        // Modifier reordering is opt-in; off by default to preserve the significant-token sequence.
+        assert!(!c.reorder_modifiers);
     }
 
     #[test]
@@ -475,6 +486,12 @@ mod tests {
     fn reorder_imports_parses() {
         let c: Config = toml::from_str("reorder-imports = true\n").unwrap();
         assert!(c.reorder_imports);
+    }
+
+    #[test]
+    fn reorder_modifiers_parses() {
+        let c: Config = toml::from_str("reorder-modifiers = true\n").unwrap();
+        assert!(c.reorder_modifiers);
     }
 
     #[test]

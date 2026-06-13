@@ -7,13 +7,14 @@
 //!
 //! Invariants the formatter upholds:
 //! - **Significant tokens are preserved.** The sequence of non-trivia tokens of the output
-//!   equals that of the input (only whitespace/comment layout changes), with three opt-in
+//!   equals that of the input (only whitespace/comment layout changes), with four opt-in
 //!   exceptions, each off by default: [`Config::reorder_imports`] may reorder import
 //!   declarations (the token *multiset* is still preserved), [`Config::group_imports`] may
 //!   reorder imports into prefix-defined groups (multiset preserved; it overrides
-//!   `reorder_imports`), and [`Config::trailing_comma`] (when not
-//!   [`Preserve`](TrailingComma::Preserve)) may add or drop the single trailing comma of an
-//!   array initializer.
+//!   `reorder_imports`), [`Config::reorder_modifiers`] may reorder a declaration's modifiers
+//!   into canonical order, hoisting annotations to the front (multiset preserved), and
+//!   [`Config::trailing_comma`] (when not [`Preserve`](TrailingComma::Preserve)) may add or
+//!   drop the single trailing comma of an array initializer.
 //! - **Comments are never dropped.** Each stays glued to its anchoring token, so a comment
 //!   moves with its token when that token is reordered; a dropped trailing comma that carries a
 //!   comment is kept.
@@ -24,6 +25,7 @@ mod config;
 mod doc;
 mod imports;
 mod lower;
+mod modifiers;
 mod output;
 mod render;
 mod wrap;

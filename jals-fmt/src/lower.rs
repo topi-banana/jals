@@ -14,7 +14,8 @@
 //! canonical operator spacing, and a binary expression that overflows `max-width` wraps at
 //! its operators (placement per `binop-separator`); everything else falls back to
 //! [`lower_generic`], which lays a node out inline with normalized spacing. Source-file
-//! layout, including import reordering/grouping, lives in [`crate::imports`].
+//! layout, including import reordering/grouping, lives in [`crate::imports`]; modifier
+//! reordering (`reorder-modifiers`) lives in [`crate::modifiers`].
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
@@ -58,8 +59,23 @@ pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         S::BINARY_EXPR => lower_binary(node, ctx),
         S::UNARY_EXPR => lower_unary(node, ctx),
         S::CALL_EXPR | S::FIELD_ACCESS => lower_chain(node, ctx),
+        S::MODIFIERS => crate::modifiers::lower_modifiers(node, ctx),
+        S::NON_SEALED_KW => lower_non_sealed(node, ctx),
         _ => lower_generic(node, ctx),
     }
+}
+
+/// Lower the `non-sealed` modifier. Its three tokens (`non` `-` `sealed`) form one keyword, so
+/// they are emitted tight (no spaces) — the generic path would insert spaces and produce the
+/// non-keyword `non - sealed`. Comments attached to any of the tokens are preserved.
+fn lower_non_sealed(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    let parts: Vec<Doc> = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .map(|t| tok(&t, ctx))
+        .collect();
+    concat(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +210,7 @@ fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
 /// Lay a node out inline: child nodes are recursed, tokens are separated by single
 /// spaces per [`want_space`]. Whitespace, newlines, and comment trivia are skipped here
 /// (comments are injected via [`tok`]).
-fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     lower_inline(node, ctx, false)
 }
 
@@ -218,7 +234,7 @@ fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
 /// [`lower_inline`] (a whole node's children) and chain-selector emission, which feeds it a
 /// `FIELD_ACCESS`'s children minus the receiver (see [`lower_after_first_node`]); routing both
 /// through here keeps the type-witness hug below in one place.
-fn lower_elements(
+pub(crate) fn lower_elements(
     els: impl Iterator<Item = SyntaxElement>,
     ctx: &Ctx<'_>,
     control_flow: bool,

@@ -25,6 +25,7 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Typed AST | `jals-syntax/java.ungram`, `jals-syntax/src/ast/` | Zero-cost newtype views over the CST. `ast/generated.rs` is rendered from `java.ungram` by `cargo run -p xtask -- codegen` (committed; CI checks drift); bespoke accessors live in `ast/ext.rs`. Accessors return `Option`/iterators, never panic. |
 | Formatter pipeline | `jals-fmt/src/lower.rs` → `doc.rs` → `render.rs` | CST → `Doc` IR → text. |
 | Import layout | `jals-fmt/src/imports.rs` | Pure ordering/grouping of the leading import run (`reorder-imports` / `group-imports`) + its `Doc` emission. |
+| Modifier layout | `jals-fmt/src/modifiers.rs` | Pure canonical reordering of a `MODIFIERS` node's keyword modifiers (`reorder-modifiers`), annotations hoisted to the front, + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
 | CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lsp`; config discovery memoized per directory. |
@@ -67,20 +68,23 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
    aborting.
 4. **Formatter fidelity.** Comments are never dropped, and formatting is idempotent
    (`format(format(x)) == format(x)`). By default the significant-token *sequence* (non-trivia
-   tokens) is preserved exactly. Three options, each off by default, relax this:
+   tokens) is preserved exactly. Four options, each off by default, relax this:
    - **`reorder-imports`** may reorder import declarations. The significant-token *multiset* is
      still preserved (none added, dropped, or altered), and each comment stays glued to its
      anchoring token (so a comment moves, with its token, when that token is reordered).
    - **`group-imports`** may reorder import declarations into prefix-defined groups separated by
      blank lines (it overrides `reorder-imports`). The *multiset* is preserved and each comment
      stays glued to its import, exactly as for `reorder-imports`.
+   - **`reorder-modifiers`** may reorder a declaration's keyword modifiers into canonical order
+     and hoist its annotations to the front. The *multiset* is preserved and each comment stays
+     glued to its modifier, exactly as for `reorder-imports`.
    - **`trailing-comma`** (any value other than `preserve`, the default) may add or drop the
      single trailing comma of an **array initializer** — the only Java list (besides enum
      constant lists) where that token is legal. No other token is touched, and a dropped comma
      that carries a comment is kept, so comments are never lost.
-   Idempotency holds in every case. With all three at their defaults (`reorder-imports` and
-   `group-imports` off, `trailing-comma = preserve`), the exact-sequence guarantee is in full
-   force.
+   Idempotency holds in every case. With all four at their defaults (`reorder-imports`,
+   `group-imports`, and `reorder-modifiers` off, `trailing-comma = preserve`), the
+   exact-sequence guarantee is in full force.
 5. **`wasm32` compatibility.** Everything except `jals-cli` and `jals-lsp` must build for
    `wasm32-unknown-unknown` (both are host-only: `jals-cli` does filesystem/process work,
    `jals-lsp` uses tokio/stdio). Do not add non-wasm-compatible deps or `std::fs`/process/IO

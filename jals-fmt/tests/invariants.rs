@@ -150,6 +150,37 @@ fn group_config() -> Config {
     }
 }
 
+/// Config with modifier reordering on.
+fn reorder_mods_config() -> Config {
+    Config {
+        reorder_modifiers: true,
+        ..Config::default()
+    }
+}
+
+/// The canonical rank of a keyword modifier, or `None` for an annotation (or any non-modifier
+/// element). Mirrors the formatter's internal `modifiers::rank_of` so a canonical layout can be
+/// asserted on formatted output.
+fn modifier_rank(kind: SyntaxKind) -> Option<usize> {
+    Some(match kind {
+        SyntaxKind::PUBLIC_KW => 0,
+        SyntaxKind::PROTECTED_KW => 1,
+        SyntaxKind::PRIVATE_KW => 2,
+        SyntaxKind::ABSTRACT_KW => 3,
+        SyntaxKind::DEFAULT_KW => 4,
+        SyntaxKind::STATIC_KW => 5,
+        SyntaxKind::SEALED_KW => 6,
+        SyntaxKind::NON_SEALED_KW => 7,
+        SyntaxKind::FINAL_KW => 8,
+        SyntaxKind::TRANSIENT_KW => 9,
+        SyntaxKind::VOLATILE_KW => 10,
+        SyntaxKind::SYNCHRONIZED_KW => 11,
+        SyntaxKind::NATIVE_KW => 12,
+        SyntaxKind::STRICTFP_KW => 13,
+        _ => return None,
+    })
+}
+
 /// Config with a given trailing-comma policy and a narrow `array-width`, so array initializers
 /// are pushed into the vertical (broken) layout where `vertical` adds its comma.
 fn trailing_config(trailing_comma: TrailingComma) -> Config {
@@ -281,6 +312,32 @@ fn import_group_keys(src: &str) -> Vec<(usize, String)> {
             (default_group_rank(imp.is_static(), &name), name)
         })
         .collect()
+}
+
+/// A class whose member carries a random, possibly-unsorted run of modifiers and annotations,
+/// so `reorder-modifiers` has multi-modifier `MODIFIERS` nodes to reorder. Semantically these
+/// combinations need not be legal Java — the parser is error-resilient and still builds the
+/// `MODIFIERS` node, which is all the invariants exercise.
+fn java_with_modifiers() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("public"),
+            Just("protected"),
+            Just("private"),
+            Just("abstract"),
+            Just("static"),
+            Just("final"),
+            Just("synchronized"),
+            Just("volatile"),
+            Just("transient"),
+            Just("@A"),
+            Just("@B(1)"),
+            Just("/* c */ public"),
+            Just("// lead\nstatic"),
+        ],
+        0..7,
+    )
+    .prop_map(|mods| format!("class C {{\n{} int x = 0;\n}}\n", mods.join(" ")))
 }
 
 proptest! {
@@ -735,5 +792,87 @@ proptest! {
         let _ = fmt_with(&src, &params_config(FnParamsLayout::Tall));
         let _ = fmt_with(&src, &params_config(FnParamsLayout::Compressed));
         let _ = fmt_with(&src, &params_config(FnParamsLayout::Vertical));
+    }
+
+    /// Modifier reordering keeps formatting idempotent.
+    #[test]
+    fn reorder_mods_idempotent(src in javaish()) {
+        let once = fmt_with(&src, &reorder_mods_config());
+        let twice = fmt_with(&once, &reorder_mods_config());
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Modifier reordering preserves the *multiset* of significant tokens (the sequence may
+    /// change, but no token is added, dropped, or altered) — the relaxed invariant that applies
+    /// when `reorder-modifiers` is on.
+    #[test]
+    fn reorder_mods_preserves_significant_token_multiset(src in javaish()) {
+        let out = fmt_with(&src, &reorder_mods_config());
+        let mut before = sig_tokens(&src);
+        let mut after = sig_tokens(&out);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// Modifier reordering never drops or mangles a comment (each moves with the modifier it is
+    /// glued to, so document order may change). Compare the multiset.
+    #[test]
+    fn reorder_mods_preserves_comments(src in javaish()) {
+        let out = fmt_with(&src, &reorder_mods_config());
+        let mut before = comment_contents(&src);
+        let mut after = comment_contents(&out);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// Modifier reordering never panics on arbitrary Unicode input.
+    #[test]
+    fn reorder_mods_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &reorder_mods_config());
+    }
+
+    /// On a targeted generator of scrambled modifier runs, reordering still preserves the
+    /// significant-token multiset and stays idempotent.
+    #[test]
+    fn reorder_mods_targeted_multiset_and_idempotent(src in java_with_modifiers()) {
+        let once = fmt_with(&src, &reorder_mods_config());
+        let twice = fmt_with(&once, &reorder_mods_config());
+        prop_assert_eq!(&once, &twice);
+        let mut before = sig_tokens(&src);
+        let mut after = sig_tokens(&once);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
+    /// Every emitted `MODIFIERS` node is canonical: all annotations precede every keyword
+    /// modifier, and the keyword modifiers are in non-decreasing canonical rank.
+    #[test]
+    fn reorder_mods_emits_canonical_order(src in java_with_modifiers()) {
+        let out = fmt_with(&src, &reorder_mods_config());
+        for m in parse(&out)
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::MODIFIERS)
+        {
+            let mut seen_keyword = false;
+            let mut last_rank = 0usize;
+            for e in m
+                .children_with_tokens()
+                .filter(|e| !e.kind().is_trivia())
+            {
+                match modifier_rank(e.kind()) {
+                    Some(rank) => {
+                        prop_assert!(rank >= last_rank, "keyword ranks must be non-decreasing");
+                        last_rank = rank;
+                        seen_keyword = true;
+                    }
+                    // An annotation appearing after a keyword would mean it was not hoisted.
+                    None => prop_assert!(!seen_keyword, "annotations must precede keyword modifiers"),
+                }
+            }
+        }
     }
 }
