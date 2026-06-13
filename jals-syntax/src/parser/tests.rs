@@ -2805,6 +2805,157 @@ fn array_method_refs() {
 }
 
 #[test]
+fn generic_qualified_method_refs() {
+    // Receiver-parameterized references (JLS 15.13 `ClassType :: ...`): the `<...>`
+    // receiver type arguments must not be mistaken for a `<`/`>` comparison. Covers a
+    // bare name, a dotted name, nested type arguments, a wildcard generic array
+    // constructor reference (`Foo<?>[]::new`), and a `::<T>` type witness layered on top of
+    // receiver type arguments.
+    check(
+        "class C { void m() { f(Foo<String>::new); g(a.b.C<X>::method); h(Map<K, V>::new); i(Foo<String>::<Long>bar); j(Foo<?>[]::new); } }",
+        expect![[r#"
+            SOURCE_FILE@0..130
+              CLASS_DECL@0..130
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..130
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..128
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..128
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..41
+                        CALL_EXPR@20..40
+                          NAME_REF@20..22
+                            WHITESPACE@20..21 " "
+                            IDENT@21..22 "f"
+                          ARG_LIST@22..40
+                            LPAREN@22..23 "("
+                            METHOD_REF_EXPR@23..39
+                              NAME_REF@23..26
+                                IDENT@23..26 "Foo"
+                              TYPE_ARGS@26..34
+                                LT@26..27 "<"
+                                TYPE@27..33
+                                  IDENT@27..33 "String"
+                                GT@33..34 ">"
+                              COLON_COLON@34..36 "::"
+                              NEW_KW@36..39 "new"
+                            RPAREN@39..40 ")"
+                        SEMICOLON@40..41 ";"
+                      EXPR_STMT@41..62
+                        CALL_EXPR@41..61
+                          NAME_REF@41..43
+                            WHITESPACE@41..42 " "
+                            IDENT@42..43 "g"
+                          ARG_LIST@43..61
+                            LPAREN@43..44 "("
+                            METHOD_REF_EXPR@44..60
+                              FIELD_ACCESS@44..49
+                                FIELD_ACCESS@44..47
+                                  NAME_REF@44..45
+                                    IDENT@44..45 "a"
+                                  DOT@45..46 "."
+                                  IDENT@46..47 "b"
+                                DOT@47..48 "."
+                                IDENT@48..49 "C"
+                              TYPE_ARGS@49..52
+                                LT@49..50 "<"
+                                TYPE@50..51
+                                  IDENT@50..51 "X"
+                                GT@51..52 ">"
+                              COLON_COLON@52..54 "::"
+                              IDENT@54..60 "method"
+                            RPAREN@60..61 ")"
+                        SEMICOLON@61..62 ";"
+                      EXPR_STMT@62..81
+                        CALL_EXPR@62..80
+                          NAME_REF@62..64
+                            WHITESPACE@62..63 " "
+                            IDENT@63..64 "h"
+                          ARG_LIST@64..80
+                            LPAREN@64..65 "("
+                            METHOD_REF_EXPR@65..79
+                              NAME_REF@65..68
+                                IDENT@65..68 "Map"
+                              TYPE_ARGS@68..74
+                                LT@68..69 "<"
+                                TYPE@69..70
+                                  IDENT@69..70 "K"
+                                COMMA@70..71 ","
+                                TYPE@71..73
+                                  WHITESPACE@71..72 " "
+                                  IDENT@72..73 "V"
+                                GT@73..74 ">"
+                              COLON_COLON@74..76 "::"
+                              NEW_KW@76..79 "new"
+                            RPAREN@79..80 ")"
+                        SEMICOLON@80..81 ";"
+                      EXPR_STMT@81..108
+                        CALL_EXPR@81..107
+                          NAME_REF@81..83
+                            WHITESPACE@81..82 " "
+                            IDENT@82..83 "i"
+                          ARG_LIST@83..107
+                            LPAREN@83..84 "("
+                            METHOD_REF_EXPR@84..106
+                              NAME_REF@84..87
+                                IDENT@84..87 "Foo"
+                              TYPE_ARGS@87..95
+                                LT@87..88 "<"
+                                TYPE@88..94
+                                  IDENT@88..94 "String"
+                                GT@94..95 ">"
+                              COLON_COLON@95..97 "::"
+                              TYPE_ARGS@97..103
+                                LT@97..98 "<"
+                                TYPE@98..102
+                                  IDENT@98..102 "Long"
+                                GT@102..103 ">"
+                              IDENT@103..106 "bar"
+                            RPAREN@106..107 ")"
+                        SEMICOLON@107..108 ";"
+                      EXPR_STMT@108..126
+                        CALL_EXPR@108..125
+                          NAME_REF@108..110
+                            WHITESPACE@108..109 " "
+                            IDENT@109..110 "j"
+                          ARG_LIST@110..125
+                            LPAREN@110..111 "("
+                            METHOD_REF_EXPR@111..124
+                              NAME_REF@111..114
+                                IDENT@111..114 "Foo"
+                              TYPE_ARGS@114..117
+                                LT@114..115 "<"
+                                QUESTION@115..116 "?"
+                                GT@116..117 ">"
+                              LBRACK@117..118 "["
+                              RBRACK@118..119 "]"
+                              COLON_COLON@119..121 "::"
+                              NEW_KW@121..124 "new"
+                            RPAREN@124..125 ")"
+                        SEMICOLON@125..126 ";"
+                      WHITESPACE@126..127 " "
+                      RBRACE@127..128 "}"
+                  WHITESPACE@128..129 " "
+                  RBRACE@129..130 "}"
+        "#]],
+    );
+}
+
+#[test]
 fn class_literal_statement_position() {
     // `int.class` at statement start must parse as an expression statement, not be
     // mistaken for the start of a local variable declaration (javac rejects the
