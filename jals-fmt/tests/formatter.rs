@@ -2502,3 +2502,120 @@ fn type_use_annotation_cast() {
         "#]],
     );
 }
+
+#[test]
+fn non_sealed_modifier_renders_tight() {
+    // `non-sealed` is one keyword: its `non` `-` `sealed` tokens stay tight (not `non - sealed`).
+    check(
+        "class C{public sealed class S permits N{}non-sealed class N extends S{}}",
+        expect![[r#"
+            class C {
+                public sealed class S permits N {}
+                non-sealed class N extends S {}
+            }
+        "#]],
+    );
+}
+
+// ===== reorder-modifiers =====
+
+/// Format with `reorder-modifiers` enabled.
+fn fmt_reorder_mods(src: &str) -> String {
+    let cfg = Config {
+        reorder_modifiers: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_reorder_mods(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_reorder_mods(src));
+}
+
+#[test]
+fn reorder_modifiers_sorts_type_method_and_field() {
+    check_reorder_mods(
+        "final public class C{static private final int x=0;synchronized public void m(){}}",
+        expect![[r#"
+            public final class C {
+                private static final int x = 0;
+                public synchronized void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_modifiers_hoists_annotations_to_front() {
+    check_reorder_mods(
+        "class C{public @Override static void m(){}}",
+        expect![[r#"
+            class C {
+                @Override public static void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_modifiers_keeps_relative_annotation_order() {
+    check_reorder_mods(
+        "class C{static @A public @B int x=0;}",
+        expect![[r#"
+            class C {
+                @A @B public static int x = 0;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_modifiers_orders_sealed_and_non_sealed() {
+    check_reorder_mods(
+        "class C{final sealed class S{}final non-sealed class N{}}",
+        expect![[r#"
+            class C {
+                sealed final class S {}
+                non-sealed final class N {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_modifiers_keeps_attached_comment_glued() {
+    // A comment leading a modifier stays glued to it and moves with it when reordered: the
+    // `// keep` comment anchored to `static` follows `static` past `public`.
+    check_reorder_mods(
+        "class C{\n// keep\nstatic public int x=0;}",
+        expect![[r#"
+            class C {
+                public
+                // keep
+                static int x = 0;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_modifiers_off_by_default_preserves_order() {
+    // With the option off (the default), the source modifier order is preserved exactly.
+    check(
+        "class C{final public static int x=0;}",
+        expect![[r#"
+            class C {
+                final public static int x = 0;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_modifiers_is_idempotent() {
+    let src =
+        "final public class C{static @A private final int x=0;synchronized public void m(){}}";
+    let once = fmt_reorder_mods(src);
+    let twice = fmt_reorder_mods(&once);
+    assert_eq!(once, twice, "reorder-modifiers must be idempotent");
+}

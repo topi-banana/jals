@@ -12,9 +12,10 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
 
 It upholds the workspace formatter invariants: comments are never dropped and formatting is
 idempotent (`format(format(x)) == format(x)`); by default the significant-token sequence is
-preserved exactly. Three opt-in options relax this (see [Configuration](#configuration)):
-`reorder-imports` and `group-imports` preserve the token *multiset* instead, and
-`trailing-comma` may add or drop the single trailing comma of an array initializer.
+preserved exactly. Four opt-in options relax this (see [Configuration](#configuration)):
+`reorder-imports`, `group-imports`, and `reorder-modifiers` preserve the token *multiset*
+instead, and `trailing-comma` may add or drop the single trailing comma of an array
+initializer.
 
 ## What it does today
 
@@ -98,6 +99,13 @@ The current formatter is intentionally minimal. It performs:
   into the prefix groups of `import-groups` (e.g. `java.` / `javax.` / others / `static`), each
   group sorted alphabetically and separated by one blank line. Overrides `reorder-imports`. Off
   by default; see below.
+- **Modifier ordering** — with `reorder-modifiers` enabled, every declaration's keyword
+  modifiers (`public`, `static`, `final`, …) are sorted into the canonical JLS / Checkstyle
+  order (public, protected, private, abstract, default, static, sealed, non-sealed, final,
+  transient, volatile, synchronized, native, strictfp) and all annotations are hoisted to the
+  front (keeping their relative order). The significant-token *multiset* is preserved (none
+  added, dropped, or altered) and each comment stays glued to its modifier. Off by default; see
+  below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -132,6 +140,7 @@ are kebab-case.
 | `space-after-colon` | bool | `true` | ✅ wired — emit a space after a `:`, in the same contexts as `space-before-colon`. On by default. `::` is never affected. Layout-only; mirrors rustfmt's `space_after_colon` |
 | `fn-params-layout` | `"tall"` \| `"compressed"` \| `"vertical"` | `"tall"` | ✅ wired — layout of a method / constructor parameter list: `tall` (all-or-nothing), `compressed` (pack as many parameters per line as fit `max-width`), or `vertical` (always one per line, even when it fits). Governs only declaration parameter lists, never call argument lists. Layout-only (the significant-token sequence is preserved exactly). The deprecated key `fn-args-layout` is accepted as an alias. Mirrors rustfmt's `fn_params_layout` |
 | `type-punctuation-density` | `"wide"` \| `"compressed"` | `"wide"` | ✅ wired — spacing around the `&` of a Java intersection type: `wide` (`A & B`) or `compressed` (`A&B`). Governs both a type-parameter bound (`<T extends A & B>`) and a cast intersection (`(A & B) x`); the bitwise-AND operator `&` (`a & b`) is never affected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `type_punctuation_density` |
+| `reorder-modifiers` | bool | `false` | ✅ wired — sort each declaration's keyword modifiers into the canonical JLS / Checkstyle order (public, protected, private, abstract, default, static, sealed, non-sealed, final, transient, volatile, synchronized, native, strictfp) and hoist all annotations to the front (relative order kept). Off by default; when on, the significant-token *sequence* may change (the multiset is preserved, comments stay glued to their modifier). A Java-specific option with no rustfmt equivalent |
 
 ---
 
@@ -276,7 +285,8 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 - **Annotation placement** — annotations on their own line vs. inline, per target
   (field/method/parameter). One of the most contested Java style points.
-- **Modifier ordering** — canonical order of `public static final …`.
+- **Modifier ordering** — canonical order of `public static final …`. **Implemented**
+  (`reorder-modifiers`) — see [What it does today](#what-it-does-today).
 - **`switch` arm style** — legacy `case:` vs. arrow `case ->`; lambda block conversion.
 
 ## Suggested priority
@@ -288,5 +298,6 @@ via `wrap_comments` — method-chain wrapping — `chain_width` — call-argumen
 `reorder_imports` — import grouping — `group_imports` — trailing commas —
 `trailing_comma` — binary-expression wrapping — `binop_separator` — last-argument
 overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon` /
-`space_after_colon` — parameter-list layout — `fn_params_layout` — and type-punctuation
-density — `type_punctuation_density` — are done.)
+`space_after_colon` — parameter-list layout — `fn_params_layout` — type-punctuation
+density — `type_punctuation_density` — and modifier ordering — `reorder_modifiers` — are
+done.)
