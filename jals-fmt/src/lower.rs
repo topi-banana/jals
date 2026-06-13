@@ -19,10 +19,12 @@
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
-use crate::config::{BinopSeparator, BraceStyle, Config, ControlBraceStyle, TrailingComma};
+use crate::config::{
+    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, TrailingComma,
+};
 use crate::doc::{
-    Doc, blank_line, concat, group, group_overflow, group_within, hardline, if_break, indent, line,
-    nil, raw, softline, text,
+    Doc, blank_line, concat, fill, group, group_always_break, group_overflow, group_within,
+    hardline, if_break, indent, line, nil, raw, softline, text,
 };
 
 /// Lowering context shared (immutably) across the walk.
@@ -732,21 +734,32 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         return group_overflow(head, last_item, tail, budget);
     }
 
+    // A `Compressed` parameter list packs as many parameters per line as fit (a `Fill`);
+    // every other list joins its items with a plain break, wrapping all-or-nothing.
+    let compressed_params =
+        node.kind() == S::PARAM_LIST && ctx.cfg.fn_params_layout == FnParamsLayout::Compressed;
+    let inner = if compressed_params {
+        fill(items)
+    } else {
+        crate::doc::join(line(), items)
+    };
     let doc = concat(vec![
         open_doc,
-        indent(concat(vec![softline(), crate::doc::join(line(), items)])),
+        indent(concat(vec![softline(), inner])),
         softline(),
         close_doc,
     ]);
     // A call's argument list (`ARG_LIST`) honors `fn-call-width` and an array initializer
-    // (`ARRAY_INIT`) honors `array-width`; other delimited lists (params, …) only break
-    // against `max-width`.
-    if node.kind() == S::ARG_LIST {
-        group_within(doc, ctx.cfg.fn_call_width)
-    } else if node.kind() == S::ARRAY_INIT {
-        group_within(doc, ctx.cfg.array_width)
-    } else {
-        group(doc)
+    // (`ARRAY_INIT`) honors `array-width`. A parameter list (`PARAM_LIST`) follows
+    // `fn-params-layout`: `Vertical` forces one parameter per line, while `Tall` / `Compressed`
+    // break against `max-width` like every other list. The rest only break against `max-width`.
+    match node.kind() {
+        S::ARG_LIST => group_within(doc, ctx.cfg.fn_call_width),
+        S::ARRAY_INIT => group_within(doc, ctx.cfg.array_width),
+        S::PARAM_LIST if ctx.cfg.fn_params_layout == FnParamsLayout::Vertical => {
+            group_always_break(doc)
+        }
+        _ => group(doc),
     }
 }
 

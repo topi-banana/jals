@@ -134,6 +134,25 @@ pub enum BinopSeparator {
     Back,
 }
 
+/// Layout of a method / constructor parameter list (`PARAM_LIST`). Mirrors rustfmt's
+/// `fn_params_layout` (formerly `fn_args_layout`, which jals accepts as a deprecated alias);
+/// it applies only to declaration parameter lists, never to call argument lists. Layout-only —
+/// the significant-token sequence is preserved exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FnParamsLayout {
+    /// All-or-nothing: keep the parameters on one line when they fit
+    /// [`max_width`](Config::max_width), otherwise lay them out one per line. The default;
+    /// matches the prior behavior.
+    Tall,
+    /// Pack as many parameters per line as fit [`max_width`](Config::max_width), wrapping to a
+    /// new line only when the next parameter would overflow. Mirrors rustfmt's `Compressed`.
+    Compressed,
+    /// Always one parameter per line, even when the whole list would fit on one line. Mirrors
+    /// rustfmt's `Vertical`.
+    Vertical,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -232,6 +251,15 @@ pub struct Config {
     /// method-reference token is never affected. Layout-only. Mirrors rustfmt's
     /// `space_after_colon`.
     pub space_after_colon: bool,
+    /// Layout of a method / constructor parameter list (`PARAM_LIST`):
+    /// [`Tall`](FnParamsLayout::Tall) (the default, all-or-nothing),
+    /// [`Compressed`](FnParamsLayout::Compressed) (pack as many per line as fit), or
+    /// [`Vertical`](FnParamsLayout::Vertical) (always one per line). Applies only to
+    /// declaration parameter lists, never to call argument lists. Layout-only — the
+    /// significant-token sequence is preserved exactly. Mirrors rustfmt's `fn_params_layout`;
+    /// the deprecated key `fn-args-layout` is accepted as an alias.
+    #[serde(alias = "fn-args-layout")]
+    pub fn_params_layout: FnParamsLayout,
 }
 
 impl Default for Config {
@@ -263,6 +291,7 @@ impl Default for Config {
             overflow_delimited_expr: false,
             space_before_colon: false,
             space_after_colon: true,
+            fn_params_layout: FnParamsLayout::Tall,
         }
     }
 }
@@ -395,6 +424,8 @@ mod tests {
         // one space after.
         assert!(!c.space_before_colon);
         assert!(c.space_after_colon);
+        // Parameter lists default to the all-or-nothing Tall layout (the prior behavior).
+        assert_eq!(c.fn_params_layout, FnParamsLayout::Tall);
     }
 
     #[test]
@@ -450,6 +481,23 @@ mod tests {
     fn overflow_delimited_expr_parses() {
         let c: Config = toml::from_str("overflow-delimited-expr = true\n").unwrap();
         assert!(c.overflow_delimited_expr);
+    }
+
+    #[test]
+    fn fn_params_layout_parses_kebab_values() {
+        let c: Config = toml::from_str("fn-params-layout = \"tall\"\n").unwrap();
+        assert_eq!(c.fn_params_layout, FnParamsLayout::Tall);
+        let c: Config = toml::from_str("fn-params-layout = \"compressed\"\n").unwrap();
+        assert_eq!(c.fn_params_layout, FnParamsLayout::Compressed);
+        let c: Config = toml::from_str("fn-params-layout = \"vertical\"\n").unwrap();
+        assert_eq!(c.fn_params_layout, FnParamsLayout::Vertical);
+    }
+
+    #[test]
+    fn fn_args_layout_is_a_deprecated_alias() {
+        // The rustfmt-era `fn-args-layout` key maps to the same field as `fn-params-layout`.
+        let c: Config = toml::from_str("fn-args-layout = \"vertical\"\n").unwrap();
+        assert_eq!(c.fn_params_layout, FnParamsLayout::Vertical);
     }
 
     #[test]

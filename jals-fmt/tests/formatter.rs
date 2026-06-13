@@ -2,7 +2,8 @@
 
 use expect_test::{Expect, expect};
 use jals_fmt::{
-    BinopSeparator, BraceStyle, Config, ControlBraceStyle, LineEnding, TrailingComma, format_source,
+    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, LineEnding,
+    TrailingComma, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -2214,5 +2215,163 @@ fn colon_spacing_is_idempotent() {
                 "colon spacing must be idempotent (before={before}, after={after})"
             );
         }
+    }
+}
+
+// ----- fn-params-layout -------------------------------------------------------------------
+
+/// Format with a given parameter-list layout at the default width.
+fn fmt_params(src: &str, layout: FnParamsLayout) -> String {
+    let cfg = Config {
+        fn_params_layout: layout,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// Format with a parameter-list layout and a narrow `max-width` to force wrapping.
+fn fmt_params_narrow(src: &str, layout: FnParamsLayout, max_width: usize) -> String {
+    let cfg = Config {
+        fn_params_layout: layout,
+        max_width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// A four-parameter method whose flat signature fits the default width but not a narrow one.
+const PARAMS_SRC: &str = "class A{void m(int alpha,String beta,long gamma,double delta){}}";
+
+#[test]
+fn fn_params_tall_keeps_one_line_when_it_fits() {
+    // Tall (the default): a parameter list that fits stays on one line.
+    expect![[r#"
+        class A {
+            void m(int alpha, String beta, long gamma, double delta) {}
+        }
+    "#]]
+    .assert_eq(&fmt_params(PARAMS_SRC, FnParamsLayout::Tall));
+}
+
+#[test]
+fn fn_params_tall_breaks_all_or_nothing() {
+    // Tall under a narrow width: all-or-nothing, one parameter per line.
+    expect![[r#"
+        class A {
+            void m(
+                int alpha,
+                String beta,
+                long gamma,
+                double delta
+            ) {}
+        }
+    "#]]
+    .assert_eq(&fmt_params_narrow(PARAMS_SRC, FnParamsLayout::Tall, 40));
+}
+
+#[test]
+fn fn_params_vertical_breaks_even_when_it_fits() {
+    // Vertical: one parameter per line even though the list would fit on one line.
+    expect![[r#"
+        class A {
+            void m(
+                int alpha,
+                String beta,
+                long gamma,
+                double delta
+            ) {}
+        }
+    "#]]
+    .assert_eq(&fmt_params(PARAMS_SRC, FnParamsLayout::Vertical));
+}
+
+#[test]
+fn fn_params_vertical_single_param_still_breaks() {
+    // A single parameter still goes on its own line under Vertical.
+    expect![[r#"
+        class A {
+            void m(
+                int only
+            ) {}
+        }
+    "#]]
+    .assert_eq(&fmt_params(
+        "class A{void m(int only){}}",
+        FnParamsLayout::Vertical,
+    ));
+}
+
+#[test]
+fn fn_params_vertical_empty_list_stays_inline() {
+    // An empty parameter list has nothing to break: it stays `()`.
+    expect![[r#"
+        class A {
+            void m() {}
+        }
+    "#]]
+    .assert_eq(&fmt_params("class A{void m(){}}", FnParamsLayout::Vertical));
+}
+
+#[test]
+fn fn_params_compressed_packs_as_many_as_fit() {
+    // Compressed under a narrow width: pack parameters per line, wrapping at the width.
+    expect![[r#"
+        class A {
+            void m(
+                int alpha, String beta,
+                long gamma, double delta
+            ) {}
+        }
+    "#]]
+    .assert_eq(&fmt_params_narrow(
+        PARAMS_SRC,
+        FnParamsLayout::Compressed,
+        40,
+    ));
+}
+
+#[test]
+fn fn_params_compressed_keeps_one_line_when_it_fits() {
+    // Compressed that fits stays on one line, just like Tall.
+    expect![[r#"
+        class A {
+            void m(int alpha, String beta, long gamma, double delta) {}
+        }
+    "#]]
+    .assert_eq(&fmt_params(PARAMS_SRC, FnParamsLayout::Compressed));
+}
+
+#[test]
+fn fn_params_layout_only_affects_params_not_call_args() {
+    // Vertical breaks the *parameter* list but leaves a call's *argument* list inline.
+    expect![[r#"
+        class A {
+            void m(
+                int a,
+                int b
+            ) {
+                f(x, y, z);
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_params(
+        "class A{void m(int a,int b){f(x,y,z);}}",
+        FnParamsLayout::Vertical,
+    ));
+}
+
+#[test]
+fn fn_params_layout_modes_are_idempotent() {
+    for layout in [
+        FnParamsLayout::Tall,
+        FnParamsLayout::Compressed,
+        FnParamsLayout::Vertical,
+    ] {
+        let once = fmt_params_narrow(PARAMS_SRC, layout, 40);
+        let twice = fmt_params_narrow(&once, layout, 40);
+        assert_eq!(
+            once, twice,
+            "fn-params-layout {layout:?} must be idempotent"
+        );
     }
 }
