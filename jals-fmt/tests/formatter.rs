@@ -2093,3 +2093,126 @@ fn overflow_is_idempotent() {
     let twice = fmt_overflow(&once);
     assert_eq!(once, twice, "overflow layout must be idempotent");
 }
+
+// ---------------------------------------------------------------------------
+// Colon spacing (`space-before-colon` / `space-after-colon`)
+// ---------------------------------------------------------------------------
+
+fn fmt_colon(src: &str, space_before_colon: bool, space_after_colon: bool) -> String {
+    let config = Config {
+        space_before_colon,
+        space_after_colon,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising every Java colon context: a ternary, an enhanced `for`, a labeled
+/// statement, an `assert` message, and `case` / `default` switch labels.
+const COLON_SRC: &str = "class C{void m(int x){int y=x>0?1:2;for(int i:list){use(i);}outer:for(;;){break outer;}assert x>0:\"m\";switch(x){case 1:a();break;case 2:case 3:b();break;default:c();}}}";
+
+#[test]
+fn colon_default_no_space_before_one_space_after() {
+    // Defaults (`space-before-colon = false`, `space-after-colon = true`) give idiomatic
+    // `label:` / `case x:` spacing, applied uniformly to ternary / for-each / assert too.
+    expect![[r#"
+        class C {
+            void m(int x) {
+                int y = x > 0 ? 1: 2;
+                for (int i: list) {
+                    use(i);
+                }
+                outer: for (;;) {
+                    break outer;
+                }
+                assert x > 0: "m";
+                switch (x) {
+                    case 1: a(); break;
+                    case 2: case 3: b(); break;
+                    default: c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_colon(COLON_SRC, false, true));
+}
+
+#[test]
+fn colon_space_before_adds_space_in_every_context() {
+    // `space-before-colon = true` puts a space before every colon, uniformly.
+    expect![[r#"
+        class C {
+            void m(int x) {
+                int y = x > 0 ? 1 : 2;
+                for (int i : list) {
+                    use(i);
+                }
+                outer : for (;;) {
+                    break outer;
+                }
+                assert x > 0 : "m";
+                switch (x) {
+                    case 1 : a(); break;
+                    case 2 : case 3 : b(); break;
+                    default : c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_colon(COLON_SRC, true, true));
+}
+
+#[test]
+fn colon_no_space_after_tightens_every_context() {
+    // `space-after-colon = false` removes the space after every colon, uniformly.
+    expect![[r#"
+        class C {
+            void m(int x) {
+                int y = x > 0 ? 1:2;
+                for (int i:list) {
+                    use(i);
+                }
+                outer:for (;;) {
+                    break outer;
+                }
+                assert x > 0:"m";
+                switch (x) {
+                    case 1:a(); break;
+                    case 2:case 3:b(); break;
+                    default:c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_colon(COLON_SRC, false, false));
+}
+
+#[test]
+fn colon_method_reference_is_never_affected() {
+    // `::` is a distinct token (`COLON_COLON`); colon spacing never touches it, and the
+    // fusion-safety net keeps a ternary colon from joining a following `::` into `:::`.
+    check(
+        "class C{void m(){var r=cond?Foo::bar:Baz::qux;}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    var r = cond ? Foo::bar: Baz::qux;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn colon_spacing_is_idempotent() {
+    for before in [false, true] {
+        for after in [false, true] {
+            let once = fmt_colon(COLON_SRC, before, after);
+            let twice = fmt_colon(&once, before, after);
+            assert_eq!(
+                once, twice,
+                "colon spacing must be idempotent (before={before}, after={after})"
+            );
+        }
+    }
+}

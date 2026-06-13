@@ -63,6 +63,12 @@ The current formatter is intentionally minimal. It performs:
   (`"back"`). Assignments (`=`) and ternaries are not wrapped yet.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
   net so operator fusion (`>>`, `->`, …) is never introduced or changed.
+- **Colon spacing** — the spacing around a `:` follows `space-before-colon` (default off) and
+  `space-after-colon` (default on), applied uniformly to every Java colon context: a ternary
+  (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled statement (`label:`), an
+  `assert` message (`assert c : m`), and a `switch` `case` / `default` label (`case x:`). The
+  defaults give idiomatic `label:` / `case x:` style. The `::` method-reference token is a
+  distinct token and is never affected.
 - **Comment placement** — leading / trailing / dangling comments are anchored and re-emitted.
 - **Comment reflow** — with `wrap-comments` enabled, standalone line and block/Javadoc
   comments are rewrapped to `comment-width` at their indentation. Lines are wrapped
@@ -110,6 +116,8 @@ are kebab-case.
 | `import-groups` | array of strings | `["java.", "javax.", "*", "static"]` | ✅ wired — ordered prefix groups for `group-imports`: a non-static import joins its *longest* matching prefix, `"*"` is the catch-all for the rest, and `"static"` groups all static imports. A missing `"*"` / `"static"` becomes an implicit trailing group. Only consulted when `group-imports` is enabled |
 | `binop-separator` | `"front"` \| `"back"` | `"front"` | ✅ wired — placement of a binary operator when its expression wraps (driven by `max-width` alone): `front` starts the continuation line with the operator, `back` ends the broken line with it; mirrors rustfmt's `binop_separator` |
 | `overflow-delimited-expr` | bool | `false` | ✅ wired — let the last item of a call / annotation argument list hang past the call line when it is a block-bodied lambda, anonymous-class `new`, or array initializer (`f(a, () -> {` … `});`); falls back to the all-or-nothing layout when an earlier item is multi-line or the first line overflows `fn-call-width`/`max-width`. Layout-only (the significant-token sequence is preserved exactly); mirrors rustfmt's `overflow_delimited_expr` |
+| `space-before-colon` | bool | `false` | ✅ wired — emit a space before a `:`, applied uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`). Off by default (idiomatic `label:` / `case x:`). `::` is a distinct token and is never affected. Layout-only; mirrors rustfmt's `space_before_colon` |
+| `space-after-colon` | bool | `true` | ✅ wired — emit a space after a `:`, in the same contexts as `space-before-colon`. On by default. `::` is never affected. Layout-only; mirrors rustfmt's `space_after_colon` |
 
 ---
 
@@ -167,10 +175,14 @@ see [What it does today](#what-it-does-today). Remaining:
 
 ## 4. Spacing
 
+Colon spacing (`space_after_colon`, `space_before_colon`) is **implemented**, applied
+uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`,
+`case`/`default`) — see [What it does today](#what-it-does-today). Remaining:
+
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Space after `:` (ternary, enhanced-`for`, labels, `case x:`) | `space_after_colon` |
-| Space before `:` | `space_before_colon` |
+| Space after `:` (ternary, enhanced-`for`, labels, `case x:`) | `space_after_colon` ✅ |
+| Space before `:` | `space_before_colon` ✅ |
 | Density of type punctuation (`T extends A & B`) | `type_punctuation_density` |
 
 ## 5. Comments
@@ -255,5 +267,6 @@ By Java-user impact: the remaining import-organization option (`imports_granular
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
 `fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
 `reorder_imports` — import grouping — `group_imports` — trailing commas —
-`trailing_comma` — binary-expression wrapping — `binop_separator` — and last-argument
-overflow — `overflow_delimited_expr` — are done.)
+`trailing_comma` — binary-expression wrapping — `binop_separator` — last-argument
+overflow — `overflow_delimited_expr` — and colon spacing — `space_before_colon` /
+`space_after_colon` — are done.)

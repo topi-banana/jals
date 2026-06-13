@@ -94,7 +94,7 @@ fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 
 /// The aesthetic spacing rule between two significant tokens (before the fusion-safety
 /// net in [`sep`] is applied).
-fn want_space(prev: S, next: S) -> bool {
+fn want_space(prev: S, next: S, cfg: &Config) -> bool {
     use S::*;
     // No space after these.
     if matches!(
@@ -119,6 +119,17 @@ fn want_space(prev: S, next: S) -> bool {
             | MINUS_MINUS
     ) {
         return false;
+    }
+    // Colon spacing (ternary `?:`, enhanced-`for`, labels, `assert`, `case` / `default`) is
+    // configurable and applies uniformly to every colon context. `::` is a distinct token
+    // (`COLON_COLON`, handled above as a no-space operator) and is never affected. The
+    // structural no-space rules above take precedence, so a colon abutting `)` / `,` / `;`
+    // (only reachable through error recovery) never gains a stray space.
+    if next == COLON {
+        return cfg.space_before_colon;
+    }
+    if prev == COLON {
+        return cfg.space_after_colon;
     }
     // `(` hugs a preceding callee/array; keywords get a space before it.
     if next == LPAREN {
@@ -145,7 +156,7 @@ fn would_fuse(a: &str, b: &str) -> bool {
 
 /// The separator document between `prev` (if any) and the token `next`. Applies the
 /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
-fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
+fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
     let Some(p) = prev else {
         return nil();
     };
@@ -154,7 +165,7 @@ fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
     if pk == S::GT && (nk == S::GT || nk == S::EQ) {
         return if adjacent(p, next) { nil() } else { text(" ") };
     }
-    let space = want_space(pk, nk) || would_fuse(p.text(), next.text());
+    let space = want_space(pk, nk, cfg) || would_fuse(p.text(), next.text());
     if space { text(" ") } else { nil() }
 }
 
@@ -273,7 +284,7 @@ fn flow_sep(
     {
         return hardline();
     }
-    sep(prev, next)
+    sep(prev, next, ctx.cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -646,7 +657,7 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     for el in node.children_with_tokens() {
         if let Some(child) = el.as_node() {
             if let Some(first) = first_sig_token(child) {
-                current.push(sep(cur_prev.as_ref(), &first));
+                current.push(sep(cur_prev.as_ref(), &first, ctx.cfg));
             }
             current.push(lower(child, ctx));
             cur_prev = last_sig_token(child);
@@ -663,7 +674,7 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
                 }
                 _ if kind.is_trivia() => {}
                 _ => {
-                    current.push(sep(cur_prev.as_ref(), t));
+                    current.push(sep(cur_prev.as_ref(), t, ctx.cfg));
                     current.push(tok(t, ctx));
                     cur_prev = Some(t.clone());
                 }

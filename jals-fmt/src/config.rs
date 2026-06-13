@@ -219,6 +219,19 @@ pub struct Config {
     /// layout. Layout-only — the significant-token sequence is preserved exactly. Mirrors
     /// rustfmt's `overflow_delimited_expr`.
     pub overflow_delimited_expr: bool,
+    /// Whether to emit a space *before* a colon (`:`). Applies uniformly to every Java colon
+    /// context: a ternary (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled
+    /// statement (`label:`), an `assert` message (`assert c : m`), and a `switch` `case` /
+    /// `default` label (`case x:`). Off by default (no space before), matching idiomatic
+    /// label / `case` style. The `::` method-reference token is a distinct token and is never
+    /// affected. Layout-only — the significant-token sequence is preserved exactly. Mirrors
+    /// rustfmt's `space_before_colon`.
+    pub space_before_colon: bool,
+    /// Whether to emit a space *after* a colon (`:`), in the same contexts as
+    /// [`space_before_colon`](Config::space_before_colon). On by default. The `::`
+    /// method-reference token is never affected. Layout-only. Mirrors rustfmt's
+    /// `space_after_colon`.
+    pub space_after_colon: bool,
 }
 
 impl Default for Config {
@@ -248,6 +261,8 @@ impl Default for Config {
             ],
             binop_separator: BinopSeparator::Front,
             overflow_delimited_expr: false,
+            space_before_colon: false,
+            space_after_colon: true,
         }
     }
 }
@@ -376,6 +391,10 @@ mod tests {
         assert_eq!(c.binop_separator, BinopSeparator::Front);
         // Last-argument overflow is opt-in; off by default keeps the all-or-nothing layout.
         assert!(!c.overflow_delimited_expr);
+        // Colon spacing defaults to idiomatic `label:` / `case x:` style: no space before,
+        // one space after.
+        assert!(!c.space_before_colon);
+        assert!(c.space_after_colon);
     }
 
     #[test]
@@ -431,6 +450,14 @@ mod tests {
     fn overflow_delimited_expr_parses() {
         let c: Config = toml::from_str("overflow-delimited-expr = true\n").unwrap();
         assert!(c.overflow_delimited_expr);
+    }
+
+    #[test]
+    fn colon_spacing_parses_kebab_keys() {
+        let c: Config =
+            toml::from_str("space-before-colon = true\nspace-after-colon = false\n").unwrap();
+        assert!(c.space_before_colon);
+        assert!(!c.space_after_colon);
     }
 
     #[test]
