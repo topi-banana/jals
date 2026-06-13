@@ -4100,3 +4100,548 @@ fn lossless_on_various_inputs() {
         assert_lossless(src);
     }
 }
+
+#[test]
+fn wildcard_with_annotation() {
+    // JSR 308: a type-use annotation before a wildcard `?` (`MyList<@A ?>`).
+    check(
+        "class C { void m(MyList<@WldA ?> l) {} }",
+        expect![[r#"
+        SOURCE_FILE@0..40
+          CLASS_DECL@0..40
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..40
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..38
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..35
+                  LPAREN@16..17 "("
+                  PARAM@17..34
+                    MODIFIERS@17..17
+                    TYPE@17..32
+                      IDENT@17..23 "MyList"
+                      TYPE_ARGS@23..32
+                        LT@23..24 "<"
+                        ANNOTATION@24..29
+                          AT@24..25 "@"
+                          QUALIFIED_NAME@25..29
+                            IDENT@25..29 "WldA"
+                        WHITESPACE@29..30 " "
+                        QUESTION@30..31 "?"
+                        GT@31..32 ">"
+                    WHITESPACE@32..33 " "
+                    IDENT@33..34 "l"
+                  RPAREN@34..35 ")"
+                BLOCK@35..38
+                  WHITESPACE@35..36 " "
+                  LBRACE@36..37 "{"
+                  RBRACE@37..38 "}"
+              WHITESPACE@38..39 " "
+              RBRACE@39..40 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn wildcard_annotated_bounded() {
+    // Annotated wildcard whose bound nests further annotated wildcards.
+    check(
+        "class C { MyList<@WldA ? extends @WldA MyList<@WldB(\"m\") ?>> f; }",
+        expect![[r#"
+            SOURCE_FILE@0..65
+              CLASS_DECL@0..65
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..65
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  FIELD_DECL@9..63
+                    MODIFIERS@9..9
+                    TYPE@9..60
+                      WHITESPACE@9..10 " "
+                      IDENT@10..16 "MyList"
+                      TYPE_ARGS@16..60
+                        LT@16..17 "<"
+                        ANNOTATION@17..22
+                          AT@17..18 "@"
+                          QUALIFIED_NAME@18..22
+                            IDENT@18..22 "WldA"
+                        WHITESPACE@22..23 " "
+                        QUESTION@23..24 "?"
+                        WHITESPACE@24..25 " "
+                        EXTENDS_KW@25..32 "extends"
+                        TYPE@32..59
+                          ANNOTATION@32..38
+                            WHITESPACE@32..33 " "
+                            AT@33..34 "@"
+                            QUALIFIED_NAME@34..38
+                              IDENT@34..38 "WldA"
+                          WHITESPACE@38..39 " "
+                          IDENT@39..45 "MyList"
+                          TYPE_ARGS@45..59
+                            LT@45..46 "<"
+                            ANNOTATION@46..56
+                              AT@46..47 "@"
+                              QUALIFIED_NAME@47..51
+                                IDENT@47..51 "WldB"
+                              ANNOTATION_ARG_LIST@51..56
+                                LPAREN@51..52 "("
+                                LITERAL@52..55
+                                  STRING_LITERAL@52..55 "\"m\""
+                                RPAREN@55..56 ")"
+                            WHITESPACE@56..57 " "
+                            QUESTION@57..58 "?"
+                            GT@58..59 ">"
+                        GT@59..60 ">"
+                    WHITESPACE@60..61 " "
+                    IDENT@61..62 "f"
+                    SEMICOLON@62..63 ";"
+                  WHITESPACE@63..64 " "
+                  RBRACE@64..65 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn inner_type_annotation() {
+    // JSR 308: an annotation on the inner type of a qualified type (`Outer.@A Inner`).
+    check(
+        "class C { void m(Outer.@RcvrB Inner this) {} }",
+        expect![[r#"
+        SOURCE_FILE@0..46
+          CLASS_DECL@0..46
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..46
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..44
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..41
+                  LPAREN@16..17 "("
+                  PARAM@17..40
+                    MODIFIERS@17..17
+                    TYPE@17..35
+                      IDENT@17..22 "Outer"
+                      DOT@22..23 "."
+                      ANNOTATION@23..29
+                        AT@23..24 "@"
+                        QUALIFIED_NAME@24..29
+                          IDENT@24..29 "RcvrB"
+                      WHITESPACE@29..30 " "
+                      IDENT@30..35 "Inner"
+                    WHITESPACE@35..36 " "
+                    THIS_KW@36..40 "this"
+                  RPAREN@40..41 ")"
+                BLOCK@41..44
+                  WHITESPACE@41..42 " "
+                  LBRACE@42..43 "{"
+                  RBRACE@43..44 "}"
+              WHITESPACE@44..45 " "
+              RBRACE@45..46 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn inner_type_annotation_generic() {
+    // Inner-type annotation with type arguments on both sides of the dot.
+    check(
+        "class C { void m(GenericOuter<S, T>.@RcvrB GenericInner<U, V> this) {} }",
+        expect![[r#"
+            SOURCE_FILE@0..72
+              CLASS_DECL@0..72
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..72
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..70
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..67
+                      LPAREN@16..17 "("
+                      PARAM@17..66
+                        MODIFIERS@17..17
+                        TYPE@17..61
+                          IDENT@17..29 "GenericOuter"
+                          TYPE_ARGS@29..35
+                            LT@29..30 "<"
+                            TYPE@30..31
+                              IDENT@30..31 "S"
+                            COMMA@31..32 ","
+                            TYPE@32..34
+                              WHITESPACE@32..33 " "
+                              IDENT@33..34 "T"
+                            GT@34..35 ">"
+                          DOT@35..36 "."
+                          ANNOTATION@36..42
+                            AT@36..37 "@"
+                            QUALIFIED_NAME@37..42
+                              IDENT@37..42 "RcvrB"
+                          WHITESPACE@42..43 " "
+                          IDENT@43..55 "GenericInner"
+                          TYPE_ARGS@55..61
+                            LT@55..56 "<"
+                            TYPE@56..57
+                              IDENT@56..57 "U"
+                            COMMA@57..58 ","
+                            TYPE@58..60
+                              WHITESPACE@58..59 " "
+                              IDENT@59..60 "V"
+                            GT@60..61 ">"
+                        WHITESPACE@61..62 " "
+                        THIS_KW@62..66 "this"
+                      RPAREN@66..67 ")"
+                    BLOCK@67..70
+                      WHITESPACE@67..68 " "
+                      LBRACE@68..69 "{"
+                      RBRACE@69..70 "}"
+                  WHITESPACE@70..71 " "
+                  RBRACE@71..72 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn varargs_annotation() {
+    // JSR 308: a type-use annotation on a varargs element type (`Object @A...`).
+    check(
+        "class C { void m(Object @VarArgA... objs) {} }",
+        expect![[r#"
+        SOURCE_FILE@0..46
+          CLASS_DECL@0..46
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..46
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..44
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..41
+                  LPAREN@16..17 "("
+                  PARAM@17..40
+                    MODIFIERS@17..17
+                    TYPE@17..23
+                      IDENT@17..23 "Object"
+                    ANNOTATION@23..32
+                      WHITESPACE@23..24 " "
+                      AT@24..25 "@"
+                      QUALIFIED_NAME@25..32
+                        IDENT@25..32 "VarArgA"
+                    ELLIPSIS@32..35 "..."
+                    WHITESPACE@35..36 " "
+                    IDENT@36..40 "objs"
+                  RPAREN@40..41 ")"
+                BLOCK@41..44
+                  WHITESPACE@41..42 " "
+                  LBRACE@42..43 "{"
+                  RBRACE@43..44 "}"
+              WHITESPACE@44..45 " "
+              RBRACE@45..46 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn varargs_annotation_after_dims() {
+    // A varargs annotation following annotated array dimensions.
+    check(
+        "class C { void m(@ArrA String @ArrB [] @ArrC [] @ArrD ... arg) {} }",
+        expect![[r#"
+            SOURCE_FILE@0..67
+              CLASS_DECL@0..67
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..67
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..65
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..62
+                      LPAREN@16..17 "("
+                      PARAM@17..61
+                        MODIFIERS@17..22
+                          ANNOTATION@17..22
+                            AT@17..18 "@"
+                            QUALIFIED_NAME@18..22
+                              IDENT@18..22 "ArrA"
+                        TYPE@22..47
+                          WHITESPACE@22..23 " "
+                          IDENT@23..29 "String"
+                          ANNOTATION@29..35
+                            WHITESPACE@29..30 " "
+                            AT@30..31 "@"
+                            QUALIFIED_NAME@31..35
+                              IDENT@31..35 "ArrB"
+                          WHITESPACE@35..36 " "
+                          LBRACK@36..37 "["
+                          RBRACK@37..38 "]"
+                          ANNOTATION@38..44
+                            WHITESPACE@38..39 " "
+                            AT@39..40 "@"
+                            QUALIFIED_NAME@40..44
+                              IDENT@40..44 "ArrC"
+                          WHITESPACE@44..45 " "
+                          LBRACK@45..46 "["
+                          RBRACK@46..47 "]"
+                        ANNOTATION@47..53
+                          WHITESPACE@47..48 " "
+                          AT@48..49 "@"
+                          QUALIFIED_NAME@49..53
+                            IDENT@49..53 "ArrD"
+                        WHITESPACE@53..54 " "
+                        ELLIPSIS@54..57 "..."
+                        WHITESPACE@57..58 " "
+                        IDENT@58..61 "arg"
+                      RPAREN@61..62 ")"
+                    BLOCK@62..65
+                      WHITESPACE@62..63 " "
+                      LBRACE@63..64 "{"
+                      RBRACE@64..65 "}"
+                  WHITESPACE@65..66 " "
+                  RBRACE@66..67 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn record_component_varargs_annotation() {
+    // A varargs annotation on a record component.
+    check(
+        "record R(String @A... xs) {}",
+        expect![[r#"
+        SOURCE_FILE@0..28
+          RECORD_DECL@0..28
+            MODIFIERS@0..0
+            RECORD_KW@0..6 "record"
+            WHITESPACE@6..7 " "
+            IDENT@7..8 "R"
+            RECORD_HEADER@8..25
+              LPAREN@8..9 "("
+              RECORD_COMPONENT@9..24
+                MODIFIERS@9..9
+                TYPE@9..15
+                  IDENT@9..15 "String"
+                ANNOTATION@15..18
+                  WHITESPACE@15..16 " "
+                  AT@16..17 "@"
+                  QUALIFIED_NAME@17..18
+                    IDENT@17..18 "A"
+                ELLIPSIS@18..21 "..."
+                WHITESPACE@21..22 " "
+                IDENT@22..24 "xs"
+              RPAREN@24..25 ")"
+            CLASS_BODY@25..28
+              WHITESPACE@25..26 " "
+              LBRACE@26..27 "{"
+              RBRACE@27..28 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn cast_with_annotation() {
+    // JSR 308: an annotated type in a cast (`(@A Long) y`).
+    check(
+        "class C { void m() { Object x = (@A Long) y; } }",
+        expect![[r#"
+        SOURCE_FILE@0..48
+          CLASS_DECL@0..48
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..48
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..46
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..18
+                  LPAREN@16..17 "("
+                  RPAREN@17..18 ")"
+                BLOCK@18..46
+                  WHITESPACE@18..19 " "
+                  LBRACE@19..20 "{"
+                  LOCAL_VAR_DECL@20..44
+                    MODIFIERS@20..20
+                    TYPE@20..27
+                      WHITESPACE@20..21 " "
+                      IDENT@21..27 "Object"
+                    WHITESPACE@27..28 " "
+                    IDENT@28..29 "x"
+                    WHITESPACE@29..30 " "
+                    EQ@30..31 "="
+                    CAST_EXPR@31..43
+                      WHITESPACE@31..32 " "
+                      LPAREN@32..33 "("
+                      TYPE@33..40
+                        ANNOTATION@33..35
+                          AT@33..34 "@"
+                          QUALIFIED_NAME@34..35
+                            IDENT@34..35 "A"
+                        WHITESPACE@35..36 " "
+                        IDENT@36..40 "Long"
+                      RPAREN@40..41 ")"
+                      NAME_REF@41..43
+                        WHITESPACE@41..42 " "
+                        IDENT@42..43 "y"
+                    SEMICOLON@43..44 ";"
+                  WHITESPACE@44..45 " "
+                  RBRACE@45..46 "}"
+              WHITESPACE@46..47 " "
+              RBRACE@47..48 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn generic_method_return_type_annotation() {
+    // JSR 308: a type-use annotation on a generic method's return type, after the type
+    // parameters (`<T> @A String m()`).
+    check(
+        "class C { <T> @A String m() { return null; } }",
+        expect![[r#"
+        SOURCE_FILE@0..46
+          CLASS_DECL@0..46
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..46
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..44
+                MODIFIERS@9..9
+                TYPE_PARAMS@9..13
+                  WHITESPACE@9..10 " "
+                  LT@10..11 "<"
+                  TYPE_PARAM@11..12
+                    IDENT@11..12 "T"
+                  GT@12..13 ">"
+                TYPE@13..23
+                  ANNOTATION@13..16
+                    WHITESPACE@13..14 " "
+                    AT@14..15 "@"
+                    QUALIFIED_NAME@15..16
+                      IDENT@15..16 "A"
+                  WHITESPACE@16..17 " "
+                  IDENT@17..23 "String"
+                WHITESPACE@23..24 " "
+                IDENT@24..25 "m"
+                PARAM_LIST@25..27
+                  LPAREN@25..26 "("
+                  RPAREN@26..27 ")"
+                BLOCK@27..44
+                  WHITESPACE@27..28 " "
+                  LBRACE@28..29 "{"
+                  RETURN_STMT@29..42
+                    WHITESPACE@29..30 " "
+                    RETURN_KW@30..36 "return"
+                    LITERAL@36..41
+                      WHITESPACE@36..37 " "
+                      NULL_KW@37..41 "null"
+                    SEMICOLON@41..42 ";"
+                  WHITESPACE@42..43 " "
+                  RBRACE@43..44 "}"
+              WHITESPACE@44..45 " "
+              RBRACE@45..46 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn throws_dotted_annotation() {
+    // An inner-type annotation inside a throws clause (`throws @A Ex.@B Inner`).
+    check(
+        "class C { void m() throws @A Ex.@B Inner {} }",
+        expect![[r#"
+        SOURCE_FILE@0..45
+          CLASS_DECL@0..45
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..45
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..43
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..18
+                  LPAREN@16..17 "("
+                  RPAREN@17..18 ")"
+                THROWS_CLAUSE@18..40
+                  WHITESPACE@18..19 " "
+                  THROWS_KW@19..25 "throws"
+                  TYPE@25..40
+                    ANNOTATION@25..28
+                      WHITESPACE@25..26 " "
+                      AT@26..27 "@"
+                      QUALIFIED_NAME@27..28
+                        IDENT@27..28 "A"
+                    WHITESPACE@28..29 " "
+                    IDENT@29..31 "Ex"
+                    DOT@31..32 "."
+                    ANNOTATION@32..34
+                      AT@32..33 "@"
+                      QUALIFIED_NAME@33..34
+                        IDENT@33..34 "B"
+                    WHITESPACE@34..35 " "
+                    IDENT@35..40 "Inner"
+                BLOCK@40..43
+                  WHITESPACE@40..41 " "
+                  LBRACE@41..42 "{"
+                  RBRACE@42..43 "}"
+              WHITESPACE@43..44 " "
+              RBRACE@44..45 "}"
+    "#]],
+    );
+}

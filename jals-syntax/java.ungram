@@ -144,7 +144,7 @@ RecordHeader =
   '(' components:(RecordComponent (',' RecordComponent)*)? ')'
 
 RecordComponent =
-  Modifiers ty:Type '...'? name:'ident'
+  Modifiers ty:Type Annotation* '...'? name:'ident'
 
 // ===== Class body & members =====
 
@@ -196,24 +196,27 @@ ParamList =
 
 // Also used for lambda parameters, where the modifiers and type may be
 // absent. A receiver parameter uses `this`, an unnamed parameter `_`.
+// A type-use annotation may precede the varargs `...` (`String @A ...`).
 Param =
-  modifiers:Modifiers? ty:Type? '...'? (name:'ident' | 'this' | '_')
+  modifiers:Modifiers? ty:Type? Annotation* '...'? (name:'ident' | 'this' | '_')
 
 // ===== Types =====
 
 // `int`, `List<T>`, `a.b.C<D>.E`, `int[]`, `var`. Dimensions may be
-// annotated (`String @A []`).
+// annotated (`String @A []`), as may an inner type after a dot
+// (`Outer.@A Inner`).
 Type =
   Annotation*
   ( 'var'
   | 'boolean' | 'byte' | 'short' | 'int' | 'long' | 'char' | 'float'
   | 'double' | 'void'
-  | 'ident' type_args:TypeArgs? ('.' 'ident' TypeArgs?)*
+  | 'ident' type_args:TypeArgs? ('.' Annotation* 'ident' TypeArgs?)*
   )
   (Annotation* '[' ']')*
 
 // Wildcard arguments (`?` / `? extends T` / `? super T`) keep their bound as
-// a direct `Type` child; the `?` itself is a bare token.
+// a direct `Type` child; the `?` itself is a bare token, optionally preceded
+// by type-use annotations (`<@A ?>`).
 TypeArgs =
   '<' args:(Type (',' Type)*)? '>'
 
