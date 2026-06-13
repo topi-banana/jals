@@ -1,6 +1,6 @@
 //! Property tests for the formatter's correctness invariants.
 
-use jals_fmt::{BinopSeparator, Config, TrailingComma, format_source};
+use jals_fmt::{BinopSeparator, Config, FnParamsLayout, TrailingComma, format_source};
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
 
@@ -178,6 +178,25 @@ fn overflow_config() -> Config {
         array_width: 8,
         ..Config::default()
     }
+}
+
+/// Config with a given parameter layout and a narrow `max-width`, so parameter lists are pushed
+/// into the wrapped (`Tall`) / packed (`Compressed`) / vertical layout the option selects.
+fn params_config(layout: FnParamsLayout) -> Config {
+    Config {
+        fn_params_layout: layout,
+        max_width: 24,
+        ..Config::default()
+    }
+}
+
+/// A generator over the three parameter layouts.
+fn params_layout() -> impl Strategy<Value = FnParamsLayout> {
+    prop_oneof![
+        Just(FnParamsLayout::Tall),
+        Just(FnParamsLayout::Compressed),
+        Just(FnParamsLayout::Vertical),
+    ]
 }
 
 /// The non-trivia tokens of `src` with every `,` removed. The trailing-comma modes may add or
@@ -624,5 +643,38 @@ proptest! {
     #[test]
     fn overflow_delimited_expr_never_panics(src in ".*") {
         let _ = fmt_with(&src, &overflow_config());
+    }
+
+    /// Each parameter layout keeps formatting idempotent (the `Compressed` packing in
+    /// particular: re-formatting the packed lines reproduces the same wrapping).
+    #[test]
+    fn fn_params_layout_idempotent(src in javaish(), layout in params_layout()) {
+        let cfg = params_config(layout);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Parameter layout is layout-only: the significant-token sequence is preserved exactly
+    /// (no comma is ever added or dropped — Java forbids a trailing comma in a parameter list).
+    #[test]
+    fn fn_params_layout_preserves_significant_tokens(src in javaish(), layout in params_layout()) {
+        let out = fmt_with(&src, &params_config(layout));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Parameter layout never drops or mangles a comment.
+    #[test]
+    fn fn_params_layout_preserves_comments(src in javaish(), layout in params_layout()) {
+        let out = fmt_with(&src, &params_config(layout));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Parameter layout never panics on arbitrary Unicode input.
+    #[test]
+    fn fn_params_layout_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &params_config(FnParamsLayout::Tall));
+        let _ = fmt_with(&src, &params_config(FnParamsLayout::Compressed));
+        let _ = fmt_with(&src, &params_config(FnParamsLayout::Vertical));
     }
 }

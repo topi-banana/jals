@@ -42,6 +42,13 @@ The current formatter is intentionally minimal. It performs:
 - **Array initializers** — an array initializer (`{a, b, c}`, including `new T[]{…}`) whose
   flat width exceeds `array-width` is laid out one element per line, even when the line would
   otherwise fit `max-width`. Argument and parameter lists are unaffected.
+- **Parameter layout** — a method or constructor parameter list follows `fn-params-layout`:
+  `tall` (the default, all-or-nothing — one line when it fits, else one parameter per line),
+  `vertical` (always one parameter per line, even when the list would fit), or `compressed`
+  (pack as many parameters per line as fit `max-width`, wrapping at the width). It governs only
+  **declaration parameter lists**, never call argument lists; the deprecated rustfmt key
+  `fn-args-layout` is accepted as an alias. Layout-only (the significant-token sequence is
+  preserved exactly). See below.
 - **Last-argument overflow** — with `overflow-delimited-expr` enabled, a call or annotation
   argument list whose last item is a delimited expression — a block-bodied lambda, an
   anonymous-class `new X() {…}`, or an array initializer (including `new T[]{…}` and
@@ -118,6 +125,7 @@ are kebab-case.
 | `overflow-delimited-expr` | bool | `false` | ✅ wired — let the last item of a call / annotation argument list hang past the call line when it is a block-bodied lambda, anonymous-class `new`, or array initializer (`f(a, () -> {` … `});`); falls back to the all-or-nothing layout when an earlier item is multi-line or the first line overflows `fn-call-width`/`max-width`. Layout-only (the significant-token sequence is preserved exactly); mirrors rustfmt's `overflow_delimited_expr` |
 | `space-before-colon` | bool | `false` | ✅ wired — emit a space before a `:`, applied uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`). Off by default (idiomatic `label:` / `case x:`). `::` is a distinct token and is never affected. Layout-only; mirrors rustfmt's `space_before_colon` |
 | `space-after-colon` | bool | `true` | ✅ wired — emit a space after a `:`, in the same contexts as `space-before-colon`. On by default. `::` is never affected. Layout-only; mirrors rustfmt's `space_after_colon` |
+| `fn-params-layout` | `"tall"` \| `"compressed"` \| `"vertical"` | `"tall"` | ✅ wired — layout of a method / constructor parameter list: `tall` (all-or-nothing), `compressed` (pack as many parameters per line as fit `max-width`), or `vertical` (always one per line, even when it fits). Governs only declaration parameter lists, never call argument lists. Layout-only (the significant-token sequence is preserved exactly). The deprecated key `fn-args-layout` is accepted as an alias. Mirrors rustfmt's `fn_params_layout` |
 
 ---
 
@@ -165,9 +173,12 @@ see [What it does today](#what-it-does-today). Remaining:
 
 ## 3. Wrapping shape (delimited lists wrap all-or-nothing)
 
+Parameter-list layout (`fn_params_layout` — Tall / Compressed / Vertical) is **implemented** for
+declaration parameter lists — see [What it does today](#what-it-does-today). Remaining:
+
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Parameter/argument layout: Tall / Compressed / **Vertical (one per line)** | `fn_params_layout`, `fn_args_layout` |
+| Parameter layout: Tall / Compressed / Vertical (one per line) | `fn_params_layout`, `fn_args_layout` ✅ |
 | Wrap binary expressions; operator at line-start (Front) vs. line-end (Back) | `binop_separator` ✅ |
 | Let the last argument (lambda/array) overflow the call parentheses | `overflow_delimited_expr` ✅ |
 | Trailing comma: Always / Never / Vertical (array initializers) | `trailing_comma` ✅ |
@@ -268,5 +279,5 @@ via `wrap_comments` — method-chain wrapping — `chain_width` — call-argumen
 `fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
 `reorder_imports` — import grouping — `group_imports` — trailing commas —
 `trailing_comma` — binary-expression wrapping — `binop_separator` — last-argument
-overflow — `overflow_delimited_expr` — and colon spacing — `space_before_colon` /
-`space_after_colon` — are done.)
+overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon` /
+`space_after_colon` — and parameter-list layout — `fn_params_layout` — are done.)

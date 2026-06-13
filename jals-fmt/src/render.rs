@@ -12,7 +12,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
-use crate::doc::{CommentKind, Doc};
+use crate::doc::{CommentKind, Doc, flat_width};
 use crate::wrap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -215,6 +215,7 @@ pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
                 mode,
                 doc: if mode == Mode::Break { broken } else { flat },
             }),
+            Doc::Fill(parts) => render_fill(&out, indent, parts, &mut stack),
         }
     }
 
@@ -314,6 +315,64 @@ fn finalize(mut out: String, cfg: &Config, newline: &str) -> String {
     out
 }
 
+/// Render a [`Doc::Fill`] greedily: pack as many items per line as fit `max_width`, breaking
+/// the separator *before* an item that would overflow. `parts` alternates
+/// `[content, sep, …, content]` (odd length). Each separator's flat/break choice is a pure
+/// function of the items' flat widths and the running column, so re-formatting the output
+/// reproduces the same layout (the fill is idempotent).
+fn render_fill<'a>(out: &Out<'_>, indent: usize, parts: &'a [Doc], stack: &mut Vec<Cmd<'a>>) {
+    let max = out.cfg.max_width;
+    // Column at the start of a freshly broken line (where wrapped items land).
+    let base_col = indent * out.cfg.indent_cols();
+    // Where the first item lands: the indent when we just broke (the enclosing group is laying
+    // out vertically), else the live column (the group fits flat on the current line).
+    let mut col = if out.at_line_start() {
+        base_col
+    } else {
+        out.col
+    };
+    let mut seq: Vec<(Mode, &Doc)> = Vec::with_capacity(parts.len());
+    let mut i = 0;
+    while i < parts.len() {
+        let content = &parts[i];
+        let content_w = flat_width(content);
+        // An item that cannot be laid out flat carries a forced break (e.g. an attached
+        // comment); render it broken and resume the next item at the indent.
+        let content_mode = if content_w.is_some() {
+            Mode::Flat
+        } else {
+            Mode::Break
+        };
+        seq.push((content_mode, content));
+        col = match content_w {
+            Some(w) => col + w,
+            None => base_col,
+        };
+        if let Some(sep) = parts.get(i + 1) {
+            let next_w = parts.get(i + 2).and_then(flat_width);
+            // Keep the next item on this line only when this item is flat and the next one
+            // still fits after a single separating space.
+            let keep = content_mode == Mode::Flat && next_w.is_some_and(|nw| col + 1 + nw <= max);
+            if keep {
+                seq.push((Mode::Flat, sep));
+                col += 1;
+            } else {
+                seq.push((Mode::Break, sep));
+                col = base_col;
+            }
+        }
+        i += 2;
+    }
+    // Push in reverse so the items render front-to-back (the stack is LIFO).
+    for (m, d) in seq.into_iter().rev() {
+        stack.push(Cmd {
+            indent,
+            mode: m,
+            doc: d,
+        });
+    }
+}
+
 /// Whether `group_doc`, rendered flat starting at the current column, fits within
 /// `max_width` together with the content that follows on the same line.
 fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool {
@@ -379,6 +438,14 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
                     Mode::Flat
                 };
                 work.push((ind, m, doc));
+            }
+            // A fill is measured one-line, exactly like a `Concat`: every separator counts as a
+            // flat space and the items count flat. (`fits` only ever asks whether the enclosing
+            // group's flat layout stays within `max-width`.)
+            Doc::Fill(v) => {
+                for d in v.iter().rev() {
+                    work.push((ind, mode, d));
+                }
             }
             Doc::Line => match mode {
                 Mode::Flat => {

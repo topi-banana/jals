@@ -29,8 +29,8 @@ mod render;
 mod wrap;
 
 pub use config::{
-    BinopSeparator, BraceStyle, Config, ConfigError, ControlBraceStyle, IndentStyle, LineEnding,
-    TrailingComma,
+    BinopSeparator, BraceStyle, Config, ConfigError, ControlBraceStyle, FnParamsLayout,
+    IndentStyle, LineEnding, TrailingComma,
 };
 pub use output::{FormatOutput, Warning};
 

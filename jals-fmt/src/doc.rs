@@ -70,6 +70,12 @@ pub(crate) enum Doc {
         /// Emitted when the enclosing group renders flat.
         flat: Box<Doc>,
     },
+    /// A fill: an alternating, odd-length sequence `[content, sep, content, sep, …, content]`.
+    /// The renderer greedily keeps each item on the current line, breaking the *preceding*
+    /// separator (a [`Line`](Doc::Line)) only when the next item would overflow `max-width`.
+    /// Unlike a [`Group`](Doc::Group) — which is all-or-nothing — a fill packs as many items
+    /// per line as fit. Used for the `Compressed` parameter layout (`fn-params-layout`).
+    Fill(Vec<Doc>),
 }
 
 /// Empty document.
@@ -139,6 +145,32 @@ pub(crate) fn group(doc: Doc) -> Doc {
     }
 }
 
+/// Group a document forced to render broken regardless of width — every [`Line`](Doc::Line) /
+/// [`SoftLine`](Doc::SoftLine) inside breaks. Used for the `Vertical` parameter layout, which
+/// lays out one parameter per line even when the list would fit on one line.
+pub(crate) fn group_always_break(doc: Doc) -> Doc {
+    Doc::Group {
+        doc: Box::new(doc),
+        should_break: true,
+    }
+}
+
+/// Build a [`Doc::Fill`] from already-rendered items, interleaving a [`line()`] separator
+/// between consecutive items. The renderer packs as many items per line as fit `max-width`.
+/// An empty or single-item list needs no separators and is returned as-is inside the fill.
+pub(crate) fn fill(items: Vec<Doc>) -> Doc {
+    let mut parts = Vec::with_capacity(items.len().saturating_mul(2).saturating_sub(1));
+    let mut first = true;
+    for item in items {
+        if !first {
+            parts.push(line());
+        }
+        parts.push(item);
+        first = false;
+    }
+    Doc::Fill(parts)
+}
+
 /// Group a document under a flat-width budget narrower than `max-width`: it is forced broken
 /// when its flat width would exceed `max_flat` (or it cannot be laid out flat at all). Within
 /// the budget it still renders flat only if it also fits `max-width` at its position, exactly
@@ -193,6 +225,7 @@ fn first_line_width(docs: &[&Doc]) -> usize {
             Doc::Concat(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
             Doc::Indent(d) | Doc::IndentIfBreak(d) => work.push((broken, d)),
             Doc::Group { doc, should_break } => work.push((*should_break, doc)),
+            Doc::Fill(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
             Doc::Line if broken => return width,
             Doc::Line => width += 1,
             Doc::SoftLine if broken => return width,
@@ -209,7 +242,7 @@ fn first_line_width(docs: &[&Doc]) -> usize {
 /// contains a forced break (hard/blank line or an already-breaking group) or a multi-line
 /// raw token. `Line` counts as one space, `SoftLine` as nothing, mirroring the renderer's
 /// flat mode.
-fn flat_width(doc: &Doc) -> Option<usize> {
+pub(crate) fn flat_width(doc: &Doc) -> Option<usize> {
     let w = match doc {
         Doc::Text(s) => UnicodeWidthStr::width(&**s),
         Doc::RawText(s) => {
@@ -224,7 +257,7 @@ fn flat_width(doc: &Doc) -> Option<usize> {
             }
             UnicodeWidthStr::width(&**text)
         }
-        Doc::Concat(v) => {
+        Doc::Concat(v) | Doc::Fill(v) => {
             let mut total = 0;
             for d in v {
                 total += flat_width(d)?;
@@ -283,7 +316,7 @@ pub(crate) fn join(sep: Doc, items: Vec<Doc>) -> Doc {
 fn contains_forced_break(doc: &Doc) -> bool {
     match doc {
         Doc::HardLine | Doc::BlankLine(_) => true,
-        Doc::Concat(v) => v.iter().any(contains_forced_break),
+        Doc::Concat(v) | Doc::Fill(v) => v.iter().any(contains_forced_break),
         Doc::Indent(d) | Doc::IndentIfBreak(d) | Doc::LineSuffix(d) => contains_forced_break(d),
         Doc::Group { should_break, .. } => *should_break,
         _ => false,
@@ -315,5 +348,6 @@ fn clone_doc(doc: &Doc) -> Doc {
             broken: Box::new(clone_doc(broken)),
             flat: Box::new(clone_doc(flat)),
         },
+        Doc::Fill(v) => Doc::Fill(v.iter().map(clone_doc).collect()),
     }
 }
