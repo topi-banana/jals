@@ -21,6 +21,7 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 use crate::comments::{self, CommentMap};
 use crate::config::{
     BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, TrailingComma,
+    TypePunctuationDensity,
 };
 use crate::doc::{
     Doc, blank_line, concat, fill, group, group_always_break, group_overflow, group_within,
@@ -132,6 +133,12 @@ fn want_space(prev: S, next: S, cfg: &Config) -> bool {
     }
     if prev == COLON {
         return cfg.space_after_colon;
+    }
+    // Intersection-type `&` density (a type-parameter bound `<T extends A & B>` or a cast
+    // intersection `(A & B) x`) is configurable. The bitwise-AND operator `&` is a `BINARY_EXPR`,
+    // lowered by `lower_binary` with hardcoded spacing, so it never reaches here.
+    if prev == AMP || next == AMP {
+        return cfg.type_punctuation_density == TypePunctuationDensity::Wide;
     }
     // `(` hugs a preceding callee/array; keywords get a space before it.
     if next == LPAREN {

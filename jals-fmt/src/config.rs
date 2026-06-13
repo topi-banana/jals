@@ -153,6 +153,19 @@ pub enum FnParamsLayout {
     Vertical,
 }
 
+/// Density of spacing around the `&` of a Java intersection type — a type-parameter bound
+/// (`<T extends A & B>`) or a cast intersection (`(A & B) x`). Mirrors rustfmt's
+/// `type_punctuation_density`. The bitwise-AND operator `&` (an expression) is never affected.
+/// Layout-only — the significant-token sequence is preserved exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TypePunctuationDensity {
+    /// Space around `&` (`A & B`). The default; matches the prior behavior.
+    Wide,
+    /// No space around `&` (`A&B`). Mirrors rustfmt's `Compressed`.
+    Compressed,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -260,6 +273,12 @@ pub struct Config {
     /// the deprecated key `fn-args-layout` is accepted as an alias.
     #[serde(alias = "fn-args-layout")]
     pub fn_params_layout: FnParamsLayout,
+    /// Density of spacing around the `&` of a Java intersection type — a type-parameter bound
+    /// (`<T extends A & B>`) or a cast intersection (`(A & B) x`): [`Wide`](TypePunctuationDensity::Wide)
+    /// (the default, `A & B`) or [`Compressed`](TypePunctuationDensity::Compressed) (`A&B`). The
+    /// bitwise-AND operator `&` (an expression) is never affected. Layout-only — the
+    /// significant-token sequence is preserved exactly. Mirrors rustfmt's `type_punctuation_density`.
+    pub type_punctuation_density: TypePunctuationDensity,
 }
 
 impl Default for Config {
@@ -292,6 +311,7 @@ impl Default for Config {
             space_before_colon: false,
             space_after_colon: true,
             fn_params_layout: FnParamsLayout::Tall,
+            type_punctuation_density: TypePunctuationDensity::Wide,
         }
     }
 }
@@ -506,6 +526,17 @@ mod tests {
             toml::from_str("space-before-colon = true\nspace-after-colon = false\n").unwrap();
         assert!(c.space_before_colon);
         assert!(!c.space_after_colon);
+    }
+
+    #[test]
+    fn type_punctuation_density_parses_kebab_values() {
+        let c: Config = toml::from_str("type-punctuation-density = \"wide\"\n").unwrap();
+        assert_eq!(c.type_punctuation_density, TypePunctuationDensity::Wide);
+        let c: Config = toml::from_str("type-punctuation-density = \"compressed\"\n").unwrap();
+        assert_eq!(
+            c.type_punctuation_density,
+            TypePunctuationDensity::Compressed
+        );
     }
 
     #[test]
