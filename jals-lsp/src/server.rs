@@ -8,14 +8,14 @@ use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, GlobPattern, InitializeParams, InitializeResult,
-    InitializedParams, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
-    SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher,
+    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, GlobPattern,
+    InitializeParams, InitializeResult, InitializedParams, OneOf, PublishDiagnosticsParams,
+    Registration, RegistrationParams, SelectionRange, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
     notification::{self, Notification},
     request,
 };
@@ -185,6 +185,18 @@ impl LanguageServer for ServerState {
         })
     }
 
+    fn document_highlight(
+        &mut self,
+        params: DocumentHighlightParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<DocumentHighlight>>, Self::Error>> {
+        let pos = params.text_document_position_params;
+        let doc = self.store.get(&pos.text_document.uri);
+        Box::pin(async move {
+            Ok(doc
+                .map(|doc| handlers::document_highlight(&doc.text, &doc.line_index, pos.position)))
+        })
+    }
+
     fn formatting(
         &mut self,
         params: DocumentFormattingParams,
@@ -259,6 +271,7 @@ fn server_capabilities() -> ServerCapabilities {
             TextDocumentSyncKind::INCREMENTAL,
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
