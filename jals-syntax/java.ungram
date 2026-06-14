@@ -403,8 +403,11 @@ PostfixExpr =
 ParenExpr =
   '(' expr:Expr ')'
 
+// A method or constructor call. `type_args` is the leading type witness of an
+// explicit constructor invocation `<T>this(...)` / `<T>super(...)`; a witness on a
+// qualified call (`recv.<T>method()`) lives on the FieldAccess callee instead.
 CallExpr =
-  callee:Expr args:ArgList
+  type_args:TypeArgs? callee:Expr args:ArgList
 
 // `receiver.name`, `receiver.this`, `receiver.super`, or a type-witness
 // selector `receiver.<T>method`; `field` (ext.rs) returns the last IDENT.

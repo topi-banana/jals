@@ -2781,6 +2781,9 @@ pub struct CallExpr {
 }
 
 impl CallExpr {
+    pub fn type_args(&self) -> Option<TypeArgs> {
+        support::child(&self.syntax)
+    }
     pub fn callee(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }

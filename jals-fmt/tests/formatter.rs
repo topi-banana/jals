@@ -170,6 +170,29 @@ fn explicit_type_witness_hugs_method_name() {
 }
 
 #[test]
+fn constructor_call_type_witness() {
+    // `new <T>Foo()` keeps a space after `new`; leading `<T>this`/`<T>super` and qualified
+    // `t.<T>super()` witnesses round-trip. (These all parse to fresh tree shapes.)
+    check(
+        "class C{Object a=new <Integer>T<Float>(\"\");C(){<Integer>super(\"x\");}C(int i){<Object>this();}void m(T t){t.<Object>super();}}",
+        expect![[r#"
+            class C {
+                Object a = new <Integer> T<Float>("");
+                C() {
+                    <Integer> super("x");
+                }
+                C(int i) {
+                    <Object> this();
+                }
+                void m(T t) {
+                    t.<Object>super();
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn long_param_list_wraps() {
     check(
         "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){}}",
