@@ -202,6 +202,14 @@ pub struct Config {
     /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are governed separately by
     /// [`control_brace_style`](Config::control_brace_style).
     pub brace_style: BraceStyle,
+    /// Collapse an empty declaration body — a type body (`class` / `interface` / `@interface` /
+    /// record) or the block of a method, constructor, or initializer — to `{}` on the header's
+    /// line. On by default. When off, such a body expands to a two-line `{` … `}` (opening on
+    /// its own line under [`brace_style`](Config::brace_style) `next-line`). Control-flow /
+    /// `switch` / lambda / bare blocks are never affected and always keep `{}`; `enum` bodies
+    /// (not block-formatted yet) are likewise unaffected. Layout-only — the significant-token
+    /// sequence is preserved exactly. Mirrors rustfmt's `empty_item_single_line`.
+    pub empty_item_single_line: bool,
     /// Layout of control-flow brace styling: the opening brace of a control-flow / `switch` /
     /// lambda / bare block, and the `} else` / `} catch` / `} finally` / `} while`
     /// continuations. Same line (K&R) or next line (Allman).
@@ -302,6 +310,7 @@ impl Default for Config {
             fn_call_width: 60,
             array_width: 60,
             brace_style: BraceStyle::SameLine,
+            empty_item_single_line: true,
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
@@ -438,6 +447,8 @@ mod tests {
         // K&R braces by default, for both declaration and control-flow braces.
         assert_eq!(c.brace_style, BraceStyle::SameLine);
         assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
+        // Empty declaration bodies collapse to `{}` by default (rustfmt's `empty_item_single_line`).
+        assert!(c.empty_item_single_line);
         // Import sorting is opt-in; off by default to preserve the significant-token sequence.
         assert!(!c.reorder_imports);
         // Trailing-comma handling defaults to preserve, keeping the source comma exactly.
@@ -473,6 +484,14 @@ mod tests {
         assert_eq!(c.control_brace_style, ControlBraceStyle::NextLine);
         let c: Config = toml::from_str("control-brace-style = \"same-line\"\n").unwrap();
         assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
+    }
+
+    #[test]
+    fn empty_item_single_line_parses() {
+        let c: Config = toml::from_str("empty-item-single-line = false\n").unwrap();
+        assert!(!c.empty_item_single_line);
+        let c: Config = toml::from_str("empty-item-single-line = true\n").unwrap();
+        assert!(c.empty_item_single_line);
     }
 
     #[test]

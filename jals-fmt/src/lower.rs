@@ -466,10 +466,22 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let dangling = ctx.comments.dangling(rbrace);
     let close = concat(vec![text("}"), ctx.comments.trailing_doc(rbrace)]);
 
-    // An empty body collapses to `{}` on the header's line regardless of brace style
-    // (cf. rustfmt's `empty_item_single_line`), so `next-line` never strands a lone `{}`.
+    // An empty body. Under `empty_item_single_line` (the default) it collapses to `{}` on the
+    // header's line regardless of brace style, so `next-line` never strands a lone `{}`. With
+    // the option off, an empty *declaration* body (a type body, or a method / constructor /
+    // initializer block) instead expands to a two-line `{ <newline> }`, opening on its own
+    // line under `brace-style = next-line`; control-flow / `switch` / lambda / bare blocks are
+    // never governed and always keep `{}` (matching rustfmt's item-only scoping).
     if !any && !has_dangling {
-        return concat(vec![open, close]);
+        if ctx.cfg.empty_item_single_line || !governs_empty_single_line(node) {
+            return concat(vec![open, close]);
+        }
+        let lead = if opens_on_next_line(node, ctx.cfg) {
+            hardline()
+        } else {
+            nil()
+        };
+        return concat(vec![lead, open, hardline(), close]);
     }
 
     let mut body: Vec<Doc> = vec![hardline()];
@@ -515,6 +527,14 @@ fn is_declaration_body(node: &SyntaxNode) -> bool {
         node.parent().map(|p| p.kind()),
         Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL | S::INITIALIZER)
     )
+}
+
+/// Whether an empty `node` is governed by [`empty_item_single_line`](Config::empty_item_single_line)
+/// — a declaration body: a type body (`CLASS_BODY`) or a method / constructor / initializer block.
+/// Control-flow blocks, `switch` blocks, lambda bodies, and bare blocks are never governed (they
+/// always keep `{}`), matching rustfmt's item-only scoping.
+fn governs_empty_single_line(node: &SyntaxNode) -> bool {
+    matches!(node.kind(), S::CLASS_BODY) || (node.kind() == S::BLOCK && is_declaration_body(node))
 }
 
 /// Build the inner document for a sequence of item nodes. Returns the content and whether

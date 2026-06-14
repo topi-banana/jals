@@ -209,6 +209,14 @@ fn type_punct_config(type_punctuation_density: TypePunctuationDensity) -> Config
     }
 }
 
+/// Config with a given `empty-item-single-line` setting.
+fn empty_single_line_config(empty_item_single_line: bool) -> Config {
+    Config {
+        empty_item_single_line,
+        ..Config::default()
+    }
+}
+
 /// Config with `overflow-delimited-expr` on and narrow widths, so the overflow layout and
 /// each of its fallbacks are exercised by the generator's lambdas, `new`s, and braces.
 fn overflow_config() -> Config {
@@ -729,6 +737,47 @@ proptest! {
     fn type_punctuation_density_never_panics(src in ".*") {
         let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Wide));
         let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Compressed));
+    }
+
+    /// Expanding empty declaration bodies stays idempotent under both settings (re-formatting
+    /// an expanded `{` … `}` reproduces it; collapsing a `{}` likewise stays put).
+    #[test]
+    fn empty_item_single_line_idempotent(
+        src in javaish(),
+        single_line in prop_oneof![Just(true), Just(false)],
+    ) {
+        let cfg = empty_single_line_config(single_line);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// `empty-item-single-line` is layout-only: it only moves whitespace inside an empty body,
+    /// so the significant-token sequence is preserved exactly under both settings.
+    #[test]
+    fn empty_item_single_line_preserves_significant_tokens(
+        src in javaish(),
+        single_line in prop_oneof![Just(true), Just(false)],
+    ) {
+        let out = fmt_with(&src, &empty_single_line_config(single_line));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// `empty-item-single-line` never drops or mangles a comment.
+    #[test]
+    fn empty_item_single_line_preserves_comments(
+        src in javaish(),
+        single_line in prop_oneof![Just(true), Just(false)],
+    ) {
+        let out = fmt_with(&src, &empty_single_line_config(single_line));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// `empty-item-single-line` never panics on arbitrary Unicode input.
+    #[test]
+    fn empty_item_single_line_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &empty_single_line_config(true));
+        let _ = fmt_with(&src, &empty_single_line_config(false));
     }
 
     /// Last-argument overflow stays idempotent: re-formatting the hung layout reproduces it.

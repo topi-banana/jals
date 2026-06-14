@@ -552,6 +552,163 @@ fn brace_style_next_line_is_idempotent() {
     assert_eq!(once, twice, "next-line brace style must be idempotent");
 }
 
+// --- empty-item-single-line ------------------------------------------------
+
+/// Format with `empty-item-single-line = false` (defaults otherwise).
+fn fmt_no_empty_single_line(src: &str) -> String {
+    let cfg = Config {
+        empty_item_single_line: false,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// Format with `empty-item-single-line = false` and `brace-style = next-line`.
+fn fmt_no_empty_single_line_next_line(src: &str) -> String {
+    let cfg = Config {
+        empty_item_single_line: false,
+        brace_style: BraceStyle::NextLine,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn empty_item_single_line_default_collapses_bodies() {
+    // By default an empty declaration body collapses to `{}` on the header's line.
+    expect![[r#"
+        class Foo {}
+    "#]]
+    .assert_eq(&fmt("class Foo{}"));
+}
+
+#[test]
+fn empty_item_single_line_off_expands_class_body() {
+    expect![[r#"
+        class Foo {
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line("class Foo{}"));
+}
+
+#[test]
+fn empty_item_single_line_off_expands_member_bodies() {
+    // The (non-empty) class body lays out normally; each empty member body expands, its `}`
+    // landing at the member's own indent.
+    expect![[r#"
+        class C {
+            void m() {
+            }
+            C() {
+            }
+            static {
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line(
+        "class C{void m(){}C(){}static{}}",
+    ));
+}
+
+#[test]
+fn empty_item_single_line_off_expands_every_type_kind() {
+    // Every body that lowers to `CLASS_BODY` expands. (Enum bodies are `ENUM_BODY`, not yet
+    // block-formatted, so they are out of scope and unaffected — see the dedicated test.)
+    expect![[r#"
+        interface I {
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line("interface I{}"));
+    expect![[r#"
+        @interface A {
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line("@interface A{}"));
+    expect![[r#"
+        record R(int x) {
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line("record R(int x){}"));
+}
+
+#[test]
+fn empty_item_single_line_off_leaves_enum_body_untouched() {
+    // Enum bodies do not go through the block formatter, so the option does not govern them
+    // (they format identically with the option on or off).
+    expect![["enum E { }\n"]].assert_eq(&fmt_no_empty_single_line("enum E{}"));
+    expect![["enum E { }\n"]].assert_eq(&fmt("enum E{}"));
+}
+
+#[test]
+fn empty_item_single_line_off_keeps_control_flow_collapsed() {
+    // Control-flow / switch / bare blocks are never governed: they always stay `{}`.
+    expect![[r#"
+        class C {
+            void m() {
+                if (a) {}
+                while (b) {}
+                switch (x) {}
+                {}
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line(
+        "class C{void m(){if(a){}while(b){}switch(x){}{}}}",
+    ));
+}
+
+#[test]
+fn empty_item_single_line_off_keeps_lambda_collapsed() {
+    // A lambda body is not a declaration body, so an empty one stays `{}`.
+    expect![[r#"
+        class C {
+            Runnable r = () -> {};
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line("class C{Runnable r=()->{};}"));
+}
+
+#[test]
+fn empty_item_single_line_off_preserves_dangling_comment_body() {
+    // A body whose only content is a comment dangling on `}` already takes the multi-line
+    // path (it is not "empty"), so the option does not govern it and the comment is kept.
+    expect![[r#"
+        class Foo {
+            // x
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line("class Foo{\n// x\n}"));
+}
+
+#[test]
+fn empty_item_single_line_off_next_line_opens_brace_on_own_line() {
+    expect![[r#"
+        class Foo
+        {
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line_next_line("class Foo{}"));
+    expect![[r#"
+        class C
+        {
+            void m()
+            {
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_no_empty_single_line_next_line("class C{void m(){}}"));
+}
+
+#[test]
+fn empty_item_single_line_off_is_idempotent() {
+    let once = fmt_no_empty_single_line("class C{void m(){}C(){}static{}class Inner{}}");
+    let twice = fmt_no_empty_single_line(&once);
+    assert_eq!(
+        once, twice,
+        "empty-item-single-line = false must be idempotent"
+    );
+}
+
 // --- control-brace-style ---------------------------------------------------
 
 /// Format with `control-brace-style = next-line` (declaration braces left at the default K&R).
