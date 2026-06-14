@@ -115,6 +115,11 @@ fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 /// net in [`sep`] is applied).
 fn want_space(prev: S, next: S, cfg: &Config) -> bool {
     use S::*;
+    // A constructor-call type witness `new <Integer>Foo()` keeps a space after `new`; the
+    // generic no-space-before-`<` rule below (for `Foo<T>`) must not glue `new` to its `<`.
+    if prev == NEW_KW && next == LT {
+        return true;
+    }
     // No space after these.
     if matches!(
         prev,

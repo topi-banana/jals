@@ -160,6 +160,9 @@ const EXPR_START: TokenSet = TokenSet::new(&[
     MINUS,
     PLUS_PLUS,
     MINUS_MINUS,
+    // A leading `<` can only begin an explicit constructor invocation type witness,
+    // `<Type>this(...)` / `<Type>super(...)` (JLS 8.8.7.1); handled in `primary_expr`.
+    LT,
 ]);
 
 /// Entry point. Parses a compilation unit.
@@ -2042,10 +2045,16 @@ fn postfix_expr(p: &mut Parser) -> Option<CompletedMarker> {
                 // `recv.<Type>method(...)`, e.g. `List.<String>of()`. The `<Type>method`
                 // selector folds into a FIELD_ACCESS; the trailing argument list is then
                 // consumed by the LPAREN arm on the next iteration to form the CALL_EXPR.
+                // The member may also be `super`/`this` for a qualified explicit constructor
+                // invocation `recv.<Type>super(...)` / `recv.<Type>this(...)` (JLS 8.8.7.1).
                 let m = lhs.precede(p);
                 p.bump(DOT);
                 type_args(p);
-                p.expect(IDENT);
+                if p.at(THIS_KW) || p.at(SUPER_KW) {
+                    p.bump_any();
+                } else {
+                    p.expect(IDENT);
+                }
                 lhs = m.complete(p, FIELD_ACCESS);
             }
             DOT if p.nth_at(1, IDENT) || p.nth_at(1, THIS_KW) || p.nth_at(1, SUPER_KW) => {
@@ -2163,6 +2172,27 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             p.bump_any();
             m.complete(p, NAME_REF)
         }
+        LT => {
+            // Explicit constructor invocation with a leading type witness:
+            // `<Type>this(...)` / `<Type>super(...)` (JLS 8.8.7.1). A `<` is otherwise never
+            // legal at the start of an operand, so this is the only meaning. The whole call is
+            // built here (including the argument list) so the TYPE_ARGS node sits directly
+            // under CALL_EXPR, before the `this`/`super` callee — letting the postfix LPAREN
+            // arm form the CALL_EXPR instead would nest the witness one level too deep.
+            let m = p.start();
+            type_args(p);
+            let nm = p.start();
+            if p.at(THIS_KW) || p.at(SUPER_KW) {
+                p.bump_any();
+            } else {
+                p.error("expected `this` or `super`");
+            }
+            nm.complete(p, NAME_REF);
+            if p.at(LPAREN) {
+                arg_list(p);
+            }
+            m.complete(p, CALL_EXPR)
+        }
         LPAREN => {
             let m = p.start();
             p.bump(LPAREN);
@@ -2208,6 +2238,13 @@ fn switch_expr(p: &mut Parser) -> CompletedMarker {
 fn new_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump(NEW_KW);
+    if p.at(LT) {
+        // Explicit type arguments (a "type witness") on a constructor call:
+        // `new <Integer>Foo<>(...)` (JLS 15.9 `new [TypeArguments] ...`). The qualified
+        // inner-class form `outer.new <T>Inner()` is handled by the matching arm in
+        // `postfix_expr`; the TYPE_ARGS node sits directly under NEW_EXPR before `ty`.
+        type_args(p);
+    }
     type_(p);
     if p.at(LPAREN) {
         arg_list(p);

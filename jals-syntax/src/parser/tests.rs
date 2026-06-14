@@ -3209,6 +3209,252 @@ fn explicit_type_witness() {
 }
 
 #[test]
+fn new_expr_type_witness() {
+    // Explicit type arguments on a constructor call: `new <T>Foo<>(...)`, including a
+    // diamond, a parameterized witness, and an annotated witness.
+    check(
+        r#"class C { Object a = new <Integer>T<Float>(""); Object b = new <@A Integer> Foo<>(); }"#,
+        expect![[r#"
+            SOURCE_FILE@0..86
+              CLASS_DECL@0..86
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..86
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  FIELD_DECL@9..47
+                    MODIFIERS@9..9
+                    TYPE@9..16
+                      WHITESPACE@9..10 " "
+                      IDENT@10..16 "Object"
+                    WHITESPACE@16..17 " "
+                    IDENT@17..18 "a"
+                    WHITESPACE@18..19 " "
+                    EQ@19..20 "="
+                    NEW_EXPR@20..46
+                      WHITESPACE@20..21 " "
+                      NEW_KW@21..24 "new"
+                      TYPE_ARGS@24..34
+                        WHITESPACE@24..25 " "
+                        LT@25..26 "<"
+                        TYPE@26..33
+                          IDENT@26..33 "Integer"
+                        GT@33..34 ">"
+                      TYPE@34..42
+                        IDENT@34..35 "T"
+                        TYPE_ARGS@35..42
+                          LT@35..36 "<"
+                          TYPE@36..41
+                            IDENT@36..41 "Float"
+                          GT@41..42 ">"
+                      ARG_LIST@42..46
+                        LPAREN@42..43 "("
+                        LITERAL@43..45
+                          STRING_LITERAL@43..45 "\"\""
+                        RPAREN@45..46 ")"
+                    SEMICOLON@46..47 ";"
+                  FIELD_DECL@47..84
+                    MODIFIERS@47..47
+                    TYPE@47..54
+                      WHITESPACE@47..48 " "
+                      IDENT@48..54 "Object"
+                    WHITESPACE@54..55 " "
+                    IDENT@55..56 "b"
+                    WHITESPACE@56..57 " "
+                    EQ@57..58 "="
+                    NEW_EXPR@58..83
+                      WHITESPACE@58..59 " "
+                      NEW_KW@59..62 "new"
+                      TYPE_ARGS@62..75
+                        WHITESPACE@62..63 " "
+                        LT@63..64 "<"
+                        TYPE@64..74
+                          ANNOTATION@64..66
+                            AT@64..65 "@"
+                            QUALIFIED_NAME@65..66
+                              IDENT@65..66 "A"
+                          WHITESPACE@66..67 " "
+                          IDENT@67..74 "Integer"
+                        GT@74..75 ">"
+                      TYPE@75..81
+                        WHITESPACE@75..76 " "
+                        IDENT@76..79 "Foo"
+                        TYPE_ARGS@79..81
+                          LT@79..80 "<"
+                          GT@80..81 ">"
+                      ARG_LIST@81..83
+                        LPAREN@81..82 "("
+                        RPAREN@82..83 ")"
+                    SEMICOLON@83..84 ";"
+                  WHITESPACE@84..85 " "
+                  RBRACE@85..86 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn explicit_constructor_invocation_type_witness() {
+    // Leading type witness on `this(...)` / `super(...)` (JLS 8.8.7.1), parsed as a
+    // CALL_EXPR whose TYPE_ARGS sits before the `this`/`super` callee.
+    check(
+        "class C { C() { <Integer>super(\"x\"); } C(int i) { <T, E>this(); } }",
+        expect![[r#"
+            SOURCE_FILE@0..67
+              CLASS_DECL@0..67
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..67
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  CONSTRUCTOR_DECL@9..38
+                    MODIFIERS@9..9
+                    WHITESPACE@9..10 " "
+                    IDENT@10..11 "C"
+                    PARAM_LIST@11..13
+                      LPAREN@11..12 "("
+                      RPAREN@12..13 ")"
+                    BLOCK@13..38
+                      WHITESPACE@13..14 " "
+                      LBRACE@14..15 "{"
+                      EXPR_STMT@15..36
+                        CALL_EXPR@15..35
+                          TYPE_ARGS@15..25
+                            WHITESPACE@15..16 " "
+                            LT@16..17 "<"
+                            TYPE@17..24
+                              IDENT@17..24 "Integer"
+                            GT@24..25 ">"
+                          NAME_REF@25..30
+                            SUPER_KW@25..30 "super"
+                          ARG_LIST@30..35
+                            LPAREN@30..31 "("
+                            LITERAL@31..34
+                              STRING_LITERAL@31..34 "\"x\""
+                            RPAREN@34..35 ")"
+                        SEMICOLON@35..36 ";"
+                      WHITESPACE@36..37 " "
+                      RBRACE@37..38 "}"
+                  CONSTRUCTOR_DECL@38..65
+                    MODIFIERS@38..38
+                    WHITESPACE@38..39 " "
+                    IDENT@39..40 "C"
+                    PARAM_LIST@40..47
+                      LPAREN@40..41 "("
+                      PARAM@41..46
+                        MODIFIERS@41..41
+                        TYPE@41..44
+                          INT_KW@41..44 "int"
+                        WHITESPACE@44..45 " "
+                        IDENT@45..46 "i"
+                      RPAREN@46..47 ")"
+                    BLOCK@47..65
+                      WHITESPACE@47..48 " "
+                      LBRACE@48..49 "{"
+                      EXPR_STMT@49..63
+                        CALL_EXPR@49..62
+                          TYPE_ARGS@49..56
+                            WHITESPACE@49..50 " "
+                            LT@50..51 "<"
+                            TYPE@51..52
+                              IDENT@51..52 "T"
+                            COMMA@52..53 ","
+                            TYPE@53..55
+                              WHITESPACE@53..54 " "
+                              IDENT@54..55 "E"
+                            GT@55..56 ">"
+                          NAME_REF@56..60
+                            THIS_KW@56..60 "this"
+                          ARG_LIST@60..62
+                            LPAREN@60..61 "("
+                            RPAREN@61..62 ")"
+                        SEMICOLON@62..63 ";"
+                      WHITESPACE@63..64 " "
+                      RBRACE@64..65 "}"
+                  WHITESPACE@65..66 " "
+                  RBRACE@66..67 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_super_this_type_witness() {
+    // Qualified explicit constructor invocation `recv.<T>super(...)` / `recv.<T>this(...)`:
+    // the witness folds into a FIELD_ACCESS whose member is a `super`/`this` keyword.
+    check(
+        "class C { C(T t) { t.<Object>super(); t.<X>this(); } }",
+        expect![[r#"
+            SOURCE_FILE@0..54
+              CLASS_DECL@0..54
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..54
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  CONSTRUCTOR_DECL@9..52
+                    MODIFIERS@9..9
+                    WHITESPACE@9..10 " "
+                    IDENT@10..11 "C"
+                    PARAM_LIST@11..16
+                      LPAREN@11..12 "("
+                      PARAM@12..15
+                        MODIFIERS@12..12
+                        TYPE@12..13
+                          IDENT@12..13 "T"
+                        WHITESPACE@13..14 " "
+                        IDENT@14..15 "t"
+                      RPAREN@15..16 ")"
+                    BLOCK@16..52
+                      WHITESPACE@16..17 " "
+                      LBRACE@17..18 "{"
+                      EXPR_STMT@18..37
+                        CALL_EXPR@18..36
+                          FIELD_ACCESS@18..34
+                            NAME_REF@18..20
+                              WHITESPACE@18..19 " "
+                              IDENT@19..20 "t"
+                            DOT@20..21 "."
+                            TYPE_ARGS@21..29
+                              LT@21..22 "<"
+                              TYPE@22..28
+                                IDENT@22..28 "Object"
+                              GT@28..29 ">"
+                            SUPER_KW@29..34 "super"
+                          ARG_LIST@34..36
+                            LPAREN@34..35 "("
+                            RPAREN@35..36 ")"
+                        SEMICOLON@36..37 ";"
+                      EXPR_STMT@37..50
+                        CALL_EXPR@37..49
+                          FIELD_ACCESS@37..47
+                            NAME_REF@37..39
+                              WHITESPACE@37..38 " "
+                              IDENT@38..39 "t"
+                            DOT@39..40 "."
+                            TYPE_ARGS@40..43
+                              LT@40..41 "<"
+                              TYPE@41..42
+                                IDENT@41..42 "X"
+                              GT@42..43 ">"
+                            THIS_KW@43..47 "this"
+                          ARG_LIST@47..49
+                            LPAREN@47..48 "("
+                            RPAREN@48..49 ")"
+                        SEMICOLON@49..50 ";"
+                      WHITESPACE@50..51 " "
+                      RBRACE@51..52 "}"
+                  WHITESPACE@52..53 " "
+                  RBRACE@53..54 "}"
+        "#]],
+    );
+}
+
+#[test]
 fn ternary_and_assignment() {
     check(
         "class C { void m() { x = a ? b : c; y += 1; z >>= 2; } }",
