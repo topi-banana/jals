@@ -36,6 +36,14 @@ The current formatter is intentionally minimal. It performs:
   `brace-style = next-line`). Control-flow / `switch` / lambda / bare blocks always keep `{}`,
   and `enum` bodies (not block-formatted yet) are unaffected. Layout-only (the
   significant-token sequence is preserved exactly).
+- **Single-statement-body collapse** — with `fn-single-line` enabled, a **declaration** body (a
+  method / constructor / initializer block) holding exactly one statement and no comments
+  collapses onto the header's line (`int foo() { return 1; }`) when it fits `max-width`. A body
+  with two or more statements, a comment, a nested block, or one that would overflow `max-width`
+  stays multi-line. The one-liner is emitted regardless of `brace-style` (like the empty-body
+  collapse); only when it does not fit does the brace open on its own line under
+  `brace-style = next-line`. Off by default; layout-only (the significant-token sequence is
+  preserved exactly).
 - **Delimited lists** — parameter lists, argument lists, record headers, annotation argument
   lists, and array initializers wrap **all-or-nothing** against `max-width`. Call argument
   lists additionally honor `fn-call-width` and array initializers `array-width` (see below);
@@ -137,6 +145,7 @@ are kebab-case.
 | `brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens type/method/constructor/initializer bodies on their own line; control-flow & `switch` are governed by `control-brace-style` |
 | `control-brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens control-flow / `switch` / lambda / bare block braces on their own line and breaks `} else` / `} catch` / `} finally` / `} while`; mirrors rustfmt's `control_brace_style` |
 | `empty-item-single-line` | bool | `true` | ✅ wired — collapse an empty declaration body (a `class` / `interface` / `@interface` / record body, or a method / constructor / initializer block) to `{}` on the header's line; when off it expands to a two-line `{` … `}` (opening on its own line under `brace-style = next-line`). Control-flow / `switch` / lambda / bare blocks always keep `{}`, and `enum` bodies are unaffected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `empty_item_single_line` |
+| `fn-single-line` | bool | `false` | ✅ wired — keep a declaration body (a method / constructor / initializer block) holding exactly one statement and no comments on the header's line (`int foo() { return 1; }`) when it fits `max-width`; a body with ≥2 statements, a comment, a nested block, or one that overflows stays multi-line. The one-liner is emitted regardless of `brace-style`; only when it does not fit does the brace open on its own line under `next-line`. Off by default; layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `fn_single_line` |
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
 | `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
 | `reorder-imports` | bool | `false` | ✅ wired — sort the leading `import` block (non-static first, then static, each alphabetical by qualified name); blank lines inside the block collapse and comments attached to an import move with it. Off by default; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `reorder_imports` |
@@ -172,13 +181,13 @@ step.
 
 Opening-brace placement is **implemented** for both halves — declaration bodies
 (`brace_style`) and control-flow / `switch` / lambda braces plus `} else` / `} catch` /
-`} finally` / `} while` continuations (`control_brace_style`) — and empty-declaration-body
-collapse is configurable (`empty_item_single_line`) — see
-[What it does today](#what-it-does-today). Remaining:
+`} finally` / `} while` continuations (`control_brace_style`) — empty-declaration-body
+collapse is configurable (`empty_item_single_line`), and single-statement-body collapse is
+configurable (`fn_single_line`) — see [What it does today](#what-it-does-today). Remaining:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Keep single-statement methods on one line | `fn_single_line` |
+| Keep single-statement methods on one line | `fn_single_line` ✅ |
 | Force every block multi-line | `force_multiline_blocks` |
 | Keep a `throws` clause / type bounds on one line | `where_single_line` (analogue) |
 
@@ -302,7 +311,8 @@ Mirroring rustfmt fully still leaves big Java-only knobs uncovered:
 
 By Java-user impact: the remaining import-organization option (`imports_granularity`).
 (Brace styling — `brace_style` and `control_brace_style` — empty-body collapse —
-`empty_item_single_line` — comment reflow — `comment-width`
+`empty_item_single_line` — single-statement-body collapse — `fn_single_line` — comment reflow —
+`comment-width`
 via `wrap_comments` — method-chain wrapping — `chain_width` — call-argument wrapping —
 `fn_call_width` — array-initializer wrapping — `array_width` — import sorting —
 `reorder_imports` — import grouping — `group_imports` — trailing commas —

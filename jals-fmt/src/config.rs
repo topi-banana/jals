@@ -210,6 +210,16 @@ pub struct Config {
     /// (not block-formatted yet) are likewise unaffected. Layout-only — the significant-token
     /// sequence is preserved exactly. Mirrors rustfmt's `empty_item_single_line`.
     pub empty_item_single_line: bool,
+    /// Keep a declaration body — the block of a method, constructor, or initializer — on the
+    /// header's line when it holds exactly one statement and no comments, e.g.
+    /// `int foo() { return 1; }`. Off by default. When on, such a body collapses onto one line
+    /// if it fits [`max_width`](Config::max_width); a body with two or more statements, a
+    /// comment, a nested block, or one that would overflow `max-width` stays multi-line. The
+    /// one-liner is emitted regardless of [`brace_style`](Config::brace_style) (like
+    /// [`empty_item_single_line`](Config::empty_item_single_line)); only when it does not fit
+    /// does the brace open on its own line under `next-line`. Layout-only — the
+    /// significant-token sequence is preserved exactly. Mirrors rustfmt's `fn_single_line`.
+    pub fn_single_line: bool,
     /// Layout of control-flow brace styling: the opening brace of a control-flow / `switch` /
     /// lambda / bare block, and the `} else` / `} catch` / `} finally` / `} while`
     /// continuations. Same line (K&R) or next line (Allman).
@@ -311,6 +321,7 @@ impl Default for Config {
             array_width: 60,
             brace_style: BraceStyle::SameLine,
             empty_item_single_line: true,
+            fn_single_line: false,
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
@@ -468,6 +479,9 @@ mod tests {
         assert_eq!(c.fn_params_layout, FnParamsLayout::Tall);
         // Modifier reordering is opt-in; off by default to preserve the significant-token sequence.
         assert!(!c.reorder_modifiers);
+        // Single-statement bodies are not collapsed onto one line by default (rustfmt's
+        // `fn_single_line` is also off by default).
+        assert!(!c.fn_single_line);
     }
 
     #[test]
@@ -492,6 +506,14 @@ mod tests {
         assert!(!c.empty_item_single_line);
         let c: Config = toml::from_str("empty-item-single-line = true\n").unwrap();
         assert!(c.empty_item_single_line);
+    }
+
+    #[test]
+    fn fn_single_line_parses() {
+        let c: Config = toml::from_str("fn-single-line = true\n").unwrap();
+        assert!(c.fn_single_line);
+        let c: Config = toml::from_str("fn-single-line = false\n").unwrap();
+        assert!(!c.fn_single_line);
     }
 
     #[test]

@@ -709,6 +709,171 @@ fn empty_item_single_line_off_is_idempotent() {
     );
 }
 
+// --- fn-single-line --------------------------------------------------------
+
+/// Format with `fn-single-line = true` (defaults otherwise).
+fn fmt_fn_single_line(src: &str) -> String {
+    let cfg = Config {
+        fn_single_line: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn fn_single_line_collapses_single_statement_method() {
+    expect![[r#"
+        class C {
+            int foo() { return 1; }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line("class C{int foo(){return 1;}}"));
+}
+
+#[test]
+fn fn_single_line_collapses_constructor_and_initializer() {
+    // The option governs every declaration body: methods, constructors, and initializers.
+    expect![[r#"
+        class C {
+            C() { this.x = 1; }
+            static { init(); }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line(
+        "class C{C(){this.x=1;}static{init();}}",
+    ));
+}
+
+#[test]
+fn fn_single_line_keeps_multi_statement_body_multiline() {
+    // Two statements never collapse, even when they would fit on one line.
+    expect![[r#"
+        class C {
+            void bar() {
+                a();
+                b();
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line("class C{void bar(){a();b();}}"));
+}
+
+#[test]
+fn fn_single_line_keeps_overflowing_body_multiline() {
+    // A single statement that would overflow `max-width` falls back to the multi-line body.
+    let cfg = Config {
+        fn_single_line: true,
+        max_width: 40,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C {
+            int wide() {
+                return aVeryLongMethodCallThatOverflows();
+            }
+        }
+    "#]]
+    .assert_eq(
+        &format_source(
+            "class C{int wide(){return aVeryLongMethodCallThatOverflows();}}",
+            &cfg,
+        )
+        .formatted,
+    );
+}
+
+#[test]
+fn fn_single_line_keeps_nested_block_body_multiline() {
+    // A nested block forces a break inside the body, so it is never collapsed.
+    expect![[r#"
+        class C {
+            void m() {
+                if (x) {
+                    y();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line("class C{void m(){if(x){y();}}}"));
+}
+
+#[test]
+fn fn_single_line_keeps_commented_body_multiline() {
+    // A body carrying a comment is never collapsed (comments must stay on their anchor).
+    expect![[r#"
+        class C {
+            void m() {
+                // keep
+                return;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line("class C{void m(){\n// keep\nreturn;}}"));
+}
+
+#[test]
+fn fn_single_line_next_line_collapses_when_fits_else_opens_brace() {
+    // Under `brace-style = next-line` a fitting single-statement body still collapses to one
+    // line; an overflowing one falls back to the next-line brace layout.
+    let cfg = Config {
+        fn_single_line: true,
+        brace_style: BraceStyle::NextLine,
+        max_width: 40,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C
+        {
+            int foo() { return 1; }
+            int wide()
+            {
+                return aVeryLongMethodCallThatOverflows();
+            }
+        }
+    "#]]
+    .assert_eq(
+        &format_source(
+            "class C{int foo(){return 1;}int wide(){return aVeryLongMethodCallThatOverflows();}}",
+            &cfg,
+        )
+        .formatted,
+    );
+}
+
+#[test]
+fn fn_single_line_off_by_default_keeps_body_multiline() {
+    // With the option off (the default) a single-statement body stays multi-line.
+    expect![[r#"
+        class C {
+            int foo() {
+                return 1;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt("class C{int foo(){return 1;}}"));
+}
+
+#[test]
+fn fn_single_line_collapses_braceless_control_statement() {
+    // The rule is "one statement with no forced break", not "one expression statement": a
+    // braceless control statement is a single statement and collapses when it fits. A bare or
+    // braced control block forces a break (see the nested-block test) and never collapses.
+    expect![[r#"
+        class C {
+            void m() { if (a) only(); }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line("class C{void m(){if(a)only();}}"));
+}
+
+#[test]
+fn fn_single_line_is_idempotent() {
+    let once =
+        fmt_fn_single_line("class C{int foo(){return 1;}void bar(){a();b();}static{init();}}");
+    let twice = fmt_fn_single_line(&once);
+    assert_eq!(once, twice, "fn-single-line = true must be idempotent");
+}
+
 // --- control-brace-style ---------------------------------------------------
 
 /// Format with `control-brace-style = next-line` (declaration braces left at the default K&R).
