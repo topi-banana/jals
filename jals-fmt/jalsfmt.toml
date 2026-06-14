@@ -6,6 +6,7 @@ line-ending = "lf"                # "lf" | "crlf"
 insert-final-newline = true
 max-width = 100                   # code wrap target (columns)
 brace-style = "same-line"         # "same-line" (K&R) | "next-line" (Allman); declaration bodies only
+empty-item-single-line = true     # collapse an empty declaration body to {}; off expands it to { … }
 control-brace-style = "same-line" # "same-line" | "next-line"; control-flow/switch braces & } else
 wrap-comments = false             # reflow comments/Javadoc to comment-width (off by default)
 comment-width = 80                # comment / Javadoc reflow target (columns); needs wrap-comments
