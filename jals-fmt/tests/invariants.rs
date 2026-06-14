@@ -217,6 +217,14 @@ fn empty_single_line_config(empty_item_single_line: bool) -> Config {
     }
 }
 
+/// Config with a given `fn-single-line` setting.
+fn fn_single_line_config(fn_single_line: bool) -> Config {
+    Config {
+        fn_single_line,
+        ..Config::default()
+    }
+}
+
 /// Config with `overflow-delimited-expr` on and narrow widths, so the overflow layout and
 /// each of its fallbacks are exercised by the generator's lambdas, `new`s, and braces.
 fn overflow_config() -> Config {
@@ -778,6 +786,47 @@ proptest! {
     fn empty_item_single_line_never_panics(src in ".*") {
         let _ = fmt_with(&src, &empty_single_line_config(true));
         let _ = fmt_with(&src, &empty_single_line_config(false));
+    }
+
+    /// `fn-single-line` is idempotent: re-formatting a collapsed (or un-collapsed) body
+    /// reproduces it under both settings.
+    #[test]
+    fn fn_single_line_idempotent(
+        src in javaish(),
+        single_line in prop_oneof![Just(true), Just(false)],
+    ) {
+        let cfg = fn_single_line_config(single_line);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// `fn-single-line` is layout-only: it only moves whitespace inside a single-statement
+    /// body, so the significant-token sequence is preserved exactly under both settings.
+    #[test]
+    fn fn_single_line_preserves_significant_tokens(
+        src in javaish(),
+        single_line in prop_oneof![Just(true), Just(false)],
+    ) {
+        let out = fmt_with(&src, &fn_single_line_config(single_line));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// `fn-single-line` never drops or mangles a comment (a commented body is never collapsed).
+    #[test]
+    fn fn_single_line_preserves_comments(
+        src in javaish(),
+        single_line in prop_oneof![Just(true), Just(false)],
+    ) {
+        let out = fmt_with(&src, &fn_single_line_config(single_line));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// `fn-single-line` never panics on arbitrary Unicode input.
+    #[test]
+    fn fn_single_line_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &fn_single_line_config(true));
+        let _ = fmt_with(&src, &fn_single_line_config(false));
     }
 
     /// Last-argument overflow stays idempotent: re-formatting the hung layout reproduces it.

@@ -489,6 +489,30 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         return concat(vec![lead, open, hardline(), close]);
     }
 
+    // `fn-single-line`: a declaration body holding exactly one statement and no comments
+    // collapses onto the header's line when it fits `max-width`. The grouped layout renders
+    // flat (`header { stmt }`) when it fits and falls back to the standard multi-line body
+    // otherwise; the `if_break` lead keeps the brace on its own line in the broken case under
+    // `brace-style = next-line` (and is not a forced break, so the flat form stays available).
+    if ctx.cfg.fn_single_line
+        && !has_dangling
+        && is_declaration_body(node)
+        && single_statement_no_comments(node, ctx)
+    {
+        let lead = if opens_on_next_line(node, ctx.cfg) {
+            if_break(hardline(), nil())
+        } else {
+            nil()
+        };
+        return group(concat(vec![
+            lead,
+            open,
+            indent(concat(vec![line(), inner])),
+            line(),
+            close,
+        ]));
+    }
+
     let mut body: Vec<Doc> = vec![hardline()];
     if any {
         body.push(inner);
@@ -540,6 +564,22 @@ fn is_declaration_body(node: &SyntaxNode) -> bool {
 /// always keep `{}`), matching rustfmt's item-only scoping.
 fn governs_empty_single_line(node: &SyntaxNode) -> bool {
     matches!(node.kind(), S::CLASS_BODY) || (node.kind() == S::BLOCK && is_declaration_body(node))
+}
+
+/// Whether `node` (a braced body) holds exactly one statement and carries no comment anywhere
+/// inside the braces — the precondition for [`fn_single_line`](Config::fn_single_line) to
+/// collapse it onto one line. A comment (which must never be dropped or moved off its anchor)
+/// or a second statement keeps the body multi-line.
+fn single_statement_no_comments(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
+    let mut stmts = node.children().filter(|c| first_sig_token(c).is_some());
+    if stmts.next().is_none() || stmts.next().is_some() {
+        return false; // zero or more than one statement
+    }
+    !node
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .any(|t| ctx.comments.has_comments(&t))
 }
 
 /// Build the inner document for a sequence of item nodes. Returns the content and whether
