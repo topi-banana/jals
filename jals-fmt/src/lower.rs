@@ -21,8 +21,8 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
 use crate::config::{
-    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, HexLiteralCase,
-    TrailingComma, TypePunctuationDensity,
+    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FloatLiteralTrailingZero,
+    FnParamsLayout, HexLiteralCase, TrailingComma, TypePunctuationDensity,
 };
 use crate::doc::{
     Doc, blank_line, concat, fill, group, group_always_break, group_overflow, group_within,
@@ -84,16 +84,72 @@ fn lower_non_sealed(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
 /// The bare text of a significant token. String literals and text blocks are emitted as
 /// raw (verbatim) text so their multi-line content is never reindented. An integer / float
-/// literal has the case of its hex digits normalized per [`HexLiteralCase`] (a no-op under the
-/// default `Preserve`, and for any literal that is not hexadecimal).
+/// literal is normalized by the literal rules: [`FloatLiteralTrailingZero`] adjusts a decimal
+/// float's trailing zero and [`HexLiteralCase`] normalizes a hex literal's digit case (each a
+/// no-op under its default `Preserve`). Their domains are disjoint — trailing-zero touches only
+/// decimal floats, hex-case only `0x` literals — so the order merely future-proofs the pipeline.
 fn token_text(tok: &SyntaxToken, cfg: &Config) -> Doc {
     match tok.kind() {
         S::STRING_LITERAL | S::TEXT_BLOCK => raw(tok.text().to_string()),
-        S::INT_LITERAL | S::FLOAT_LITERAL => match map_hex_case(tok.text(), cfg.hex_literal_case) {
-            Some(normalized) => text(normalized),
-            None => text(tok.text().to_string()),
-        },
+        S::INT_LITERAL | S::FLOAT_LITERAL => {
+            let original = tok.text();
+            let after_zero = map_float_trailing_zero(original, cfg.float_literal_trailing_zero);
+            let base = after_zero.as_deref().unwrap_or(original);
+            match map_hex_case(base, cfg.hex_literal_case).or(after_zero) {
+                Some(normalized) => text(normalized),
+                None => text(original.to_string()),
+            }
+        }
         _ => text(tok.text().to_string()),
+    }
+}
+
+/// Normalize the trailing zero of a **decimal** floating-point literal `lit` per `policy`,
+/// returning the rewritten text — or `None` when nothing should change (the policy is
+/// [`Preserve`](FloatLiteralTrailingZero::Preserve), or `lit` is out of scope).
+///
+/// Out of scope (always `None`): a hex literal (`0x…`), a literal with no `.` (a dotless float
+/// `1e10` / `100f`, or any integer), and — for [`Never`](FloatLiteralTrailingZero::Never) — a
+/// leading-dot float (`.5` / `.0`, whose fraction can never be stripped without producing the
+/// illegal bare `.`). The literal's text is pure ASCII, so byte indices are char indices.
+///
+/// Let `frac` be the digit/underscore run right after the `.` (it stops at an `e` / `E` exponent
+/// marker or an `f` / `F` / `d` / `D` suffix). [`Always`](FloatLiteralTrailingZero::Always) inserts
+/// a single `0` when `frac` is empty; [`Never`](FloatLiteralTrailingZero::Never) removes `frac`
+/// when it is non-empty and consists solely of `0`s (so `1.50` and underscore fractions like
+/// `1.0_0` are left intact). Both transforms preserve the numeric value, the suffix, and the
+/// exponent, and are idempotent in a single pass.
+fn map_float_trailing_zero(lit: &str, policy: FloatLiteralTrailingZero) -> Option<String> {
+    if policy == FloatLiteralTrailingZero::Preserve {
+        return None;
+    }
+    let bytes = lit.as_bytes();
+    // Hex literals (`0x` / `0X`) are out of scope — left to `hex-literal-case`.
+    if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
+        return None;
+    }
+    // A dotless float (`1e10`, `100f`) or any integer literal has no fraction to normalize.
+    let dot = bytes.iter().position(|&b| b == b'.')?;
+    // The fraction is the digit/underscore run after the `.`; it ends at the exponent or suffix.
+    let mut frac_end = dot + 1;
+    while frac_end < bytes.len() && (bytes[frac_end].is_ascii_digit() || bytes[frac_end] == b'_') {
+        frac_end += 1;
+    }
+    match policy {
+        FloatLiteralTrailingZero::Always if frac_end == dot + 1 => {
+            // Empty fraction: insert a single `0` right after the `.` (`1.` → `1.0`).
+            Some(format!("{}0{}", &lit[..dot + 1], &lit[dot + 1..]))
+        }
+        FloatLiteralTrailingZero::Never
+            // Non-empty integer part (so the bare `.` is never produced) and an all-zero fraction.
+            if dot > 0
+                && frac_end > dot + 1
+                && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') =>
+        {
+            // Strip the whole zero run at once (`1.0` / `1.00` → `1.`) — required for idempotency.
+            Some(format!("{}{}", &lit[..dot + 1], &lit[frac_end..]))
+        }
+        _ => None,
     }
 }
 
@@ -1080,7 +1136,8 @@ fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
 #[cfg(test)]
 mod tests {
-    use super::map_hex_case;
+    use super::{map_float_trailing_zero, map_hex_case};
+    use crate::config::FloatLiteralTrailingZero::{self, Always, Never};
     use crate::config::HexLiteralCase::{Lower, Preserve, Upper};
 
     #[test]
@@ -1139,5 +1196,81 @@ mod tests {
         // `f` / `d` are valid hex digits in the mantissa, but a suffix after the exponent is not.
         assert_eq!(map_hex_case("0xFp2d", Lower).as_deref(), Some("0xfp2d"));
         assert_eq!(map_hex_case("0X1P-2D", Lower).as_deref(), Some("0X1P-2D"));
+    }
+
+    #[test]
+    fn float_trailing_zero_preserve_is_a_no_op() {
+        for lit in ["1.0", "1.", "1.50", "0x1.0p3"] {
+            assert_eq!(
+                map_float_trailing_zero(lit, FloatLiteralTrailingZero::Preserve),
+                None,
+                "{lit}"
+            );
+        }
+    }
+
+    #[test]
+    fn float_trailing_zero_skips_dotless_and_non_float_literals() {
+        // No `.` to normalize: dotless floats and every integer literal are untouched.
+        for lit in ["1e10", "100f", "1f", "123", "0xCafe", "0b1010", "0777"] {
+            assert_eq!(map_float_trailing_zero(lit, Always), None, "{lit}");
+            assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn float_trailing_zero_skips_hex_floats() {
+        // Hex floats are left to `hex-literal-case`; the `0x` prefix opts them out of both modes.
+        for lit in ["0x1.0p3", "0x1.p3", "0X1.0P-2f"] {
+            assert_eq!(map_float_trailing_zero(lit, Always), None, "{lit}");
+            assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn always_inserts_a_single_trailing_zero() {
+        assert_eq!(
+            map_float_trailing_zero("1.", Always).as_deref(),
+            Some("1.0")
+        );
+        assert_eq!(
+            map_float_trailing_zero("1.f", Always).as_deref(),
+            Some("1.0f")
+        );
+        assert_eq!(
+            map_float_trailing_zero("1.e10", Always).as_deref(),
+            Some("1.0e10")
+        );
+        // A fraction that already has a digit (even another zero) is left as written.
+        for lit in ["1.0", "1.00", "1.5", ".5", ".0"] {
+            assert_eq!(map_float_trailing_zero(lit, Always), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn never_strips_an_all_zero_fraction() {
+        assert_eq!(map_float_trailing_zero("1.0", Never).as_deref(), Some("1."));
+        assert_eq!(
+            map_float_trailing_zero("1.00", Never).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(map_float_trailing_zero("0.0", Never).as_deref(), Some("0."));
+        assert_eq!(
+            map_float_trailing_zero("1.0f", Never).as_deref(),
+            Some("1.f")
+        );
+        assert_eq!(
+            map_float_trailing_zero("1.0e10", Never).as_deref(),
+            Some("1.e10")
+        );
+    }
+
+    #[test]
+    fn never_keeps_nonzero_underscore_empty_and_leading_dot_fractions() {
+        // A non-zero digit, an underscore-grouped fraction, an already-empty fraction, and a
+        // leading-dot float (stripping which would yield the illegal bare `.`) are all untouched.
+        for lit in ["1.5", "1.50", "1.05", "1.0_0", "1.", ".0", ".5"] {
+            assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
+        }
     }
 }

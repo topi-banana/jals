@@ -204,6 +204,29 @@ pub enum HexLiteralCase {
     Lower,
 }
 
+/// Whether a decimal floating-point literal carries a trailing zero — `1.0` vs. `1.`. Mirrors
+/// rustfmt's `float_literal_trailing_zero`, plus a [`Preserve`](Self::Preserve) default that keeps
+/// the source exactly, so the strict significant-token invariant holds unless this is opted into.
+/// (rustfmt's Rust-only `IfNoPostfix` mode is intentionally omitted: in Java both `1.f` and `1.0f`
+/// are legal, so it would be semantically empty.)
+///
+/// Only **decimal** float literals that contain a `.` are affected, and only the boundary between
+/// an empty fraction (`1.`) and an all-zero one (`1.0`): a fraction with a non-zero digit (`1.50`),
+/// a dotless float (`1e10`, `100f`), a leading-dot float (`.5`, `.0`), a hex float (`0x1.0p3`), and
+/// every integer literal are all left exactly as written. The numeric value, the type suffix
+/// (`f` / `F` / `d` / `D`), and any exponent are preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FloatLiteralTrailingZero {
+    /// Keep the source's trailing zero (or lack of one) exactly. The default; preserves the
+    /// significant-token sequence.
+    Preserve,
+    /// Give every in-scope float literal a trailing zero (`1.` → `1.0`, `1.f` → `1.0f`).
+    Always,
+    /// Strip an all-zero trailing fraction (`1.0` → `1.`, `1.00` → `1.`, `1.0f` → `1.f`).
+    Never,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -359,6 +382,14 @@ pub struct Config {
     /// change). The `0x` prefix, `p` exponent, and any `l` / `f` / `d` suffix are left untouched.
     /// Mirrors rustfmt's `hex_literal_case`.
     pub hex_literal_case: HexLiteralCase,
+    /// Whether a decimal float literal carries a trailing zero (`1.0` vs. `1.`). Defaults to
+    /// [`Preserve`](FloatLiteralTrailingZero::Preserve), which keeps the source exactly;
+    /// [`Always`](FloatLiteralTrailingZero::Always) adds the zero and
+    /// [`Never`](FloatLiteralTrailingZero::Never) strips an all-zero fraction, both weakening the
+    /// strict significant-token invariant (a literal token's text — but never its kind — may
+    /// change). Only in-scope decimal floats are touched; the value, suffix, and exponent are
+    /// preserved. Mirrors rustfmt's `float_literal_trailing_zero`.
+    pub float_literal_trailing_zero: FloatLiteralTrailingZero,
 }
 
 impl Default for Config {
@@ -397,6 +428,7 @@ impl Default for Config {
             reorder_modifiers: false,
             annotation_placement: AnnotationPlacement::Compact,
             hex_literal_case: HexLiteralCase::Preserve,
+            float_literal_trailing_zero: FloatLiteralTrailingZero::Preserve,
         }
     }
 }
@@ -673,6 +705,25 @@ mod tests {
         assert_eq!(c.hex_literal_case, HexLiteralCase::Upper);
         let c: Config = toml::from_str("hex-literal-case = \"lower\"\n").unwrap();
         assert_eq!(c.hex_literal_case, HexLiteralCase::Lower);
+    }
+
+    #[test]
+    fn float_literal_trailing_zero_parses_kebab_values() {
+        let c: Config = toml::from_str("float-literal-trailing-zero = \"preserve\"\n").unwrap();
+        assert_eq!(
+            c.float_literal_trailing_zero,
+            FloatLiteralTrailingZero::Preserve
+        );
+        let c: Config = toml::from_str("float-literal-trailing-zero = \"always\"\n").unwrap();
+        assert_eq!(
+            c.float_literal_trailing_zero,
+            FloatLiteralTrailingZero::Always
+        );
+        let c: Config = toml::from_str("float-literal-trailing-zero = \"never\"\n").unwrap();
+        assert_eq!(
+            c.float_literal_trailing_zero,
+            FloatLiteralTrailingZero::Never
+        );
     }
 
     #[test]

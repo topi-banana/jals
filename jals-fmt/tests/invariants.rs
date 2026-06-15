@@ -1,8 +1,8 @@
 //! Property tests for the formatter's correctness invariants.
 
 use jals_fmt::{
-    AnnotationPlacement, BinopSeparator, Config, FnParamsLayout, HexLiteralCase, TrailingComma,
-    TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopSeparator, Config, FloatLiteralTrailingZero, FnParamsLayout,
+    HexLiteralCase, TrailingComma, TypePunctuationDensity, format_source,
 };
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
@@ -444,6 +444,101 @@ fn sig_tokens_canon_hex(src: &str) -> Vec<(SyntaxKind, String)> {
     sig_tokens(src)
         .into_iter()
         .map(|(k, t)| (k, canon_hex(k, &t)))
+        .collect()
+}
+
+/// Config with a given float-literal-trailing-zero policy.
+fn float_config(float_literal_trailing_zero: FloatLiteralTrailingZero) -> Config {
+    Config {
+        float_literal_trailing_zero,
+        ..Config::default()
+    }
+}
+
+/// A generator over the two non-default float-literal-trailing-zero policies.
+fn float_zero_mode() -> impl Strategy<Value = FloatLiteralTrailingZero> {
+    prop_oneof![
+        Just(FloatLiteralTrailingZero::Always),
+        Just(FloatLiteralTrailingZero::Never),
+    ]
+}
+
+/// A class whose fields are initialized with a random mix of in-scope decimal floats (empty,
+/// single-zero, and multi-zero fractions, with `f` suffixes and `e` exponents) and out-of-scope
+/// literals (non-zero fractions, leading-dot, dotless, hex floats, integers), so
+/// `float-literal-trailing-zero` has real material to normalize and real material to leave alone.
+/// As with the other targeted generators these need not be semantically legal Java — the parser is
+/// error-resilient and still produces the literal tokens.
+fn java_with_float_literals() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("1.0"),
+            Just("1."),
+            Just("1.00"),
+            Just("0.0"),
+            Just("1.0f"),
+            Just("1.f"),
+            Just("1.0e10"),
+            Just("1.e10"),
+            Just("1.5"),
+            Just("1.50"),
+            Just(".5"),
+            Just(".0"),
+            Just("1.0_0"),
+            Just("1e10"),
+            Just("100f"),
+            Just("0x1.0p3"),
+            Just("255"),
+        ],
+        0..8,
+    )
+    .prop_map(|literals| {
+        let fields = literals
+            .iter()
+            .enumerate()
+            .map(|(i, lit)| format!("    double x{i} = {lit};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("class C {{\n{fields}\n}}\n")
+    })
+}
+
+/// Collapse the trailing zero of an in-scope decimal float so `1.`, `1.0`, and `1.00` all map to
+/// the same string (the bare-dot form), mirroring the exact scope of `float-literal-trailing-zero`
+/// (a non-zero fraction, a leading-dot float, a dotless float, a hex float, and any integer are
+/// left as-is). Used to compare token streams modulo the only thing the option may change.
+fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
+    if kind != SyntaxKind::FLOAT_LITERAL {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    // Hex floats are out of scope.
+    if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
+        return text.to_string();
+    }
+    let Some(dot) = bytes.iter().position(|&b| b == b'.') else {
+        return text.to_string();
+    };
+    let mut frac_end = dot + 1;
+    while frac_end < bytes.len() && (bytes[frac_end].is_ascii_digit() || bytes[frac_end] == b'_') {
+        frac_end += 1;
+    }
+    // Strip an all-zero fraction (with a non-empty integer part) to the bare dot: `1.0` / `1.00`
+    // canonicalize to `1.`, exactly the form the empty fraction already has.
+    if dot > 0 && frac_end > dot + 1 && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') {
+        format!("{}{}", &text[..dot + 1], &text[frac_end..])
+    } else {
+        text.to_string()
+    }
+}
+
+/// The significant tokens of `src`, with every in-scope float literal's trailing zero canonicalized.
+/// Equal before and after formatting iff the token *kinds* are preserved exactly and every token's
+/// text is preserved except (possibly) an in-scope decimal float's trailing zero.
+fn sig_tokens_canon_float(src: &str) -> Vec<(SyntaxKind, String)> {
+    sig_tokens(src)
+        .into_iter()
+        .map(|(k, t)| (k, canon_float_zero(k, &t)))
         .collect()
 }
 
@@ -1223,5 +1318,82 @@ proptest! {
     fn hex_literal_case_never_panics(src in ".*") {
         let _ = fmt_with(&src, &hex_config(HexLiteralCase::Upper));
         let _ = fmt_with(&src, &hex_config(HexLiteralCase::Lower));
+    }
+
+    /// Each float-literal-trailing-zero mode keeps formatting idempotent (the literals are already
+    /// normalized after the first pass, so the second reproduces them).
+    #[test]
+    fn float_literal_trailing_zero_idempotent(src in javaish(), mode in float_zero_mode()) {
+        let cfg = float_config(mode);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Float-literal-trailing-zero preserves the token *kind* sequence exactly, and every token's
+    /// text except (possibly) an in-scope decimal float's trailing zero. No token is added, dropped,
+    /// or otherwise altered — the relaxed invariant that applies when the option is on.
+    #[test]
+    fn float_literal_trailing_zero_preserves_tokens_modulo_zero(
+        src in java_with_float_literals(),
+        mode in float_zero_mode(),
+    ) {
+        let out = fmt_with(&src, &float_config(mode));
+        prop_assert_eq!(sig_tokens_canon_float(&src), sig_tokens_canon_float(&out));
+    }
+
+    /// The emitted float literals are actually normalized: under `Always` no in-scope decimal float
+    /// has an empty fraction (a digit always follows the `.`), and under `Never` no decimal float
+    /// with a non-empty integer part has an all-zero fraction.
+    #[test]
+    fn float_literal_trailing_zero_actually_normalizes(
+        src in java_with_float_literals(),
+        mode in float_zero_mode(),
+    ) {
+        let out = fmt_with(&src, &float_config(mode));
+        for (kind, t) in sig_tokens(&out) {
+            if kind != SyntaxKind::FLOAT_LITERAL {
+                continue;
+            }
+            let b = t.as_bytes();
+            // Skip hex floats (out of scope) and dotless floats (no fraction to normalize).
+            if b.len() >= 2 && b[0] == b'0' && matches!(b[1], b'x' | b'X') {
+                continue;
+            }
+            let Some(dot) = b.iter().position(|&c| c == b'.') else {
+                continue;
+            };
+            let mut frac_end = dot + 1;
+            while frac_end < b.len() && (b[frac_end].is_ascii_digit() || b[frac_end] == b'_') {
+                frac_end += 1;
+            }
+            match mode {
+                FloatLiteralTrailingZero::Always => prop_assert!(
+                    frac_end > dot + 1,
+                    "found empty fraction in {t:?} under Always"
+                ),
+                FloatLiteralTrailingZero::Never => prop_assert!(
+                    !(dot > 0
+                        && frac_end > dot + 1
+                        && b[dot + 1..frac_end].iter().all(|&c| c == b'0')),
+                    "found all-zero fraction in {t:?} under Never"
+                ),
+                FloatLiteralTrailingZero::Preserve => {}
+            }
+        }
+    }
+
+    /// Float-literal-trailing-zero never drops or mangles a comment.
+    #[test]
+    fn float_literal_trailing_zero_preserves_comments(src in javaish(), mode in float_zero_mode()) {
+        let out = fmt_with(&src, &float_config(mode));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Float-literal-trailing-zero never panics on arbitrary Unicode input.
+    #[test]
+    fn float_literal_trailing_zero_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &float_config(FloatLiteralTrailingZero::Always));
+        let _ = fmt_with(&src, &float_config(FloatLiteralTrailingZero::Never));
     }
 }

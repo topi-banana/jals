@@ -12,11 +12,12 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
 
 It upholds the workspace formatter invariants: comments are never dropped and formatting is
 idempotent (`format(format(x)) == format(x)`); by default the significant-token sequence is
-preserved exactly. Five opt-in options relax this (see [Configuration](#configuration)):
+preserved exactly. Six opt-in options relax this (see [Configuration](#configuration)):
 `reorder-imports`, `group-imports`, and `reorder-modifiers` preserve the token *multiset*
 instead, `trailing-comma` may add or drop the single trailing comma of an array initializer,
-and `hex-literal-case` may rewrite the case of a hex literal's digits (the token *kind*
-sequence is preserved exactly).
+`hex-literal-case` may rewrite the case of a hex literal's digits, and
+`float-literal-trailing-zero` may add or strip the trailing zero of a decimal float literal
+(the token *kind* sequence is preserved exactly).
 
 ## What it does today
 
@@ -138,6 +139,17 @@ The current formatter is intentionally minimal. It performs:
   binary literals are never touched. Off by default (`preserve`); when on, a literal token's
   *text* may change (but never its kind), so the significant-token sequence is no longer
   byte-for-byte preserved. See below.
+- **Float literal trailing zero** — with `float-literal-trailing-zero` set to `always` or `never`,
+  a **decimal** floating-point literal's trailing zero is normalized between the two legal forms
+  `1.0` and `1.`: `always` gives every empty-fraction float a trailing zero (`1.` → `1.0`,
+  `1.f` → `1.0f`, `1.e10` → `1.0e10`) and `never` strips an all-zero fraction (`1.0` / `1.00` →
+  `1.`, `1.0f` → `1.f`). Only in-scope decimal floats change: a fraction with a non-zero digit
+  (`1.50`), a leading-dot float (`.5`, `.0`, which `never` leaves alone since stripping would yield
+  the illegal bare `.`), a dotless float (`1e10`, `100f`), a hex float (`0x1.0p3`), and every
+  integer literal are left exactly as written, as are the numeric value, the `f` / `F` / `d` / `D`
+  suffix, and any exponent. Off by default (`preserve`); when on, a literal token's *text* may
+  change (but never its kind), so the significant-token sequence is no longer byte-for-byte
+  preserved. See below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -177,6 +189,7 @@ are kebab-case.
 | `reorder-modifiers` | bool | `false` | ✅ wired — sort each declaration's keyword modifiers into the canonical JLS / Checkstyle order (public, protected, private, abstract, default, static, sealed, non-sealed, final, transient, volatile, synchronized, native, strictfp) and hoist all annotations to the front (relative order kept). Off by default; when on, the significant-token *sequence* may change (the multiset is preserved, comments stay glued to their modifier). A Java-specific option with no rustfmt equivalent |
 | `annotation-placement` | `"compact"` \| `"expanded"` | `"compact"` | ✅ wired — placement of a declaration's leading annotations (a type / method / constructor / field / initializer / local-variable declaration): `compact` keeps them inline (`@Override public void m()`), `expanded` breaks each annotation in the leading run onto its own line above the declaration. A parameter's annotations and type-use / enum-constant / type-parameter annotations are never affected (always inline). Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
 | `hex-literal-case` | `"preserve"` \| `"upper"` \| `"lower"` | `"preserve"` | ✅ wired — case of the hex digit letters of an integer / float literal (`0xCafe`): `preserve` keeps the source's, `upper` / `lower` force it. Only the hex mantissa digits change; the `0x` prefix, the `p` exponent, and any `l` / `f` / `d` suffix are untouched, and non-hex literals are never affected. Non-`preserve` may rewrite a literal token's text (never its kind); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `hex_literal_case` |
+| `float-literal-trailing-zero` | `"preserve"` \| `"always"` \| `"never"` | `"preserve"` | ✅ wired — trailing zero of a **decimal** float literal (`1.0` vs. `1.`): `preserve` keeps the source's, `always` adds it (`1.` → `1.0`), `never` strips an all-zero fraction (`1.0` / `1.00` → `1.`). Only in-scope decimal floats change; a non-zero fraction (`1.50`), a leading-dot float (`.5`), a dotless float (`1e10`), a hex float (`0x1.0p3`), and integers are untouched, as are the value, suffix, and exponent. Non-`preserve` may rewrite a literal token's text (never its kind); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `float_literal_trailing_zero` (its Rust-only `IfNoPostfix` mode is omitted — both `1.f` and `1.0f` are legal Java) |
 
 ---
 
@@ -277,13 +290,13 @@ Reflow comments/Javadoc to `comment-width` (`wrap_comments`) is **implemented** 
 
 ## 8. Literal normalization
 
-Hex literal case (`hex_literal_case`) is **implemented** — see
-[What it does today](#what-it-does-today). Remaining:
+Hex literal case (`hex_literal_case`) and float trailing zero (`float_literal_trailing_zero`) are
+both **implemented** — see [What it does today](#what-it-does-today). Remaining:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Hex literal case (`0xFF` vs. `0xff`) | `hex_literal_case` ✅ |
-| Float trailing zero (`1.0` vs. `1.`) | `float_literal_trailing_zero` |
+| Float trailing zero (`1.0` vs. `1.`) | `float_literal_trailing_zero` ✅ |
 | *(Java-specific extension)* underscore grouping; `L`/`F`/`D` suffix case | — |
 
 ## 9. File selection, errors & operational (language-agnostic)
@@ -343,5 +356,5 @@ via `wrap_comments` — method-chain wrapping — `chain_width` — call-argumen
 overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon` /
 `space_after_colon` — parameter-list layout — `fn_params_layout` — type-punctuation
 density — `type_punctuation_density` — modifier ordering — `reorder_modifiers` —
-annotation placement — `annotation-placement` — and hex-literal case —
-`hex_literal_case` — are done.)
+annotation placement — `annotation-placement` — hex-literal case —
+`hex_literal_case` — and float trailing zero — `float_literal_trailing_zero` — are done.)
