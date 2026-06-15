@@ -288,6 +288,7 @@ fn token_kind(token: &str) -> Option<&'static str> {
         // `'ident'` is deliberately absent: an `is_x:'ident'` flag would be true
         // for nearly every node, so it must fail loudly (use `x:'ident'` instead).
         "static" => "STATIC_KW",
+        "module" => "MODULE_KW",
         "open" => "OPEN_KW",
         "transitive" => "TRANSITIVE_KW",
         "sealed" => "SEALED_KW",

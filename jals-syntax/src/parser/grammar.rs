@@ -196,8 +196,16 @@ fn package_decl(p: &mut Parser) {
 fn import_decl(p: &mut Parser) {
     let m = p.start();
     p.bump(IMPORT_KW);
-    p.eat(STATIC_KW);
-    qualified_name(p, true);
+    // `import module M;` (JEP 511). `module` is a restricted keyword (lexed as `IDENT`);
+    // it starts a module import only when a name follows it, so `import module.foo.Bar;`
+    // and `import module;` remain ordinary type imports of a package/type named `module`.
+    if p.at_contextual_kw("module") && p.nth_at(1, IDENT) {
+        p.bump_remap(MODULE_KW);
+        qualified_name(p, false);
+    } else {
+        p.eat(STATIC_KW);
+        qualified_name(p, true);
+    }
     p.expect(SEMICOLON);
     m.complete(p, IMPORT_DECL);
 }

@@ -1635,6 +1635,47 @@ fn reorder_imports_comments_follow() {
 }
 
 #[test]
+fn module_import_formats_inline() {
+    // `import module M;` (JEP 511) lays out with normal spacing under the default config.
+    check(
+        "import module java.base;class C{}",
+        expect![[r#"
+            import module java.base;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_module_to_front() {
+    // Module imports lead their own tier: module, then ordinary (alphabetical), then static.
+    check_reorder(
+        "import b.B;import module java.base;import static a.A.a;import a.A;class C{}",
+        expect![[r#"
+            import module java.base;
+            import a.A;
+            import b.B;
+            import static a.A.a;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_imports_module_comment_follows() {
+    // A leading comment glued to a module import moves with it when it is reordered to the front.
+    check_reorder(
+        "import b.B;\n// lead for mod\nimport module java.base;\nclass C {}\n",
+        expect![[r#"
+            // lead for mod
+            import module java.base;
+            import b.B;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
 fn reorder_imports_wildcard() {
     // `*` (0x2A) sorts before `.` (0x2E), so `a.b.*` precedes `a.b.C`. Locks the chosen order.
     check_reorder(
@@ -1746,6 +1787,24 @@ fn group_imports_static_block_last() {
 
             import static a.A.a;
             import static b.B.b;
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn group_imports_module_block_first() {
+    // Module imports cluster in a leading block, before every prefix group and the static block.
+    check_group(
+        "import static a.A.a;import com.foo.Bar;import module java.base;import java.util.List;class C{}",
+        expect![[r#"
+            import module java.base;
+
+            import java.util.List;
+
+            import com.foo.Bar;
+
+            import static a.A.a;
             class C {}
         "#]],
     );
