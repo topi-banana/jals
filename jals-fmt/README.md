@@ -12,10 +12,11 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
 
 It upholds the workspace formatter invariants: comments are never dropped and formatting is
 idempotent (`format(format(x)) == format(x)`); by default the significant-token sequence is
-preserved exactly. Four opt-in options relax this (see [Configuration](#configuration)):
+preserved exactly. Five opt-in options relax this (see [Configuration](#configuration)):
 `reorder-imports`, `group-imports`, and `reorder-modifiers` preserve the token *multiset*
-instead, and `trailing-comma` may add or drop the single trailing comma of an array
-initializer.
+instead, `trailing-comma` may add or drop the single trailing comma of an array initializer,
+and `hex-literal-case` may rewrite the case of a hex literal's digits (the token *kind*
+sequence is preserved exactly).
 
 ## What it does today
 
@@ -129,6 +130,14 @@ The current formatter is intentionally minimal. It performs:
   initializer / local-variable declaration); a parameter's annotations and type-use /
   enum-constant / type-parameter annotations always stay inline. Layout-only (the
   significant-token sequence is preserved exactly). Off by default; see below.
+- **Hex literal case** — with `hex-literal-case` set to `upper` or `lower`, the hexadecimal
+  digit letters (`a`–`f` / `A`–`F`) of an integer or floating-point literal are normalized to
+  that case (`0xCafe` → `0xCAFE` / `0xcafe`). Only the hex *mantissa* digits change: the `0x` /
+  `0X` radix prefix, the `p` / `P` binary exponent of a hex float (and its decimal digits), and
+  any `l` / `L` / `f` / `F` / `d` / `D` suffix are left exactly as written, and decimal / octal /
+  binary literals are never touched. Off by default (`preserve`); when on, a literal token's
+  *text* may change (but never its kind), so the significant-token sequence is no longer
+  byte-for-byte preserved. See below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -167,6 +176,7 @@ are kebab-case.
 | `type-punctuation-density` | `"wide"` \| `"compressed"` | `"wide"` | ✅ wired — spacing around the `&` of a Java intersection type: `wide` (`A & B`) or `compressed` (`A&B`). Governs both a type-parameter bound (`<T extends A & B>`) and a cast intersection (`(A & B) x`); the bitwise-AND operator `&` (`a & b`) is never affected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `type_punctuation_density` |
 | `reorder-modifiers` | bool | `false` | ✅ wired — sort each declaration's keyword modifiers into the canonical JLS / Checkstyle order (public, protected, private, abstract, default, static, sealed, non-sealed, final, transient, volatile, synchronized, native, strictfp) and hoist all annotations to the front (relative order kept). Off by default; when on, the significant-token *sequence* may change (the multiset is preserved, comments stay glued to their modifier). A Java-specific option with no rustfmt equivalent |
 | `annotation-placement` | `"compact"` \| `"expanded"` | `"compact"` | ✅ wired — placement of a declaration's leading annotations (a type / method / constructor / field / initializer / local-variable declaration): `compact` keeps them inline (`@Override public void m()`), `expanded` breaks each annotation in the leading run onto its own line above the declaration. A parameter's annotations and type-use / enum-constant / type-parameter annotations are never affected (always inline). Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
+| `hex-literal-case` | `"preserve"` \| `"upper"` \| `"lower"` | `"preserve"` | ✅ wired — case of the hex digit letters of an integer / float literal (`0xCafe`): `preserve` keeps the source's, `upper` / `lower` force it. Only the hex mantissa digits change; the `0x` prefix, the `p` exponent, and any `l` / `f` / `d` suffix are untouched, and non-hex literals are never affected. Non-`preserve` may rewrite a literal token's text (never its kind); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `hex_literal_case` |
 
 ---
 
@@ -267,9 +277,12 @@ Reflow comments/Javadoc to `comment-width` (`wrap_comments`) is **implemented** 
 
 ## 8. Literal normalization
 
+Hex literal case (`hex_literal_case`) is **implemented** — see
+[What it does today](#what-it-does-today). Remaining:
+
 | Capability | rustfmt equivalent |
 | --- | --- |
-| Hex literal case (`0xFF` vs. `0xff`) | `hex_literal_case` |
+| Hex literal case (`0xFF` vs. `0xff`) | `hex_literal_case` ✅ |
 | Float trailing zero (`1.0` vs. `1.`) | `float_literal_trailing_zero` |
 | *(Java-specific extension)* underscore grouping; `L`/`F`/`D` suffix case | — |
 
@@ -329,5 +342,6 @@ via `wrap_comments` — method-chain wrapping — `chain_width` — call-argumen
 `trailing_comma` — binary-expression wrapping — `binop_separator` — last-argument
 overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon` /
 `space_after_colon` — parameter-list layout — `fn_params_layout` — type-punctuation
-density — `type_punctuation_density` — modifier ordering — `reorder_modifiers` — and
-annotation placement — `annotation-placement` — are done.)
+density — `type_punctuation_density` — modifier ordering — `reorder_modifiers` —
+annotation placement — `annotation-placement` — and hex-literal case —
+`hex_literal_case` — are done.)

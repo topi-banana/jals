@@ -3,7 +3,7 @@
 use expect_test::{Expect, expect};
 use jals_fmt::{
     AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout,
-    LineEnding, TrailingComma, TypePunctuationDensity, format_source,
+    HexLiteralCase, LineEnding, TrailingComma, TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -3198,6 +3198,95 @@ fn annotation_placement_modes_are_idempotent() {
         assert_eq!(
             once, twice,
             "annotation-placement {placement:?} must be idempotent"
+        );
+    }
+}
+
+// ----- hex-literal-case -------------------------------------------------------------------
+
+fn fmt_hex(src: &str, hex_literal_case: HexLiteralCase) -> String {
+    let config = Config {
+        hex_literal_case,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising hex integers (plain, with `_` separators, with an `l`/`L` suffix), hex
+/// floats (with a `p` exponent and an `f`/`d` suffix), and non-hex literals (decimal, octal,
+/// binary, decimal float) that must stay byte-for-byte unchanged.
+const HEX_SRC: &str = "class C{int a=0xCafe;int b=0XdeadL;long c=0xDEAD_beefl;double d=0xA.bP1F;float e=0Xf.0p-2d;int f=255;int g=0777;int h=0b1010;double i=3.14F;}";
+
+#[test]
+fn hex_literal_case_preserve_keeps_source_case() {
+    // The default leaves every literal exactly as written.
+    expect![[r#"
+        class C {
+            int a = 0xCafe;
+            int b = 0XdeadL;
+            long c = 0xDEAD_beefl;
+            double d = 0xA.bP1F;
+            float e = 0Xf.0p-2d;
+            int f = 255;
+            int g = 0777;
+            int h = 0b1010;
+            double i = 3.14F;
+        }
+    "#]]
+    .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Preserve));
+}
+
+#[test]
+fn hex_literal_case_upper_uppercases_only_hex_digits() {
+    // Hex mantissa digits become upper case; the `0x`/`0X` prefix, the `p` exponent, and the
+    // `l`/`f`/`d` suffix keep their case. Non-hex literals are untouched.
+    expect![[r#"
+        class C {
+            int a = 0xCAFE;
+            int b = 0XDEADL;
+            long c = 0xDEAD_BEEFl;
+            double d = 0xA.BP1F;
+            float e = 0XF.0p-2d;
+            int f = 255;
+            int g = 0777;
+            int h = 0b1010;
+            double i = 3.14F;
+        }
+    "#]]
+    .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Upper));
+}
+
+#[test]
+fn hex_literal_case_lower_lowercases_only_hex_digits() {
+    // Mirror image of the upper-case test: only the hex mantissa digits change.
+    expect![[r#"
+        class C {
+            int a = 0xcafe;
+            int b = 0XdeadL;
+            long c = 0xdead_beefl;
+            double d = 0xa.bP1F;
+            float e = 0Xf.0p-2d;
+            int f = 255;
+            int g = 0777;
+            int h = 0b1010;
+            double i = 3.14F;
+        }
+    "#]]
+    .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Lower));
+}
+
+#[test]
+fn hex_literal_case_is_idempotent() {
+    for case in [
+        HexLiteralCase::Preserve,
+        HexLiteralCase::Upper,
+        HexLiteralCase::Lower,
+    ] {
+        let once = fmt_hex(HEX_SRC, case);
+        let twice = fmt_hex(&once, case);
+        assert_eq!(
+            once, twice,
+            "hex-literal-case must be idempotent ({case:?})"
         );
     }
 }
