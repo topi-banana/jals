@@ -16,7 +16,7 @@
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
-use crate::config::AnnotationPlacement;
+use crate::config::{AnnotationPlacement, Config};
 use crate::doc::{Doc, concat, hardline};
 use crate::lower::{
     Ctx, first_sig_token, last_sig_token, lower, lower_elements, lower_generic, sep, tok,
@@ -63,6 +63,52 @@ pub(crate) fn plan(els: Vec<SyntaxElement>) -> Vec<SyntaxElement> {
     out
 }
 
+/// The first significant token of an element: the first non-trivia token of a node, or the
+/// token itself.
+fn element_first_token(el: &SyntaxElement) -> Option<SyntaxToken> {
+    match el.as_node() {
+        Some(n) => first_sig_token(n),
+        None => el.as_token().cloned(),
+    }
+}
+
+/// The last significant token of an element: the last non-trivia token of a node, or the token
+/// itself.
+fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
+    match el.as_node() {
+        Some(n) => last_sig_token(n),
+        None => el.as_token().cloned(),
+    }
+}
+
+/// The first and last significant tokens of a `MODIFIERS` node *as emitted*. With
+/// `reorder-modifiers` off these are the structural [`first_sig_token`] / [`last_sig_token`];
+/// with it on, [`plan`] may move an annotation to the front (or a keyword to the end), so the
+/// emitted boundary tokens differ from the structural ones.
+///
+/// The parent node uses these (rather than the structural tokens) to compute the separators
+/// around the `MODIFIERS` node, keeping the boundary spacing consistent with what is actually
+/// emitted. Without it, reordering an annotation that was structurally last desyncs the trailing
+/// separator: e.g. `class{public@=` (error recovery) reorders to `@public`, but the parent would
+/// compute the separator before `=` from the structural-last `@` token (no space) on the first
+/// pass and from `public` (a space) on the second — breaking idempotency.
+pub(crate) fn emitted_boundary_tokens(
+    node: &SyntaxNode,
+    cfg: &Config,
+) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
+    if !cfg.reorder_modifiers {
+        return (first_sig_token(node), last_sig_token(node));
+    }
+    let els: Vec<SyntaxElement> = node
+        .children_with_tokens()
+        .filter(|e| !e.kind().is_trivia())
+        .collect();
+    let planned = plan(els);
+    let first = planned.first().and_then(element_first_token);
+    let last = planned.last().and_then(element_last_token);
+    (first, last)
+}
+
 /// The declaration-level targets whose leading-annotation run `annotation-placement = expanded`
 /// breaks onto its own line. A parameter's `MODIFIERS` (parent `PARAM`) is deliberately
 /// excluded so parameter annotations stay inline; type-use / enum-constant / type-parameter
@@ -91,12 +137,14 @@ fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
 /// `annotation-placement = expanded` on a declaration-level target, the leading annotations are
 /// broken onto their own lines by [`lower_modifiers_with_breaks`].
 ///
-/// The reorder is confined to the `MODIFIERS` subtree; the rowan tree is unchanged, so the
-/// parent's separator before/after this node (computed from the node's source-order first /
-/// last significant token) is unaffected. That is harmless: the spacing rule yields a single
-/// space between any modifier/annotation end and any following type token regardless of which
-/// modifier sorts last, so the boundary is order-invariant and idempotency holds. When the last
-/// emitted part is a forced break, that trailing parent space is trimmed by the renderer.
+/// The reorder is confined to the `MODIFIERS` subtree; the rowan tree is unchanged. For valid
+/// code the boundary spacing is order-invariant (any modifier/annotation end takes a single
+/// space before the following type token), but malformed input can put an annotation
+/// structurally last while reordering emits a keyword last, desyncing the parent's trailing
+/// separator. So the parent computes the separators around this node from
+/// [`emitted_boundary_tokens`] (the emitted-order first / last token), not the structural ones,
+/// which keeps idempotency. When the last emitted part is a forced break, that trailing parent
+/// space is trimmed by the renderer.
 pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
     // The hot path: nothing to reorder and no annotation to break out.
@@ -141,12 +189,12 @@ fn lower_modifiers_with_breaks(els: &[SyntaxElement], ctx: &Ctx<'_>) -> Doc {
             still_leading = false;
         }
 
-        let (first, el_doc, last) = if let Some(n) = el.as_node() {
-            (first_sig_token(n), lower(n, ctx), last_sig_token(n))
-        } else {
-            let t = el.as_token().expect("element is a node or a token");
-            (Some(t.clone()), tok(t, ctx), Some(t.clone()))
+        let first = element_first_token(el);
+        let el_doc = match el.as_node() {
+            Some(n) => lower(n, ctx),
+            None => tok(el.as_token().expect("element is a node or a token"), ctx),
         };
+        let last = element_last_token(el);
 
         if let Some(first) = first.as_ref() {
             let s = if prev_was_leading_annotation {

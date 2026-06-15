@@ -2965,6 +2965,19 @@ fn reorder_modifiers_is_idempotent() {
     assert_eq!(once, twice, "reorder-modifiers must be idempotent");
 }
 
+#[test]
+fn reorder_modifiers_boundary_is_idempotent_on_malformed_input() {
+    // Regression: error recovery puts the annotation structurally last (`public @`), so hoisting
+    // it to the front changed which token the parent used for the trailing separator before the
+    // stray `=`. The boundary now follows the emitted order, so the first pass already produces
+    // the stable spacing instead of `@public=` collapsing to `@public =` on a second pass.
+    let src = "class{public@=";
+    let once = fmt_reorder_mods(src);
+    assert_eq!(once, "class { @public =\n");
+    let twice = fmt_reorder_mods(&once);
+    assert_eq!(once, twice, "reorder-modifiers boundary must be idempotent");
+}
+
 // --- annotation-placement -------------------------------------------------------------------
 
 fn fmt_annotation_placement(src: &str, placement: AnnotationPlacement) -> String {

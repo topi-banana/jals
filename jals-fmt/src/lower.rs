@@ -252,11 +252,19 @@ pub(crate) fn lower_elements(
 
     for el in els {
         if let Some(child) = el.as_node() {
-            if let Some(first) = first_sig_token(child) {
+            // A reordered `MODIFIERS` node emits its tokens in a different order than the tree,
+            // so the separators around it must use the *emitted* boundary tokens (see
+            // `modifiers::emitted_boundary_tokens`); every other node emits in tree order.
+            let (emitted_first, emitted_last) = if child.kind() == S::MODIFIERS {
+                crate::modifiers::emitted_boundary_tokens(child, ctx.cfg)
+            } else {
+                (first_sig_token(child), last_sig_token(child))
+            };
+            if let Some(first) = emitted_first.as_ref() {
                 let s = if hug_witness {
                     nil()
                 } else {
-                    flow_sep(ctx, control_flow, prev.as_ref(), child.kind(), &first)
+                    flow_sep(ctx, control_flow, prev.as_ref(), child.kind(), first)
                 };
                 parts.push(s);
             }
@@ -266,7 +274,7 @@ pub(crate) fn lower_elements(
                     Some(S::DOT | S::COLON_COLON)
                 );
             parts.push(lower(child, ctx));
-            if let Some(last) = last_sig_token(child) {
+            if let Some(last) = emitted_last {
                 prev = Some(last);
             }
         } else if let Some(t) = el.as_token() {
