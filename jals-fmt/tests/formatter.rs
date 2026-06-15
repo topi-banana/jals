@@ -3016,16 +3016,31 @@ fn reorder_modifiers_is_idempotent() {
 }
 
 #[test]
-fn reorder_modifiers_boundary_is_idempotent_on_malformed_input() {
-    // Regression: error recovery puts the annotation structurally last (`public @`), so hoisting
-    // it to the front changed which token the parent used for the trailing separator before the
-    // stray `=`. The boundary now follows the emitted order, so the first pass already produces
-    // the stable spacing instead of `@public=` collapsing to `@public =` on a second pass.
-    let src = "class{public@=";
-    let once = fmt_reorder_mods(src);
-    assert_eq!(once, "class { @public =\n");
-    let twice = fmt_reorder_mods(&once);
-    assert_eq!(once, twice, "reorder-modifiers boundary must be idempotent");
+fn reorder_modifiers_skips_stray_error_recovery_modifiers() {
+    // Regression: a `MODIFIERS` node produced by error recovery does not sit in a real
+    // declaration — its parent is a `CLASS_BODY` / `SOURCE_FILE` / recovery node, never a member
+    // or type declaration — so it is left in source order. Hoisting its annotation would change
+    // the significant-token *sequence* such that re-parsing the output regroups tokens into a
+    // different tree, which never reaches a fixed point (e.g. the `@` of `<public@` would be
+    // absorbed into the preceding `<…>` as a type-parameter annotation). Source order is preserved
+    // and stays idempotent.
+
+    // `public @` directly under a class body keeps its order (no hoist to `@public`).
+    let once = fmt_reorder_mods("class{public@=");
+    assert_eq!(once, "class { public @=\n");
+    assert_eq!(
+        once,
+        fmt_reorder_mods(&once),
+        "stray modifiers must be idempotent"
+    );
+
+    // The original repro: the stray `MODIFIERS` sits under `SOURCE_FILE` next to a `<…>`.
+    let once = fmt_reorder_mods("<public@");
+    assert_eq!(
+        once,
+        fmt_reorder_mods(&once),
+        "stray modifiers must be idempotent"
+    );
 }
 
 // --- annotation-placement -------------------------------------------------------------------
