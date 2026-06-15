@@ -1279,30 +1279,62 @@ fn finally_clause(p: &mut Parser) {
     m.complete(p, FINALLY_CLAUSE);
 }
 
-/// Whether to treat `yield` as a statement (when followed by an unambiguous expression start). Cases like `yield = 3;` (variable) are sent to expression statement.
+/// Whether to treat `yield` as a statement. Uses javac's token-based disambiguation: a
+/// statement-leading `yield` followed by an unambiguous expression start is a yield statement.
+/// `yield = 3;` (variable) and `yield++;` (postfix on a variable) fall through to an expression
+/// statement, as does a method call `yield(...)` (yield used as a method name).
 fn at_yield_stmt(p: &Parser) -> bool {
     if !p.at_contextual_kw("yield") {
         return false;
     }
-    matches!(
-        p.nth_nofuel(1),
-        IDENT
-            | INT_LITERAL
-            | FLOAT_LITERAL
-            | CHAR_LITERAL
-            | STRING_LITERAL
-            | TEXT_BLOCK
-            | TRUE_KW
-            | FALSE_KW
-            | NULL_KW
-            | BANG
-            | TILDE
-            | NEW_KW
-            | THIS_KW
-            | SUPER_KW
-            | SWITCH_KW
-            | LPAREN
-    )
+    match p.nth_nofuel(1) {
+        IDENT | INT_LITERAL | FLOAT_LITERAL | CHAR_LITERAL | STRING_LITERAL | TEXT_BLOCK
+        | TRUE_KW | FALSE_KW | NULL_KW | BANG | TILDE | PLUS | MINUS | NEW_KW | THIS_KW
+        | SUPER_KW | SWITCH_KW => true,
+        // `yield ++i;` yields a pre-increment, but `yield++;` is a postfix increment of a
+        // variable named `yield`. Disambiguate on the token after `++`/`--` (yield statement
+        // unless it is `;`), matching javac.
+        PLUS_PLUS | MINUS_MINUS => p.nth_nofuel(2) != SEMICOLON,
+        // `yield (expr)`, a cast `yield (T) e`, and a lambda `yield () -> e` are yield
+        // statements; only an argument-list-shaped `yield()` / `yield(a, b)` is a method call.
+        LPAREN => !at_yield_method_call(p),
+        _ => false,
+    }
+}
+
+/// For a statement-leading `yield (`, decides whether the parenthesized run is a method-call
+/// argument list (yield used as a method name) rather than a single yielded expression. It is a
+/// method call when the list is empty (`yield()`) or holds a top-level comma (`yield(a, b)`) —
+/// neither is a valid single expression — and is not a lambda parameter list (the matching `)`
+/// is not followed by `->`). A single parenthesized expression, a cast (`yield (T) e`), and a
+/// lambda (`yield () -> e`) stay yield statements, matching javac.
+fn at_yield_method_call(p: &Parser) -> bool {
+    debug_assert_eq!(p.nth_nofuel(1), LPAREN);
+    let mut paren = 0i32;
+    // Generic type-argument depth, so a comma inside `(Map<A, B>) e` is not a top-level arg
+    // separator. `>` is always a single `GT`; clamp at 0 so a stray relational `>` cannot
+    // hide a genuine top-level comma.
+    let mut angle = 0i32;
+    let mut comma = false;
+    let mut i = 1;
+    loop {
+        match p.nth_nofuel(i) {
+            LPAREN => paren += 1,
+            RPAREN => {
+                paren -= 1;
+                if paren == 0 {
+                    let empty = i == 2; // `(` immediately followed by `)`
+                    return (empty || comma) && p.nth_nofuel(i + 1) != ARROW;
+                }
+            }
+            LT => angle += 1,
+            GT => angle = (angle - 1).max(0),
+            COMMA if paren == 1 && angle == 0 => comma = true,
+            EOF => return false, // unbalanced; let the yield-statement path report the error
+            _ => {}
+        }
+        i += 1;
+    }
 }
 
 fn if_stmt(p: &mut Parser) {
