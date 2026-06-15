@@ -2,8 +2,9 @@
 
 use expect_test::{Expect, expect};
 use jals_fmt::{
-    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, LineEnding,
-    TrailingComma, TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
+    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, TrailingComma,
+    TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -3039,4 +3040,415 @@ fn reorder_modifiers_is_idempotent() {
     let once = fmt_reorder_mods(src);
     let twice = fmt_reorder_mods(&once);
     assert_eq!(once, twice, "reorder-modifiers must be idempotent");
+}
+
+#[test]
+fn reorder_modifiers_boundary_is_idempotent_on_malformed_input() {
+    // Regression: error recovery puts the annotation structurally last (`public @`), so hoisting
+    // it to the front changed which token the parent used for the trailing separator before the
+    // stray `=`. The boundary now follows the emitted order, so the first pass already produces
+    // the stable spacing instead of `@public=` collapsing to `@public =` on a second pass.
+    let src = "class{public@=";
+    let once = fmt_reorder_mods(src);
+    assert_eq!(once, "class { @public =\n");
+    let twice = fmt_reorder_mods(&once);
+    assert_eq!(once, twice, "reorder-modifiers boundary must be idempotent");
+}
+
+// --- annotation-placement -------------------------------------------------------------------
+
+fn fmt_annotation_placement(src: &str, placement: AnnotationPlacement) -> String {
+    let cfg = Config {
+        annotation_placement: placement,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_expanded(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_annotation_placement(
+        src,
+        AnnotationPlacement::Expanded,
+    ));
+}
+
+#[test]
+fn annotation_placement_compact_keeps_annotations_inline() {
+    // `compact` (the default) reproduces the prior behavior: annotations are pulled inline onto
+    // the declaration's line, collapsing the source's line break.
+    expect![[r#"
+        @Foo @Bar class D {
+            @Inject private int x;
+        }
+    "#]]
+    .assert_eq(&fmt_annotation_placement(
+        "@Foo\n@Bar class D{@Inject private int x;}",
+        AnnotationPlacement::Compact,
+    ));
+}
+
+#[test]
+fn annotation_placement_expanded_breaks_type_annotations() {
+    check_expanded(
+        "@Foo @Bar class C{}",
+        expect![[r#"
+            @Foo
+            @Bar
+            class C {}
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_breaks_method_annotation() {
+    check_expanded(
+        "class C{@Override public void m(){}}",
+        expect![[r#"
+            class C {
+                @Override
+                public void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_breaks_field_annotation() {
+    check_expanded(
+        "class C{@Inject private int x;}",
+        expect![[r#"
+            class C {
+                @Inject
+                private int x;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_breaks_lone_marker() {
+    // A single marker annotation still breaks onto its own line under `expanded`.
+    check_expanded(
+        "class C{@Override void m(){}}",
+        expect![[r#"
+            class C {
+                @Override
+                void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_keeps_annotation_arguments() {
+    // Each annotation breaks; its argument list is untouched.
+    check_expanded(
+        "class C{@Foo(\"x\") @Bar(a=1) void m(){}}",
+        expect![[r#"
+            class C {
+                @Foo("x")
+                @Bar(a = 1)
+                void m() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_keeps_parameter_annotation_inline() {
+    // A parameter's annotation is never broken out — it stays inline with the parameter.
+    check_expanded(
+        "class C{@Override void m(@NonNull String s){}}",
+        expect![[r#"
+            class C {
+                @Override
+                void m(@NonNull String s) {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_keeps_type_use_annotation_inline() {
+    // A type-use annotation lives in the type, not in the leading MODIFIERS, so it is unaffected.
+    check_expanded(
+        "class C{Outer. @A Inner f(){return null;}}",
+        expect![[r#"
+            class C {
+                Outer.@A Inner f() {
+                    return null;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_keeps_interleaved_annotation_inline() {
+    // An annotation after a keyword (not in the leading run) stays inline — only the leading
+    // contiguous run breaks. Here the run is empty, so nothing breaks.
+    check_expanded(
+        "class C{public @A static int x;}",
+        expect![[r#"
+            class C {
+                public @A static int x;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_breaks_local_variable_annotation() {
+    // A local-variable declaration is a declaration-level target, so its annotation breaks too.
+    check_expanded(
+        "class C{void q(){@SuppressWarnings(\"x\") final var y=f();}}",
+        expect![[r#"
+            class C {
+                void q() {
+                    @SuppressWarnings("x")
+                    final var y = f();
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_placement_expanded_composes_with_reorder_modifiers() {
+    // Annotations are first hoisted to the front (reorder-modifiers), then each broken onto its
+    // own line (annotation-placement = expanded).
+    let cfg = Config {
+        reorder_modifiers: true,
+        annotation_placement: AnnotationPlacement::Expanded,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C {
+            @Foo
+            @Bar
+            public static int x;
+        }
+    "#]]
+    .assert_eq(&fmt_with("class C{static @Foo public @Bar int x;}", &cfg));
+}
+
+#[test]
+fn annotation_placement_expanded_keeps_single_line_body() {
+    // The header break does not force a `fn-single-line` body to break.
+    let cfg = Config {
+        fn_single_line: true,
+        annotation_placement: AnnotationPlacement::Expanded,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C {
+            @Override
+            int m() { return 1; }
+        }
+    "#]]
+    .assert_eq(&fmt_with("class C{@Override int m(){return 1;}}", &cfg));
+}
+
+#[test]
+fn annotation_placement_modes_are_idempotent() {
+    let src = "@A @B class C{@Override int x=0;@Foo(\"y\") void m(@NonNull String s){}static @Bar int z;}";
+    for placement in [AnnotationPlacement::Compact, AnnotationPlacement::Expanded] {
+        let once = fmt_annotation_placement(src, placement);
+        let twice = fmt_annotation_placement(&once, placement);
+        assert_eq!(
+            once, twice,
+            "annotation-placement {placement:?} must be idempotent"
+        );
+    }
+}
+
+// ----- hex-literal-case -------------------------------------------------------------------
+
+fn fmt_hex(src: &str, hex_literal_case: HexLiteralCase) -> String {
+    let config = Config {
+        hex_literal_case,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising hex integers (plain, with `_` separators, with an `l`/`L` suffix), hex
+/// floats (with a `p` exponent and an `f`/`d` suffix), and non-hex literals (decimal, octal,
+/// binary, decimal float) that must stay byte-for-byte unchanged.
+const HEX_SRC: &str = "class C{int a=0xCafe;int b=0XdeadL;long c=0xDEAD_beefl;double d=0xA.bP1F;float e=0Xf.0p-2d;int f=255;int g=0777;int h=0b1010;double i=3.14F;}";
+
+#[test]
+fn hex_literal_case_preserve_keeps_source_case() {
+    // The default leaves every literal exactly as written.
+    expect![[r#"
+        class C {
+            int a = 0xCafe;
+            int b = 0XdeadL;
+            long c = 0xDEAD_beefl;
+            double d = 0xA.bP1F;
+            float e = 0Xf.0p-2d;
+            int f = 255;
+            int g = 0777;
+            int h = 0b1010;
+            double i = 3.14F;
+        }
+    "#]]
+    .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Preserve));
+}
+
+#[test]
+fn hex_literal_case_upper_uppercases_only_hex_digits() {
+    // Hex mantissa digits become upper case; the `0x`/`0X` prefix, the `p` exponent, and the
+    // `l`/`f`/`d` suffix keep their case. Non-hex literals are untouched.
+    expect![[r#"
+        class C {
+            int a = 0xCAFE;
+            int b = 0XDEADL;
+            long c = 0xDEAD_BEEFl;
+            double d = 0xA.BP1F;
+            float e = 0XF.0p-2d;
+            int f = 255;
+            int g = 0777;
+            int h = 0b1010;
+            double i = 3.14F;
+        }
+    "#]]
+    .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Upper));
+}
+
+#[test]
+fn hex_literal_case_lower_lowercases_only_hex_digits() {
+    // Mirror image of the upper-case test: only the hex mantissa digits change.
+    expect![[r#"
+        class C {
+            int a = 0xcafe;
+            int b = 0XdeadL;
+            long c = 0xdead_beefl;
+            double d = 0xa.bP1F;
+            float e = 0Xf.0p-2d;
+            int f = 255;
+            int g = 0777;
+            int h = 0b1010;
+            double i = 3.14F;
+        }
+    "#]]
+    .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Lower));
+}
+
+#[test]
+fn hex_literal_case_is_idempotent() {
+    for case in [
+        HexLiteralCase::Preserve,
+        HexLiteralCase::Upper,
+        HexLiteralCase::Lower,
+    ] {
+        let once = fmt_hex(HEX_SRC, case);
+        let twice = fmt_hex(&once, case);
+        assert_eq!(
+            once, twice,
+            "hex-literal-case must be idempotent ({case:?})"
+        );
+    }
+}
+
+// ----- float-literal-trailing-zero --------------------------------------------------------
+
+fn fmt_float(src: &str, float_literal_trailing_zero: FloatLiteralTrailingZero) -> String {
+    let config = Config {
+        float_literal_trailing_zero,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising the in-scope boundary (`1.0` / `1.` / `1.00`, with and without an `f`
+/// suffix or an `e` exponent) and the out-of-scope literals that must stay byte-for-byte
+/// unchanged: a non-zero fraction (`1.5`), a leading-dot float (`.5`), a dotless float (`1e10`),
+/// a hex float (`0x1.0p3`), and an integer (`123`).
+const FLOAT_SRC: &str = "class C{double a=1.0;double b=1.;double c=1.00;double d=1.5;double e=.5;double f=0.0;float g=1.0f;float h=1.f;double i=1.0e10;double j=1e10;double k=0x1.0p3;int l=123;}";
+
+#[test]
+fn float_literal_trailing_zero_preserve_keeps_source() {
+    // The default leaves every literal exactly as written.
+    expect![[r#"
+        class C {
+            double a = 1.0;
+            double b = 1.;
+            double c = 1.00;
+            double d = 1.5;
+            double e = .5;
+            double f = 0.0;
+            float g = 1.0f;
+            float h = 1.f;
+            double i = 1.0e10;
+            double j = 1e10;
+            double k = 0x1.0p3;
+            int l = 123;
+        }
+    "#]]
+    .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Preserve));
+}
+
+#[test]
+fn float_literal_trailing_zero_always_adds_the_zero() {
+    // Every empty-fraction decimal float gains a single trailing zero (`1.` → `1.0`,
+    // `1.f` → `1.0f`); fractions that already have a digit, dotless / leading-dot / hex floats,
+    // and integers are untouched.
+    expect![[r#"
+        class C {
+            double a = 1.0;
+            double b = 1.0;
+            double c = 1.00;
+            double d = 1.5;
+            double e = .5;
+            double f = 0.0;
+            float g = 1.0f;
+            float h = 1.0f;
+            double i = 1.0e10;
+            double j = 1e10;
+            double k = 0x1.0p3;
+            int l = 123;
+        }
+    "#]]
+    .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Always));
+}
+
+#[test]
+fn float_literal_trailing_zero_never_strips_the_zero() {
+    // Every all-zero fraction is stripped to a bare dot (`1.0` / `1.00` → `1.`, `1.0f` → `1.f`,
+    // `1.0e10` → `1.e10`); non-zero fractions, the leading-dot `.5`, dotless / hex floats, and
+    // integers are untouched.
+    expect![[r#"
+        class C {
+            double a = 1.;
+            double b = 1.;
+            double c = 1.;
+            double d = 1.5;
+            double e = .5;
+            double f = 0.;
+            float g = 1.f;
+            float h = 1.f;
+            double i = 1.e10;
+            double j = 1e10;
+            double k = 0x1.0p3;
+            int l = 123;
+        }
+    "#]]
+    .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Never));
+}
+
+#[test]
+fn float_literal_trailing_zero_is_idempotent() {
+    for mode in [
+        FloatLiteralTrailingZero::Preserve,
+        FloatLiteralTrailingZero::Always,
+        FloatLiteralTrailingZero::Never,
+    ] {
+        let once = fmt_float(FLOAT_SRC, mode);
+        let twice = fmt_float(&once, mode);
+        assert_eq!(
+            once, twice,
+            "float-literal-trailing-zero must be idempotent ({mode:?})"
+        );
+    }
 }

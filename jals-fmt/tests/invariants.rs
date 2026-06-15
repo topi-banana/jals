@@ -1,7 +1,8 @@
 //! Property tests for the formatter's correctness invariants.
 
 use jals_fmt::{
-    BinopSeparator, Config, FnParamsLayout, TrailingComma, TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopSeparator, Config, FloatLiteralTrailingZero, FnParamsLayout,
+    HexLiteralCase, TrailingComma, TypePunctuationDensity, format_source,
 };
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
@@ -209,6 +210,14 @@ fn type_punct_config(type_punctuation_density: TypePunctuationDensity) -> Config
     }
 }
 
+/// Config with a given annotation placement.
+fn annotation_placement_config(annotation_placement: AnnotationPlacement) -> Config {
+    Config {
+        annotation_placement,
+        ..Config::default()
+    }
+}
+
 /// Config with a given `empty-item-single-line` setting.
 fn empty_single_line_config(empty_item_single_line: bool) -> Config {
     Config {
@@ -354,6 +363,183 @@ fn java_with_modifiers() -> impl Strategy<Value = String> {
         0..7,
     )
     .prop_map(|mods| format!("class C {{\n{} int x = 0;\n}}\n", mods.join(" ")))
+}
+
+/// Config with a given hex-literal-case policy.
+fn hex_config(hex_literal_case: HexLiteralCase) -> Config {
+    Config {
+        hex_literal_case,
+        ..Config::default()
+    }
+}
+
+/// A generator over the two non-default hex-literal-case policies.
+fn hex_case() -> impl Strategy<Value = HexLiteralCase> {
+    prop_oneof![Just(HexLiteralCase::Upper), Just(HexLiteralCase::Lower)]
+}
+
+/// A class whose fields are initialized with a random mix of hex integers / floats (mixed-case,
+/// with `_` separators and `l`/`L`/`f`/`d` suffixes) and non-hex literals, so `hex-literal-case`
+/// has real material to normalize. As with the other targeted generators, these need not be
+/// semantically legal Java — the parser is error-resilient and still produces the literal tokens.
+fn java_with_hex_literals() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("0xFF"),
+            Just("0Xff"),
+            Just("0xCafeBabe"),
+            Just("0xDEAD_beefL"),
+            Just("0xAl"),
+            Just("0x1.8p3"),
+            Just("0xA.Bp1f"),
+            Just("0X1p-2d"),
+            Just("0xabcDEF"),
+            Just("255"),
+            Just("0777"),
+            Just("0b1010"),
+            Just("3.14f"),
+        ],
+        0..8,
+    )
+    .prop_map(|literals| {
+        let fields = literals
+            .iter()
+            .enumerate()
+            .map(|(i, lit)| format!("    int x{i} = {lit};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("class C {{\n{fields}\n}}\n")
+    })
+}
+
+/// Lowercase only a hex literal's *mantissa* digits, mirroring the exact scope of
+/// `hex-literal-case` (the `0x`/`0X` prefix, the `p`/`P` exponent and its decimal digits, and any
+/// `l`/`f`/`d` suffix are left as-is). Used to compare token streams modulo the only thing the
+/// option may change.
+fn canon_hex(kind: SyntaxKind, text: &str) -> String {
+    if !matches!(kind, SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL) {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'0' || !matches!(bytes[1], b'x' | b'X') {
+        return text.to_string();
+    }
+    let mantissa_end = match bytes[2..].iter().position(|b| matches!(b, b'p' | b'P')) {
+        Some(i) => i + 2,
+        None if matches!(bytes.last(), Some(b'l' | b'L')) => text.len() - 1,
+        None => text.len(),
+    };
+    format!(
+        "{}{}{}",
+        &text[..2],
+        text[2..mantissa_end].to_ascii_lowercase(),
+        &text[mantissa_end..]
+    )
+}
+
+/// The significant tokens of `src`, with every hex literal's mantissa case canonicalized. Equal
+/// before and after formatting iff the token *kinds* are preserved exactly and every token's text
+/// is preserved except (possibly) the case of a hex literal's mantissa digits.
+fn sig_tokens_canon_hex(src: &str) -> Vec<(SyntaxKind, String)> {
+    sig_tokens(src)
+        .into_iter()
+        .map(|(k, t)| (k, canon_hex(k, &t)))
+        .collect()
+}
+
+/// Config with a given float-literal-trailing-zero policy.
+fn float_config(float_literal_trailing_zero: FloatLiteralTrailingZero) -> Config {
+    Config {
+        float_literal_trailing_zero,
+        ..Config::default()
+    }
+}
+
+/// A generator over the two non-default float-literal-trailing-zero policies.
+fn float_zero_mode() -> impl Strategy<Value = FloatLiteralTrailingZero> {
+    prop_oneof![
+        Just(FloatLiteralTrailingZero::Always),
+        Just(FloatLiteralTrailingZero::Never),
+    ]
+}
+
+/// A class whose fields are initialized with a random mix of in-scope decimal floats (empty,
+/// single-zero, and multi-zero fractions, with `f` suffixes and `e` exponents) and out-of-scope
+/// literals (non-zero fractions, leading-dot, dotless, hex floats, integers), so
+/// `float-literal-trailing-zero` has real material to normalize and real material to leave alone.
+/// As with the other targeted generators these need not be semantically legal Java — the parser is
+/// error-resilient and still produces the literal tokens.
+fn java_with_float_literals() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("1.0"),
+            Just("1."),
+            Just("1.00"),
+            Just("0.0"),
+            Just("1.0f"),
+            Just("1.f"),
+            Just("1.0e10"),
+            Just("1.e10"),
+            Just("1.5"),
+            Just("1.50"),
+            Just(".5"),
+            Just(".0"),
+            Just("1.0_0"),
+            Just("1e10"),
+            Just("100f"),
+            Just("0x1.0p3"),
+            Just("255"),
+        ],
+        0..8,
+    )
+    .prop_map(|literals| {
+        let fields = literals
+            .iter()
+            .enumerate()
+            .map(|(i, lit)| format!("    double x{i} = {lit};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("class C {{\n{fields}\n}}\n")
+    })
+}
+
+/// Collapse the trailing zero of an in-scope decimal float so `1.`, `1.0`, and `1.00` all map to
+/// the same string (the bare-dot form), mirroring the exact scope of `float-literal-trailing-zero`
+/// (a non-zero fraction, a leading-dot float, a dotless float, a hex float, and any integer are
+/// left as-is). Used to compare token streams modulo the only thing the option may change.
+fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
+    if kind != SyntaxKind::FLOAT_LITERAL {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    // Hex floats are out of scope.
+    if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
+        return text.to_string();
+    }
+    let Some(dot) = bytes.iter().position(|&b| b == b'.') else {
+        return text.to_string();
+    };
+    let mut frac_end = dot + 1;
+    while frac_end < bytes.len() && (bytes[frac_end].is_ascii_digit() || bytes[frac_end] == b'_') {
+        frac_end += 1;
+    }
+    // Strip an all-zero fraction (with a non-empty integer part) to the bare dot: `1.0` / `1.00`
+    // canonicalize to `1.`, exactly the form the empty fraction already has.
+    if dot > 0 && frac_end > dot + 1 && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') {
+        format!("{}{}", &text[..dot + 1], &text[frac_end..])
+    } else {
+        text.to_string()
+    }
+}
+
+/// The significant tokens of `src`, with every in-scope float literal's trailing zero canonicalized.
+/// Equal before and after formatting iff the token *kinds* are preserved exactly and every token's
+/// text is preserved except (possibly) an in-scope decimal float's trailing zero.
+fn sig_tokens_canon_float(src: &str) -> Vec<(SyntaxKind, String)> {
+    sig_tokens(src)
+        .into_iter()
+        .map(|(k, t)| (k, canon_float_zero(k, &t)))
+        .collect()
 }
 
 proptest! {
@@ -747,6 +933,92 @@ proptest! {
         let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Compressed));
     }
 
+    /// Annotation placement stays idempotent under both modes.
+    #[test]
+    fn annotation_placement_idempotent(
+        src in javaish(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let cfg = annotation_placement_config(placement);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// On a targeted generator of scrambled modifier runs (including annotations and comments),
+    /// annotation placement stays idempotent.
+    #[test]
+    fn annotation_placement_targeted_idempotent(
+        src in java_with_modifiers(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let cfg = annotation_placement_config(placement);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Annotation placement is layout-only: it only moves line breaks between an annotation and
+    /// the following modifier/declaration, so the significant-token *sequence* is preserved
+    /// exactly (the strict invariant, composing with the default).
+    #[test]
+    fn annotation_placement_preserves_significant_tokens(
+        src in javaish(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let out = fmt_with(&src, &annotation_placement_config(placement));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Annotation placement never drops or mangles a comment.
+    #[test]
+    fn annotation_placement_preserves_comments(
+        src in javaish(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let out = fmt_with(&src, &annotation_placement_config(placement));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Annotation placement never panics on arbitrary Unicode input.
+    #[test]
+    fn annotation_placement_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &annotation_placement_config(AnnotationPlacement::Compact));
+        let _ = fmt_with(&src, &annotation_placement_config(AnnotationPlacement::Expanded));
+    }
+
+    /// Composed with `reorder-modifiers`, expanding annotations still preserves the
+    /// significant-token *multiset* (the sequence may change, since reordering permutes
+    /// modifiers) and stays idempotent.
+    #[test]
+    fn annotation_placement_expanded_with_reorder_preserves_multiset(src in java_with_modifiers()) {
+        let cfg = Config {
+            reorder_modifiers: true,
+            annotation_placement: AnnotationPlacement::Expanded,
+            ..Config::default()
+        };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(&once, &twice);
+        let mut before = sig_tokens(&src);
+        let mut after = sig_tokens(&once);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
+    }
+
     /// Expanding empty declaration bodies stays idempotent under both settings (re-formatting
     /// an expanded `{` … `}` reproduces it; collapsing a `{}` likewise stays put).
     #[test]
@@ -972,5 +1244,156 @@ proptest! {
                 }
             }
         }
+    }
+
+    /// Each hex-literal-case mode keeps formatting idempotent (the literals are already normalized
+    /// after the first pass, so the second reproduces them).
+    #[test]
+    fn hex_literal_case_idempotent(src in javaish(), case in hex_case()) {
+        let cfg = hex_config(case);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Hex-literal-case preserves the token *kind* sequence exactly, and every token's text except
+    /// (possibly) the case of a hex literal's mantissa digits. No token is added, dropped, or
+    /// otherwise altered — the relaxed invariant that applies when `hex-literal-case` is on.
+    #[test]
+    fn hex_literal_case_preserves_tokens_modulo_hex_case(
+        src in java_with_hex_literals(),
+        case in hex_case(),
+    ) {
+        let out = fmt_with(&src, &hex_config(case));
+        prop_assert_eq!(sig_tokens_canon_hex(&src), sig_tokens_canon_hex(&out));
+    }
+
+    /// The emitted hex literals are actually in the requested case: no `a`–`f` letter survives
+    /// under `Upper`, and no `A`–`F` under `Lower`, anywhere in a hex literal's mantissa.
+    #[test]
+    fn hex_literal_case_actually_normalizes(
+        src in java_with_hex_literals(),
+        case in hex_case(),
+    ) {
+        let out = fmt_with(&src, &hex_config(case));
+        for (kind, t) in sig_tokens(&out) {
+            if !matches!(kind, SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL) {
+                continue;
+            }
+            let b = t.as_bytes();
+            if b.len() < 2 || b[0] != b'0' || !matches!(b[1], b'x' | b'X') {
+                continue;
+            }
+            // Inspect only the mantissa (before a `p`/`P` exponent, before an `l`/`L` suffix).
+            let end = match b[2..].iter().position(|x| matches!(x, b'p' | b'P')) {
+                Some(i) => i + 2,
+                None if matches!(b.last(), Some(b'l' | b'L')) => t.len() - 1,
+                None => t.len(),
+            };
+            for &c in &b[2..end] {
+                match case {
+                    HexLiteralCase::Upper => prop_assert!(
+                        !c.is_ascii_lowercase(),
+                        "found lower-case digit in {t:?} under Upper"
+                    ),
+                    HexLiteralCase::Lower => prop_assert!(
+                        !c.is_ascii_uppercase(),
+                        "found upper-case digit in {t:?} under Lower"
+                    ),
+                    HexLiteralCase::Preserve => {}
+                }
+            }
+        }
+    }
+
+    /// Hex-literal-case never drops or mangles a comment.
+    #[test]
+    fn hex_literal_case_preserves_comments(src in javaish(), case in hex_case()) {
+        let out = fmt_with(&src, &hex_config(case));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Hex-literal-case never panics on arbitrary Unicode input.
+    #[test]
+    fn hex_literal_case_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &hex_config(HexLiteralCase::Upper));
+        let _ = fmt_with(&src, &hex_config(HexLiteralCase::Lower));
+    }
+
+    /// Each float-literal-trailing-zero mode keeps formatting idempotent (the literals are already
+    /// normalized after the first pass, so the second reproduces them).
+    #[test]
+    fn float_literal_trailing_zero_idempotent(src in javaish(), mode in float_zero_mode()) {
+        let cfg = float_config(mode);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Float-literal-trailing-zero preserves the token *kind* sequence exactly, and every token's
+    /// text except (possibly) an in-scope decimal float's trailing zero. No token is added, dropped,
+    /// or otherwise altered — the relaxed invariant that applies when the option is on.
+    #[test]
+    fn float_literal_trailing_zero_preserves_tokens_modulo_zero(
+        src in java_with_float_literals(),
+        mode in float_zero_mode(),
+    ) {
+        let out = fmt_with(&src, &float_config(mode));
+        prop_assert_eq!(sig_tokens_canon_float(&src), sig_tokens_canon_float(&out));
+    }
+
+    /// The emitted float literals are actually normalized: under `Always` no in-scope decimal float
+    /// has an empty fraction (a digit always follows the `.`), and under `Never` no decimal float
+    /// with a non-empty integer part has an all-zero fraction.
+    #[test]
+    fn float_literal_trailing_zero_actually_normalizes(
+        src in java_with_float_literals(),
+        mode in float_zero_mode(),
+    ) {
+        let out = fmt_with(&src, &float_config(mode));
+        for (kind, t) in sig_tokens(&out) {
+            if kind != SyntaxKind::FLOAT_LITERAL {
+                continue;
+            }
+            let b = t.as_bytes();
+            // Skip hex floats (out of scope) and dotless floats (no fraction to normalize).
+            if b.len() >= 2 && b[0] == b'0' && matches!(b[1], b'x' | b'X') {
+                continue;
+            }
+            let Some(dot) = b.iter().position(|&c| c == b'.') else {
+                continue;
+            };
+            let mut frac_end = dot + 1;
+            while frac_end < b.len() && (b[frac_end].is_ascii_digit() || b[frac_end] == b'_') {
+                frac_end += 1;
+            }
+            match mode {
+                FloatLiteralTrailingZero::Always => prop_assert!(
+                    frac_end > dot + 1,
+                    "found empty fraction in {t:?} under Always"
+                ),
+                FloatLiteralTrailingZero::Never => prop_assert!(
+                    !(dot > 0
+                        && frac_end > dot + 1
+                        && b[dot + 1..frac_end].iter().all(|&c| c == b'0')),
+                    "found all-zero fraction in {t:?} under Never"
+                ),
+                FloatLiteralTrailingZero::Preserve => {}
+            }
+        }
+    }
+
+    /// Float-literal-trailing-zero never drops or mangles a comment.
+    #[test]
+    fn float_literal_trailing_zero_preserves_comments(src in javaish(), mode in float_zero_mode()) {
+        let out = fmt_with(&src, &float_config(mode));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Float-literal-trailing-zero never panics on arbitrary Unicode input.
+    #[test]
+    fn float_literal_trailing_zero_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &float_config(FloatLiteralTrailingZero::Always));
+        let _ = fmt_with(&src, &float_config(FloatLiteralTrailingZero::Never));
     }
 }

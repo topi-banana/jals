@@ -166,6 +166,67 @@ pub enum TypePunctuationDensity {
     Compressed,
 }
 
+/// Placement of a declaration's leading annotations (the annotations in the `MODIFIERS` node of
+/// a type / method / constructor / field / initializer / local-variable declaration). A
+/// Java-specific option with no rustfmt equivalent. Layout-only — the significant-token
+/// sequence is preserved exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnnotationPlacement {
+    /// Keep a declaration's leading annotations inline with the modifiers / declaration
+    /// (`@Override public void m()`). The default; matches the prior behavior.
+    Compact,
+    /// Break each leading annotation onto its own line above the declaration (`@Override`,
+    /// then `public void m()`). The idiomatic Java convention. Parameter annotations and
+    /// type-use / enum-constant / type-parameter annotations are never affected.
+    Expanded,
+}
+
+/// Case of the hexadecimal digit letters (`a`–`f` / `A`–`F`) of an integer or floating-point
+/// literal — `0xFF` vs. `0xff`. Mirrors rustfmt's `hex_literal_case`, plus a
+/// [`Preserve`](Self::Preserve) default (rustfmt's is `Preserve` too) that keeps the source
+/// case exactly, so the strict significant-token invariant holds unless this is opted into.
+///
+/// Only the hex *mantissa* digits are affected. The `0x` / `0X` radix prefix, the `p` / `P`
+/// binary exponent marker of a hex float and its decimal digits, and any `l` / `L` integer or
+/// `f` / `F` / `d` / `D` float suffix are all left exactly as written (suffix-letter case is a
+/// separate, not-yet-implemented Java-specific concern). Decimal, octal, and binary literals
+/// have no hex digits and are never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HexLiteralCase {
+    /// Keep the source's hex-digit case exactly. The default; preserves the significant-token
+    /// sequence.
+    Preserve,
+    /// Force hex digits to upper case (`0xff` → `0xFF`).
+    Upper,
+    /// Force hex digits to lower case (`0xFF` → `0xff`).
+    Lower,
+}
+
+/// Whether a decimal floating-point literal carries a trailing zero — `1.0` vs. `1.`. Mirrors
+/// rustfmt's `float_literal_trailing_zero`, plus a [`Preserve`](Self::Preserve) default that keeps
+/// the source exactly, so the strict significant-token invariant holds unless this is opted into.
+/// (rustfmt's Rust-only `IfNoPostfix` mode is intentionally omitted: in Java both `1.f` and `1.0f`
+/// are legal, so it would be semantically empty.)
+///
+/// Only **decimal** float literals that contain a `.` are affected, and only the boundary between
+/// an empty fraction (`1.`) and an all-zero one (`1.0`): a fraction with a non-zero digit (`1.50`),
+/// a dotless float (`1e10`, `100f`), a leading-dot float (`.5`, `.0`), a hex float (`0x1.0p3`), and
+/// every integer literal are all left exactly as written. The numeric value, the type suffix
+/// (`f` / `F` / `d` / `D`), and any exponent are preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FloatLiteralTrailingZero {
+    /// Keep the source's trailing zero (or lack of one) exactly. The default; preserves the
+    /// significant-token sequence.
+    Preserve,
+    /// Give every in-scope float literal a trailing zero (`1.` → `1.0`, `1.f` → `1.0f`).
+    Always,
+    /// Strip an all-zero trailing fraction (`1.0` → `1.`, `1.00` → `1.`, `1.0f` → `1.f`).
+    Never,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -305,6 +366,30 @@ pub struct Config {
     /// significant-token *sequence* may change (the multiset is preserved, and each comment stays
     /// glued to its modifier). A Java-specific option with no rustfmt equivalent.
     pub reorder_modifiers: bool,
+    /// Placement of a declaration's leading annotations (the `MODIFIERS` node of a type / method
+    /// / constructor / field / initializer / local-variable declaration):
+    /// [`Compact`](AnnotationPlacement::Compact) (the default, inline `@Override public void m()`)
+    /// or [`Expanded`](AnnotationPlacement::Expanded) (each annotation on its own line above the
+    /// declaration). Parameter annotations (a `PARAM`'s own `MODIFIERS`) and type-use /
+    /// enum-constant / type-parameter annotations are never affected — they always stay inline.
+    /// Layout-only — the significant-token sequence is preserved exactly. A Java-specific option
+    /// with no rustfmt equivalent.
+    pub annotation_placement: AnnotationPlacement,
+    /// Case of the hexadecimal digit letters of an integer / floating-point literal (`0xFF` vs.
+    /// `0xff`). Defaults to [`Preserve`](HexLiteralCase::Preserve), which keeps the source case
+    /// exactly; the other modes rewrite the case of the hex *mantissa* digits, weakening the
+    /// strict significant-token invariant (a literal token's text — but never its kind — may
+    /// change). The `0x` prefix, `p` exponent, and any `l` / `f` / `d` suffix are left untouched.
+    /// Mirrors rustfmt's `hex_literal_case`.
+    pub hex_literal_case: HexLiteralCase,
+    /// Whether a decimal float literal carries a trailing zero (`1.0` vs. `1.`). Defaults to
+    /// [`Preserve`](FloatLiteralTrailingZero::Preserve), which keeps the source exactly;
+    /// [`Always`](FloatLiteralTrailingZero::Always) adds the zero and
+    /// [`Never`](FloatLiteralTrailingZero::Never) strips an all-zero fraction, both weakening the
+    /// strict significant-token invariant (a literal token's text — but never its kind — may
+    /// change). Only in-scope decimal floats are touched; the value, suffix, and exponent are
+    /// preserved. Mirrors rustfmt's `float_literal_trailing_zero`.
+    pub float_literal_trailing_zero: FloatLiteralTrailingZero,
 }
 
 impl Default for Config {
@@ -341,6 +426,9 @@ impl Default for Config {
             fn_params_layout: FnParamsLayout::Tall,
             type_punctuation_density: TypePunctuationDensity::Wide,
             reorder_modifiers: false,
+            annotation_placement: AnnotationPlacement::Compact,
+            hex_literal_case: HexLiteralCase::Preserve,
+            float_literal_trailing_zero: FloatLiteralTrailingZero::Preserve,
         }
     }
 }
@@ -482,6 +570,10 @@ mod tests {
         // Single-statement bodies are not collapsed onto one line by default (rustfmt's
         // `fn_single_line` is also off by default).
         assert!(!c.fn_single_line);
+        // Annotation placement defaults to Compact (inline, the prior behavior).
+        assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
+        // Hex-literal case defaults to preserve, keeping the source case exactly.
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Preserve);
     }
 
     #[test]
@@ -594,6 +686,43 @@ mod tests {
         assert_eq!(
             c.type_punctuation_density,
             TypePunctuationDensity::Compressed
+        );
+    }
+
+    #[test]
+    fn annotation_placement_parses_kebab_values() {
+        let c: Config = toml::from_str("annotation-placement = \"compact\"\n").unwrap();
+        assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
+        let c: Config = toml::from_str("annotation-placement = \"expanded\"\n").unwrap();
+        assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
+    }
+
+    #[test]
+    fn hex_literal_case_parses_kebab_values() {
+        let c: Config = toml::from_str("hex-literal-case = \"preserve\"\n").unwrap();
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Preserve);
+        let c: Config = toml::from_str("hex-literal-case = \"upper\"\n").unwrap();
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Upper);
+        let c: Config = toml::from_str("hex-literal-case = \"lower\"\n").unwrap();
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Lower);
+    }
+
+    #[test]
+    fn float_literal_trailing_zero_parses_kebab_values() {
+        let c: Config = toml::from_str("float-literal-trailing-zero = \"preserve\"\n").unwrap();
+        assert_eq!(
+            c.float_literal_trailing_zero,
+            FloatLiteralTrailingZero::Preserve
+        );
+        let c: Config = toml::from_str("float-literal-trailing-zero = \"always\"\n").unwrap();
+        assert_eq!(
+            c.float_literal_trailing_zero,
+            FloatLiteralTrailingZero::Always
+        );
+        let c: Config = toml::from_str("float-literal-trailing-zero = \"never\"\n").unwrap();
+        assert_eq!(
+            c.float_literal_trailing_zero,
+            FloatLiteralTrailingZero::Never
         );
     }
 

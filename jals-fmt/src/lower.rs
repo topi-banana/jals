@@ -21,8 +21,8 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::comments::{self, CommentMap};
 use crate::config::{
-    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout, TrailingComma,
-    TypePunctuationDensity,
+    BinopSeparator, BraceStyle, Config, ControlBraceStyle, FloatLiteralTrailingZero,
+    FnParamsLayout, HexLiteralCase, TrailingComma, TypePunctuationDensity,
 };
 use crate::doc::{
     Doc, blank_line, concat, fill, group, group_always_break, group_overflow, group_within,
@@ -83,17 +83,114 @@ fn lower_non_sealed(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 // ---------------------------------------------------------------------------
 
 /// The bare text of a significant token. String literals and text blocks are emitted as
-/// raw (verbatim) text so their multi-line content is never reindented.
-fn token_text(tok: &SyntaxToken) -> Doc {
+/// raw (verbatim) text so their multi-line content is never reindented. An integer / float
+/// literal is normalized by the literal rules: [`FloatLiteralTrailingZero`] adjusts a decimal
+/// float's trailing zero and [`HexLiteralCase`] normalizes a hex literal's digit case (each a
+/// no-op under its default `Preserve`). Their domains are disjoint — trailing-zero touches only
+/// decimal floats, hex-case only `0x` literals — so the order merely future-proofs the pipeline.
+fn token_text(tok: &SyntaxToken, cfg: &Config) -> Doc {
     match tok.kind() {
         S::STRING_LITERAL | S::TEXT_BLOCK => raw(tok.text().to_string()),
+        S::INT_LITERAL | S::FLOAT_LITERAL => {
+            let original = tok.text();
+            let after_zero = map_float_trailing_zero(original, cfg.float_literal_trailing_zero);
+            let base = after_zero.as_deref().unwrap_or(original);
+            match map_hex_case(base, cfg.hex_literal_case).or(after_zero) {
+                Some(normalized) => text(normalized),
+                None => text(original.to_string()),
+            }
+        }
         _ => text(tok.text().to_string()),
     }
 }
 
+/// Normalize the trailing zero of a **decimal** floating-point literal `lit` per `policy`,
+/// returning the rewritten text — or `None` when nothing should change (the policy is
+/// [`Preserve`](FloatLiteralTrailingZero::Preserve), or `lit` is out of scope).
+///
+/// Out of scope (always `None`): a hex literal (`0x…`), a literal with no `.` (a dotless float
+/// `1e10` / `100f`, or any integer), and — for [`Never`](FloatLiteralTrailingZero::Never) — a
+/// leading-dot float (`.5` / `.0`, whose fraction can never be stripped without producing the
+/// illegal bare `.`). The literal's text is pure ASCII, so byte indices are char indices.
+///
+/// Let `frac` be the digit/underscore run right after the `.` (it stops at an `e` / `E` exponent
+/// marker or an `f` / `F` / `d` / `D` suffix). [`Always`](FloatLiteralTrailingZero::Always) inserts
+/// a single `0` when `frac` is empty; [`Never`](FloatLiteralTrailingZero::Never) removes `frac`
+/// when it is non-empty and consists solely of `0`s (so `1.50` and underscore fractions like
+/// `1.0_0` are left intact). Both transforms preserve the numeric value, the suffix, and the
+/// exponent, and are idempotent in a single pass.
+fn map_float_trailing_zero(lit: &str, policy: FloatLiteralTrailingZero) -> Option<String> {
+    if policy == FloatLiteralTrailingZero::Preserve {
+        return None;
+    }
+    let bytes = lit.as_bytes();
+    // Hex literals (`0x` / `0X`) are out of scope — left to `hex-literal-case`.
+    if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
+        return None;
+    }
+    // A dotless float (`1e10`, `100f`) or any integer literal has no fraction to normalize.
+    let dot = bytes.iter().position(|&b| b == b'.')?;
+    // The fraction is the digit/underscore run after the `.`; it ends at the exponent or suffix.
+    let mut frac_end = dot + 1;
+    while frac_end < bytes.len() && (bytes[frac_end].is_ascii_digit() || bytes[frac_end] == b'_') {
+        frac_end += 1;
+    }
+    match policy {
+        FloatLiteralTrailingZero::Always if frac_end == dot + 1 => {
+            // Empty fraction: insert a single `0` right after the `.` (`1.` → `1.0`).
+            Some(format!("{}0{}", &lit[..dot + 1], &lit[dot + 1..]))
+        }
+        FloatLiteralTrailingZero::Never
+            // Non-empty integer part (so the bare `.` is never produced) and an all-zero fraction.
+            if dot > 0
+                && frac_end > dot + 1
+                && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') =>
+        {
+            // Strip the whole zero run at once (`1.0` / `1.00` → `1.`) — required for idempotency.
+            Some(format!("{}{}", &lit[..dot + 1], &lit[frac_end..]))
+        }
+        _ => None,
+    }
+}
+
+/// Normalize the case of the hexadecimal digit letters (`a`–`f` / `A`–`F`) of `lit` per
+/// `case`, returning the rewritten text — or `None` when nothing should change (the policy is
+/// [`Preserve`](HexLiteralCase::Preserve), or `lit` is not a hex literal).
+///
+/// Only the hex *mantissa* digits are remapped. The `0x` / `0X` prefix is kept verbatim; for a
+/// hex float the mantissa stops at the `p` / `P` exponent marker (the marker, its sign and
+/// decimal digits, and any `f` / `F` / `d` / `D` suffix follow unchanged); for a hex integer it
+/// stops before a trailing `l` / `L` suffix. The mantissa of a well-formed literal holds only
+/// hex digits, `.`, and `_`, so an ASCII case map touches exactly the `a`–`f` letters.
+fn map_hex_case(lit: &str, case: HexLiteralCase) -> Option<String> {
+    if case == HexLiteralCase::Preserve {
+        return None;
+    }
+    let bytes = lit.as_bytes();
+    // A hex literal: `0x` / `0X` prefix. (The lexer only emits such a token with at least one
+    // hex digit after the prefix, and a numeric token's text is pure ASCII.)
+    if bytes.len() < 2 || bytes[0] != b'0' || !matches!(bytes[1], b'x' | b'X') {
+        return None;
+    }
+    let mantissa_end = match bytes[2..].iter().position(|b| matches!(b, b'p' | b'P')) {
+        // Hex float: the mantissa ends at the `p` / `P` exponent marker.
+        Some(i) => i + 2,
+        // Hex integer: the mantissa ends before a trailing `l` / `L` suffix, if any.
+        None if matches!(bytes.last(), Some(b'l' | b'L')) => lit.len() - 1,
+        None => lit.len(),
+    };
+    let mantissa = &lit[2..mantissa_end];
+    let mapped = match case {
+        HexLiteralCase::Upper => mantissa.to_ascii_uppercase(),
+        HexLiteralCase::Lower => mantissa.to_ascii_lowercase(),
+        HexLiteralCase::Preserve => unreachable!("handled above"),
+    };
+    Some(format!("{}{}{}", &lit[..2], mapped, &lit[mantissa_end..]))
+}
+
 /// A significant token with its attached comments.
 pub(crate) fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
-    ctx.comments.token(tok, token_text(tok))
+    ctx.comments.token(tok, token_text(tok, ctx.cfg))
 }
 
 /// The first non-trivia token contained in `node`, if any.
@@ -104,7 +201,7 @@ pub(crate) fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 }
 
 /// The last non-trivia token contained in `node`, if any.
-fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub(crate) fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
         .filter_map(|e| e.into_token())
         .filter(|t| !t.kind().is_trivia())
@@ -186,7 +283,7 @@ fn would_fuse(a: &str, b: &str) -> bool {
 
 /// The separator document between `prev` (if any) and the token `next`. Applies the
 /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
-fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
+pub(crate) fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
     let Some(p) = prev else {
         return nil();
     };
@@ -252,11 +349,19 @@ pub(crate) fn lower_elements(
 
     for el in els {
         if let Some(child) = el.as_node() {
-            if let Some(first) = first_sig_token(child) {
+            // A reordered `MODIFIERS` node emits its tokens in a different order than the tree,
+            // so the separators around it must use the *emitted* boundary tokens (see
+            // `modifiers::emitted_boundary_tokens`); every other node emits in tree order.
+            let (emitted_first, emitted_last) = if child.kind() == S::MODIFIERS {
+                crate::modifiers::emitted_boundary_tokens(child, ctx.cfg)
+            } else {
+                (first_sig_token(child), last_sig_token(child))
+            };
+            if let Some(first) = emitted_first.as_ref() {
                 let s = if hug_witness {
                     nil()
                 } else {
-                    flow_sep(ctx, control_flow, prev.as_ref(), child.kind(), &first)
+                    flow_sep(ctx, control_flow, prev.as_ref(), child.kind(), first)
                 };
                 parts.push(s);
             }
@@ -266,7 +371,7 @@ pub(crate) fn lower_elements(
                     Some(S::DOT | S::COLON_COLON)
                 );
             parts.push(lower(child, ctx));
-            if let Some(last) = last_sig_token(child) {
+            if let Some(last) = emitted_last {
                 prev = Some(last);
             }
         } else if let Some(t) = el.as_token() {
@@ -1027,4 +1132,145 @@ fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         }
     }
     concat(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_float_trailing_zero, map_hex_case};
+    use crate::config::FloatLiteralTrailingZero::{self, Always, Never};
+    use crate::config::HexLiteralCase::{Lower, Preserve, Upper};
+
+    #[test]
+    fn preserve_is_a_no_op() {
+        assert_eq!(map_hex_case("0xFf", Preserve), None);
+    }
+
+    #[test]
+    fn non_hex_literals_are_untouched() {
+        // Decimal, octal, and binary literals have no hex digits and no `0x` prefix.
+        for lit in ["123", "0", "0777", "0b1010", "1_000L", "3.14f", "1e10"] {
+            assert_eq!(map_hex_case(lit, Upper), None, "{lit}");
+            assert_eq!(map_hex_case(lit, Lower), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn maps_hex_integer_digits() {
+        assert_eq!(map_hex_case("0xff", Upper).as_deref(), Some("0xFF"));
+        assert_eq!(map_hex_case("0xFF", Lower).as_deref(), Some("0xff"));
+        assert_eq!(
+            map_hex_case("0xCafeBabe", Upper).as_deref(),
+            Some("0xCAFEBABE")
+        );
+        assert_eq!(
+            map_hex_case("0xCafeBabe", Lower).as_deref(),
+            Some("0xcafebabe")
+        );
+    }
+
+    #[test]
+    fn keeps_the_radix_prefix_case() {
+        // The `0x` / `0X` prefix is never rewritten — only the digits after it.
+        assert_eq!(map_hex_case("0Xff", Upper).as_deref(), Some("0XFF"));
+        assert_eq!(map_hex_case("0XFF", Lower).as_deref(), Some("0Xff"));
+    }
+
+    #[test]
+    fn keeps_the_integer_suffix_case() {
+        // The `l` / `L` suffix is outside the mantissa and keeps its case.
+        assert_eq!(map_hex_case("0xabl", Upper).as_deref(), Some("0xABl"));
+        assert_eq!(map_hex_case("0xABL", Lower).as_deref(), Some("0xabL"));
+        // `_` separators in the mantissa are preserved.
+        assert_eq!(
+            map_hex_case("0xDEAD_beefL", Lower).as_deref(),
+            Some("0xdead_beefL")
+        );
+    }
+
+    #[test]
+    fn maps_hex_float_mantissa_only() {
+        // The mantissa (before `p`) is mapped; the `p` exponent, its decimal digits, and any
+        // `f` / `d` suffix keep their case.
+        assert_eq!(map_hex_case("0xA.Bp1f", Lower).as_deref(), Some("0xa.bp1f"));
+        assert_eq!(map_hex_case("0xa.bP1F", Upper).as_deref(), Some("0xA.BP1F"));
+        // `f` / `d` are valid hex digits in the mantissa, but a suffix after the exponent is not.
+        assert_eq!(map_hex_case("0xFp2d", Lower).as_deref(), Some("0xfp2d"));
+        assert_eq!(map_hex_case("0X1P-2D", Lower).as_deref(), Some("0X1P-2D"));
+    }
+
+    #[test]
+    fn float_trailing_zero_preserve_is_a_no_op() {
+        for lit in ["1.0", "1.", "1.50", "0x1.0p3"] {
+            assert_eq!(
+                map_float_trailing_zero(lit, FloatLiteralTrailingZero::Preserve),
+                None,
+                "{lit}"
+            );
+        }
+    }
+
+    #[test]
+    fn float_trailing_zero_skips_dotless_and_non_float_literals() {
+        // No `.` to normalize: dotless floats and every integer literal are untouched.
+        for lit in ["1e10", "100f", "1f", "123", "0xCafe", "0b1010", "0777"] {
+            assert_eq!(map_float_trailing_zero(lit, Always), None, "{lit}");
+            assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn float_trailing_zero_skips_hex_floats() {
+        // Hex floats are left to `hex-literal-case`; the `0x` prefix opts them out of both modes.
+        for lit in ["0x1.0p3", "0x1.p3", "0X1.0P-2f"] {
+            assert_eq!(map_float_trailing_zero(lit, Always), None, "{lit}");
+            assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn always_inserts_a_single_trailing_zero() {
+        assert_eq!(
+            map_float_trailing_zero("1.", Always).as_deref(),
+            Some("1.0")
+        );
+        assert_eq!(
+            map_float_trailing_zero("1.f", Always).as_deref(),
+            Some("1.0f")
+        );
+        assert_eq!(
+            map_float_trailing_zero("1.e10", Always).as_deref(),
+            Some("1.0e10")
+        );
+        // A fraction that already has a digit (even another zero) is left as written.
+        for lit in ["1.0", "1.00", "1.5", ".5", ".0"] {
+            assert_eq!(map_float_trailing_zero(lit, Always), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn never_strips_an_all_zero_fraction() {
+        assert_eq!(map_float_trailing_zero("1.0", Never).as_deref(), Some("1."));
+        assert_eq!(
+            map_float_trailing_zero("1.00", Never).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(map_float_trailing_zero("0.0", Never).as_deref(), Some("0."));
+        assert_eq!(
+            map_float_trailing_zero("1.0f", Never).as_deref(),
+            Some("1.f")
+        );
+        assert_eq!(
+            map_float_trailing_zero("1.0e10", Never).as_deref(),
+            Some("1.e10")
+        );
+    }
+
+    #[test]
+    fn never_keeps_nonzero_underscore_empty_and_leading_dot_fractions() {
+        // A non-zero digit, an underscore-grouped fraction, an already-empty fraction, and a
+        // leading-dot float (stripping which would yield the illegal bare `.`) are all untouched.
+        for lit in ["1.5", "1.50", "1.05", "1.0_0", "1.", ".0", ".5"] {
+            assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
+        }
+    }
 }

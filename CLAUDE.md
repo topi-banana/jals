@@ -68,7 +68,7 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
    aborting.
 4. **Formatter fidelity.** Comments are never dropped, and formatting is idempotent
    (`format(format(x)) == format(x)`). By default the significant-token *sequence* (non-trivia
-   tokens) is preserved exactly. Four options, each off by default, relax this:
+   tokens) is preserved exactly. Six options, each off by default, relax this:
    - **`reorder-imports`** may reorder import declarations. The significant-token *multiset* is
      still preserved (none added, dropped, or altered), and each comment stays glued to its
      anchoring token (so a comment moves, with its token, when that token is reordered).
@@ -82,9 +82,19 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
      single trailing comma of an **array initializer** — the only Java list (besides enum
      constant lists) where that token is legal. No other token is touched, and a dropped comma
      that carries a comment is kept, so comments are never lost.
-   Idempotency holds in every case. With all four at their defaults (`reorder-imports`,
-   `group-imports`, and `reorder-modifiers` off, `trailing-comma = preserve`), the
-   exact-sequence guarantee is in full force.
+   - **`hex-literal-case`** (any value other than `preserve`, the default) may rewrite the case
+     of the hex digits of an integer / float literal (`0xCafe` → `0xCAFE` / `0xcafe`). The token
+     *kind* sequence is preserved exactly — only a hex literal's *text* changes, and only the
+     mantissa digits (the `0x` prefix, `p` exponent, and `l`/`f`/`d` suffix are untouched).
+   - **`float-literal-trailing-zero`** (any value other than `preserve`, the default) may add or
+     strip the trailing zero of a **decimal** float literal (`1.0` ↔ `1.`). The token *kind*
+     sequence is preserved exactly — only an in-scope decimal float's *text* changes; a non-zero
+     fraction (`1.50`), a leading-dot float (`.5`), a dotless float (`1e10`), a hex float
+     (`0x1.0p3`), and integers are untouched, as are the value, suffix, and exponent.
+   Idempotency holds in every case. With all six at their defaults (`reorder-imports`,
+   `group-imports`, and `reorder-modifiers` off, `trailing-comma = preserve`,
+   `hex-literal-case = preserve`, `float-literal-trailing-zero = preserve`), the exact-sequence
+   guarantee is in full force.
 5. **`wasm32` compatibility.** Everything except `jals-cli` and `jals-lsp` must build for
    `wasm32-unknown-unknown` (both are host-only: `jals-cli` does filesystem/process work,
    `jals-lsp` uses tokio/stdio). Do not add non-wasm-compatible deps or `std::fs`/process/IO
