@@ -44,6 +44,9 @@ fn symbol_for_decl(decl: &Decl, text: &str, idx: &LineIndex) -> DocumentSymbol {
             idx,
         ),
         Decl::Enum(d) => enum_symbol(d, text, idx),
+        // Top-level field / method of a compact source file (JEP 512).
+        Decl::Field(d) => leaf(d.syntax(), d.name(), SymbolKind::FIELD, text, idx),
+        Decl::Method(d) => leaf(d.syntax(), d.name(), SymbolKind::METHOD, text, idx),
     }
 }
 
@@ -199,6 +202,21 @@ mod tests {
         assert_eq!(
             (children[2].name.as_str(), children[2].kind),
             ("m", SymbolKind::METHOD)
+        );
+    }
+
+    #[test]
+    fn top_level_members_in_compact_source_file() {
+        // JEP 512: top-level field / method declarations become document symbols directly.
+        let syms = symbols("int count = 0;\nvoid main() {}\n");
+        assert_eq!(syms.len(), 2);
+        assert_eq!(
+            (syms[0].name.as_str(), syms[0].kind),
+            ("count", SymbolKind::FIELD)
+        );
+        assert_eq!(
+            (syms[1].name.as_str(), syms[1].kind),
+            ("main", SymbolKind::METHOD)
         );
     }
 

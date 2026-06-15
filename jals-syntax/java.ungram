@@ -75,12 +75,17 @@ ProvidesDirective =
 
 // ===== Type declarations =====
 
+// A top-level declaration in a source file. Besides type declarations, a compact
+// source file (JEP 512) may declare fields and methods directly at the top level —
+// they are members of the file's implicit class.
 Decl =
   ClassDecl
 | InterfaceDecl
 | EnumDecl
 | RecordDecl
 | AnnotationTypeDecl
+| MethodDecl
+| FieldDecl
 
 ClassDecl =
   modifiers:Modifiers 'class' name:'ident' type_params:TypeParams?

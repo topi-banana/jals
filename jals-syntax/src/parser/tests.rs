@@ -286,6 +286,141 @@ fn class_with_field_and_method() {
 }
 
 #[test]
+fn top_level_main_method_compact_source_file() {
+    // JEP 512: a method declared directly at the top level (no enclosing class).
+    check(
+        "void main() {\n    System.out.println(\"Hello\");\n}\n",
+        expect![[r#"
+            SOURCE_FILE@0..49
+              METHOD_DECL@0..48
+                MODIFIERS@0..0
+                TYPE@0..4
+                  VOID_KW@0..4 "void"
+                WHITESPACE@4..5 " "
+                IDENT@5..9 "main"
+                PARAM_LIST@9..11
+                  LPAREN@9..10 "("
+                  RPAREN@10..11 ")"
+                BLOCK@11..48
+                  WHITESPACE@11..12 " "
+                  LBRACE@12..13 "{"
+                  EXPR_STMT@13..46
+                    CALL_EXPR@13..45
+                      FIELD_ACCESS@13..36
+                        FIELD_ACCESS@13..28
+                          NAME_REF@13..24
+                            NEWLINE@13..14 "\n"
+                            WHITESPACE@14..18 "    "
+                            IDENT@18..24 "System"
+                          DOT@24..25 "."
+                          IDENT@25..28 "out"
+                        DOT@28..29 "."
+                        IDENT@29..36 "println"
+                      ARG_LIST@36..45
+                        LPAREN@36..37 "("
+                        LITERAL@37..44
+                          STRING_LITERAL@37..44 "\"Hello\""
+                        RPAREN@44..45 ")"
+                    SEMICOLON@45..46 ";"
+                  NEWLINE@46..47 "\n"
+                  RBRACE@47..48 "}"
+              NEWLINE@48..49 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn top_level_field_and_generic_method() {
+    // JEP 512: a top-level field, a top-level generic method, and a type declaration
+    // can all coexist as members of the file's implicit class.
+    check(
+        "private static int count = 0;\nenum Color { RED, GREEN }\n<T> T id(T x) { return x; }\n",
+        expect![[r#"
+            SOURCE_FILE@0..84
+              FIELD_DECL@0..29
+                MODIFIERS@0..14
+                  PRIVATE_KW@0..7 "private"
+                  WHITESPACE@7..8 " "
+                  STATIC_KW@8..14 "static"
+                TYPE@14..18
+                  WHITESPACE@14..15 " "
+                  INT_KW@15..18 "int"
+                WHITESPACE@18..19 " "
+                IDENT@19..24 "count"
+                WHITESPACE@24..25 " "
+                EQ@25..26 "="
+                LITERAL@26..28
+                  WHITESPACE@26..27 " "
+                  INT_LITERAL@27..28 "0"
+                SEMICOLON@28..29 ";"
+              ENUM_DECL@29..55
+                MODIFIERS@29..29
+                NEWLINE@29..30 "\n"
+                ENUM_KW@30..34 "enum"
+                WHITESPACE@34..35 " "
+                IDENT@35..40 "Color"
+                ENUM_BODY@40..55
+                  WHITESPACE@40..41 " "
+                  LBRACE@41..42 "{"
+                  ENUM_CONSTANT@42..46
+                    WHITESPACE@42..43 " "
+                    IDENT@43..46 "RED"
+                  COMMA@46..47 ","
+                  ENUM_CONSTANT@47..53
+                    WHITESPACE@47..48 " "
+                    IDENT@48..53 "GREEN"
+                  WHITESPACE@53..54 " "
+                  RBRACE@54..55 "}"
+              METHOD_DECL@55..83
+                MODIFIERS@55..55
+                TYPE_PARAMS@55..59
+                  NEWLINE@55..56 "\n"
+                  LT@56..57 "<"
+                  TYPE_PARAM@57..58
+                    IDENT@57..58 "T"
+                  GT@58..59 ">"
+                TYPE@59..61
+                  WHITESPACE@59..60 " "
+                  IDENT@60..61 "T"
+                WHITESPACE@61..62 " "
+                IDENT@62..64 "id"
+                PARAM_LIST@64..69
+                  LPAREN@64..65 "("
+                  PARAM@65..68
+                    MODIFIERS@65..65
+                    TYPE@65..66
+                      IDENT@65..66 "T"
+                    WHITESPACE@66..67 " "
+                    IDENT@67..68 "x"
+                  RPAREN@68..69 ")"
+                BLOCK@69..83
+                  WHITESPACE@69..70 " "
+                  LBRACE@70..71 "{"
+                  RETURN_STMT@71..81
+                    WHITESPACE@71..72 " "
+                    RETURN_KW@72..78 "return"
+                    NAME_REF@78..80
+                      WHITESPACE@78..79 " "
+                      IDENT@79..80 "x"
+                    SEMICOLON@80..81 ";"
+                  WHITESPACE@81..82 " "
+                  RBRACE@82..83 "}"
+              NEWLINE@83..84 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn method_ref_malformed_angles_no_panic() {
+    // Regression: `at_generic_method_ref` accepts `<0<>>` as a balanced angle run, but the
+    // real consumer `type_args` stops short on the non-type `0`, leaving the cursor off the
+    // `::`. `method_ref_tail` must `expect` (not `bump`) the `::` to stay panic-free. Reachable
+    // both inside a class body and — since JEP 512 — at the top level via a field initializer.
+    assert_lossless("class C { Object o = x<0<>>::; }");
+    assert_lossless("x=x<0<>>::");
+}
+
+#[test]
 fn generics_nested_close() {
     check(
         "class C { Map<K, List<V>> m; }",
