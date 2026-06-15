@@ -1574,6 +1574,38 @@ fn trailing_comma_modes_are_idempotent() {
     }
 }
 
+#[test]
+fn trailing_comma_unclosed_array_is_not_synthesized() {
+    // Regression: an array initializer left unclosed by error recovery (no `}`) must NOT gain a
+    // synthesized trailing comma. With no closing brace the comma would not be trailing — on a
+    // re-parse it reads as an item separator that pulls the following token into the list,
+    // breaking idempotency. The source is preserved exactly here (no comma added after `beta`).
+    expect![[r#"
+        class A { int [] x = {
+            alpha,
+            beta
+    "#]]
+    .assert_eq(&fmt_trailing_narrow(
+        "class A{int[] x={alpha,beta",
+        TrailingComma::Vertical,
+    ));
+}
+
+#[test]
+fn trailing_comma_unclosed_array_is_idempotent() {
+    // The non-idempotency this guards against only appears across two passes, so assert both
+    // modes that synthesize a comma reach a fixed point on an unclosed initializer.
+    for mode in [TrailingComma::Always, TrailingComma::Vertical] {
+        let src = "class A{int[] x={alpha,beta";
+        let once = fmt_trailing_narrow(src, mode);
+        let twice = fmt_trailing_narrow(&once, mode);
+        assert_eq!(
+            once, twice,
+            "unclosed-array trailing-comma {mode:?} must be idempotent"
+        );
+    }
+}
+
 // ===== reorder-imports =====
 
 #[test]

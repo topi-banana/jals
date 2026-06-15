@@ -886,6 +886,9 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // and fill from the real tokens so the significant-token sequence is preserved.
     let mut open_doc = nil();
     let mut close_doc = nil();
+    // Whether a closing delimiter token was actually present. A list left open by error
+    // recovery has none; synthesizing a trailing comma there is unsafe (see `policy` below).
+    let mut has_close = false;
     // Each row is one item's content plus the comma token that follows it (if any). The comma
     // of the final row is the list's (optional) trailing comma.
     let mut rows: Vec<(Doc, Option<SyntaxToken>)> = Vec::new();
@@ -903,7 +906,10 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             let kind = t.kind();
             match kind {
                 S::LPAREN | S::LBRACE | S::LBRACK => open_doc = tok(t, ctx),
-                S::RPAREN | S::RBRACE | S::RBRACK => close_doc = tok(t, ctx),
+                S::RPAREN | S::RBRACE | S::RBRACK => {
+                    close_doc = tok(t, ctx);
+                    has_close = true;
+                }
                 S::COMMA => {
                     // The comma ends the current item; keep it so the trailing one can follow
                     // the `trailing-comma` policy while inter-item commas stay verbatim.
@@ -929,8 +935,11 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
     // Only an array initializer honors `trailing-comma`; every other delimited list preserves
     // the source exactly (a trailing comma elsewhere is invalid Java, reachable only via error
-    // recovery, so dropping/adding one is never appropriate).
-    let policy = if node.kind() == S::ARRAY_INIT {
+    // recovery, so dropping/adding one is never appropriate). An initializer left unclosed by
+    // error recovery (no `}`) is also preserved: with no closing brace a synthesized trailing
+    // comma is not actually trailing — on a re-parse it reads as an item separator and pulls the
+    // following token into the list, which would break idempotency.
+    let policy = if node.kind() == S::ARRAY_INIT && has_close {
         ctx.cfg.trailing_comma
     } else {
         TrailingComma::Preserve
