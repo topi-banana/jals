@@ -824,6 +824,7 @@ dependencies = [
  "anyhow",
  "clap",
  "jals-fmt",
+ "jals-lint",
  "jals-lsp",
  "tempfile",
 ]
@@ -838,6 +839,17 @@ dependencies = [
  "serde",
  "toml",
  "unicode-width",
+]
+
+[[package]]
+name = "jals-lint"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "jals-syntax",
+ "proptest",
+ "serde",
+ "toml",
 ]
 
 [[package]]

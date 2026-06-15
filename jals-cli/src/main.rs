@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use jals_fmt::{Config, FormatOutput};
+use jals_lint::{Config as LintConfig, LintOutput};
 
 #[derive(Parser)]
 #[command(name = "jals", version, about = "JALS/Java tooling")]
@@ -20,6 +21,8 @@ struct Cli {
 enum Commands {
     /// Format JALS/Java source files.
     Fmt(FmtArgs),
+    /// Lint JALS/Java source files.
+    Lint(LintArgs),
     /// Run the language server (LSP) over stdio.
     Lsp(LspArgs),
 }
@@ -45,6 +48,17 @@ struct FmtArgs {
 }
 
 #[derive(Args)]
+struct LintArgs {
+    /// Files or directories to lint. Directories are searched recursively for `.java` files.
+    /// With no paths, source is read from stdin.
+    paths: Vec<PathBuf>,
+
+    /// Use this config file instead of discovering `jalslint.toml`.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct LspArgs {
     /// Accepted for editor compatibility; the stdio transport is always used.
     #[arg(long)]
@@ -56,6 +70,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Commands::Fmt(args) => run_fmt(args),
         Commands::Lsp(args) => run_lsp(args),
+        Commands::Lint(args) => run_lint(args),
     };
     match result {
         Ok(code) => code,
@@ -120,6 +135,44 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
 
     let fail = (args.check && any_changed) || (deny_warnings && any_warning);
     Ok(if fail {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+fn run_lint(args: LintArgs) -> Result<ExitCode> {
+    let explicit_config = args
+        .config
+        .as_deref()
+        .map(LintConfig::from_file)
+        .transpose()
+        .context("loading --config")?;
+
+    let mut discovery = LintDiscovery::new(explicit_config);
+    let mut any_finding = false;
+
+    if args.paths.is_empty() {
+        // stdin
+        let mut src = String::new();
+        std::io::stdin()
+            .read_to_string(&mut src)
+            .context("reading stdin")?;
+        let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
+        let out = jals_lint::lint_source(&src, &cfg);
+        any_finding |= report_lint(&out, "<stdin>", &src);
+    } else {
+        for path in collect_java_files(&args.paths)? {
+            let src = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let cfg = discovery.for_dir(parent)?;
+            let out = jals_lint::lint_source(&src, &cfg);
+            any_finding |= report_lint(&out, &path.display().to_string(), &src);
+        }
+    }
+
+    Ok(if any_finding {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -198,4 +251,65 @@ fn report_warnings(out: &FormatOutput, label: &str) {
             w.range.start, w.range.end, w.message
         );
     }
+}
+
+/// Resolves the lint config for a directory, mirroring [`Discovery`] for [`jals_lint::Config`]:
+/// either from an explicit `--config` (used for all files) or by discovering `jalslint.toml`,
+/// memoized per directory.
+struct LintDiscovery {
+    explicit: Option<LintConfig>,
+    cache: HashMap<PathBuf, LintConfig>,
+}
+
+impl LintDiscovery {
+    fn new(explicit: Option<LintConfig>) -> Self {
+        LintDiscovery {
+            explicit,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn for_dir(&mut self, dir: &Path) -> Result<LintConfig> {
+        if let Some(cfg) = &self.explicit {
+            return Ok(cfg.clone());
+        }
+        if let Some(cfg) = self.cache.get(dir) {
+            return Ok(cfg.clone());
+        }
+        let cfg = LintConfig::discover(dir)
+            .with_context(|| format!("discovering config from {}", dir.display()))?;
+        self.cache.insert(dir.to_path_buf(), cfg.clone());
+        Ok(cfg)
+    }
+}
+
+/// Print every diagnostic (and parser error) for one file as `label:line:col: severity[rule]:
+/// message`. Returns whether anything was reported.
+fn report_lint(out: &LintOutput, label: &str, src: &str) -> bool {
+    for d in out.diagnostics.iter().chain(&out.parse_errors) {
+        let (line, col) = line_col(src, d.range.start);
+        eprintln!(
+            "{label}:{line}:{col}: {}[{}]: {}",
+            d.severity, d.rule, d.message
+        );
+    }
+    out.has_diagnostics()
+}
+
+/// Translate a byte offset into a 1-based (line, column) pair, counting columns in characters.
+fn line_col(src: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in src.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
