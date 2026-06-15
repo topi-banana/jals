@@ -281,6 +281,14 @@ pub struct Config {
     /// wraps when it would overflow [`max_width`](Config::max_width)). Mirrors rustfmt's
     /// `array_width`.
     pub array_width: usize,
+    /// Maximum flat width of a ternary conditional (`a ? b : c`) kept on a single line. A
+    /// ternary whose flat width exceeds this — or that would overflow
+    /// [`max_width`](Config::max_width) — wraps, the `?` and `:` placed per
+    /// [`binop_separator`](Config::binop_separator) (leading the continuation line under
+    /// `front`, trailing the broken line under `back`). A value of `0` wraps every ternary.
+    /// Layout-only — the significant-token sequence is preserved exactly. Mirrors rustfmt's
+    /// `single_line_if_else_max_width` (whose Rust if-else expression maps to Java's ternary).
+    pub single_line_if_else_max_width: usize,
     /// Placement of the opening brace of a declaration body (type, method, constructor, or
     /// initializer): same line (K&R) or next line (Allman). Control-flow blocks
     /// (`if`/`for`/`while`/`try`/…), `switch`, and lambda bodies are governed separately by
@@ -435,6 +443,7 @@ impl Default for Config {
             chain_width: 60,
             fn_call_width: 60,
             array_width: 60,
+            single_line_if_else_max_width: 50,
             brace_style: BraceStyle::SameLine,
             empty_item_single_line: true,
             fn_single_line: false,
@@ -797,6 +806,12 @@ mod tests {
     fn array_width_parses_kebab_key() {
         let c: Config = toml::from_str("array-width = 40\n").unwrap();
         assert_eq!(c.array_width, 40);
+    }
+
+    #[test]
+    fn single_line_if_else_max_width_parses_kebab_key() {
+        let c: Config = toml::from_str("single-line-if-else-max-width = 40\n").unwrap();
+        assert_eq!(c.single_line_if_else_max_width, 40);
     }
 
     #[test]

@@ -853,6 +853,35 @@ fn fn_single_line_keeps_commented_body_multiline() {
 }
 
 #[test]
+fn fn_single_line_keeps_body_multiline_when_header_has_trailing_comment() {
+    // A trailing comment on a header token (here, the return type) renders as a line suffix that
+    // flushes at the body's first newline. Collapsing the body to one line would relocate it past
+    // the closing brace, re-anchoring it on the next parse and breaking idempotency — so the body
+    // stays multi-line and the comment keeps its place.
+    expect![[r#"
+        class C {
+            int foo() {  /*c*/
+                return 1;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_fn_single_line("class C{int/*c*/foo(){return 1;}}"));
+}
+
+#[test]
+fn fn_single_line_header_trailing_comment_is_idempotent() {
+    // The header-trailing-comment case must be idempotent (it previously collapsed once, then
+    // expanded — the comment having moved past the brace flipped the collapse decision).
+    let src = "class C{int foo()/*c*/{return 1;}}";
+    let once = fmt_fn_single_line(src);
+    let twice = fmt_fn_single_line(&once);
+    assert_eq!(
+        once, twice,
+        "header-trailing-comment collapse must be idempotent"
+    );
+}
+
+#[test]
 fn fn_single_line_next_line_collapses_when_fits_else_opens_brace() {
     // Under `brace-style = next-line` a fitting single-statement body still collapses to one
     // line; an overflowing one falls back to the next-line brace layout.
@@ -2547,6 +2576,141 @@ fn overflow_is_idempotent() {
     let once = fmt_overflow(src);
     let twice = fmt_overflow(&once);
     assert_eq!(once, twice, "overflow layout must be idempotent");
+}
+
+// ---------------------------------------------------------------------------
+// Ternary wrapping (`single-line-if-else-max-width`)
+// ---------------------------------------------------------------------------
+
+fn fmt_ternary(src: &str, width: usize) -> String {
+    let cfg = Config {
+        single_line_if_else_max_width: width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn fmt_ternary_back(src: &str, width: usize) -> String {
+    let cfg = Config {
+        single_line_if_else_max_width: width,
+        binop_separator: BinopSeparator::Back,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn ternary_within_width_stays_flat() {
+    // A ternary whose flat width fits the budget keeps the inline form, with the `:` spacing
+    // following the colon options (default: no space before, one after).
+    expect![[r#"
+        class C {
+            int m() {
+                return x > 0 ? 1: 2;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ternary("class C{int m(){return x>0?1:2;}}", 50));
+}
+
+#[test]
+fn ternary_exceeding_width_wraps_front() {
+    // Past the budget the ternary wraps, `?` and `:` leading the continuation lines (front).
+    expect![[r#"
+        class C {
+            int m() {
+                return someCondition
+                    ? thisIsARatherLongThenExpression
+                    : theElseBranchValue;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ternary(
+        "class C{int m(){return someCondition?thisIsARatherLongThenExpression:theElseBranchValue;}}",
+        50,
+    ));
+}
+
+#[test]
+fn ternary_exceeding_width_wraps_back() {
+    // The same source under `binop-separator = back`: `?` and `:` trail the broken lines.
+    expect![[r#"
+        class C {
+            int m() {
+                return someCondition ?
+                    thisIsARatherLongThenExpression:
+                    theElseBranchValue;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ternary_back(
+        "class C{int m(){return someCondition?thisIsARatherLongThenExpression:theElseBranchValue;}}",
+        50,
+    ));
+}
+
+#[test]
+fn ternary_zero_width_always_wraps() {
+    // A width of `0` forces even a tiny ternary to wrap.
+    expect![[r#"
+        class C {
+            int m() {
+                return x > 0
+                    ? 1
+                    : 2;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ternary("class C{int m(){return x>0?1:2;}}", 0));
+}
+
+#[test]
+fn ternary_wrap_respects_colon_spacing() {
+    // The wrapped `:` line honors `space-before-colon`: with it on, a space precedes the `:`.
+    let cfg = Config {
+        single_line_if_else_max_width: 0,
+        space_before_colon: true,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C {
+            int m() {
+                return x > 0
+                    ? 1
+                    : 2;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_with("class C{int m(){return x>0?1:2;}}", &cfg));
+}
+
+#[test]
+fn ternary_nested_wraps_independently() {
+    // A nested ternary (the else branch is itself a ternary) is its own group; each wraps when
+    // it exceeds the budget.
+    expect![[r#"
+        class C {
+            int m() {
+                return firstCondition
+                    ? firstValueExpression
+                    : secondConditionHere
+                        ? secondValueExpression
+                        : thirdFallbackValue;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_ternary(
+        "class C{int m(){return firstCondition?firstValueExpression:secondConditionHere?secondValueExpression:thirdFallbackValue;}}",
+        50,
+    ));
+}
+
+#[test]
+fn ternary_wrap_is_idempotent() {
+    let src = "class C{int m(){return someCondition?thisIsARatherLongThenExpression:theElseBranchValue;}}";
+    let once = fmt_ternary(src, 50);
+    let twice = fmt_ternary(&once, 50);
+    assert_eq!(once, twice, "ternary wrapping must be idempotent");
 }
 
 // ---------------------------------------------------------------------------
