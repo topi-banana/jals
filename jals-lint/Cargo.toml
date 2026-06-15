@@ -1,0 +1,13 @@
+[package]
+name = "jals-lint"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jals-syntax.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+
+[dev-dependencies]
+expect-test = "1.5"
+proptest = "1"
