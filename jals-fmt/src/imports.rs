@@ -435,7 +435,10 @@ mod tests {
     #[test]
     fn group_rank_module_leads() {
         // Module imports always take the leading rank 0, before every prefix group and static.
-        let run = run_of("import module java.base;import java.util.List;import static a.A.a;class C{}");
+        let run = run_of(
+            "import module java.base;import java.util.List;\
+             import static a.A.a;class C{}",
+        );
         let c = Config::default();
         assert_eq!(import_group_rank(&run[0], &c.import_groups), 0);
         assert!(import_group_rank(&run[1], &c.import_groups) > 0);
@@ -444,7 +447,10 @@ mod tests {
 
     #[test]
     fn sort_module_tier_leads() {
-        let run = run_of("import b.B;import module java.base;import static a.A.a;import a.A;class C{}");
+        let run = run_of(
+            "import b.B;import module java.base;import static a.A.a;\
+             import a.A;class C{}",
+        );
         let plan = plan_run(run, ImportOrdering::Sort);
         assert_eq!(names(&plan.imports), ["java.base", "a.A", "b.B", "a.A.a"]);
     }
