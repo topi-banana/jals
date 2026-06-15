@@ -108,6 +108,51 @@ fn package_and_imports() {
 }
 
 #[test]
+fn module_import() {
+    // `import module M;` (JEP 511): `module` is remapped from IDENT to MODULE_KW.
+    check(
+        "import module java.base;\n",
+        expect![[r#"
+            SOURCE_FILE@0..25
+              IMPORT_DECL@0..24
+                IMPORT_KW@0..6 "import"
+                WHITESPACE@6..7 " "
+                MODULE_KW@7..13 "module"
+                QUALIFIED_NAME@13..23
+                  WHITESPACE@13..14 " "
+                  IDENT@14..18 "java"
+                  DOT@18..19 "."
+                  IDENT@19..23 "base"
+                SEMICOLON@23..24 ";"
+              NEWLINE@24..25 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn module_named_package_is_ordinary_import() {
+    // `module` followed by `.` is a package segment, not the module-import keyword, so this
+    // stays an ordinary type import of `module.foo.Bar`.
+    check(
+        "import module.foo.Bar;\n",
+        expect![[r#"
+            SOURCE_FILE@0..23
+              IMPORT_DECL@0..22
+                IMPORT_KW@0..6 "import"
+                QUALIFIED_NAME@6..21
+                  WHITESPACE@6..7 " "
+                  IDENT@7..13 "module"
+                  DOT@13..14 "."
+                  IDENT@14..17 "foo"
+                  DOT@17..18 "."
+                  IDENT@18..21 "Bar"
+                SEMICOLON@21..22 ";"
+              NEWLINE@22..23 "\n"
+        "#]],
+    );
+}
+
+#[test]
 fn module_info_directives() {
     check(
         "open module a.b {\n  requires transitive java.base;\n  exports p.q to m.n;\n  uses p.S;\n  provides p.S with p.Impl;\n}\n",

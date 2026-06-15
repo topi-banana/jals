@@ -34,7 +34,7 @@ PackageDecl =
   'package' name:QualifiedName ';'
 
 ImportDecl =
-  'import' is_static:'static'? name:QualifiedName ';'
+  'import' is_static:'static'? is_module:'module'? name:QualifiedName ';'
 
 QualifiedName =
   'ident' ('.' 'ident')* ('.' is_wildcard:'*')?

@@ -218,24 +218,43 @@ fn import_name(node: &SyntaxNode) -> String {
         .unwrap_or_default()
 }
 
-/// The total, deterministic sort key for an import under `reorder-imports`: non-static (`false`)
-/// before static (`true`), then the dotted name text in lexicographic order. Duplicates are kept
-/// (stable sort).
-fn import_sort_key(node: &SyntaxNode) -> (bool, String) {
-    let is_static = ImportDecl::cast(node.clone()).is_some_and(|i| i.is_static());
-    (is_static, import_name(node))
+/// The ordering tier of an import: module imports (`0`) lead, then ordinary type imports (`1`),
+/// then static imports (`2`). `import module M;` (JEP 511) is a broad aggregate import, so it
+/// forms its own leading tier — symmetric to static's trailing tier.
+fn import_tier(node: &SyntaxNode) -> u8 {
+    let Some(import) = ImportDecl::cast(node.clone()) else {
+        return 1;
+    };
+    if import.is_module() {
+        0
+    } else if import.is_static() {
+        2
+    } else {
+        1
+    }
+}
+
+/// The total, deterministic sort key for an import under `reorder-imports`: by tier (module,
+/// then ordinary, then static), then the dotted name text in lexicographic order. Duplicates are
+/// kept (stable sort).
+fn import_sort_key(node: &SyntaxNode) -> (u8, String) {
+    (import_tier(node), import_name(node))
 }
 
 /// The group rank of an import under `groups` (the `import-groups` list); lower ranks emit first.
-/// A non-static import takes the index of its *longest* matching prefix (ties broken by list
-/// order — the earliest such prefix wins); failing that, the catch-all `"*"`'s index, or
+/// Module imports lead in their own group (rank `0`); every other import is the rank below shifted
+/// up by one. A non-static import takes the index of its *longest* matching prefix (ties broken by
+/// list order — the earliest such prefix wins); failing that, the catch-all `"*"`'s index, or
 /// `groups.len()` when the list has no `"*"`. A static import takes `"static"`'s index, or
-/// `groups.len() + 1` (after the catch-all) when the list has no `"static"`. The literals `"*"`
-/// and `"static"` are never matched as textual prefixes (`static` is a Java keyword, so it can
+/// `groups.len() + 1` (after the catch-all) when the list has no `"static"`. The literals `"*"`,
+/// `"static"` and `"module"` are never matched as textual prefixes (they are keywords, so they can
 /// never be a real name segment).
 fn import_group_rank(node: &SyntaxNode, groups: &[String]) -> usize {
+    if import_tier(node) == 0 {
+        return 0;
+    }
     if ImportDecl::cast(node.clone()).is_some_and(|i| i.is_static()) {
-        return groups
+        return 1 + groups
             .iter()
             .position(|g| g.as_str() == "static")
             .unwrap_or(groups.len() + 1);
@@ -244,7 +263,7 @@ fn import_group_rank(node: &SyntaxNode, groups: &[String]) -> usize {
     let mut best_len = 0usize;
     let mut best_idx: Option<usize> = None;
     for (i, g) in groups.iter().enumerate() {
-        if matches!(g.as_str(), "*" | "static") {
+        if matches!(g.as_str(), "*" | "static" | "module") {
             continue;
         }
         if g.len() > best_len && name.starts_with(g.as_str()) {
@@ -252,7 +271,7 @@ fn import_group_rank(node: &SyntaxNode, groups: &[String]) -> usize {
             best_idx = Some(i);
         }
     }
-    best_idx.unwrap_or_else(|| {
+    1 + best_idx.unwrap_or_else(|| {
         groups
             .iter()
             .position(|g| g.as_str() == "*")
@@ -386,30 +405,54 @@ mod tests {
 
     #[test]
     fn group_rank_longest_prefix_wins() {
+        // Ranks are the prefix index shifted up by one (rank 0 is reserved for module imports).
         let run = run_of("import java.util.List;import java.io.File;class C{}");
         let g = groups(&["java.", "java.util.", "*"]);
-        assert_eq!(import_group_rank(&run[0], &g), 1);
-        assert_eq!(import_group_rank(&run[1], &g), 0);
+        assert_eq!(import_group_rank(&run[0], &g), 2);
+        assert_eq!(import_group_rank(&run[1], &g), 1);
     }
 
     #[test]
     fn group_rank_missing_catch_all_and_static_implicit_trailing() {
         let run = run_of("import com.a.B;import static x.Y.z;class C{}");
         let g = groups(&["java."]);
-        // No "*": non-matching non-static imports take groups.len()...
-        assert_eq!(import_group_rank(&run[0], &g), 1);
-        // ...and no "static": static imports take groups.len() + 1, after the catch-all.
-        assert_eq!(import_group_rank(&run[1], &g), 2);
+        // No "*": non-matching non-static imports take groups.len() (shifted up by one)...
+        assert_eq!(import_group_rank(&run[0], &g), 2);
+        // ...and no "static": static imports take groups.len() + 1, after the catch-all (shifted).
+        assert_eq!(import_group_rank(&run[1], &g), 3);
     }
 
     #[test]
     fn group_rank_static_slot_ignores_prefixes() {
         let run = run_of("import static a.B.c;import b.X;class C{}");
         let g = groups(&["a.", "static", "*"]);
-        // A static import takes the "static" slot even though "a." matches its name.
-        assert_eq!(import_group_rank(&run[0], &g), 1);
+        // A static import takes the "static" slot even though "a." matches its name (shifted).
+        assert_eq!(import_group_rank(&run[0], &g), 2);
         // The "static" literal is never scanned as a textual prefix.
-        assert_eq!(import_group_rank(&run[1], &g), 2);
+        assert_eq!(import_group_rank(&run[1], &g), 3);
+    }
+
+    #[test]
+    fn group_rank_module_leads() {
+        // Module imports always take the leading rank 0, before every prefix group and static.
+        let run = run_of(
+            "import module java.base;import java.util.List;\
+             import static a.A.a;class C{}",
+        );
+        let c = Config::default();
+        assert_eq!(import_group_rank(&run[0], &c.import_groups), 0);
+        assert!(import_group_rank(&run[1], &c.import_groups) > 0);
+        assert!(import_group_rank(&run[2], &c.import_groups) > 0);
+    }
+
+    #[test]
+    fn sort_module_tier_leads() {
+        let run = run_of(
+            "import b.B;import module java.base;import static a.A.a;\
+             import a.A;class C{}",
+        );
+        let plan = plan_run(run, ImportOrdering::Sort);
+        assert_eq!(names(&plan.imports), ["java.base", "a.A", "b.B", "a.A.a"]);
     }
 
     #[test]

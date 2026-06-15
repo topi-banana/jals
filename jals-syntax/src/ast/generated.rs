@@ -85,6 +85,9 @@ impl ImportDecl {
     pub fn is_static(&self) -> bool {
         support::token(&self.syntax, STATIC_KW).is_some()
     }
+    pub fn is_module(&self) -> bool {
+        support::token(&self.syntax, MODULE_KW).is_some()
+    }
     pub fn name(&self) -> Option<QualifiedName> {
         support::child(&self.syntax)
     }
