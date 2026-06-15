@@ -1,7 +1,8 @@
 //! Property tests for the formatter's correctness invariants.
 
 use jals_fmt::{
-    BinopSeparator, Config, FnParamsLayout, TrailingComma, TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopSeparator, Config, FnParamsLayout, TrailingComma,
+    TypePunctuationDensity, format_source,
 };
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
@@ -205,6 +206,14 @@ fn binop_config(binop_separator: BinopSeparator) -> Config {
 fn type_punct_config(type_punctuation_density: TypePunctuationDensity) -> Config {
     Config {
         type_punctuation_density,
+        ..Config::default()
+    }
+}
+
+/// Config with a given annotation placement.
+fn annotation_placement_config(annotation_placement: AnnotationPlacement) -> Config {
+    Config {
+        annotation_placement,
         ..Config::default()
     }
 }
@@ -745,6 +754,92 @@ proptest! {
     fn type_punctuation_density_never_panics(src in ".*") {
         let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Wide));
         let _ = fmt_with(&src, &type_punct_config(TypePunctuationDensity::Compressed));
+    }
+
+    /// Annotation placement stays idempotent under both modes.
+    #[test]
+    fn annotation_placement_idempotent(
+        src in javaish(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let cfg = annotation_placement_config(placement);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// On a targeted generator of scrambled modifier runs (including annotations and comments),
+    /// annotation placement stays idempotent.
+    #[test]
+    fn annotation_placement_targeted_idempotent(
+        src in java_with_modifiers(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let cfg = annotation_placement_config(placement);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Annotation placement is layout-only: it only moves line breaks between an annotation and
+    /// the following modifier/declaration, so the significant-token *sequence* is preserved
+    /// exactly (the strict invariant, composing with the default).
+    #[test]
+    fn annotation_placement_preserves_significant_tokens(
+        src in javaish(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let out = fmt_with(&src, &annotation_placement_config(placement));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Annotation placement never drops or mangles a comment.
+    #[test]
+    fn annotation_placement_preserves_comments(
+        src in javaish(),
+        placement in prop_oneof![
+            Just(AnnotationPlacement::Compact),
+            Just(AnnotationPlacement::Expanded),
+        ],
+    ) {
+        let out = fmt_with(&src, &annotation_placement_config(placement));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Annotation placement never panics on arbitrary Unicode input.
+    #[test]
+    fn annotation_placement_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &annotation_placement_config(AnnotationPlacement::Compact));
+        let _ = fmt_with(&src, &annotation_placement_config(AnnotationPlacement::Expanded));
+    }
+
+    /// Composed with `reorder-modifiers`, expanding annotations still preserves the
+    /// significant-token *multiset* (the sequence may change, since reordering permutes
+    /// modifiers) and stays idempotent.
+    #[test]
+    fn annotation_placement_expanded_with_reorder_preserves_multiset(src in java_with_modifiers()) {
+        let cfg = Config {
+            reorder_modifiers: true,
+            annotation_placement: AnnotationPlacement::Expanded,
+            ..Config::default()
+        };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(&once, &twice);
+        let mut before = sig_tokens(&src);
+        let mut after = sig_tokens(&once);
+        before.sort();
+        after.sort();
+        prop_assert_eq!(before, after);
     }
 
     /// Expanding empty declaration bodies stays idempotent under both settings (re-formatting

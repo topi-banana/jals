@@ -166,6 +166,22 @@ pub enum TypePunctuationDensity {
     Compressed,
 }
 
+/// Placement of a declaration's leading annotations (the annotations in the `MODIFIERS` node of
+/// a type / method / constructor / field / initializer / local-variable declaration). A
+/// Java-specific option with no rustfmt equivalent. Layout-only — the significant-token
+/// sequence is preserved exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnnotationPlacement {
+    /// Keep a declaration's leading annotations inline with the modifiers / declaration
+    /// (`@Override public void m()`). The default; matches the prior behavior.
+    Compact,
+    /// Break each leading annotation onto its own line above the declaration (`@Override`,
+    /// then `public void m()`). The idiomatic Java convention. Parameter annotations and
+    /// type-use / enum-constant / type-parameter annotations are never affected.
+    Expanded,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -305,6 +321,15 @@ pub struct Config {
     /// significant-token *sequence* may change (the multiset is preserved, and each comment stays
     /// glued to its modifier). A Java-specific option with no rustfmt equivalent.
     pub reorder_modifiers: bool,
+    /// Placement of a declaration's leading annotations (the `MODIFIERS` node of a type / method
+    /// / constructor / field / initializer / local-variable declaration):
+    /// [`Compact`](AnnotationPlacement::Compact) (the default, inline `@Override public void m()`)
+    /// or [`Expanded`](AnnotationPlacement::Expanded) (each annotation on its own line above the
+    /// declaration). Parameter annotations (a `PARAM`'s own `MODIFIERS`) and type-use /
+    /// enum-constant / type-parameter annotations are never affected — they always stay inline.
+    /// Layout-only — the significant-token sequence is preserved exactly. A Java-specific option
+    /// with no rustfmt equivalent.
+    pub annotation_placement: AnnotationPlacement,
 }
 
 impl Default for Config {
@@ -341,6 +366,7 @@ impl Default for Config {
             fn_params_layout: FnParamsLayout::Tall,
             type_punctuation_density: TypePunctuationDensity::Wide,
             reorder_modifiers: false,
+            annotation_placement: AnnotationPlacement::Compact,
         }
     }
 }
@@ -482,6 +508,8 @@ mod tests {
         // Single-statement bodies are not collapsed onto one line by default (rustfmt's
         // `fn_single_line` is also off by default).
         assert!(!c.fn_single_line);
+        // Annotation placement defaults to Compact (inline, the prior behavior).
+        assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
     }
 
     #[test]
@@ -595,6 +623,14 @@ mod tests {
             c.type_punctuation_density,
             TypePunctuationDensity::Compressed
         );
+    }
+
+    #[test]
+    fn annotation_placement_parses_kebab_values() {
+        let c: Config = toml::from_str("annotation-placement = \"compact\"\n").unwrap();
+        assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
+        let c: Config = toml::from_str("annotation-placement = \"expanded\"\n").unwrap();
+        assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
     }
 
     #[test]

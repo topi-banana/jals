@@ -1,17 +1,26 @@
-//! Canonical ordering of a declaration's modifiers: `reorder-modifiers`.
+//! Modifier layout: canonical ordering (`reorder-modifiers`) and annotation placement
+//! (`annotation-placement`).
 //!
-//! [`lower_modifiers`] lowers a `MODIFIERS` node; when `reorder-modifiers` is enabled the
+//! [`lower_modifiers`] lowers a `MODIFIERS` node. When `reorder-modifiers` is enabled the
 //! node's keyword modifiers (`public`, `static`, `final`, …) are sorted into a fixed
 //! canonical order and all annotations are hoisted to the front (keeping their relative
 //! order). The pure planning step ([`plan`]: pick the permutation of the element list) is
 //! kept separate from `Doc` emission so it is unit-testable without rendering. Emission
 //! reuses the original elements, so every token keeps its byte offset, attached comments
 //! travel with their modifier, and the significant-token *multiset* is preserved.
+//!
+//! When `annotation-placement = expanded` and the node belongs to a declaration-level target
+//! (a type / method / constructor / field / initializer / local-variable declaration), each
+//! annotation in the leading contiguous run is broken onto its own line. This only moves
+//! whitespace, so the significant-token *sequence* is preserved exactly.
 
-use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
-use crate::doc::Doc;
-use crate::lower::{Ctx, lower_elements, lower_generic};
+use crate::config::{AnnotationPlacement, Config};
+use crate::doc::{Doc, concat, hardline};
+use crate::lower::{
+    Ctx, first_sig_token, last_sig_token, lower, lower_elements, lower_generic, sep, tok,
+};
 
 /// The canonical rank of a keyword modifier, or `None` for any other element (annotations and
 /// anything else stay fixed, hoisted to the front). The order follows the JLS recommended
@@ -54,24 +63,161 @@ pub(crate) fn plan(els: Vec<SyntaxElement>) -> Vec<SyntaxElement> {
     out
 }
 
-/// Lower a `MODIFIERS` node. With `reorder-modifiers` off this is exactly [`lower_generic`]
-/// (byte-identical to the prior behavior). With it on, the node's significant children are
-/// reordered by [`plan`] before emission.
+/// The first significant token of an element: the first non-trivia token of a node, or the
+/// token itself.
+fn element_first_token(el: &SyntaxElement) -> Option<SyntaxToken> {
+    match el.as_node() {
+        Some(n) => first_sig_token(n),
+        None => el.as_token().cloned(),
+    }
+}
+
+/// The last significant token of an element: the last non-trivia token of a node, or the token
+/// itself.
+fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
+    match el.as_node() {
+        Some(n) => last_sig_token(n),
+        None => el.as_token().cloned(),
+    }
+}
+
+/// The first and last significant tokens of a `MODIFIERS` node *as emitted*. With
+/// `reorder-modifiers` off these are the structural [`first_sig_token`] / [`last_sig_token`];
+/// with it on, [`plan`] may move an annotation to the front (or a keyword to the end), so the
+/// emitted boundary tokens differ from the structural ones.
 ///
-/// The reorder is confined to the `MODIFIERS` subtree; the rowan tree is unchanged, so the
-/// parent's separator before/after this node (computed from the node's source-order first /
-/// last significant token) is unaffected. That is harmless: the spacing rule yields a single
-/// space between any modifier/annotation end and any following type token regardless of which
-/// modifier sorts last, so the boundary is order-invariant and idempotency holds.
+/// The parent node uses these (rather than the structural tokens) to compute the separators
+/// around the `MODIFIERS` node, keeping the boundary spacing consistent with what is actually
+/// emitted. Without it, reordering an annotation that was structurally last desyncs the trailing
+/// separator: e.g. `class{public@=` (error recovery) reorders to `@public`, but the parent would
+/// compute the separator before `=` from the structural-last `@` token (no space) on the first
+/// pass and from `public` (a space) on the second — breaking idempotency.
+pub(crate) fn emitted_boundary_tokens(
+    node: &SyntaxNode,
+    cfg: &Config,
+) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
+    if !cfg.reorder_modifiers {
+        return (first_sig_token(node), last_sig_token(node));
+    }
+    let els: Vec<SyntaxElement> = node
+        .children_with_tokens()
+        .filter(|e| !e.kind().is_trivia())
+        .collect();
+    let planned = plan(els);
+    let first = planned.first().and_then(element_first_token);
+    let last = planned.last().and_then(element_last_token);
+    (first, last)
+}
+
+/// The declaration-level targets whose leading-annotation run `annotation-placement = expanded`
+/// breaks onto its own line. A parameter's `MODIFIERS` (parent `PARAM`) is deliberately
+/// excluded so parameter annotations stay inline; type-use / enum-constant / type-parameter
+/// annotations never live in a `MODIFIERS` node and so never reach this code at all.
+fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
+    matches!(
+        node.parent().map(|p| p.kind()),
+        Some(
+            S::CLASS_DECL
+                | S::INTERFACE_DECL
+                | S::ENUM_DECL
+                | S::RECORD_DECL
+                | S::ANNOTATION_TYPE_DECL
+                | S::METHOD_DECL
+                | S::CONSTRUCTOR_DECL
+                | S::FIELD_DECL
+                | S::INITIALIZER
+                | S::LOCAL_VAR_DECL
+        )
+    )
+}
+
+/// Lower a `MODIFIERS` node. With `reorder-modifiers` off and `annotation-placement = compact`
+/// this is exactly [`lower_generic`] (byte-identical to the prior behavior). With
+/// `reorder-modifiers` on, the node's significant children are reordered by [`plan`]; with
+/// `annotation-placement = expanded` on a declaration-level target, the leading annotations are
+/// broken onto their own lines by [`lower_modifiers_with_breaks`].
+///
+/// The reorder is confined to the `MODIFIERS` subtree; the rowan tree is unchanged. For valid
+/// code the boundary spacing is order-invariant (any modifier/annotation end takes a single
+/// space before the following type token), but malformed input can put an annotation
+/// structurally last while reordering emits a keyword last, desyncing the parent's trailing
+/// separator. So the parent computes the separators around this node from
+/// [`emitted_boundary_tokens`] (the emitted-order first / last token), not the structural ones,
+/// which keeps idempotency. When the last emitted part is a forced break, that trailing parent
+/// space is trimmed by the renderer.
 pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-    if !ctx.cfg.reorder_modifiers {
+    let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
+    // The hot path: nothing to reorder and no annotation to break out.
+    if !ctx.cfg.reorder_modifiers && !expanded {
         return lower_generic(node, ctx);
     }
     let els: Vec<SyntaxElement> = node
         .children_with_tokens()
         .filter(|e| !e.kind().is_trivia())
         .collect();
-    lower_elements(plan(els).into_iter(), ctx, false)
+    let els = if ctx.cfg.reorder_modifiers {
+        plan(els)
+    } else {
+        els
+    };
+    if expanded && is_decl_level_modifiers(node) {
+        lower_modifiers_with_breaks(&els, ctx)
+    } else {
+        lower_elements(els.into_iter(), ctx, false)
+    }
+}
+
+/// Lay out a declaration's modifiers, breaking each annotation in the leading contiguous run
+/// onto its own line (`annotation-placement = expanded`). Mirrors [`lower_elements`]'s inline
+/// emission, but the separator *after* a leading-run annotation is a forced break instead of a
+/// space. Only the leading run breaks: an annotation interleaved after a keyword
+/// (`public @A static`, possible only without `reorder-modifiers`) stays inline, which keeps
+/// the layout idempotent. With `reorder-modifiers` on, [`plan`] has already hoisted every
+/// annotation into one leading run, so every annotation breaks.
+fn lower_modifiers_with_breaks(els: &[SyntaxElement], ctx: &Ctx<'_>) -> Doc {
+    let mut parts: Vec<Doc> = Vec::new();
+    let mut prev: Option<SyntaxToken> = None;
+    // Whether the previous emitted element was an annotation in the leading run (so this
+    // element starts a fresh line).
+    let mut prev_was_leading_annotation = false;
+    // Whether we are still inside the leading contiguous run of annotations.
+    let mut still_leading = true;
+
+    for el in els {
+        let is_annotation = el.kind() == S::ANNOTATION;
+        if !is_annotation {
+            still_leading = false;
+        }
+
+        let first = element_first_token(el);
+        let el_doc = match el.as_node() {
+            Some(n) => lower(n, ctx),
+            None => tok(el.as_token().expect("element is a node or a token"), ctx),
+        };
+        let last = element_last_token(el);
+
+        if let Some(first) = first.as_ref() {
+            let s = if prev_was_leading_annotation {
+                hardline()
+            } else {
+                sep(prev.as_ref(), first, ctx.cfg)
+            };
+            parts.push(s);
+        }
+        parts.push(el_doc);
+        if last.is_some() {
+            prev = last;
+        }
+        prev_was_leading_annotation = is_annotation && still_leading;
+    }
+    // When the leading run is the whole modifier list (no keyword follows, e.g. `@A @B class D`
+    // or `@Override int x;`), the break before the declaration keyword must be emitted here as a
+    // trailing forced break — that keyword lives in the parent node, not in `MODIFIERS`. The
+    // renderer drops the parent's following separator space at the fresh line's start.
+    if prev_was_leading_annotation {
+        parts.push(hardline());
+    }
+    concat(parts)
 }
 
 #[cfg(test)]
@@ -199,5 +345,34 @@ mod tests {
     #[test]
     fn empty_modifiers_plans_to_empty() {
         assert!(plan(Vec::new()).is_empty());
+    }
+
+    /// The first `MODIFIERS` node in `src` whose parent has kind `parent`.
+    fn modifiers_under(src: &str, parent: S) -> SyntaxNode {
+        jals_syntax::parse(src)
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == S::MODIFIERS)
+            .find(|n| n.parent().map(|p| p.kind()) == Some(parent))
+            .unwrap_or_else(|| panic!("test source has a MODIFIERS node under {parent:?}"))
+    }
+
+    #[test]
+    fn decl_level_modifiers_detected() {
+        // A field / method member's MODIFIERS is a declaration-level target.
+        assert!(is_decl_level_modifiers(&modifiers_of("public int x;")));
+        assert!(is_decl_level_modifiers(&modifiers_of("public void m() {}")));
+        // A local-variable declaration is included too.
+        assert!(is_decl_level_modifiers(&modifiers_under(
+            "class C { void m() { final int y = 1; } }",
+            S::LOCAL_VAR_DECL,
+        )));
+    }
+
+    #[test]
+    fn param_modifiers_not_decl_level() {
+        // A parameter's MODIFIERS is excluded so parameter annotations stay inline.
+        let modifiers = modifiers_under("class C { void m(final int x) {} }", S::PARAM);
+        assert!(!is_decl_level_modifiers(&modifiers));
     }
 }
