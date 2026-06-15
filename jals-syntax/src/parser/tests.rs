@@ -1792,6 +1792,597 @@ fn switch_expression_with_yield() {
 }
 
 #[test]
+fn yield_prefix_increment_is_yield_stmt() {
+    // `yield ++i;` / `yield --i;` yield a pre-increment, not a postfix increment of `yield`.
+    check(
+        "class C { int m(int i) { return switch (i) { default: yield ++i; }; } }",
+        expect![[r#"
+            SOURCE_FILE@0..71
+              CLASS_DECL@0..71
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..71
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..69
+                    MODIFIERS@9..9
+                    TYPE@9..13
+                      WHITESPACE@9..10 " "
+                      INT_KW@10..13 "int"
+                    WHITESPACE@13..14 " "
+                    IDENT@14..15 "m"
+                    PARAM_LIST@15..22
+                      LPAREN@15..16 "("
+                      PARAM@16..21
+                        MODIFIERS@16..16
+                        TYPE@16..19
+                          INT_KW@16..19 "int"
+                        WHITESPACE@19..20 " "
+                        IDENT@20..21 "i"
+                      RPAREN@21..22 ")"
+                    BLOCK@22..69
+                      WHITESPACE@22..23 " "
+                      LBRACE@23..24 "{"
+                      RETURN_STMT@24..67
+                        WHITESPACE@24..25 " "
+                        RETURN_KW@25..31 "return"
+                        SWITCH_EXPR@31..66
+                          WHITESPACE@31..32 " "
+                          SWITCH_KW@32..38 "switch"
+                          WHITESPACE@38..39 " "
+                          LPAREN@39..40 "("
+                          NAME_REF@40..41
+                            IDENT@40..41 "i"
+                          RPAREN@41..42 ")"
+                          SWITCH_BLOCK@42..66
+                            WHITESPACE@42..43 " "
+                            LBRACE@43..44 "{"
+                            SWITCH_GROUP@44..64
+                              SWITCH_LABEL@44..52
+                                WHITESPACE@44..45 " "
+                                DEFAULT_KW@45..52 "default"
+                              COLON@52..53 ":"
+                              YIELD_STMT@53..64
+                                WHITESPACE@53..54 " "
+                                YIELD_KW@54..59 "yield"
+                                UNARY_EXPR@59..63
+                                  WHITESPACE@59..60 " "
+                                  PLUS_PLUS@60..62 "++"
+                                  NAME_REF@62..63
+                                    IDENT@62..63 "i"
+                                SEMICOLON@63..64 ";"
+                            WHITESPACE@64..65 " "
+                            RBRACE@65..66 "}"
+                        SEMICOLON@66..67 ";"
+                      WHITESPACE@67..68 " "
+                      RBRACE@68..69 "}"
+                  WHITESPACE@69..70 " "
+                  RBRACE@70..71 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn yield_postfix_increment_is_expr_stmt() {
+    // `yield++;` / `yield--;` are a postfix increment of a variable named `yield`.
+    check(
+        "class C { void m() { yield++; } }",
+        expect![[r#"
+        SOURCE_FILE@0..33
+          CLASS_DECL@0..33
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..33
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..31
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..18
+                  LPAREN@16..17 "("
+                  RPAREN@17..18 ")"
+                BLOCK@18..31
+                  WHITESPACE@18..19 " "
+                  LBRACE@19..20 "{"
+                  EXPR_STMT@20..29
+                    POSTFIX_EXPR@20..28
+                      NAME_REF@20..26
+                        WHITESPACE@20..21 " "
+                        IDENT@21..26 "yield"
+                      PLUS_PLUS@26..28 "++"
+                    SEMICOLON@28..29 ";"
+                  WHITESPACE@29..30 " "
+                  RBRACE@30..31 "}"
+              WHITESPACE@31..32 " "
+              RBRACE@32..33 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn yield_unary_minus_is_yield_stmt() {
+    // `yield -x;` yields a unary minus, not a binary subtraction.
+    check(
+        "class C { int m(int x) { return switch (x) { default: yield -x; }; } }",
+        expect![[r#"
+            SOURCE_FILE@0..70
+              CLASS_DECL@0..70
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..70
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..68
+                    MODIFIERS@9..9
+                    TYPE@9..13
+                      WHITESPACE@9..10 " "
+                      INT_KW@10..13 "int"
+                    WHITESPACE@13..14 " "
+                    IDENT@14..15 "m"
+                    PARAM_LIST@15..22
+                      LPAREN@15..16 "("
+                      PARAM@16..21
+                        MODIFIERS@16..16
+                        TYPE@16..19
+                          INT_KW@16..19 "int"
+                        WHITESPACE@19..20 " "
+                        IDENT@20..21 "x"
+                      RPAREN@21..22 ")"
+                    BLOCK@22..68
+                      WHITESPACE@22..23 " "
+                      LBRACE@23..24 "{"
+                      RETURN_STMT@24..66
+                        WHITESPACE@24..25 " "
+                        RETURN_KW@25..31 "return"
+                        SWITCH_EXPR@31..65
+                          WHITESPACE@31..32 " "
+                          SWITCH_KW@32..38 "switch"
+                          WHITESPACE@38..39 " "
+                          LPAREN@39..40 "("
+                          NAME_REF@40..41
+                            IDENT@40..41 "x"
+                          RPAREN@41..42 ")"
+                          SWITCH_BLOCK@42..65
+                            WHITESPACE@42..43 " "
+                            LBRACE@43..44 "{"
+                            SWITCH_GROUP@44..63
+                              SWITCH_LABEL@44..52
+                                WHITESPACE@44..45 " "
+                                DEFAULT_KW@45..52 "default"
+                              COLON@52..53 ":"
+                              YIELD_STMT@53..63
+                                WHITESPACE@53..54 " "
+                                YIELD_KW@54..59 "yield"
+                                UNARY_EXPR@59..62
+                                  WHITESPACE@59..60 " "
+                                  MINUS@60..61 "-"
+                                  NAME_REF@61..62
+                                    IDENT@61..62 "x"
+                                SEMICOLON@62..63 ";"
+                            WHITESPACE@63..64 " "
+                            RBRACE@64..65 "}"
+                        SEMICOLON@65..66 ";"
+                      WHITESPACE@66..67 " "
+                      RBRACE@67..68 "}"
+                  WHITESPACE@68..69 " "
+                  RBRACE@69..70 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn yield_method_call_no_args() {
+    // Statement-position `yield()` is a method call (yield as a method name), not a yield stmt.
+    check(
+        "class C { void m() { yield(); } }",
+        expect![[r#"
+        SOURCE_FILE@0..33
+          CLASS_DECL@0..33
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..33
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..31
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..18
+                  LPAREN@16..17 "("
+                  RPAREN@17..18 ")"
+                BLOCK@18..31
+                  WHITESPACE@18..19 " "
+                  LBRACE@19..20 "{"
+                  EXPR_STMT@20..29
+                    CALL_EXPR@20..28
+                      NAME_REF@20..26
+                        WHITESPACE@20..21 " "
+                        IDENT@21..26 "yield"
+                      ARG_LIST@26..28
+                        LPAREN@26..27 "("
+                        RPAREN@27..28 ")"
+                    SEMICOLON@28..29 ";"
+                  WHITESPACE@29..30 " "
+                  RBRACE@30..31 "}"
+              WHITESPACE@31..32 " "
+              RBRACE@32..33 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn yield_method_call_multiple_args() {
+    check(
+        "class C { void m() { yield(2, 2); } }",
+        expect![[r#"
+        SOURCE_FILE@0..37
+          CLASS_DECL@0..37
+            MODIFIERS@0..0
+            CLASS_KW@0..5 "class"
+            WHITESPACE@5..6 " "
+            IDENT@6..7 "C"
+            CLASS_BODY@7..37
+              WHITESPACE@7..8 " "
+              LBRACE@8..9 "{"
+              METHOD_DECL@9..35
+                MODIFIERS@9..9
+                TYPE@9..14
+                  WHITESPACE@9..10 " "
+                  VOID_KW@10..14 "void"
+                WHITESPACE@14..15 " "
+                IDENT@15..16 "m"
+                PARAM_LIST@16..18
+                  LPAREN@16..17 "("
+                  RPAREN@17..18 ")"
+                BLOCK@18..35
+                  WHITESPACE@18..19 " "
+                  LBRACE@19..20 "{"
+                  EXPR_STMT@20..33
+                    CALL_EXPR@20..32
+                      NAME_REF@20..26
+                        WHITESPACE@20..21 " "
+                        IDENT@21..26 "yield"
+                      ARG_LIST@26..32
+                        LPAREN@26..27 "("
+                        LITERAL@27..28
+                          INT_LITERAL@27..28 "2"
+                        COMMA@28..29 ","
+                        LITERAL@29..31
+                          WHITESPACE@29..30 " "
+                          INT_LITERAL@30..31 "2"
+                        RPAREN@31..32 ")"
+                    SEMICOLON@32..33 ";"
+                  WHITESPACE@33..34 " "
+                  RBRACE@34..35 "}"
+              WHITESPACE@35..36 " "
+              RBRACE@36..37 "}"
+    "#]],
+    );
+}
+
+#[test]
+fn yield_method_call_chain() {
+    // A top-level comma makes `yield(2, 2)` an argument list, so it is a method call even with a
+    // trailing chain.
+    check(
+        "class C { void m() { yield(2, 2).toString(); } }",
+        expect![[r#"
+            SOURCE_FILE@0..48
+              CLASS_DECL@0..48
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..48
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..46
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..46
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..44
+                        CALL_EXPR@20..43
+                          FIELD_ACCESS@20..41
+                            CALL_EXPR@20..32
+                              NAME_REF@20..26
+                                WHITESPACE@20..21 " "
+                                IDENT@21..26 "yield"
+                              ARG_LIST@26..32
+                                LPAREN@26..27 "("
+                                LITERAL@27..28
+                                  INT_LITERAL@27..28 "2"
+                                COMMA@28..29 ","
+                                LITERAL@29..31
+                                  WHITESPACE@29..30 " "
+                                  INT_LITERAL@30..31 "2"
+                                RPAREN@31..32 ")"
+                            DOT@32..33 "."
+                            IDENT@33..41 "toString"
+                          ARG_LIST@41..43
+                            LPAREN@41..42 "("
+                            RPAREN@42..43 ")"
+                        SEMICOLON@43..44 ";"
+                      WHITESPACE@44..45 " "
+                      RBRACE@45..46 "}"
+                  WHITESPACE@46..47 " "
+                  RBRACE@47..48 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn yield_single_paren_arg_is_yield_stmt() {
+    // A single parenthesized argument is a valid yield expression, so `yield(2)` stays a yield
+    // statement (matching javac), unlike the empty / multi-arg method-call forms.
+    check(
+        "class C { int m(int x) { return switch (x) { default: yield(2); }; } }",
+        expect![[r#"
+            SOURCE_FILE@0..70
+              CLASS_DECL@0..70
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..70
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..68
+                    MODIFIERS@9..9
+                    TYPE@9..13
+                      WHITESPACE@9..10 " "
+                      INT_KW@10..13 "int"
+                    WHITESPACE@13..14 " "
+                    IDENT@14..15 "m"
+                    PARAM_LIST@15..22
+                      LPAREN@15..16 "("
+                      PARAM@16..21
+                        MODIFIERS@16..16
+                        TYPE@16..19
+                          INT_KW@16..19 "int"
+                        WHITESPACE@19..20 " "
+                        IDENT@20..21 "x"
+                      RPAREN@21..22 ")"
+                    BLOCK@22..68
+                      WHITESPACE@22..23 " "
+                      LBRACE@23..24 "{"
+                      RETURN_STMT@24..66
+                        WHITESPACE@24..25 " "
+                        RETURN_KW@25..31 "return"
+                        SWITCH_EXPR@31..65
+                          WHITESPACE@31..32 " "
+                          SWITCH_KW@32..38 "switch"
+                          WHITESPACE@38..39 " "
+                          LPAREN@39..40 "("
+                          NAME_REF@40..41
+                            IDENT@40..41 "x"
+                          RPAREN@41..42 ")"
+                          SWITCH_BLOCK@42..65
+                            WHITESPACE@42..43 " "
+                            LBRACE@43..44 "{"
+                            SWITCH_GROUP@44..63
+                              SWITCH_LABEL@44..52
+                                WHITESPACE@44..45 " "
+                                DEFAULT_KW@45..52 "default"
+                              COLON@52..53 ":"
+                              YIELD_STMT@53..63
+                                WHITESPACE@53..54 " "
+                                YIELD_KW@54..59 "yield"
+                                PAREN_EXPR@59..62
+                                  LPAREN@59..60 "("
+                                  LITERAL@60..61
+                                    INT_LITERAL@60..61 "2"
+                                  RPAREN@61..62 ")"
+                                SEMICOLON@62..63 ";"
+                            WHITESPACE@63..64 " "
+                            RBRACE@64..65 "}"
+                        SEMICOLON@65..66 ";"
+                      WHITESPACE@66..67 " "
+                      RBRACE@67..68 "}"
+                  WHITESPACE@68..69 " "
+                  RBRACE@69..70 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn yield_lambda_is_yield_stmt() {
+    // `yield () -> e;` yields a no-arg lambda; the empty parens must not be read as a method call.
+    check(
+        "class C { Runnable m(int x) { return switch (x) { default: yield () -> {}; }; } }",
+        expect![[r#"
+            SOURCE_FILE@0..81
+              CLASS_DECL@0..81
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..81
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..79
+                    MODIFIERS@9..9
+                    TYPE@9..18
+                      WHITESPACE@9..10 " "
+                      IDENT@10..18 "Runnable"
+                    WHITESPACE@18..19 " "
+                    IDENT@19..20 "m"
+                    PARAM_LIST@20..27
+                      LPAREN@20..21 "("
+                      PARAM@21..26
+                        MODIFIERS@21..21
+                        TYPE@21..24
+                          INT_KW@21..24 "int"
+                        WHITESPACE@24..25 " "
+                        IDENT@25..26 "x"
+                      RPAREN@26..27 ")"
+                    BLOCK@27..79
+                      WHITESPACE@27..28 " "
+                      LBRACE@28..29 "{"
+                      RETURN_STMT@29..77
+                        WHITESPACE@29..30 " "
+                        RETURN_KW@30..36 "return"
+                        SWITCH_EXPR@36..76
+                          WHITESPACE@36..37 " "
+                          SWITCH_KW@37..43 "switch"
+                          WHITESPACE@43..44 " "
+                          LPAREN@44..45 "("
+                          NAME_REF@45..46
+                            IDENT@45..46 "x"
+                          RPAREN@46..47 ")"
+                          SWITCH_BLOCK@47..76
+                            WHITESPACE@47..48 " "
+                            LBRACE@48..49 "{"
+                            SWITCH_GROUP@49..74
+                              SWITCH_LABEL@49..57
+                                WHITESPACE@49..50 " "
+                                DEFAULT_KW@50..57 "default"
+                              COLON@57..58 ":"
+                              YIELD_STMT@58..74
+                                WHITESPACE@58..59 " "
+                                YIELD_KW@59..64 "yield"
+                                LAMBDA_EXPR@64..73
+                                  LAMBDA_PARAMS@64..67
+                                    WHITESPACE@64..65 " "
+                                    LPAREN@65..66 "("
+                                    RPAREN@66..67 ")"
+                                  WHITESPACE@67..68 " "
+                                  ARROW@68..70 "->"
+                                  BLOCK@70..73
+                                    WHITESPACE@70..71 " "
+                                    LBRACE@71..72 "{"
+                                    RBRACE@72..73 "}"
+                                SEMICOLON@73..74 ";"
+                            WHITESPACE@74..75 " "
+                            RBRACE@75..76 "}"
+                        SEMICOLON@76..77 ";"
+                      WHITESPACE@77..78 " "
+                      RBRACE@78..79 "}"
+                  WHITESPACE@79..80 " "
+                  RBRACE@80..81 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn yield_cast_is_yield_stmt() {
+    // `yield (T) e;` yields a cast; a comma inside the generic type arguments must not be read as
+    // an argument-list separator.
+    check(
+        "class C { Object m(int x, Object v) { return switch (x) { default: yield (Map<String, String>) v; }; } }",
+        expect![[r#"
+            SOURCE_FILE@0..104
+              CLASS_DECL@0..104
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..104
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..102
+                    MODIFIERS@9..9
+                    TYPE@9..16
+                      WHITESPACE@9..10 " "
+                      IDENT@10..16 "Object"
+                    WHITESPACE@16..17 " "
+                    IDENT@17..18 "m"
+                    PARAM_LIST@18..35
+                      LPAREN@18..19 "("
+                      PARAM@19..24
+                        MODIFIERS@19..19
+                        TYPE@19..22
+                          INT_KW@19..22 "int"
+                        WHITESPACE@22..23 " "
+                        IDENT@23..24 "x"
+                      COMMA@24..25 ","
+                      PARAM@25..34
+                        MODIFIERS@25..25
+                        TYPE@25..32
+                          WHITESPACE@25..26 " "
+                          IDENT@26..32 "Object"
+                        WHITESPACE@32..33 " "
+                        IDENT@33..34 "v"
+                      RPAREN@34..35 ")"
+                    BLOCK@35..102
+                      WHITESPACE@35..36 " "
+                      LBRACE@36..37 "{"
+                      RETURN_STMT@37..100
+                        WHITESPACE@37..38 " "
+                        RETURN_KW@38..44 "return"
+                        SWITCH_EXPR@44..99
+                          WHITESPACE@44..45 " "
+                          SWITCH_KW@45..51 "switch"
+                          WHITESPACE@51..52 " "
+                          LPAREN@52..53 "("
+                          NAME_REF@53..54
+                            IDENT@53..54 "x"
+                          RPAREN@54..55 ")"
+                          SWITCH_BLOCK@55..99
+                            WHITESPACE@55..56 " "
+                            LBRACE@56..57 "{"
+                            SWITCH_GROUP@57..97
+                              SWITCH_LABEL@57..65
+                                WHITESPACE@57..58 " "
+                                DEFAULT_KW@58..65 "default"
+                              COLON@65..66 ":"
+                              YIELD_STMT@66..97
+                                WHITESPACE@66..67 " "
+                                YIELD_KW@67..72 "yield"
+                                CAST_EXPR@72..96
+                                  WHITESPACE@72..73 " "
+                                  LPAREN@73..74 "("
+                                  TYPE@74..93
+                                    IDENT@74..77 "Map"
+                                    TYPE_ARGS@77..93
+                                      LT@77..78 "<"
+                                      TYPE@78..84
+                                        IDENT@78..84 "String"
+                                      COMMA@84..85 ","
+                                      TYPE@85..92
+                                        WHITESPACE@85..86 " "
+                                        IDENT@86..92 "String"
+                                      GT@92..93 ">"
+                                  RPAREN@93..94 ")"
+                                  NAME_REF@94..96
+                                    WHITESPACE@94..95 " "
+                                    IDENT@95..96 "v"
+                                SEMICOLON@96..97 ";"
+                            WHITESPACE@97..98 " "
+                            RBRACE@98..99 "}"
+                        SEMICOLON@99..100 ";"
+                      WHITESPACE@100..101 " "
+                      RBRACE@101..102 "}"
+                  WHITESPACE@102..103 " "
+                  RBRACE@103..104 "}"
+        "#]],
+    );
+}
+
+#[test]
 fn record_pattern_in_instanceof() {
     check(
         "class C { void m(Object o) { if (o instanceof Point(int x, int y)) f(); } }",
