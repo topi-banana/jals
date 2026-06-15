@@ -182,6 +182,28 @@ pub enum AnnotationPlacement {
     Expanded,
 }
 
+/// Case of the hexadecimal digit letters (`a`–`f` / `A`–`F`) of an integer or floating-point
+/// literal — `0xFF` vs. `0xff`. Mirrors rustfmt's `hex_literal_case`, plus a
+/// [`Preserve`](Self::Preserve) default (rustfmt's is `Preserve` too) that keeps the source
+/// case exactly, so the strict significant-token invariant holds unless this is opted into.
+///
+/// Only the hex *mantissa* digits are affected. The `0x` / `0X` radix prefix, the `p` / `P`
+/// binary exponent marker of a hex float and its decimal digits, and any `l` / `L` integer or
+/// `f` / `F` / `d` / `D` float suffix are all left exactly as written (suffix-letter case is a
+/// separate, not-yet-implemented Java-specific concern). Decimal, octal, and binary literals
+/// have no hex digits and are never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HexLiteralCase {
+    /// Keep the source's hex-digit case exactly. The default; preserves the significant-token
+    /// sequence.
+    Preserve,
+    /// Force hex digits to upper case (`0xff` → `0xFF`).
+    Upper,
+    /// Force hex digits to lower case (`0xFF` → `0xff`).
+    Lower,
+}
+
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -330,6 +352,13 @@ pub struct Config {
     /// Layout-only — the significant-token sequence is preserved exactly. A Java-specific option
     /// with no rustfmt equivalent.
     pub annotation_placement: AnnotationPlacement,
+    /// Case of the hexadecimal digit letters of an integer / floating-point literal (`0xFF` vs.
+    /// `0xff`). Defaults to [`Preserve`](HexLiteralCase::Preserve), which keeps the source case
+    /// exactly; the other modes rewrite the case of the hex *mantissa* digits, weakening the
+    /// strict significant-token invariant (a literal token's text — but never its kind — may
+    /// change). The `0x` prefix, `p` exponent, and any `l` / `f` / `d` suffix are left untouched.
+    /// Mirrors rustfmt's `hex_literal_case`.
+    pub hex_literal_case: HexLiteralCase,
 }
 
 impl Default for Config {
@@ -367,6 +396,7 @@ impl Default for Config {
             type_punctuation_density: TypePunctuationDensity::Wide,
             reorder_modifiers: false,
             annotation_placement: AnnotationPlacement::Compact,
+            hex_literal_case: HexLiteralCase::Preserve,
         }
     }
 }
@@ -510,6 +540,8 @@ mod tests {
         assert!(!c.fn_single_line);
         // Annotation placement defaults to Compact (inline, the prior behavior).
         assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
+        // Hex-literal case defaults to preserve, keeping the source case exactly.
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Preserve);
     }
 
     #[test]
@@ -631,6 +663,16 @@ mod tests {
         assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
         let c: Config = toml::from_str("annotation-placement = \"expanded\"\n").unwrap();
         assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
+    }
+
+    #[test]
+    fn hex_literal_case_parses_kebab_values() {
+        let c: Config = toml::from_str("hex-literal-case = \"preserve\"\n").unwrap();
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Preserve);
+        let c: Config = toml::from_str("hex-literal-case = \"upper\"\n").unwrap();
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Upper);
+        let c: Config = toml::from_str("hex-literal-case = \"lower\"\n").unwrap();
+        assert_eq!(c.hex_literal_case, HexLiteralCase::Lower);
     }
 
     #[test]
