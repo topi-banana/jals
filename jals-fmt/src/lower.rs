@@ -104,7 +104,7 @@ pub(crate) fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 }
 
 /// The last non-trivia token contained in `node`, if any.
-fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub(crate) fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
         .filter_map(|e| e.into_token())
         .filter(|t| !t.kind().is_trivia())
@@ -186,7 +186,7 @@ fn would_fuse(a: &str, b: &str) -> bool {
 
 /// The separator document between `prev` (if any) and the token `next`. Applies the
 /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
-fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
+pub(crate) fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
     let Some(p) = prev else {
         return nil();
     };
