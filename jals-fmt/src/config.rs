@@ -190,8 +190,8 @@ pub enum AnnotationPlacement {
 /// Only the hex *mantissa* digits are affected. The `0x` / `0X` radix prefix, the `p` / `P`
 /// binary exponent marker of a hex float and its decimal digits, and any `l` / `L` integer or
 /// `f` / `F` / `d` / `D` float suffix are all left exactly as written (suffix-letter case is a
-/// separate, not-yet-implemented Java-specific concern). Decimal, octal, and binary literals
-/// have no hex digits and are never touched.
+/// separate Java-specific concern handled by [`LiteralSuffixCase`]). Decimal, octal, and binary
+/// literals have no hex digits and are never touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HexLiteralCase {
@@ -225,6 +225,29 @@ pub enum FloatLiteralTrailingZero {
     Always,
     /// Strip an all-zero trailing fraction (`1.0` → `1.`, `1.00` → `1.`, `1.0f` → `1.f`).
     Never,
+}
+
+/// Case of a numeric literal's trailing type suffix — `123l` vs. `123L`, `1.5f` vs. `1.5F`. A
+/// Java-specific extension with no rustfmt equivalent (rustfmt's `hex_literal_case` covers only
+/// the digits), plus a [`Preserve`](Self::Preserve) default that keeps the source exactly, so the
+/// strict significant-token invariant holds unless this is opted into.
+///
+/// Only the single trailing suffix letter is affected: the `l` / `L` `long` suffix of an integer
+/// literal, or the `f` / `F` / `d` / `D` `float` / `double` suffix of a floating-point literal.
+/// The kind of the literal disambiguates: a trailing `f` / `d` on an *integer* literal is a hex
+/// digit (`0xabcdef`), never a suffix, and a float literal never ends in `l` / `L`. The numeric
+/// value, the radix prefix, the mantissa, and any exponent are all left exactly as written; a
+/// literal with no suffix is untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiteralSuffixCase {
+    /// Keep the source's suffix-letter case exactly. The default; preserves the significant-token
+    /// sequence.
+    Preserve,
+    /// Force the suffix letter to upper case (`123l` → `123L`, `1.5f` → `1.5F`, `1.5d` → `1.5D`).
+    Upper,
+    /// Force the suffix letter to lower case (`123L` → `123l`, `1.5F` → `1.5f`, `1.5D` → `1.5d`).
+    Lower,
 }
 
 /// Formatter style settings.
@@ -390,6 +413,14 @@ pub struct Config {
     /// change). Only in-scope decimal floats are touched; the value, suffix, and exponent are
     /// preserved. Mirrors rustfmt's `float_literal_trailing_zero`.
     pub float_literal_trailing_zero: FloatLiteralTrailingZero,
+    /// Case of a numeric literal's trailing type suffix (`123l` vs. `123L`, `1.5f` vs. `1.5F`).
+    /// Defaults to [`Preserve`](LiteralSuffixCase::Preserve), which keeps the source exactly;
+    /// [`Upper`](LiteralSuffixCase::Upper) / [`Lower`](LiteralSuffixCase::Lower) force the case of
+    /// the single suffix letter (the `l` / `L` integer suffix or the `f` / `F` / `d` / `D` float
+    /// suffix), weakening the strict significant-token invariant (a literal token's text — but
+    /// never its kind — may change). The value, radix prefix, mantissa, and exponent are left
+    /// untouched. A Java-specific option with no rustfmt equivalent.
+    pub literal_suffix_case: LiteralSuffixCase,
 }
 
 impl Default for Config {
@@ -429,6 +460,7 @@ impl Default for Config {
             annotation_placement: AnnotationPlacement::Compact,
             hex_literal_case: HexLiteralCase::Preserve,
             float_literal_trailing_zero: FloatLiteralTrailingZero::Preserve,
+            literal_suffix_case: LiteralSuffixCase::Preserve,
         }
     }
 }
@@ -724,6 +756,16 @@ mod tests {
             c.float_literal_trailing_zero,
             FloatLiteralTrailingZero::Never
         );
+    }
+
+    #[test]
+    fn literal_suffix_case_parses_kebab_values() {
+        let c: Config = toml::from_str("literal-suffix-case = \"preserve\"\n").unwrap();
+        assert_eq!(c.literal_suffix_case, LiteralSuffixCase::Preserve);
+        let c: Config = toml::from_str("literal-suffix-case = \"upper\"\n").unwrap();
+        assert_eq!(c.literal_suffix_case, LiteralSuffixCase::Upper);
+        let c: Config = toml::from_str("literal-suffix-case = \"lower\"\n").unwrap();
+        assert_eq!(c.literal_suffix_case, LiteralSuffixCase::Lower);
     }
 
     #[test]

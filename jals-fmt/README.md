@@ -12,11 +12,12 @@ CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted 
 
 It upholds the workspace formatter invariants: comments are never dropped and formatting is
 idempotent (`format(format(x)) == format(x)`); by default the significant-token sequence is
-preserved exactly. Six opt-in options relax this (see [Configuration](#configuration)):
+preserved exactly. Seven opt-in options relax this (see [Configuration](#configuration)):
 `reorder-imports`, `group-imports`, and `reorder-modifiers` preserve the token *multiset*
 instead, `trailing-comma` may add or drop the single trailing comma of an array initializer,
-`hex-literal-case` may rewrite the case of a hex literal's digits, and
-`float-literal-trailing-zero` may add or strip the trailing zero of a decimal float literal
+`hex-literal-case` may rewrite the case of a hex literal's digits,
+`float-literal-trailing-zero` may add or strip the trailing zero of a decimal float literal, and
+`literal-suffix-case` may rewrite the case of a literal's `l` / `f` / `d` type suffix
 (the token *kind* sequence is preserved exactly).
 
 ## What it does today
@@ -150,6 +151,16 @@ The current formatter is intentionally minimal. It performs:
   suffix, and any exponent. Off by default (`preserve`); when on, a literal token's *text* may
   change (but never its kind), so the significant-token sequence is no longer byte-for-byte
   preserved. See below.
+- **Literal suffix case** — with `literal-suffix-case` set to `upper` or `lower`, the trailing
+  type-suffix letter of a numeric literal is normalized to that case: the `l` / `L` `long` suffix
+  of an integer (`123l` → `123L` / `123l`) and the `f` / `F` / `d` / `D` `float` / `double` suffix
+  of a floating-point literal (`1.5f` → `1.5F` / `1.5f`). Only that one trailing letter changes;
+  the token *kind* is unaffected, and the numeric value, radix prefix, mantissa, and exponent are
+  left exactly as written. The literal's kind tells the ambiguous letters apart: an integer's
+  trailing `f` / `d` is a hex *digit* (`0xabcdef`), never a suffix, and a float never ends in
+  `l` / `L`. A Java-specific extension with no rustfmt equivalent. Off by default (`preserve`);
+  when on, a literal token's *text* may change (but never its kind), so the significant-token
+  sequence is no longer byte-for-byte preserved. See below.
 - **Blank lines, final newline, trailing-whitespace trimming.**
 
 Everything else falls back to inline emission with normalized spacing.
@@ -190,6 +201,7 @@ are kebab-case.
 | `annotation-placement` | `"compact"` \| `"expanded"` | `"compact"` | ✅ wired — placement of a declaration's leading annotations (a type / method / constructor / field / initializer / local-variable declaration): `compact` keeps them inline (`@Override public void m()`), `expanded` breaks each annotation in the leading run onto its own line above the declaration. A parameter's annotations and type-use / enum-constant / type-parameter annotations are never affected (always inline). Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
 | `hex-literal-case` | `"preserve"` \| `"upper"` \| `"lower"` | `"preserve"` | ✅ wired — case of the hex digit letters of an integer / float literal (`0xCafe`): `preserve` keeps the source's, `upper` / `lower` force it. Only the hex mantissa digits change; the `0x` prefix, the `p` exponent, and any `l` / `f` / `d` suffix are untouched, and non-hex literals are never affected. Non-`preserve` may rewrite a literal token's text (never its kind); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `hex_literal_case` |
 | `float-literal-trailing-zero` | `"preserve"` \| `"always"` \| `"never"` | `"preserve"` | ✅ wired — trailing zero of a **decimal** float literal (`1.0` vs. `1.`): `preserve` keeps the source's, `always` adds it (`1.` → `1.0`), `never` strips an all-zero fraction (`1.0` / `1.00` → `1.`). Only in-scope decimal floats change; a non-zero fraction (`1.50`), a leading-dot float (`.5`), a dotless float (`1e10`), a hex float (`0x1.0p3`), and integers are untouched, as are the value, suffix, and exponent. Non-`preserve` may rewrite a literal token's text (never its kind); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `float_literal_trailing_zero` (its Rust-only `IfNoPostfix` mode is omitted — both `1.f` and `1.0f` are legal Java) |
+| `literal-suffix-case` | `"preserve"` \| `"upper"` \| `"lower"` | `"preserve"` | ✅ wired — case of a numeric literal's trailing type suffix: the integer `l` / `L` (`123l` vs. `123L`) and the float `f` / `F` / `d` / `D` (`1.5f` vs. `1.5F`). `preserve` keeps the source's, `upper` / `lower` force it. Only the single trailing suffix letter changes; the value, radix prefix, mantissa, and exponent are untouched, and an integer's trailing `f` / `d` hex *digit* (`0xabcdef`) is never a suffix. Non-`preserve` may rewrite a literal token's text (never its kind); the default `preserve` keeps the strict significant-token sequence. A Java-specific option with no rustfmt equivalent |
 
 ---
 
@@ -290,14 +302,16 @@ Reflow comments/Javadoc to `comment-width` (`wrap_comments`) is **implemented** 
 
 ## 8. Literal normalization
 
-Hex literal case (`hex_literal_case`) and float trailing zero (`float_literal_trailing_zero`) are
-both **implemented** — see [What it does today](#what-it-does-today). Remaining:
+Hex literal case (`hex_literal_case`), float trailing zero (`float_literal_trailing_zero`), and
+the Java-specific `L`/`F`/`D` suffix case (`literal-suffix-case`) are all **implemented** — see
+[What it does today](#what-it-does-today). Remaining:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Hex literal case (`0xFF` vs. `0xff`) | `hex_literal_case` ✅ |
 | Float trailing zero (`1.0` vs. `1.`) | `float_literal_trailing_zero` ✅ |
-| *(Java-specific extension)* underscore grouping; `L`/`F`/`D` suffix case | — |
+| *(Java-specific extension)* `L`/`F`/`D` suffix case (`123l` vs. `123L`) | `literal-suffix-case` ✅ |
+| *(Java-specific extension)* underscore grouping (`1000000` vs. `1_000_000`) | — |
 
 ## 9. File selection, errors & operational (language-agnostic)
 

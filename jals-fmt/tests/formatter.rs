@@ -3,8 +3,8 @@
 use expect_test::{Expect, expect};
 use jals_fmt::{
     AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
-    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, TrailingComma,
-    TypePunctuationDensity, format_source,
+    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, LiteralSuffixCase,
+    TrailingComma, TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -3390,6 +3390,104 @@ fn float_literal_trailing_zero_is_idempotent() {
         assert_eq!(
             once, twice,
             "float-literal-trailing-zero must be idempotent ({mode:?})"
+        );
+    }
+}
+
+// ----- literal-suffix-case ----------------------------------------------------------------
+
+fn fmt_suffix(src: &str, literal_suffix_case: LiteralSuffixCase) -> String {
+    let config = Config {
+        literal_suffix_case,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising the in-scope suffixes — the integer `l`/`L` (decimal and hex) and the
+/// floating-point `f`/`F`/`d`/`D` (decimal and hex) — alongside the out-of-scope literals that
+/// must stay byte-for-byte unchanged: an unsuffixed integer (`255`), a hex integer whose trailing
+/// `f` is a *digit* not a suffix (`0xabcdef`), and an unsuffixed float (`1.5`).
+const SUFFIX_SRC: &str = "class C{long a=123l;long b=123L;long c=0xCAFEl;float d=1.5f;float e=2.5F;double f=3.5d;double g=4.5D;float h=0x1p3f;int i=255;int j=0xabcdef;double k=1.5;}";
+
+#[test]
+fn literal_suffix_case_preserve_keeps_source() {
+    // The default leaves every literal exactly as written.
+    expect![[r#"
+        class C {
+            long a = 123l;
+            long b = 123L;
+            long c = 0xCAFEl;
+            float d = 1.5f;
+            float e = 2.5F;
+            double f = 3.5d;
+            double g = 4.5D;
+            float h = 0x1p3f;
+            int i = 255;
+            int j = 0xabcdef;
+            double k = 1.5;
+        }
+    "#]]
+    .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Preserve));
+}
+
+#[test]
+fn literal_suffix_case_upper_uppercases_only_the_suffix() {
+    // Every trailing type-suffix letter becomes upper case (`123l` → `123L`, `1.5f` → `1.5F`).
+    // The hex digits keep their case (`hex-literal-case` is off), the unsuffixed literals are
+    // untouched, and a hex integer's trailing `f` digit (`0xabcdef`) is *not* a suffix.
+    expect![[r#"
+        class C {
+            long a = 123L;
+            long b = 123L;
+            long c = 0xCAFEL;
+            float d = 1.5F;
+            float e = 2.5F;
+            double f = 3.5D;
+            double g = 4.5D;
+            float h = 0x1p3F;
+            int i = 255;
+            int j = 0xabcdef;
+            double k = 1.5;
+        }
+    "#]]
+    .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Upper));
+}
+
+#[test]
+fn literal_suffix_case_lower_lowercases_only_the_suffix() {
+    // Mirror image of the upper-case test: only the trailing suffix letter changes, and the
+    // `0xabcdef` digit `f` stays put.
+    expect![[r#"
+        class C {
+            long a = 123l;
+            long b = 123l;
+            long c = 0xCAFEl;
+            float d = 1.5f;
+            float e = 2.5f;
+            double f = 3.5d;
+            double g = 4.5d;
+            float h = 0x1p3f;
+            int i = 255;
+            int j = 0xabcdef;
+            double k = 1.5;
+        }
+    "#]]
+    .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Lower));
+}
+
+#[test]
+fn literal_suffix_case_is_idempotent() {
+    for case in [
+        LiteralSuffixCase::Preserve,
+        LiteralSuffixCase::Upper,
+        LiteralSuffixCase::Lower,
+    ] {
+        let once = fmt_suffix(SUFFIX_SRC, case);
+        let twice = fmt_suffix(&once, case);
+        assert_eq!(
+            once, twice,
+            "literal-suffix-case must be idempotent ({case:?})"
         );
     }
 }
