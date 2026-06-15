@@ -22,7 +22,7 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 use crate::comments::{self, CommentMap};
 use crate::config::{
     BinopSeparator, BraceStyle, Config, ControlBraceStyle, FloatLiteralTrailingZero,
-    FnParamsLayout, HexLiteralCase, TrailingComma, TypePunctuationDensity,
+    FnParamsLayout, HexLiteralCase, LiteralSuffixCase, TrailingComma, TypePunctuationDensity,
 };
 use crate::doc::{
     Doc, blank_line, concat, fill, group, group_always_break, group_overflow, group_within,
@@ -84,21 +84,28 @@ fn lower_non_sealed(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
 /// The bare text of a significant token. String literals and text blocks are emitted as
 /// raw (verbatim) text so their multi-line content is never reindented. An integer / float
-/// literal is normalized by the literal rules: [`FloatLiteralTrailingZero`] adjusts a decimal
-/// float's trailing zero and [`HexLiteralCase`] normalizes a hex literal's digit case (each a
-/// no-op under its default `Preserve`). Their domains are disjoint — trailing-zero touches only
-/// decimal floats, hex-case only `0x` literals — so the order merely future-proofs the pipeline.
+/// literal is normalized by the literal rules, each applied in turn: [`FloatLiteralTrailingZero`]
+/// adjusts a decimal float's trailing zero, [`HexLiteralCase`] normalizes a hex literal's digit
+/// case, and [`LiteralSuffixCase`] normalizes the trailing `l` / `f` / `d` type suffix (each a
+/// no-op under its default `Preserve`). The three touch disjoint parts of a literal — the
+/// fraction, the hex mantissa, and the final suffix letter respectively — so they compose without
+/// interference and the order is immaterial.
 fn token_text(tok: &SyntaxToken, cfg: &Config) -> Doc {
     match tok.kind() {
         S::STRING_LITERAL | S::TEXT_BLOCK => raw(tok.text().to_string()),
         S::INT_LITERAL | S::FLOAT_LITERAL => {
             let original = tok.text();
-            let after_zero = map_float_trailing_zero(original, cfg.float_literal_trailing_zero);
-            let base = after_zero.as_deref().unwrap_or(original);
-            match map_hex_case(base, cfg.hex_literal_case).or(after_zero) {
-                Some(normalized) => text(normalized),
-                None => text(original.to_string()),
+            let mut current = original.to_string();
+            if let Some(s) = map_float_trailing_zero(&current, cfg.float_literal_trailing_zero) {
+                current = s;
             }
+            if let Some(s) = map_hex_case(&current, cfg.hex_literal_case) {
+                current = s;
+            }
+            if let Some(s) = map_literal_suffix(&current, tok.kind(), cfg.literal_suffix_case) {
+                current = s;
+            }
+            text(current)
         }
         _ => text(tok.text().to_string()),
     }
@@ -186,6 +193,42 @@ fn map_hex_case(lit: &str, case: HexLiteralCase) -> Option<String> {
         HexLiteralCase::Preserve => unreachable!("handled above"),
     };
     Some(format!("{}{}{}", &lit[..2], mapped, &lit[mantissa_end..]))
+}
+
+/// Normalize the case of the trailing type suffix of the numeric literal `lit` (whose token is
+/// `kind`) per `case`, returning the rewritten text — or `None` when nothing should change (the
+/// policy is [`Preserve`](LiteralSuffixCase::Preserve), the literal carries no suffix, or it is
+/// already in the requested case).
+///
+/// The suffix is always the literal's final character: the `l` / `L` `long` suffix of an
+/// [`INT_LITERAL`](S::INT_LITERAL), or the `f` / `F` / `d` / `D` `float` / `double` suffix of a
+/// [`FLOAT_LITERAL`](S::FLOAT_LITERAL). The token kind disambiguates the otherwise ambiguous
+/// trailing letters: a final `f` / `d` on an integer literal is a hex digit (`0xabcdef`), not a
+/// suffix, and a float literal never ends in `l` / `L`. Only that one letter is remapped; the
+/// value, radix prefix, mantissa, and exponent are kept verbatim. The literal's text is pure
+/// ASCII, so the final byte is the final character.
+fn map_literal_suffix(lit: &str, kind: S, case: LiteralSuffixCase) -> Option<String> {
+    if case == LiteralSuffixCase::Preserve {
+        return None;
+    }
+    let last = *lit.as_bytes().last()?;
+    let is_suffix = match kind {
+        S::INT_LITERAL => matches!(last, b'l' | b'L'),
+        S::FLOAT_LITERAL => matches!(last, b'f' | b'F' | b'd' | b'D'),
+        _ => false,
+    };
+    if !is_suffix {
+        return None;
+    }
+    let mapped = match case {
+        LiteralSuffixCase::Upper => last.to_ascii_uppercase(),
+        LiteralSuffixCase::Lower => last.to_ascii_lowercase(),
+        LiteralSuffixCase::Preserve => unreachable!("handled above"),
+    };
+    if mapped == last {
+        return None;
+    }
+    Some(format!("{}{}", &lit[..lit.len() - 1], mapped as char))
 }
 
 /// A significant token with its attached comments.
@@ -843,6 +886,9 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // and fill from the real tokens so the significant-token sequence is preserved.
     let mut open_doc = nil();
     let mut close_doc = nil();
+    // Whether a closing delimiter token was actually present. A list left open by error
+    // recovery has none; synthesizing a trailing comma there is unsafe (see `policy` below).
+    let mut has_close = false;
     // Each row is one item's content plus the comma token that follows it (if any). The comma
     // of the final row is the list's (optional) trailing comma.
     let mut rows: Vec<(Doc, Option<SyntaxToken>)> = Vec::new();
@@ -860,7 +906,10 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             let kind = t.kind();
             match kind {
                 S::LPAREN | S::LBRACE | S::LBRACK => open_doc = tok(t, ctx),
-                S::RPAREN | S::RBRACE | S::RBRACK => close_doc = tok(t, ctx),
+                S::RPAREN | S::RBRACE | S::RBRACK => {
+                    close_doc = tok(t, ctx);
+                    has_close = true;
+                }
                 S::COMMA => {
                     // The comma ends the current item; keep it so the trailing one can follow
                     // the `trailing-comma` policy while inter-item commas stay verbatim.
@@ -886,8 +935,11 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
     // Only an array initializer honors `trailing-comma`; every other delimited list preserves
     // the source exactly (a trailing comma elsewhere is invalid Java, reachable only via error
-    // recovery, so dropping/adding one is never appropriate).
-    let policy = if node.kind() == S::ARRAY_INIT {
+    // recovery, so dropping/adding one is never appropriate). An initializer left unclosed by
+    // error recovery (no `}`) is also preserved: with no closing brace a synthesized trailing
+    // comma is not actually trailing — on a re-parse it reads as an item separator and pulls the
+    // following token into the list, which would break idempotency.
+    let policy = if node.kind() == S::ARRAY_INIT && has_close {
         ctx.cfg.trailing_comma
     } else {
         TrailingComma::Preserve
@@ -1136,9 +1188,12 @@ fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_float_trailing_zero, map_hex_case};
+    use jals_syntax::SyntaxKind;
+
+    use super::{map_float_trailing_zero, map_hex_case, map_literal_suffix};
     use crate::config::FloatLiteralTrailingZero::{self, Always, Never};
     use crate::config::HexLiteralCase::{Lower, Preserve, Upper};
+    use crate::config::LiteralSuffixCase;
 
     #[test]
     fn preserve_is_a_no_op() {
@@ -1272,5 +1327,89 @@ mod tests {
         for lit in ["1.5", "1.50", "1.05", "1.0_0", "1.", ".0", ".5"] {
             assert_eq!(map_float_trailing_zero(lit, Never), None, "{lit}");
         }
+    }
+
+    use LiteralSuffixCase::{Lower as SufLower, Preserve as SufPreserve, Upper as SufUpper};
+    const INT: SyntaxKind = SyntaxKind::INT_LITERAL;
+    const FLOAT: SyntaxKind = SyntaxKind::FLOAT_LITERAL;
+
+    #[test]
+    fn literal_suffix_preserve_is_a_no_op() {
+        for (lit, kind) in [("123l", INT), ("1.5f", FLOAT), ("2.0D", FLOAT)] {
+            assert_eq!(map_literal_suffix(lit, kind, SufPreserve), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn literal_suffix_maps_the_integer_long_suffix() {
+        assert_eq!(
+            map_literal_suffix("123l", INT, SufUpper).as_deref(),
+            Some("123L")
+        );
+        assert_eq!(
+            map_literal_suffix("123L", INT, SufLower).as_deref(),
+            Some("123l")
+        );
+        // The suffix is the only thing touched — hex digits, `_` separators, and the radix prefix
+        // are all preserved.
+        assert_eq!(
+            map_literal_suffix("0xCAFEl", INT, SufUpper).as_deref(),
+            Some("0xCAFEL")
+        );
+        assert_eq!(
+            map_literal_suffix("0b1010L", INT, SufLower).as_deref(),
+            Some("0b1010l")
+        );
+    }
+
+    #[test]
+    fn literal_suffix_maps_the_float_and_double_suffix() {
+        for (lit, want) in [("1.5f", "1.5F"), ("1.5d", "1.5D"), ("1e10f", "1e10F")] {
+            assert_eq!(
+                map_literal_suffix(lit, FLOAT, SufUpper).as_deref(),
+                Some(want)
+            );
+        }
+        for (lit, want) in [("1.5F", "1.5f"), ("2.0D", "2.0d")] {
+            assert_eq!(
+                map_literal_suffix(lit, FLOAT, SufLower).as_deref(),
+                Some(want)
+            );
+        }
+    }
+
+    #[test]
+    fn literal_suffix_leaves_an_integer_literals_trailing_hex_digit_alone() {
+        // A final `f` / `d` on an *integer* literal is a hex digit, never a suffix, so it must
+        // never be rewritten — the token kind is what tells the two apart.
+        for lit in ["0xabcdef", "0xff", "0xFD", "0xabcd"] {
+            assert_eq!(map_literal_suffix(lit, INT, SufUpper), None, "{lit}");
+            assert_eq!(map_literal_suffix(lit, INT, SufLower), None, "{lit}");
+        }
+    }
+
+    #[test]
+    fn literal_suffix_maps_only_the_hex_floats_final_letter() {
+        // The `f` inside the hex-float mantissa is left alone; only the trailing `d` suffix flips.
+        assert_eq!(
+            map_literal_suffix("0x1.fp3d", FLOAT, SufUpper).as_deref(),
+            Some("0x1.fp3D")
+        );
+        assert_eq!(
+            map_literal_suffix("0x1p3f", FLOAT, SufUpper).as_deref(),
+            Some("0x1p3F")
+        );
+    }
+
+    #[test]
+    fn literal_suffix_skips_unsuffixed_literals_and_already_correct_case() {
+        // No trailing suffix letter to normalize.
+        for (lit, kind) in [("123", INT), ("1.5", FLOAT), ("1e10", FLOAT), ("0xff", INT)] {
+            assert_eq!(map_literal_suffix(lit, kind, SufUpper), None, "{lit}");
+            assert_eq!(map_literal_suffix(lit, kind, SufLower), None, "{lit}");
+        }
+        // Already in the requested case: no change (returns `None`).
+        assert_eq!(map_literal_suffix("123L", INT, SufUpper), None);
+        assert_eq!(map_literal_suffix("1.5f", FLOAT, SufLower), None);
     }
 }

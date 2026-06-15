@@ -68,7 +68,7 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
    aborting.
 4. **Formatter fidelity.** Comments are never dropped, and formatting is idempotent
    (`format(format(x)) == format(x)`). By default the significant-token *sequence* (non-trivia
-   tokens) is preserved exactly. Six options, each off by default, relax this:
+   tokens) is preserved exactly. Seven options, each off by default, relax this:
    - **`reorder-imports`** may reorder import declarations. The significant-token *multiset* is
      still preserved (none added, dropped, or altered), and each comment stays glued to its
      anchoring token (so a comment moves, with its token, when that token is reordered).
@@ -91,10 +91,16 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
      sequence is preserved exactly — only an in-scope decimal float's *text* changes; a non-zero
      fraction (`1.50`), a leading-dot float (`.5`), a dotless float (`1e10`), a hex float
      (`0x1.0p3`), and integers are untouched, as are the value, suffix, and exponent.
-   Idempotency holds in every case. With all six at their defaults (`reorder-imports`,
+   - **`literal-suffix-case`** (any value other than `preserve`, the default) may rewrite the case
+     of a numeric literal's trailing type suffix — the integer `l`/`L` (`123l` ↔ `123L`) or the
+     float `f`/`F`/`d`/`D` (`1.5f` ↔ `1.5F`). The token *kind* sequence is preserved exactly —
+     only that single trailing suffix letter's *text* changes; the value, radix prefix, mantissa,
+     and exponent are untouched, and an integer's trailing `f`/`d` hex *digit* (`0xabcdef`) is
+     never a suffix.
+   Idempotency holds in every case. With all seven at their defaults (`reorder-imports`,
    `group-imports`, and `reorder-modifiers` off, `trailing-comma = preserve`,
-   `hex-literal-case = preserve`, `float-literal-trailing-zero = preserve`), the exact-sequence
-   guarantee is in full force.
+   `hex-literal-case = preserve`, `float-literal-trailing-zero = preserve`,
+   `literal-suffix-case = preserve`), the exact-sequence guarantee is in full force.
 5. **`wasm32` compatibility.** Everything except `jals-cli` and `jals-lsp` must build for
    `wasm32-unknown-unknown` (both are host-only: `jals-cli` does filesystem/process work,
    `jals-lsp` uses tokio/stdio). Do not add non-wasm-compatible deps or `std::fs`/process/IO

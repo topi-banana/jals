@@ -2,7 +2,7 @@
 
 use jals_fmt::{
     AnnotationPlacement, BinopSeparator, Config, FloatLiteralTrailingZero, FnParamsLayout,
-    HexLiteralCase, TrailingComma, TypePunctuationDensity, format_source,
+    HexLiteralCase, LiteralSuffixCase, TrailingComma, TypePunctuationDensity, format_source,
 };
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
@@ -539,6 +539,94 @@ fn sig_tokens_canon_float(src: &str) -> Vec<(SyntaxKind, String)> {
     sig_tokens(src)
         .into_iter()
         .map(|(k, t)| (k, canon_float_zero(k, &t)))
+        .collect()
+}
+
+/// Config with a given literal-suffix-case policy.
+fn suffix_config(literal_suffix_case: LiteralSuffixCase) -> Config {
+    Config {
+        literal_suffix_case,
+        ..Config::default()
+    }
+}
+
+/// A generator over the two non-default literal-suffix-case policies.
+fn suffix_case() -> impl Strategy<Value = LiteralSuffixCase> {
+    prop_oneof![
+        Just(LiteralSuffixCase::Upper),
+        Just(LiteralSuffixCase::Lower)
+    ]
+}
+
+/// A class whose fields are initialized with a random mix of suffixed literals — the integer
+/// `l`/`L` (decimal and hex) and the floating-point `f`/`F`/`d`/`D` (decimal and hex) — and
+/// literals out of scope for `literal-suffix-case`: an unsuffixed integer / float, and a hex
+/// integer whose trailing `f`/`d`/`F`/`D` is a *digit* not a suffix (`0xabcdef`, `0xFD`). As with
+/// the other targeted generators these need not be semantically legal Java — the parser is
+/// error-resilient and still produces the literal tokens.
+fn java_with_suffix_literals() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("123l"),
+            Just("456L"),
+            Just("0xCAFEl"),
+            Just("0xBEEFL"),
+            Just("1.5f"),
+            Just("2.5F"),
+            Just("3.5d"),
+            Just("4.5D"),
+            Just("0x1p3f"),
+            Just("0x1.8p3D"),
+            Just("0xabcdef"),
+            Just("0xFD"),
+            Just("0xff"),
+            Just("255"),
+            Just("1.5"),
+            Just("1e10"),
+        ],
+        0..8,
+    )
+    .prop_map(|literals| {
+        let fields = literals
+            .iter()
+            .enumerate()
+            .map(|(i, lit)| format!("    int x{i} = {lit};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("class C {{\n{fields}\n}}\n")
+    })
+}
+
+/// Lowercase only a numeric literal's trailing type-suffix letter (the integer `l`/`L`, or the
+/// floating-point `f`/`F`/`d`/`D`, disambiguated by the token kind so an integer's trailing hex
+/// digit is never touched), mirroring the exact scope of `literal-suffix-case`. Used to compare
+/// token streams modulo the only thing the option may change.
+fn canon_suffix(kind: SyntaxKind, text: &str) -> String {
+    let Some(&last) = text.as_bytes().last() else {
+        return text.to_string();
+    };
+    let is_suffix = match kind {
+        SyntaxKind::INT_LITERAL => matches!(last, b'l' | b'L'),
+        SyntaxKind::FLOAT_LITERAL => matches!(last, b'f' | b'F' | b'd' | b'D'),
+        _ => false,
+    };
+    if !is_suffix {
+        return text.to_string();
+    }
+    format!(
+        "{}{}",
+        &text[..text.len() - 1],
+        last.to_ascii_lowercase() as char
+    )
+}
+
+/// The significant tokens of `src`, with every numeric literal's trailing suffix letter
+/// canonicalized. Equal before and after formatting iff the token *kinds* are preserved exactly
+/// and every token's text is preserved except (possibly) the case of a literal's suffix letter.
+fn sig_tokens_canon_suffix(src: &str) -> Vec<(SyntaxKind, String)> {
+    sig_tokens(src)
+        .into_iter()
+        .map(|(k, t)| (k, canon_suffix(k, &t)))
         .collect()
 }
 
@@ -1395,5 +1483,76 @@ proptest! {
     fn float_literal_trailing_zero_never_panics(src in ".*") {
         let _ = fmt_with(&src, &float_config(FloatLiteralTrailingZero::Always));
         let _ = fmt_with(&src, &float_config(FloatLiteralTrailingZero::Never));
+    }
+
+    /// Each literal-suffix-case mode keeps formatting idempotent (the suffixes are already in the
+    /// requested case after the first pass, so the second reproduces them).
+    #[test]
+    fn literal_suffix_case_idempotent(src in javaish(), case in suffix_case()) {
+        let cfg = suffix_config(case);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Literal-suffix-case preserves the token *kind* sequence exactly, and every token's text
+    /// except (possibly) the case of a literal's trailing suffix letter. No token is added,
+    /// dropped, or otherwise altered — the relaxed invariant that applies when the option is on.
+    #[test]
+    fn literal_suffix_case_preserves_tokens_modulo_suffix_case(
+        src in java_with_suffix_literals(),
+        case in suffix_case(),
+    ) {
+        let out = fmt_with(&src, &suffix_config(case));
+        prop_assert_eq!(sig_tokens_canon_suffix(&src), sig_tokens_canon_suffix(&out));
+    }
+
+    /// The emitted literals' suffixes are actually in the requested case: every in-scope trailing
+    /// suffix letter (the integer `l`/`L`, the float `f`/`F`/`d`/`D`) is upper under `Upper` and
+    /// lower under `Lower`. A hex integer's trailing digit is not a suffix and is left alone.
+    #[test]
+    fn literal_suffix_case_actually_normalizes(
+        src in java_with_suffix_literals(),
+        case in suffix_case(),
+    ) {
+        let out = fmt_with(&src, &suffix_config(case));
+        for (kind, t) in sig_tokens(&out) {
+            let Some(&last) = t.as_bytes().last() else {
+                continue;
+            };
+            let is_suffix = match kind {
+                SyntaxKind::INT_LITERAL => matches!(last, b'l' | b'L'),
+                SyntaxKind::FLOAT_LITERAL => matches!(last, b'f' | b'F' | b'd' | b'D'),
+                _ => false,
+            };
+            if !is_suffix {
+                continue;
+            }
+            match case {
+                LiteralSuffixCase::Upper => prop_assert!(
+                    last.is_ascii_uppercase(),
+                    "found lower-case suffix in {t:?} under Upper"
+                ),
+                LiteralSuffixCase::Lower => prop_assert!(
+                    last.is_ascii_lowercase(),
+                    "found upper-case suffix in {t:?} under Lower"
+                ),
+                LiteralSuffixCase::Preserve => {}
+            }
+        }
+    }
+
+    /// Literal-suffix-case never drops or mangles a comment.
+    #[test]
+    fn literal_suffix_case_preserves_comments(src in javaish(), case in suffix_case()) {
+        let out = fmt_with(&src, &suffix_config(case));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Literal-suffix-case never panics on arbitrary Unicode input.
+    #[test]
+    fn literal_suffix_case_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &suffix_config(LiteralSuffixCase::Upper));
+        let _ = fmt_with(&src, &suffix_config(LiteralSuffixCase::Lower));
     }
 }

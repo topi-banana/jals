@@ -81,22 +81,56 @@ fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
     }
 }
 
+/// Whether reordering this `MODIFIERS` node is safe — i.e. it sits in a genuine declaration
+/// context. In valid code a `MODIFIERS` node always has one of these parents. An error-recovery
+/// artifact does not: e.g. `<public@` parses a stray `MODIFIERS` (holding `public` and an
+/// incomplete `@`) directly under `SOURCE_FILE`, next to a `TYPE_PARAMS` sibling. Hoisting the
+/// annotation to the front there changes the significant-token *sequence* such that re-parsing the
+/// output regroups the `@` into the preceding `<…>` as a type-parameter annotation — a different
+/// tree, so the layout never reaches a fixed point. Reordering is confined to these contexts so
+/// the multiset-preserving relaxation never costs idempotency; elsewhere the node emits in source
+/// order (the byte-for-byte-stable baseline).
+fn is_reorderable_context(node: &SyntaxNode) -> bool {
+    matches!(
+        node.parent().map(|p| p.kind()),
+        Some(
+            S::CLASS_DECL
+                | S::INTERFACE_DECL
+                | S::ENUM_DECL
+                | S::RECORD_DECL
+                | S::ANNOTATION_TYPE_DECL
+                | S::MODULE_DECL
+                | S::METHOD_DECL
+                | S::CONSTRUCTOR_DECL
+                | S::FIELD_DECL
+                | S::INITIALIZER
+                | S::LOCAL_VAR_DECL
+                | S::PARAM
+                | S::FOR_EACH_STMT
+                | S::RESOURCE
+                | S::CATCH_CLAUSE
+        )
+    )
+}
+
 /// The first and last significant tokens of a `MODIFIERS` node *as emitted*. With
-/// `reorder-modifiers` off these are the structural [`first_sig_token`] / [`last_sig_token`];
-/// with it on, [`plan`] may move an annotation to the front (or a keyword to the end), so the
-/// emitted boundary tokens differ from the structural ones.
+/// `reorder-modifiers` off (or in a non-reorderable error-recovery context) these are the
+/// structural [`first_sig_token`] / [`last_sig_token`]; with it on, [`plan`] may move an
+/// annotation to the front (or a keyword to the end), so the emitted boundary tokens differ from
+/// the structural ones.
 ///
 /// The parent node uses these (rather than the structural tokens) to compute the separators
 /// around the `MODIFIERS` node, keeping the boundary spacing consistent with what is actually
-/// emitted. Without it, reordering an annotation that was structurally last desyncs the trailing
-/// separator: e.g. `class{public@=` (error recovery) reorders to `@public`, but the parent would
-/// compute the separator before `=` from the structural-last `@` token (no space) on the first
-/// pass and from `public` (a space) on the second — breaking idempotency.
+/// emitted: when [`plan`] hoists an annotation that was structurally last to the front, the
+/// emitted-last token becomes a keyword, and the parent's trailing separator must follow the
+/// keyword (not the structural-last `@`) so the spacing is the same on every pass. Reordering is
+/// confined to genuine declaration contexts ([`is_reorderable_context`]), so this only ever runs
+/// where the boundary token is followed by ordinary, space-separated declaration syntax.
 pub(crate) fn emitted_boundary_tokens(
     node: &SyntaxNode,
     cfg: &Config,
 ) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
-    if !cfg.reorder_modifiers {
+    if !cfg.reorder_modifiers || !is_reorderable_context(node) {
         return (first_sig_token(node), last_sig_token(node));
     }
     let els: Vec<SyntaxElement> = node
@@ -155,7 +189,10 @@ pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         .children_with_tokens()
         .filter(|e| !e.kind().is_trivia())
         .collect();
-    let els = if ctx.cfg.reorder_modifiers {
+    // Reorder only in a genuine declaration context; a stray `MODIFIERS` from error recovery is
+    // emitted in source order so reordering can't change the re-parse and break idempotency
+    // (see [`is_reorderable_context`]).
+    let els = if ctx.cfg.reorder_modifiers && is_reorderable_context(node) {
         plan(els)
     } else {
         els

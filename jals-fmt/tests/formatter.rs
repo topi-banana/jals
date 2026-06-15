@@ -3,8 +3,8 @@
 use expect_test::{Expect, expect};
 use jals_fmt::{
     AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
-    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, TrailingComma,
-    TypePunctuationDensity, format_source,
+    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, LiteralSuffixCase,
+    TrailingComma, TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -1574,6 +1574,38 @@ fn trailing_comma_modes_are_idempotent() {
     }
 }
 
+#[test]
+fn trailing_comma_unclosed_array_is_not_synthesized() {
+    // Regression: an array initializer left unclosed by error recovery (no `}`) must NOT gain a
+    // synthesized trailing comma. With no closing brace the comma would not be trailing — on a
+    // re-parse it reads as an item separator that pulls the following token into the list,
+    // breaking idempotency. The source is preserved exactly here (no comma added after `beta`).
+    expect![[r#"
+        class A { int [] x = {
+            alpha,
+            beta
+    "#]]
+    .assert_eq(&fmt_trailing_narrow(
+        "class A{int[] x={alpha,beta",
+        TrailingComma::Vertical,
+    ));
+}
+
+#[test]
+fn trailing_comma_unclosed_array_is_idempotent() {
+    // The non-idempotency this guards against only appears across two passes, so assert both
+    // modes that synthesize a comma reach a fixed point on an unclosed initializer.
+    for mode in [TrailingComma::Always, TrailingComma::Vertical] {
+        let src = "class A{int[] x={alpha,beta";
+        let once = fmt_trailing_narrow(src, mode);
+        let twice = fmt_trailing_narrow(&once, mode);
+        assert_eq!(
+            once, twice,
+            "unclosed-array trailing-comma {mode:?} must be idempotent"
+        );
+    }
+}
+
 // ===== reorder-imports =====
 
 #[test]
@@ -3043,16 +3075,31 @@ fn reorder_modifiers_is_idempotent() {
 }
 
 #[test]
-fn reorder_modifiers_boundary_is_idempotent_on_malformed_input() {
-    // Regression: error recovery puts the annotation structurally last (`public @`), so hoisting
-    // it to the front changed which token the parent used for the trailing separator before the
-    // stray `=`. The boundary now follows the emitted order, so the first pass already produces
-    // the stable spacing instead of `@public=` collapsing to `@public =` on a second pass.
-    let src = "class{public@=";
-    let once = fmt_reorder_mods(src);
-    assert_eq!(once, "class { @public =\n");
-    let twice = fmt_reorder_mods(&once);
-    assert_eq!(once, twice, "reorder-modifiers boundary must be idempotent");
+fn reorder_modifiers_skips_stray_error_recovery_modifiers() {
+    // Regression: a `MODIFIERS` node produced by error recovery does not sit in a real
+    // declaration — its parent is a `CLASS_BODY` / `SOURCE_FILE` / recovery node, never a member
+    // or type declaration — so it is left in source order. Hoisting its annotation would change
+    // the significant-token *sequence* such that re-parsing the output regroups tokens into a
+    // different tree, which never reaches a fixed point (e.g. the `@` of `<public@` would be
+    // absorbed into the preceding `<…>` as a type-parameter annotation). Source order is preserved
+    // and stays idempotent.
+
+    // `public @` directly under a class body keeps its order (no hoist to `@public`).
+    let once = fmt_reorder_mods("class{public@=");
+    assert_eq!(once, "class { public @=\n");
+    assert_eq!(
+        once,
+        fmt_reorder_mods(&once),
+        "stray modifiers must be idempotent"
+    );
+
+    // The original repro: the stray `MODIFIERS` sits under `SOURCE_FILE` next to a `<…>`.
+    let once = fmt_reorder_mods("<public@");
+    assert_eq!(
+        once,
+        fmt_reorder_mods(&once),
+        "stray modifiers must be idempotent"
+    );
 }
 
 // --- annotation-placement -------------------------------------------------------------------
@@ -3449,6 +3496,104 @@ fn float_literal_trailing_zero_is_idempotent() {
         assert_eq!(
             once, twice,
             "float-literal-trailing-zero must be idempotent ({mode:?})"
+        );
+    }
+}
+
+// ----- literal-suffix-case ----------------------------------------------------------------
+
+fn fmt_suffix(src: &str, literal_suffix_case: LiteralSuffixCase) -> String {
+    let config = Config {
+        literal_suffix_case,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising the in-scope suffixes — the integer `l`/`L` (decimal and hex) and the
+/// floating-point `f`/`F`/`d`/`D` (decimal and hex) — alongside the out-of-scope literals that
+/// must stay byte-for-byte unchanged: an unsuffixed integer (`255`), a hex integer whose trailing
+/// `f` is a *digit* not a suffix (`0xabcdef`), and an unsuffixed float (`1.5`).
+const SUFFIX_SRC: &str = "class C{long a=123l;long b=123L;long c=0xCAFEl;float d=1.5f;float e=2.5F;double f=3.5d;double g=4.5D;float h=0x1p3f;int i=255;int j=0xabcdef;double k=1.5;}";
+
+#[test]
+fn literal_suffix_case_preserve_keeps_source() {
+    // The default leaves every literal exactly as written.
+    expect![[r#"
+        class C {
+            long a = 123l;
+            long b = 123L;
+            long c = 0xCAFEl;
+            float d = 1.5f;
+            float e = 2.5F;
+            double f = 3.5d;
+            double g = 4.5D;
+            float h = 0x1p3f;
+            int i = 255;
+            int j = 0xabcdef;
+            double k = 1.5;
+        }
+    "#]]
+    .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Preserve));
+}
+
+#[test]
+fn literal_suffix_case_upper_uppercases_only_the_suffix() {
+    // Every trailing type-suffix letter becomes upper case (`123l` → `123L`, `1.5f` → `1.5F`).
+    // The hex digits keep their case (`hex-literal-case` is off), the unsuffixed literals are
+    // untouched, and a hex integer's trailing `f` digit (`0xabcdef`) is *not* a suffix.
+    expect![[r#"
+        class C {
+            long a = 123L;
+            long b = 123L;
+            long c = 0xCAFEL;
+            float d = 1.5F;
+            float e = 2.5F;
+            double f = 3.5D;
+            double g = 4.5D;
+            float h = 0x1p3F;
+            int i = 255;
+            int j = 0xabcdef;
+            double k = 1.5;
+        }
+    "#]]
+    .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Upper));
+}
+
+#[test]
+fn literal_suffix_case_lower_lowercases_only_the_suffix() {
+    // Mirror image of the upper-case test: only the trailing suffix letter changes, and the
+    // `0xabcdef` digit `f` stays put.
+    expect![[r#"
+        class C {
+            long a = 123l;
+            long b = 123l;
+            long c = 0xCAFEl;
+            float d = 1.5f;
+            float e = 2.5f;
+            double f = 3.5d;
+            double g = 4.5d;
+            float h = 0x1p3f;
+            int i = 255;
+            int j = 0xabcdef;
+            double k = 1.5;
+        }
+    "#]]
+    .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Lower));
+}
+
+#[test]
+fn literal_suffix_case_is_idempotent() {
+    for case in [
+        LiteralSuffixCase::Preserve,
+        LiteralSuffixCase::Upper,
+        LiteralSuffixCase::Lower,
+    ] {
+        let once = fmt_suffix(SUFFIX_SRC, case);
+        let twice = fmt_suffix(&once, case);
+        assert_eq!(
+            once, twice,
+            "literal-suffix-case must be idempotent ({case:?})"
         );
     }
 }
