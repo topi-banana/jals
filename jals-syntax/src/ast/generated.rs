@@ -152,6 +152,8 @@ pub enum Decl {
     Enum(EnumDecl),
     Record(RecordDecl),
     AnnotationType(AnnotationTypeDecl),
+    Method(MethodDecl),
+    Field(FieldDecl),
 }
 
 impl AstNode for Decl {
@@ -159,7 +161,13 @@ impl AstNode for Decl {
     fn can_cast(kind: SyntaxKind) -> bool {
         matches!(
             kind,
-            CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
+            CLASS_DECL
+                | INTERFACE_DECL
+                | ENUM_DECL
+                | RECORD_DECL
+                | ANNOTATION_TYPE_DECL
+                | METHOD_DECL
+                | FIELD_DECL
         )
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
@@ -169,6 +177,8 @@ impl AstNode for Decl {
             ENUM_DECL => Decl::Enum(EnumDecl { syntax }),
             RECORD_DECL => Decl::Record(RecordDecl { syntax }),
             ANNOTATION_TYPE_DECL => Decl::AnnotationType(AnnotationTypeDecl { syntax }),
+            METHOD_DECL => Decl::Method(MethodDecl { syntax }),
+            FIELD_DECL => Decl::Field(FieldDecl { syntax }),
             _ => return None,
         };
         Some(res)
@@ -180,6 +190,8 @@ impl AstNode for Decl {
             Decl::Enum(it) => it.syntax(),
             Decl::Record(it) => it.syntax(),
             Decl::AnnotationType(it) => it.syntax(),
+            Decl::Method(it) => it.syntax(),
+            Decl::Field(it) => it.syntax(),
         }
     }
 }
@@ -663,6 +675,91 @@ impl AstNode for AnnotationTypeDecl {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
         kind == ANNOTATION_TYPE_DECL
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct MethodDecl {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl MethodDecl {
+    pub fn modifiers(&self) -> Option<Modifiers> {
+        support::child(&self.syntax)
+    }
+    pub fn type_params(&self) -> Option<TypeParams> {
+        support::child(&self.syntax)
+    }
+    pub fn return_type(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+    pub fn name(&self) -> Option<String> {
+        name_text(&self.syntax)
+    }
+    pub fn params(&self) -> Option<ParamList> {
+        support::child(&self.syntax)
+    }
+    pub fn throws_clause(&self) -> Option<ThrowsClause> {
+        support::child(&self.syntax)
+    }
+    pub fn body(&self) -> Option<Block> {
+        support::child(&self.syntax)
+    }
+}
+
+impl AstNode for MethodDecl {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == METHOD_DECL
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct FieldDecl {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl FieldDecl {
+    pub fn modifiers(&self) -> Option<Modifiers> {
+        support::child(&self.syntax)
+    }
+    pub fn ty(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+    pub fn name(&self) -> Option<String> {
+        name_text(&self.syntax)
+    }
+    pub fn value(&self) -> Option<Expr> {
+        support::child(&self.syntax)
+    }
+}
+
+impl AstNode for FieldDecl {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == FIELD_DECL
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {
@@ -1302,91 +1399,6 @@ impl AstNode for ArgList {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
         kind == ARG_LIST
-    }
-    fn cast(syntax: SyntaxNode) -> Option<Self> {
-        if Self::can_cast(syntax.kind()) {
-            Some(Self { syntax })
-        } else {
-            None
-        }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct FieldDecl {
-    pub(crate) syntax: SyntaxNode,
-}
-
-impl FieldDecl {
-    pub fn modifiers(&self) -> Option<Modifiers> {
-        support::child(&self.syntax)
-    }
-    pub fn ty(&self) -> Option<Type> {
-        support::child(&self.syntax)
-    }
-    pub fn name(&self) -> Option<String> {
-        name_text(&self.syntax)
-    }
-    pub fn value(&self) -> Option<Expr> {
-        support::child(&self.syntax)
-    }
-}
-
-impl AstNode for FieldDecl {
-    type Language = JavaLanguage;
-    fn can_cast(kind: SyntaxKind) -> bool {
-        kind == FIELD_DECL
-    }
-    fn cast(syntax: SyntaxNode) -> Option<Self> {
-        if Self::can_cast(syntax.kind()) {
-            Some(Self { syntax })
-        } else {
-            None
-        }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct MethodDecl {
-    pub(crate) syntax: SyntaxNode,
-}
-
-impl MethodDecl {
-    pub fn modifiers(&self) -> Option<Modifiers> {
-        support::child(&self.syntax)
-    }
-    pub fn type_params(&self) -> Option<TypeParams> {
-        support::child(&self.syntax)
-    }
-    pub fn return_type(&self) -> Option<Type> {
-        support::child(&self.syntax)
-    }
-    pub fn name(&self) -> Option<String> {
-        name_text(&self.syntax)
-    }
-    pub fn params(&self) -> Option<ParamList> {
-        support::child(&self.syntax)
-    }
-    pub fn throws_clause(&self) -> Option<ThrowsClause> {
-        support::child(&self.syntax)
-    }
-    pub fn body(&self) -> Option<Block> {
-        support::child(&self.syntax)
-    }
-}
-
-impl AstNode for MethodDecl {
-    type Language = JavaLanguage;
-    fn can_cast(kind: SyntaxKind) -> bool {
-        kind == METHOD_DECL
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {

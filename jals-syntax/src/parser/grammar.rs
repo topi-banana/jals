@@ -229,7 +229,9 @@ fn at_record_decl(p: &Parser) -> bool {
     p.at_contextual_kw("record") && p.nth_at(1, IDENT) && (p.nth_at(2, LPAREN) || p.nth_at(2, LT))
 }
 
-/// Type declaration (class / interface / enum / record / `@interface`).
+/// Top-level declaration: a type declaration (class / interface / enum / record /
+/// `@interface` / module) or, in a compact source file (JEP 512), a top-level field
+/// or method declaration belonging to the file's implicit class.
 fn type_decl(p: &mut Parser) {
     let m = p.start();
     modifiers(p);
@@ -240,6 +242,14 @@ fn type_decl(p: &mut Parser) {
         AT if p.nth_at(1, INTERFACE_KW) => annotation_type_rest(p, m),
         _ if at_module_decl(p) => module_rest(p, m),
         _ if at_record_decl(p) => record_rest(p, m),
+        // Top-level field / (generic) method in a compact source file.
+        _ if at_type_start(p) || p.at(LT) => {
+            if p.at(LT) {
+                // Type parameters of a generic method, e.g. `<T> T id(T x) { ... }`.
+                type_params(p);
+            }
+            field_or_method(p, m);
+        }
         _ => {
             m.abandon(p);
             p.err_and_bump("expected a type declaration");
@@ -745,6 +755,14 @@ fn member(p: &mut Parser) {
     }
 
     // Otherwise starts with a type (field or method).
+    field_or_method(p, m);
+}
+
+/// Parses a field or method declaration, given a marker `m` started before the
+/// modifiers were consumed. The current position is just past the modifiers (and any
+/// leading method type parameters). Shared by class members and top-level members
+/// (JEP 512 compact source files).
+fn field_or_method(p: &mut Parser, m: Marker) {
     if !at_type_start(p) {
         m.abandon(p);
         p.err_recover("expected a member declaration", MEMBER_RECOVERY);
@@ -2019,7 +2037,11 @@ fn at_generic_method_ref(p: &Parser) -> bool {
 
 /// Parses the `:: [type_args] (new | ident)` tail of a method reference.
 fn method_ref_tail(p: &mut Parser) {
-    p.bump(COLON_COLON);
+    // `expect` rather than `bump`: the `::` lookahead (`at_generic_method_ref` /
+    // `at_array_method_ref`) skips a balanced `<...>`/`[]` run permissively, but the
+    // real consumer (`type_args`) can stop short on malformed input (e.g. `x<0<>>::`),
+    // leaving the cursor off the `::`. Recording an error keeps the parser panic-free.
+    p.expect(COLON_COLON);
     if p.at(LT) {
         type_args(p);
     }

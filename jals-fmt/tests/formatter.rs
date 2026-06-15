@@ -274,6 +274,23 @@ fn already_formatted_is_stable() {
     assert_eq!(once, twice, "format must be idempotent");
 }
 
+#[test]
+fn compact_source_file_top_level_members() {
+    // JEP 512: top-level fields and methods (members of the file's implicit class)
+    // format like ordinary class members and round-trip idempotently.
+    check(
+        "int count=0;void main(){System.out.println(count);}",
+        expect![[r#"
+            int count = 0;
+            void main() {
+                System.out.println(count);
+            }
+        "#]],
+    );
+    let once = fmt("int count=0;void main(){System.out.println(count);}");
+    assert_eq!(fmt(&once), once, "format must be idempotent");
+}
+
 // --- max-blank-lines -------------------------------------------------------
 
 #[test]
