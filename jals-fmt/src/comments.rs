@@ -176,6 +176,16 @@ impl CommentMap {
             || self.trailing_below.contains_key(&offset)
     }
 
+    /// Whether the token carries a trailing comment — same-line (`trailing_inline`) or own-line
+    /// below (`trailing_below`) — as opposed to a leading comment. A header token's trailing
+    /// comment is emitted as a line suffix that flushes at the body's first newline; collapsing a
+    /// single-statement body to one line would relocate it past the closing brace, so such a body
+    /// must stay multi-line (see `fn-single-line`).
+    pub(crate) fn has_trailing(&self, tok: &SyntaxToken) -> bool {
+        let offset = usize::from(tok.text_range().start());
+        self.trailing_inline.contains_key(&offset) || self.trailing_below.contains_key(&offset)
+    }
+
     /// The number of blank lines that should precede this token's first leading comment (or
     /// the token itself, when it has none).
     pub(crate) fn blank_lines_before_first(&self, tok: &SyntaxToken) -> usize {

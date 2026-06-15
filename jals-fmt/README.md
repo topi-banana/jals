@@ -87,7 +87,14 @@ The current formatter is intentionally minimal. It performs:
   lower-precedence operators break first (`a == b && c == d || e == f` breaks at `||`, then
   `&&`, while each `==` stays on its line). The operator sits at the start of the
   continuation line (`binop-separator = "front"`, default) or at the end of the broken line
-  (`"back"`). Assignments (`=`) and ternaries are not wrapped yet.
+  (`"back"`). Assignments (`=`) are not wrapped yet.
+- **Ternary wrapping** — a ternary conditional (`a ? b : c`) is kept on one line while its flat
+  width fits `single-line-if-else-max-width` (default `50`); a wider ternary, or one that would
+  overflow `max-width`, wraps with `?` and `:` each leading a continuation line
+  (`binop-separator = "front"`, default) or trailing the broken line (`"back"`). The flat form is
+  byte-identical to the inline emission (the `:` spacing follows the colon options), and a nested
+  ternary wraps independently. Set the width to `0` to wrap every ternary. Layout-only (the
+  significant-token sequence is preserved exactly). See below.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
   net so operator fusion (`>>`, `->`, …) is never introduced or changed.
 - **Colon spacing** — the spacing around a `:` follows `space-before-colon` (default off) and
@@ -181,6 +188,7 @@ are kebab-case.
 | `chain-width` | integer | `60` | ✅ wired — a method chain (`a.b().c()`) with ≥2 calls wraps one call per line when its flat width exceeds this or the line overflows `max-width`; mirrors rustfmt's `chain_width` |
 | `fn-call-width` | integer | `60` | ✅ wired — a function/method call whose argument list's flat width exceeds this wraps one argument per line, even when it fits `max-width`; mirrors rustfmt's `fn_call_width` |
 | `array-width` | integer | `60` | ✅ wired — an array initializer (`{a, b, c}`) whose flat width exceeds this wraps one element per line, even when it fits `max-width`; mirrors rustfmt's `array_width` |
+| `single-line-if-else-max-width` | integer | `50` | ✅ wired — a ternary conditional (`a ? b : c`) whose flat width exceeds this — or that would overflow `max-width` — wraps, the `?` and `:` placed per `binop-separator` (leading the continuation line under `front`, trailing the broken line under `back`); `0` wraps every ternary. The flat form is byte-identical to inline emission. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `single_line_if_else_max_width` (whose Rust if-else expression maps to Java's ternary) |
 | `brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens type/method/constructor/initializer bodies on their own line; control-flow & `switch` are governed by `control-brace-style` |
 | `control-brace-style` | `"same-line"` \| `"next-line"` | `"same-line"` | ✅ wired — `next-line` (Allman) opens control-flow / `switch` / lambda / bare block braces on their own line and breaks `} else` / `} catch` / `} finally` / `} while`; mirrors rustfmt's `control_brace_style` |
 | `empty-item-single-line` | bool | `true` | ✅ wired — collapse an empty declaration body (a `class` / `interface` / `@interface` / record body, or a method / constructor / initializer block) to `{}` on the header's line; when off it expands to a two-line `{` … `}` (opening on its own line under `brace-style = next-line`). Control-flow / `switch` / lambda / bare blocks always keep `{}`, and `enum` bodies are unaffected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `empty_item_single_line` |
@@ -237,13 +245,14 @@ configurable (`fn_single_line`) — see [What it does today](#what-it-does-today
 ## 2. Width-based heuristics (jals has `max-width`, `chain-width`, `fn-call-width`, and `array-width`)
 
 **Method-chain** wrap width (`chain_width`), **method-call argument** wrap width
-(`fn_call_width`), and **array-initializer** wrap width (`array_width`) are **implemented** —
-see [What it does today](#what-it-does-today). Remaining:
+(`fn_call_width`), **array-initializer** wrap width (`array_width`), and **ternary** single-line
+max width (`single_line_if_else_max_width`) are **implemented** — see
+[What it does today](#what-it-does-today). Remaining:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Preset bundle for all width thresholds (Default/Off/Max) | `use_small_heuristics` |
-| Keep a ternary / `if-else` on one line up to width | `single_line_if_else_max_width` |
+| Keep a ternary / `if-else` on one line up to width | `single_line_if_else_max_width` ✅ |
 | Annotation wrap widths | `attr_fn_like_width`, `inline_attribute_width` |
 | Pack short array elements | `short_array_element_width_threshold` |
 
@@ -371,4 +380,5 @@ overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon
 `space_after_colon` — parameter-list layout — `fn_params_layout` — type-punctuation
 density — `type_punctuation_density` — modifier ordering — `reorder_modifiers` —
 annotation placement — `annotation-placement` — hex-literal case —
-`hex_literal_case` — and float trailing zero — `float_literal_trailing_zero` — are done.)
+`hex_literal_case` — float trailing zero — `float_literal_trailing_zero` — and ternary
+wrapping — `single_line_if_else_max_width` — are done.)

@@ -57,6 +57,7 @@ pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         }
         S::IF_STMT | S::TRY_STMT | S::DO_WHILE_STMT => lower_control_flow(node, ctx),
         S::BINARY_EXPR => lower_binary(node, ctx),
+        S::TERNARY_EXPR => lower_ternary(node, ctx),
         S::UNARY_EXPR => lower_unary(node, ctx),
         S::CALL_EXPR | S::FIELD_ACCESS => lower_chain(node, ctx),
         S::MODIFIERS => crate::modifiers::lower_modifiers(node, ctx),
@@ -646,6 +647,7 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         && !has_dangling
         && is_declaration_body(node)
         && single_statement_no_comments(node, ctx)
+        && !header_has_trailing_comment(node, ctx)
     {
         let lead = if opens_on_next_line(node, ctx.cfg) {
             if_break(hardline(), nil())
@@ -728,6 +730,24 @@ fn single_statement_no_comments(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
         .filter_map(|e| e.into_token())
         .filter(|t| !t.kind().is_trivia())
         .any(|t| ctx.comments.has_comments(&t))
+}
+
+/// Whether any significant token of `node`'s parent declaration that precedes the body (`node`)
+/// carries a trailing comment. Such a comment renders as a line suffix that flushes at the body's
+/// first newline; collapsing the body onto one line under [`fn_single_line`](Config::fn_single_line)
+/// would relocate it past the closing brace, re-anchoring it on the next parse and breaking
+/// idempotency — so a header trailing comment keeps the body multi-line. (A comment *inside* the
+/// braces is already caught by [`single_statement_no_comments`].)
+fn header_has_trailing_comment(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let body_start = node.text_range().start();
+    parent
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia() && t.text_range().end() <= body_start)
+        .any(|t| ctx.comments.has_trailing(&t))
 }
 
 /// Build the inner document for a sequence of item nodes. Returns the content and whether
@@ -1159,6 +1179,83 @@ fn flush_operator(parts: &mut Vec<Doc>, pending_op: &mut Vec<Doc>) {
     parts.push(text(" "));
     parts.push(concat(std::mem::take(pending_op)));
     parts.push(text(" "));
+}
+
+/// Split a `TERNARY_EXPR` into its canonical `cond ? then : els` shape: exactly three child
+/// nodes with the `?` token between the first two and the `:` token between the last two.
+/// `None` for any other shape (error recovery), in which case the caller falls back to inline
+/// emission.
+fn ternary_parts(
+    node: &SyntaxNode,
+) -> Option<(SyntaxNode, SyntaxToken, SyntaxNode, SyntaxToken, SyntaxNode)> {
+    let mut nodes = node.children();
+    let (cond, then, els) = (nodes.next()?, nodes.next()?, nodes.next()?);
+    if nodes.next().is_some() {
+        return None;
+    }
+    let toks: Vec<SyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter(|t| !t.kind().is_trivia())
+        .collect();
+    let [q, colon] = toks.as_slice() else {
+        return None;
+    };
+    // The `?` must sit between `cond` and `then`, the `:` between `then` and `els`.
+    if q.kind() != S::QUESTION
+        || colon.kind() != S::COLON
+        || q.text_range().start() < cond.text_range().end()
+        || then.text_range().start() < q.text_range().end()
+        || colon.text_range().start() < then.text_range().end()
+        || els.text_range().start() < colon.text_range().end()
+    {
+        return None;
+    }
+    Some((cond, q.clone(), then, colon.clone(), els))
+}
+
+/// Lower a ternary conditional `cond ? then : els`. It is one group with a break point before
+/// (or, under `binop-separator = back`, after) each operator: flat it is `cond ? then: els`
+/// (the `:` spacing follows `space-before-colon` / `space-after-colon`, byte-identical to
+/// inline emission); when its flat width exceeds `single-line-if-else-max-width` — or it would
+/// overflow `max-width` — it wraps, the `?` and `:` leading the continuation lines
+/// (`binop-separator = front`, the default) or trailing the broken lines (`back`). A value of
+/// `0` for the width wraps every ternary. A malformed ternary (error recovery) falls back to
+/// inline emission, byte-for-byte unchanged.
+fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    let Some((cond, q, then, colon, els)) = ternary_parts(node) else {
+        return lower_generic(node, ctx);
+    };
+    // A break point whose flat form is a space (`line`) or nothing (`softline`); both break to
+    // a newline. The `?` is always space-surrounded; the `:` follows the colon-spacing config.
+    let break_at = |flat_space: bool| if flat_space { line() } else { softline() };
+    let colon_space = |on: bool| if on { text(" ") } else { nil() };
+    let sbc = ctx.cfg.space_before_colon;
+    let sac = ctx.cfg.space_after_colon;
+    let tail = match ctx.cfg.binop_separator {
+        BinopSeparator::Front => concat(vec![
+            break_at(true),
+            tok(&q, ctx),
+            text(" "),
+            lower(&then, ctx),
+            break_at(sbc),
+            tok(&colon, ctx),
+            colon_space(sac),
+            lower(&els, ctx),
+        ]),
+        BinopSeparator::Back => concat(vec![
+            text(" "),
+            tok(&q, ctx),
+            break_at(true),
+            lower(&then, ctx),
+            colon_space(sbc),
+            tok(&colon, ctx),
+            break_at(sac),
+            lower(&els, ctx),
+        ]),
+    };
+    let doc = concat(vec![lower(&cond, ctx), indent(tail)]);
+    group_within(doc, ctx.cfg.single_line_if_else_max_width)
 }
 
 /// Lower a unary expression tight (`-x`), inserting a space only when the operator and
