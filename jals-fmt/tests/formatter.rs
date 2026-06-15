@@ -2,8 +2,9 @@
 
 use expect_test::{Expect, expect};
 use jals_fmt::{
-    AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle, FnParamsLayout,
-    HexLiteralCase, LineEnding, TrailingComma, TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
+    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, TrailingComma,
+    TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -3287,6 +3288,108 @@ fn hex_literal_case_is_idempotent() {
         assert_eq!(
             once, twice,
             "hex-literal-case must be idempotent ({case:?})"
+        );
+    }
+}
+
+// ----- float-literal-trailing-zero --------------------------------------------------------
+
+fn fmt_float(src: &str, float_literal_trailing_zero: FloatLiteralTrailingZero) -> String {
+    let config = Config {
+        float_literal_trailing_zero,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+/// A source exercising the in-scope boundary (`1.0` / `1.` / `1.00`, with and without an `f`
+/// suffix or an `e` exponent) and the out-of-scope literals that must stay byte-for-byte
+/// unchanged: a non-zero fraction (`1.5`), a leading-dot float (`.5`), a dotless float (`1e10`),
+/// a hex float (`0x1.0p3`), and an integer (`123`).
+const FLOAT_SRC: &str = "class C{double a=1.0;double b=1.;double c=1.00;double d=1.5;double e=.5;double f=0.0;float g=1.0f;float h=1.f;double i=1.0e10;double j=1e10;double k=0x1.0p3;int l=123;}";
+
+#[test]
+fn float_literal_trailing_zero_preserve_keeps_source() {
+    // The default leaves every literal exactly as written.
+    expect![[r#"
+        class C {
+            double a = 1.0;
+            double b = 1.;
+            double c = 1.00;
+            double d = 1.5;
+            double e = .5;
+            double f = 0.0;
+            float g = 1.0f;
+            float h = 1.f;
+            double i = 1.0e10;
+            double j = 1e10;
+            double k = 0x1.0p3;
+            int l = 123;
+        }
+    "#]]
+    .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Preserve));
+}
+
+#[test]
+fn float_literal_trailing_zero_always_adds_the_zero() {
+    // Every empty-fraction decimal float gains a single trailing zero (`1.` → `1.0`,
+    // `1.f` → `1.0f`); fractions that already have a digit, dotless / leading-dot / hex floats,
+    // and integers are untouched.
+    expect![[r#"
+        class C {
+            double a = 1.0;
+            double b = 1.0;
+            double c = 1.00;
+            double d = 1.5;
+            double e = .5;
+            double f = 0.0;
+            float g = 1.0f;
+            float h = 1.0f;
+            double i = 1.0e10;
+            double j = 1e10;
+            double k = 0x1.0p3;
+            int l = 123;
+        }
+    "#]]
+    .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Always));
+}
+
+#[test]
+fn float_literal_trailing_zero_never_strips_the_zero() {
+    // Every all-zero fraction is stripped to a bare dot (`1.0` / `1.00` → `1.`, `1.0f` → `1.f`,
+    // `1.0e10` → `1.e10`); non-zero fractions, the leading-dot `.5`, dotless / hex floats, and
+    // integers are untouched.
+    expect![[r#"
+        class C {
+            double a = 1.;
+            double b = 1.;
+            double c = 1.;
+            double d = 1.5;
+            double e = .5;
+            double f = 0.;
+            float g = 1.f;
+            float h = 1.f;
+            double i = 1.e10;
+            double j = 1e10;
+            double k = 0x1.0p3;
+            int l = 123;
+        }
+    "#]]
+    .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Never));
+}
+
+#[test]
+fn float_literal_trailing_zero_is_idempotent() {
+    for mode in [
+        FloatLiteralTrailingZero::Preserve,
+        FloatLiteralTrailingZero::Always,
+        FloatLiteralTrailingZero::Never,
+    ] {
+        let once = fmt_float(FLOAT_SRC, mode);
+        let twice = fmt_float(&once, mode);
+        assert_eq!(
+            once, twice,
+            "float-literal-trailing-zero must be idempotent ({mode:?})"
         );
     }
 }
