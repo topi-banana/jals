@@ -29,8 +29,8 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Modifier layout | `jals-fmt/src/modifiers.rs` | Pure canonical reordering of a `MODIFIERS` node's keyword modifiers (`reorder-modifiers`), annotations hoisted to the front, + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
-| Build/compile | `jals-build/src/` | `jals.toml` (`Manifest`) parsing + a pure `javac`/`java` invocation builder (`build_invocation`/`run_invocation`) + project scaffolding (`scaffold`, for `jals init`). Pure lib (serde/toml, no `std::process`/`std::fs`), so wasm-compatible; `jals-cli` walks sources, spawns the tools, and writes the scaffold files. |
-| CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lint`/`jals lsp`/`jals build`/`jals run`/`jals init`; config discovery memoized per directory. |
+| Build/compile | `jals-build/src/` | `jals.toml` (`Manifest`) parsing + a pure `javac`/`java` invocation builder (`build_invocation`/`run_invocation`) + clean-path resolution (`clean_paths`, for `jals clean`) + project scaffolding (`scaffold`, for `jals init`). Pure lib (serde/toml, no `std::process`/`std::fs`), so wasm-compatible; `jals-cli` walks sources, spawns the tools, removes the build output, and writes the scaffold files. |
+| CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lint`/`jals lsp`/`jals build`/`jals run`/`jals clean`/`jals init`; config discovery memoized per directory. |
 | LSP | `jals-lsp/src/` | `async-lsp` server (`jals lsp`): diagnostics, document symbols, formatting. Pure handlers + UTF-16 `LineIndex`. Host-only (tokio/stdio). |
 | Playground | `jals-playground/` | Yew (CSR) browser app served by Trunk (`Trunk.toml`, tailwind); compiles to `wasm32`. Runs the syntax/formatter in-browser. |
 
@@ -43,6 +43,7 @@ cargo run -p jals-cli -- fmt <paths>       # or: echo '...' | cargo run -p jals-
 cargo run -p jals-cli -- init [path]       # scaffold a new jals.toml project (Main.java, .gitignore)
 cargo run -p jals-cli -- build [--dry-run] # compile a jals.toml project with javac (--dry-run prints the command)
 cargo run -p jals-cli -- run               # compile then run the project's [run] main-class with java
+cargo run -p jals-cli -- clean [--dry-run] # remove the project's build output (the classes-dir)
 cargo run -p jals-cli -- lsp               # run the language server over stdio (for editors)
 cargo run -p xtask -- codegen              # regenerate jals-syntax/src/ast/generated.rs from java.ungram
 (cd jals-playground && trunk serve)        # run the browser playground (needs trunk + the wasm32 target)

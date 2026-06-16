@@ -32,6 +32,8 @@ enum Commands {
     Build(BuildArgs),
     /// Compile and run a JALS/Java project with `java`.
     Run(RunArgs),
+    /// Remove a JALS/Java project's build output (the `classes-dir`).
+    Clean(CleanArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
     Init(InitArgs),
 }
@@ -122,6 +124,17 @@ struct RunArgs {
 }
 
 #[derive(Args)]
+struct CleanArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Print the paths that would be removed and exit, without deleting anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
 struct InitArgs {
     /// Directory to initialize. Created if it does not exist. Defaults to the current directory.
     #[arg(value_name = "PATH")]
@@ -140,6 +153,7 @@ fn main() -> ExitCode {
         Commands::Lint(args) => run_lint(args),
         Commands::Build(args) => run_build(args),
         Commands::Run(args) => run_run(args),
+        Commands::Clean(args) => run_clean(args),
         Commands::Init(args) => run_init(args),
     };
     match result {
@@ -316,6 +330,27 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
     let java = jdk_tool("JAVA", "java");
     let run_status = spawn_tool(&java, &run_inv.args)?;
     Ok(to_exit_code(run_status))
+}
+
+/// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
+/// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
+/// project succeeds quietly). `--dry-run` prints the paths without deleting them.
+fn run_clean(args: CleanArgs) -> Result<ExitCode> {
+    let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
+    let paths = jals_build::clean_paths(&manifest, &root);
+
+    for path in &paths {
+        if args.dry_run {
+            println!("would remove {}", path.display());
+            continue;
+        }
+        if !path.exists() {
+            continue;
+        }
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
+        println!("removed {}", path.display());
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Scaffolds a new project: resolves the target directory and name, then writes the files from
