@@ -257,6 +257,21 @@ fn comments_after_final_brace_kept() {
 }
 
 #[test]
+fn trailing_line_comment_on_brace_forces_break() {
+    // A `//` trailing comment on a closing brace (emitted via `lower_braced`'s `trailing_doc`)
+    // must force the line to break before the next token's own trailing comment — otherwise
+    // error-recovery shapes glue two `//` comments onto one physical line, where the second is
+    // swallowed by the first on re-lex (dropping a comment and breaking idempotency).
+    check(
+        "class{{}// alpha\nclass// beta\n",
+        expect![[r#"
+            class { {}  // alpha
+            class  // beta
+        "#]],
+    );
+}
+
+#[test]
 fn binary_operators_spaced() {
     check(
         "class C{boolean b=a>>2==c&&d>=e;}",
