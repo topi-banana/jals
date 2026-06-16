@@ -145,3 +145,30 @@ jobs:
         with:
           header: parse-soundness
           path: soundness.md
+
+  golden-fidelity:
+    name: google-java-format fidelity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      # Only the small google-java-format corpus is needed — not the huge OpenJDK
+      # submodule — so init just that one shallowly instead of `submodules: true`.
+      - name: Check out the google-java-format corpus
+        run: git submodule update --init --depth 1 jals-tests/sources/google-java-format
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run formatter-fidelity check
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo run --release -p jals-tests --bin jals-golden -- gjf-testdata --markdown \
+            | tee golden.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment fidelity on PR
+        if: always() && github.event_name == 'pull_request' && hashFiles('golden.md') != ''
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: golden-fidelity
+          path: golden.md
