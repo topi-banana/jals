@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "jals-build",
   "jals-cli",
   "jals-fmt",
   "jals-lint",
@@ -21,6 +22,7 @@ ariadne = { version = "0.6.0" }
 async-lsp = { version = "0.2.4" }
 clap = { version = "4.6.1", features = ["derive"] }
 futures = { version = "0.3" }
+jals-build = { path = "jals-build" }
 jals-fmt = { path = "jals-fmt" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }

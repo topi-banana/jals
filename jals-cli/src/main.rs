@@ -7,8 +7,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use jals_build::Manifest;
 use jals_fmt::Config;
 use jals_lint::Config as LintConfig;
 
@@ -27,6 +28,14 @@ enum Commands {
     Lint(LintArgs),
     /// Run the language server (LSP) over stdio.
     Lsp(LspArgs),
+    /// Compile a JALS/Java project described by `jals.toml` with `javac`.
+    Build(BuildArgs),
+    /// Compile and run a JALS/Java project with `java`.
+    Run(RunArgs),
+    /// Remove a JALS/Java project's build output (the `classes-dir`).
+    Clean(CleanArgs),
+    /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
+    Init(InitArgs),
 }
 
 #[derive(Args)]
@@ -72,12 +81,80 @@ struct LspArgs {
     stdio: bool,
 }
 
+#[derive(Args)]
+struct BuildArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Print the javac command that would run and exit, without compiling.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print the javac command before running it (like `cargo build -v` showing rustc).
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    /// Override the output directory (`-d`); takes precedence over `classes-dir`.
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Print the javac/java commands that would run and exit, without compiling or running.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print the javac/java commands before running them.
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    /// Run this fully-qualified main class instead of `[run] main-class`.
+    #[arg(long, value_name = "FQCN")]
+    main_class: Option<String>,
+
+    /// Arguments passed to the program after `--`.
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
+#[derive(Args)]
+struct CleanArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Print the paths that would be removed and exit, without deleting anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// Directory to initialize. Created if it does not exist. Defaults to the current directory.
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
+
+    /// Project name written to `[package] name`. Defaults to the target directory's name.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Fmt(args) => run_fmt(args),
         Commands::Lsp(args) => run_lsp(args),
         Commands::Lint(args) => run_lint(args),
+        Commands::Build(args) => run_build(args),
+        Commands::Run(args) => run_run(args),
+        Commands::Clean(args) => run_clean(args),
+        Commands::Init(args) => run_init(args),
     };
     match result {
         Ok(code) => code,
@@ -196,6 +273,226 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
 fn run_lsp(_args: LspArgs) -> Result<ExitCode> {
     jals_lsp::run()?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
+/// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
+fn run_build(args: BuildArgs) -> Result<ExitCode> {
+    let (mut manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
+    if let Some(out) = &args.out_dir {
+        manifest.build.classes_dir = out.to_string_lossy().into_owned();
+    }
+    let sources = discover_sources(&manifest, &root)?;
+    let invocation = jals_build::build_invocation(&manifest, &root, &sources, path_sep());
+
+    if args.dry_run || args.verbose {
+        println!("{}", invocation.display_command());
+    }
+    if args.dry_run {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let javac = jdk_tool("JAVAC", "javac");
+    let status = spawn_tool(&javac, &invocation.args)?;
+    Ok(to_exit_code(status))
+}
+
+/// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
+/// run; `--dry-run` prints both commands without executing either.
+fn run_run(args: RunArgs) -> Result<ExitCode> {
+    let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
+    let main_class = args
+        .main_class
+        .clone()
+        .or_else(|| manifest.run.main_class.clone())
+        .ok_or_else(|| {
+            anyhow!("no main class: set `[run] main-class` in jals.toml or pass --main-class")
+        })?;
+    let sources = discover_sources(&manifest, &root)?;
+    let sep = path_sep();
+    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, sep);
+    let run_inv = jals_build::run_invocation(&manifest, &root, &main_class, &args.args, sep);
+
+    if args.dry_run || args.verbose {
+        println!("{}", build_inv.display_command());
+        println!("{}", run_inv.display_command());
+    }
+    if args.dry_run {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Compile first; only run when compilation succeeds.
+    let javac = jdk_tool("JAVAC", "javac");
+    let build_status = spawn_tool(&javac, &build_inv.args)?;
+    if !build_status.success() {
+        return Ok(to_exit_code(build_status));
+    }
+    let java = jdk_tool("JAVA", "java");
+    let run_status = spawn_tool(&java, &run_inv.args)?;
+    Ok(to_exit_code(run_status))
+}
+
+/// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
+/// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
+/// project succeeds quietly). `--dry-run` prints the paths without deleting them.
+fn run_clean(args: CleanArgs) -> Result<ExitCode> {
+    let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
+    let paths = jals_build::clean_paths(&manifest, &root);
+
+    for path in &paths {
+        if args.dry_run {
+            println!("would remove {}", path.display());
+            continue;
+        }
+        if !path.exists() {
+            continue;
+        }
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
+        println!("removed {}", path.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Scaffolds a new project: resolves the target directory and name, then writes the files from
+/// [`jals_build::scaffold`]. Refuses to overwrite an existing `jals.toml`; any other pre-existing
+/// scaffold file (e.g. a hand-written `Main.java`) is left untouched.
+fn run_init(args: InitArgs) -> Result<ExitCode> {
+    let dir = match args.path {
+        Some(p) => p,
+        None => std::env::current_dir().context("getting current dir")?,
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    if dir.join("jals.toml").exists() {
+        return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
+    }
+
+    let name = match args.name {
+        Some(n) => n,
+        None => project_name_from_dir(&dir)?,
+    };
+
+    let files = jals_build::scaffold(&jals_build::InitOptions { name: name.clone() });
+    for file in &files {
+        let dest = dir.join(&file.path);
+        if dest.exists() {
+            println!("skipping {} (already exists)", dest.display());
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&dest, file.contents.as_bytes())
+            .with_context(|| format!("writing {}", dest.display()))?;
+    }
+
+    println!("created JALS project `{name}` in {}", dir.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Infers a project name from a target directory's final component, canonicalizing first so a
+/// relative path or `.` resolves to the directory's real name rather than the literal `.`.
+fn project_name_from_dir(dir: &Path) -> Result<String> {
+    let absolute = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    absolute
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            anyhow!(
+                "could not infer a project name from {}; pass --name",
+                dir.display()
+            )
+        })
+}
+
+/// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
+/// returning the parsed manifest and the project root (the manifest's parent directory). A missing
+/// manifest is an error, unlike the formatter/linter configs.
+fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
+    let manifest_path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let cwd = std::env::current_dir().context("getting current dir")?;
+            Manifest::discover_path(&cwd)
+                .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
+        }
+    };
+    let manifest = Manifest::from_file(&manifest_path)
+        .with_context(|| format!("loading {}", manifest_path.display()))?;
+    let root = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    Ok((manifest, root))
+}
+
+/// Collects the `.java` files under the manifest's source directories (resolved against `root`).
+/// Each source directory must exist, and at least one source file must be found.
+fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
+    let source_roots: Vec<PathBuf> = manifest
+        .build
+        .source_dirs
+        .iter()
+        .map(|d| root.join(d))
+        .collect();
+    for dir in &source_roots {
+        if !dir.is_dir() {
+            return Err(anyhow!("source directory {} does not exist", dir.display()));
+        }
+    }
+    let sources = collect_java_files(&source_roots)?;
+    if sources.is_empty() {
+        return Err(anyhow!(
+            "no .java files found under {:?}",
+            manifest.build.source_dirs
+        ));
+    }
+    Ok(sources)
+}
+
+/// The platform classpath separator.
+fn path_sep() -> char {
+    if cfg!(windows) { ';' } else { ':' }
+}
+
+/// Resolves a JDK tool (`javac`/`java`): honor `$<env>` first, then `$JAVA_HOME/bin/<tool>`, and
+/// finally fall back to the bare tool name on `PATH`.
+fn jdk_tool(env: &str, tool: &str) -> PathBuf {
+    if let Some(explicit) = std::env::var_os(env) {
+        return PathBuf::from(explicit);
+    }
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        let candidate = Path::new(&home).join("bin").join(tool);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(tool)
+}
+
+/// Spawns `program` with `args`, inheriting stdio so the tool's diagnostics pass straight through.
+fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatus> {
+    std::process::Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to spawn `{}` (is a JDK installed and on PATH?)",
+                program.display()
+            )
+        })
+}
+
+/// Maps a process exit status to a CLI [`ExitCode`]: 0 succeeds, any other code propagates, and a
+/// signal-terminated process fails with code 1.
+fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
+    match status.code() {
+        Some(0) => ExitCode::SUCCESS,
+        Some(code) => ExitCode::from(code as u8),
+        None => ExitCode::from(1),
+    }
 }
 
 /// Resolves the config for a directory, either from an explicit `--config` (used for all

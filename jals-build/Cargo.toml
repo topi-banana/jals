@@ -1,0 +1,8 @@
+[package]
+name = "jals-build"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
