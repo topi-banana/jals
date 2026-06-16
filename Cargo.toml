@@ -31,7 +31,7 @@ rayon = { version = "1" }
 rowan = { version = "0.16.1" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0" }
-similar = { version = "2" }
+similar = { version = "3" }
 text-size = { version = "1.1.1" }
 tokio = { version = "1", features = ["net", "rt"] }
 toml = { version = "1.1.2" }
