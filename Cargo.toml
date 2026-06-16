@@ -17,6 +17,7 @@ edition = "2024"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99" }
+ariadne = { version = "0.6.0" }
 async-lsp = { version = "0.2.4" }
 clap = { version = "4.6.1", features = ["derive"] }
 futures = { version = "0.3" }
@@ -30,6 +31,7 @@ rayon = { version = "1" }
 rowan = { version = "0.16.1" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0" }
+similar = { version = "2" }
 text-size = { version = "1.1.1" }
 tokio = { version = "1", features = ["net", "rt"] }
 toml = { version = "1.1.2" }
