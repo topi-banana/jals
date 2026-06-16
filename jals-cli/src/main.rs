@@ -32,6 +32,8 @@ enum Commands {
     Build(BuildArgs),
     /// Compile and run a JALS/Java project with `java`.
     Run(RunArgs),
+    /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
+    Init(InitArgs),
 }
 
 #[derive(Args)]
@@ -119,6 +121,17 @@ struct RunArgs {
     args: Vec<String>,
 }
 
+#[derive(Args)]
+struct InitArgs {
+    /// Directory to initialize. Created if it does not exist. Defaults to the current directory.
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
+
+    /// Project name written to `[package] name`. Defaults to the target directory's name.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -127,6 +140,7 @@ fn main() -> ExitCode {
         Commands::Lint(args) => run_lint(args),
         Commands::Build(args) => run_build(args),
         Commands::Run(args) => run_run(args),
+        Commands::Init(args) => run_init(args),
     };
     match result {
         Ok(code) => code,
@@ -302,6 +316,60 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
     let java = jdk_tool("JAVA", "java");
     let run_status = spawn_tool(&java, &run_inv.args)?;
     Ok(to_exit_code(run_status))
+}
+
+/// Scaffolds a new project: resolves the target directory and name, then writes the files from
+/// [`jals_build::scaffold`]. Refuses to overwrite an existing `jals.toml`; any other pre-existing
+/// scaffold file (e.g. a hand-written `Main.java`) is left untouched.
+fn run_init(args: InitArgs) -> Result<ExitCode> {
+    let dir = match args.path {
+        Some(p) => p,
+        None => std::env::current_dir().context("getting current dir")?,
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    if dir.join("jals.toml").exists() {
+        return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
+    }
+
+    let name = match args.name {
+        Some(n) => n,
+        None => project_name_from_dir(&dir)?,
+    };
+
+    let files = jals_build::scaffold(&jals_build::InitOptions { name: name.clone() });
+    for file in &files {
+        let dest = dir.join(&file.path);
+        if dest.exists() {
+            println!("skipping {} (already exists)", dest.display());
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&dest, file.contents.as_bytes())
+            .with_context(|| format!("writing {}", dest.display()))?;
+    }
+
+    println!("created JALS project `{name}` in {}", dir.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Infers a project name from a target directory's final component, canonicalizing first so a
+/// relative path or `.` resolves to the directory's real name rather than the literal `.`.
+fn project_name_from_dir(dir: &Path) -> Result<String> {
+    let absolute = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    absolute
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            anyhow!(
+                "could not infer a project name from {}; pass --name",
+                dir.display()
+            )
+        })
 }
 
 /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
