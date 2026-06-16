@@ -6,16 +6,18 @@ use std::ops::ControlFlow;
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
+    CreateFilesParams, DeleteFilesParams, DidChangeConfigurationParams,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight,
-    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher,
-    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, GlobPattern,
-    InitializeParams, InitializeResult, InitializedParams, OneOf, PublishDiagnosticsParams,
-    Registration, RegistrationParams, SelectionRange, SelectionRangeParams,
-    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, GlobPattern, InitializeParams, InitializeResult,
+    InitializedParams, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
+    RenameFilesParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
     notification::{self, Notification},
     request,
 };
@@ -170,6 +172,56 @@ impl LanguageServer for ServerState {
         ControlFlow::Continue(())
     }
 
+    // No-op notification handlers. `async-lsp`'s `from_language_server` wires *every*
+    // standard LSP notification to the omnitrait default, which returns
+    // `ControlFlow::Break(Err(..))` for any notification not starting with `$/` — and a
+    // `Break` from a notification stops the main loop, exiting the server process. So a
+    // client sending one of these (notably Helix sends `textDocument/didSave` on every
+    // save, because we advertise `TextDocumentSyncCapability::Kind`) would crash the
+    // server. We don't act on these, but we must consume them with `Continue` rather than
+    // let them fall through to the loop-breaking default.
+
+    fn did_save(&mut self, _params: DidSaveTextDocumentParams) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn will_save(&mut self, _params: WillSaveTextDocumentParams) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn did_change_configuration(
+        &mut self,
+        _params: DidChangeConfigurationParams,
+    ) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn did_change_workspace_folders(
+        &mut self,
+        _params: DidChangeWorkspaceFoldersParams,
+    ) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn work_done_progress_cancel(
+        &mut self,
+        _params: WorkDoneProgressCancelParams,
+    ) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn did_create_files(&mut self, _params: CreateFilesParams) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn did_rename_files(&mut self, _params: RenameFilesParams) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
+    fn did_delete_files(&mut self, _params: DeleteFilesParams) -> Self::NotifyResult {
+        ControlFlow::Continue(())
+    }
+
     fn document_symbol(
         &mut self,
         params: DocumentSymbolParams,
@@ -290,6 +342,31 @@ fn server_capabilities() -> ServerCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A notification handler returning `ControlFlow::Break` stops `async-lsp`'s main loop,
+    /// exiting the server process. The notifications we don't act on must therefore return
+    /// `Continue`, not fall through to the omnitrait default (which `Break`s). Regression for
+    /// a Helix crash: Helix sends `textDocument/didSave` on every save (we advertise
+    /// `TextDocumentSyncCapability::Kind`), which otherwise killed the server.
+    #[test]
+    fn ignored_notifications_continue_rather_than_break() {
+        let mut state = ServerState::new(ClientSocket::new_closed());
+        assert!(matches!(
+            state.did_save(DidSaveTextDocumentParams {
+                text_document: async_lsp::lsp_types::TextDocumentIdentifier {
+                    uri: Url::parse("file:///a/B.java").unwrap(),
+                },
+                text: None,
+            }),
+            ControlFlow::Continue(())
+        ));
+        assert!(matches!(
+            state.did_change_configuration(DidChangeConfigurationParams {
+                settings: serde_json::Value::Null,
+            }),
+            ControlFlow::Continue(())
+        ));
+    }
 
     #[test]
     fn config_watch_registration_targets_jalsfmt_toml() {
