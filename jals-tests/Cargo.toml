@@ -11,10 +11,16 @@ path = "src/lib.rs"
 name = "jals-tests"
 path = "src/main.rs"
 
+[[bin]]
+name = "jals-golden"
+path = "src/bin/golden.rs"
+
 [dependencies]
 clap.workspace = true
+jals-fmt.workspace = true
 jals-syntax.workspace = true
 rayon.workspace = true
+similar.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]

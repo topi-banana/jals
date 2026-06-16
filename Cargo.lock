@@ -927,8 +927,10 @@ name = "jals-tests"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "jals-fmt",
  "jals-syntax",
  "rayon",
+ "similar",
  "tempfile",
  "walkdir",
 ]

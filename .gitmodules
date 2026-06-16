@@ -1,3 +1,6 @@
 [submodule "jals-tests/sources/openjdk"]
 	path = jals-tests/sources/openjdk
 	url = https://github.com/openjdk/jdk
+[submodule "jals-tests/sources/google-java-format"]
+	path = jals-tests/sources/google-java-format
+	url = https://github.com/google/google-java-format
