@@ -2,6 +2,9 @@
 name = "jals-tests"
 version.workspace = true
 edition.workspace = true
+# The crate ships two binaries (jals-tests, jals-golden); keep `cargo run -p
+# jals-tests` resolving to the parse-soundness CLI.
+default-run = "jals-tests"
 
 [lib]
 name = "jals_tests"

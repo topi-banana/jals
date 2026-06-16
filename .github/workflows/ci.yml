@@ -138,7 +138,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo run --release -p jals-tests -- --markdown | tee soundness.md >> "$GITHUB_STEP_SUMMARY"
+          cargo run --release -p jals-tests --bin jals-tests -- --markdown | tee soundness.md >> "$GITHUB_STEP_SUMMARY"
       - name: Comment parse rate on PR
         if: always() && github.event_name == 'pull_request' && hashFiles('soundness.md') != ''
         uses: marocchino/sticky-pull-request-comment@v3
