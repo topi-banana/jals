@@ -312,6 +312,18 @@ pub struct Config {
     /// does the brace open on its own line under `next-line`. Layout-only — the
     /// significant-token sequence is preserved exactly. Mirrors rustfmt's `fn_single_line`.
     pub fn_single_line: bool,
+    /// Force every block to be laid out multi-line. When on, an empty block — of any kind
+    /// (a type body, a method / constructor / initializer block, a control-flow / `switch` /
+    /// lambda / bare block) — expands to a two-line `{` … `}` instead of collapsing to `{}`
+    /// (overriding [`empty_item_single_line`](Config::empty_item_single_line) and extending past
+    /// its declaration-only scope), and a single-statement declaration body is never collapsed
+    /// onto the header's line (overriding [`fn_single_line`](Config::fn_single_line)). The opening
+    /// brace still follows [`brace_style`](Config::brace_style) /
+    /// [`control_brace_style`](Config::control_brace_style). Off by default. Layout-only — the
+    /// significant-token sequence is preserved exactly. Reinterprets rustfmt's
+    /// `force_multiline_blocks` (whose literal closure / match-arm brace-wrapping would add tokens
+    /// and is not portable under jals's invariants).
+    pub force_multiline_blocks: bool,
     /// Layout of control-flow brace styling: the opening brace of a control-flow / `switch` /
     /// lambda / bare block, and the `} else` / `} catch` / `} finally` / `} while`
     /// continuations. Same line (K&R) or next line (Allman).
@@ -447,6 +459,7 @@ impl Default for Config {
             brace_style: BraceStyle::SameLine,
             empty_item_single_line: true,
             fn_single_line: false,
+            force_multiline_blocks: false,
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
@@ -611,6 +624,8 @@ mod tests {
         // Single-statement bodies are not collapsed onto one line by default (rustfmt's
         // `fn_single_line` is also off by default).
         assert!(!c.fn_single_line);
+        // Blocks are not forced multi-line by default (collapses stay available).
+        assert!(!c.force_multiline_blocks);
         // Annotation placement defaults to Compact (inline, the prior behavior).
         assert_eq!(c.annotation_placement, AnnotationPlacement::Compact);
         // Hex-literal case defaults to preserve, keeping the source case exactly.
@@ -647,6 +662,14 @@ mod tests {
         assert!(c.fn_single_line);
         let c: Config = toml::from_str("fn-single-line = false\n").unwrap();
         assert!(!c.fn_single_line);
+    }
+
+    #[test]
+    fn force_multiline_blocks_parses() {
+        let c: Config = toml::from_str("force-multiline-blocks = true\n").unwrap();
+        assert!(c.force_multiline_blocks);
+        let c: Config = toml::from_str("force-multiline-blocks = false\n").unwrap();
+        assert!(!c.force_multiline_blocks);
     }
 
     #[test]

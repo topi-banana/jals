@@ -627,7 +627,12 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // line under `brace-style = next-line`; control-flow / `switch` / lambda / bare blocks are
     // never governed and always keep `{}` (matching rustfmt's item-only scoping).
     if !any && !has_dangling {
-        if ctx.cfg.empty_item_single_line || !governs_empty_single_line(node) {
+        // `force_multiline_blocks` expands every empty block to a two-line `{ <newline> }`,
+        // overriding `empty_item_single_line` and extending past it to control-flow / `switch` /
+        // lambda / bare blocks (which the latter never governs).
+        if !ctx.cfg.force_multiline_blocks
+            && (ctx.cfg.empty_item_single_line || !governs_empty_single_line(node))
+        {
             return concat(vec![open, close]);
         }
         let lead = if opens_on_next_line(node, ctx.cfg) {
@@ -644,6 +649,7 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // otherwise; the `if_break` lead keeps the brace on its own line in the broken case under
     // `brace-style = next-line` (and is not a forced break, so the flat form stays available).
     if ctx.cfg.fn_single_line
+        && !ctx.cfg.force_multiline_blocks
         && !has_dangling
         && is_declaration_body(node)
         && single_statement_no_comments(node, ctx)
