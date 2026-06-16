@@ -29,8 +29,8 @@ Four subcommands are wired through `jals-cli`, each backed by one pure entry poi
 
 | Command | Backed by | What it does | Flags |
 | --- | --- | --- | --- |
-| `jals build` | `build_invocation` | Discover the manifest and `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>` |
-| `jals run` | `build_invocation` + `run_invocation` | Compile, then run the `[run] main-class` with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `-- <args>` |
+| `jals build` | `build_invocation` | Discover the manifest and `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
+| `jals run` | `resolve_run_target` + `build_invocation` + `run_invocation` | Compile, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
 | `jals clean` | `clean_paths` | Remove the build output (the `classes-dir`). A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
 | `jals init [PATH]` | `scaffold` | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`. | `--name <NAME>` |
 
@@ -53,13 +53,15 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
 ## The manifest (`jals.toml`)
 
 Every key is optional and falls back to its default; keys are kebab-case and grouped into
-`[package]`, `[build]`, and `[run]`. The defaults encode the Maven-style
-`src/main/java` → `target/classes` layout, so an empty (or absent) section just uses them.
+`[package]`, `[build]`, `[run]`, and the repeatable `[[bin]]`. The defaults encode the
+Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent) section just
+uses them.
 
 ```toml
 [package]
 name = "hello"
 version = "0.1.0"
+# default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
 [build]
 source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
@@ -71,7 +73,16 @@ classpath = ["libs/guava.jar"]    # -classpath entries (jars or dirs)
 javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
 
 [run]
-main-class = "com.example.Main"   # entry point for `jals run`
+main-class = "com.example.Main"   # entry point for `jals run` (used only when no [[bin]] exists)
+
+# Or declare several named entry points instead of [run] main-class:
+# [[bin]]
+# name = "server"
+# main-class = "com.example.Server"
+#
+# [[bin]]
+# name = "cli"
+# main-class = "com.example.Cli"
 ```
 
 ### `[package]`
@@ -80,6 +91,7 @@ main-class = "com.example.Main"   # entry point for `jals run`
 | --- | --- | --- | --- |
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
+| `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
 
 ### `[build]`
 
@@ -97,7 +109,33 @@ main-class = "com.example.Main"   # entry point for `jals run`
 
 | Key | Type | Default | Maps to |
 | --- | --- | --- | --- |
-| `main-class` | string | — | the fully-qualified entry point passed to `java`. `jals run` errors if it is unset and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. |
+| `main-class` | string | — | the fully-qualified entry point passed to `java`, used **only when no `[[bin]]` is declared**. `jals run` errors if it is unset, no `[[bin]]` exists, and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. |
+
+### `[[bin]]`
+
+A repeatable array-of-tables declaring **named entry points** (Cargo's `[[bin]]`). Both keys are
+**required**.
+
+| Key | Type | Maps to |
+| --- | --- | --- |
+| `name` | string | the bin's selector for `--bin <name>` and `[package] default-run` |
+| `main-class` | string | the fully-qualified class `java` runs for this bin |
+
+Because `javac` compiles **all** discovered sources in one pass, a `[[bin]]` is *not* a separate
+compilation unit (unlike Rust). It only selects which `main-class` `java` runs — it never changes
+what is compiled. `jals build --bin <name>` therefore only validates that the name exists; the
+compile command is unchanged.
+
+The run target for `jals run` is resolved in this order (`resolve_run_target`):
+
+1. `--main-class <FQCN>` — runs that class directly, bypassing the manifest.
+2. `--bin <name>` — the `[[bin]]` with that name (error if none matches).
+3. `[package] default-run` — when several `[[bin]]` exist.
+4. the single `[[bin]]`, when exactly one is declared.
+5. `[run] main-class` — only when **no** `[[bin]]` is declared (full backward compatibility).
+
+Once any `[[bin]]` exists, `[run] main-class` is ignored for selection. Duplicate bin names and a
+`default-run` that names no bin are rejected at manifest load (`Manifest::validate`).
 
 ## Usage
 
@@ -106,7 +144,8 @@ jals init my-app            # scaffold ./my-app (jals.toml, src/main/java/Main.j
 cd my-app
 jals build                  # compile with javac
 jals build --dry-run        # print the javac command without compiling
-jals run                    # compile, then run [run] main-class
+jals run                    # compile, then run the resolved entry point
+jals run --bin server       # run the [[bin]] named "server"
 jals run -- arg1 arg2       # ...passing args to the program
 jals run --main-class com.example.Other
 jals clean                  # remove target/classes
@@ -119,13 +158,16 @@ pub fn build_invocation(manifest: &Manifest, project_root: &Path,
                         sources: &[PathBuf], path_sep: char) -> Invocation;
 pub fn run_invocation(manifest: &Manifest, project_root: &Path, main_class: &str,
                       program_args: &[String], path_sep: char) -> Invocation;
+pub fn resolve_run_target<'m>(manifest: &'m Manifest, bin: Option<&str>)
+                          -> Result<&'m str, ResolveTargetError>;
 pub fn clean_paths(manifest: &Manifest, project_root: &Path) -> Vec<PathBuf>;
 pub fn scaffold(options: &InitOptions) -> Vec<ScaffoldFile>;
 ```
 
 `Invocation { program, args }` is a resolved command line as pure data; `display_command()`
-renders it for `--dry-run`/`-v`. `Manifest::from_file` / `Manifest::discover_path` load and
-locate `jals.toml`.
+renders it for `--dry-run`/`-v`. `resolve_run_target` picks the `main-class` `jals run` should
+execute from `[[bin]]`/`default-run`/`[run] main-class`. `Manifest::from_file` loads, parses, and
+validates (`Manifest::validate`) `jals.toml`; `Manifest::discover_path` locates it.
 
 ## Development
 
@@ -171,9 +213,9 @@ discovered source list is fed in today.
 
 ### `[package]` expansion (Cargo `[package]`)
 
-`description`, `authors`, `license`, `repository`, `homepage`, `keywords`,
-`edition` / `java-version` (a default `release`), and `default-run` (when multiple binaries
-exist). These become a jar's `MANIFEST.MF` / POM metadata on packaging.
+`description`, `authors`, `license`, `repository`, `homepage`, `keywords`, and
+`edition` / `java-version` (a default `release`). These become a jar's `MANIFEST.MF` / POM
+metadata on packaging. (`default-run` is already implemented — see [`[[bin]]`](#bin).)
 
 ### `[build]` additions
 
@@ -203,7 +245,6 @@ exist). These become a jar's `MANIFEST.MF` / POM metadata on packaging.
 | `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
 | `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]` | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels) |
-| `[[bin]]` | `[[bin]]` | multiple entry points (named `main-class`es) |
 | `[workspace]` / `[[module]]` | `[workspace]` | multi-module builds with a shared lockfile |
 | `[lints]` | `[lints]` | wire `jals-lint` / `-Xlint` configuration |
 

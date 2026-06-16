@@ -146,6 +146,26 @@ fn run(args: &[&str]) -> (String, i32) {
     )
 }
 
+/// Run the `jals` binary with `args`, returning (stdout, stderr, exit code).
+fn run_full(args: &[&str]) -> (String, String, i32) {
+    let out = jals().args(args).output().unwrap();
+    (
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+        out.status.code().unwrap(),
+    )
+}
+
+/// A `jals.toml` with two `[[bin]]` entries (`one`/`two`); `extra` is appended to `[package]`
+/// (e.g. `"default-run = \"two\"\n"` or `""`).
+fn two_bin_manifest(extra: &str) -> String {
+    format!(
+        "[package]\nname = \"hello\"\n{extra}\n\
+         [[bin]]\nname = \"one\"\nmain-class = \"com.example.One\"\n\n\
+         [[bin]]\nname = \"two\"\nmain-class = \"com.example.Two\"\n"
+    )
+}
+
 fn javac_available() -> bool {
     Command::new("javac")
         .arg("-version")
@@ -253,4 +273,154 @@ fn build_compiles_when_javac_present() {
             .join("target/classes/com/example/Main.class")
             .exists()
     );
+}
+
+#[test]
+fn run_bin_flag_selects_main_class() {
+    let dir = project(&two_bin_manifest(""));
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "run",
+        "--dry-run",
+        "--bin",
+        "two",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("java -cp "), "got: {stdout}");
+    assert!(stdout.contains("com.example.Two"), "got: {stdout}");
+    assert!(!stdout.contains("com.example.One"), "got: {stdout}");
+}
+
+#[test]
+fn run_default_run_picks_default() {
+    let dir = project(&two_bin_manifest("default-run = \"two\"\n"));
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "run",
+        "--dry-run",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("com.example.Two"), "got: {stdout}");
+}
+
+#[test]
+fn run_ambiguous_bins_errors() {
+    let dir = project(&two_bin_manifest(""));
+    let manifest = dir.path().join("jals.toml");
+    let (_stdout, stderr, code) = run_full(&[
+        "run",
+        "--dry-run",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("multiple bins"), "stderr: {stderr}");
+}
+
+#[test]
+fn run_unknown_bin_errors() {
+    let dir = project(&two_bin_manifest(""));
+    let manifest = dir.path().join("jals.toml");
+    let (_stdout, stderr, code) = run_full(&[
+        "run",
+        "--dry-run",
+        "--bin",
+        "nope",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no bin named"), "stderr: {stderr}");
+}
+
+#[test]
+fn run_main_class_overrides_bins() {
+    // `--main-class` short-circuits manifest selection even when `[[bin]]` entries exist.
+    let dir = project(&two_bin_manifest("default-run = \"two\"\n"));
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "run",
+        "--dry-run",
+        "--main-class",
+        "com.example.Override",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("com.example.Override"), "got: {stdout}");
+    assert!(!stdout.contains("com.example.Two"), "got: {stdout}");
+}
+
+#[test]
+fn run_bin_conflicts_with_main_class() {
+    let dir = project(&two_bin_manifest(""));
+    let manifest = dir.path().join("jals.toml");
+    let (_stdout, stderr, code) = run_full(&[
+        "run",
+        "--bin",
+        "one",
+        "--main-class",
+        "com.example.Whatever",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    // clap rejects conflicting flags at parse time with usage exit code 2.
+    assert_eq!(code, 2);
+    assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
+}
+
+#[test]
+fn build_unknown_bin_errors() {
+    let dir = project(&two_bin_manifest(""));
+    let manifest = dir.path().join("jals.toml");
+    let (_stdout, stderr, code) = run_full(&[
+        "build",
+        "--dry-run",
+        "--bin",
+        "nope",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no bin named"), "stderr: {stderr}");
+}
+
+#[test]
+fn build_known_bin_still_compiles_all_sources() {
+    // `--bin` validates the name but does not change the compile command.
+    let dir = project(&two_bin_manifest(""));
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--bin",
+        "one",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.starts_with("javac "), "got: {stdout}");
+    assert!(stdout.contains("Main.java"), "got: {stdout}");
+}
+
+#[test]
+fn invalid_manifest_duplicate_bin_errors_early() {
+    // A structurally invalid manifest fails on load, for any command (here `build --dry-run`).
+    let manifest = "[package]\nname = \"hello\"\n\n\
+         [[bin]]\nname = \"dup\"\nmain-class = \"com.example.A\"\n\n\
+         [[bin]]\nname = \"dup\"\nmain-class = \"com.example.B\"\n";
+    let dir = project(manifest);
+    let path = dir.path().join("jals.toml");
+    let (_stdout, stderr, code) = run_full(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("duplicate"), "stderr: {stderr}");
 }

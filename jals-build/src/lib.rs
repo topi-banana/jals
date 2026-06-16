@@ -6,6 +6,8 @@
 //! inputs into an [`Invocation`] — a program name and an argument vector for `javac`/`java`.
 //! [`clean_paths`] resolves the build artifacts to delete (for `jals clean`). [`scaffold`] goes the
 //! other way: it produces the files a brand-new project needs (for `jals init`).
+//! [`resolve_run_target`] picks which `main-class` `jals run` should execute, from a manifest's
+//! `[[bin]]` entries, `[package] default-run`, and `[run] main-class`.
 //!
 //! Everything here is pure: it never spawns a process or touches the filesystem, mirroring
 //! `jals-fmt`/`jals-lint`. `jals-cli` owns the process and directory-walking I/O and feeds the
@@ -17,8 +19,10 @@ mod clean;
 mod init;
 mod invocation;
 mod manifest;
+mod target;
 
 pub use clean::clean_paths;
 pub use init::{InitOptions, ScaffoldFile, scaffold};
 pub use invocation::{Invocation, build_invocation, run_invocation};
-pub use manifest::{Build, Manifest, ManifestError, Package, Run};
+pub use manifest::{Bin, Build, Manifest, ManifestError, Package, Run, ValidationError};
+pub use target::{ResolveTargetError, resolve_run_target};

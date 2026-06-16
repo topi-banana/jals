@@ -128,7 +128,8 @@ jals init my-app            # scaffold ./my-app (jals.toml, src/main/java/Main.j
 cd my-app
 jals build                  # compile with javac
 jals build --dry-run        # print the javac command without compiling
-jals run                    # compile, then run the [run] main-class
+jals run                    # compile, then run the resolved entry point
+jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
 jals clean                  # remove the build output (target/classes)
 ```
@@ -148,7 +149,12 @@ release = 21                        # javac --release N
 # classpath   = ["libs/guava.jar"]  # -classpath entries
 
 [run]
-main-class = "com.example.Main"     # entry point for `jals run`
+main-class = "com.example.Main"     # entry point for `jals run` (used when no [[bin]] exists)
+
+# Or declare several named entry points and pick one with `jals run --bin <name>`:
+# [[bin]]
+# name = "server"
+# main-class = "com.example.Server"
 ```
 
 The build crate (`jals-build`) only *plans* commands as pure data — `jals-cli` discovers the

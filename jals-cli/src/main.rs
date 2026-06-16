@@ -98,6 +98,11 @@ struct BuildArgs {
     /// Override the output directory (`-d`); takes precedence over `classes-dir`.
     #[arg(long, value_name = "DIR")]
     out_dir: Option<PathBuf>,
+
+    /// Require that a `[[bin]]` with this name exists. Does not change what is compiled — `javac`
+    /// always compiles all discovered sources — it only validates the name.
+    #[arg(long, value_name = "NAME")]
+    bin: Option<String>,
 }
 
 #[derive(Args)]
@@ -114,9 +119,13 @@ struct RunArgs {
     #[arg(short = 'v', long)]
     verbose: bool,
 
-    /// Run this fully-qualified main class instead of `[run] main-class`.
+    /// Run this fully-qualified main class instead of the resolved entry point.
     #[arg(long, value_name = "FQCN")]
     main_class: Option<String>,
+
+    /// Run the `[[bin]]` with this name. Mutually exclusive with `--main-class`.
+    #[arg(long, value_name = "NAME", conflicts_with = "main_class")]
+    bin: Option<String>,
 
     /// Arguments passed to the program after `--`.
     #[arg(last = true)]
@@ -282,6 +291,11 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
     if let Some(out) = &args.out_dir {
         manifest.build.classes_dir = out.to_string_lossy().into_owned();
     }
+    // `--bin` does not narrow compilation (javac compiles all sources); it only asserts the bin
+    // exists, so a typo fails fast before spawning the compiler.
+    if let Some(name) = &args.bin {
+        jals_build::resolve_run_target(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
+    }
     let sources = discover_sources(&manifest, &root)?;
     let invocation = jals_build::build_invocation(&manifest, &root, &sources, path_sep());
 
@@ -301,13 +315,14 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
 /// run; `--dry-run` prints both commands without executing either.
 fn run_run(args: RunArgs) -> Result<ExitCode> {
     let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
-    let main_class = args
-        .main_class
-        .clone()
-        .or_else(|| manifest.run.main_class.clone())
-        .ok_or_else(|| {
-            anyhow!("no main class: set `[run] main-class` in jals.toml or pass --main-class")
-        })?;
+    // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point from
+    // `[[bin]]` / `[package] default-run` / `[run] main-class`.
+    let main_class: String = match &args.main_class {
+        Some(explicit) => explicit.clone(),
+        None => jals_build::resolve_run_target(&manifest, args.bin.as_deref())
+            .map_err(|e| anyhow!("{e}"))?
+            .to_string(),
+    };
     let sources = discover_sources(&manifest, &root)?;
     let sep = path_sep();
     let build_inv = jals_build::build_invocation(&manifest, &root, &sources, sep);
