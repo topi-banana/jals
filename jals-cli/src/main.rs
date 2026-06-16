@@ -1,5 +1,7 @@
 //! `jals` command-line interface.
 
+mod report;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,8 +9,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use jals_fmt::{Config, FormatOutput};
-use jals_lint::{Config as LintConfig, LintOutput};
+use jals_fmt::Config;
+use jals_lint::Config as LintConfig;
 
 #[derive(Parser)]
 #[command(name = "jals", version, about = "JALS/Java tooling")]
@@ -33,9 +35,14 @@ struct FmtArgs {
     /// files. With no paths, source is read from stdin and written to stdout.
     paths: Vec<PathBuf>,
 
-    /// Check mode: do not write anything; exit non-zero if any file would change.
+    /// Check mode: write nothing and print a diff of what would change; exit non-zero if
+    /// any file would change.
     #[arg(long)]
     check: bool,
+
+    /// Print a diff of what would change without writing, like `--check` but always exits zero.
+    #[arg(long)]
+    diff: bool,
 
     /// Deny lints (repeatable). Pass `-D warnings` to fail when any file has syntax
     /// warnings. Only `warnings` is recognized.
@@ -90,6 +97,10 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
         .transpose()
         .context("loading --config")?;
 
+    // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
+    // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
+    let show_diff = args.check || args.diff;
+
     let mut discovery = Discovery::new(explicit_config);
     let mut any_changed = false;
     let mut any_warning = false;
@@ -102,10 +113,13 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
             .context("reading stdin")?;
         let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
         let out = jals_fmt::format_source(&src, &cfg);
-        any_changed |= out.formatted != src;
+        let changed = out.formatted != src;
+        any_changed |= changed;
         any_warning |= out.has_warnings();
-        report_warnings(&out, "<stdin>");
-        if !args.check {
+        report::report_format_warnings("<stdin>", &src, &out);
+        if show_diff {
+            report::print_diff("<stdin>", &src, &out.formatted);
+        } else {
             std::io::stdout()
                 .write_all(out.formatted.as_bytes())
                 .context("writing stdout")?;
@@ -120,12 +134,11 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
             let changed = out.formatted != src;
             any_changed |= changed;
             any_warning |= out.has_warnings();
-            report_warnings(&out, &path.display().to_string());
+            let label = path.display().to_string();
+            report::report_format_warnings(&label, &src, &out);
 
-            if args.check {
-                if changed {
-                    eprintln!("Would reformat: {}", path.display());
-                }
+            if show_diff {
+                report::print_diff(&label, &src, &out.formatted);
             } else if changed {
                 std::fs::write(&path, out.formatted.as_bytes())
                     .with_context(|| format!("writing {}", path.display()))?;
@@ -160,7 +173,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .context("reading stdin")?;
         let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
         let out = jals_lint::lint_source(&src, &cfg);
-        any_finding |= report_lint(&out, "<stdin>", &src);
+        any_finding |= report::report_lint("<stdin>", &src, &out);
     } else {
         for path in collect_java_files(&args.paths)? {
             let src = std::fs::read_to_string(&path)
@@ -168,7 +181,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));
             let cfg = discovery.for_dir(parent)?;
             let out = jals_lint::lint_source(&src, &cfg);
-            any_finding |= report_lint(&out, &path.display().to_string(), &src);
+            any_finding |= report::report_lint(&path.display().to_string(), &src, &out);
         }
     }
 
@@ -244,15 +257,6 @@ fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn report_warnings(out: &FormatOutput, label: &str) {
-    for w in &out.warnings {
-        eprintln!(
-            "warning: {label}:{}..{}: {}",
-            w.range.start, w.range.end, w.message
-        );
-    }
-}
-
 /// Resolves the lint config for a directory, mirroring [`Discovery`] for [`jals_lint::Config`]:
 /// either from an explicit `--config` (used for all files) or by discovering `jalslint.toml`,
 /// memoized per directory.
@@ -281,35 +285,4 @@ impl LintDiscovery {
         self.cache.insert(dir.to_path_buf(), cfg.clone());
         Ok(cfg)
     }
-}
-
-/// Print every diagnostic (and parser error) for one file as `label:line:col: severity[rule]:
-/// message`. Returns whether anything was reported.
-fn report_lint(out: &LintOutput, label: &str, src: &str) -> bool {
-    for d in out.diagnostics.iter().chain(&out.parse_errors) {
-        let (line, col) = line_col(src, d.range.start);
-        eprintln!(
-            "{label}:{line}:{col}: {}[{}]: {}",
-            d.severity, d.rule, d.message
-        );
-    }
-    out.has_diagnostics()
-}
-
-/// Translate a byte offset into a 1-based (line, column) pair, counting columns in characters.
-fn line_col(src: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-    for (i, ch) in src.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
 }
