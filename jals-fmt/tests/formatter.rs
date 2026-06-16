@@ -944,6 +944,161 @@ fn fn_single_line_is_idempotent() {
     assert_eq!(once, twice, "fn-single-line = true must be idempotent");
 }
 
+// --- force-multiline-blocks ------------------------------------------------
+
+/// Format with `force-multiline-blocks = true` (defaults otherwise).
+fn fmt_force_multiline_blocks(src: &str) -> String {
+    let cfg = Config {
+        force_multiline_blocks: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn force_multiline_blocks_expands_empty_type_body() {
+    // An empty type body expands to a two-line `{` … `}` instead of collapsing to `{}`,
+    // overriding the default `empty-item-single-line`.
+    expect![[r#"
+        class C {
+        }
+    "#]]
+    .assert_eq(&fmt_force_multiline_blocks("class C{}"));
+}
+
+#[test]
+fn force_multiline_blocks_expands_empty_method_body() {
+    // An empty method / constructor / initializer body expands too.
+    expect![[r#"
+        class C {
+            void m() {
+            }
+            C() {
+            }
+            static {
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_force_multiline_blocks(
+        "class C{void m(){}C(){}static{}}",
+    ));
+}
+
+#[test]
+fn force_multiline_blocks_expands_empty_control_flow_block() {
+    // Goes beyond `empty-item-single-line` (declaration-only): an empty control-flow block,
+    // which would otherwise always keep `{}`, also expands.
+    expect![[r#"
+        class C {
+            void m() {
+                if (true) {
+                }
+                while (x) {
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_force_multiline_blocks(
+        "class C{void m(){if(true){}while(x){}}}",
+    ));
+}
+
+#[test]
+fn force_multiline_blocks_expands_empty_lambda_block() {
+    // An empty lambda block expands as well.
+    expect![[r#"
+        class C {
+            Runnable r = () -> {
+            };
+        }
+    "#]]
+    .assert_eq(&fmt_force_multiline_blocks(
+        "class C{Runnable r = () -> {};}",
+    ));
+}
+
+#[test]
+fn force_multiline_blocks_overrides_fn_single_line() {
+    // When both are on, `force-multiline-blocks` wins: a single-statement body never collapses.
+    let cfg = Config {
+        force_multiline_blocks: true,
+        fn_single_line: true,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C {
+            int foo() {
+                return 1;
+            }
+        }
+    "#]]
+    .assert_eq(&format_source("class C{int foo(){return 1;}}", &cfg).formatted);
+}
+
+#[test]
+fn force_multiline_blocks_next_line_empty_body_opens_brace() {
+    // Under `brace-style = next-line` an expanded empty declaration body opens its brace on its
+    // own line.
+    let cfg = Config {
+        force_multiline_blocks: true,
+        brace_style: BraceStyle::NextLine,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C
+        {
+            void m()
+            {
+            }
+        }
+    "#]]
+    .assert_eq(&format_source("class C{void m(){}}", &cfg).formatted);
+}
+
+#[test]
+fn force_multiline_blocks_control_next_line_empty_block_opens_brace() {
+    // Under `control-brace-style = next-line` an expanded empty control-flow block opens its
+    // brace on its own line too.
+    let cfg = Config {
+        force_multiline_blocks: true,
+        control_brace_style: ControlBraceStyle::NextLine,
+        ..Config::default()
+    };
+    expect![[r#"
+        class C {
+            void m() {
+                if (true)
+                {
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&format_source("class C{void m(){if(true){}}}", &cfg).formatted);
+}
+
+#[test]
+fn force_multiline_blocks_off_by_default_collapses_empties() {
+    // With the option off (the default) empty bodies still collapse to `{}`.
+    expect![[r#"
+        class C {
+            void m() {}
+        }
+    "#]]
+    .assert_eq(&fmt("class C{void m(){}}"));
+}
+
+#[test]
+fn force_multiline_blocks_is_idempotent() {
+    let once = fmt_force_multiline_blocks(
+        "class C{void m(){}C(){}Runnable r = () -> {};void n(){if(true){}}}",
+    );
+    let twice = fmt_force_multiline_blocks(&once);
+    assert_eq!(
+        once, twice,
+        "force-multiline-blocks = true must be idempotent"
+    );
+}
+
 // --- control-brace-style ---------------------------------------------------
 
 /// Format with `control-brace-style = next-line` (declaration braces left at the default K&R).

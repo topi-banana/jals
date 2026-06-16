@@ -234,6 +234,14 @@ fn fn_single_line_config(fn_single_line: bool) -> Config {
     }
 }
 
+/// Config with a given `force-multiline-blocks` setting.
+fn force_multiline_blocks_config(force_multiline_blocks: bool) -> Config {
+    Config {
+        force_multiline_blocks,
+        ..Config::default()
+    }
+}
+
 /// Config with `overflow-delimited-expr` on and narrow widths, so the overflow layout and
 /// each of its fallbacks are exercised by the generator's lambdas, `new`s, and braces.
 fn overflow_config() -> Config {
@@ -1187,6 +1195,47 @@ proptest! {
     fn fn_single_line_never_panics(src in ".*") {
         let _ = fmt_with(&src, &fn_single_line_config(true));
         let _ = fmt_with(&src, &fn_single_line_config(false));
+    }
+
+    /// `force-multiline-blocks` is idempotent: re-formatting the expanded blocks reproduces
+    /// them under both settings.
+    #[test]
+    fn force_multiline_blocks_idempotent(
+        src in javaish(),
+        force in prop_oneof![Just(true), Just(false)],
+    ) {
+        let cfg = force_multiline_blocks_config(force);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// `force-multiline-blocks` is layout-only: it only expands blocks onto more lines, so the
+    /// significant-token sequence is preserved exactly under both settings.
+    #[test]
+    fn force_multiline_blocks_preserves_significant_tokens(
+        src in javaish(),
+        force in prop_oneof![Just(true), Just(false)],
+    ) {
+        let out = fmt_with(&src, &force_multiline_blocks_config(force));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// `force-multiline-blocks` never drops or mangles a comment.
+    #[test]
+    fn force_multiline_blocks_preserves_comments(
+        src in javaish(),
+        force in prop_oneof![Just(true), Just(false)],
+    ) {
+        let out = fmt_with(&src, &force_multiline_blocks_config(force));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// `force-multiline-blocks` never panics on arbitrary Unicode input.
+    #[test]
+    fn force_multiline_blocks_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &force_multiline_blocks_config(true));
+        let _ = fmt_with(&src, &force_multiline_blocks_config(false));
     }
 
     /// Last-argument overflow stays idempotent: re-formatting the hung layout reproduces it.
