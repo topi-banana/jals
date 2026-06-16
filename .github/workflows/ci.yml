@@ -121,8 +121,8 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
-  parse-soundness:
-    name: parse soundness
+  corpus-reports:
+    name: corpus reports
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -130,18 +130,25 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # Both corpora: OpenJDK (parse soundness) and google-java-format (fidelity).
           submodules: true
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run parse-soundness check
+      - name: Build the corpus tools
+        run: cargo build --release -p jals-tests --bins
+      - name: Generate corpus reports
         shell: bash
         run: |
           set -o pipefail
-          cargo run --release -p jals-tests -- --markdown | tee soundness.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Comment parse rate on PR
-        if: always() && github.event_name == 'pull_request' && hashFiles('soundness.md') != ''
+          {
+            cargo run --release -p jals-tests --bin jals-tests -- --markdown
+            echo
+            cargo run --release -p jals-tests --bin jals-golden -- gjf-testdata --markdown
+          } | tee corpus.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment corpus reports on PR
+        if: always() && github.event_name == 'pull_request' && hashFiles('corpus.md') != ''
         uses: marocchino/sticky-pull-request-comment@v3
         with:
-          header: parse-soundness
-          path: soundness.md
+          header: corpus-reports
+          path: corpus.md

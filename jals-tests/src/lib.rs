@@ -4,6 +4,11 @@
 //! The point is to exercise the parser's invariants — never panics, lossless,
 //! always produces a tree — against large real-world corpora, and to surface a
 //! parse-failure rate plus the offending files.
+//!
+//! [`golden`] is a separate harness that checks formatter *fidelity* against
+//! `google-java-format` output, rather than parser soundness.
+
+pub mod golden;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};

@@ -1,2 +1,7 @@
 /target
 /jals-playground/dist
+# Generated golden corpus (derivatives of GPL'd OpenJDK sources — do not commit).
+/jals-tests/sources/openjdk-gjf
+# Local google-java-format jar for golden generation (binary — never commit).
+/jals-tests/vendor
+google-java-format-*.jar
