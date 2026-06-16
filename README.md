@@ -7,7 +7,9 @@ A Java toolchain written in Rust, built on a **lossless** syntax tree.
 `jals` parses Java source into a full-fidelity concrete syntax tree (CST) — every byte,
 including whitespace and comments, is preserved — and uses that tree to power source
 tooling. Today it ships a code formatter and a language server (LSP); the same foundation is
-designed to host a linter too.
+designed to host a linter too. Alongside them, a Cargo-style build front end
+(`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac` / `java` from a `jals.toml`
+manifest.
 
 > 日本語版の README は [README_jp.md](README_jp.md) にあります。
 
@@ -19,18 +21,22 @@ designed to host a linter too.
   lambdas, switch expressions, patterns (including record patterns and guards), and more.
 - **A formatter with guarantees.** Significant tokens are never changed, comments are never
   dropped or reordered, and formatting is idempotent (`format(format(x)) == format(x)`).
+- **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
+  drives `jals build` / `run` / `clean` / `init`, a thin, pure `javac`/`java` wrapper that
+  plans commands as data and never touches the JDK itself until the CLI runs them.
 - **`wasm32`-ready core.** Everything except the CLI builds for `wasm32-unknown-unknown`,
   so the syntax and formatting layers can run in the browser.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of four core crates plus a browser playground:
+`jals` is a Cargo workspace of five core crates plus a browser playground:
 
 | Crate | Description |
 | --- | --- |
 | [`jals-syntax`](jals-syntax) | A lossless Java 26 lexer (`logos`) and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
 | [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, and formatting from the same CST. Host-only. |
+| [`jals-build`](jals-build) | A Cargo-style build orchestrator: it parses a `jals.toml` manifest and turns it into `javac`/`java` command plans, clean paths, and project scaffolding — all as pure data, with no `jals-syntax` dependency and no I/O. Backs `jals build`/`run`/`clean`/`init`. |
 | [`jals-cli`](jals-cli) | The `jals` command-line binary. |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the `jals-syntax`/`jals-fmt` layers entirely in the browser. |
 
@@ -39,6 +45,7 @@ jals/
 ├── jals-syntax/      # lexer + CST parser + typed AST  (wasm-compatible)
 ├── jals-fmt/         # formatter (CST -> Doc IR -> text)
 ├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)
+├── jals-build/       # Cargo-style javac/java build planner  (wasm-compatible)
 ├── jals-cli/         # `jals` binary
 └── jals-playground/  # browser playground (Yew + Trunk -> wasm)
 ```
@@ -60,7 +67,8 @@ The release binary is produced at `target/release/jals`.
 
 ## Usage
 
-`jals` is invoked through subcommands: `fmt` (format source) and `lsp` (language server).
+`jals` is invoked through subcommands: `fmt` (format source), `lsp` (language server), and a
+Cargo-style build front end — `init`, `build`, `run`, and `clean`.
 
 ### Format files in place
 
@@ -107,6 +115,47 @@ editor rather than run by hand; see [`jals-lsp`](jals-lsp/README.md) for editor 
 ```sh
 jals lsp
 ```
+
+### Build Java projects (Cargo-style)
+
+Beyond source tooling, `jals` is a small Cargo-style front end for the JDK. A
+[`jals.toml`](jals-build/README.md) manifest — the Java analogue of `Cargo.toml` — declares
+where sources live, where compiled classes go, which Java release to target, and the
+classpath; the build subcommands turn it into `javac`/`java` invocations.
+
+```sh
+jals init my-app            # scaffold ./my-app (jals.toml, src/main/java/Main.java, .gitignore)
+cd my-app
+jals build                  # compile with javac
+jals build --dry-run        # print the javac command without compiling
+jals run                    # compile, then run the [run] main-class
+jals run -- arg1 arg2       # ...passing args to the program
+jals clean                  # remove the build output (target/classes)
+```
+
+A minimal `jals.toml` — every key is optional and defaults to the Maven-style
+`src/main/java` → `target/classes` layout:
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+
+[build]
+release = 21                        # javac --release N
+# source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
+# classes-dir = "target/classes"    # javac -d
+# classpath   = ["libs/guava.jar"]  # -classpath entries
+
+[run]
+main-class = "com.example.Main"     # entry point for `jals run`
+```
+
+The build crate (`jals-build`) only *plans* commands as pure data — `jals-cli` discovers the
+manifest, walks the sources, and spawns the JDK tools (resolving `javac`/`java` via
+`$JAVAC`/`$JAVA`, then `$JAVA_HOME/bin`, then `PATH`). See
+[`jals-build/README.md`](jals-build/README.md) for the full manifest reference and the
+roadmap toward a fuller Cargo-for-Java front end.
 
 ### Options
 
@@ -266,8 +315,10 @@ for any change to the syntax or formatting layers:
 ## Status
 
 Early stage (`0.1.0`). The formatter and language server are functional and the syntax layer
-covers a broad slice of Java 26, but APIs may change. A linter (`jals-lint`) is the intended
-next consumer of the syntax layer.
+covers a broad slice of Java 26, but APIs may change. The `jals build`/`run`/`clean`/`init`
+front end is a faithful but thin `javac`/`java` wrapper today, with dependency management,
+testing, and packaging on its [roadmap](jals-build/README.md#roadmap). A linter (`jals-lint`)
+is the intended next consumer of the syntax layer.
 
 ## License
 

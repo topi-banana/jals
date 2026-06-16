@@ -29,7 +29,7 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Modifier layout | `jals-fmt/src/modifiers.rs` | Pure canonical reordering of a `MODIFIERS` node's keyword modifiers (`reorder-modifiers`), annotations hoisted to the front, + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
-| Build/compile | `jals-build/src/` | `jals.toml` (`Manifest`) parsing + a pure `javac`/`java` invocation builder (`build_invocation`/`run_invocation`) + clean-path resolution (`clean_paths`, for `jals clean`) + project scaffolding (`scaffold`, for `jals init`). Pure lib (serde/toml, no `std::process`/`std::fs`), so wasm-compatible; `jals-cli` walks sources, spawns the tools, removes the build output, and writes the scaffold files. |
+| Build/compile | `jals-build/src/` | `jals.toml` (`Manifest`) parsing + a pure `javac`/`java` invocation builder (`build_invocation`/`run_invocation`) + clean-path resolution (`clean_paths`, for `jals clean`) + project scaffolding (`scaffold`, for `jals init`). Pure lib (serde/toml, no `std::process`/`std::fs`), so wasm-compatible; `jals-cli` walks sources, spawns the tools, removes the build output, and writes the scaffold files. `jals-build/README.md` has the full manifest reference and the Cargo-for-Java roadmap. |
 | CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lint`/`jals lsp`/`jals build`/`jals run`/`jals clean`/`jals init`; config discovery memoized per directory. |
 | LSP | `jals-lsp/src/` | `async-lsp` server (`jals lsp`): diagnostics, document symbols, formatting. Pure handlers + UTF-16 `LineIndex`. Host-only (tokio/stdio). |
 | Playground | `jals-playground/` | Yew (CSR) browser app served by Trunk (`Trunk.toml`, tailwind); compiles to `wasm32`. Runs the syntax/formatter in-browser. |
@@ -110,7 +110,8 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
 5. **`wasm32` compatibility.** Everything except `jals-cli` and `jals-lsp` must build for
    `wasm32-unknown-unknown` (both are host-only: `jals-cli` does filesystem/process work,
    `jals-lsp` uses tokio/stdio). Do not add non-wasm-compatible deps or `std::fs`/process/IO
-   usage to `jals-syntax` or `jals-fmt`; keep that work in `jals-cli`/`jals-lsp`.
+   usage to `jals-syntax`, `jals-fmt`, or `jals-build`; keep that work in `jals-cli`/`jals-lsp`
+   (`jals-build` only *plans* `javac`/`java` commands as pure data — `jals-cli` spawns them).
 
 When touching the lexer, parser, or formatter, prefer adding a snapshot test
 (`expect-test`) and confirm the property tests still pass.
