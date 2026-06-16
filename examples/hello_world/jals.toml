@@ -1,0 +1,14 @@
+[package]
+name = "hello_world"
+version = "0.1.0"
+
+# Compilation settings. Every key is optional; the values here are spelled out
+# to show what `jals build` does — drop the whole [build] table and you get the
+# same Maven-style defaults.
+[build]
+source-dirs = ["src/main/java"] # .java source roots (also -sourcepath)
+classes-dir = "target/classes"  # javac -d (also what `jals clean` removes)
+release = 21                    # javac --release N
+
+[run]
+main-class = "com.example.Main" # entry point for `jals run`

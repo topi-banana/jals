@@ -123,18 +123,7 @@ impl CommentMap {
         }
         parts.push(token_doc);
         if let Some(trail) = self.trailing_inline.get(&offset) {
-            let mut force_break = false;
-            for c in trail {
-                parts.push(line_suffix(concat(vec![text("  "), comment_inline(c)])));
-                // A `//` comment runs to end of line, so the next token must start a new
-                // line; force a break (it coalesces with any following break).
-                if c.kind == SyntaxKind::LINE_COMMENT {
-                    force_break = true;
-                }
-            }
-            if force_break {
-                parts.push(hardline());
-            }
+            parts.push(trailing_inline_doc(trail));
         }
         if let Some(trail) = self.trailing_below.get(&offset) {
             for c in trail {
@@ -204,11 +193,7 @@ impl CommentMap {
         let offset = usize::from(tok.text_range().start());
         let mut parts = Vec::new();
         if let Some(trail) = self.trailing_inline.get(&offset) {
-            parts.extend(
-                trail
-                    .iter()
-                    .map(|c| line_suffix(concat(vec![text("  "), comment_inline(c)]))),
-            );
+            parts.push(trailing_inline_doc(trail));
         }
         if let Some(trail) = self.trailing_below.get(&offset) {
             for c in trail {
@@ -237,6 +222,27 @@ impl CommentMap {
             }
         }
     }
+}
+
+/// The document for a token's same-line trailing comments: each emitted as a line suffix
+/// (deferred to the end of the line). A `//` line comment runs to end of line, so anything
+/// after it — the next token *or another trailing comment* — must start a fresh line; a
+/// trailing [`hardline`] forces that break (it coalesces with any following break). Shared by
+/// [`CommentMap::token`] and [`CommentMap::trailing_doc`] so a closing brace's trailing line
+/// comment forces the break too, never colliding with the next comment under error recovery.
+fn trailing_inline_doc(trail: &[Comment]) -> Doc {
+    let mut parts = Vec::new();
+    let mut force_break = false;
+    for c in trail {
+        parts.push(line_suffix(concat(vec![text("  "), comment_inline(c)])));
+        if c.kind == SyntaxKind::LINE_COMMENT {
+            force_break = true;
+        }
+    }
+    if force_break {
+        parts.push(hardline());
+    }
+    concat(parts)
 }
 
 /// Is this token kind a comment?
