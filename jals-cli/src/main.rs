@@ -7,8 +7,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use jals_build::Manifest;
 use jals_fmt::Config;
 use jals_lint::Config as LintConfig;
 
@@ -27,6 +28,10 @@ enum Commands {
     Lint(LintArgs),
     /// Run the language server (LSP) over stdio.
     Lsp(LspArgs),
+    /// Compile a JALS/Java project described by `jals.toml` with `javac`.
+    Build(BuildArgs),
+    /// Compile and run a JALS/Java project with `java`.
+    Run(RunArgs),
 }
 
 #[derive(Args)]
@@ -72,12 +77,56 @@ struct LspArgs {
     stdio: bool,
 }
 
+#[derive(Args)]
+struct BuildArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Print the javac command that would run and exit, without compiling.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print the javac command before running it (like `cargo build -v` showing rustc).
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    /// Override the output directory (`-d`); takes precedence over `classes-dir`.
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Print the javac/java commands that would run and exit, without compiling or running.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print the javac/java commands before running them.
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    /// Run this fully-qualified main class instead of `[run] main-class`.
+    #[arg(long, value_name = "FQCN")]
+    main_class: Option<String>,
+
+    /// Arguments passed to the program after `--`.
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Fmt(args) => run_fmt(args),
         Commands::Lsp(args) => run_lsp(args),
         Commands::Lint(args) => run_lint(args),
+        Commands::Build(args) => run_build(args),
+        Commands::Run(args) => run_run(args),
     };
     match result {
         Ok(code) => code,
@@ -196,6 +245,151 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
 fn run_lsp(_args: LspArgs) -> Result<ExitCode> {
     jals_lsp::run()?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
+/// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
+fn run_build(args: BuildArgs) -> Result<ExitCode> {
+    let (mut manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
+    if let Some(out) = &args.out_dir {
+        manifest.build.classes_dir = out.to_string_lossy().into_owned();
+    }
+    let sources = discover_sources(&manifest, &root)?;
+    let invocation = jals_build::build_invocation(&manifest, &root, &sources, path_sep());
+
+    if args.dry_run || args.verbose {
+        println!("{}", invocation.display_command());
+    }
+    if args.dry_run {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let javac = jdk_tool("JAVAC", "javac");
+    let status = spawn_tool(&javac, &invocation.args)?;
+    Ok(to_exit_code(status))
+}
+
+/// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
+/// run; `--dry-run` prints both commands without executing either.
+fn run_run(args: RunArgs) -> Result<ExitCode> {
+    let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
+    let main_class = args
+        .main_class
+        .clone()
+        .or_else(|| manifest.run.main_class.clone())
+        .ok_or_else(|| {
+            anyhow!("no main class: set `[run] main-class` in jals.toml or pass --main-class")
+        })?;
+    let sources = discover_sources(&manifest, &root)?;
+    let sep = path_sep();
+    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, sep);
+    let run_inv = jals_build::run_invocation(&manifest, &root, &main_class, &args.args, sep);
+
+    if args.dry_run || args.verbose {
+        println!("{}", build_inv.display_command());
+        println!("{}", run_inv.display_command());
+    }
+    if args.dry_run {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Compile first; only run when compilation succeeds.
+    let javac = jdk_tool("JAVAC", "javac");
+    let build_status = spawn_tool(&javac, &build_inv.args)?;
+    if !build_status.success() {
+        return Ok(to_exit_code(build_status));
+    }
+    let java = jdk_tool("JAVA", "java");
+    let run_status = spawn_tool(&java, &run_inv.args)?;
+    Ok(to_exit_code(run_status))
+}
+
+/// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
+/// returning the parsed manifest and the project root (the manifest's parent directory). A missing
+/// manifest is an error, unlike the formatter/linter configs.
+fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
+    let manifest_path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let cwd = std::env::current_dir().context("getting current dir")?;
+            Manifest::discover_path(&cwd)
+                .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
+        }
+    };
+    let manifest = Manifest::from_file(&manifest_path)
+        .with_context(|| format!("loading {}", manifest_path.display()))?;
+    let root = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    Ok((manifest, root))
+}
+
+/// Collects the `.java` files under the manifest's source directories (resolved against `root`).
+/// Each source directory must exist, and at least one source file must be found.
+fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
+    let source_roots: Vec<PathBuf> = manifest
+        .build
+        .source_dirs
+        .iter()
+        .map(|d| root.join(d))
+        .collect();
+    for dir in &source_roots {
+        if !dir.is_dir() {
+            return Err(anyhow!("source directory {} does not exist", dir.display()));
+        }
+    }
+    let sources = collect_java_files(&source_roots)?;
+    if sources.is_empty() {
+        return Err(anyhow!(
+            "no .java files found under {:?}",
+            manifest.build.source_dirs
+        ));
+    }
+    Ok(sources)
+}
+
+/// The platform classpath separator.
+fn path_sep() -> char {
+    if cfg!(windows) { ';' } else { ':' }
+}
+
+/// Resolves a JDK tool (`javac`/`java`): honor `$<env>` first, then `$JAVA_HOME/bin/<tool>`, and
+/// finally fall back to the bare tool name on `PATH`.
+fn jdk_tool(env: &str, tool: &str) -> PathBuf {
+    if let Some(explicit) = std::env::var_os(env) {
+        return PathBuf::from(explicit);
+    }
+    if let Some(home) = std::env::var_os("JAVA_HOME") {
+        let candidate = Path::new(&home).join("bin").join(tool);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(tool)
+}
+
+/// Spawns `program` with `args`, inheriting stdio so the tool's diagnostics pass straight through.
+fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatus> {
+    std::process::Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to spawn `{}` (is a JDK installed and on PATH?)",
+                program.display()
+            )
+        })
+}
+
+/// Maps a process exit status to a CLI [`ExitCode`]: 0 succeeds, any other code propagates, and a
+/// signal-terminated process fails with code 1.
+fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
+    match status.code() {
+        Some(0) => ExitCode::SUCCESS,
+        Some(code) => ExitCode::from(code as u8),
+        None => ExitCode::from(1),
+    }
 }
 
 /// Resolves the config for a directory, either from an explicit `--config` (used for all

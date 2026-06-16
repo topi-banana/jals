@@ -122,3 +122,135 @@ fn deny_warnings_does_not_swallow_positional_path() {
     // Already formatted and no syntax warnings -> success.
     assert_eq!(status.code(), Some(0));
 }
+
+/// Build a minimal project tree (`jals.toml` + one source) under a fresh tempdir.
+fn project(manifest: &str) -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("jals.toml"), manifest).unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\npublic class Main { public static void main(String[] a) {} }\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// Run the `jals` binary with `args`, returning (stdout, exit code).
+fn run(args: &[&str]) -> (String, i32) {
+    let out = jals().args(args).output().unwrap();
+    (
+        String::from_utf8(out.stdout).unwrap(),
+        out.status.code().unwrap(),
+    )
+}
+
+fn javac_available() -> bool {
+    Command::new("javac")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn build_dry_run_prints_javac_command() {
+    let dir = project("[package]\nname = \"hello\"\n[build]\nrelease = 21\n");
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.starts_with("javac "), "got: {stdout}");
+    assert!(stdout.contains("-d "), "got: {stdout}");
+    assert!(stdout.contains("target/classes"), "got: {stdout}");
+    assert!(stdout.contains("--release 21"), "got: {stdout}");
+    assert!(stdout.contains("Main.java"), "got: {stdout}");
+}
+
+#[test]
+fn build_out_dir_override_in_dry_run() {
+    let dir = project("[package]\nname = \"hello\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+        "--out-dir",
+        "custom-out",
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("custom-out"), "got: {stdout}");
+}
+
+#[test]
+fn build_no_manifest_in_tree_errors() {
+    let dir = tempdir().unwrap();
+    let out = jals()
+        .arg("build")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("jals.toml"), "stderr: {stderr}");
+}
+
+#[test]
+fn run_dry_run_prints_javac_and_java_commands() {
+    let dir = project("[package]\nname = \"hello\"\n[run]\nmain-class = \"com.example.Main\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let (stdout, code) = run(&[
+        "run",
+        "--dry-run",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("javac "), "got: {stdout}");
+    assert!(stdout.contains("java -cp "), "got: {stdout}");
+    assert!(stdout.contains("com.example.Main"), "got: {stdout}");
+}
+
+#[test]
+fn run_without_main_class_errors() {
+    let dir = project("[package]\nname = \"hello\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let out = jals()
+        .args(["run", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("main class"), "stderr: {stderr}");
+}
+
+#[test]
+fn build_compiles_when_javac_present() {
+    if !javac_available() {
+        // No JDK on this machine/CI; the dry-run tests cover command generation.
+        return;
+    }
+    // No explicit `release` so the default JDK's level is used (any JDK works).
+    let dir = project("[package]\nname = \"hello\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let status = jals()
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(
+        dir.path()
+            .join("target/classes/com/example/Main.class")
+            .exists()
+    );
+}

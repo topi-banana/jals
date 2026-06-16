@@ -10,7 +10,8 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 (`jals-lsp`, run via `jals lsp`) is another consumer; a linter is an intended future one.
 
 - Edition 2024, resolver 3, workspace version `0.1.0`. Needs Rust 1.85+.
-- Crate graph: `jals-cli` → `{jals-fmt, jals-lsp}`; `jals-lsp`/`jals-fmt` → `jals-syntax`.
+- Crate graph: `jals-cli` → `{jals-fmt, jals-lsp, jals-build}`; `jals-lsp`/`jals-fmt` → `jals-syntax`.
+  `jals-build` has no `jals-syntax` dependency (it only orchestrates `javac`/`java`).
   `jals-playground` is a separate
   Yew/Trunk browser app that runs `jals-fmt`/`jals-syntax` in the browser. It targets `wasm32`
   but also compiles on the host, so `--workspace` build/clippy/test all include it.
@@ -28,7 +29,8 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Modifier layout | `jals-fmt/src/modifiers.rs` | Pure canonical reordering of a `MODIFIERS` node's keyword modifiers (`reorder-modifiers`), annotations hoisted to the front, + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
-| CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lsp`; config discovery memoized per directory. |
+| Build/compile | `jals-build/src/` | `jals.toml` (`Manifest`) parsing + a pure `javac`/`java` invocation builder (`build_invocation`/`run_invocation`). Pure lib (serde/toml, no `std::process`), so wasm-compatible; `jals-cli` walks sources and spawns the tools. |
+| CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lint`/`jals lsp`/`jals build`/`jals run`; config discovery memoized per directory. |
 | LSP | `jals-lsp/src/` | `async-lsp` server (`jals lsp`): diagnostics, document symbols, formatting. Pure handlers + UTF-16 `LineIndex`. Host-only (tokio/stdio). |
 | Playground | `jals-playground/` | Yew (CSR) browser app served by Trunk (`Trunk.toml`, tailwind); compiles to `wasm32`. Runs the syntax/formatter in-browser. |
 
@@ -38,6 +40,8 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 cargo build --workspace
 cargo test  --workspace --all-features
 cargo run -p jals-cli -- fmt <paths>       # or: echo '...' | cargo run -p jals-cli -- fmt
+cargo run -p jals-cli -- build [--dry-run] # compile a jals.toml project with javac (--dry-run prints the command)
+cargo run -p jals-cli -- run               # compile then run the project's [run] main-class with java
 cargo run -p jals-cli -- lsp               # run the language server over stdio (for editors)
 cargo run -p xtask -- codegen              # regenerate jals-syntax/src/ast/generated.rs from java.ungram
 (cd jals-playground && trunk serve)        # run the browser playground (needs trunk + the wasm32 target)
