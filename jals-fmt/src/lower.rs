@@ -51,7 +51,7 @@ pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
 pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match node.kind() {
         S::SOURCE_FILE => crate::imports::lower_source_file(node, ctx),
-        S::CLASS_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
+        S::CLASS_BODY | S::MODULE_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
         S::PARAM_LIST | S::ARG_LIST | S::RECORD_HEADER | S::ANNOTATION_ARG_LIST | S::ARRAY_INIT => {
             lower_delimited(node, ctx)
         }
@@ -696,12 +696,12 @@ fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 }
 
 /// Whether the opening brace of braced `node` should sit on its own line. Declaration bodies
-/// — every type body (`CLASS_BODY`) and the block of a method, constructor, or initializer —
-/// follow [`BraceStyle`]; control-flow blocks, `switch` blocks, lambda bodies, and bare
-/// statement blocks follow [`ControlBraceStyle`].
+/// — every type body (`CLASS_BODY`), a module body (`MODULE_BODY`), and the block of a method,
+/// constructor, or initializer — follow [`BraceStyle`]; control-flow blocks, `switch` blocks,
+/// lambda bodies, and bare statement blocks follow [`ControlBraceStyle`].
 fn opens_on_next_line(node: &SyntaxNode, cfg: &Config) -> bool {
     match node.kind() {
-        S::CLASS_BODY => cfg.brace_style == BraceStyle::NextLine,
+        S::CLASS_BODY | S::MODULE_BODY => cfg.brace_style == BraceStyle::NextLine,
         S::BLOCK if is_declaration_body(node) => cfg.brace_style == BraceStyle::NextLine,
         S::BLOCK | S::SWITCH_BLOCK => cfg.control_brace_style == ControlBraceStyle::NextLine,
         _ => false,
@@ -718,11 +718,12 @@ fn is_declaration_body(node: &SyntaxNode) -> bool {
 }
 
 /// Whether an empty `node` is governed by [`empty_item_single_line`](Config::empty_item_single_line)
-/// — a declaration body: a type body (`CLASS_BODY`) or a method / constructor / initializer block.
-/// Control-flow blocks, `switch` blocks, lambda bodies, and bare blocks are never governed (they
-/// always keep `{}`), matching rustfmt's item-only scoping.
+/// — a declaration body: a type body (`CLASS_BODY`), a module body (`MODULE_BODY`), or a method /
+/// constructor / initializer block. Control-flow blocks, `switch` blocks, lambda bodies, and bare
+/// blocks are never governed (they always keep `{}`), matching rustfmt's item-only scoping.
 fn governs_empty_single_line(node: &SyntaxNode) -> bool {
-    matches!(node.kind(), S::CLASS_BODY) || (node.kind() == S::BLOCK && is_declaration_body(node))
+    matches!(node.kind(), S::CLASS_BODY | S::MODULE_BODY)
+        || (node.kind() == S::BLOCK && is_declaration_body(node))
 }
 
 /// Whether `node` (a braced body) holds exactly one statement and carries no comment anywhere
