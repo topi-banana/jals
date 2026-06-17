@@ -22,8 +22,8 @@ mod tests;
 pub use error::ConfigError;
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase};
 pub use options::{
-    AnnotationPlacement, BinopSeparator, BraceStyle, ControlBraceStyle, FnParamsLayout,
-    IndentStyle, LineEnding, TrailingComma, TypePunctuationDensity,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ControlBraceStyle,
+    FnParamsLayout, IndentStyle, LineEnding, TrailingComma, TypePunctuationDensity,
 };
 
 /// Formatter style settings.
@@ -149,6 +149,13 @@ pub struct Config {
     /// the end of the broken line ([`Back`](BinopSeparator::Back)). The wrapping itself is
     /// driven by [`max_width`](Config::max_width) alone. Mirrors rustfmt's `binop_separator`.
     pub binop_separator: BinopSeparator,
+    /// How a same-precedence binary-operator run lays out when it wraps:
+    /// [`Tall`](BinopLayout::Tall) breaks at every operator (the default), while
+    /// [`Compressed`](BinopLayout::Compressed) packs as many operands per line as fit
+    /// [`max_width`](Config::max_width) (a *fill*, matching google-java-format). Orthogonal to
+    /// [`binop_separator`](Config::binop_separator). Layout-only — the significant-token sequence
+    /// is preserved exactly.
+    pub binop_layout: BinopLayout,
     /// Let the last item of a call argument list or annotation argument list hang past the
     /// call line when it is a delimited expression — a block-bodied lambda, an
     /// anonymous-class / array-creating `new`, an array initializer, or a `name = {…}`
@@ -258,6 +265,7 @@ impl Default for Config {
                 "static".to_string(),
             ],
             binop_separator: BinopSeparator::Front,
+            binop_layout: BinopLayout::Tall,
             overflow_delimited_expr: false,
             space_before_colon: false,
             space_after_colon: true,

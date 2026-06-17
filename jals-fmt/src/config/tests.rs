@@ -29,6 +29,8 @@ fn defaults() {
     assert_eq!(c.import_groups, ["java.", "javax.", "*", "static"]);
     // Wrapped binary operators lead their continuation line by default.
     assert_eq!(c.binop_separator, BinopSeparator::Front);
+    // Binary runs default to the all-or-nothing Tall layout (the prior behavior).
+    assert_eq!(c.binop_layout, BinopLayout::Tall);
     // Last-argument overflow is opt-in; off by default keeps the all-or-nothing layout.
     assert!(!c.overflow_delimited_expr);
     // Colon spacing defaults to idiomatic `label:` / `case x:` style: no space before,
@@ -127,6 +129,14 @@ fn binop_separator_parses_kebab_values() {
     assert_eq!(c.binop_separator, BinopSeparator::Front);
     let c: Config = toml::from_str("binop-separator = \"back\"\n").unwrap();
     assert_eq!(c.binop_separator, BinopSeparator::Back);
+}
+
+#[test]
+fn binop_layout_parses_kebab_values() {
+    let c: Config = toml::from_str("binop-layout = \"tall\"\n").unwrap();
+    assert_eq!(c.binop_layout, BinopLayout::Tall);
+    let c: Config = toml::from_str("binop-layout = \"compressed\"\n").unwrap();
+    assert_eq!(c.binop_layout, BinopLayout::Compressed);
 }
 
 #[test]

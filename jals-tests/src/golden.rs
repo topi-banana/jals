@@ -19,8 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use jals_fmt::{
-    AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle, IndentStyle,
-    LineEnding,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
+    IndentStyle, LineEnding,
 };
 use rayon::prelude::*;
 use similar::TextDiff;
@@ -85,8 +85,9 @@ pub fn google_config() -> Config {
         // Modifiers in canonical JLS order; annotations on their own lines.
         reorder_modifiers: true,
         annotation_placement: AnnotationPlacement::Expanded,
-        // Break before binary operators.
+        // Break before binary operators, packing as many operands per line as fit (fill).
         binop_separator: BinopSeparator::Front,
+        binop_layout: BinopLayout::Compressed,
         // Google style has no fixed per-construct width heuristics — it wraps purely
         // against the 100-column limit, so push every threshold up to the column limit.
         chain_width: 100,
