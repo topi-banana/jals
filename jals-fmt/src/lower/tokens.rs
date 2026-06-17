@@ -78,6 +78,9 @@ fn want_space(prev: S, next: S, cfg: &Config) -> bool {
             | ELLIPSIS
             | RPAREN
             | RBRACK
+            // An array type / dimension / subscript `[` hugs the token before it: `int[]`,
+            // `String[][]`, `a[0]`, `foo()[0]`, `List<String>[]`.
+            | LBRACK
             | LT
             | GT
             | PLUS_PLUS
