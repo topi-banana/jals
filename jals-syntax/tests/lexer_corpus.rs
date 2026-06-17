@@ -89,6 +89,17 @@ const CHAR_EMPTY: &str = "''";
 const CHAR_BACKSLASH_AT_EOF: &str = "'\\";
 /// Char literal quote followed directly by a newline.
 const CHAR_BROKEN_BY_NEWLINE: &str = "'\n";
+/// Octal escape (1-3 octal digits) is a single char literal.
+const CHAR_OCTAL_ESCAPE: &str = r"'\033'";
+/// The largest in-range octal escape (`\377` == 255).
+const CHAR_OCTAL_ESCAPE_MAX: &str = r"'\377'";
+/// Unicode escape `\uXXXX` is a single char literal.
+const CHAR_UNICODE_ESCAPE: &str = r"'\u00ff'";
+/// A 4th octal digit overruns the escape and defeats the closing quote.
+const CHAR_OCTAL_TOO_LONG: &str = r"'\0000'";
+/// A `\u` escape with zero hex digits: the next `'` closes it, so the malformed escape
+/// still forms a single (raw) char literal rather than derailing.
+const CHAR_UNICODE_NO_HEX: &str = r"'\u'";
 /// CRLF between identifiers is a single NEWLINE token.
 const CRLF_BETWEEN_IDENTS: &str = "a\r\nb";
 /// Lone CR followed by CRLF: two NEWLINE tokens.
@@ -136,6 +147,11 @@ const CORPUS: &[&str] = &[
     CHAR_EMPTY,
     CHAR_BACKSLASH_AT_EOF,
     CHAR_BROKEN_BY_NEWLINE,
+    CHAR_OCTAL_ESCAPE,
+    CHAR_OCTAL_ESCAPE_MAX,
+    CHAR_UNICODE_ESCAPE,
+    CHAR_OCTAL_TOO_LONG,
+    CHAR_UNICODE_NO_HEX,
     CRLF_BETWEEN_IDENTS,
     CR_THEN_CRLF,
     LONE_CR,
@@ -578,6 +594,46 @@ fn char_literal_error_spans() {
         expect![[r#"
         ERROR "'"
         NEWLINE "\n"
+    "#]],
+    );
+    // A 4th octal digit overruns `\000` and defeats the close; the excluded `0` and the
+    // quote re-lex on their own.
+    check(
+        CHAR_OCTAL_TOO_LONG,
+        expect![[r#"
+        ERROR "'\\000"
+        INT_LITERAL "0"
+        ERROR "'"
+    "#]],
+    );
+    // `\u` with zero hex digits: the `'` right after closes it, so it stays one raw char
+    // literal (a malformed escape, kept verbatim) instead of derailing.
+    check(
+        CHAR_UNICODE_NO_HEX,
+        expect![[r#"
+        CHAR_LITERAL "'\\u'"
+    "#]],
+    );
+}
+
+#[test]
+fn char_literal_escape_spans() {
+    check(
+        CHAR_OCTAL_ESCAPE,
+        expect![[r#"
+        CHAR_LITERAL "'\\033'"
+    "#]],
+    );
+    check(
+        CHAR_OCTAL_ESCAPE_MAX,
+        expect![[r#"
+        CHAR_LITERAL "'\\377'"
+    "#]],
+    );
+    check(
+        CHAR_UNICODE_ESCAPE,
+        expect![[r#"
+        CHAR_LITERAL "'\\u00ff'"
     "#]],
     );
 }
