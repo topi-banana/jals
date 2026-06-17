@@ -44,13 +44,19 @@ pub(crate) enum Doc {
     /// One or more blank lines (the source count; the renderer clamps it to
     /// `max_blank_lines`). Forces enclosing groups to break.
     BlankLine(usize),
-    /// Increase the indentation level of the child by one.
+    /// Increase the indentation of the child by one block level (`indent-width`). Used for block
+    /// bodies (`{ … }`).
     Indent(Box<Doc>),
-    /// Increase the indentation level of the child by one only when the governing group
-    /// renders broken; leave it at the current level when flat. Lets
-    /// `overflow-delimited-expr` place the hanging last argument inside the list indent in
-    /// the vertical layout but at the call's own level in the overflow layout (prettier's
-    /// `indentIfBreak`).
+    /// Increase the indentation of the child by one *continuation* width (`continuation-indent`,
+    /// falling back to `indent-width`). Used where an expression or statement wraps — method
+    /// chains, wrapped binary / ternary operators, and delimited lists — as opposed to a block
+    /// body.
+    ContinuationIndent(Box<Doc>),
+    /// Increase the indentation of the child by one *continuation* width only when the governing
+    /// group renders broken; leave it at the current level when flat. Lets
+    /// `overflow-delimited-expr` place the hanging last argument inside the list (continuation)
+    /// indent in the vertical layout but at the call's own level in the overflow layout
+    /// (prettier's `indentIfBreak`).
     IndentIfBreak(Box<Doc>),
     /// A break point: render flat if it fits, otherwise broken.
     Group {
@@ -126,9 +132,15 @@ pub(crate) fn blank_line(count: usize) -> Doc {
     Doc::BlankLine(count)
 }
 
-/// Indent a document by one level.
+/// Indent a document by one block level.
 pub(crate) fn indent(doc: Doc) -> Doc {
     Doc::Indent(Box::new(doc))
+}
+
+/// Indent a document by one continuation width — used for the wrapped lines of an expression or
+/// statement (method chains, wrapped binary / ternary operators, delimited lists).
+pub(crate) fn continuation_indent(doc: Doc) -> Doc {
+    Doc::ContinuationIndent(Box::new(doc))
 }
 
 /// Indent a document by one level only when the governing group renders broken.
@@ -223,7 +235,9 @@ fn first_line_width(docs: &[&Doc]) -> usize {
                 None => width += UnicodeWidthStr::width(&**s),
             },
             Doc::Concat(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
-            Doc::Indent(d) | Doc::IndentIfBreak(d) => work.push((broken, d)),
+            Doc::Indent(d) | Doc::ContinuationIndent(d) | Doc::IndentIfBreak(d) => {
+                work.push((broken, d))
+            }
             Doc::Group { doc, should_break } => work.push((*should_break, doc)),
             Doc::Fill(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
             Doc::Line if broken => return width,
@@ -267,7 +281,7 @@ pub(crate) fn flat_width(doc: &Doc) -> Option<usize> {
         Doc::Line => 1,
         Doc::SoftLine => 0,
         Doc::HardLine | Doc::BlankLine(_) => return None,
-        Doc::Indent(d) | Doc::IndentIfBreak(d) => flat_width(d)?,
+        Doc::Indent(d) | Doc::ContinuationIndent(d) | Doc::IndentIfBreak(d) => flat_width(d)?,
         Doc::Group { doc, should_break } => {
             if *should_break {
                 return None;
@@ -317,7 +331,10 @@ fn contains_forced_break(doc: &Doc) -> bool {
     match doc {
         Doc::HardLine | Doc::BlankLine(_) => true,
         Doc::Concat(v) | Doc::Fill(v) => v.iter().any(contains_forced_break),
-        Doc::Indent(d) | Doc::IndentIfBreak(d) | Doc::LineSuffix(d) => contains_forced_break(d),
+        Doc::Indent(d)
+        | Doc::ContinuationIndent(d)
+        | Doc::IndentIfBreak(d)
+        | Doc::LineSuffix(d) => contains_forced_break(d),
         Doc::Group { should_break, .. } => *should_break,
         _ => false,
     }
@@ -338,6 +355,7 @@ fn clone_doc(doc: &Doc) -> Doc {
         Doc::HardLine => Doc::HardLine,
         Doc::BlankLine(n) => Doc::BlankLine(*n),
         Doc::Indent(d) => Doc::Indent(Box::new(clone_doc(d))),
+        Doc::ContinuationIndent(d) => Doc::ContinuationIndent(Box::new(clone_doc(d))),
         Doc::IndentIfBreak(d) => Doc::IndentIfBreak(Box::new(clone_doc(d))),
         Doc::Group { doc, should_break } => Doc::Group {
             doc: Box::new(clone_doc(doc)),

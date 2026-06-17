@@ -258,6 +258,14 @@ pub struct Config {
     pub indent_style: IndentStyle,
     /// Number of columns per indentation level (and spaces emitted when `indent_style` is `Space`).
     pub indent_width: usize,
+    /// Columns to indent a *continuation* line — the extra lines produced when an expression or
+    /// statement wraps (method chains, wrapped binary / ternary operators, and delimited lists:
+    /// parameter / argument / array-initializer / annotation-arg / record-header). `None` (the
+    /// default) falls back to [`indent_width`](Config::indent_width), so default output is
+    /// unchanged. Block bodies (`{ … }`) always use `indent-width`. In tab style this is ignored
+    /// (each continuation is one tab), keeping the output a whole number of tabs. Layout-only —
+    /// the significant-token sequence is preserved exactly.
+    pub continuation_indent: Option<usize>,
     /// Runs of blank lines are collapsed down to at most this many.
     pub max_blank_lines: usize,
     /// Line terminator to emit.
@@ -448,6 +456,7 @@ impl Default for Config {
         Config {
             indent_style: IndentStyle::Space,
             indent_width: 4,
+            continuation_indent: None,
             max_blank_lines: 1,
             line_ending: LineEnding::Lf,
             insert_final_newline: true,
@@ -499,6 +508,19 @@ impl Config {
     /// The number of display columns one indentation level occupies.
     pub(crate) fn indent_cols(&self) -> usize {
         self.indent_width.max(1)
+    }
+
+    /// The number of display columns one *continuation* indent occupies — the indent applied to
+    /// the wrapped lines of an expression / statement (method chains, wrapped binary / ternary
+    /// operators, and delimited lists). Falls back to `indent-width` when
+    /// [`continuation_indent`](Config::continuation_indent) is unset, so default output is
+    /// unchanged. In tab style it equals one indentation level (`indent_cols()`), keeping the
+    /// emitted indentation a whole number of tabs.
+    pub(crate) fn continuation_cols(&self) -> usize {
+        match self.indent_style {
+            IndentStyle::Tab => self.indent_cols(),
+            IndentStyle::Space => self.continuation_indent.unwrap_or(self.indent_width).max(1),
+        }
     }
 
     /// The resolved line terminator for input `src`, honoring `Auto`/`Native`.
@@ -589,6 +611,9 @@ mod tests {
     fn defaults() {
         let c = Config::default();
         assert_eq!(c.indent_width, 4);
+        // Continuation indent is unset by default and falls back to `indent-width`.
+        assert_eq!(c.continuation_indent, None);
+        assert_eq!(c.continuation_cols(), 4);
         assert_eq!(c.max_width, 100);
         assert_eq!(c.chain_width, 60);
         assert_eq!(c.fn_call_width, 60);
@@ -817,6 +842,19 @@ mod tests {
     fn chain_width_parses_kebab_key() {
         let c: Config = toml::from_str("chain-width = 40\n").unwrap();
         assert_eq!(c.chain_width, 40);
+    }
+
+    #[test]
+    fn continuation_indent_parses_kebab_key() {
+        let c: Config = toml::from_str("continuation-indent = 8\n").unwrap();
+        assert_eq!(c.continuation_indent, Some(8));
+        assert_eq!(c.continuation_cols(), 8);
+        // Omitted ⇒ None, falling back to `indent-width`.
+        assert_eq!(Config::default().continuation_indent, None);
+        // Tab style ignores `continuation-indent`: one tab per continuation level.
+        let c: Config =
+            toml::from_str("indent-style = \"tab\"\ncontinuation-indent = 8\n").unwrap();
+        assert_eq!(c.continuation_cols(), c.indent_cols());
     }
 
     #[test]
