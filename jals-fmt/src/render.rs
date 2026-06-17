@@ -11,7 +11,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::Config;
+use crate::config::{Config, IndentStyle};
 use crate::doc::{CommentKind, Doc, flat_width};
 use crate::wrap;
 
@@ -23,6 +23,8 @@ enum Mode {
 
 #[derive(Clone, Copy)]
 struct Cmd<'a> {
+    /// Indentation in display columns (not levels): a [`Doc::Indent`] adds `indent_cols()`, a
+    /// [`Doc::ContinuationIndent`] / broken [`Doc::IndentIfBreak`] adds `continuation_cols()`.
     indent: usize,
     mode: Mode,
     doc: &'a Doc,
@@ -41,7 +43,7 @@ struct Out<'c> {
     /// Newlines buffered before the next content (0 = none, 1 = plain break, `n` = `n - 1`
     /// blank lines).
     pending_newlines: usize,
-    /// Indentation level for the line after the pending break.
+    /// Indentation (in display columns) for the line after the pending break.
     pending_indent: usize,
 }
 
@@ -74,7 +76,7 @@ impl Out<'_> {
             self.buf.push_str(self.newline);
         }
         push_indent(&mut self.buf, self.pending_indent, self.cfg);
-        self.col = self.pending_indent * self.cfg.indent_cols();
+        self.col = self.pending_indent;
         self.pending_newlines = 0;
         self.line_has_content = false;
     }
@@ -158,13 +160,18 @@ pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
                 }
             }
             Doc::Indent(d) => stack.push(Cmd {
-                indent: indent + 1,
+                indent: indent + out.cfg.indent_cols(),
+                mode,
+                doc: d,
+            }),
+            Doc::ContinuationIndent(d) => stack.push(Cmd {
+                indent: indent + out.cfg.continuation_cols(),
                 mode,
                 doc: d,
             }),
             Doc::IndentIfBreak(d) => stack.push(Cmd {
                 indent: if mode == Mode::Break {
-                    indent + 1
+                    indent + out.cfg.continuation_cols()
                 } else {
                     indent
                 },
@@ -268,8 +275,8 @@ fn render_comment(out: &mut Out<'_>, indent: usize, kind: CommentKind, text: &st
         }
         return;
     }
-    let indent_str = out.cfg.indent_unit().repeat(indent);
-    let indent_cols = indent * out.cfg.indent_cols();
+    let indent_str = indent_string(indent, out.cfg);
+    let indent_cols = indent;
     let newline = out.newline;
     let width = out.cfg.comment_width;
     let reflowed = match kind {
@@ -284,11 +291,28 @@ fn render_comment(out: &mut Out<'_>, indent: usize, kind: CommentKind, text: &st
     out.raw(&reflowed);
 }
 
-fn push_indent(out: &mut String, indent: usize, cfg: &Config) {
-    let unit = cfg.indent_unit();
-    for _ in 0..indent {
-        out.push_str(&unit);
+/// Build the leading-whitespace string for an indentation of `cols` display columns. In space
+/// style this is `cols` spaces; in tab style it is whole tabs (`cols / indent_cols()`) with any
+/// remainder emitted as spaces — the remainder is always zero, since every indent step (block or
+/// continuation) is a whole tab in tab style, so the output stays a whole number of tabs.
+fn indent_string(cols: usize, cfg: &Config) -> String {
+    match cfg.indent_style {
+        IndentStyle::Tab => {
+            // One tab per indent level; any sub-level remainder (never produced in tab style,
+            // where every step is a whole tab) falls back to spaces.
+            let unit = cfg.indent_cols();
+            let mut s = cfg.indent_unit().repeat(cols / unit);
+            for _ in 0..(cols % unit) {
+                s.push(' ');
+            }
+            s
+        }
+        IndentStyle::Space => " ".repeat(cols),
     }
+}
+
+fn push_indent(out: &mut String, cols: usize, cfg: &Config) {
+    out.push_str(&indent_string(cols, cfg));
 }
 
 /// Remove trailing spaces and tabs (renderer-added; never part of a `RawText` token,
@@ -323,7 +347,7 @@ fn finalize(mut out: String, cfg: &Config, newline: &str) -> String {
 fn render_fill<'a>(out: &Out<'_>, indent: usize, parts: &'a [Doc], stack: &mut Vec<Cmd<'a>>) {
     let max = out.cfg.max_width;
     // Column at the start of a freshly broken line (where wrapped items land).
-    let base_col = indent * out.cfg.indent_cols();
+    let base_col = indent;
     // Where the first item lands: the indent when we just broke (the enclosing group is laying
     // out vertically), else the live column (the group fits flat on the current line).
     let mut col = if out.at_line_start() {
@@ -377,7 +401,7 @@ fn render_fill<'a>(out: &Out<'_>, indent: usize, parts: &'a [Doc], stack: &mut V
 /// `max_width` together with the content that follows on the same line.
 fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool {
     let start_col = if out.pending_newlines > 0 {
-        out.pending_indent * out.cfg.indent_cols()
+        out.pending_indent
     } else {
         out.col
     };
@@ -426,9 +450,14 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
                     work.push((ind, mode, d));
                 }
             }
-            Doc::Indent(d) => work.push((ind + 1, mode, d)),
+            Doc::Indent(d) => work.push((ind + out.cfg.indent_cols(), mode, d)),
+            Doc::ContinuationIndent(d) => work.push((ind + out.cfg.continuation_cols(), mode, d)),
             Doc::IndentIfBreak(d) => {
-                let ind = if mode == Mode::Break { ind + 1 } else { ind };
+                let ind = if mode == Mode::Break {
+                    ind + out.cfg.continuation_cols()
+                } else {
+                    ind
+                };
                 work.push((ind, mode, d));
             }
             Doc::Group { doc, should_break } => {

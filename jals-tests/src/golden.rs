@@ -59,16 +59,18 @@ pub fn golden_source_by_name(name: &str) -> Option<&'static GoldenSource> {
 /// today.
 ///
 /// This deliberately lives in the test crate, not in `jals-fmt`, until a first-class
-/// `Config::google()` preset exists. The biggest remaining gap is the **continuation
-/// indent**: Google style indents wrapped continuation lines by +4 columns while the
-/// block indent is +2, but jals has a single indent width, so continuations here come
-/// out at +2. Closing that gap (a dedicated continuation-indent option) is the single
-/// largest expected jump in the similarity metric this harness reports.
+/// `Config::google()` preset exists. The **continuation indent** — Google style indents
+/// wrapped continuation lines by +4 columns while the block indent is +2 — is now
+/// modeled with the dedicated `continuation-indent` option (see below); it had been the
+/// single largest gap in the similarity metric this harness reports.
 pub fn google_config() -> Config {
     Config {
         // Block indentation: Google style is 2 spaces.
         indent_style: IndentStyle::Space,
         indent_width: 2,
+        // Continuation indentation: Google style indents wrapped lines by +4 columns
+        // (double the +2 block indent).
+        continuation_indent: Some(4),
         // Column limit and blank-line policy.
         max_width: 100,
         max_blank_lines: 1,
@@ -260,6 +262,8 @@ mod tests {
     fn google_config_has_google_defaults() {
         let c = google_config();
         assert_eq!(c.indent_width, 2);
+        // Google style wraps continuation lines at +4 columns (double the +2 block indent).
+        assert_eq!(c.continuation_indent, Some(4));
         assert_eq!(c.max_width, 100);
         assert!(c.group_imports);
         assert_eq!(c.import_groups, ["static", "*"]);

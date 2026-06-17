@@ -684,6 +684,32 @@ proptest! {
         prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
     }
 
+    /// Formatting stays idempotent under any continuation-indent (a narrow width forces wrapping
+    /// so the continuation indent is actually exercised).
+    #[test]
+    fn idempotent_under_continuation_indent(
+        src in javaish(),
+        cont in prop::option::of(0usize..8),
+        max_width in 20usize..60,
+    ) {
+        let cfg = Config { continuation_indent: cont, max_width, ..Config::default() };
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Continuation-indent is layout-only: the significant-token sequence is preserved.
+    #[test]
+    fn preserves_significant_tokens_under_continuation_indent(
+        src in javaish(),
+        cont in prop::option::of(0usize..8),
+        max_width in 20usize..60,
+    ) {
+        let cfg = Config { continuation_indent: cont, max_width, ..Config::default() };
+        let out = fmt_with(&src, &cfg);
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
     /// Reflow keeps formatting idempotent.
     #[test]
     fn wrap_idempotent(src in javaish()) {

@@ -25,8 +25,8 @@ use crate::config::{
     FnParamsLayout, HexLiteralCase, LiteralSuffixCase, TrailingComma, TypePunctuationDensity,
 };
 use crate::doc::{
-    Doc, blank_line, concat, fill, group, group_always_break, group_overflow, group_within,
-    hardline, if_break, indent, line, nil, raw, softline, text,
+    Doc, blank_line, concat, continuation_indent, fill, group, group_always_break, group_overflow,
+    group_within, hardline, if_break, indent, line, nil, raw, softline, text,
 };
 
 /// Lowering context shared (immutably) across the walk.
@@ -522,7 +522,10 @@ fn lower_chain(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         wrapped.push(lower_link(link, ctx));
     }
 
-    let doc = concat(vec![concat(head_line), indent(concat(wrapped))]);
+    let doc = concat(vec![
+        concat(head_line),
+        continuation_indent(concat(wrapped)),
+    ]);
     group_within(doc, ctx.cfg.chain_width)
 }
 
@@ -999,7 +1002,7 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             head_inner.push(crate::doc::join(line(), items));
             head_inner.push(line());
         }
-        let head = concat(vec![open_doc, indent(concat(head_inner))]);
+        let head = concat(vec![open_doc, continuation_indent(concat(head_inner))]);
         let tail = concat(vec![softline(), close_doc]);
         let budget = (node.kind() == S::ARG_LIST).then_some(ctx.cfg.fn_call_width);
         return group_overflow(head, last_item, tail, budget);
@@ -1016,7 +1019,7 @@ fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     };
     let doc = concat(vec![
         open_doc,
-        indent(concat(vec![softline(), inner])),
+        continuation_indent(concat(vec![softline(), inner])),
         softline(),
         close_doc,
     ]);
@@ -1154,7 +1157,10 @@ fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             BinopSeparator::Back => tail.extend([text(" "), op, line(), lower(rhs, ctx)]),
         }
     }
-    group(concat(vec![lower(&first, ctx), indent(concat(tail))]))
+    group(concat(vec![
+        lower(&first, ctx),
+        continuation_indent(concat(tail)),
+    ]))
 }
 
 /// Lower a malformed binary expression inline as `lhs op rhs`, joining a run of operator
@@ -1260,7 +1266,7 @@ fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             lower(&els, ctx),
         ]),
     };
-    let doc = concat(vec![lower(&cond, ctx), indent(tail)]);
+    let doc = concat(vec![lower(&cond, ctx), continuation_indent(tail)]);
     group_within(doc, ctx.cfg.single_line_if_else_max_width)
 }
 

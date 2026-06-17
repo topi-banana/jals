@@ -3,8 +3,8 @@
 use expect_test::{Expect, expect};
 use jals_fmt::{
     AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
-    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, LineEnding, LiteralSuffixCase,
-    TrailingComma, TypePunctuationDensity, format_source,
+    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle, LineEnding,
+    LiteralSuffixCase, TrailingComma, TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -3930,4 +3930,209 @@ fn literal_suffix_case_is_idempotent() {
             "literal-suffix-case must be idempotent ({case:?})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// continuation-indent
+//
+// A `continuation-indent` of `n` indents the wrapped (continuation) lines of an expression /
+// statement by `n` columns, independently of the block-body indent (`indent-width`). The
+// default (`None`) falls back to `indent-width`, leaving output unchanged.
+// ---------------------------------------------------------------------------
+
+fn fmt_cont(src: &str, n: usize) -> String {
+    let cfg = Config {
+        continuation_indent: Some(n),
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn fmt_cont_narrow(src: &str, n: usize, max_width: usize) -> String {
+    let cfg = Config {
+        continuation_indent: Some(n),
+        max_width,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn continuation_indent_wraps_binary_at_configured_width() {
+    // The statement sits at column 8 (two block levels); wrapped operands hang 8 columns past it
+    // (column 16) instead of the 4-column block indent.
+    expect![[r#"
+        class A {
+            void m() {
+                result = alphaOperandName
+                        + betaOperandName
+                        + gammaOperandName
+                        + deltaOperandName
+                        + epsilonOperandName;
+            }
+        }
+    "#]].assert_eq(&fmt_cont(
+        "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
+        8,
+    ));
+}
+
+#[test]
+fn continuation_indent_wraps_method_chain() {
+    // Each wrapped `.call()` hangs `continuation-indent` (8) past the receiver line.
+    expect![[r#"
+        class A {
+            void m() {
+                source.stream()
+                        .filter(predicate)
+                        .map(mapper)
+                        .collect(collector);
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_cont_narrow(
+        "class A{void m(){source.stream().filter(predicate).map(mapper).collect(collector);}}",
+        8,
+        40,
+    ));
+}
+
+#[test]
+fn continuation_indent_wraps_call_arguments() {
+    // Wrapped arguments hang `continuation-indent` (8) past the call line.
+    expect![[r#"
+        class A {
+            void m() {
+                compute(
+                        alphaArg,
+                        betaArg,
+                        gammaArg,
+                        deltaArg,
+                        epsilonArg
+                );
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_cont_narrow(
+        "class A{void m(){compute(alphaArg,betaArg,gammaArg,deltaArg,epsilonArg);}}",
+        8,
+        40,
+    ));
+}
+
+#[test]
+fn continuation_indent_wraps_parameters_but_not_body() {
+    // The wrapped parameters hang 8 past the method header (column 4 + 8 = 12), while the body
+    // statement keeps the 4-column block indent (column 8). This is the block-vs-continuation
+    // split.
+    expect![[r#"
+        class A {
+            void method(
+                    int alpha,
+                    String beta,
+                    long gamma,
+                    double delta
+            ) {
+                int x = 1;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_cont_narrow(
+        "class A{void method(int alpha,String beta,long gamma,double delta){int x=1;}}",
+        8,
+        40,
+    ));
+}
+
+#[test]
+fn continuation_indent_wraps_ternary() {
+    // The `?` / `:` continuation lines hang `continuation-indent` (8) past the condition.
+    expect![[r#"
+        class A {
+            void m() {
+                int v = conditionExpr
+                        ? thenValueExpression
+                        : elseValueExpression;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_cont_narrow(
+        "class A{void m(){int v=conditionExpr?thenValueExpression:elseValueExpression;}}",
+        8,
+        30,
+    ));
+}
+
+#[test]
+fn continuation_indent_composes_block_and_continuation() {
+    // Three distinct indents in one snapshot: wrapped params hang 8 past the header (col 12),
+    // body statements use the 4-column block indent (col 8), and the body's wrapped binary hangs
+    // a further 8 (col 16).
+    expect![[r#"
+        class A {
+            int method(
+                    int alphaParam,
+                    int betaParam,
+                    int gammaParam
+            ) {
+                return alphaParam
+                        + betaParam
+                        + gammaParam
+                        + alphaParam
+                        + betaParam;
+            }
+        }
+    "#]].assert_eq(&fmt_cont_narrow(
+        "class A{int method(int alphaParam,int betaParam,int gammaParam){return alphaParam+betaParam+gammaParam+alphaParam+betaParam;}}",
+        8,
+        40,
+    ));
+}
+
+#[test]
+fn continuation_indent_default_matches_indent_width() {
+    // `continuation-indent = Some(4)` is byte-identical to the default (`None`), which falls back
+    // to `indent-width = 4`. Guards the fallback path.
+    let src = "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}";
+    assert_eq!(fmt_cont(src, 4), fmt(src));
+}
+
+#[test]
+fn continuation_indent_is_idempotent() {
+    let src = "class A{int method(int alphaParam,int betaParam,int gammaParam){return alphaParam+betaParam+gammaParam+alphaParam+betaParam;}}";
+    let once = fmt_cont_narrow(src, 8, 40);
+    let twice = fmt_cont_narrow(&once, 8, 40);
+    assert_eq!(once, twice, "continuation-indent must be idempotent");
+}
+
+#[test]
+fn continuation_indent_ignored_in_tab_style() {
+    // In tab style every indent step is one tab, so `continuation-indent` is ignored and the
+    // output stays a whole number of tabs (no stray spaces).
+    let cfg = Config {
+        indent_style: IndentStyle::Tab,
+        continuation_indent: Some(8),
+        max_width: 40,
+        ..Config::default()
+    };
+    let out = format_source(
+        "class A{void m(){result=alphaOperandName+betaOperandName+gammaName;}}",
+        &cfg,
+    )
+    .formatted;
+    assert!(
+        !out.lines()
+            .any(|l| l.starts_with('\t') && l.trim_start_matches('\t').starts_with(' ')),
+        "tab-style indentation must not mix tabs then spaces:\n{out}"
+    );
+    expect![[r#"
+        class A {
+        	void m() {
+        		result = alphaOperandName
+        			+ betaOperandName
+        			+ gammaName;
+        	}
+        }
+    "#]]
+    .assert_eq(&out);
 }

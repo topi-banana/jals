@@ -24,7 +24,13 @@ instead, `trailing-comma` may add or drop the single trailing comma of an array 
 
 The current formatter is intentionally minimal. It performs:
 
-- **Indentation** — spaces or a tab, configurable width.
+- **Indentation** — spaces or a tab, configurable width. A separate `continuation-indent` governs
+  the indent of **continuation lines** — the wrapped lines of an expression / statement (a method
+  chain, wrapped binary / ternary operators, or a wrapped delimited list) — distinct from the
+  block-body indent (`indent-width`); it defaults to `indent-width`, so output is unchanged until
+  set. Block bodies always use `indent-width`. Tab style ignores it (one tab per continuation),
+  keeping the output a whole number of tabs. Layout-only (the significant-token sequence is
+  preserved exactly). See below.
 - **Block layout** — class bodies, blocks, and switch blocks (`{ … }`) are laid out
   multi-line. The opening brace of a **declaration body** (type, method, constructor, or
   initializer) follows `brace-style`, and the opening brace of a **control-flow / `switch` /
@@ -189,6 +195,7 @@ are kebab-case.
 | --- | --- | --- | --- |
 | `indent-style` | `"space"` \| `"tab"` | `"space"` | ✅ wired |
 | `indent-width` | integer | `4` | ✅ wired |
+| `continuation-indent` | integer (optional) | falls back to `indent-width` | ✅ wired — columns to indent a *continuation* line (the wrapped lines of an expression / statement): a method chain, wrapped binary / ternary operators, or a wrapped delimited list (parameter / argument / array-initializer / annotation-arg / record-header). Block bodies (`{ … }`) keep `indent-width`. Unset by default (output unchanged). Ignored in tab style (one tab per continuation, keeping the output a whole number of tabs). Layout-only (the significant-token sequence is preserved exactly). A Java-specific option (cf. IntelliJ / Checkstyle continuation indent) with no rustfmt equivalent |
 | `max-blank-lines` | integer | `1` | ✅ wired — runs of blank lines are clamped to this many (`0` removes them) |
 | `line-ending` | `"lf"` \| `"crlf"` \| `"auto"` \| `"native"` | `"lf"` | ✅ wired — `auto` matches the source's first line break, `native` uses the host terminator |
 | `insert-final-newline` | bool | `true` | ✅ wired |
