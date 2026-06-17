@@ -1879,6 +1879,52 @@ fn module_import_formats_inline() {
 }
 
 #[test]
+fn module_decl_empty_body_collapses() {
+    // A module declaration's body is a braced declaration body like a class body: an empty one
+    // collapses to `{}` (not `{ }`) under the default `empty-item-single-line`.
+    check(
+        "open module com.google.m { }",
+        expect![[r#"
+            open module com.google.m {}
+        "#]],
+    );
+    check(
+        "module com.google.m {}",
+        expect![[r#"
+            module com.google.m {}
+        "#]],
+    );
+}
+
+#[test]
+fn module_decl_directives_break_and_indent() {
+    // A non-empty module body lays its directives out one per indented line, like class members.
+    check(
+        "module com.google.m { requires java.base; exports com.foo; }",
+        expect![[r#"
+            module com.google.m {
+                requires java.base;
+                exports com.foo;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn module_decl_empty_body_next_line_brace() {
+    // Like a type body, the module body's brace follows `brace-style`: an empty body still
+    // collapses to `{}` under `next-line` (matching the class-body behavior).
+    let cfg = Config {
+        brace_style: BraceStyle::NextLine,
+        ..Config::default()
+    };
+    expect![[r#"
+        module com.google.m {}
+    "#]]
+    .assert_eq(&fmt_with("module com.google.m { }", &cfg));
+}
+
+#[test]
 fn reorder_imports_module_to_front() {
     // Module imports lead their own tier: module, then ordinary (alphabetical), then static.
     check_reorder(
