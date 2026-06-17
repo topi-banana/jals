@@ -113,9 +113,9 @@ fn class_literals() {
                 void m() {
                     f(int.class);
                     f(void.class);
-                    f(int [].class);
-                    f(String [].class);
-                    f(java.lang.String [] [].class);
+                    f(int[].class);
+                    f(String[].class);
+                    f(java.lang.String[][].class);
                 }
             }
         "#]],
@@ -129,11 +129,11 @@ fn array_method_refs() {
         expect![[r#"
             class A {
                 void m() {
-                    f(String []::new);
-                    f(int []::new);
-                    f(int [] []::new);
-                    f(java.lang.String [] []::new);
-                    f(Map.Entry []::new);
+                    f(String[]::new);
+                    f(int[]::new);
+                    f(int[][]::new);
+                    f(java.lang.String[][]::new);
+                    f(Map.Entry[]::new);
                 }
             }
         "#]],
@@ -1544,7 +1544,7 @@ fn array_width_forces_break_below_max_width() {
     // Fits max-width(100) but exceeds the narrow array-width, so the elements break.
     expect![[r#"
         class A {
-            int [] x = {
+            int[] x = {
                 alpha,
                 beta,
                 gamma
@@ -1559,7 +1559,7 @@ fn array_width_generous_keeps_inline() {
     // A generous array-width keeps the initializer on one line.
     expect![[r#"
         class A {
-            int [] x = {alpha, beta, gamma};
+            int[] x = {alpha, beta, gamma};
         }
     "#]]
     .assert_eq(&fmt_array_init("class A{int[] x={alpha,beta,gamma};}", 200));
@@ -1570,7 +1570,7 @@ fn array_width_breaks_new_array_creation() {
     // `new T[]{…}` carries the same ARRAY_INIT node, so it honors array-width too.
     expect![[r#"
         class A {
-            int [] x = new int [] {
+            int[] x = new int[] {
                 alpha,
                 beta,
                 gamma
@@ -1611,7 +1611,7 @@ fn trailing_comma_preserve_keeps_source_absent() {
     // Preserve (the default): an absent trailing comma stays absent.
     expect![[r#"
         class A {
-            int [] x = {a, b, c};
+            int[] x = {a, b, c};
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1625,7 +1625,7 @@ fn trailing_comma_preserve_keeps_source_present() {
     // Preserve: a present trailing comma stays present.
     expect![[r#"
         class A {
-            int [] x = {a, b, c,};
+            int[] x = {a, b, c,};
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1638,7 +1638,7 @@ fn trailing_comma_preserve_keeps_source_present() {
 fn trailing_comma_always_adds_when_absent() {
     expect![[r#"
         class A {
-            int [] x = {a, b, c,};
+            int[] x = {a, b, c,};
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1651,7 +1651,7 @@ fn trailing_comma_always_adds_when_absent() {
 fn trailing_comma_never_drops_when_present() {
     expect![[r#"
         class A {
-            int [] x = {a, b, c};
+            int[] x = {a, b, c};
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1665,7 +1665,7 @@ fn trailing_comma_vertical_omits_when_flat() {
     // Fits on one line, so the comma is omitted — even though the source had one.
     expect![[r#"
         class A {
-            int [] x = {a, b, c};
+            int[] x = {a, b, c};
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1679,7 +1679,7 @@ fn trailing_comma_vertical_adds_when_broken() {
     // Broken one element per line, so the comma is added.
     expect![[r#"
         class A {
-            int [] x = {
+            int[] x = {
                 alpha,
                 beta,
                 gamma,
@@ -1697,7 +1697,7 @@ fn trailing_comma_never_omits_even_when_broken() {
     // `never` keeps no trailing comma regardless of layout.
     expect![[r#"
         class A {
-            int [] x = {
+            int[] x = {
                 alpha,
                 beta,
                 gamma
@@ -1714,7 +1714,7 @@ fn trailing_comma_never_omits_even_when_broken() {
 fn trailing_comma_always_when_broken() {
     expect![[r#"
         class A {
-            int [] x = {
+            int[] x = {
                 alpha,
                 beta,
                 gamma,
@@ -1750,7 +1750,7 @@ fn trailing_comma_never_keeps_commented_comma() {
     // comment survives.
     expect![[r#"
         class A {
-            int [] x = {a, b, c,}; /* keep */
+            int[] x = {a, b, c,}; /* keep */
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1780,7 +1780,7 @@ fn trailing_comma_unclosed_array_is_not_synthesized() {
     // re-parse it reads as an item separator that pulls the following token into the list,
     // breaking idempotency. The source is preserved exactly here (no comma added after `beta`).
     expect![[r#"
-        class A { int [] x = {
+        class A { int[] x = {
             alpha,
             beta
     "#]]
@@ -2629,7 +2629,7 @@ fn overflow_hangs_trailing_array_creation() {
     expect![[r#"
         class A {
             void m() {
-                fill(buf, new int [] {
+                fill(buf, new int[] {
                     alpha,
                     beta,
                     gamma
@@ -2656,7 +2656,7 @@ fn overflow_array_honors_vertical_trailing_comma() {
     expect![[r#"
         class A {
             void m() {
-                fill(buf, new int [] {
+                fill(buf, new int[] {
                     alpha,
                     beta,
                     gamma,
