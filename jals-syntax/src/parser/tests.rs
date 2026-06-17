@@ -331,6 +331,68 @@ fn class_with_field_and_method() {
 }
 
 #[test]
+fn char_literal_escapes_parse_without_errors() {
+    // Octal (`\033`, `\377`) and unicode (`ÿ`) escapes inside a char literal used to
+    // derail the lexer into an ERROR/INT/ERROR cascade, which then produced a flood of
+    // parse errors (278 across the OpenJDK corpus). Each must now parse cleanly as a single
+    // CHAR_LITERAL with no syntax errors.
+    for src in [
+        "class C { char a = '\\033'; }",
+        "class C { char a = '\\377'; }",
+        "class C { char a = '\\u00ff'; }",
+        "class C { char a = '\\0'; }",
+        "class C { char a = '\\n'; }",
+    ] {
+        let parse = parse(src);
+        assert!(
+            parse.errors().is_empty(),
+            "expected no parse errors for {src:?}, got {:?}",
+            parse.errors()
+        );
+        assert_eq!(
+            parse.syntax().text().to_string(),
+            src,
+            "lossless invariant violated for {src:?}"
+        );
+    }
+}
+
+#[test]
+fn char_literal_octal_escape_field() {
+    // Freezes the tree shape: the octal escape is a single CHAR_LITERAL inside the field's
+    // initializer, with no trailing `error ...:` lines.
+    check(
+        "class C { char a = '\\033'; }",
+        expect![[r#"
+            SOURCE_FILE@0..28
+              CLASS_DECL@0..28
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..28
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  FIELD_DECL@9..26
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      CHAR_KW@10..14 "char"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "a"
+                    WHITESPACE@16..17 " "
+                    EQ@17..18 "="
+                    LITERAL@18..25
+                      WHITESPACE@18..19 " "
+                      CHAR_LITERAL@19..25 "'\\033'"
+                    SEMICOLON@25..26 ";"
+                  WHITESPACE@26..27 " "
+                  RBRACE@27..28 "}"
+        "#]],
+    );
+}
+
+#[test]
 fn top_level_main_method_compact_source_file() {
     // JEP 512: a method declared directly at the top level (no enclosing class).
     check(

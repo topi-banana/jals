@@ -360,17 +360,12 @@ fn scan_char_literal(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) 
         src,
         pos: start + 1,
     };
-    // The single element: a plain char or a `\` escape (covering any char except `\n`).
+    // The single element: a plain char or a `\` escape.
     match cursor.first() {
         None | Some('\'' | '\r' | '\n') => return (Err(()), cursor.pos),
         Some('\\') => {
             cursor.bump();
-            match cursor.first() {
-                None | Some('\n') => return (Err(()), cursor.pos),
-                Some(_) => {
-                    cursor.bump();
-                }
-            }
+            consume_char_escape_body(&mut cursor);
         }
         Some(_) => {
             cursor.bump();
@@ -381,6 +376,49 @@ fn scan_char_literal(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) 
         (Ok(TokenKind::CHAR_LITERAL), cursor.pos)
     } else {
         (Err(()), cursor.pos)
+    }
+}
+
+/// Consumes the body of a `\`-escape inside a char literal, with the cursor positioned
+/// right after the backslash. Mirrors the JLS escape grammar just enough to find where the
+/// escape ends so the closing quote can be located: octal escapes (1-3 digits), unicode
+/// escapes (`\u`+ then 4 hex digits), and single-char escapes (`\n`, `\t`, `\\`, ...). The
+/// raw slice is kept; escape values are never validated here (that is later semantic work).
+fn consume_char_escape_body(cursor: &mut Cursor) {
+    match cursor.first() {
+        // Backslash at end of input or directly before a line break: not a valid escape.
+        // Consume nothing, so the line break re-lexes on its own and the missing closing
+        // quote turns the whole thing into an ERROR token.
+        None | Some('\n') => {}
+        // Octal escape: 1-3 octal digits. Java caps a 3-digit octal's first digit at 0-3,
+        // but we consume greedily up to 3 regardless — an over-range octal then simply
+        // fails the closing-quote check (rejecting its value is not the lexer's concern),
+        // which is more resilient than splitting it and re-lexing the trailing digits.
+        Some('0'..='7') => {
+            cursor.bump();
+            for _ in 0..2 {
+                if matches!(cursor.first(), Some('0'..='7')) {
+                    cursor.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        // Unicode escape: one or more `u`s, then up to 4 hex digits.
+        Some('u') => {
+            cursor.eat_while(|c| c == 'u');
+            for _ in 0..4 {
+                if cursor.first().is_some_and(|c| c.is_ascii_hexdigit()) {
+                    cursor.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        // Any other single-char escape (`\t`, `\\`, `\'`, `\"`, `\r`, and invalid ones).
+        Some(_) => {
+            cursor.bump();
+        }
     }
 }
 
@@ -714,6 +752,24 @@ mod tests {
     }
 
     #[test]
+    fn char_literal_escapes() {
+        // Octal escapes (1-3 digits) are a single CHAR_LITERAL, not a derailed ERROR run.
+        assert_eq!(kinds(r"'\0'"), vec![CHAR_LITERAL]);
+        assert_eq!(kinds(r"'\12'"), vec![CHAR_LITERAL]);
+        assert_eq!(kinds(r"'\033'"), vec![CHAR_LITERAL]);
+        assert_eq!(kinds(r"'\377'"), vec![CHAR_LITERAL]);
+        // Unicode escapes, including the `\uuu...` multi-`u` form.
+        assert_eq!(kinds(r"'\u00ff'"), vec![CHAR_LITERAL]);
+        assert_eq!(kinds(r"'\uuu00ff'"), vec![CHAR_LITERAL]);
+        // A real multi-byte char (not a `\u` escape) keeps working.
+        assert_eq!(kinds("'\u{ff}'"), vec![CHAR_LITERAL]);
+        // Single-char escapes still work.
+        assert_eq!(kinds(r"'\n'"), vec![CHAR_LITERAL]);
+        assert_eq!(kinds(r"'\\'"), vec![CHAR_LITERAL]);
+        assert_eq!(kinds(r"'\''"), vec![CHAR_LITERAL]);
+    }
+
+    #[test]
     fn comments_and_javadoc() {
         assert_eq!(kinds("// hi"), vec![LINE_COMMENT]);
         assert_eq!(kinds("/* b */"), vec![BLOCK_COMMENT]);
@@ -758,6 +814,9 @@ mod tests {
             "'a",
             "\"\"\"unterminated",
             "0x",
+            r"'\0000'", // over-long octal: 4th digit defeats the close
+            r"'\u'",    // unicode escape with no hex digits
+            r"'\",      // backslash at end of input
         ] {
             assert_eq!(roundtrip(s), s, "{s:?} の round-trip 失敗");
         }
