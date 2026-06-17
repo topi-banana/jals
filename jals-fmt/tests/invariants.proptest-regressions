@@ -15,3 +15,4 @@ cc 67f9273d3df17e98300f61285c7dc29ac08386957fc90dd5609f62b0eb7c5c8b # shrinks to
 cc f904afef9c2819f529b86c5c0e7461df032e96b23240b8baf2b09825c8e0115b # shrinks to src = "\n\n// c\nclass"
 cc 34d243e6d8eef08672ee7876cb45d6a2ebf8cb97de5082ee17ef25a44d3a213f # shrinks to src = "class{}\n// c\n"
 cc d7bf099687f0321f3cffe08736f6365a9034c428137c147e3e162737bbd9407b # shrinks to src = "class{{}// alpha beta gamma delta epsilon\nclass// c\n"
+cc cd0915a794177d2d0c37933b0e181d198a911814aa01b2418028858e725edede # shrinks to src = "x.@classclass(>>)x", single_line = true

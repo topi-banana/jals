@@ -833,9 +833,15 @@ fn dims(p: &mut Parser) {
                 while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
                     annotation(p);
                 }
-                p.bump(LBRACK);
-                p.bump(RBRACK);
-                continue;
+                // The lookahead promised `[]` after the annotations, but a malformed
+                // annotation argument list can make the real parse stop short of it
+                // (`String @A(x 0) []` leaves the parser at `0`), so guard the bump:
+                // its lookahead-vs-parse divergence must never panic.
+                if p.at(LBRACK) && p.nth_at(1, RBRACK) {
+                    p.bump(LBRACK);
+                    p.bump(RBRACK);
+                    continue;
+                }
             }
             break;
         }
@@ -942,7 +948,10 @@ fn type_(p: &mut Parser) {
             while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
                 annotation(p);
             }
-            p.bump(IDENT);
+            // `dot_continues_type`'s lookahead promised an `IDENT` past the annotations, but a
+            // malformed annotation argument list (`Outer.@A(x y) Inner`) can make the real parse
+            // stop short of it, so `expect` (not `bump`) the inner name to stay panic-free.
+            p.expect(IDENT);
             if p.at(LT) {
                 type_args(p);
             }
@@ -972,8 +981,10 @@ fn type_arg(p: &mut Parser) {
         while p.at(AT) && !p.nth_at(1, INTERFACE_KW) {
             annotation(p);
         }
-        // Wildcard `? extends T` / `? super T`.
-        p.bump(QUESTION);
+        // The lookahead promised a `?` past the annotations, but a malformed annotation argument
+        // list (`@A(x y) ?`) can make the real parse stop short of it, so `expect` (not `bump`)
+        // the wildcard `?` to stay panic-free. `? extends T` / `? super T` follow.
+        p.expect(QUESTION);
         if p.at(EXTENDS_KW) || p.at(SUPER_KW) {
             p.bump_any();
             type_(p);
