@@ -69,6 +69,15 @@ fn fmt_group_with(src: &str, import_groups: &[&str]) -> String {
     format_source(src, &cfg).formatted
 }
 
+/// Format with `annotation-placement = expanded` (each leading annotation on its own line).
+fn fmt_expanded(src: &str) -> String {
+    let cfg = Config {
+        annotation_placement: AnnotationPlacement::Expanded,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
 #[test]
 fn simple_class() {
     check(
@@ -668,8 +677,9 @@ fn empty_item_single_line_off_expands_member_bodies() {
 
 #[test]
 fn empty_item_single_line_off_expands_every_type_kind() {
-    // Every body that lowers to `CLASS_BODY` expands. (Enum bodies are `ENUM_BODY`, not yet
-    // block-formatted, so they are out of scope and unaffected — see the dedicated test.)
+    // Every body that lowers to `CLASS_BODY` expands. (Enum bodies are `ENUM_BODY` with their own
+    // dedicated lowering; an empty one always collapses to `{}` regardless of this option — see the
+    // dedicated test.)
     expect![[r#"
         interface I {
         }
@@ -688,11 +698,195 @@ fn empty_item_single_line_off_expands_every_type_kind() {
 }
 
 #[test]
-fn empty_item_single_line_off_leaves_enum_body_untouched() {
-    // Enum bodies do not go through the block formatter, so the option does not govern them
-    // (they format identically with the option on or off).
-    expect![["enum E { }\n"]].assert_eq(&fmt_no_empty_single_line("enum E{}"));
-    expect![["enum E { }\n"]].assert_eq(&fmt("enum E{}"));
+fn empty_enum_body_collapses_to_braces() {
+    // An empty enum body is `{}` with no inner space, unconditionally — `empty-item-single-line`
+    // never governs it (it has its own `ENUM_BODY` lowering), so it is identical with the option
+    // on or off.
+    expect![["enum E {}\n"]].assert_eq(&fmt_no_empty_single_line("enum E{}"));
+    expect![["enum E {}\n"]].assert_eq(&fmt("enum E{}"));
+}
+
+#[test]
+fn enum_constants_break_one_per_line() {
+    // A non-empty enum body always breaks — one constant per line — even when it would fit.
+    check(
+        "enum Suit { DIAMONDS, HEARTS, CLUBS, SPADES }",
+        expect![[r#"
+            enum Suit {
+                DIAMONDS,
+                HEARTS,
+                CLUBS,
+                SPADES
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_terminator_glues_to_last_constant() {
+    // No trailing comma: the terminator `;` glues onto the last constant.
+    check(
+        "enum E { ONE, TWO; }",
+        expect![[r#"
+            enum E {
+                ONE,
+                TWO;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_trailing_comma_keeps_terminator_on_own_line() {
+    // A trailing comma keeps the terminator `;` on its own line.
+    check(
+        "enum E { ONE, TWO,; }",
+        expect![[r#"
+            enum E {
+                ONE,
+                TWO,
+                ;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_no_constants_terminator_on_own_line() {
+    // A body that starts with `;` (no constants) puts the terminator on its own line, then the
+    // members below it.
+    check(
+        "public enum E { ; public static final String ONE = \"ONE\"; }",
+        expect![[r#"
+            public enum E {
+                ;
+                public static final String ONE = "ONE";
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_multiple_empty_declarations() {
+    // The first `;` is the terminator; each subsequent `;` is an empty-declaration member, one
+    // per line.
+    check(
+        "public enum Empty {;;;}",
+        expect![[r#"
+            public enum Empty {
+                ;
+                ;
+                ;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_preserves_blank_lines_between_constants() {
+    // Blank lines between constants are preserved (clamped by the renderer); the blank after `{`
+    // before the first constant is dropped, like a class body.
+    check(
+        "enum E {\n\n  A,\n  B,\n\n  C;\n}",
+        expect![[r#"
+            enum E {
+                A,
+                B,
+
+                C;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_members_after_terminator() {
+    // Members after the terminator format like class-body items, each on its own line (source
+    // blank lines preserved — here there were none, so none are inserted).
+    check(
+        "enum E { A, B; int x; E() {} }",
+        expect![[r#"
+            enum E {
+                A,
+                B;
+                int x;
+                E() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_constant_with_class_body() {
+    // A constant's class body recurses through the block formatter.
+    check(
+        "enum E { A { void m() {} }, B; }",
+        expect![[r#"
+            enum E {
+                A {
+                    void m() {}
+                },
+                B;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_constant_annotations_expanded_vs_compact() {
+    // Under `annotation-placement = expanded` each leading annotation breaks onto its own line;
+    // under the default `compact` the constant stays inline.
+    expect![[r#"
+        enum E {
+            @A
+            ONE,
+            TWO,
+            @B
+            @C
+            THREE;
+        }
+    "#]]
+    .assert_eq(&fmt_expanded("enum E { @A ONE, TWO, @B @C THREE; }"));
+    expect![[r#"
+        enum E {
+            @A ONE,
+            TWO,
+            @B @C THREE;
+        }
+    "#]]
+    .assert_eq(&fmt("enum E { @A ONE, TWO, @B @C THREE; }"));
+}
+
+#[test]
+fn enum_comment_before_terminator_keeps_it_on_own_line() {
+    // A leading comment on the terminator `;` blocks gluing (gluing would relocate the comment
+    // above the constant), so the `;` stays on its own line and the comment is preserved.
+    check(
+        "enum E { ONE, TWO\n // keep\n ; }",
+        expect![[r#"
+            enum E {
+                ONE,
+                TWO
+                // keep
+                ;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn enum_dangling_comment_before_brace() {
+    // A comment on its own line with no following token dangles before the closing brace and is
+    // still emitted.
+    check(
+        "enum E { ONE;\n /* dangling */\n }",
+        expect![[r#"
+            enum E {
+                ONE;
+                /* dangling */
+            }
+        "#]],
+    );
 }
 
 #[test]

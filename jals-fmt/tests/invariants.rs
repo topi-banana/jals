@@ -654,6 +654,45 @@ fn sig_tokens_canon_suffix(src: &str) -> Vec<(SyntaxKind, String)> {
         .collect()
 }
 
+/// An enum body assembled from a random run of fragments — constants (plain, with args, with a
+/// leading annotation, with a class body), commas, semicolons, members, comments, and whitespace —
+/// so the dedicated `ENUM_BODY` lowering is exercised across its branches (constant lists, the
+/// terminator's gluing, members, and the error-recovery fallback). As with the other targeted
+/// generators these need not be legal Java; the parser is error-resilient and still builds the
+/// `ENUM_BODY`, and the enum lowering is layout-only, so the strict token sequence is preserved
+/// regardless.
+fn java_with_enum() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("A"),
+            Just("B(1)"),
+            Just("@X C"),
+            Just("@X @Y(2) D"),
+            Just("E { void m() {} }"),
+            Just(","),
+            Just(";"),
+            Just("// line\n"),
+            Just("/** doc */"),
+            Just("\n"),
+            Just("\n\n"),
+            Just(" "),
+            Just("int f;"),
+            Just("void g() {}"),
+        ],
+        0..12,
+    )
+    .prop_map(|parts| format!("enum En {{ {} }}\n", parts.concat()))
+}
+
+/// Config with `annotation-placement = expanded` (enum-constant annotations break onto their own
+/// lines, as Google style does).
+fn expanded_config() -> Config {
+    Config {
+        annotation_placement: AnnotationPlacement::Expanded,
+        ..Config::default()
+    }
+}
+
 proptest! {
     /// Formatting is idempotent.
     #[test]
@@ -1676,5 +1715,45 @@ proptest! {
     fn literal_suffix_case_never_panics(src in ".*") {
         let _ = fmt_with(&src, &suffix_config(LiteralSuffixCase::Upper));
         let _ = fmt_with(&src, &suffix_config(LiteralSuffixCase::Lower));
+    }
+
+    /// Enum-body layout is idempotent.
+    #[test]
+    fn enum_idempotent(src in java_with_enum()) {
+        let once = fmt(&src);
+        let twice = fmt(&once);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Enum-body layout preserves the significant-token sequence exactly (it is pure layout —
+    /// no token is added, dropped, reordered, or altered).
+    #[test]
+    fn enum_preserves_significant_tokens(src in java_with_enum()) {
+        let out = fmt(&src);
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Enum-body layout never drops or mangles a comment.
+    #[test]
+    fn enum_preserves_comments(src in java_with_enum()) {
+        let out = fmt(&src);
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Enum-body layout stays idempotent with `annotation-placement = expanded`, where each
+    /// enum-constant annotation breaks onto its own line.
+    #[test]
+    fn enum_expanded_idempotent(src in java_with_enum()) {
+        let cfg = expanded_config();
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Enum-body layout preserves the significant-token sequence exactly under `expanded` too.
+    #[test]
+    fn enum_expanded_preserves_significant_tokens(src in java_with_enum()) {
+        let out = fmt_with(&src, &expanded_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
     }
 }
