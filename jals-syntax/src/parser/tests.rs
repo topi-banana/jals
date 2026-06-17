@@ -466,6 +466,35 @@ fn method_ref_malformed_angles_no_panic() {
 }
 
 #[test]
+fn annotated_dim_malformed_args_no_panic() {
+    // Regression: `dims` consults `skip_annotations_lookahead`, whose paren-depth scan treats
+    // a whole `(...)` as the annotation's argument list and so promises `[]` follows. But the
+    // real `annotation_arg_list` stops at the first non-comma-separated element (`@A(x 0)`
+    // leaves the cursor on `0`), so `dims` must `at`-guard (not blindly `bump`) the `[` to stay
+    // panic-free. Reachable as a field type and — since JEP 512 — at the top level.
+    assert_lossless("class C { int @A(x 0)[] f; }");
+    assert_lossless("int @A(x 0)[] f;");
+}
+
+#[test]
+fn annotated_qualified_type_malformed_args_no_panic() {
+    // Regression: `dot_continues_type`'s lookahead promises an inner `IDENT` past the type-use
+    // annotations on a dotted type (`Outer.@A Inner`), but a malformed annotation argument list
+    // makes the real parse stop short, so `type_` must `expect` (not `bump`) the inner name.
+    assert_lossless("x.@classclass(>>)x");
+    assert_lossless("class C { Outer.@A(x y) Inner f; }");
+}
+
+#[test]
+fn annotated_wildcard_malformed_args_no_panic() {
+    // Regression: the wildcard branch of `type_arg` is entered on a lookahead that a `?` follows
+    // the annotations, but a malformed annotation argument list makes the real parse stop short,
+    // so it must `expect` (not `bump`) the `?`.
+    assert_lossless("class C { Foo<@A(x y)?> m; }");
+    assert_lossless("class C { Foo<@A(x 0)?> m; }");
+}
+
+#[test]
 fn generics_nested_close() {
     check(
         "class C { Map<K, List<V>> m; }",
