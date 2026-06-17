@@ -9,8 +9,8 @@
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::ControlBraceStyle;
-use crate::doc::{Doc, concat, hardline, nil};
-use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, sep, tok};
+use crate::doc::{Doc, concat, hardline};
+use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, sep, tight_sep, tok};
 
 /// Lay a node out inline: child nodes are recursed, tokens are separated by single
 /// spaces per [`crate::lower::want_space`]. Whitespace, newlines, and comment trivia are skipped
@@ -62,7 +62,10 @@ pub(crate) fn lower_elements(
             };
             if let Some(first) = emitted_first.as_ref() {
                 let s = if hug_witness {
-                    nil()
+                    // Hug the name onto the type witness (`List.<String>of`), but keep the
+                    // fusion-safety net: a malformed witness can end in a token that would fuse
+                    // with the name (`<void` then `x` → `voidx`), so a space is still needed there.
+                    tight_sep(prev.as_ref(), first)
                 } else {
                     flow_sep(ctx, control_flow, prev.as_ref(), child.kind(), first)
                 };
@@ -82,7 +85,7 @@ pub(crate) fn lower_elements(
                 continue;
             }
             let s = if hug_witness {
-                nil()
+                tight_sep(prev.as_ref(), t)
             } else {
                 flow_sep(ctx, control_flow, prev.as_ref(), t.kind(), t)
             };

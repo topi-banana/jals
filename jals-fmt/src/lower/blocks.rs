@@ -210,19 +210,25 @@ pub(crate) fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
 /// `max_blank_lines` by the renderer) when it had one, else a plain line break.
 pub(crate) fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     match first_sig_token(node) {
-        Some(t) => {
-            let blanks = if ctx.comments.has_leading(&t) {
-                ctx.comments.blank_lines_before_first(&t)
-            } else {
-                blank_lines_before(&t)
-            };
-            if blanks > 0 {
-                blank_line(blanks)
-            } else {
-                hardline()
-            }
-        }
+        Some(t) => break_before(&t, ctx),
         None => hardline(),
+    }
+}
+
+/// The line break before a row anchored at significant token `t`: the source's blank-line run
+/// (clamped to `max_blank_lines` by the renderer) when one preceded it, else a plain line break.
+/// The token-anchored core of [`item_separator`], shared with the enum-body lowering (which also
+/// anchors on bare `;` tokens that have no containing item node).
+pub(crate) fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
+    let blanks = if ctx.comments.has_leading(t) {
+        ctx.comments.blank_lines_before_first(t)
+    } else {
+        blank_lines_before(t)
+    };
+    if blanks > 0 {
+        blank_line(blanks)
+    } else {
+        hardline()
     }
 }
 

@@ -33,13 +33,17 @@ use crate::rules::Registry;
 mod blocks;
 mod chains;
 mod delimited;
+mod enums;
 mod expr;
 mod inline;
 mod tokens;
 
-pub(crate) use blocks::{blank_lines_before, item_separator, lower_braced, lower_items};
+pub(crate) use blocks::{
+    blank_lines_before, break_before, item_separator, lower_braced, lower_items,
+};
 pub(crate) use chains::lower_chain;
 pub(crate) use delimited::lower_delimited;
+pub(crate) use enums::lower_enum_body;
 pub(crate) use expr::{lower_binary, lower_ternary, lower_unary};
 pub(crate) use inline::{lower_control_flow, lower_elements, lower_generic, lower_inline};
 pub(crate) use tokens::{first_sig_token, last_sig_token, sep, tight_sep, tok};
@@ -74,6 +78,7 @@ pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     }
     match node.kind() {
         S::CLASS_BODY | S::MODULE_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
+        S::ENUM_BODY => lower_enum_body(node, ctx),
         S::PARAM_LIST | S::ARG_LIST | S::RECORD_HEADER | S::ANNOTATION_ARG_LIST | S::ARRAY_INIT => {
             lower_delimited(node, ctx)
         }
