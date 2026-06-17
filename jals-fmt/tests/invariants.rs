@@ -1,8 +1,9 @@
 //! Property tests for the formatter's correctness invariants.
 
 use jals_fmt::{
-    AnnotationPlacement, BinopSeparator, Config, FloatLiteralTrailingZero, FnParamsLayout,
-    HexLiteralCase, LiteralSuffixCase, TrailingComma, TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopLayout, BinopSeparator, Config, FloatLiteralTrailingZero,
+    FnParamsLayout, HexLiteralCase, LiteralSuffixCase, TrailingComma, TypePunctuationDensity,
+    format_source,
 };
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
@@ -271,6 +272,21 @@ fn params_layout() -> impl Strategy<Value = FnParamsLayout> {
         Just(FnParamsLayout::Compressed),
         Just(FnParamsLayout::Vertical),
     ]
+}
+
+/// Config with a given binary-operator layout and a narrow `max-width`, so binary runs are pushed
+/// into the wrapped (`Tall`) / packed (`Compressed`) layout the option selects.
+fn binop_layout_config(layout: BinopLayout) -> Config {
+    Config {
+        binop_layout: layout,
+        max_width: 24,
+        ..Config::default()
+    }
+}
+
+/// A generator over the two binary-operator layouts.
+fn binop_layout() -> impl Strategy<Value = BinopLayout> {
+    prop_oneof![Just(BinopLayout::Tall), Just(BinopLayout::Compressed)]
 }
 
 /// The non-trivia tokens of `src` with every `,` removed. The trailing-comma modes may add or
@@ -1325,6 +1341,37 @@ proptest! {
         let _ = fmt_with(&src, &params_config(FnParamsLayout::Tall));
         let _ = fmt_with(&src, &params_config(FnParamsLayout::Compressed));
         let _ = fmt_with(&src, &params_config(FnParamsLayout::Vertical));
+    }
+
+    /// Each binary-operator layout keeps formatting idempotent (the `Compressed` fill in
+    /// particular: re-formatting the packed lines reproduces the same wrapping).
+    #[test]
+    fn binop_layout_idempotent(src in javaish(), layout in binop_layout()) {
+        let cfg = binop_layout_config(layout);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Binary-operator layout is layout-only: the significant-token sequence is preserved exactly.
+    #[test]
+    fn binop_layout_preserves_significant_tokens(src in javaish(), layout in binop_layout()) {
+        let out = fmt_with(&src, &binop_layout_config(layout));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Binary-operator layout never drops or mangles a comment.
+    #[test]
+    fn binop_layout_preserves_comments(src in javaish(), layout in binop_layout()) {
+        let out = fmt_with(&src, &binop_layout_config(layout));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Binary-operator layout never panics on arbitrary Unicode input.
+    #[test]
+    fn binop_layout_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &binop_layout_config(BinopLayout::Tall));
+        let _ = fmt_with(&src, &binop_layout_config(BinopLayout::Compressed));
     }
 
     /// Modifier reordering keeps formatting idempotent.

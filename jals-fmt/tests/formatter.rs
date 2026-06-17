@@ -2,7 +2,7 @@
 
 use expect_test::{Expect, expect};
 use jals_fmt::{
-    AnnotationPlacement, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
     FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle, LineEnding,
     LiteralSuffixCase, TrailingComma, TypePunctuationDensity, format_source,
 };
@@ -2457,6 +2457,77 @@ fn binop_wrapping_is_idempotent() {
         let once = fmt_binop(src, 40, sep);
         let twice = fmt_binop(&once, 40, sep);
         assert_eq!(once, twice, "binop wrapping must be idempotent ({sep:?})");
+    }
+}
+
+fn fmt_binop_layout(
+    src: &str,
+    max_width: usize,
+    binop_separator: BinopSeparator,
+    binop_layout: BinopLayout,
+) -> String {
+    let cfg = Config {
+        max_width,
+        binop_separator,
+        binop_layout,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn compressed_layout_packs_operands_per_line() {
+    // The same input as `long_binary_wraps_operator_front_by_default`, but `binop-layout =
+    // compressed`: instead of one operand per line, operands pack up to max-width(100) and only
+    // the overflowing operand starts a new line, the operator leading it (google-java-format's
+    // layout).
+    expect![[r#"
+        class A {
+            void m() {
+                result = alphaOperandName + betaOperandName + gammaOperandName + deltaOperandName
+                    + epsilonOperandName;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop_layout(
+        "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
+        100,
+        BinopSeparator::Front,
+        BinopLayout::Compressed,
+    ));
+}
+
+#[test]
+fn compressed_layout_packs_each_precedence_level() {
+    // Mixed precedence: the outer `||` and the inner `&&` each fill independently; an `==` unit
+    // that fits stays whole on its line.
+    expect![[r#"
+        class A {
+            void m() {
+                flag = aLongName == bLongName && cLongName == dLongName
+                    || eLongName == fLongName;
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_binop_layout(
+        "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}",
+        65,
+        BinopSeparator::Front,
+        BinopLayout::Compressed,
+    ));
+}
+
+#[test]
+fn compressed_layout_is_idempotent() {
+    // Re-formatting the packed output reproduces the same wrapping, under both separators.
+    let src = "class A{void m(){total=aa+bb+cc+dd+ee+ff+gg+hh+ii+jj+kk+ll+mm+nn+oo+pp+qq+rr+ss;}}";
+    for sep in [BinopSeparator::Front, BinopSeparator::Back] {
+        let once = fmt_binop_layout(src, 40, sep, BinopLayout::Compressed);
+        let twice = fmt_binop_layout(&once, 40, sep, BinopLayout::Compressed);
+        assert_eq!(
+            once, twice,
+            "compressed binop layout must be idempotent ({sep:?})"
+        );
     }
 }
 

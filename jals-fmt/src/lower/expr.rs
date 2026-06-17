@@ -8,9 +8,9 @@
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
-use crate::config::BinopSeparator;
+use crate::config::{BinopLayout, BinopSeparator};
 use crate::doc::{
-    Doc, concat, continuation_indent, group, group_within, line, nil, softline, text,
+    Doc, concat, continuation_indent, fill, group, group_within, line, nil, softline, text,
 };
 use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, lower_generic, tight_sep, tok};
 
@@ -87,29 +87,62 @@ fn flatten_binary(node: &SyntaxNode) -> Option<(SyntaxNode, Vec<BinopStep>)> {
     Some((first, steps))
 }
 
-/// Lower a binary expression. The same-precedence run is one group with a break point at
-/// every operator: flat it is `a op b op c`; when it overflows `max-width` every step wraps,
-/// the operator leading the continuation line (`binop-separator = front`, the default) or
-/// trailing the broken line (`back`). A run of operator tokens (e.g. the two `>` of `>>`)
-/// is joined tightly so operator fusion is preserved.
+/// Lower a binary expression. The same-precedence run wraps with a break point at every
+/// operator, the operator leading the continuation line (`binop-separator = front`, the default)
+/// or trailing the broken line (`back`). A run of operator tokens (e.g. the two `>` of `>>`) is
+/// joined tightly so operator fusion is preserved. `binop-layout` chooses how it wraps:
+/// [`Tall`](BinopLayout::Tall) is one group — flat `a op b op c`, else *every* step on its own
+/// line; [`Compressed`](BinopLayout::Compressed) is a fill that packs as many operands per line
+/// as fit `max-width` (google-java-format's layout).
 pub(crate) fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((first, steps)) = flatten_binary(node) else {
         // Error recovery produced something other than `lhs op rhs`; emit inline with
         // canonical spacing so every token is preserved verbatim.
         return lower_binary_inline(node, ctx);
     };
-    let mut tail: Vec<Doc> = Vec::new();
-    for (ops, rhs) in &steps {
-        let op = concat(ops.iter().map(|t| tok(t, ctx)).collect());
-        match ctx.cfg.binop_separator {
-            BinopSeparator::Front => tail.extend([line(), op, text(" "), lower(rhs, ctx)]),
-            BinopSeparator::Back => tail.extend([text(" "), op, line(), lower(rhs, ctx)]),
+    match ctx.cfg.binop_layout {
+        BinopLayout::Tall => {
+            // All-or-nothing: one group breaking at every operator together.
+            let mut tail: Vec<Doc> = Vec::new();
+            for (ops, rhs) in &steps {
+                let op = concat(ops.iter().map(|t| tok(t, ctx)).collect());
+                match ctx.cfg.binop_separator {
+                    BinopSeparator::Front => tail.extend([line(), op, text(" "), lower(rhs, ctx)]),
+                    BinopSeparator::Back => tail.extend([text(" "), op, line(), lower(rhs, ctx)]),
+                }
+            }
+            group(concat(vec![
+                lower(&first, ctx),
+                continuation_indent(concat(tail)),
+            ]))
+        }
+        BinopLayout::Compressed => {
+            // Fill: each operand (with its glued operator) is a fill item; `fill` inserts a
+            // breakable `line` between items, so the renderer packs as many per line as fit.
+            // `front` glues the operator to the *following* operand (it leads the next line);
+            // `back` glues it to the *preceding* one (it trails the broken line).
+            let mut items: Vec<Doc> = Vec::with_capacity(steps.len() + 1);
+            match ctx.cfg.binop_separator {
+                BinopSeparator::Front => {
+                    items.push(lower(&first, ctx));
+                    for (ops, rhs) in &steps {
+                        let op = concat(ops.iter().map(|t| tok(t, ctx)).collect());
+                        items.push(concat(vec![op, text(" "), lower(rhs, ctx)]));
+                    }
+                }
+                BinopSeparator::Back => {
+                    let mut operand = lower(&first, ctx);
+                    for (ops, rhs) in &steps {
+                        let op = concat(ops.iter().map(|t| tok(t, ctx)).collect());
+                        items.push(concat(vec![operand, text(" "), op]));
+                        operand = lower(rhs, ctx);
+                    }
+                    items.push(operand);
+                }
+            }
+            continuation_indent(fill(items))
         }
     }
-    group(concat(vec![
-        lower(&first, ctx),
-        continuation_indent(concat(tail)),
-    ]))
 }
 
 /// Lower a malformed binary expression inline as `lhs op rhs`, joining a run of operator

@@ -130,6 +130,24 @@ pub enum BinopSeparator {
     Back,
 }
 
+/// How a same-precedence binary-operator run (`a + b + c …`) is laid out when it wraps across
+/// lines, independent of [`BinopSeparator`] (which decides *where* the operator sits). A
+/// Java-specific option with no rustfmt equivalent. Layout-only — the significant-token sequence
+/// is preserved exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BinopLayout {
+    /// All-or-nothing: keep the run on one line when it fits [`max_width`](super::Config::max_width),
+    /// otherwise break at *every* operator (one operand per line). The default; matches the prior
+    /// behavior.
+    Tall,
+    /// Pack as many operands per line as fit [`max_width`](super::Config::max_width), wrapping to a
+    /// new line only when the next operand would overflow (a *fill*). Matches google-java-format's
+    /// binary-expression wrapping. Mirrors the [`Compressed`](FnParamsLayout::Compressed) parameter
+    /// layout.
+    Compressed,
+}
+
 /// Layout of a method / constructor parameter list (`PARAM_LIST`). Mirrors rustfmt's
 /// `fn_params_layout` (formerly `fn_args_layout`, which jals accepts as a deprecated alias);
 /// it applies only to declaration parameter lists, never to call argument lists. Layout-only —
