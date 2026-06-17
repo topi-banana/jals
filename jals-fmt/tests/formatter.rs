@@ -234,7 +234,7 @@ fn comments_kept() {
             class C {
                 // leading
                 void m() {
-                    foo();  // trailing
+                    foo(); // trailing
                     bar();
                 }
             }
@@ -249,7 +249,7 @@ fn comments_after_final_brace_kept() {
     check(
         "class A{} // same\n// below\n/* block */\n",
         expect![[r#"
-            class A {}  // same
+            class A {} // same
             // below
             /* block */
         "#]],
@@ -265,8 +265,8 @@ fn trailing_line_comment_on_brace_forces_break() {
     check(
         "class{{}// alpha\nclass// beta\n",
         expect![[r#"
-            class { {}  // alpha
-            class  // beta
+            class { {} // alpha
+            class // beta
         "#]],
     );
 }
@@ -502,7 +502,7 @@ fn trailing_comment_is_never_wrapped() {
         20,
         expect![[r#"
             class C {
-                int x = 1;  // aaaa bbbb cccc dddd eeee ffff gggg
+                int x = 1; // aaaa bbbb cccc dddd eeee ffff gggg
             }
         "#]],
     );
@@ -875,7 +875,7 @@ fn fn_single_line_keeps_body_multiline_when_header_has_trailing_comment() {
     // stays multi-line and the comment keeps its place.
     expect![[r#"
         class C {
-            int foo() {  /*c*/
+            int foo() { /*c*/
                 return 1;
             }
         }
@@ -1750,7 +1750,7 @@ fn trailing_comma_never_keeps_commented_comma() {
     // comment survives.
     expect![[r#"
         class A {
-            int [] x = {a, b, c,};  /* keep */
+            int [] x = {a, b, c,}; /* keep */
         }
     "#]]
     .assert_eq(&fmt_trailing(
@@ -1859,7 +1859,7 @@ fn reorder_imports_comments_follow() {
         "import b.B;\n// lead for a\nimport a.A; // trail for a\nclass C {}\n",
         expect![[r#"
             // lead for a
-            import a.A;  // trail for a
+            import a.A; // trail for a
             import b.B;
             class C {}
         "#]],
@@ -2109,7 +2109,7 @@ fn group_imports_comment_follows() {
         "import com.b.B;\n// lead\nimport java.a.A; // trail\nclass C {}\n",
         expect![[r#"
             // lead
-            import java.a.A;  // trail
+            import java.a.A; // trail
 
             import com.b.B;
             class C {}
@@ -2397,7 +2397,7 @@ fn comment_on_operator_forces_break_front() {
         class A {
             void m() {
                 x = a
-                    +  // why
+                    + // why
                     b;
             }
         }
@@ -2413,7 +2413,7 @@ fn comment_on_operator_forces_break_back() {
     expect![[r#"
         class A {
             void m() {
-                x = a +  // why
+                x = a + // why
                     b;
             }
         }
@@ -2694,7 +2694,7 @@ fn overflow_falls_back_on_comment_between_arguments() {
             class A {
                 void m() {
                     foo(
-                        a,  // note
+                        a, // note
                         () -> {
                             run();
                         }
