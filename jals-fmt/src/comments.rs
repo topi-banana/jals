@@ -234,7 +234,7 @@ fn trailing_inline_doc(trail: &[Comment]) -> Doc {
     let mut parts = Vec::new();
     let mut force_break = false;
     for c in trail {
-        parts.push(line_suffix(concat(vec![text("  "), comment_inline(c)])));
+        parts.push(line_suffix(concat(vec![text(" "), comment_inline(c)])));
         if c.kind == SyntaxKind::LINE_COMMENT {
             force_break = true;
         }
