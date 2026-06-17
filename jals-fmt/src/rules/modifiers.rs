@@ -21,6 +21,16 @@ use crate::doc::{Doc, concat, hardline};
 use crate::lower::{
     Ctx, first_sig_token, last_sig_token, lower, lower_elements, lower_generic, sep, tok,
 };
+use crate::rules::StructuralRule;
+
+/// The `reorder-modifiers` / `annotation-placement` rule: owns lowering of a `MODIFIERS` node.
+pub(crate) struct ModifierRule;
+
+impl StructuralRule for ModifierRule {
+    fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+        lower_modifiers(node, ctx)
+    }
+}
 
 /// The canonical rank of a keyword modifier, or `None` for any other element (annotations and
 /// anything else stay fixed, hoisted to the front). The order follows the JLS recommended

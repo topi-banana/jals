@@ -15,6 +15,16 @@ use crate::doc::{Doc, blank_line, concat, hardline, text};
 use crate::lower::{
     Ctx, blank_lines_before, first_sig_token, item_separator, lower, lower_items, tok,
 };
+use crate::rules::StructuralRule;
+
+/// The `reorder-imports` / `group-imports` rule: owns lowering of the `SOURCE_FILE` node.
+pub(crate) struct ImportRule;
+
+impl StructuralRule for ImportRule {
+    fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+        lower_source_file(node, ctx)
+    }
+}
 
 /// Which import reordering applies — resolved from the two config flags in exactly one
 /// place: `group-imports` overrides `reorder-imports`
