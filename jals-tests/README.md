@@ -54,20 +54,34 @@ git submodule add --depth 1 https://github.com/google/google-java-format \
 These cases are mostly bug-tracker regressions, so they are an *edge-case* set more
 than representative real code.
 
-**`openjdk-gjf`** — a representative set: real OpenJDK files run through
-google-java-format. These are derivatives of GPL'd OpenJDK sources, so they are
-**generated locally and gitignored, never committed**.
+**`openjdk-gjf`** — real OpenJDK `src/` library code run through google-java-format
+(what CI reports as the second fidelity row). These are derivatives of GPL'd OpenJDK
+sources, so they are **generated locally and gitignored, never committed**.
 
 1. Get a google-java-format "all-deps" jar (v1.35.0 at time of writing) from the
    [releases page](https://github.com/google/google-java-format/releases) and drop it
    in `jals-tests/vendor/` (gitignored).
 2. Make sure the OpenJDK submodule is checked out (see above).
-3. Generate the pairs (default 500 files; google-java-format runs on JDK 17+, the
-   script passes the `--add-exports` flags modern JDKs require):
+3. Generate the pairs. `gen-openjdk-gjf.sh` walks the submodule (or the subtree named
+   by `SUBTREE`), formats each file with batched, warm google-java-format JVMs, and
+   writes `.input`/`.output` pairs. google-java-format needs JDK 21+ (tested on 25); the
+   script passes the `--add-exports` flags modern JDKs require. Env: `GJF_JAR` (required),
+   `SUBTREE` (subtree to walk, default the whole submodule), `JOBS` (concurrent JVMs,
+   default 2). The `COUNT` argument caps how many files to consider (default `0` = no cap):
 
    ```sh
+   # The full src/ subtree (what CI generates):
    GJF_JAR=jals-tests/vendor/google-java-format-1.35.0-all-deps.jar \
-     jals-tests/scripts/gen-openjdk-gjf.sh 500
+     SUBTREE=src jals-tests/scripts/gen-openjdk-gjf.sh 0
+   # A quick local sample (first 500 files of src/):
+   GJF_JAR=jals-tests/vendor/google-java-format-1.35.0-all-deps.jar \
+     SUBTREE=src jals-tests/scripts/gen-openjdk-gjf.sh 500
    ```
 
 Then run `cargo run -p jals-tests --bin jals-golden -- openjdk-gjf`.
+
+CI generates this corpus automatically in the `corpus-reports` job and caches it on the
+OpenJDK submodule commit (plus the google-java-format version), so it is regenerated only
+when the submodule pin moves. The report runs
+`jals-golden gjf-testdata openjdk-gjf --markdown`, putting both corpora in one table with
+a least-similar `<details>` list per corpus.

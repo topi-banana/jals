@@ -127,6 +127,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    env:
+      # Pinned google-java-format release used to generate the OpenJDK src/ golden corpus.
+      GJF_VERSION: "1.35.0"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -137,6 +140,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the corpus tools
         run: cargo build --release -p jals-tests --bins
+      - name: Set up JDK (for google-java-format)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Cache the google-java-format jar
+        id: gjf-jar
+        uses: actions/cache@v4
+        with:
+          # Immutable per release, so the version alone keys it.
+          path: jals-tests/vendor/google-java-format-${{ env.GJF_VERSION }}-all-deps.jar
+          key: gjf-jar-${{ env.GJF_VERSION }}
+      - name: Download the google-java-format jar
+        if: steps.gjf-jar.outputs.cache-hit != 'true'
+        run: |
+          curl -fL --retry 3 --create-dirs \
+            -o "jals-tests/vendor/google-java-format-${GJF_VERSION}-all-deps.jar" \
+            "https://github.com/google/google-java-format/releases/download/v${GJF_VERSION}/google-java-format-${GJF_VERSION}-all-deps.jar"
+      - name: Resolve the OpenJDK submodule commit
+        id: openjdk
+        # Reads the gitlink the superproject pins, no submodule history needed.
+        run: echo "sha=$(git rev-parse HEAD:jals-tests/sources/openjdk)" >> "$GITHUB_OUTPUT"
+      - name: Cache the OpenJDK src/ gjf corpus
+        id: corpus-cache
+        uses: actions/cache@v4
+        with:
+          # Generated, never committed (GPL'd OpenJDK derivative). Regenerated only when
+          # the submodule pin, the google-java-format version, or the generator changes.
+          path: jals-tests/sources/openjdk-gjf
+          key: openjdk-gjf-src-${{ env.GJF_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-gjf.sh') }}
+      - name: Generate the OpenJDK src/ gjf corpus
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        env:
+          GJF_JAR: jals-tests/vendor/google-java-format-${{ env.GJF_VERSION }}-all-deps.jar
+          SUBTREE: src
+          JOBS: "2"
+        run: jals-tests/scripts/gen-openjdk-gjf.sh 0
       - name: Generate corpus reports
         shell: bash
         run: |
@@ -144,7 +184,7 @@ jobs:
           {
             cargo run --release -p jals-tests --bin jals-tests -- --markdown
             echo
-            cargo run --release -p jals-tests --bin jals-golden -- gjf-testdata --markdown
+            cargo run --release -p jals-tests --bin jals-golden -- gjf-testdata openjdk-gjf --worst 20 --markdown
           } | tee corpus.md >> "$GITHUB_STEP_SUMMARY"
       - name: Comment corpus reports on PR
         if: always() && github.event_name == 'pull_request' && hashFiles('corpus.md') != ''

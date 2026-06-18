@@ -46,7 +46,7 @@ pub const GOLDEN_SOURCES: &[GoldenSource] = &[
     GoldenSource {
         name: "openjdk-gjf",
         root_rel: "openjdk-gjf",
-        description: "OpenJDK files formatted with google-java-format (generated; see scripts/gen-openjdk-gjf.sh)",
+        description: "OpenJDK src/ library sources formatted with google-java-format (generated; see scripts/gen-openjdk-gjf.sh)",
     },
 ];
 

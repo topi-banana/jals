@@ -2,6 +2,8 @@
 /jals-playground/dist
 # Generated golden corpus (derivatives of GPL'd OpenJDK sources — do not commit).
 /jals-tests/sources/openjdk-gjf
+# Scratch dirs the golden generator swaps from (same fs as the corpus, for atomic rename).
+/jals-tests/sources/openjdk-gjf.tmp.*
 # Local google-java-format jar for golden generation (binary — never commit).
 /jals-tests/vendor
 google-java-format-*.jar
