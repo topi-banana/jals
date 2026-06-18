@@ -174,6 +174,18 @@ pub struct Config {
     /// layout. Layout-only — the significant-token sequence is preserved exactly. Mirrors
     /// rustfmt's `overflow_delimited_expr`.
     pub overflow_delimited_expr: bool,
+    /// Preserve the *tabular* (table-shaped) layout of an array initializer: when the source
+    /// lays the elements out as a grid — at least two source rows, every row but the last with
+    /// the same number of elements (the last with that many or fewer), and no interior
+    /// comments — keep those source row breaks instead of reflowing against
+    /// [`array_width`](Config::array_width) / [`max_width`](Config::max_width). Each source row
+    /// goes on its own (block-indented) line, elements within a row separated by a single space.
+    /// Any other multi-line array (an irregular row shape, or a single row) is unaffected and
+    /// still wraps by width. Off by default. Layout-only — the significant-token sequence is
+    /// preserved exactly (only inter-element whitespace changes); idempotent. A Java-specific
+    /// option with no rustfmt equivalent; mirrors google-java-format's preservation of tabular
+    /// array initializers (its `TabularMixedSignInitializer` behavior).
+    pub tabular_array_initializers: bool,
     /// Whether to emit a space *before* a colon (`:`). Applies uniformly to every Java colon
     /// context: a ternary (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled
     /// statement (`label:`), an `assert` message (`assert c : m`), and a `switch` `case` /
@@ -278,6 +290,7 @@ impl Default for Config {
             binop_separator: BinopSeparator::Front,
             binop_layout: BinopLayout::Tall,
             overflow_delimited_expr: false,
+            tabular_array_initializers: false,
             space_before_colon: false,
             space_after_colon: true,
             fn_params_layout: FnParamsLayout::Tall,

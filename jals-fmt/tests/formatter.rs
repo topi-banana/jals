@@ -4544,3 +4544,120 @@ fn parameter_comments_normalization_is_idempotent() {
         "normalize-parameter-comments must be idempotent"
     );
 }
+
+/// Format with `tabular-array-initializers` enabled, in a Google-like 2-space layout so the
+/// preserved grid is easy to read.
+fn fmt_tabular(src: &str) -> String {
+    let cfg = Config {
+        indent_width: 2,
+        max_width: 100,
+        array_width: 100,
+        tabular_array_initializers: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_tabular(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_tabular(src));
+}
+
+#[test]
+fn tabular_array_initializer_preserves_grid() {
+    // A table-shaped initializer (rows of equal element counts) keeps its source row breaks
+    // even though the elements would otherwise fit on one line — google-java-format's
+    // `TabularMixedSignInitializer` behavior.
+    check_tabular(
+        "public class T {\n  private static final double[] f = {\n    95.0, 75.0, -95.0, 75.0,\n    -95.0, 75.0, +95.0, 75.0\n  };\n}\n",
+        expect![[r#"
+            public class T {
+              private static final double[] f = {
+                95.0, 75.0, -95.0, 75.0,
+                -95.0, 75.0, +95.0, 75.0
+              };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn tabular_array_initializer_with_short_final_row() {
+    // The final row may hold fewer elements than the others.
+    check_tabular(
+        "class T {\n  int[] g = {\n    1, 2, 3,\n    4, 5, 6,\n    7, 8\n  };\n}\n",
+        expect![[r#"
+            class T {
+              int[] g = {
+                1, 2, 3,
+                4, 5, 6,
+                7, 8
+              };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn tabular_array_initializer_off_by_default_collapses() {
+    // With the option off (the default), a grid initializer that fits collapses to one line.
+    check(
+        "class T {\n  int[] g = {\n    1, 2,\n    3, 4\n  };\n}\n",
+        expect![[r#"
+            class T {
+                int[] g = {1, 2, 3, 4};
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn tabular_falls_back_for_irregular_rows() {
+    // Rows of unequal length (the last is longer than the first) are not a table; the
+    // initializer wraps by width and collapses when it fits.
+    check_tabular(
+        "class T {\n  int[] g = {\n    1, 2,\n    3, 4, 5\n  };\n}\n",
+        expect![[r#"
+            class T {
+              int[] g = {1, 2, 3, 4, 5};
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn tabular_falls_back_for_single_row() {
+    // A single source row is not a table; it collapses by width.
+    check_tabular(
+        "class T {\n  int[] g = {\n    1, 2, 3\n  };\n}\n",
+        expect![[r#"
+            class T {
+              int[] g = {1, 2, 3};
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn tabular_nested_outer_grid_inner_collapses() {
+    // The outer initializer is a one-column table (each inner array on its own row); the inner
+    // single-line arrays are not tables and stay on their row.
+    check_tabular(
+        "class T {\n  int[][] m = {\n    {1, 2},\n    {3, 4}\n  };\n}\n",
+        expect![[r#"
+            class T {
+              int[][] m = {
+                {1, 2},
+                {3, 4}
+              };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn tabular_array_initializer_is_idempotent() {
+    let src = "public class T {\n  private static final int[] g = {\n    1, 2, 3,\n    4, 5, 6\n  };\n}\n";
+    let once = fmt_tabular(src);
+    let twice = fmt_tabular(&once);
+    assert_eq!(once, twice, "tabular-array-initializers must be idempotent");
+}

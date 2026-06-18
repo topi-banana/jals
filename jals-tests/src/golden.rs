@@ -97,6 +97,9 @@ pub fn google_config() -> Config {
         // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
         // and hugs them to the following argument.
         normalize_parameter_comments: true,
+        // google-java-format preserves the source row breaks of a tabular (grid-shaped) array
+        // initializer instead of reflowing it by width.
+        tabular_array_initializers: true,
         ..Config::default()
     }
 }
