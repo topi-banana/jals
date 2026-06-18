@@ -33,6 +33,8 @@ fn defaults() {
     assert_eq!(c.binop_layout, BinopLayout::Tall);
     // Last-argument overflow is opt-in; off by default keeps the all-or-nothing layout.
     assert!(!c.overflow_delimited_expr);
+    // A switch expression stays on the `=` line by default.
+    assert!(!c.switch_expression_on_new_line);
     // Colon spacing defaults to idiomatic `label:` / `case x:` style: no space before,
     // one space after.
     assert!(!c.space_before_colon);
@@ -143,6 +145,12 @@ fn binop_layout_parses_kebab_values() {
 fn overflow_delimited_expr_parses() {
     let c: Config = toml::from_str("overflow-delimited-expr = true\n").unwrap();
     assert!(c.overflow_delimited_expr);
+}
+
+#[test]
+fn switch_expression_on_new_line_parses() {
+    let c: Config = toml::from_str("switch-expression-on-new-line = true\n").unwrap();
+    assert!(c.switch_expression_on_new_line);
 }
 
 #[test]

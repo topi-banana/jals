@@ -4661,3 +4661,122 @@ fn tabular_array_initializer_is_idempotent() {
     let twice = fmt_tabular(&once);
     assert_eq!(once, twice, "tabular-array-initializers must be idempotent");
 }
+
+/// Format with `switch-expression-on-new-line` enabled, in a Google-like 2-space / +4
+/// continuation layout so the broken switch is easy to read.
+fn fmt_switch_nl(src: &str) -> String {
+    let cfg = Config {
+        indent_width: 2,
+        continuation_indent: Some(4),
+        max_width: 100,
+        switch_expression_on_new_line: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_switch_nl(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_switch_nl(src));
+}
+
+#[test]
+fn switch_on_new_line_breaks_local_var_initializer() {
+    // A local variable initialized with a switch expression breaks after `=`; the switch lands at
+    // +4 (continuation) and its cases at +2 from the switch — google-java-format's layout.
+    check_switch_nl(
+        "class T { void f(String v) { int x = switch (v) { case \"a\" -> 1; default -> 0; }; } }",
+        expect![[r#"
+            class T {
+              void f(String v) {
+                int x =
+                    switch (v) {
+                      case "a" -> 1;
+                      default -> 0;
+                    };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_on_new_line_breaks_field_initializer() {
+    // A field initializer behaves the same as a local one.
+    check_switch_nl(
+        "class T { int x = switch (v) { case 1 -> 1; default -> 0; }; }",
+        expect![[r#"
+            class T {
+              int x =
+                  switch (v) {
+                    case 1 -> 1;
+                    default -> 0;
+                  };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_on_new_line_breaks_assignment() {
+    // A plain assignment (`x = switch …`) breaks after `=` too, not just declarations.
+    check_switch_nl(
+        "class T { void f() { x = switch (v) { case 1 -> 1; default -> 0; }; } }",
+        expect![[r#"
+            class T {
+              void f() {
+                x =
+                    switch (v) {
+                      case 1 -> 1;
+                      default -> 0;
+                    };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_on_new_line_keeps_return_inline() {
+    // `return switch …` has no `=`, so it stays on the `return` line even with the option on.
+    check_switch_nl(
+        "class T { int f(String v) { return switch (v) { case \"a\" -> 1; default -> 0; }; } }",
+        expect![[r#"
+            class T {
+              int f(String v) {
+                return switch (v) {
+                  case "a" -> 1;
+                  default -> 0;
+                };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_on_new_line_off_by_default_keeps_inline() {
+    // With the option off (the default), the switch rides on the `=` line.
+    check(
+        "class T { int x = switch (v) { case 1 -> 1; default -> 0; }; }",
+        expect![[r#"
+            class T {
+                int x = switch (v) {
+                    case 1 -> 1;
+                    default -> 0;
+                };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_on_new_line_is_idempotent() {
+    let src =
+        "class T { void f(String v) { int x = switch (v) { case \"a\" -> 1; default -> 0; }; } }";
+    let once = fmt_switch_nl(src);
+    let twice = fmt_switch_nl(&once);
+    assert_eq!(
+        once, twice,
+        "switch-expression-on-new-line must be idempotent"
+    );
+}

@@ -315,6 +315,15 @@ fn overflow_config() -> Config {
     }
 }
 
+/// Config with `switch-expression-on-new-line` enabled. Layout-only, so no width tuning is
+/// needed — the break fires structurally whenever a switch expression is the value of a `=`.
+fn switch_on_new_line_config() -> Config {
+    Config {
+        switch_expression_on_new_line: true,
+        ..Config::default()
+    }
+}
+
 /// Config with a given parameter layout and a narrow `max-width`, so parameter lists are pushed
 /// into the wrapped (`Tall`) / packed (`Compressed`) / vertical layout the option selects.
 fn params_config(layout: FnParamsLayout) -> Config {
@@ -1407,6 +1416,37 @@ proptest! {
     #[test]
     fn overflow_delimited_expr_never_panics(src in ".*") {
         let _ = fmt_with(&src, &overflow_config());
+    }
+
+    /// Breaking a switch-expression initializer onto its own line stays idempotent: re-formatting
+    /// the broken layout reproduces it.
+    #[test]
+    fn switch_on_new_line_idempotent(src in javaish()) {
+        let cfg = switch_on_new_line_config();
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// The option is layout-only: it only changes the whitespace after a `=`, so the
+    /// significant-token sequence is preserved exactly.
+    #[test]
+    fn switch_on_new_line_preserves_significant_tokens(src in javaish()) {
+        let out = fmt_with(&src, &switch_on_new_line_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// The break never drops or mangles a comment.
+    #[test]
+    fn switch_on_new_line_preserves_comments(src in javaish()) {
+        let out = fmt_with(&src, &switch_on_new_line_config());
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// The break never panics on arbitrary Unicode input.
+    #[test]
+    fn switch_on_new_line_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &switch_on_new_line_config());
     }
 
     /// Each parameter layout keeps formatting idempotent (the `Compressed` packing in

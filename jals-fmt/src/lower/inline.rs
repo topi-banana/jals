@@ -9,7 +9,7 @@
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::ControlBraceStyle;
-use crate::doc::{Doc, concat, hardline};
+use crate::doc::{Doc, concat, continuation_indent, hardline};
 use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, sep, tight_sep, tok};
 
 /// Lay a node out inline: child nodes are recursed, tokens are separated by single
@@ -52,6 +52,24 @@ pub(crate) fn lower_elements(
 
     for el in els {
         if let Some(child) = el.as_node() {
+            // `switch-expression-on-new-line`: a `switch` expression that is the value of a `=`
+            // (a variable / field initializer or an assignment) breaks onto its own
+            // continuation-indented line, instead of riding on the `=` line. The `=`-then-switch
+            // shape only occurs in assignment / initializer contexts (a switch is not a legal
+            // annotation default / argument value), so this never misfires; `return switch …`
+            // has no `=` and stays inline. Layout-only — only the inter-token whitespace changes.
+            if ctx.cfg.switch_expression_on_new_line
+                && child.kind() == S::SWITCH_EXPR
+                && prev.as_ref().map(|t| t.kind()) == Some(S::EQ)
+            {
+                parts.push(continuation_indent(concat(vec![
+                    hardline(),
+                    lower(child, ctx),
+                ])));
+                prev = last_sig_token(child);
+                hug_witness = false;
+                continue;
+            }
             // A reordered `MODIFIERS` node emits its tokens in a different order than the tree,
             // so the separators around it must use the *emitted* boundary tokens (see
             // `rules::modifiers::emitted_boundary_tokens`); every other node emits in tree order.

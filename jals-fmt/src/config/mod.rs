@@ -186,6 +186,15 @@ pub struct Config {
     /// option with no rustfmt equivalent; mirrors google-java-format's preservation of tabular
     /// array initializers (its `TabularMixedSignInitializer` behavior).
     pub tabular_array_initializers: bool,
+    /// Put a `switch` *expression* that is the right-hand side of a `=` — a variable or field
+    /// initializer (`int x = switch (v) {…}`) or an assignment (`x = switch (v) {…}`) — on its
+    /// own continuation-indented line, breaking right after the `=`. Off by default, keeping the
+    /// switch on the `=` line. Only the `=` assignment operator is affected; a `return switch …`
+    /// (which has no `=`) stays inline, and a `switch` *statement* is never touched. Layout-only —
+    /// the significant-token sequence is preserved exactly (only the whitespace after the `=`
+    /// changes); idempotent. A Java-specific option with no rustfmt equivalent; mirrors
+    /// google-java-format's layout of an assignment whose value is a switch expression.
+    pub switch_expression_on_new_line: bool,
     /// Whether to emit a space *before* a colon (`:`). Applies uniformly to every Java colon
     /// context: a ternary (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled
     /// statement (`label:`), an `assert` message (`assert c : m`), and a `switch` `case` /
@@ -291,6 +300,7 @@ impl Default for Config {
             binop_layout: BinopLayout::Tall,
             overflow_delimited_expr: false,
             tabular_array_initializers: false,
+            switch_expression_on_new_line: false,
             space_before_colon: false,
             space_after_colon: true,
             fn_params_layout: FnParamsLayout::Tall,
