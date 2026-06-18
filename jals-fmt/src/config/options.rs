@@ -195,3 +195,24 @@ pub enum AnnotationPlacement {
     /// type-use / enum-constant / type-parameter annotations are never affected.
     Expanded,
 }
+
+/// How the body of a *legacy* (colon-form) `switch` group — one or more `case X:` / `default:`
+/// labels followed by statements — is laid out relative to the label's colon. The arrow form
+/// (`case X -> …`) is a different construct and is never affected. Layout-only — the
+/// significant-token sequence is preserved exactly (only the whitespace after the colon
+/// changes); idempotent. A Java-specific option with no rustfmt equivalent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SwitchCaseBody {
+    /// Put each label on its own line and break after the last label's colon, indenting every
+    /// body statement one level (`case X:` then the body below). The default; matches
+    /// google-java-format.
+    Always,
+    /// Keep a group's body on the colon line only when it is a single label with a single
+    /// statement and carries no comments (`case X: stmt;`); every other group is laid out as
+    /// [`Always`](Self::Always).
+    SingleLine,
+    /// Keep the whole group inline on the label line (`case X: stmt; stmt;`), adding no break
+    /// or indent. Matches the prior (pre-option) behavior.
+    SameLine,
+}

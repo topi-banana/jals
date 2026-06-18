@@ -6,11 +6,11 @@
 //! empty / single-statement cases. Blank lines from the source are preserved (clamped by the
 //! renderer).
 
-use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
-use crate::config::{BraceStyle, Config, ControlBraceStyle};
+use crate::config::{BraceStyle, Config, ControlBraceStyle, SwitchCaseBody};
 use crate::doc::{Doc, blank_line, concat, group, hardline, if_break, indent, line, nil, text};
-use crate::lower::{Ctx, first_sig_token, lower, lower_generic, tok};
+use crate::lower::{Ctx, first_sig_token, lower, lower_elements, lower_generic, tok};
 
 /// Lower a `{ ... }` node (block, class body, switch body) with one indentation level.
 pub(crate) fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
@@ -145,11 +145,7 @@ fn single_statement_no_comments(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
     if stmts.next().is_none() || stmts.next().is_some() {
         return false; // zero or more than one statement
     }
-    !node
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .any(|t| ctx.comments.has_comments(&t))
+    !has_comments_in_subtree(node, ctx)
 }
 
 /// Whether any significant token of `node`'s parent declaration that precedes the body (`node`)
@@ -247,4 +243,108 @@ pub(crate) fn blank_lines_before(tok: &SyntaxToken) -> usize {
         cur = t.prev_token();
     }
     newlines.saturating_sub(1)
+}
+
+/// Lower a *legacy* (colon-form) `switch` group — `(SwitchLabel ':')+ Stmt*` — per
+/// [`SwitchCaseBody`]. The arrow form is a `SWITCH_RULE` node and never reaches here.
+///
+/// `SameLine` keeps the generic inline layout wholesale (`case X: stmt; stmt;`). `Always` (and a
+/// `SingleLine` group that is not eligible to stay inline) puts each label on its own line and
+/// breaks every body statement onto its own line, indented one level — google-java-format's
+/// layout. `SingleLine` keeps a lone label with a single, comment-free statement inline. A
+/// malformed group (error recovery — a label without a colon, a stray significant token) falls
+/// back to the inline path, so every significant token is still emitted exactly once.
+pub(crate) fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    if ctx.cfg.switch_case_body == SwitchCaseBody::SameLine {
+        return lower_generic(node, ctx);
+    }
+    let Some((labels, stmts)) = split_switch_group(node) else {
+        return lower_generic(node, ctx);
+    };
+    // `single-line`: a single label with a single statement and no comments stays on the colon
+    // line. A comment forces the broken, indented form so it renders correctly and idempotently.
+    if ctx.cfg.switch_case_body == SwitchCaseBody::SingleLine
+        && labels.len() == 1
+        && stmts.len() == 1
+        && !has_comments_in_subtree(node, ctx)
+    {
+        return lower_generic(node, ctx);
+    }
+
+    let mut parts: Vec<Doc> = Vec::new();
+    for (i, (label, colon)) in labels.iter().enumerate() {
+        // Each fall-through label takes its own line; `item_separator` preserves a leading
+        // comment / blank line on the label, whose tokens are emitted by `lower_elements`.
+        if i > 0 {
+            parts.push(item_separator(label, ctx));
+        }
+        let els = [
+            SyntaxElement::Node(label.clone()),
+            SyntaxElement::Token(colon.clone()),
+        ];
+        parts.push(lower_elements(els.into_iter(), ctx, false));
+    }
+    // The body statements break onto their own lines, one indent level deeper than the labels;
+    // the first statement's `item_separator` is the break from the last label's colon line.
+    let mut body: Vec<Doc> = Vec::new();
+    for stmt in &stmts {
+        body.push(item_separator(stmt, ctx));
+        body.push(lower(stmt, ctx));
+    }
+    if !body.is_empty() {
+        parts.push(indent(concat(body)));
+    }
+    concat(parts)
+}
+
+/// A switch label paired with its terminating `:` token.
+type SwitchLabelPair = (SyntaxNode, SyntaxToken);
+
+/// Split a `SWITCH_GROUP` into its `(label, ':')` pairs and its body statements. Returns `None`
+/// for a malformed group (a label without a following colon, a statement before a colon, a stray
+/// colon / significant token, or no labels at all) so the caller can fall back to inline emission
+/// and preserve every token. Empty (token-less) statement nodes from error recovery are skipped.
+fn split_switch_group(node: &SyntaxNode) -> Option<(Vec<SwitchLabelPair>, Vec<SyntaxNode>)> {
+    let mut labels: Vec<SwitchLabelPair> = Vec::new();
+    let mut stmts: Vec<SyntaxNode> = Vec::new();
+    let mut pending: Option<SyntaxNode> = None;
+    for el in node.children_with_tokens() {
+        if let Some(n) = el.as_node() {
+            if n.kind() == S::SWITCH_LABEL {
+                // A label must precede every statement and follow a colon-terminated label.
+                if pending.is_some() || !stmts.is_empty() {
+                    return None;
+                }
+                pending = Some(n.clone());
+            } else if first_sig_token(n).is_some() {
+                if pending.is_some() {
+                    return None; // a statement before its label's colon
+                }
+                stmts.push(n.clone());
+            }
+        } else if let Some(t) = el.as_token() {
+            let kind = t.kind();
+            if kind == S::COLON {
+                match pending.take() {
+                    Some(label) => labels.push((label, t.clone())),
+                    None => return None, // a stray colon
+                }
+            } else if !kind.is_trivia() {
+                return None; // a stray significant token
+            }
+        }
+    }
+    if pending.is_some() || labels.is_empty() {
+        return None;
+    }
+    Some((labels, stmts))
+}
+
+/// Whether any significant token in `node`'s subtree carries a comment. Used to keep a body that
+/// holds a comment (which must never be dropped or moved off its anchor) out of a one-line layout.
+fn has_comments_in_subtree(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
+    node.descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .any(|t| ctx.comments.has_comments(&t))
 }

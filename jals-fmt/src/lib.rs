@@ -40,7 +40,7 @@ mod wrap;
 pub use config::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ConfigError,
     ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
-    LineEnding, LiteralSuffixCase, TrailingComma, TypePunctuationDensity,
+    LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
 };
 pub use output::{FormatOutput, Warning};
 

@@ -282,6 +282,9 @@ mod tests {
         assert!(c.normalize_parameter_comments);
         assert!(c.tabular_array_initializers);
         assert!(c.switch_expression_on_new_line);
+        // google-java-format breaks and indents a legacy (colon-form) switch's case bodies; this
+        // is jals's default, so `google_config` inherits it.
+        assert_eq!(c.switch_case_body, jals_fmt::SwitchCaseBody::Always);
     }
 
     #[test]

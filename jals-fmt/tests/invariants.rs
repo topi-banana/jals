@@ -2,8 +2,8 @@
 
 use jals_fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, Config, FloatLiteralTrailingZero,
-    FnParamsLayout, HexLiteralCase, LiteralSuffixCase, TrailingComma, TypePunctuationDensity,
-    format_source,
+    FnParamsLayout, HexLiteralCase, LiteralSuffixCase, SwitchCaseBody, TrailingComma,
+    TypePunctuationDensity, format_source,
 };
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
@@ -322,6 +322,24 @@ fn switch_on_new_line_config() -> Config {
         switch_expression_on_new_line: true,
         ..Config::default()
     }
+}
+
+/// Config with a given `switch-case-body` mode. Layout-only, so no width tuning is needed — the
+/// break / indent fires structurally on a legacy (colon-form) switch group.
+fn switch_case_body_config(mode: SwitchCaseBody) -> Config {
+    Config {
+        switch_case_body: mode,
+        ..Config::default()
+    }
+}
+
+/// A generator over the three `switch-case-body` modes.
+fn switch_case_body_mode() -> impl Strategy<Value = SwitchCaseBody> {
+    prop_oneof![
+        Just(SwitchCaseBody::Always),
+        Just(SwitchCaseBody::SingleLine),
+        Just(SwitchCaseBody::SameLine),
+    ]
 }
 
 /// Config with a given parameter layout and a narrow `max-width`, so parameter lists are pushed
@@ -1447,6 +1465,37 @@ proptest! {
     #[test]
     fn switch_on_new_line_never_panics(src in ".*") {
         let _ = fmt_with(&src, &switch_on_new_line_config());
+    }
+
+    /// Every `switch-case-body` mode stays idempotent: re-formatting the broken (or inline)
+    /// legacy-switch layout reproduces it.
+    #[test]
+    fn switch_case_body_idempotent(src in javaish(), mode in switch_case_body_mode()) {
+        let cfg = switch_case_body_config(mode);
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// The option is layout-only: it only changes whitespace around a case label's colon, so the
+    /// significant-token sequence is preserved exactly in every mode.
+    #[test]
+    fn switch_case_body_preserves_significant_tokens(src in javaish(), mode in switch_case_body_mode()) {
+        let out = fmt_with(&src, &switch_case_body_config(mode));
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Breaking / indenting a case body never drops or mangles a comment.
+    #[test]
+    fn switch_case_body_preserves_comments(src in javaish(), mode in switch_case_body_mode()) {
+        let out = fmt_with(&src, &switch_case_body_config(mode));
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// No `switch-case-body` mode panics on arbitrary Unicode input.
+    #[test]
+    fn switch_case_body_never_panics(src in ".*", mode in switch_case_body_mode()) {
+        let _ = fmt_with(&src, &switch_case_body_config(mode));
     }
 
     /// Each parameter layout keeps formatting idempotent (the `Compressed` packing in
