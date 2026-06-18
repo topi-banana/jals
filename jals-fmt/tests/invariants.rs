@@ -71,6 +71,66 @@ fn comment_contents(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Config with `normalize-parameter-comments` enabled.
+fn param_comment_config() -> Config {
+    Config {
+        normalize_parameter_comments: true,
+        ..Config::default()
+    }
+}
+
+/// The comment contents of `src` with *all* whitespace removed and sorted into a stable order,
+/// so `/*a=*/` and `/* a= */` compare equal and a legitimate reordering does not matter.
+/// `normalize-parameter-comments` only ever rewrites a block comment's interior whitespace
+/// (`/*a=*/` → `/* a= */`) and may move a parameter comment to hug its argument (so its position
+/// relative to a non-parameter comment can change, exactly as `reorder-imports` moves a comment
+/// with its import); this canonicalization checks the comment *multiset* — no comment is added,
+/// dropped, or mangled — independent of order.
+fn comment_multiset_no_ws(src: &str) -> Vec<String> {
+    let mut comments: Vec<String> = parse(src)
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| {
+            matches!(
+                t.kind(),
+                SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
+            )
+        })
+        .map(|t| t.text().chars().filter(|c| !c.is_whitespace()).collect())
+        .collect();
+    comments.sort();
+    comments
+}
+
+/// A class whose method calls carry a random mix of parameter-name comments (`/*a=*/`,
+/// already-canonical `/* a= */`, extra-whitespace `/*  b  =  */`, varargs `/*xs...=*/`) and
+/// non-matching comments (`/* hello */`, `/*=*/`), so `normalize-parameter-comments` has real
+/// material to rewrite and real material to leave alone. As with the other targeted generators
+/// these need not be semantically legal Java — the parser is error-resilient.
+fn java_with_param_comments() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just("/*a=*/"),
+            Just("/* a= */"),
+            Just("/*  b  =  */"),
+            Just("/*xs...=*/"),
+            Just("/* hello */"),
+            Just("/*=*/"),
+        ],
+        0..6,
+    )
+    .prop_map(|comments| {
+        let args = comments
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("class C {{\n    void m() {{\n        f({args});\n    }}\n}}\n")
+    })
+}
+
 /// A generator of Java-ish source: random concatenations of real tokens, whitespace, and
 /// comments. Mirrors the lossless generator in `jals-syntax`.
 fn javaish() -> impl Strategy<Value = String> {
@@ -1755,5 +1815,46 @@ proptest! {
     fn enum_expanded_preserves_significant_tokens(src in java_with_enum()) {
         let out = fmt_with(&src, &expanded_config());
         prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Normalizing parameter comments keeps formatting idempotent (a rewritten `/* a= */` is a
+    /// fixed point, so the second pass reproduces it).
+    #[test]
+    fn param_comments_idempotent(src in javaish()) {
+        let cfg = param_comment_config();
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// It never touches significant tokens — comments are trivia, so the significant-token
+    /// sequence is preserved exactly even with the option on.
+    #[test]
+    fn param_comments_preserve_significant_tokens(src in javaish()) {
+        let out = fmt_with(&src, &param_comment_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// The comment multiset (modulo whitespace) is preserved: the option only rewrites a block
+    /// comment's interior *whitespace* (`/*a=*/` → `/* a= */`) and may move a parameter comment to
+    /// hug its argument, never adding, dropping, or mangling a comment.
+    #[test]
+    fn param_comments_preserve_comment_multiset_modulo_whitespace(src in javaish()) {
+        let out = fmt_with(&src, &param_comment_config());
+        prop_assert_eq!(comment_multiset_no_ws(&src), comment_multiset_no_ws(&out));
+    }
+
+    /// On input rich in parameter comments, the same whitespace-insensitive comment multiset is
+    /// preserved (the targeted generator gives the rewrite real material to act on).
+    #[test]
+    fn param_comments_preserve_targeted_comment_multiset(src in java_with_param_comments()) {
+        let out = fmt_with(&src, &param_comment_config());
+        prop_assert_eq!(comment_multiset_no_ws(&src), comment_multiset_no_ws(&out));
+    }
+
+    /// Never panics on arbitrary Unicode input.
+    #[test]
+    fn param_comments_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &param_comment_config());
     }
 }

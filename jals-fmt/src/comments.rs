@@ -8,6 +8,10 @@
 //!   between) — anchored to that token, emitted at the end of its line.
 //! - **leading**: starts its own line — anchored to the following significant token,
 //!   emitted on its own line(s) above it.
+//! - **leading-inline**: a leading comment that hugs its anchor token on the same line
+//!   (`/* a= */ 1`) instead of sitting above it — currently only parameter-name block
+//!   comments under `normalize-parameter-comments`. Emitted immediately before the token
+//!   text so the two wrap together as a unit.
 //!
 //! Every comment is anchored exactly once, so as long as every significant token is
 //! emitted exactly once through [`CommentMap::token`], no comment is dropped or
@@ -27,11 +31,19 @@ struct Comment {
     text: String,
     /// The number of blank lines preceding this comment in the source.
     blank_lines_before: usize,
+    /// An inline (hugging) leading comment: a parameter-name block comment under
+    /// `normalize-parameter-comments`, emitted on the same line immediately before its anchor
+    /// token (`/* a= */ 1`) rather than on its own line above it.
+    inline: bool,
 }
 
 /// Comments anchored to significant tokens by source byte offset.
 pub(crate) struct CommentMap {
     leading: HashMap<usize, Vec<Comment>>,
+    /// Leading comments that hug their anchor token on the same line (parameter comments under
+    /// `normalize-parameter-comments`): emitted immediately before the token text, so they wrap
+    /// together with it (`/* a= */ 1`). Keyed by the anchor token's offset, like [`leading`].
+    leading_inline: HashMap<usize, Vec<Comment>>,
     /// Same-line trailing comments (emitted as line suffixes).
     trailing_inline: HashMap<usize, Vec<Comment>>,
     /// Own-line comments after the last significant token (emitted on their own lines so
@@ -41,9 +53,11 @@ pub(crate) struct CommentMap {
     orphans: Vec<Comment>,
 }
 
-/// Build the comment map for a tree.
-pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
+/// Build the comment map for a tree. `normalize_param_comments` is the resolved
+/// `normalize-parameter-comments` policy, threaded down to [`classify`].
+pub(crate) fn build(root: &SyntaxNode, normalize_param_comments: bool) -> CommentMap {
     let mut leading: HashMap<usize, Vec<Comment>> = HashMap::new();
+    let mut leading_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
     let mut trailing_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
     let mut trailing_below: HashMap<usize, Vec<Comment>> = HashMap::new();
 
@@ -57,13 +71,18 @@ pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
     {
         let kind = tok.kind();
         if is_comment(kind) {
+            let (text, inline) = classify(&tok, normalize_param_comments);
             let comment = Comment {
                 kind,
-                text: content(&tok),
+                text,
                 blank_lines_before: newlines.saturating_sub(1),
+                inline,
             };
             match last_sig {
-                Some(anchor) if newlines == 0 && pending.is_empty() => {
+                // A parameter comment (`inline`) always *leads* the following token (it hugs it),
+                // so it is never attached as a trailing comment of the previous one — route it to
+                // `pending` like an own-line leading comment regardless of an intervening newline.
+                Some(anchor) if newlines == 0 && pending.is_empty() && !inline => {
                     trailing_inline.entry(anchor).or_default().push(comment);
                 }
                 _ => pending.push(comment),
@@ -74,7 +93,19 @@ pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
         } else if !kind.is_trivia() {
             let offset = usize::from(tok.text_range().start());
             if !pending.is_empty() {
-                leading.insert(offset, std::mem::take(&mut pending));
+                // Inline (hugging) parameter comments go to `leading_inline`; own-line comments
+                // to `leading`. `partition` keeps each group's source order, and the two groups
+                // never interleave at emit time (own-line above, inline hugging the token).
+                let (inline_lead, own_lead): (Vec<Comment>, Vec<Comment>) =
+                    std::mem::take(&mut pending)
+                        .into_iter()
+                        .partition(|c| c.inline);
+                if !own_lead.is_empty() {
+                    leading.insert(offset, own_lead);
+                }
+                if !inline_lead.is_empty() {
+                    leading_inline.insert(offset, inline_lead);
+                }
             }
             last_sig = Some(offset);
             newlines = 0;
@@ -93,6 +124,7 @@ pub(crate) fn build(root: &SyntaxNode) -> CommentMap {
 
     CommentMap {
         leading,
+        leading_inline,
         trailing_inline,
         trailing_below,
         orphans,
@@ -121,7 +153,21 @@ impl CommentMap {
             }
             parts.push(hardline());
         }
-        parts.push(token_doc);
+        // Inline (hugging) leading comments sit immediately before the token text on the same
+        // line, e.g. `/* a= */ 1`. They are concatenated into the token's own unit so they wrap
+        // together with it (a broken argument list keeps each `/* x= */ value` group intact).
+        parts.push(match self.leading_inline.get(&offset) {
+            None => token_doc,
+            Some(inline) => {
+                let mut hug: Vec<Doc> = Vec::new();
+                for c in inline {
+                    hug.push(raw(c.text.clone()));
+                    hug.push(text(" "));
+                }
+                hug.push(token_doc);
+                concat(hug)
+            }
+        });
         if let Some(trail) = self.trailing_inline.get(&offset) {
             parts.push(trailing_inline_doc(trail));
         }
@@ -161,6 +207,7 @@ impl CommentMap {
     pub(crate) fn has_comments(&self, tok: &SyntaxToken) -> bool {
         let offset = usize::from(tok.text_range().start());
         self.leading.contains_key(&offset)
+            || self.leading_inline.contains_key(&offset)
             || self.trailing_inline.contains_key(&offset)
             || self.trailing_below.contains_key(&offset)
     }
@@ -253,12 +300,24 @@ pub(crate) fn is_comment(kind: SyntaxKind) -> bool {
     )
 }
 
-/// Lightly normalize comment text: line comments have trailing whitespace stripped;
-/// block/doc comments are kept verbatim (their interior alignment is preserved).
-fn content(tok: &SyntaxToken) -> String {
+/// Classify a comment token into its emitted text and whether it is an inline (hugging)
+/// parameter comment.
+///
+/// Line comments have their trailing whitespace stripped; block / doc comments are kept verbatim
+/// (their interior alignment is preserved). The one exception is `normalize-parameter-comments`:
+/// a `BLOCK_COMMENT` that is a parameter-name label (`/*a=*/`) is rewritten to the canonical
+/// `/* a= */` form (see [`crate::rules::parameter_comment`]) and flagged `inline` so it hugs the
+/// following token instead of trailing the previous one or sitting on its own line.
+fn classify(tok: &SyntaxToken, normalize_param_comments: bool) -> (String, bool) {
     match tok.kind() {
-        SyntaxKind::LINE_COMMENT => tok.text().trim_end().to_string(),
-        _ => tok.text().to_string(),
+        SyntaxKind::LINE_COMMENT => (tok.text().trim_end().to_string(), false),
+        SyntaxKind::BLOCK_COMMENT if normalize_param_comments => {
+            match crate::rules::parameter_comment::normalize(tok.text()) {
+                Some(normalized) => (normalized, true),
+                None => (tok.text().to_string(), false),
+            }
+        }
+        _ => (tok.text().to_string(), false),
     }
 }
 

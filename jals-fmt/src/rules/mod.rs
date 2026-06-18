@@ -24,6 +24,7 @@ use crate::lower::Ctx;
 pub(crate) mod imports;
 pub(crate) mod literals;
 pub(crate) mod modifiers;
+pub(crate) mod parameter_comment;
 pub(crate) mod trailing_comma;
 
 pub(crate) use literals::LiteralRegistry;
