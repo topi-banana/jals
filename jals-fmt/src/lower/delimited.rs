@@ -12,7 +12,7 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 use crate::config::{FnParamsLayout, TrailingComma};
 use crate::doc::{
     Doc, concat, continuation_indent, fill, group, group_always_break, group_overflow,
-    group_within, line, nil, softline,
+    group_within, hardline, indent, join, line, nil, softline, text,
 };
 use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, sep, tok};
 
@@ -74,6 +74,92 @@ fn overflows_last_item(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
     is_overflowable_expr(&cand, node.kind() == S::ANNOTATION_ARG_LIST)
         && first_sig_token(&cand).is_some_and(|t| !ctx.comments.has_leading(&t))
         && !ctx.comments.has_leading(&close)
+}
+
+/// Whether the array element `node` begins a new *source row* — its leading trivia (every token
+/// before its first significant one) contains a `NEWLINE`. A comment in that leading run is not
+/// a newline, so it does not start a row here; [`tabular_rows`] disqualifies any commented
+/// initializer separately.
+fn starts_new_row(node: &SyntaxNode) -> bool {
+    for t in node
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+    {
+        if !t.kind().is_trivia() {
+            return false;
+        }
+        if t.kind() == S::NEWLINE {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the subtree under `node` contains any comment token. A tabular layout preserves
+/// inter-element whitespace only; an interior comment would need its own anchoring, so a
+/// commented initializer is never treated as tabular and falls back to width-based wrapping.
+fn has_interior_comment(node: &SyntaxNode) -> bool {
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| crate::comments::is_comment(t.kind()))
+}
+
+/// The source-row partition of an array initializer laid out as a *table*, or `None` when it is
+/// not tabular. Tabular requires: no interior comments; at least two source rows; every row but
+/// the last holding the same element count `N` (`N >= 1`); and the last holding `1..=N`.
+/// `element_count` is the number of comma-separated items the caller built — the partition is
+/// rejected unless it accounts for exactly that many, so a malformed list (stray tokens, a count
+/// mismatch) safely falls back to width-based wrapping.
+fn tabular_rows(node: &SyntaxNode, element_count: usize) -> Option<Vec<usize>> {
+    if has_interior_comment(node) {
+        return None;
+    }
+    let mut rows: Vec<usize> = Vec::new();
+    let mut cur = 0usize;
+    for child in node.children().filter(|c| first_sig_token(c).is_some()) {
+        if cur > 0 && starts_new_row(&child) {
+            rows.push(cur);
+            cur = 0;
+        }
+        cur += 1;
+    }
+    if cur > 0 {
+        rows.push(cur);
+    }
+    if rows.len() < 2 || rows.iter().sum::<usize>() != element_count {
+        return None;
+    }
+    // Every pushed row has `cur > 0`, so `n >= 1`; a table needs every body row to equal `n`
+    // and the final row to hold `1..=n`.
+    let n = rows[0];
+    let (body, last) = rows.split_at(rows.len() - 1);
+    if body.iter().any(|&c| c != n) || last[0] > n {
+        return None;
+    }
+    Some(rows)
+}
+
+/// Lay out a tabular array initializer: each source row on its own line, elements within a row
+/// separated by a single space, rows separated by a forced break. `items` are the already-built
+/// per-element docs (each including its trailing comma); `row_sizes` partitions them into rows and
+/// is guaranteed by [`tabular_rows`] to sum to `items.len()`.
+///
+/// Unlike the width-wrapped array path (which uses `continuation_indent`), the rows are laid out
+/// with one block [`indent`] level: a preserved table reads as a block of rows, and
+/// google-java-format indents tabular contents by the block indent, not the wider continuation
+/// indent.
+fn tabular_doc(open: Doc, close: Doc, items: Vec<Doc>, row_sizes: &[usize]) -> Doc {
+    let mut it = items.into_iter();
+    let row_docs: Vec<Doc> = row_sizes
+        .iter()
+        .map(|&n| join(text(" "), it.by_ref().take(n).collect()))
+        .collect();
+    concat(vec![
+        open,
+        indent(concat(vec![hardline(), join(hardline(), row_docs)])),
+        hardline(),
+        close,
+    ])
 }
 
 /// Lower a comma-separated, delimited list that wraps all-or-nothing. Items are separated by a
@@ -169,6 +255,15 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             concat(vec![content, comma_doc])
         })
         .collect();
+
+    // `tabular-array-initializers`: a table-shaped array initializer keeps its source row breaks
+    // instead of reflowing by width. Layout-only — `items` already carries every token verbatim.
+    if node.kind() == S::ARRAY_INIT
+        && ctx.cfg.tabular_array_initializers
+        && let Some(row_sizes) = tabular_rows(node, items.len())
+    {
+        return tabular_doc(open_doc, close_doc, items, &row_sizes);
+    }
 
     // `overflow-delimited-expr`: hang the final delimited item past the call line. Laid out
     // flat, the earlier items stay on the line and only the item's body breaks; laid out
