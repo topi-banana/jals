@@ -119,6 +119,16 @@ pub struct Config {
     /// Target line width for reflowing comment / Javadoc prose, including indentation.
     /// Only consulted when [`wrap_comments`](Config::wrap_comments) is enabled.
     pub comment_width: usize,
+    /// Rewrite block comments that look like a parameter-name label before an argument
+    /// (`/*a=*/`, `/*xs...=*/`) into google-java-format's canonical spaced form `/* name= */`,
+    /// collapsing interior whitespace (`/*  a  =  */` → `/* a= */`). A comment is rewritten
+    /// only when its *entire* text matches `/* <java-identifier>(...)? = */`; Javadoc
+    /// (`/** … */`), line comments, and any non-matching block comment are left exactly as
+    /// written. Off by default. Operates only on comment trivia — the significant-token
+    /// sequence is preserved exactly (a comment-whitespace toggle like
+    /// [`wrap_comments`](Config::wrap_comments)). Mirrors google-java-format's
+    /// `CommentsHelper.reformatParameterComment`.
+    pub normalize_parameter_comments: bool,
     /// Sort `import` declarations: non-static imports first (alphabetical by qualified name),
     /// then static imports (alphabetical). Off by default; opt-in like
     /// [`wrap_comments`](Config::wrap_comments). When enabled the formatter's significant-token
@@ -255,6 +265,7 @@ impl Default for Config {
             control_brace_style: ControlBraceStyle::SameLine,
             wrap_comments: false,
             comment_width: 80,
+            normalize_parameter_comments: false,
             reorder_imports: false,
             trailing_comma: TrailingComma::Preserve,
             group_imports: false,

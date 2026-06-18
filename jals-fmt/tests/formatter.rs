@@ -33,6 +33,19 @@ fn check_wrapped(src: &str, comment_width: usize, expected: Expect) {
     expected.assert_eq(&fmt_wrapped(src, comment_width));
 }
 
+/// Format with `normalize-parameter-comments` enabled (otherwise default config).
+fn fmt_param_comments(src: &str) -> String {
+    let cfg = Config {
+        normalize_parameter_comments: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_param_comments(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_param_comments(src));
+}
+
 /// Format with `reorder-imports` enabled.
 fn fmt_reorder(src: &str) -> String {
     let cfg = Config {
@@ -4446,4 +4459,88 @@ fn continuation_indent_ignored_in_tab_style() {
         }
     "#]]
     .assert_eq(&out);
+}
+
+// ----- normalize-parameter-comments -------------------------------------------------------
+
+#[test]
+fn parameter_comments_are_normalized_and_hugged() {
+    // Each `/*name=*/` becomes the canonical `/* name= */` (interior whitespace collapsed,
+    // varargs `...` kept) and hugs the following argument on the same line.
+    check_param_comments(
+        "class C{void m(){f(/*a=*/1,/*xs...=*/2,/*  b  =  */3);}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    f(/* a= */ 1, /* xs...= */ 2, /* b= */ 3);
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn parameter_comments_break_one_per_line_each_hugged() {
+    // When the argument list wraps, each `/* name= */ value` group stays together on its line.
+    check_param_comments(
+        "class C{void m(){foo(/*alpha=*/111,/*beta=*/222,/*gamma=*/333,/*delta=*/444,/*epsilon=*/555);}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    foo(
+                        /* alpha= */ 111,
+                        /* beta= */ 222,
+                        /* gamma= */ 333,
+                        /* delta= */ 444,
+                        /* epsilon= */ 555
+                    );
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn parameter_comments_off_by_default_keeps_them_verbatim() {
+    // With the option off (the default), the comment text is untouched and it stays a trailing
+    // line-suffix of the preceding token, exactly as before.
+    check(
+        "class C{void m(){f(/*a=*/1);}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    f(1); /*a=*/
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn parameter_comments_leave_non_matching_comments_untouched() {
+    // A non-matching block comment (`/* hello */`, `/* = */`, a leading-digit name `/*1=*/`) and
+    // Javadoc (`/** doc */`) are neither rewritten nor hugged — they keep their text and their
+    // ordinary trailing placement.
+    check_param_comments(
+        "class C{void m(){f(/* hello */1,/* = */2,/*1=*/3);g(/** doc */4);}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    f(1, 2, 3); /* hello */ /* = */ /*1=*/
+                    g(4); /** doc */
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn parameter_comments_normalization_is_idempotent() {
+    let src = "class C{void m(){f(/*a=*/1,/*xs...=*/2);}}";
+    let once = fmt_param_comments(src);
+    let twice = fmt_param_comments(&once);
+    assert_eq!(
+        once, twice,
+        "normalize-parameter-comments must be idempotent"
+    );
 }

@@ -94,6 +94,9 @@ pub fn google_config() -> Config {
         fn_call_width: 100,
         array_width: 100,
         single_line_if_else_max_width: 100,
+        // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
+        // and hugs them to the following argument.
+        normalize_parameter_comments: true,
         ..Config::default()
     }
 }
@@ -270,6 +273,7 @@ mod tests {
         assert_eq!(c.import_groups, ["static", "*"]);
         assert!(c.reorder_modifiers);
         assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
+        assert!(c.normalize_parameter_comments);
     }
 
     #[test]
