@@ -100,6 +100,9 @@ pub fn google_config() -> Config {
         // google-java-format preserves the source row breaks of a tabular (grid-shaped) array
         // initializer instead of reflowing it by width.
         tabular_array_initializers: true,
+        // google-java-format puts a `switch` expression that is the value of a `=` (a variable /
+        // field initializer or an assignment) on its own continuation-indented line.
+        switch_expression_on_new_line: true,
         ..Config::default()
     }
 }
@@ -277,6 +280,8 @@ mod tests {
         assert!(c.reorder_modifiers);
         assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
         assert!(c.normalize_parameter_comments);
+        assert!(c.tabular_array_initializers);
+        assert!(c.switch_expression_on_new_line);
     }
 
     #[test]
