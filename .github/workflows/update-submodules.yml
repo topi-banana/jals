@@ -22,7 +22,7 @@ jobs:
       # The OpenJDK submodule (openjdk/jdk) is huge, so don't check it out here.
       # The next step initializes it and fetches only the latest commit
       # (--depth 1) of its tracked branch instead of the full history.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Update submodule to upstream
         id: update
