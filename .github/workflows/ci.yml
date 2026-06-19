@@ -147,7 +147,7 @@ jobs:
           java-version: "25"
       - name: Cache the google-java-format jar
         id: gjf-jar
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # Immutable per release, so the version alone keys it.
           path: jals-tests/vendor/google-java-format-${{ env.GJF_VERSION }}-all-deps.jar
@@ -164,7 +164,7 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD:jals-tests/sources/openjdk)" >> "$GITHUB_OUTPUT"
       - name: Cache the OpenJDK src/ gjf corpus
         id: corpus-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           # Generated, never committed (GPL'd OpenJDK derivative). Regenerated only when
           # the submodule pin, the google-java-format version, or the generator changes.
