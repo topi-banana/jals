@@ -23,7 +23,7 @@ pub use error::ConfigError;
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase};
 pub use options::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ControlBraceStyle,
-    FnParamsLayout, IndentStyle, LineEnding, TrailingComma, TypePunctuationDensity,
+    FnParamsLayout, IndentStyle, LineEnding, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
 };
 
 /// Formatter style settings.
@@ -195,6 +195,17 @@ pub struct Config {
     /// changes); idempotent. A Java-specific option with no rustfmt equivalent; mirrors
     /// google-java-format's layout of an assignment whose value is a switch expression.
     pub switch_expression_on_new_line: bool,
+    /// How a *legacy* (colon-form) `switch` group — one or more `case X:` / `default:` labels
+    /// followed by statements — lays out its body relative to the label's colon:
+    /// [`Always`](SwitchCaseBody::Always) (the default; each label on its own line, every body
+    /// statement broken onto its own line and indented one level, matching google-java-format),
+    /// [`SingleLine`](SwitchCaseBody::SingleLine) (keep a single-label, single-statement,
+    /// comment-free body inline on the colon line, break the rest), or
+    /// [`SameLine`](SwitchCaseBody::SameLine) (keep the whole group inline). The arrow form
+    /// (`case X -> …`) is never affected. Layout-only — the significant-token sequence is
+    /// preserved exactly (only whitespace after the colon changes); idempotent. A Java-specific
+    /// option with no rustfmt equivalent.
+    pub switch_case_body: SwitchCaseBody,
     /// Whether to emit a space *before* a colon (`:`). Applies uniformly to every Java colon
     /// context: a ternary (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled
     /// statement (`label:`), an `assert` message (`assert c : m`), and a `switch` `case` /
@@ -301,6 +312,7 @@ impl Default for Config {
             overflow_delimited_expr: false,
             tabular_array_initializers: false,
             switch_expression_on_new_line: false,
+            switch_case_body: SwitchCaseBody::Always,
             space_before_colon: false,
             space_after_colon: true,
             fn_params_layout: FnParamsLayout::Tall,

@@ -92,14 +92,15 @@ fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
 }
 
 /// Whether reordering this `MODIFIERS` node is safe — i.e. it sits in a genuine declaration
-/// context. In valid code a `MODIFIERS` node always has one of these parents. An error-recovery
-/// artifact does not: e.g. `<public@` parses a stray `MODIFIERS` (holding `public` and an
-/// incomplete `@`) directly under `SOURCE_FILE`, next to a `TYPE_PARAMS` sibling. Hoisting the
-/// annotation to the front there changes the significant-token *sequence* such that re-parsing the
-/// output regroups the `@` into the preceding `<…>` as a type-parameter annotation — a different
-/// tree, so the layout never reaches a fixed point. Reordering is confined to these contexts so
-/// the multiset-preserving relaxation never costs idempotency; elsewhere the node emits in source
-/// order (the byte-for-byte-stable baseline).
+/// context and is not poisoned by a preceding annotation-absorbing token. In valid code a
+/// `MODIFIERS` node always has one of these parents. An error-recovery artifact does not: e.g.
+/// `<public@` parses a stray `MODIFIERS` (holding `public` and an incomplete `@`) directly under
+/// `SOURCE_FILE`, next to a `TYPE_PARAMS` sibling. Hoisting the annotation to the front there
+/// changes the significant-token *sequence* such that re-parsing the output regroups the `@` into
+/// the preceding `<…>` as a type-parameter annotation — a different tree, so the layout never
+/// reaches a fixed point. Reordering is confined to these contexts so the multiset-preserving
+/// relaxation never costs idempotency; elsewhere the node emits in source order (the
+/// byte-for-byte-stable baseline).
 fn is_reorderable_context(node: &SyntaxNode) -> bool {
     matches!(
         node.parent().map(|p| p.kind()),
@@ -120,7 +121,38 @@ fn is_reorderable_context(node: &SyntaxNode) -> bool {
                 | S::RESOURCE
                 | S::CATCH_CLAUSE
         )
-    )
+    ) && !preceded_by_dangling_lt(node)
+}
+
+/// Whether the significant token immediately preceding this `MODIFIERS` run is a `<` (`LT`). Even
+/// inside a genuine declaration, an error-recovery `<` directly before the modifiers (a dangling
+/// `TYPE_PARAMS` opener, as in `<public@x x`, where `public @x` lands in a real `FIELD_DECL` next
+/// to a stray `<` sibling) would absorb a hoisted leading `@` into the preceding `<…>` on re-parse
+/// as a type-parameter annotation — the same idempotency trap [`is_reorderable_context`] guards
+/// against. A `@` is only ever legal directly after a `<` in type-parameter / type-use position,
+/// so a preceding `<` fully characterizes this absorber; in valid code a declaration's modifiers
+/// are never preceded by a bare `<`, so this never fires there.
+///
+/// Sibling traversal is used rather than [`SyntaxToken::prev_token`], which does not cross the
+/// empty error-recovery nodes (an empty `TYPE_PARAM`) that produce exactly this shape.
+fn preceded_by_dangling_lt(node: &SyntaxNode) -> bool {
+    // Walk back from the modifiers' owning declaration to the nearest preceding significant token.
+    let mut cursor = node.parent().and_then(|decl| decl.prev_sibling_or_token());
+    while let Some(el) = cursor {
+        match el {
+            SyntaxElement::Token(t) => {
+                if !t.kind().is_trivia() {
+                    return t.kind() == S::LT;
+                }
+                cursor = t.prev_sibling_or_token();
+            }
+            SyntaxElement::Node(n) => match last_sig_token(&n) {
+                Some(t) => return t.kind() == S::LT,
+                None => cursor = n.prev_sibling_or_token(),
+            },
+        }
+    }
+    false
 }
 
 /// The first and last significant tokens of a `MODIFIERS` node *as emitted*. With
@@ -421,5 +453,18 @@ mod tests {
         // A parameter's MODIFIERS is excluded so parameter annotations stay inline.
         let modifiers = modifiers_under("class C { void m(final int x) {} }", S::PARAM);
         assert!(!is_decl_level_modifiers(&modifiers));
+    }
+
+    #[test]
+    fn dangling_lt_before_modifiers_is_not_reorderable() {
+        // A normal declaration's modifiers reorder freely.
+        assert!(is_reorderable_context(&modifiers_of("public @A int x;")));
+        // Error recovery can place a real FIELD_DECL right after a stray `<` (a dangling
+        // TYPE_PARAMS opener): `<public@x x` parses `public @x` into a FIELD_DECL next to a `<`
+        // sibling. Hoisting the annotation to the front there would let the re-parse absorb the
+        // `@` into the preceding `<…>` as a type-parameter annotation — a different tree — so the
+        // node is not reorderable and emits in source order, keeping the layout idempotent.
+        let modifiers = modifiers_under("<public@x x", S::FIELD_DECL);
+        assert!(!is_reorderable_context(&modifiers));
     }
 }

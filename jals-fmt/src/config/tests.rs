@@ -35,6 +35,8 @@ fn defaults() {
     assert!(!c.overflow_delimited_expr);
     // A switch expression stays on the `=` line by default.
     assert!(!c.switch_expression_on_new_line);
+    // A legacy (colon-form) switch breaks and indents its case bodies by default (GJF layout).
+    assert_eq!(c.switch_case_body, SwitchCaseBody::Always);
     // Colon spacing defaults to idiomatic `label:` / `case x:` style: no space before,
     // one space after.
     assert!(!c.space_before_colon);
@@ -151,6 +153,16 @@ fn overflow_delimited_expr_parses() {
 fn switch_expression_on_new_line_parses() {
     let c: Config = toml::from_str("switch-expression-on-new-line = true\n").unwrap();
     assert!(c.switch_expression_on_new_line);
+}
+
+#[test]
+fn switch_case_body_parses_kebab_values() {
+    let c: Config = toml::from_str("switch-case-body = \"always\"\n").unwrap();
+    assert_eq!(c.switch_case_body, SwitchCaseBody::Always);
+    let c: Config = toml::from_str("switch-case-body = \"single-line\"\n").unwrap();
+    assert_eq!(c.switch_case_body, SwitchCaseBody::SingleLine);
+    let c: Config = toml::from_str("switch-case-body = \"same-line\"\n").unwrap();
+    assert_eq!(c.switch_case_body, SwitchCaseBody::SameLine);
 }
 
 #[test]

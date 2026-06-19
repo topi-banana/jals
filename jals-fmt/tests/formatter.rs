@@ -4,7 +4,7 @@ use expect_test::{Expect, expect};
 use jals_fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
     FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle, LineEnding,
-    LiteralSuffixCase, TrailingComma, TypePunctuationDensity, format_source,
+    LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity, format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -3215,6 +3215,9 @@ fn fmt_colon(src: &str, space_before_colon: bool, space_after_colon: bool) -> St
     let config = Config {
         space_before_colon,
         space_after_colon,
+        // Keep the legacy `case x:` body inline so these tests stay focused on colon *spacing*
+        // (and double as `same-line` coverage); the default `Always` would break the body out.
+        switch_case_body: SwitchCaseBody::SameLine,
         ..Config::default()
     };
     fmt_with(src, &config)
@@ -4779,4 +4782,133 @@ fn switch_on_new_line_is_idempotent() {
         once, twice,
         "switch-expression-on-new-line must be idempotent"
     );
+}
+
+// ----- switch-case-body -------------------------------------------------------------------
+
+/// Format with an explicit `switch-case-body` mode at the default 4-space layout.
+fn fmt_case_body(src: &str, mode: SwitchCaseBody) -> String {
+    let cfg = Config {
+        switch_case_body: mode,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+/// A legacy (colon-form) switch exercising a single-statement case, a multi-statement case, a
+/// fall-through (`case 2: case 3:`), and a `default`.
+const LEGACY_SWITCH_SRC: &str = "class C{void m(int x){switch(x){case 0:return 0;case 1:a();break;case 2:case 3:b();break;default:c();}}}";
+
+#[test]
+fn switch_case_body_always_breaks_and_indents() {
+    // The default: every label on its own line, every body statement broken out and indented
+    // one level (google-java-format's legacy-switch layout).
+    expect![[r#"
+        class C {
+            void m(int x) {
+                switch (x) {
+                    case 0:
+                        return 0;
+                    case 1:
+                        a();
+                        break;
+                    case 2:
+                    case 3:
+                        b();
+                        break;
+                    default:
+                        c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_case_body(LEGACY_SWITCH_SRC, SwitchCaseBody::Always));
+}
+
+#[test]
+fn switch_case_body_single_line_keeps_single_statement_inline() {
+    // A lone label with a single statement stays on the colon line; a multi-statement body and
+    // a fall-through still break and indent.
+    expect![[r#"
+        class C {
+            void m(int x) {
+                switch (x) {
+                    case 0: return 0;
+                    case 1:
+                        a();
+                        break;
+                    case 2:
+                    case 3:
+                        b();
+                        break;
+                    default: c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_case_body(
+        LEGACY_SWITCH_SRC,
+        SwitchCaseBody::SingleLine,
+    ));
+}
+
+#[test]
+fn switch_case_body_same_line_keeps_all_inline() {
+    // The prior behavior: the whole group stays inline on the label line.
+    expect![[r#"
+        class C {
+            void m(int x) {
+                switch (x) {
+                    case 0: return 0;
+                    case 1: a(); break;
+                    case 2: case 3: b(); break;
+                    default: c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_case_body(LEGACY_SWITCH_SRC, SwitchCaseBody::SameLine));
+}
+
+#[test]
+fn switch_case_body_always_indents_label_and_body_comments() {
+    // A comment before a label stays on the label's line; a comment before a body statement is
+    // indented with the body (the motivating google-java-format `LegacySwitchComment` case).
+    let cfg = Config {
+        indent_width: 2,
+        switch_case_body: SwitchCaseBody::Always,
+        ..Config::default()
+    };
+    let src = "class T{int f(String v){switch(v){\n// about a\ncase \"a\":\nreturn 0;\ncase \"b\":\n// about b\nreturn 1;\n}}}";
+    expect![[r#"
+        class T {
+          int f(String v) {
+            switch (v) {
+              // about a
+              case "a":
+                return 0;
+              case "b":
+                // about b
+                return 1;
+            }
+          }
+        }
+    "#]]
+    .assert_eq(&format_source(src, &cfg).formatted);
+}
+
+#[test]
+fn switch_case_body_is_idempotent() {
+    for mode in [
+        SwitchCaseBody::Always,
+        SwitchCaseBody::SingleLine,
+        SwitchCaseBody::SameLine,
+    ] {
+        let once = fmt_case_body(LEGACY_SWITCH_SRC, mode);
+        let twice = fmt_case_body(&once, mode);
+        assert_eq!(
+            once, twice,
+            "switch-case-body must be idempotent ({mode:?})"
+        );
+    }
 }
