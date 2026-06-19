@@ -19,8 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use jals_fmt::{
-    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
-    IndentStyle, LineEnding,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
+    ControlBraceStyle, IndentStyle, LineEnding,
 };
 use rayon::prelude::*;
 use similar::TextDiff;
@@ -97,6 +97,9 @@ pub fn google_config() -> Config {
         // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
         // and hugs them to the following argument.
         normalize_parameter_comments: true,
+        // google-java-format never puts the closing `)` of a paren-delimited list (call /
+        // annotation args, parameters, record header) on its own line — it hugs the last item.
+        closing_paren: ClosingParen::Hug,
         // google-java-format preserves the source row breaks of a tabular (grid-shaped) array
         // initializer instead of reflowing it by width.
         tabular_array_initializers: true,

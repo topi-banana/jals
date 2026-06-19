@@ -38,9 +38,10 @@ mod rules;
 mod wrap;
 
 pub use config::{
-    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ConfigError,
-    ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
-    LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
+    ConfigError, ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase,
+    IndentStyle, LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma,
+    TypePunctuationDensity,
 };
 pub use output::{FormatOutput, Warning};
 

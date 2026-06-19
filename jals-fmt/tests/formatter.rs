@@ -2,9 +2,10 @@
 
 use expect_test::{Expect, expect};
 use jals_fmt::{
-    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, Config, ControlBraceStyle,
-    FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle, LineEnding,
-    LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity, format_source,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
+    ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
+    LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
+    format_source,
 };
 
 fn fmt(src: &str) -> String {
@@ -231,6 +232,154 @@ fn long_param_list_wraps() {
             }
         "#]],
     );
+}
+
+// --- closing-paren = hug ----------------------------------------------------
+
+/// Format with `closing-paren = hug` (otherwise default config).
+fn fmt_hug(src: &str) -> String {
+    let cfg = Config {
+        closing_paren: ClosingParen::Hug,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_hug(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_hug(src));
+}
+
+#[test]
+fn closing_paren_hug_arg_list() {
+    // The wrapped call keeps its `)` on the last argument's line instead of dedenting it.
+    check_hug(
+        "class C{void m(){foooo(aaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbb,cccccccccccccccc,dddddddddddddddd);}}",
+        expect![[r#"
+            class C {
+                void m() {
+                    foooo(
+                        aaaaaaaaaaaaaaaa,
+                        bbbbbbbbbbbbbbbb,
+                        cccccccccccccccc,
+                        dddddddddddddddd);
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn closing_paren_hug_param_list() {
+    // A wrapped parameter list also hugs `) {`.
+    check_hug(
+        "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){}}",
+        expect![[r#"
+            class C {
+                void method(
+                    int aaaaaaaaaaaaaaaa,
+                    int bbbbbbbbbbbbbbbb,
+                    int cccccccccccccccc,
+                    int dddddddddddddddd,
+                    int eeeeeeeeeeeeeeee) {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn closing_paren_hug_record_header() {
+    // A wrapped record header hugs `) {}`.
+    check_hug(
+        "record Rrrrrrr(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int ddddddddddddd){}",
+        expect![[r#"
+            record Rrrrrrr(
+                int aaaaaaaaaaaaaaaa,
+                int bbbbbbbbbbbbbbbb,
+                int cccccccccccccccc,
+                int ddddddddddddd) {}
+        "#]],
+    );
+}
+
+#[test]
+fn closing_paren_hug_array_init_unaffected() {
+    // The brace-delimited array initializer is never hugged — its `}` stays on its own line.
+    check_hug(
+        "class C{int[] a={aaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbb,cccccccccccccccc,dddddddddddddddd,eeeeeeeeeeeeeeee};}",
+        expect![[r#"
+            class C {
+                int[] a = {
+                    aaaaaaaaaaaaaaaa,
+                    bbbbbbbbbbbbbbbb,
+                    cccccccccccccccc,
+                    dddddddddddddddd,
+                    eeeeeeeeeeeeeeee
+                };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn closing_paren_hug_overflow_flat_head() {
+    // With `overflow-delimited-expr`, when the leading args fit on the call line the trailing
+    // lambda overflows and `)` already hugs its `}` (the flat softline is nothing).
+    let cfg = Config {
+        closing_paren: ClosingParen::Hug,
+        overflow_delimited_expr: true,
+        ..Config::default()
+    };
+    let src = "class C{void m(){foooooooooooo(aaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbb,()->{doSomething();});}}";
+    expect![[r#"
+        class C {
+            void m() {
+                foooooooooooo(aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbb, () -> {
+                    doSomething();
+                });
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_with(src, &cfg));
+}
+
+#[test]
+fn closing_paren_hug_overflow_broken_head() {
+    // When the leading args are too wide to share the call line, the overflow group breaks
+    // (degenerating to the all-or-nothing layout); hug still cuddles `)` onto the last item's
+    // close instead of dedenting it onto its own line.
+    let cfg = Config {
+        closing_paren: ClosingParen::Hug,
+        overflow_delimited_expr: true,
+        ..Config::default()
+    };
+    let src = "class C{void m(){foooooooooooo(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,()->{doSomething();});}}";
+    expect![[r#"
+        class C {
+            void m() {
+                foooooooooooo(
+                    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,
+                    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,
+                    () -> {
+                        doSomething();
+                    });
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_with(src, &cfg));
+}
+
+#[test]
+fn closing_paren_hug_is_idempotent() {
+    let cfg = Config {
+        closing_paren: ClosingParen::Hug,
+        ..Config::default()
+    };
+    let once = fmt_with(
+        "class C{void m(){foooo(aaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbb,cccccccccccccccc,dddddddddddddddd);}}",
+        &cfg,
+    );
+    let twice = fmt_with(&once, &cfg);
+    assert_eq!(once, twice, "hug layout must be idempotent");
 }
 
 #[test]

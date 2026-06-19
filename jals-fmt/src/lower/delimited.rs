@@ -6,10 +6,12 @@
 //! follows `fn-params-layout`. With `overflow-delimited-expr` a call / annotation argument list
 //! whose final item is a delimited expression instead hangs that item past the call line. The
 //! trailing comma is preserved by default; for an array initializer it follows `trailing-comma`.
+//! With `closing-paren = hug` a wrapped paren-delimited list (call / annotation args, params,
+//! record header) keeps its closing `)` on the last item's line instead of dedenting it.
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
-use crate::config::{FnParamsLayout, TrailingComma};
+use crate::config::{ClosingParen, FnParamsLayout, TrailingComma};
 use crate::doc::{
     Doc, concat, continuation_indent, fill, group, group_always_break, group_overflow,
     group_within, hardline, indent, join, line, nil, softline, text,
@@ -162,6 +164,23 @@ fn tabular_doc(open: Doc, close: Doc, items: Vec<Doc>, row_sizes: &[usize]) -> D
     ])
 }
 
+/// Whether `kind` is a *paren-delimited* list whose closing `)` is governed by `closing-paren`:
+/// a call / annotation argument list, a parameter list, or a record header. The brace-delimited
+/// array initializer (`ARRAY_INIT`) is excluded — its `}` always stays on its own line.
+fn is_paren_delimited(kind: S) -> bool {
+    matches!(
+        kind,
+        S::ARG_LIST | S::PARAM_LIST | S::ANNOTATION_ARG_LIST | S::RECORD_HEADER
+    )
+}
+
+/// The separator emitted just before a wrapped list's closing token. Hugging the last item emits
+/// nothing — the close token cuddles it; otherwise a soft line, so the close token dedents onto
+/// its own line when the list breaks and collapses to nothing when it stays flat.
+fn close_sep(hug: bool) -> Doc {
+    if hug { nil() } else { softline() }
+}
+
 /// Lower a comma-separated, delimited list that wraps all-or-nothing. Items are separated by a
 /// soft line that becomes a space when flat and a break when wrapped. An argument list
 /// (`ARG_LIST`) additionally breaks when its flat width exceeds `fn-call-width`, and an array
@@ -265,6 +284,11 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         return tabular_doc(open_doc, close_doc, items, &row_sizes);
     }
 
+    // `closing-paren = hug` keeps the closing `)` on the last item's line (no break before it)
+    // for a paren-delimited list; the default dedents it onto its own line. The brace-delimited
+    // array initializer is never hugged.
+    let hug_close = ctx.cfg.closing_paren == ClosingParen::Hug && is_paren_delimited(node.kind());
+
     // `overflow-delimited-expr`: hang the final delimited item past the call line. Laid out
     // flat, the earlier items stay on the line and only the item's body breaks; laid out
     // broken, the result is identical to the all-or-nothing layout below, so this structure
@@ -278,7 +302,9 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             head_inner.push(line());
         }
         let head = concat(vec![open_doc, continuation_indent(concat(head_inner))]);
-        let tail = concat(vec![softline(), close_doc]);
+        // Hug drops the break before `)` so it cuddles the overflowed item's close (`});`); a
+        // flat layout already hugs (the softline is flat), so this only changes the broken case.
+        let tail = concat(vec![close_sep(hug_close), close_doc]);
         let budget = (node.kind() == S::ARG_LIST).then_some(ctx.cfg.fn_call_width);
         return group_overflow(head, last_item, tail, budget);
     }
@@ -295,7 +321,7 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let doc = concat(vec![
         open_doc,
         continuation_indent(concat(vec![softline(), inner])),
-        softline(),
+        close_sep(hug_close),
         close_doc,
     ]);
     // A call's argument list (`ARG_LIST`) honors `fn-call-width` and an array initializer
