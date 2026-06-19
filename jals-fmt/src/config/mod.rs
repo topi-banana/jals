@@ -22,7 +22,7 @@ mod tests;
 pub use error::ConfigError;
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase};
 pub use options::{
-    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ControlBraceStyle,
+    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, ControlBraceStyle,
     FnParamsLayout, IndentStyle, LineEnding, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
 };
 
@@ -174,6 +174,15 @@ pub struct Config {
     /// layout. Layout-only — the significant-token sequence is preserved exactly. Mirrors
     /// rustfmt's `overflow_delimited_expr`.
     pub overflow_delimited_expr: bool,
+    /// Where the closing parenthesis of a wrapped paren-delimited list — a call / annotation
+    /// argument list, a method / constructor parameter list, or a record header — is placed:
+    /// [`OwnLine`](ClosingParen::OwnLine) (the default, dedented onto its own line, mirroring the
+    /// array initializer's `}`) or [`Hug`](ClosingParen::Hug) (kept on the last item's line with
+    /// no break before it, `f(` … `last);`, matching google-java-format). The brace-delimited
+    /// array initializer (`{ … }`) is never affected. Layout-only — the significant-token sequence
+    /// is preserved exactly (only the whitespace before the `)` changes); idempotent. A
+    /// Java-specific option with no rustfmt equivalent.
+    pub closing_paren: ClosingParen,
     /// Preserve the *tabular* (table-shaped) layout of an array initializer: when the source
     /// lays the elements out as a grid — at least two source rows, every row but the last with
     /// the same number of elements (the last with that many or fewer), and no interior
@@ -310,6 +319,7 @@ impl Default for Config {
             binop_separator: BinopSeparator::Front,
             binop_layout: BinopLayout::Tall,
             overflow_delimited_expr: false,
+            closing_paren: ClosingParen::OwnLine,
             tabular_array_initializers: false,
             switch_expression_on_new_line: false,
             switch_case_body: SwitchCaseBody::Always,

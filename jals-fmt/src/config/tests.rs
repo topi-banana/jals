@@ -33,6 +33,8 @@ fn defaults() {
     assert_eq!(c.binop_layout, BinopLayout::Tall);
     // Last-argument overflow is opt-in; off by default keeps the all-or-nothing layout.
     assert!(!c.overflow_delimited_expr);
+    // A wrapped paren list's closing `)` dedents onto its own line by default (the prior behavior).
+    assert_eq!(c.closing_paren, ClosingParen::OwnLine);
     // A switch expression stays on the `=` line by default.
     assert!(!c.switch_expression_on_new_line);
     // A legacy (colon-form) switch breaks and indents its case bodies by default (GJF layout).
@@ -62,6 +64,14 @@ fn brace_style_parses_kebab_values() {
     assert_eq!(c.brace_style, BraceStyle::NextLine);
     let c: Config = toml::from_str("brace-style = \"same-line\"\n").unwrap();
     assert_eq!(c.brace_style, BraceStyle::SameLine);
+}
+
+#[test]
+fn closing_paren_parses_kebab_values() {
+    let c: Config = toml::from_str("closing-paren = \"hug\"\n").unwrap();
+    assert_eq!(c.closing_paren, ClosingParen::Hug);
+    let c: Config = toml::from_str("closing-paren = \"own-line\"\n").unwrap();
+    assert_eq!(c.closing_paren, ClosingParen::OwnLine);
 }
 
 #[test]

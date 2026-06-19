@@ -216,3 +216,22 @@ pub enum SwitchCaseBody {
     /// or indent. Matches the prior (pre-option) behavior.
     SameLine,
 }
+
+/// Where the closing parenthesis of a wrapped *paren-delimited* list — a call / annotation
+/// argument list, a method / constructor parameter list, or a record header — is placed when
+/// the list breaks across lines. The brace-delimited array initializer (`{ … }`) is never
+/// affected and always keeps its `}` on its own line. Layout-only — the significant-token
+/// sequence is preserved exactly (only the whitespace before the `)` changes); idempotent. A
+/// Java-specific option with no rustfmt equivalent (Rust always dangles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClosingParen {
+    /// Break before the closing parenthesis, placing it on its own line dedented to the line
+    /// that opened the list (`f(` … then `)` under the `f`). The default; matches the prior
+    /// behavior, and mirrors the array initializer's `}`.
+    OwnLine,
+    /// Keep the closing parenthesis on the last item's line, with no break before it
+    /// (`f(` … `last);`). Matches google-java-format, which never puts the `)` of an argument
+    /// or parameter list on its own line.
+    Hug,
+}
