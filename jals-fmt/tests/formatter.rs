@@ -3674,11 +3674,14 @@ fn reorder_modifiers_hoists_annotations_to_front() {
 
 #[test]
 fn reorder_modifiers_keeps_relative_annotation_order() {
+    // `@A` is a leading declaration annotation (before a keyword) and is hoisted to the front;
+    // `@B` sits directly before the type, so it is a trailing type-use annotation and is kept in
+    // place after the sorted keywords instead of being hoisted.
     check_reorder_mods(
         "class C{static @A public @B int x=0;}",
         expect![[r#"
             class C {
-                @A @B public static int x = 0;
+                @A public static @B int x = 0;
             }
         "#]],
     );
@@ -3835,7 +3838,10 @@ fn annotation_placement_expanded_breaks_field_annotation() {
 
 #[test]
 fn annotation_placement_expanded_breaks_lone_marker() {
-    // A single marker annotation still breaks onto its own line under `expanded`.
+    // A lone annotation with no keyword modifier before the type is syntactically a declaration
+    // annotation and breaks onto its own line. (google-java-format keeps it inline only when its
+    // `@Target` is `TYPE_USE`, e.g. `@Nullable Foo m()`, which a syntactic formatter cannot
+    // resolve — so only annotations *after* a keyword are recognized as type-use here.)
     check_expanded(
         "class C{@Override void m(){}}",
         expect![[r#"
@@ -3849,14 +3855,15 @@ fn annotation_placement_expanded_breaks_lone_marker() {
 
 #[test]
 fn annotation_placement_expanded_keeps_annotation_arguments() {
-    // Each annotation breaks; its argument list is untouched.
+    // Each leading declaration annotation (here before the `public` keyword) breaks; its argument
+    // list is untouched.
     check_expanded(
-        "class C{@Foo(\"x\") @Bar(a=1) void m(){}}",
+        "class C{@Foo(\"x\") @Bar(a=1) public void m(){}}",
         expect![[r#"
             class C {
                 @Foo("x")
                 @Bar(a = 1)
-                void m() {}
+                public void m() {}
             }
         "#]],
     );
@@ -3864,13 +3871,14 @@ fn annotation_placement_expanded_keeps_annotation_arguments() {
 
 #[test]
 fn annotation_placement_expanded_keeps_parameter_annotation_inline() {
-    // A parameter's annotation is never broken out — it stays inline with the parameter.
+    // A parameter's annotation is never broken out — it stays inline with the parameter, even when
+    // the method's own leading declaration annotation (`@Override`, before `public`) breaks.
     check_expanded(
-        "class C{@Override void m(@NonNull String s){}}",
+        "class C{@Override public void m(@NonNull String s){}}",
         expect![[r#"
             class C {
                 @Override
-                void m(@NonNull String s) {}
+                public void m(@NonNull String s) {}
             }
         "#]],
     );
@@ -3923,8 +3931,9 @@ fn annotation_placement_expanded_breaks_local_variable_annotation() {
 
 #[test]
 fn annotation_placement_expanded_composes_with_reorder_modifiers() {
-    // Annotations are first hoisted to the front (reorder-modifiers), then each broken onto its
-    // own line (annotation-placement = expanded).
+    // The leading declaration annotation `@Foo` is hoisted to the front (reorder-modifiers) and
+    // broken onto its own line (annotation-placement = expanded); the trailing type-use annotation
+    // `@Bar`, sitting directly before the type, stays in place and inline.
     let cfg = Config {
         reorder_modifiers: true,
         annotation_placement: AnnotationPlacement::Expanded,
@@ -3933,8 +3942,7 @@ fn annotation_placement_expanded_composes_with_reorder_modifiers() {
     expect![[r#"
         class C {
             @Foo
-            @Bar
-            public static int x;
+            public static @Bar int x;
         }
     "#]]
     .assert_eq(&fmt_with("class C{static @Foo public @Bar int x;}", &cfg));
@@ -3942,7 +3950,8 @@ fn annotation_placement_expanded_composes_with_reorder_modifiers() {
 
 #[test]
 fn annotation_placement_expanded_keeps_single_line_body() {
-    // The header break does not force a `fn-single-line` body to break.
+    // The header break does not force a `fn-single-line` body to break. `@Override` breaks here
+    // because the `public` keyword separates it from the type (a leading declaration annotation).
     let cfg = Config {
         fn_single_line: true,
         annotation_placement: AnnotationPlacement::Expanded,
@@ -3951,15 +3960,18 @@ fn annotation_placement_expanded_keeps_single_line_body() {
     expect![[r#"
         class C {
             @Override
-            int m() { return 1; }
+            public int m() { return 1; }
         }
     "#]]
-    .assert_eq(&fmt_with("class C{@Override int m(){return 1;}}", &cfg));
+    .assert_eq(&fmt_with(
+        "class C{@Override public int m(){return 1;}}",
+        &cfg,
+    ));
 }
 
 #[test]
 fn annotation_placement_modes_are_idempotent() {
-    let src = "@A @B class C{@Override int x=0;@Foo(\"y\") void m(@NonNull String s){}static @Bar int z;}";
+    let src = "@A @B class C{@Override int x=0;@Foo(\"y\") void m(@NonNull String s){}static @Bar int z;@Deprecated public @Nullable Object f(){return null;}@Deprecated @Nullable C(){}}";
     for placement in [AnnotationPlacement::Compact, AnnotationPlacement::Expanded] {
         let once = fmt_annotation_placement(src, placement);
         let twice = fmt_annotation_placement(&once, placement);
@@ -3968,6 +3980,93 @@ fn annotation_placement_modes_are_idempotent() {
             "annotation-placement {placement:?} must be idempotent"
         );
     }
+}
+
+// ----- type-use vs declaration annotation distinction (google-java-format parity) --------
+
+/// Format with `reorder-modifiers` + `annotation-placement = expanded` (the google-java-format
+/// preset), to exercise how the two compose around type-use annotations.
+fn fmt_reorder_expanded(src: &str) -> String {
+    let cfg = Config {
+        reorder_modifiers: true,
+        annotation_placement: AnnotationPlacement::Expanded,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+#[test]
+fn type_use_annotation_after_keyword_stays_inline() {
+    // `@Nullable` sits after `public`, directly before the return type, so it annotates the type
+    // and stays inline (google-java-format keeps `public @Nullable Object foo()`).
+    check_expanded(
+        "class C{public @Nullable Object foo(){}}",
+        expect![[r#"
+            class C {
+                public @Nullable Object foo() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn declaration_annotation_breaks_while_type_use_stays_inline() {
+    // `@Deprecated` precedes the `public` keyword (declaration annotation → own line); `@Nullable`
+    // follows it, directly before the type (type-use → inline).
+    check_expanded(
+        "class C{@Deprecated public @Nullable Object foo(){}}",
+        expect![[r#"
+            class C {
+                @Deprecated
+                public @Nullable Object foo() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn constructor_annotations_break_having_no_type() {
+    // A constructor has no type, so its annotations are all declaration annotations and each
+    // breaks onto its own line (no trailing type-use run).
+    check_expanded(
+        "class C{@Deprecated @Nullable C(){}}",
+        expect![[r#"
+            class C {
+                @Deprecated
+                @Nullable
+                C() {}
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn reorder_and_expanded_keep_type_use_annotation_in_place() {
+    // The google-java-format preset (reorder + expanded): `@Deprecated` breaks, the keyword stays
+    // canonical, and the type-use `@Nullable` is neither hoisted nor broken.
+    expect![[r#"
+        class C {
+            @Deprecated
+            public @Nullable Object foo() {}
+        }
+    "#]]
+    .assert_eq(&fmt_reorder_expanded(
+        "class C{@Deprecated public @Nullable Object foo(){}}",
+    ));
+}
+
+#[test]
+fn reorder_keeps_type_use_annotation_inline_compact() {
+    // With `reorder-modifiers` alone (compact), a type-use annotation directly before the type is
+    // kept in place rather than hoisted ahead of the keyword (cf. google-java-format's B20577626).
+    check_reorder_mods(
+        "class C{private @Mock GsaConfigFlags mGsaConfig;}",
+        expect![[r#"
+            class C {
+                private @Mock GsaConfigFlags mGsaConfig;
+            }
+        "#]],
+    );
 }
 
 // ----- hex-literal-case -------------------------------------------------------------------

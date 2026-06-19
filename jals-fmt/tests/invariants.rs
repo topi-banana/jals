@@ -1615,8 +1615,10 @@ proptest! {
         prop_assert_eq!(before, after);
     }
 
-    /// Every emitted `MODIFIERS` node is canonical: all annotations precede every keyword
-    /// modifier, and the keyword modifiers are in non-decreasing canonical rank.
+    /// Every emitted `MODIFIERS` node is canonical: the leading declaration annotations precede
+    /// every keyword modifier, the keyword modifiers are in non-decreasing canonical rank, and any
+    /// trailing *type-use* annotation run (annotations directly before the type) stays after the
+    /// keywords. Excluding that trailing run, all annotations precede all keywords.
     #[test]
     fn reorder_mods_emits_canonical_order(src in java_with_modifiers()) {
         let out = fmt_with(&src, &reorder_mods_config());
@@ -1625,20 +1627,30 @@ proptest! {
             .descendants()
             .filter(|n| n.kind() == SyntaxKind::MODIFIERS)
         {
-            let mut seen_keyword = false;
-            let mut last_rank = 0usize;
-            for e in m
+            let els: Vec<_> = m
                 .children_with_tokens()
                 .filter(|e| !e.kind().is_trivia())
-            {
+                .collect();
+            // Drop the trailing type-use annotation run before checking the canonical shape: it is
+            // intentionally kept in place after the keywords rather than hoisted to the front.
+            let mut prefix_len = els.len();
+            while prefix_len > 0 && els[prefix_len - 1].kind() == SyntaxKind::ANNOTATION {
+                prefix_len -= 1;
+            }
+            let mut seen_keyword = false;
+            let mut last_rank = 0usize;
+            for e in &els[..prefix_len] {
                 match modifier_rank(e.kind()) {
                     Some(rank) => {
                         prop_assert!(rank >= last_rank, "keyword ranks must be non-decreasing");
                         last_rank = rank;
                         seen_keyword = true;
                     }
-                    // An annotation appearing after a keyword would mean it was not hoisted.
-                    None => prop_assert!(!seen_keyword, "annotations must precede keyword modifiers"),
+                    // A non-trailing annotation after a keyword would mean it was not hoisted.
+                    None => prop_assert!(
+                        !seen_keyword,
+                        "leading annotations must precede keyword modifiers"
+                    ),
                 }
             }
         }
