@@ -4784,6 +4784,122 @@ fn switch_on_new_line_is_idempotent() {
     );
 }
 
+#[test]
+fn switch_arrow_body_arrow_comment_hangs_at_continuation() {
+    // A trailing `//` comment on `->` forces the body onto its own line; the body hangs at the
+    // label + one continuation (`case` at +8, body at +12), like the legacy colon form indents.
+    check_switch_nl(
+        "class T { void main() {int x = switch (e) {case \"a\" -> //hello\n0; case \"b\"-> 1;}; }}",
+        expect![[r#"
+            class T {
+              void main() {
+                int x =
+                    switch (e) {
+                      case "a" -> //hello
+                          0;
+                      case "b" -> 1;
+                    };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_arrow_body_leading_comment_hangs_at_continuation() {
+    // A leading comment on the body's first token (its own line between `->` and the body) hangs
+    // both the comment and the body at the label + one continuation, the same as the arrow form.
+    check_switch_nl(
+        "class T { void main() {int x = switch (e) {case \"a\" ->\n//c\n0; default -> 1;}; }}",
+        expect![[r#"
+            class T {
+              void main() {
+                int x =
+                    switch (e) {
+                      case "a" ->
+                          //c
+                          0;
+                      default -> 1;
+                    };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_arrow_body_arrow_comment_default_config() {
+    // Default config: `continuation_cols` falls back to `indent-width` (4). The switch rides on the
+    // `=` line, `case` lands at +12, and the comment-broken body at +16.
+    check(
+        "class T { void main() {int x = switch (e) {case \"a\" -> //hello\n0; case \"b\"-> 1;}; }}",
+        expect![[r#"
+            class T {
+                void main() {
+                    int x = switch (e) {
+                        case "a" -> //hello
+                            0;
+                        case "b" -> 1;
+                    };
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_arrow_block_body_with_arrow_comment_keeps_block_at_label() {
+    // A `{ … }` body is excluded from the continuation hang: even with a trailing comment on `->`,
+    // its `{` stays at the label level and it aligns its own `}` with the label.
+    check_switch_nl(
+        "class T { void main() {switch (e) {case A -> //c\n{ f(); } default -> { g(); }}}}",
+        expect![[r#"
+            class T {
+              void main() {
+                switch (e) {
+                  case A -> //c
+                  {
+                    f();
+                  }
+                  default -> {
+                    g();
+                  }
+                }
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_arrow_comment_free_body_unchanged() {
+    // No comment after `->` ⇒ the continuation hang never fires; comment-free bodies are byte-for-
+    // byte unchanged (the body rides on the arrow line).
+    check_switch_nl(
+        "class T { int x = switch (v) { case 1 -> 1; default -> 0; }; }",
+        expect![[r#"
+            class T {
+              int x =
+                  switch (v) {
+                    case 1 -> 1;
+                    default -> 0;
+                  };
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn switch_arrow_commented_body_is_idempotent() {
+    let src = "class T { void main() {int x = switch (e) {case \"a\" -> //hello\n0; case \"b\" ->\n//c\n1;}; }}";
+    let once = fmt_switch_nl(src);
+    let twice = fmt_switch_nl(&once);
+    assert_eq!(
+        once, twice,
+        "a comment-hung arrow switch body must be idempotent"
+    );
+}
+
 // ----- switch-case-body -------------------------------------------------------------------
 
 /// Format with an explicit `switch-case-body` mode at the default 4-space layout.
