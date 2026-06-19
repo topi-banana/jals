@@ -9,8 +9,13 @@
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{BraceStyle, Config, ControlBraceStyle, SwitchCaseBody};
-use crate::doc::{Doc, blank_line, concat, group, hardline, if_break, indent, line, nil, text};
-use crate::lower::{Ctx, first_sig_token, lower, lower_elements, lower_generic, tok};
+use crate::doc::{
+    Doc, blank_line, concat, continuation_indent, group, hardline, if_break, indent, line, nil,
+    text,
+};
+use crate::lower::{
+    Ctx, first_sig_token, last_sig_token, lower, lower_elements, lower_generic, sep, tok,
+};
 
 /// Lower a `{ ... }` node (block, class body, switch body) with one indentation level.
 pub(crate) fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
@@ -295,6 +300,63 @@ pub(crate) fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         parts.push(indent(concat(body)));
     }
     concat(parts)
+}
+
+/// Lower an *arrow-form* `switch` rule — `SwitchLabel '->' (Block | ThrowStmt | Expr ';')`.
+///
+/// When a comment forces a break right after `->` — a trailing comment on `->`, or a leading
+/// comment on the body's first token — the `->` and the body hang at one *continuation* indent
+/// past the label (the continuation-indent counterpart to the legacy colon group's block-indented
+/// body, [`lower_switch_group`]). Gating on a forced break keeps every comment-free body
+/// byte-for-byte unchanged (a long body still wraps on the arrow line, a `{ … }` block still aligns
+/// its `}` with the label); and because the wrap only fires when the body is already on its own
+/// line, shifting the *whole* body to the continuation level is correct even for an
+/// anonymous-class / lambda body (its `}` stays aligned with the hung body). A `{ … }` body is
+/// excluded (blocks never take a continuation indent), and a malformed rule with no `->` falls
+/// back to the inline path, so every significant token is still emitted exactly once.
+pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    // Children (grammar): `SwitchLabel '->' (Block | ThrowStmt | Expr ';')`. The label is the only
+    // significant content before the `->`, so the rule splits cleanly into the label and a tail.
+    let label = node.children().find(|n| n.kind() == S::SWITCH_LABEL);
+    let arrow = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == S::ARROW);
+    let (Some(label), Some(arrow)) = (label, arrow) else {
+        return lower_generic(node, ctx); // malformed: missing the label or the `->`
+    };
+
+    // A `{ … }` block body keeps the generic layout — its `{` rides on the arrow line and it aligns
+    // its own `}` with the label, so it is never hung at a continuation indent.
+    let body = node.children().find(|n| n.kind() != S::SWITCH_LABEL);
+    if body.as_ref().map(|n| n.kind()) == Some(S::BLOCK) {
+        return lower_generic(node, ctx);
+    }
+
+    // The body lands on its own line only when a comment forces a break right after `->` — a
+    // trailing comment on `->`, or a leading comment on the body's first significant token.
+    let forces_break = ctx.comments.has_trailing(&arrow)
+        || body
+            .as_ref()
+            .and_then(first_sig_token)
+            .is_some_and(|t| ctx.comments.has_leading(&t));
+    if !forces_break {
+        return lower_generic(node, ctx);
+    }
+
+    // The label stays at the rule's level; the `->` and the body hang at one continuation indent,
+    // so the comment-forced body line sits one level past the label. The `->` is inside the wrap
+    // so the break its trailing comment carries — and any leading-comment break on the body — is
+    // requested at `base + continuation`, governing where the body's first line lands.
+    let arrow_sep = sep(last_sig_token(&label).as_ref(), &arrow, ctx.cfg);
+    let tail = node
+        .children_with_tokens()
+        .skip_while(|e| e.as_token().map(|t| t.kind()) != Some(S::ARROW));
+    concat(vec![
+        lower(&label, ctx),
+        arrow_sep,
+        continuation_indent(lower_elements(tail, ctx, false)),
+    ])
 }
 
 /// A switch label paired with its terminating `:` token.
