@@ -44,6 +44,13 @@ pub struct Config {
     pub continuation_indent: Option<usize>,
     /// Runs of blank lines are collapsed down to at most this many.
     pub max_blank_lines: usize,
+    /// Preserve a blank line at the very start of a braced body (immediately after `{`, before
+    /// the first item), instead of always dropping it. Off by default. Applies to every braced
+    /// body (`lower_braced`): type / module bodies, method / constructor / initializer /
+    /// control-flow / bare blocks, and `switch` blocks. The kept run is still clamped by
+    /// `max-blank-lines`. Layout-only — the significant-token sequence is preserved exactly. Enum
+    /// bodies and the blank line before a closing `}` are not affected.
+    pub blank_line_at_block_start: bool,
     /// Line terminator to emit.
     pub line_ending: LineEnding,
     /// Ensure the output ends with exactly one newline.
@@ -312,6 +319,7 @@ impl Default for Config {
             indent_width: 4,
             continuation_indent: None,
             max_blank_lines: 1,
+            blank_line_at_block_start: false,
             line_ending: LineEnding::Lf,
             insert_final_newline: true,
             max_width: 100,

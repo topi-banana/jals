@@ -33,6 +33,14 @@ fn inline_block_config() -> Config {
     }
 }
 
+/// Config with `blank-line-at-block-start` enabled.
+fn blank_line_at_block_start_config() -> Config {
+    Config {
+        blank_line_at_block_start: true,
+        ..Config::default()
+    }
+}
+
 /// The prose "skeleton" of all comments: every character that is not whitespace and not a
 /// comment marker (`/` or `*`), in document order. Reflow only changes whitespace and
 /// markers and never splits or reorders a word, so this sequence is invariant under it.
@@ -917,6 +925,28 @@ proptest! {
     #[test]
     fn inline_block_preserves_comments(src in javaish()) {
         let out = fmt_with(&src, &inline_block_config());
+        prop_assert_eq!(comment_multiset_no_ws(&src), comment_multiset_no_ws(&out));
+    }
+
+    /// Preserving a body's leading blank line stays idempotent.
+    #[test]
+    fn blank_line_at_block_start_idempotent(src in javaish()) {
+        let once = fmt_with(&src, &blank_line_at_block_start_config());
+        let twice = fmt_with(&once, &blank_line_at_block_start_config());
+        prop_assert_eq!(once, twice);
+    }
+
+    /// Preserving a body's leading blank line only touches whitespace, never significant tokens.
+    #[test]
+    fn blank_line_at_block_start_preserves_significant_tokens(src in javaish()) {
+        let out = fmt_with(&src, &blank_line_at_block_start_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Preserving a body's leading blank line never drops or mangles a comment (multiset preserved).
+    #[test]
+    fn blank_line_at_block_start_preserves_comments(src in javaish()) {
+        let out = fmt_with(&src, &blank_line_at_block_start_config());
         prop_assert_eq!(comment_multiset_no_ws(&src), comment_multiset_no_ws(&out));
     }
 

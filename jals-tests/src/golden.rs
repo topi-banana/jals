@@ -74,6 +74,9 @@ pub fn google_config() -> Config {
         // Column limit and blank-line policy.
         max_width: 100,
         max_blank_lines: 1,
+        // google-java-format preserves a blank line at the start of a braced body (right after
+        // `{`), e.g. a class body or a control-flow block, instead of dropping it.
+        blank_line_at_block_start: true,
         line_ending: LineEnding::Lf,
         insert_final_newline: true,
         // K&R / "Egyptian" braces for both declarations and control flow.
