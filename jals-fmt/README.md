@@ -115,7 +115,11 @@ The current formatter is intentionally minimal. It performs:
   `space-after-colon` (default on), applied uniformly to every Java colon context: a ternary
   (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled statement (`label:`), an
   `assert` message (`assert c : m`), and a `switch` `case` / `default` label (`case x:`). The
-  defaults give idiomatic `label:` / `case x:` style. The `::` method-reference token is a
+  defaults give idiomatic `label:` / `case x:` style. `space-around-operator-colon` (default off)
+  additionally spaces *before* the *operator* colons — the ones separating two operands: the
+  ternary, the enhanced `for`, and the `assert` message — while leaving the label colons
+  (`label:`, `case x:`) hugged; an unnamed `_` for-each variable also keeps hugging
+  (`for (T _: xs)`), matching google-java-format. The `::` method-reference token is a
   distinct token and is never affected.
 - **Type-punctuation density** — the spacing around the `&` of a Java intersection type follows
   `type-punctuation-density`: `wide` (default, `A & B`) or `compressed` (`A&B`). It governs both
@@ -225,6 +229,7 @@ are kebab-case.
 | `overflow-delimited-expr` | bool | `false` | ✅ wired — let the last item of a call / annotation argument list hang past the call line when it is a block-bodied lambda, anonymous-class `new`, or array initializer (`f(a, () -> {` … `});`); falls back to the all-or-nothing layout when an earlier item is multi-line or the first line overflows `fn-call-width`/`max-width`. Layout-only (the significant-token sequence is preserved exactly); mirrors rustfmt's `overflow_delimited_expr` |
 | `space-before-colon` | bool | `false` | ✅ wired — emit a space before a `:`, applied uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`). Off by default (idiomatic `label:` / `case x:`). `::` is a distinct token and is never affected. Layout-only; mirrors rustfmt's `space_before_colon` |
 | `space-after-colon` | bool | `true` | ✅ wired — emit a space after a `:`, in the same contexts as `space-before-colon`. On by default. `::` is never affected. Layout-only; mirrors rustfmt's `space_after_colon` |
+| `space-around-operator-colon` | bool | `false` | ✅ wired — emit a space before an **operator** colon — the `:` separating two operands: an enhanced `for` (`for (T x : xs)`), a ternary (`a ? b : c`), and an `assert` message (`assert c : m`). Additive over `space-before-colon` (space emitted when either is on); the label colons (`label:`, `case x:`) are unaffected. Off by default. Exception: an unnamed `_` for-each variable keeps hugging (`for (T _: xs)`), matching google-java-format. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
 | `switch-case-body` | `"always"` \| `"single-line"` \| `"same-line"` | `"always"` | ✅ wired — layout of a **legacy** (colon-form) `switch` group's body relative to its `case x:` / `default:` colon: `always` puts each label on its own line and breaks every body statement onto its own line indented one level (google-java-format's layout), `single-line` keeps a lone label with a single, comment-free statement inline (`case x: stmt;`) and breaks the rest, `same-line` keeps the whole group inline (`case x: stmt; stmt;`). The arrow form (`case x -> …`) is never affected. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
 | `fn-params-layout` | `"tall"` \| `"compressed"` \| `"vertical"` | `"tall"` | ✅ wired — layout of a method / constructor parameter list: `tall` (all-or-nothing), `compressed` (pack as many parameters per line as fit `max-width`), or `vertical` (always one per line, even when it fits). Governs only declaration parameter lists, never call argument lists. Layout-only (the significant-token sequence is preserved exactly). The deprecated key `fn-args-layout` is accepted as an alias. Mirrors rustfmt's `fn_params_layout` |
 | `type-punctuation-density` | `"wide"` \| `"compressed"` | `"wide"` | ✅ wired — spacing around the `&` of a Java intersection type: `wide` (`A & B`) or `compressed` (`A&B`). Governs both a type-parameter bound (`<T extends A & B>`) and a cast intersection (`(A & B) x`); the bitwise-AND operator `&` (`a & b`) is never affected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `type_punctuation_density` |
@@ -296,15 +301,17 @@ declaration parameter lists — see [What it does today](#what-it-does-today). R
 ## 4. Spacing
 
 Colon spacing (`space_after_colon`, `space_before_colon`), applied uniformly to every Java
-colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`), and
-type-punctuation density (`type_punctuation_density`), governing the `&` of an intersection
-type (`T extends A & B` and `(A & B) x`), are both **implemented** — see
-[What it does today](#what-it-does-today). Nothing remains in this section:
+colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`), the
+operator-colon space-before (`space_around_operator_colon`), and type-punctuation density
+(`type_punctuation_density`), governing the `&` of an intersection type (`T extends A & B` and
+`(A & B) x`), are all **implemented** — see [What it does today](#what-it-does-today). Nothing
+remains in this section:
 
 | Capability | rustfmt equivalent |
 | --- | --- |
 | Space after `:` (ternary, enhanced-`for`, labels, `case x:`) | `space_after_colon` ✅ |
 | Space before `:` | `space_before_colon` ✅ |
+| Space before an operator `:` (enhanced-`for` / ternary / `assert`, `_`-hug exception) | none (Java-specific) ✅ |
 | Density of type punctuation (`T extends A & B`) | `type_punctuation_density` ✅ |
 
 ## 5. Comments

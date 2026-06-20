@@ -106,6 +106,11 @@ pub fn google_config() -> Config {
         // google-java-format puts a `switch` expression that is the value of a `=` (a variable /
         // field initializer or an assignment) on its own continuation-indented line.
         switch_expression_on_new_line: true,
+        // google-java-format surrounds an operator colon — an enhanced `for` (`for (T x : xs)`),
+        // a ternary (`a ? b : c`), and an `assert` message (`assert c : m`) — with spaces, while
+        // still hugging the colon of an unnamed `_` for-each variable (`for (T _: xs)`) and of
+        // label / `case` colons (`label:`, `case x:`).
+        space_around_operator_colon: true,
         ..Config::default()
     }
 }
@@ -285,6 +290,8 @@ mod tests {
         assert!(c.normalize_parameter_comments);
         assert!(c.tabular_array_initializers);
         assert!(c.switch_expression_on_new_line);
+        // google-java-format spaces the operator colon (enhanced-`for` / ternary / `assert`).
+        assert!(c.space_around_operator_colon);
         // google-java-format breaks and indents a legacy (colon-form) switch's case bodies; this
         // is jals's default, so `google_config` inherits it.
         assert_eq!(c.switch_case_body, jals_fmt::SwitchCaseBody::Always);
