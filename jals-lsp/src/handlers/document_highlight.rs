@@ -14,18 +14,19 @@
 //! highlights.
 
 use async_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
-use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use jals_syntax::{Parse, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::line_index::LineIndex;
 
 /// All same-text occurrences of the identifier under `position`, in document order; empty if
 /// the cursor is not on an identifier.
 pub(crate) fn document_highlight(
+    parse: &Parse,
     text: &str,
     line_index: &LineIndex,
     position: Position,
 ) -> Vec<DocumentHighlight> {
-    let root = jals_syntax::parse(text).syntax();
+    let root = parse.syntax();
     // `offset` is clamped into `[0, len]`, so `token_at_offset`'s precondition holds. At a
     // boundary between two tokens it yields both; preferring the `IDENT` side keeps a cursor
     // at the end of a word highlighting it (standard editor UX).
@@ -108,21 +109,26 @@ mod tests {
         character: u32,
     ) -> Vec<(u32, u32, u32, DocumentHighlightKind)> {
         let idx = LineIndex::new(text);
-        document_highlight(text, &idx, Position { line, character })
-            .into_iter()
-            .map(|h| {
-                assert_eq!(
-                    h.range.start.line, h.range.end.line,
-                    "identifiers are single-line"
-                );
-                (
-                    h.range.start.line,
-                    h.range.start.character,
-                    h.range.end.character,
-                    h.kind.expect("kind is always set"),
-                )
-            })
-            .collect()
+        document_highlight(
+            &jals_syntax::parse(text),
+            text,
+            &idx,
+            Position { line, character },
+        )
+        .into_iter()
+        .map(|h| {
+            assert_eq!(
+                h.range.start.line, h.range.end.line,
+                "identifiers are single-line"
+            );
+            (
+                h.range.start.line,
+                h.range.start.character,
+                h.range.end.character,
+                h.kind.expect("kind is always set"),
+            )
+        })
+        .collect()
     }
 
     /// Highlights with the cursor at the start of the first occurrence of `needle`.
@@ -248,8 +254,9 @@ mod tests {
     fn never_panics_on_broken_or_out_of_range() {
         for text in ["", "class", "class C {", "/* unterminated", "@", "a ="] {
             let idx = LineIndex::new(text);
+            let parse = jals_syntax::parse(text);
             for (line, character) in [(0, 0), (999, 999), (0, 999)] {
-                document_highlight(text, &idx, Position { line, character });
+                document_highlight(&parse, text, &idx, Position { line, character });
             }
         }
     }

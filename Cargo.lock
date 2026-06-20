@@ -891,6 +891,7 @@ dependencies = [
  "async-lsp",
  "futures",
  "jals-fmt",
+ "jals-lint",
  "jals-syntax",
  "serde_json",
  "tempfile",

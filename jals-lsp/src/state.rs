@@ -6,27 +6,33 @@ use std::sync::Arc;
 
 use async_lsp::lsp_types::{TextDocumentContentChangeEvent, Url};
 use jals_fmt::Config;
+use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
 
-/// An open document: its text, the client's version, and a precomputed line index.
+/// An open document: its text, the client's version, a precomputed line index, and the
+/// parsed CST.
 ///
-/// `text` and `line_index` are behind `Arc` so a snapshot can be cheaply cloned out of
-/// the store and moved into an async request handler.
+/// `text`, `line_index`, and `parse` are behind `Arc` so a snapshot can be cheaply cloned
+/// out of the store and moved into an async request handler. The CST is parsed once here,
+/// when the document is built, so each request handler reuses it instead of reparsing.
 #[derive(Clone)]
 pub(crate) struct Document {
     pub(crate) text: Arc<str>,
     pub(crate) version: i32,
     pub(crate) line_index: Arc<LineIndex>,
+    pub(crate) parse: Arc<Parse>,
 }
 
 impl Document {
     fn new(text: String, version: i32) -> Document {
         let line_index = Arc::new(LineIndex::new(&text));
+        let parse = Arc::new(jals_syntax::parse(&text));
         Document {
             text: Arc::from(text),
             version,
             line_index,
+            parse,
         }
     }
 }
@@ -99,48 +105,78 @@ pub(crate) fn apply_content_changes(
     text
 }
 
-/// Resolves a `jals-fmt` `Config` for a document by discovering `jalsfmt.toml` from the
-/// file's directory, memoized per directory. Mirrors the `jals fmt` CLI behavior.
-#[derive(Default)]
-pub(crate) struct Discovery {
-    cache: HashMap<PathBuf, Config>,
+/// A config the LSP discovers by walking up from a document's directory to a well-known TOML
+/// file. Implemented for both `jals_fmt::Config` and `jals_lint::Config` so one [`Discovery`]
+/// cache serves the formatter and the linter alike.
+pub(crate) trait DiscoverableConfig: Clone + Default {
+    /// The config file name searched for (e.g. `jalsfmt.toml`).
+    const FILE_NAME: &'static str;
+    /// Discover the config from `dir` upward, falling back to the default on any error.
+    fn discover_or_default(dir: &Path) -> Self;
 }
 
-impl Discovery {
-    /// Discover the config for a document URI. Falls back to `Config::default()` for
-    /// non-file URIs (e.g. `untitled:`) and when discovery fails.
-    pub(crate) fn for_uri(&mut self, uri: &Url) -> Config {
+impl DiscoverableConfig for Config {
+    const FILE_NAME: &'static str = "jalsfmt.toml";
+    fn discover_or_default(dir: &Path) -> Self {
+        Config::discover(dir).unwrap_or_default()
+    }
+}
+
+impl DiscoverableConfig for jals_lint::Config {
+    const FILE_NAME: &'static str = "jalslint.toml";
+    fn discover_or_default(dir: &Path) -> Self {
+        jals_lint::Config::discover(dir).unwrap_or_default()
+    }
+}
+
+/// Resolves a `C` for a document by discovering its
+/// [`FILE_NAME`](DiscoverableConfig::FILE_NAME) from the file's directory upward, memoized per
+/// directory. Mirrors the `jals` CLI behavior.
+#[derive(Default)]
+pub(crate) struct Discovery<C> {
+    cache: HashMap<PathBuf, C>,
+}
+
+impl<C: DiscoverableConfig> Discovery<C> {
+    /// Discover the config for a document URI. Falls back to `C::default()` for non-file URIs
+    /// (e.g. `untitled:`) and when discovery fails.
+    pub(crate) fn for_uri(&mut self, uri: &Url) -> C {
         let Some(dir) = uri
             .to_file_path()
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf))
         else {
-            return Config::default();
+            return C::default();
         };
         if let Some(cfg) = self.cache.get(&dir) {
             return cfg.clone();
         }
-        let cfg = Config::discover(&dir).unwrap_or_default();
+        let cfg = C::discover_or_default(&dir);
         self.cache.insert(dir, cfg.clone());
         cfg
     }
 
-    /// Forget all memoized configs, e.g. after a `jalsfmt.toml` changes on disk.
-    /// Discovery reruns lazily on the next request that needs a config.
+    /// Forget all memoized configs, e.g. after a config file changes on disk. Discovery
+    /// reruns lazily on the next request that needs a config.
     pub(crate) fn clear(&mut self) {
         self.cache.clear();
     }
 }
 
-/// File name of the formatter config, mirrored from `jals_fmt::Config::discover`.
-const CONFIG_FILE_NAME: &str = "jalsfmt.toml";
+/// Whether `uri` refers to a config file named `C::FILE_NAME` (e.g. `jalsfmt.toml`).
+fn is_config_file_for<C: DiscoverableConfig>(uri: &Url) -> bool {
+    uri.to_file_path()
+        .is_ok_and(|path| path.file_name().is_some_and(|name| name == C::FILE_NAME))
+}
 
 /// Whether a watched-file URI refers to a `jalsfmt.toml` config file.
 pub(crate) fn is_config_file(uri: &Url) -> bool {
-    uri.to_file_path().is_ok_and(|path| {
-        path.file_name()
-            .is_some_and(|name| name == CONFIG_FILE_NAME)
-    })
+    is_config_file_for::<Config>(uri)
+}
+
+/// Whether a watched-file URI refers to a `jalslint.toml` config file.
+pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
+    is_config_file_for::<jals_lint::Config>(uri)
 }
 
 #[cfg(test)]
@@ -297,7 +333,7 @@ mod tests {
 
     #[test]
     fn discovery_non_file_uri_uses_default() {
-        let mut discovery = Discovery::default();
+        let mut discovery = Discovery::<Config>::default();
         let uri = Url::parse("untitled:Untitled-1").unwrap();
         assert_eq!(discovery.for_uri(&uri), Config::default());
     }
@@ -308,7 +344,7 @@ mod tests {
         let config_path = dir.path().join("jalsfmt.toml");
         let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
 
-        let mut discovery = Discovery::default();
+        let mut discovery = Discovery::<Config>::default();
         std::fs::write(&config_path, "indent-width = 7\n").unwrap();
         assert_eq!(discovery.for_uri(&uri).indent_width, 7);
 
@@ -328,5 +364,45 @@ mod tests {
         assert!(!is_config_file(&other));
         let non_file = Url::parse("untitled:jalsfmt.toml").unwrap();
         assert!(!is_config_file(&non_file));
+    }
+
+    #[test]
+    fn lint_discovery_non_file_uri_uses_default() {
+        let mut discovery = Discovery::<jals_lint::Config>::default();
+        let uri = Url::parse("untitled:Untitled-1").unwrap();
+        assert_eq!(discovery.for_uri(&uri), jals_lint::Config::default());
+    }
+
+    #[test]
+    fn lint_discovery_clear_picks_up_config_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("jalslint.toml");
+        let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
+
+        let mut discovery = Discovery::<jals_lint::Config>::default();
+        // The resolved severity of `wildcard-import` under the on-disk config.
+        let wildcard = |d: &mut Discovery<jals_lint::Config>| {
+            d.for_uri(&uri).rules.get("wildcard-import").copied()
+        };
+
+        std::fs::write(&config_path, "[rules]\nwildcard-import = \"allow\"\n").unwrap();
+        assert_eq!(wildcard(&mut discovery), Some(jals_lint::Severity::Allow));
+
+        // The cached config survives an edit on disk until the cache is cleared.
+        std::fs::write(&config_path, "[rules]\nwildcard-import = \"error\"\n").unwrap();
+        assert_eq!(wildcard(&mut discovery), Some(jals_lint::Severity::Allow));
+
+        discovery.clear();
+        assert_eq!(wildcard(&mut discovery), Some(jals_lint::Severity::Error));
+    }
+
+    #[test]
+    fn is_lint_config_file_matches_only_jalslint_toml() {
+        let config = Url::parse("file:///p/jalslint.toml").unwrap();
+        assert!(is_lint_config_file(&config));
+        let other = Url::parse("file:///p/jalsfmt.toml").unwrap();
+        assert!(!is_lint_config_file(&other));
+        let non_file = Url::parse("untitled:jalslint.toml").unwrap();
+        assert!(!is_lint_config_file(&non_file));
     }
 }

@@ -6,18 +6,19 @@
 //! selection along syntactic boundaries.
 
 use async_lsp::lsp_types::{Position, SelectionRange};
-use jals_syntax::{SyntaxElement, SyntaxNode};
+use jals_syntax::{Parse, SyntaxElement, SyntaxNode};
 use text_size::TextRange;
 
 use crate::line_index::LineIndex;
 
 /// Build a selection-range chain for each requested position, in request order.
 pub(crate) fn selection_ranges(
+    parse: &Parse,
     text: &str,
     line_index: &LineIndex,
     positions: &[Position],
 ) -> Vec<SelectionRange> {
-    let root = jals_syntax::parse(text).syntax();
+    let root = parse.syntax();
     positions
         .iter()
         .map(|&pos| range_at(&root, text, line_index, pos))
@@ -76,7 +77,12 @@ mod tests {
     /// `(start_line, start_char, end_line, end_char)`, innermost first.
     fn chain_at(text: &str, line: u32, character: u32) -> Vec<(u32, u32, u32, u32)> {
         let idx = LineIndex::new(text);
-        let got = selection_ranges(text, &idx, &[Position { line, character }]);
+        let got = selection_ranges(
+            &jals_syntax::parse(text),
+            text,
+            &idx,
+            &[Position { line, character }],
+        );
         assert_eq!(got.len(), 1);
         let mut chain = Vec::new();
         let mut cur = Some(&got[0]);
@@ -115,6 +121,7 @@ mod tests {
         let text = "class Cls { int xy; }";
         let idx = LineIndex::new(text);
         let got = selection_ranges(
+            &jals_syntax::parse(text),
             text,
             &idx,
             &[
@@ -160,7 +167,7 @@ mod tests {
                     character: 999,
                 },
             ];
-            let got = selection_ranges(text, &idx, &positions);
+            let got = selection_ranges(&jals_syntax::parse(text), text, &idx, &positions);
             assert_eq!(got.len(), positions.len());
         }
     }
