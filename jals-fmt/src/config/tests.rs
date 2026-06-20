@@ -43,6 +43,8 @@ fn defaults() {
     assert!(!c.switch_expression_on_new_line);
     // A legacy (colon-form) switch breaks and indents its case bodies by default (GJF layout).
     assert_eq!(c.switch_case_body, SwitchCaseBody::Always);
+    // A `case` label's constant list is not wrapped by default.
+    assert!(!c.wrap_case_labels);
     // Colon spacing defaults to idiomatic `label:` / `case x:` style: no space before,
     // one space after.
     assert!(!c.space_before_colon);
@@ -176,6 +178,12 @@ fn overflow_delimited_expr_parses() {
 fn switch_expression_on_new_line_parses() {
     let c: Config = toml::from_str("switch-expression-on-new-line = true\n").unwrap();
     assert!(c.switch_expression_on_new_line);
+}
+
+#[test]
+fn wrap_case_labels_parses() {
+    let c: Config = toml::from_str("wrap-case-labels = true\n").unwrap();
+    assert!(c.wrap_case_labels);
 }
 
 #[test]

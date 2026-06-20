@@ -340,6 +340,17 @@ fn switch_on_new_line_config() -> Config {
     }
 }
 
+/// Config with `wrap-case-labels` enabled and a narrow `max-width`, so a multi-constant `case`
+/// label is pushed past the column limit and actually wraps. Layout-only — wrapping only inserts
+/// breaks between the existing comma-separated constants, never adds or drops a token.
+fn wrap_case_labels_config() -> Config {
+    Config {
+        wrap_case_labels: true,
+        max_width: 24,
+        ..Config::default()
+    }
+}
+
 /// Config with `space-around-operator-colon` enabled. Layout-only — it only changes whitespace
 /// before an operator colon (enhanced-`for` / ternary / `assert`), never a significant token.
 fn operator_colon_config() -> Config {
@@ -1535,6 +1546,36 @@ proptest! {
     #[test]
     fn switch_on_new_line_never_panics(src in ".*") {
         let _ = fmt_with(&src, &switch_on_new_line_config());
+    }
+
+    /// Wrapping a `case` label list stays idempotent: re-formatting the wrapped layout reproduces it.
+    #[test]
+    fn wrap_case_labels_idempotent(src in javaish()) {
+        let cfg = wrap_case_labels_config();
+        let once = fmt_with(&src, &cfg);
+        let twice = fmt_with(&once, &cfg);
+        prop_assert_eq!(once, twice);
+    }
+
+    /// The option is layout-only: it only inserts breaks between the comma-separated `case`
+    /// constants, so the significant-token sequence (commas included) is preserved exactly.
+    #[test]
+    fn wrap_case_labels_preserves_significant_tokens(src in javaish()) {
+        let out = fmt_with(&src, &wrap_case_labels_config());
+        prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
+    }
+
+    /// Wrapping never drops or mangles a comment glued to a `case` constant or its comma.
+    #[test]
+    fn wrap_case_labels_preserves_comments(src in javaish()) {
+        let out = fmt_with(&src, &wrap_case_labels_config());
+        prop_assert_eq!(comment_contents(&src), comment_contents(&out));
+    }
+
+    /// Wrapping never panics on arbitrary Unicode input.
+    #[test]
+    fn wrap_case_labels_never_panics(src in ".*") {
+        let _ = fmt_with(&src, &wrap_case_labels_config());
     }
 
     /// Spacing an operator colon stays idempotent: re-formatting reproduces the spaced layout.
