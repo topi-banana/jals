@@ -12,6 +12,8 @@ fn defaults() {
     assert_eq!(c.fn_call_width, 60);
     assert_eq!(c.comment_width, 80);
     assert_eq!(c.max_blank_lines, 1);
+    // A leading blank line at the start of a braced body is dropped by default; opt-in keeps it.
+    assert!(!c.blank_line_at_block_start);
     assert!(c.insert_final_newline);
     // Comment reflow is opt-in, mirroring rustfmt's `wrap_comments`.
     assert!(!c.wrap_comments);
@@ -328,6 +330,12 @@ fn single_line_if_else_max_width_parses_kebab_key() {
 fn max_blank_lines_parses_kebab_key() {
     let c: Config = toml::from_str("max-blank-lines = 2\n").unwrap();
     assert_eq!(c.max_blank_lines, 2);
+}
+
+#[test]
+fn blank_line_at_block_start_parses_kebab_key() {
+    let c: Config = toml::from_str("blank-line-at-block-start = true\n").unwrap();
+    assert!(c.blank_line_at_block_start);
 }
 
 #[test]

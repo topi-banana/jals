@@ -5449,3 +5449,88 @@ fn switch_case_body_is_idempotent() {
         );
     }
 }
+
+/// Format with `blank-line-at-block-start` enabled (otherwise default config).
+fn fmt_blank_line_at_block_start(src: &str) -> String {
+    let cfg = Config {
+        blank_line_at_block_start: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_blank_line_at_block_start(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_blank_line_at_block_start(src));
+}
+
+#[test]
+fn blank_line_at_block_start_keeps_class_body_leading_blank() {
+    check_blank_line_at_block_start(
+        "class Fields {\n\n  int a = 1;\n  int b = 1;\n}\n",
+        expect![[r#"
+            class Fields {
+
+                int a = 1;
+                int b = 1;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn blank_line_at_block_start_keeps_method_and_control_block_leading_blank() {
+    // The leading blank is preserved in every braced body: a method block and a nested `if` block.
+    check_blank_line_at_block_start(
+        "class C {\n\n  void m() {\n\n    if (a) {\n\n      x();\n    }\n  }\n}\n",
+        expect![[r#"
+            class C {
+
+                void m() {
+
+                    if (a) {
+
+                        x();
+                    }
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn blank_line_at_block_start_keeps_blank_before_leading_comment() {
+    // The blank line precedes a leading comment on the first item; it anchors on the comment (via
+    // `break_before`'s leading-comment path) and is preserved with the comment.
+    check_blank_line_at_block_start(
+        "class C {\n\n  // hi\n  int x = 1;\n}\n",
+        expect![[r#"
+            class C {
+
+                // hi
+                int x = 1;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn blank_line_at_block_start_off_drops_leading_blank() {
+    // Default config (option off): the leading blank after `{` is dropped, the prior behavior.
+    check(
+        "class Fields {\n\n  int a = 1;\n  int b = 1;\n}\n",
+        expect![[r#"
+            class Fields {
+                int a = 1;
+                int b = 1;
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn blank_line_at_block_start_is_idempotent() {
+    let src = "class C {\n\n  void m() {\n\n    x();\n  }\n}\n";
+    let once = fmt_blank_line_at_block_start(src);
+    let twice = fmt_blank_line_at_block_start(&once);
+    assert_eq!(once, twice, "blank-line-at-block-start must be idempotent");
+}

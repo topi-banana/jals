@@ -87,7 +87,14 @@ pub(crate) fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         ]));
     }
 
-    let mut body: Vec<Doc> = vec![hardline()];
+    // The break after the opening `{`. Normally a plain `hardline`, but with
+    // `blank_line_at_block_start` a leading blank line in the source is preserved (clamped by the
+    // renderer), so the body's first item keeps its blank line just like the inter-item breaks do.
+    let lead_break = match (ctx.cfg.blank_line_at_block_start, first_item_token(node)) {
+        (true, Some(t)) => break_before(&t, ctx),
+        _ => hardline(),
+    };
+    let mut body: Vec<Doc> = vec![lead_break];
     if any {
         body.push(inner);
     }
@@ -205,6 +212,30 @@ pub(crate) fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
         }
     }
     (concat(parts), saw)
+}
+
+/// The token a leading blank line before the body's first item should anchor on: the first item
+/// node's first significant token (or a leading stray significant token), skipping the opening
+/// brace and trivia. Mirrors how [`lower_items`] picks the first item, so the blank-line run before
+/// it is counted exactly as an inter-item break would count it.
+fn first_item_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    for el in node.children_with_tokens() {
+        match el {
+            SyntaxElement::Node(child) => {
+                if let Some(t) = first_sig_token(&child) {
+                    return Some(t);
+                }
+            }
+            SyntaxElement::Token(t) => {
+                let kind = t.kind();
+                if kind == S::LBRACE || kind == S::RBRACE || kind.is_trivia() {
+                    continue;
+                }
+                return Some(t);
+            }
+        }
+    }
+    None
 }
 
 /// The line break before an item node: the source's blank-line run (clamped to
