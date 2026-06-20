@@ -8,6 +8,7 @@ anyhow.workspace = true
 async-lsp = { workspace = true, features = ["tokio"] }
 futures.workspace = true
 jals-fmt.workspace = true
+jals-lint.workspace = true
 jals-syntax.workspace = true
 serde_json.workspace = true
 text-size.workspace = true

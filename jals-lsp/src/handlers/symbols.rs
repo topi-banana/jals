@@ -1,14 +1,18 @@
 //! Builds an LSP document-symbol tree from the typed AST.
 
 use async_lsp::lsp_types::{DocumentSymbol, SymbolKind};
-use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, ClassBody, Decl, EnumDecl, Member, SourceFile};
+use jals_syntax::{Parse, SyntaxNode};
 
 use crate::line_index::LineIndex;
 
-/// Build the document-symbol tree for `text`.
-pub(crate) fn document_symbols(text: &str, line_index: &LineIndex) -> Vec<DocumentSymbol> {
-    let Some(file) = SourceFile::cast(jals_syntax::parse(text).syntax()) else {
+/// Build the document-symbol tree from the cached parse of `text`.
+pub(crate) fn document_symbols(
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+) -> Vec<DocumentSymbol> {
+    let Some(file) = SourceFile::cast(parse.syntax()) else {
         return Vec::new();
     };
     file.decls()
@@ -158,7 +162,7 @@ mod tests {
     use super::*;
 
     fn symbols(text: &str) -> Vec<DocumentSymbol> {
-        document_symbols(text, &LineIndex::new(text))
+        document_symbols(&jals_syntax::parse(text), text, &LineIndex::new(text))
     }
 
     #[test]

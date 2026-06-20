@@ -10,7 +10,7 @@
 use async_lsp::lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensLegend,
 };
-use jals_syntax::{SyntaxKind, SyntaxToken};
+use jals_syntax::{Parse, SyntaxKind, SyntaxToken};
 
 use crate::line_index::LineIndex;
 
@@ -66,8 +66,8 @@ pub(crate) fn legend() -> SemanticTokensLegend {
 
 /// Classify every significant token in `text` and emit LSP semantic tokens (delta-encoded,
 /// one per line — multi-line tokens are split, as the protocol requires).
-pub(crate) fn semantic_tokens(text: &str, line_index: &LineIndex) -> SemanticTokens {
-    let root = jals_syntax::parse(text).syntax();
+pub(crate) fn semantic_tokens(parse: &Parse, text: &str, line_index: &LineIndex) -> SemanticTokens {
+    let root = parse.syntax();
     let mut data: Vec<SemanticToken> = Vec::new();
     // Anchor for delta encoding: the line/start of the previously emitted token.
     let (mut prev_line, mut prev_start) = (0u32, 0u32);
@@ -262,7 +262,7 @@ mod tests {
     /// Decode the delta-encoded tokens back to absolute positions and type names, so tests
     /// can assert on what a client would actually render.
     fn decode(text: &str) -> Vec<Tok> {
-        let toks = semantic_tokens(text, &LineIndex::new(text));
+        let toks = semantic_tokens(&jals_syntax::parse(text), text, &LineIndex::new(text));
         let legend = legend();
         let (mut line, mut start) = (0u32, 0u32);
         let mut out = Vec::new();
@@ -407,10 +407,11 @@ mod tests {
     #[test]
     fn does_not_panic_on_garbage_or_empty() {
         // Invariant: handlers never panic, even on broken / arbitrary input.
-        let _ = semantic_tokens("", &LineIndex::new(""));
-        let _ = semantic_tokens("class", &LineIndex::new("class"));
-        let _ = semantic_tokens("@#$%^ <<< class {", &LineIndex::new("@#$%^ <<< class {"));
-        let weird = "класс 类 😀 \0 /*";
-        let _ = semantic_tokens(weird, &LineIndex::new(weird));
+        let panics =
+            |text: &str| semantic_tokens(&jals_syntax::parse(text), text, &LineIndex::new(text));
+        let _ = panics("");
+        let _ = panics("class");
+        let _ = panics("@#$%^ <<< class {");
+        let _ = panics("класс 类 😀 \0 /*");
     }
 }

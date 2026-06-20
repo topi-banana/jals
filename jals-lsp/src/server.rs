@@ -30,7 +30,7 @@ use futures::future::BoxFuture;
 use tower::ServiceBuilder;
 
 use crate::handlers;
-use crate::state::{Discovery, DocumentStore, is_config_file};
+use crate::state::{Discovery, DocumentStore, is_config_file, is_lint_config_file};
 
 /// Build the server and run its stdio event loop until the client disconnects.
 pub(crate) async fn run_server() -> anyhow::Result<()> {
@@ -52,13 +52,15 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Server state: the client handle, open documents, and memoized config discovery.
+/// Server state: the client handle, open documents, and memoized config discovery (one cache
+/// each for the formatter's `jalsfmt.toml` and the linter's `jalslint.toml`).
 struct ServerState {
     client: ClientSocket,
     store: DocumentStore,
-    discovery: Discovery,
+    discovery: Discovery<jals_fmt::Config>,
+    lint_discovery: Discovery<jals_lint::Config>,
     /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
-    /// taken from the `initialize` request. Gates the `jalsfmt.toml` watcher registration.
+    /// taken from the `initialize` request. Gates the config watcher registration.
     config_watch_registration_supported: bool,
 }
 
@@ -68,16 +70,27 @@ impl ServerState {
             client,
             store: DocumentStore::default(),
             discovery: Discovery::default(),
+            lint_discovery: Discovery::default(),
             config_watch_registration_supported: false,
         }
     }
 
     /// Compute and push diagnostics for `uri` (a no-op if the document is not open).
+    ///
+    /// Both the parser's syntax errors and the enabled `jals-lint` rules run over the same
+    /// cached CST (no reparse), and their diagnostics are merged into one publish.
     fn publish_diagnostics(&mut self, uri: &Url) {
         let Some(doc) = self.store.get(uri) else {
             return;
         };
-        let diagnostics = handlers::compute_diagnostics(&doc.text, &doc.line_index);
+        let mut diagnostics = handlers::compute_diagnostics(&doc.parse, &doc.text, &doc.line_index);
+        let lint_config = self.lint_discovery.for_uri(uri);
+        diagnostics.extend(handlers::compute_lint_diagnostics(
+            &doc.parse,
+            &doc.text,
+            &doc.line_index,
+            &lint_config,
+        ));
         let _ = self
             .client
             .notify::<notification::PublishDiagnostics>(PublishDiagnosticsParams {
@@ -129,15 +142,14 @@ impl LanguageServer for ServerState {
         &mut self,
         params: DidChangeWatchedFilesParams,
     ) -> Self::NotifyResult {
-        // A created/changed/deleted jalsfmt.toml can affect discovery for any
-        // directory at or below it (including shadowing); drop the whole memo and
-        // rediscover lazily on the next formatting request.
-        if params
-            .changes
-            .iter()
-            .any(|event| is_config_file(&event.uri))
-        {
+        // A created/changed/deleted config file can affect discovery for any directory at or
+        // below it (including shadowing); drop the whole memo for the affected tool and
+        // rediscover lazily on the next request that needs it.
+        if params.changes.iter().any(|e| is_config_file(&e.uri)) {
             self.discovery.clear();
+        }
+        if params.changes.iter().any(|e| is_lint_config_file(&e.uri)) {
+            self.lint_discovery.clear();
         }
         ControlFlow::Continue(())
     }
@@ -230,6 +242,7 @@ impl LanguageServer for ServerState {
         Box::pin(async move {
             Ok(doc.map(|doc| {
                 DocumentSymbolResponse::Nested(handlers::document_symbols(
+                    &doc.parse,
                     &doc.text,
                     &doc.line_index,
                 ))
@@ -244,8 +257,9 @@ impl LanguageServer for ServerState {
         let pos = params.text_document_position_params;
         let doc = self.store.get(&pos.text_document.uri);
         Box::pin(async move {
-            Ok(doc
-                .map(|doc| handlers::document_highlight(&doc.text, &doc.line_index, pos.position)))
+            Ok(doc.map(|doc| {
+                handlers::document_highlight(&doc.parse, &doc.text, &doc.line_index, pos.position)
+            }))
         })
     }
 
@@ -267,7 +281,11 @@ impl LanguageServer for ServerState {
         let doc = self.store.get(&params.text_document.uri);
         Box::pin(async move {
             Ok(doc.map(|doc| {
-                SemanticTokensResult::Tokens(handlers::semantic_tokens(&doc.text, &doc.line_index))
+                SemanticTokensResult::Tokens(handlers::semantic_tokens(
+                    &doc.parse,
+                    &doc.text,
+                    &doc.line_index,
+                ))
             }))
         })
     }
@@ -277,9 +295,9 @@ impl LanguageServer for ServerState {
         params: FoldingRangeParams,
     ) -> BoxFuture<'static, Result<Option<Vec<FoldingRange>>, Self::Error>> {
         let doc = self.store.get(&params.text_document.uri);
-        Box::pin(
-            async move { Ok(doc.map(|doc| handlers::folding_range(&doc.text, &doc.line_index))) },
-        )
+        Box::pin(async move {
+            Ok(doc.map(|doc| handlers::folding_range(&doc.parse, &doc.text, &doc.line_index)))
+        })
     }
 
     fn selection_range(
@@ -289,21 +307,27 @@ impl LanguageServer for ServerState {
         let doc = self.store.get(&params.text_document.uri);
         Box::pin(async move {
             Ok(doc.map(|doc| {
-                handlers::selection_ranges(&doc.text, &doc.line_index, &params.positions)
+                handlers::selection_ranges(
+                    &doc.parse,
+                    &doc.text,
+                    &doc.line_index,
+                    &params.positions,
+                )
             }))
         })
     }
 }
 
-/// Ask the client to watch `jalsfmt.toml` files anywhere in the workspace, so config
-/// edits invalidate the discovery cache without a server restart.
+/// Ask the client to watch `jalsfmt.toml` and `jalslint.toml` files anywhere in the
+/// workspace, so config edits invalidate the discovery caches without a server restart.
 fn config_watch_registration() -> RegistrationParams {
+    // `None` kind means create + change + delete.
+    let watcher = |glob: &str| FileSystemWatcher {
+        glob_pattern: GlobPattern::String(glob.into()),
+        kind: None,
+    };
     let options = DidChangeWatchedFilesRegistrationOptions {
-        watchers: vec![FileSystemWatcher {
-            glob_pattern: GlobPattern::String("**/jalsfmt.toml".into()),
-            // `None` means create + change + delete.
-            kind: None,
-        }],
+        watchers: vec![watcher("**/jalsfmt.toml"), watcher("**/jalslint.toml")],
     };
     RegistrationParams {
         registrations: vec![Registration {
@@ -369,12 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn config_watch_registration_targets_jalsfmt_toml() {
+    fn config_watch_registration_targets_both_config_files() {
         let params = config_watch_registration();
         assert_eq!(params.registrations.len(), 1);
         let registration = &params.registrations[0];
         assert_eq!(registration.method, "workspace/didChangeWatchedFiles");
         let options = registration.register_options.as_ref().unwrap();
         assert_eq!(options["watchers"][0]["globPattern"], "**/jalsfmt.toml");
+        assert_eq!(options["watchers"][1]["globPattern"], "**/jalslint.toml");
     }
 }

@@ -9,7 +9,7 @@ mod selection_range;
 mod semantic_tokens;
 mod symbols;
 
-pub(crate) use diagnostics::compute_diagnostics;
+pub(crate) use diagnostics::{compute_diagnostics, compute_lint_diagnostics};
 pub(crate) use document_highlight::document_highlight;
 pub(crate) use folding_range::folding_range;
 pub(crate) use formatting::formatting_edits;

@@ -9,14 +9,18 @@
 
 use async_lsp::lsp_types::{FoldingRange, FoldingRangeKind};
 use jals_syntax::ast::{AstNode, SourceFile};
-use jals_syntax::{SyntaxKind, SyntaxNode};
+use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
 use text_size::{TextRange, TextSize};
 
 use crate::line_index::LineIndex;
 
-/// Compute folding ranges for `text`.
-pub(crate) fn folding_range(text: &str, line_index: &LineIndex) -> Vec<FoldingRange> {
-    let root = jals_syntax::parse(text).syntax();
+/// Compute folding ranges from the cached parse of `text`.
+pub(crate) fn folding_range(
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+) -> Vec<FoldingRange> {
+    let root = parse.syntax();
     let mut ranges = Vec::new();
 
     // Brace-delimited body nodes. A `BLOCK` is the body of methods/constructors/initializers
@@ -122,7 +126,7 @@ mod tests {
 
     /// `(start_line, end_line, kind)` tuples, sorted, for order-independent asserts.
     fn folds(text: &str) -> Vec<(u32, u32, Option<FoldingRangeKind>)> {
-        let mut v: Vec<_> = folding_range(text, &LineIndex::new(text))
+        let mut v: Vec<_> = folding_range(&jals_syntax::parse(text), text, &LineIndex::new(text))
             .into_iter()
             .map(|r| (r.start_line, r.end_line, r.kind))
             .collect();
