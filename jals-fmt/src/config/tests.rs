@@ -15,6 +15,8 @@ fn defaults() {
     assert!(c.insert_final_newline);
     // Comment reflow is opt-in, mirroring rustfmt's `wrap_comments`.
     assert!(!c.wrap_comments);
+    // Embedded comments are flushed to end of line by default; opt-in keeps them inline.
+    assert!(!c.inline_block_comments);
     // K&R braces by default, for both declaration and control-flow braces.
     assert_eq!(c.brace_style, BraceStyle::SameLine);
     assert_eq!(c.control_brace_style, ControlBraceStyle::SameLine);
@@ -114,6 +116,12 @@ fn wrap_comments_parses() {
     let c: Config = toml::from_str("wrap-comments = true\ncomment-width = 60\n").unwrap();
     assert!(c.wrap_comments);
     assert_eq!(c.comment_width, 60);
+}
+
+#[test]
+fn inline_block_comments_parses() {
+    let c: Config = toml::from_str("inline-block-comments = true\n").unwrap();
+    assert!(c.inline_block_comments);
 }
 
 #[test]

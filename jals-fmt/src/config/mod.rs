@@ -129,6 +129,16 @@ pub struct Config {
     /// [`wrap_comments`](Config::wrap_comments)). Mirrors google-java-format's
     /// `CommentsHelper.reformatParameterComment`.
     pub normalize_parameter_comments: bool,
+    /// Keep a block / doc comment that is written immediately before a significant token *on the
+    /// same line* hugging that token, instead of relocating it to the end of the line (e.g. the
+    /// marker comment in `java.lang./* @A */ String`). By default such a comment is attached as a
+    /// trailing comment of the preceding token and emitted as a line suffix, which flushes it past
+    /// the rest of the line (`java.lang.String s; /* @A */`). When enabled it stays where it was
+    /// written, matching google-java-format. Off by default. Operates only on comment trivia — the
+    /// significant-token sequence is preserved exactly (a comment-position toggle like
+    /// [`wrap_comments`](Config::wrap_comments)); a line comment runs to end of line, so it is never
+    /// followed by a same-line token and is unaffected.
+    pub inline_block_comments: bool,
     /// Sort `import` declarations: non-static imports first (alphabetical by qualified name),
     /// then static imports (alphabetical). Off by default; opt-in like
     /// [`wrap_comments`](Config::wrap_comments). When enabled the formatter's significant-token
@@ -317,6 +327,7 @@ impl Default for Config {
             wrap_comments: false,
             comment_width: 80,
             normalize_parameter_comments: false,
+            inline_block_comments: false,
             reorder_imports: false,
             trailing_comma: TrailingComma::Preserve,
             group_imports: false,

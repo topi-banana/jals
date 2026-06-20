@@ -97,6 +97,10 @@ pub fn google_config() -> Config {
         // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
         // and hugs them to the following argument.
         normalize_parameter_comments: true,
+        // google-java-format keeps a block comment written immediately before a token on the same
+        // line (e.g. `java.lang./* @A */ String`) hugging that token instead of flushing it to end
+        // of line.
+        inline_block_comments: true,
         // google-java-format never puts the closing `)` of a paren-delimited list (call /
         // annotation args, parameters, record header) on its own line — it hugs the last item.
         closing_paren: ClosingParen::Hug,
@@ -288,6 +292,7 @@ mod tests {
         assert!(c.reorder_modifiers);
         assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
         assert!(c.normalize_parameter_comments);
+        assert!(c.inline_block_comments);
         assert!(c.tabular_array_initializers);
         assert!(c.switch_expression_on_new_line);
         // google-java-format spaces the operator colon (enhanced-`for` / ternary / `assert`).
