@@ -9,9 +9,12 @@
 //! - **leading**: starts its own line — anchored to the following significant token,
 //!   emitted on its own line(s) above it.
 //! - **leading-inline**: a leading comment that hugs its anchor token on the same line
-//!   (`/* a= */ 1`) instead of sitting above it — currently only parameter-name block
-//!   comments under `normalize-parameter-comments`. Emitted immediately before the token
-//!   text so the two wrap together as a unit.
+//!   (`/* a= */ 1`) instead of sitting above it — parameter-name block comments under
+//!   `normalize-parameter-comments`, and (under `inline-block-comments`) any block / doc comment
+//!   written immediately before a significant token on the same line (`java.lang./* @A */ String`).
+//!   Emitted immediately before the token text so the two wrap together as a unit. Without
+//!   `inline-block-comments` such a comment falls into the *trailing* case below and is flushed to
+//!   the end of its line.
 //!
 //! Every comment is anchored exactly once, so as long as every significant token is
 //! emitted exactly once through [`CommentMap::token`], no comment is dropped or
@@ -54,8 +57,15 @@ pub(crate) struct CommentMap {
 }
 
 /// Build the comment map for a tree. `normalize_param_comments` is the resolved
-/// `normalize-parameter-comments` policy, threaded down to [`classify`].
-pub(crate) fn build(root: &SyntaxNode, normalize_param_comments: bool) -> CommentMap {
+/// `normalize-parameter-comments` policy, threaded down to [`classify`]. `inline_block_comments`
+/// is the resolved `inline-block-comments` policy: when set, a block / doc comment written
+/// immediately before a significant token on the same line hugs that token as a leading-inline
+/// comment instead of trailing the previous one to end of line.
+pub(crate) fn build(
+    root: &SyntaxNode,
+    normalize_param_comments: bool,
+    inline_block_comments: bool,
+) -> CommentMap {
     let mut leading: HashMap<usize, Vec<Comment>> = HashMap::new();
     let mut leading_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
     let mut trailing_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
@@ -71,7 +81,22 @@ pub(crate) fn build(root: &SyntaxNode, normalize_param_comments: bool) -> Commen
     {
         let kind = tok.kind();
         if is_comment(kind) {
-            let (text, inline) = classify(&tok, normalize_param_comments);
+            let (text, mut inline) = classify(&tok, normalize_param_comments);
+            // A block / doc comment written immediately before a significant token *on the same
+            // line* hugs that token instead of trailing the previous one to end of line, when
+            // `inline-block-comments` is on (e.g. `java.lang./* @A */ String`). The condition is
+            // purely "followed by a same-line significant token": the hug glues the comment to that
+            // token with one space and no break, so the property survives reformatting and the hug
+            // is idempotent — whereas keying on the *preceding* token's line would flip once the
+            // following token wraps onto its own line. A line comment runs to end of line, so it is
+            // never followed by a same-line token and never qualifies.
+            if inline_block_comments
+                && !inline
+                && matches!(kind, SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT)
+                && followed_by_same_line_sig(&tok)
+            {
+                inline = true;
+            }
             let comment = Comment {
                 kind,
                 text,
@@ -290,6 +315,26 @@ fn trailing_inline_doc(trail: &[Comment]) -> Doc {
         parts.push(hardline());
     }
     concat(parts)
+}
+
+/// Whether the next significant (non-trivia) token after `tok` is on the same line — i.e. no
+/// `NEWLINE` separates them. Intervening comments and whitespace are skipped. Used by
+/// `inline-block-comments` to decide whether a comment should hug the following token. Returns
+/// `false` at end of input.
+fn followed_by_same_line_sig(tok: &SyntaxToken) -> bool {
+    let mut cur = tok.next_token();
+    while let Some(t) = cur {
+        let k = t.kind();
+        if k == SyntaxKind::NEWLINE {
+            return false;
+        }
+        if !k.is_trivia() {
+            return true;
+        }
+        // A comment or whitespace on the same line: keep scanning for the next significant token.
+        cur = t.next_token();
+    }
+    false
 }
 
 /// Is this token kind a comment?

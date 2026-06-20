@@ -136,6 +136,11 @@ The current formatter is intentionally minimal. It performs:
   rewritten to google-java-format's canonical `/* name= */` form (collapsing interior
   whitespace) and hugged to the following token on the same line (`/* a= */ 1`). Javadoc and
   any non-matching block comment are left exactly as written. Off by default; see below.
+- **Inline block comments** — with `inline-block-comments` enabled, a block / Javadoc comment
+  written immediately before a significant token on the same line (e.g. the marker comment in
+  `java.lang./* @A */ String`) keeps hugging that token instead of being relocated to the end of
+  the line. Layout-only (the significant-token sequence is preserved exactly); line comments run
+  to end of line and are unaffected. Off by default; see below.
 - **Line endings** — `lf` / `crlf`, or `auto` (match the source's first line break, falling
   back to the host terminator when the source has none) / `native` (the host's terminator).
   This governs the breaks the formatter emits; the interior of multi-line tokens (text blocks,
@@ -221,6 +226,7 @@ are kebab-case.
 | `wrap-comments` | bool | `false` | ✅ wired — when enabled, reflow comments/Javadoc to `comment-width` (mirrors rustfmt's `wrap_comments`) |
 | `comment-width` | integer | `80` | ✅ wired — comment/Javadoc reflow target (columns); only consulted when `wrap-comments` is enabled |
 | `normalize-parameter-comments` | bool | `false` | ✅ wired — rewrite a parameter-name block comment (`/*a=*/`, `/*  a  =  */`, `/*xs...=*/`) to the canonical `/* name= */`, where `name` is a Java identifier optionally suffixed `...`, and hug it to the following token (`/* a= */ 1`). The whole comment must match; Javadoc (`/** … */`), line comments, and any other block comment are left exactly as written. Operates only on comment trivia (the significant-token sequence is preserved exactly). Mirrors google-java-format's `CommentsHelper.reformatParameterComment` |
+| `inline-block-comments` | bool | `false` | ✅ wired — keep a block / Javadoc comment written immediately before a significant token on the same line (`java.lang./* @A */ String`) hugging that token instead of relocating it to the end of the line. Operates only on comment trivia (the significant-token sequence is preserved exactly); line comments are never followed by a same-line token and are unaffected. A Java-specific option with no rustfmt equivalent |
 | `reorder-imports` | bool | `false` | ✅ wired — sort the leading `import` block (non-static first, then static, each alphabetical by qualified name); blank lines inside the block collapse and comments attached to an import move with it. Off by default; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `reorder_imports` |
 | `trailing-comma` | `"preserve"` \| `"always"` \| `"never"` \| `"vertical"` | `"preserve"` | ✅ wired — trailing comma of an **array initializer** only (`{1, 2, 3,}`): `preserve` keeps the source's, `always`/`never` force it on/off, `vertical` adds it only when the initializer breaks one element per line. Non-`preserve` may add or drop that one comma (a comma carrying a comment is kept); the default `preserve` keeps the strict significant-token sequence. Mirrors rustfmt's `trailing_comma` |
 | `group-imports` | bool | `false` | ✅ wired — partition the leading `import` block into the prefix groups of `import-groups`, each group sorted and separated by one blank line. Overrides `reorder-imports`; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `group_imports` |

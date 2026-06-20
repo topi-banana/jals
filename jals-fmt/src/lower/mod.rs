@@ -60,7 +60,11 @@ pub(crate) struct Ctx<'a> {
 /// Lower the whole tree.
 pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
     let ctx = Ctx {
-        comments: comments::build(root, cfg.normalize_parameter_comments),
+        comments: comments::build(
+            root,
+            cfg.normalize_parameter_comments,
+            cfg.inline_block_comments,
+        ),
         cfg,
         rules: Registry::from_config(cfg),
     };

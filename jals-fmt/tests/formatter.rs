@@ -4860,6 +4860,85 @@ fn parameter_comments_normalization_is_idempotent() {
     );
 }
 
+/// Format with `inline-block-comments` enabled (otherwise default config).
+fn fmt_inline_block(src: &str) -> String {
+    let cfg = Config {
+        inline_block_comments: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_inline_block(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_inline_block(src));
+}
+
+#[test]
+fn inline_block_comments_keeps_embedded_marker_in_place() {
+    check_inline_block(
+        "class N{void f(){java.lang./* @MarkerAnnotation */ String s=null;}}",
+        expect![[r#"
+            class N {
+                void f() {
+                    java.lang./* @MarkerAnnotation */ String s = null;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn inline_block_comments_hugs_consecutive_embedded_comments() {
+    check_inline_block(
+        "class N{void f(){java.lang./* a */ /* b */ String s=null;}}",
+        expect![[r#"
+            class N {
+                void f() {
+                    java.lang./* a */ /* b */ String s = null;
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn inline_block_comments_leaves_trailing_comment_relocated() {
+    // The comments are followed by a NEWLINE before the next significant token, so they are
+    // genuine trailing comments of `1` (not embedded) and stay flushed to end of line even with
+    // the option on.
+    check_inline_block(
+        "class N{int x=1 /* x */ /* y */\n+2;}",
+        expect![[r#"
+            class N {
+                int x = 1 + 2; /* x */ /* y */
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn inline_block_comments_off_relocates_embedded_marker() {
+    // Default config (option off): the embedded comment is relocated to end of line.
+    check(
+        "class N{void f(){java.lang./* @MarkerAnnotation */ String s=null;}}",
+        expect![[r#"
+            class N {
+                void f() {
+                    java.lang.String s = null; /* @MarkerAnnotation */
+                }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn inline_block_comments_is_idempotent() {
+    let src = "class N{void f(){java.lang./* @A */ String s=null;int y=1 /* m */ * 2;}}";
+    let once = fmt_inline_block(src);
+    let twice = fmt_inline_block(&once);
+    assert_eq!(once, twice, "inline-block-comments must be idempotent");
+}
+
 /// Format with `tabular-array-initializers` enabled, in a Google-like 2-space layout so the
 /// preserved grid is easy to read.
 fn fmt_tabular(src: &str) -> String {
