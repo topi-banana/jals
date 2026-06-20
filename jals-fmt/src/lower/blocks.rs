@@ -10,8 +10,8 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{BraceStyle, Config, ControlBraceStyle, SwitchCaseBody};
 use crate::doc::{
-    Doc, blank_line, concat, continuation_indent, group, hardline, if_break, indent, line, nil,
-    text,
+    Doc, blank_line, concat, continuation_indent, group, hardline, if_break, indent, join, line,
+    nil, text,
 };
 use crate::lower::{
     Ctx, first_sig_token, last_sig_token, lower, lower_elements, lower_generic, sep, tok,
@@ -388,6 +388,115 @@ pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         arrow_sep,
         continuation_indent(lower_elements(tail, ctx, false)),
     ])
+}
+
+/// Lower a `switch` `case` label, wrapping its comma-separated constant list across lines when
+/// `wrap-case-labels` is on and the arm overflows `max-width` — google-java-format's layout (e.g.
+/// `ExpressionSwitch`'s `breakLongCaseArgs`). The `case` keyword stays at the label's indent, the
+/// first constant rides on the `case` line, and each subsequent constant hangs at one continuation
+/// indent, the comma kept attached to its constant (the break falls *after* the comma). The
+/// trailing `->` / `:` and the body are emitted by the caller, so the group is measured together
+/// with what follows on the same line (`fits` looks past the group, stopping at the body's first
+/// break) — a short list, a single constant, and a bare `default` all stay on one line.
+///
+/// With the option off, or for any label that is not a multi-constant `case`, this is byte-for-byte
+/// [`lower_generic`]; a malformed label (no `case`, an empty constant) also falls back, so every
+/// significant token is still emitted exactly once.
+pub(crate) fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    if !ctx.cfg.wrap_case_labels {
+        return lower_generic(node, ctx);
+    }
+    // Only a multi-constant `case` list can wrap; skip the split (and its allocations) for the
+    // common single-constant label and a bare `default`, neither of which has a top-level comma.
+    if !node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .any(|t| t.kind() == S::COMMA)
+    {
+        return lower_generic(node, ctx);
+    }
+    let Some((case_kw, chunks)) = split_case_label(node) else {
+        return lower_generic(node, ctx); // a bare `default`, or malformed
+    };
+    // A lone constant with a trailing comma (`case A,` — error recovery) yields a single chunk.
+    if chunks.len() < 2 {
+        return lower_generic(node, ctx);
+    }
+    let Some(first) = chunks
+        .first()
+        .and_then(|(els, _)| first_sig_token_of_elements(els))
+    else {
+        return lower_generic(node, ctx);
+    };
+
+    // Each constant carries its trailing comma, and consecutive constants are joined by `line()` (a
+    // space when the list fits, a break when it wraps). The whole run hangs at one continuation
+    // indent; the first constant stays on the `case` line (no leading break), the rest break below.
+    let rows: Vec<Doc> = chunks
+        .iter()
+        .map(|(els, comma)| {
+            let mut row = vec![lower_elements(els.iter().cloned(), ctx, false)];
+            if let Some(c) = comma {
+                // No space before a comma; its leading/trailing comments ride along via `tok`.
+                row.push(tok(c, ctx));
+            }
+            concat(row)
+        })
+        .collect();
+    group(concat(vec![
+        tok(&case_kw, ctx),
+        continuation_indent(concat(vec![
+            sep(Some(&case_kw), &first, ctx.cfg),
+            join(line(), rows),
+        ])),
+    ]))
+}
+
+/// A `case` constant (a `Pattern` / `Expr`, plus an optional `Guard` and `case null, default`'s
+/// `default` token) paired with the `,` that follows it (`None` for the last constant).
+type CaseChunk = (Vec<SyntaxElement>, Option<SyntaxToken>);
+
+/// Split a `SWITCH_LABEL` into its `case` keyword and the comma-separated constant chunks. Returns
+/// `None` for a bare `default` (no `case` keyword) or a malformed label (an empty / leading comma),
+/// so the caller falls back to inline emission and preserves every token. Trivia are dropped here
+/// (comments are re-attached to their token by `lower_elements` / `tok`).
+fn split_case_label(node: &SyntaxNode) -> Option<(SyntaxToken, Vec<CaseChunk>)> {
+    let mut case_kw: Option<SyntaxToken> = None;
+    let mut chunks: Vec<CaseChunk> = Vec::new();
+    let mut current: Vec<SyntaxElement> = Vec::new();
+    for el in node.children_with_tokens() {
+        match &el {
+            SyntaxElement::Token(t) if t.kind().is_trivia() => continue,
+            SyntaxElement::Token(t)
+                if t.kind() == S::CASE_KW
+                    && case_kw.is_none()
+                    && current.is_empty()
+                    && chunks.is_empty() =>
+            {
+                case_kw = Some(t.clone());
+            }
+            SyntaxElement::Token(t) if t.kind() == S::COMMA => {
+                if current.is_empty() {
+                    return None; // a leading / doubled comma (error recovery)
+                }
+                chunks.push((std::mem::take(&mut current), Some(t.clone())));
+            }
+            _ => current.push(el),
+        }
+    }
+    if !current.is_empty() {
+        chunks.push((current, None));
+    }
+    Some((case_kw?, chunks))
+}
+
+/// The first significant token among a run of CST elements, descending into nodes.
+fn first_sig_token_of_elements(els: &[SyntaxElement]) -> Option<SyntaxToken> {
+    els.iter().find_map(|e| match e {
+        SyntaxElement::Node(n) => first_sig_token(n),
+        SyntaxElement::Token(t) if !t.kind().is_trivia() => Some(t.clone()),
+        _ => None,
+    })
 }
 
 /// A switch label paired with its terminating `:` token.

@@ -113,6 +113,9 @@ pub fn google_config() -> Config {
         // google-java-format puts a `switch` expression that is the value of a `=` (a variable /
         // field initializer or an assignment) on its own continuation-indented line.
         switch_expression_on_new_line: true,
+        // google-java-format wraps a `case` label's constant list across lines when the arm
+        // overflows the column limit (e.g. `ExpressionSwitch`'s `breakLongCaseArgs`).
+        wrap_case_labels: true,
         // google-java-format surrounds an operator colon — an enhanced `for` (`for (T x : xs)`),
         // a ternary (`a ? b : c`), and an `assert` message (`assert c : m`) — with spaces, while
         // still hugging the colon of an unnamed `_` for-each variable (`for (T _: xs)`) and of
@@ -298,6 +301,7 @@ mod tests {
         assert!(c.inline_block_comments);
         assert!(c.tabular_array_initializers);
         assert!(c.switch_expression_on_new_line);
+        assert!(c.wrap_case_labels);
         // google-java-format spaces the operator colon (enhanced-`for` / ternary / `assert`).
         assert!(c.space_around_operator_colon);
         // google-java-format breaks and indents a legacy (colon-form) switch's case bodies; this

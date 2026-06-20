@@ -5205,6 +5205,162 @@ fn switch_on_new_line_is_idempotent() {
     );
 }
 
+/// Format with `wrap-case-labels` enabled, in a Google-like 2-space / +4 continuation layout so the
+/// wrapped `case` list is easy to read.
+fn fmt_wrap_case(src: &str) -> String {
+    let cfg = Config {
+        indent_width: 2,
+        continuation_indent: Some(4),
+        max_width: 100,
+        wrap_case_labels: true,
+        ..Config::default()
+    };
+    format_source(src, &cfg).formatted
+}
+
+fn check_wrap_case(src: &str, expected: Expect) {
+    expected.assert_eq(&fmt_wrap_case(src));
+}
+
+const WRAP_CASE_SRC: &str = "class T { String m(MyEnum e) { return switch (e) { case SOME_RATHER_LONG_NAME_1, SOME_RATHER_LONG_NAME_2, SOME_RATHER_LONG_NAME_3, SOME_RATHER_LONG_NAME_4, SOME_RATHER_LONG_NAME_5, SOME_RATHER_LONG_NAME_6, SOME_RATHER_LONG_NAME_7 -> {} case SOME_RATHER_LONG_NAME_8 -> {} }; } }";
+
+#[test]
+fn wrap_case_labels_breaks_long_arrow_list() {
+    // A `case` arm whose constant list overflows the column limit wraps: the first constant stays on
+    // the `case` line, each later one hangs at +4 (continuation), the comma stays attached, and the
+    // `-> {}` rides on the last constant's line — google-java-format's `ExpressionSwitch` layout. A
+    // short arm (the second one) stays on one line.
+    check_wrap_case(
+        WRAP_CASE_SRC,
+        expect![[r#"
+            class T {
+              String m(MyEnum e) {
+                return switch (e) {
+                  case SOME_RATHER_LONG_NAME_1,
+                      SOME_RATHER_LONG_NAME_2,
+                      SOME_RATHER_LONG_NAME_3,
+                      SOME_RATHER_LONG_NAME_4,
+                      SOME_RATHER_LONG_NAME_5,
+                      SOME_RATHER_LONG_NAME_6,
+                      SOME_RATHER_LONG_NAME_7 -> {}
+                  case SOME_RATHER_LONG_NAME_8 -> {}
+                };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn wrap_case_labels_keeps_short_arrow_list_flat() {
+    // A short constant list that fits stays on one line (all-or-nothing group).
+    check_wrap_case(
+        "class T { String m(MyEnum e) { return switch (e) { case CASE_A, CASE_B -> {} }; } }",
+        expect![[r#"
+            class T {
+              String m(MyEnum e) {
+                return switch (e) {
+                  case CASE_A, CASE_B -> {}
+                };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn wrap_case_labels_breaks_long_colon_group() {
+    // The legacy colon form wraps the same way; the `:` rides on the last constant's line and the
+    // body breaks below (the default `switch-case-body = always`).
+    check_wrap_case(
+        "class T { void m(MyEnum e) { switch (e) { case SOME_RATHER_LONG_NAME_1, SOME_RATHER_LONG_NAME_2, SOME_RATHER_LONG_NAME_3, SOME_RATHER_LONG_NAME_4, SOME_RATHER_LONG_NAME_5, SOME_RATHER_LONG_NAME_6: doStuff(); break; } } }",
+        expect![[r#"
+            class T {
+              void m(MyEnum e) {
+                switch (e) {
+                  case SOME_RATHER_LONG_NAME_1,
+                      SOME_RATHER_LONG_NAME_2,
+                      SOME_RATHER_LONG_NAME_3,
+                      SOME_RATHER_LONG_NAME_4,
+                      SOME_RATHER_LONG_NAME_5,
+                      SOME_RATHER_LONG_NAME_6:
+                    doStuff();
+                    break;
+                }
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn wrap_case_labels_keeps_guard_glued_to_constant() {
+    // A `when` guard stays glued to its constant on the same wrapped line — it is part of the
+    // constant chunk, not a separate break point.
+    check_wrap_case(
+        "class T { int m(Object o) { return switch (o) { case Integer i when LOOOOOOOOOOONG_CONDITION_AAAA, Long l when LOOOOOOOOOOONG_CONDITION_BBBB -> 1; default -> 0; }; } }",
+        expect![[r#"
+            class T {
+              int m(Object o) {
+                return switch (o) {
+                  case Integer i when LOOOOOOOOOOONG_CONDITION_AAAA,
+                      Long l when LOOOOOOOOOOONG_CONDITION_BBBB -> 1;
+                  default -> 0;
+                };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn wrap_case_labels_leaves_default_and_single_constant_untouched() {
+    // A bare `default` and a single-constant `case` never wrap, even when long.
+    check_wrap_case(
+        "class T { int m(int x) { return switch (x) { case SOME_SINGLE_BUT_RATHER_LONG_CONSTANT_NAME_THAT_IS_VERY_LONG_INDEED_X -> 1; default -> 0; }; } }",
+        expect![[r#"
+            class T {
+              int m(int x) {
+                return switch (x) {
+                  case SOME_SINGLE_BUT_RATHER_LONG_CONSTANT_NAME_THAT_IS_VERY_LONG_INDEED_X -> 1;
+                  default -> 0;
+                };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn wrap_case_labels_off_by_default_keeps_flat() {
+    // With the option off, the same long list stays on one (overflowing) line — opt-in only.
+    let cfg = Config {
+        indent_width: 2,
+        continuation_indent: Some(4),
+        max_width: 100,
+        wrap_case_labels: false,
+        ..Config::default()
+    };
+    expect![[r#"
+        class T {
+          String m(MyEnum e) {
+            return switch (e) {
+              case SOME_RATHER_LONG_NAME_1, SOME_RATHER_LONG_NAME_2, SOME_RATHER_LONG_NAME_3, SOME_RATHER_LONG_NAME_4, SOME_RATHER_LONG_NAME_5, SOME_RATHER_LONG_NAME_6, SOME_RATHER_LONG_NAME_7 -> {}
+              case SOME_RATHER_LONG_NAME_8 -> {}
+            };
+          }
+        }
+    "#]]
+        .assert_eq(&fmt_with(WRAP_CASE_SRC, &cfg));
+}
+
+#[test]
+fn wrap_case_labels_is_idempotent() {
+    let once = fmt_wrap_case(WRAP_CASE_SRC);
+    let twice = fmt_wrap_case(&once);
+    assert_eq!(once, twice, "wrap-case-labels must be idempotent");
+}
+
 #[test]
 fn switch_arrow_body_arrow_comment_hangs_at_continuation() {
     // A trailing `//` comment on `->` forces the body onto its own line; the body hangs at the

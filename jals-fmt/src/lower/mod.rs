@@ -40,7 +40,7 @@ mod tokens;
 
 pub(crate) use blocks::{
     blank_lines_before, break_before, item_separator, lower_braced, lower_items,
-    lower_switch_group, lower_switch_rule,
+    lower_switch_group, lower_switch_label, lower_switch_rule,
 };
 pub(crate) use chains::lower_chain;
 pub(crate) use delimited::lower_delimited;
@@ -85,6 +85,7 @@ pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         S::CLASS_BODY | S::MODULE_BODY | S::BLOCK | S::SWITCH_BLOCK => lower_braced(node, ctx),
         S::SWITCH_GROUP => lower_switch_group(node, ctx),
         S::SWITCH_RULE => lower_switch_rule(node, ctx),
+        S::SWITCH_LABEL => lower_switch_label(node, ctx),
         S::ENUM_BODY => lower_enum_body(node, ctx),
         S::PARAM_LIST | S::ARG_LIST | S::RECORD_HEADER | S::ANNOTATION_ARG_LIST | S::ARRAY_INIT => {
             lower_delimited(node, ctx)

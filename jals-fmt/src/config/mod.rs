@@ -232,6 +232,17 @@ pub struct Config {
     /// preserved exactly (only whitespace after the colon changes); idempotent. A Java-specific
     /// option with no rustfmt equivalent.
     pub switch_case_body: SwitchCaseBody,
+    /// Wrap a `switch` `case` label's constant list — the comma-separated `case` constants — across
+    /// multiple lines when the arm overflows [`max_width`](Config::max_width): the first constant
+    /// stays on the `case` line, each subsequent constant hangs at one continuation indent, the
+    /// comma stays attached to its constant (the break falls after the comma), and the `->` / `:`
+    /// plus body ride on the last constant's line. A short list that fits stays on one line
+    /// (all-or-nothing). A single constant and a bare `default` label are never affected. Applies to
+    /// both the arrow form (`case A, B -> …`) and the legacy colon form (`case A, B: …`). Off by
+    /// default. Layout-only — the significant-token sequence is preserved exactly (only inter-token
+    /// whitespace changes); idempotent. A Java-specific option with no rustfmt equivalent; mirrors
+    /// google-java-format's wrapping of a long `case` label list (its `ExpressionSwitch` behavior).
+    pub wrap_case_labels: bool,
     /// Whether to emit a space *before* a colon (`:`). Applies uniformly to every Java colon
     /// context: a ternary (`a ? b : c`), an enhanced `for` (`for (T x : xs)`), a labeled
     /// statement (`label:`), an `assert` message (`assert c : m`), and a `switch` `case` /
@@ -352,6 +363,7 @@ impl Default for Config {
             tabular_array_initializers: false,
             switch_expression_on_new_line: false,
             switch_case_body: SwitchCaseBody::Always,
+            wrap_case_labels: false,
             space_before_colon: false,
             space_after_colon: true,
             space_around_operator_colon: false,
