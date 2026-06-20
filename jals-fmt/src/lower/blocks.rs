@@ -371,6 +371,29 @@ pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             .as_ref()
             .and_then(first_sig_token)
             .is_some_and(|t| ctx.comments.has_leading(&t));
+
+    // A wrappable multi-constant label with a non-block body breaks the body onto its own
+    // continuation line when the arm overflows, so the label group is measured against `case … ->`
+    // alone rather than the whole arm. This matches google-java-format, which wraps the labels only
+    // when the labels themselves overflow and otherwise breaks the body — e.g. I880's
+    // `case 0, 1, …, 9 -> "…"`, where the labels fit but the long body does not. Without this the
+    // label group's `fits` look-ahead would run into the body and wrap the (short) labels instead.
+    if !forces_break && case_label_wraps(&label, ctx.cfg) {
+        let arrow_sep = sep(last_sig_token(&label).as_ref(), &arrow, ctx.cfg);
+        let after_arrow = node
+            .children_with_tokens()
+            .skip_while(|e| e.as_token().map(|t| t.kind()) != Some(S::ARROW))
+            .skip(1);
+        return group(concat(vec![
+            lower(&label, ctx),
+            arrow_sep,
+            tok(&arrow, ctx),
+            continuation_indent(concat(vec![
+                line(),
+                lower_elements(after_arrow, ctx, false),
+            ])),
+        ]));
+    }
     if !forces_break {
         return lower_generic(node, ctx);
     }
@@ -450,6 +473,20 @@ pub(crate) fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
             join(line(), rows),
         ])),
     ]))
+}
+
+/// Whether [`lower_switch_label`] will actually wrap `label` — `wrap-case-labels` is on and the
+/// label is a multi-constant `case` list (two or more comma-separated constants). The arrow rule
+/// uses this to decide whether to break a non-block body, so the wrapping label group is measured
+/// against `case … ->` alone. The cheap comma pre-check skips the split for the common
+/// single-constant label and a bare `default`.
+fn case_label_wraps(label: &SyntaxNode, cfg: &Config) -> bool {
+    cfg.wrap_case_labels
+        && label
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == S::COMMA)
+        && split_case_label(label).is_some_and(|(_, chunks)| chunks.len() >= 2)
 }
 
 /// A `case` constant (a `Pattern` / `Expr`, plus an optional `Guard` and `case null, default`'s

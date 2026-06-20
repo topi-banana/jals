@@ -5269,6 +5269,27 @@ fn wrap_case_labels_keeps_short_arrow_list_flat() {
 }
 
 #[test]
+fn wrap_case_labels_breaks_body_when_labels_fit() {
+    // When the constant list fits but the (non-block) body overflows, the labels stay on one line
+    // and the body breaks after `->` — the labels are wrapped only when the labels *themselves*
+    // overflow, not when the whole arm does (google-java-format's `I880` layout).
+    check_wrap_case(
+        "class T { String f(int i) { return switch (i) { case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 -> \"loooooooooooooooooooooooooooooooooooooooooooooooong expression\"; default -> \"x\"; }; } }",
+        expect![[r#"
+            class T {
+              String f(int i) {
+                return switch (i) {
+                  case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ->
+                      "loooooooooooooooooooooooooooooooooooooooooooooooong expression";
+                  default -> "x";
+                };
+              }
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn wrap_case_labels_breaks_long_colon_group() {
     // The legacy colon form wraps the same way; the `:` rides on the last constant's line and the
     // body breaks below (the default `switch-case-body = always`).
@@ -5304,7 +5325,8 @@ fn wrap_case_labels_keeps_guard_glued_to_constant() {
               int m(Object o) {
                 return switch (o) {
                   case Integer i when LOOOOOOOOOOONG_CONDITION_AAAA,
-                      Long l when LOOOOOOOOOOONG_CONDITION_BBBB -> 1;
+                      Long l when LOOOOOOOOOOONG_CONDITION_BBBB ->
+                      1;
                   default -> 0;
                 };
               }
