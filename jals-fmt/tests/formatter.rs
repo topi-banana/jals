@@ -3482,6 +3482,70 @@ fn colon_spacing_is_idempotent() {
     }
 }
 
+fn fmt_operator_colon(src: &str) -> String {
+    let config = Config {
+        space_around_operator_colon: true,
+        // Keep the legacy `case x:` body inline so the output stays focused on colon *spacing*;
+        // the default `Always` would break the body out.
+        switch_case_body: SwitchCaseBody::SameLine,
+        ..Config::default()
+    };
+    fmt_with(src, &config)
+}
+
+#[test]
+fn operator_colon_spaces_only_for_each_ternary_and_assert() {
+    // `space-around-operator-colon` adds a space before the colon that separates two operands —
+    // the ternary, the enhanced `for`, and the `assert` message — while the label colons (a
+    // labeled statement, a `switch` `case` / `default`) keep hugging, following
+    // `space-before-colon` (off here). This is google-java-format's colon spacing.
+    expect![[r#"
+        class C {
+            void m(int x) {
+                int y = x > 0 ? 1 : 2;
+                for (int i : list) {
+                    use(i);
+                }
+                outer: for (;;) {
+                    break outer;
+                }
+                assert x > 0 : "m";
+                switch (x) {
+                    case 1: a(); break;
+                    case 2: case 3: b(); break;
+                    default: c();
+                }
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_operator_colon(COLON_SRC));
+}
+
+#[test]
+fn operator_colon_hugs_an_unnamed_for_each_variable() {
+    // google-java-format spaces a named for-each colon (`for (Order a : ys)`) but hugs the colon
+    // of an unnamed `_` loop variable (`for (Order _: xs)`); the `UNDERSCORE` token before the
+    // colon suppresses the space even with `space-around-operator-colon` on.
+    expect![[r#"
+        class C {
+            void m() {
+                for (Order _: xs) {}
+                for (Order a : ys) {}
+            }
+        }
+    "#]]
+    .assert_eq(&fmt_operator_colon(
+        "class C{void m(){for(Order _:xs){}for(Order a:ys){}}}",
+    ));
+}
+
+#[test]
+fn operator_colon_spacing_is_idempotent() {
+    let once = fmt_operator_colon(COLON_SRC);
+    let twice = fmt_operator_colon(&once);
+    assert_eq!(once, twice, "operator-colon spacing must be idempotent");
+}
+
 // ---------------------------------------------------------------------------
 // Type-punctuation density (`type-punctuation-density`)
 // ---------------------------------------------------------------------------

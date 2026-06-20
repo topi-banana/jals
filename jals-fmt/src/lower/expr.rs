@@ -224,7 +224,11 @@ pub(crate) fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // a newline. The `?` is always space-surrounded; the `:` follows the colon-spacing config.
     let break_at = |flat_space: bool| if flat_space { line() } else { softline() };
     let colon_space = |on: bool| if on { text(" ") } else { nil() };
-    let sbc = ctx.cfg.space_before_colon;
+    // The ternary is an operator colon, so `space-around-operator-colon` also spaces it (additive
+    // over `space-before-colon`), matching the enhanced-`for` / `assert` colons in `want_space`.
+    // No `_` exception is needed here (unlike the for-each colon): a ternary's then-branch operand
+    // is never a bare unnamed `_`.
+    let sbc = ctx.cfg.space_before_colon || ctx.cfg.space_around_operator_colon;
     let sac = ctx.cfg.space_after_colon;
     let tail = match ctx.cfg.binop_separator {
         BinopSeparator::Front => concat(vec![

@@ -228,6 +228,16 @@ pub struct Config {
     /// method-reference token is never affected. Layout-only. Mirrors rustfmt's
     /// `space_after_colon`.
     pub space_after_colon: bool,
+    /// Whether to emit a space *before* the colon of an *operator colon* — a `:` that separates
+    /// two operands: an enhanced `for` (`for (T x : xs)`), a ternary (`a ? b : c`), and an
+    /// `assert` message (`assert c : m`). Additive over
+    /// [`space_before_colon`](Config::space_before_colon): the space is emitted when either option
+    /// is on. The *label* colons (a labeled statement `label:` and a `switch` `case x:` /
+    /// `default:`) are never affected by this option and keep following `space_before_colon`
+    /// alone. Off by default. One exception keeps Google Java Format fidelity: an unnamed `_`
+    /// for-each variable hugs its colon (`for (T _: xs)`), so no space is inserted there even with
+    /// this option on. Layout-only — the significant-token sequence is preserved exactly.
+    pub space_around_operator_colon: bool,
     /// Layout of a method / constructor parameter list (`PARAM_LIST`):
     /// [`Tall`](FnParamsLayout::Tall) (the default, all-or-nothing),
     /// [`Compressed`](FnParamsLayout::Compressed) (pack as many per line as fit), or
@@ -325,6 +335,7 @@ impl Default for Config {
             switch_case_body: SwitchCaseBody::Always,
             space_before_colon: false,
             space_after_colon: true,
+            space_around_operator_colon: false,
             fn_params_layout: FnParamsLayout::Tall,
             type_punctuation_density: TypePunctuationDensity::Wide,
             reorder_modifiers: false,

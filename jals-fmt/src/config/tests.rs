@@ -43,6 +43,9 @@ fn defaults() {
     // one space after.
     assert!(!c.space_before_colon);
     assert!(c.space_after_colon);
+    // The operator-colon (enhanced-`for` / ternary / `assert`) space-before is opt-in; off by
+    // default so colon spacing stays uniform.
+    assert!(!c.space_around_operator_colon);
     // Parameter lists default to the all-or-nothing Tall layout (the prior behavior).
     assert_eq!(c.fn_params_layout, FnParamsLayout::Tall);
     // Modifier reordering is opt-in; off by default to preserve the significant-token sequence.
@@ -198,6 +201,12 @@ fn colon_spacing_parses_kebab_keys() {
         toml::from_str("space-before-colon = true\nspace-after-colon = false\n").unwrap();
     assert!(c.space_before_colon);
     assert!(!c.space_after_colon);
+}
+
+#[test]
+fn space_around_operator_colon_parses_kebab_key() {
+    let c: Config = toml::from_str("space-around-operator-colon = true\n").unwrap();
+    assert!(c.space_around_operator_colon);
 }
 
 #[test]

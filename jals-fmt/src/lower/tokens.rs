@@ -53,8 +53,10 @@ pub(crate) fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 }
 
 /// The aesthetic spacing rule between two significant tokens (before the fusion-safety
-/// net in [`sep`] is applied).
-fn want_space(prev: S, next: S, cfg: &Config) -> bool {
+/// net in [`sep`] is applied). `next_parent` is the parent node kind of the `next` token, used
+/// only to disambiguate colon contexts (see [`space_before_colon`]); callers pass it solely when
+/// `next` is a `COLON`.
+fn want_space(prev: S, next: S, next_parent: Option<S>, cfg: &Config) -> bool {
     use S::*;
     // A constructor-call type witness `new <Integer>Foo()` keeps a space after `new`; the
     // generic no-space-before-`<` rule below (for `Foo<T>`) must not glue `new` to its `<`.
@@ -89,12 +91,14 @@ fn want_space(prev: S, next: S, cfg: &Config) -> bool {
         return false;
     }
     // Colon spacing (ternary `?:`, enhanced-`for`, labels, `assert`, `case` / `default`) is
-    // configurable and applies uniformly to every colon context. `::` is a distinct token
-    // (`COLON_COLON`, handled above as a no-space operator) and is never affected. The
-    // structural no-space rules above take precedence, so a colon abutting `)` / `,` / `;`
+    // configurable. `space-before-colon` applies uniformly to every colon context;
+    // `space-around-operator-colon` additionally spaces the *operator* colons (enhanced-`for`,
+    // `assert` — the ternary is composed in `lower_ternary`), see [`space_before_colon`]. `::` is
+    // a distinct token (`COLON_COLON`, handled above as a no-space operator) and is never affected.
+    // The structural no-space rules above take precedence, so a colon abutting `)` / `,` / `;`
     // (only reachable through error recovery) never gains a stray space.
     if next == COLON {
-        return cfg.space_before_colon;
+        return space_before_colon(prev, next_parent, cfg);
     }
     if prev == COLON {
         return cfg.space_after_colon;
@@ -110,6 +114,19 @@ fn want_space(prev: S, next: S, cfg: &Config) -> bool {
         return !matches!(prev, IDENT | RPAREN | RBRACK | SUPER_KW | THIS_KW | GT);
     }
     true
+}
+
+/// Whether a space precedes a `:`, given the colon's parent node kind. The *label* colons (a
+/// labeled statement, a `switch` `case` / `default`) follow `space_before_colon` alone. The
+/// *operator* colons — those that separate two operands: an enhanced `for` (`for (T x : xs)`) and
+/// an `assert` message (`assert c : m`) — additionally honor `space_around_operator_colon` (the
+/// ternary `:` is composed in `lower_ternary`, never reaching here). One exception preserves
+/// Google Java Format fidelity: an unnamed `_` for-each variable hugs its colon (`for (T _: xs)`),
+/// so the space is suppressed when the preceding token is the `_` (`UNDERSCORE`).
+fn space_before_colon(prev: S, parent: Option<S>, cfg: &Config) -> bool {
+    let operator_colon = matches!(parent, Some(S::FOR_EACH_STMT | S::ASSERT_STMT));
+    cfg.space_before_colon
+        || (operator_colon && cfg.space_around_operator_colon && prev != S::UNDERSCORE)
 }
 
 /// Are `prev` and `next` adjacent in the source (no trivia between them)?
@@ -139,7 +156,14 @@ pub(crate) fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) 
     if pk == S::GT && (nk == S::GT || nk == S::EQ) {
         return if adjacent(p, next) { nil() } else { text(" ") };
     }
-    let space = want_space(pk, nk, cfg) || would_fuse(p.text(), next.text());
+    // The colon's parent node kind disambiguates colon contexts (operator vs label); only a
+    // colon needs it, so the lookup is skipped for every other token pair.
+    let next_parent = if nk == S::COLON {
+        next.parent().map(|n| n.kind())
+    } else {
+        None
+    };
+    let space = want_space(pk, nk, next_parent, cfg) || would_fuse(p.text(), next.text());
     if space { text(" ") } else { nil() }
 }
 
