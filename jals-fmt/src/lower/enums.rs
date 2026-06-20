@@ -119,7 +119,7 @@ pub(crate) fn lower_enum_body(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     };
 
     let open = tok(lbrace, ctx);
-    let has_dangling = ctx.comments.has_leading(rbrace);
+    let has_dangling = ctx.comments.has_dangling(rbrace);
     let close = concat(vec![text("}"), ctx.comments.trailing_doc(rbrace)]);
 
     // An empty body with no dangling comment stays `{}` on the header's line — no inner space.

@@ -276,23 +276,36 @@ impl CommentMap {
         concat(parts)
     }
 
+    /// Whether the token carries any *dangling* comment — an own-line `leading` comment or a
+    /// hugging `leading_inline` one — i.e. a comment anchored before it with nothing significant
+    /// in between. Used by a braced body's closing brace (emitted directly, never through
+    /// [`CommentMap::token`]) to decide whether the body is truly empty. A `leading_inline`
+    /// comment on a closing brace (`{ /* b */ }` under `inline-block-comments`) has no following
+    /// content token to hug, so it dangles here exactly like an own-line one.
+    pub(crate) fn has_dangling(&self, tok: &SyntaxToken) -> bool {
+        let offset = usize::from(tok.text_range().start());
+        self.leading.contains_key(&offset) || self.leading_inline.contains_key(&offset)
+    }
+
     /// The document for comments dangling before a token (e.g. inside an otherwise empty
-    /// block, anchored as leading comments of the closing brace).
+    /// block, anchored as leading comments of the closing brace). Both own-line `leading`
+    /// comments and hugging `leading_inline` ones are emitted, each on its own line: a
+    /// `leading_inline` comment routed here (one written immediately before a body's closing
+    /// brace under `inline-block-comments`) has no following content token to hug, so it is
+    /// emitted own-line rather than dropped. Reformatting then sees it on its own line — no
+    /// longer followed by a same-line significant token — so it stays own-line (idempotent).
     pub(crate) fn dangling(&self, tok: &SyntaxToken) -> Doc {
         let offset = usize::from(tok.text_range().start());
-        match self.leading.get(&offset) {
-            None => nil(),
-            Some(lead) => {
-                let mut parts = Vec::new();
-                for (i, c) in lead.iter().enumerate() {
-                    if i > 0 {
-                        parts.push(hardline());
-                    }
-                    parts.push(comment_doc(c));
-                }
-                concat(parts)
+        let lead = self.leading.get(&offset).into_iter().flatten();
+        let inline = self.leading_inline.get(&offset).into_iter().flatten();
+        let mut parts = Vec::new();
+        for c in lead.chain(inline) {
+            if !parts.is_empty() {
+                parts.push(hardline());
             }
+            parts.push(comment_doc(c));
         }
+        concat(parts)
     }
 }
 

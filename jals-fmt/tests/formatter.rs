@@ -4932,6 +4932,36 @@ fn inline_block_comments_off_relocates_embedded_marker() {
 }
 
 #[test]
+fn inline_block_comments_keeps_comment_before_closing_brace() {
+    // A same-line block comment immediately before a body's closing brace has no following
+    // *content* token to hug — the brace is emitted directly, never through `CommentMap::token`.
+    // It must dangle on its own line inside the body rather than be dropped.
+    check_inline_block(
+        "class C{ int x; /* b */ }",
+        expect![[r#"
+            class C {
+                int x;
+                /* b */
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn inline_block_comments_keeps_comment_in_empty_body() {
+    // The lone comment of an otherwise empty body still dangles inside it instead of being
+    // dropped when the empty body would otherwise collapse to `{}`.
+    check_inline_block(
+        "class C{/* b */}",
+        expect![[r#"
+            class C {
+                /* b */
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn inline_block_comments_is_idempotent() {
     let src = "class N{void f(){java.lang./* @A */ String s=null;int y=1 /* m */ * 2;}}";
     let once = fmt_inline_block(src);
