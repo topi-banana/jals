@@ -2,7 +2,7 @@
 //! `LanguageServer` trait, and runs the stdio event loop.
 
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
@@ -56,18 +56,18 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
 }
 
 /// Server state: the client handle, open documents, memoized config discovery (one cache each for
-/// the formatter's `jalsfmt.toml` and the linter's `jalslint.toml`), and the project symbol index.
+/// the formatter's `jalsfmt.toml` and the linter's `jalslint.toml`), and one symbol index per
+/// open `jals.toml` project.
 struct ServerState {
     client: ClientSocket,
     store: DocumentStore,
     discovery: Discovery<jals_fmt::Config>,
     lint_discovery: Discovery<jals_lint::Config>,
-    /// The project-wide symbol index, built at `initialized` from the workspace's source roots.
-    /// `None` until then, and for clients that open no workspace folder.
-    workspace: Option<Workspace>,
-    /// The workspace folder paths captured from the `initialize` request, used to locate the
-    /// `jals.toml` source roots when building the index.
-    workspace_folders: Vec<PathBuf>,
+    /// One [`Workspace`] per `jals.toml` project a client has a file open in. Populated lazily on
+    /// `did_open` by walking up from the file to its manifest (see [`ServerState::ensure_workspace_for`]),
+    /// so the server only ever indexes a real project's source roots, never a whole git checkout.
+    /// Empty for files that belong to no manifest, which fall back to file-local resolution.
+    workspaces: Vec<Workspace>,
     /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
     /// taken from the `initialize` request. Gates the config watcher registration.
     config_watch_registration_supported: bool,
@@ -80,18 +80,55 @@ impl ServerState {
             store: DocumentStore::default(),
             discovery: Discovery::default(),
             lint_discovery: Discovery::default(),
-            workspace: None,
-            workspace_folders: Vec::new(),
+            workspaces: Vec::new(),
             config_watch_registration_supported: false,
         }
     }
 
-    /// Reflect the open document at `uri` into the project index, if a workspace is loaded.
+    /// Ensure a [`Workspace`] is loaded for the `jals.toml` project `uri` belongs to.
+    ///
+    /// Walks up from the file's directory to find its manifest. If there is one and no workspace
+    /// for that project root is loaded yet, builds it from the manifest's source roots and adds it;
+    /// if one already exists it is reused, and a file under no manifest is left for file-local
+    /// resolution. The manifest is only parsed when a new workspace is actually built, so reopening
+    /// files in an already-loaded project is cheap.
+    fn ensure_workspace_for(&mut self, uri: &Url) {
+        let Some(dir) = uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        let Some(manifest_path) = Manifest::discover_path(&dir) else {
+            return;
+        };
+        let root = manifest_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        if self.workspaces.iter().any(|ws| ws.project_root() == root) {
+            return;
+        }
+        let source_roots = match Manifest::from_file(&manifest_path) {
+            Ok(manifest) => manifest.source_roots(&root),
+            Err(_) => vec![root.clone()],
+        };
+        self.workspaces.push(Workspace::load(root, source_roots));
+    }
+
+    /// The loaded workspace that owns `uri`, if any.
+    fn workspace_for(&self, uri: &Url) -> Option<&Workspace> {
+        self.workspaces.iter().find(|ws| ws.owns_uri(uri))
+    }
+
+    /// Reflect the open document at `uri` into the project index of the workspace that owns it, if
+    /// any.
     fn refresh_workspace_overlay(&mut self, uri: &Url) {
         let Some(doc) = self.store.get(uri) else {
             return;
         };
-        if let Some(workspace) = &mut self.workspace {
+        if let Some(workspace) = self.workspaces.iter_mut().find(|ws| ws.owns_uri(uri)) {
             workspace.set_overlay(uri, &doc);
         }
     }
@@ -113,7 +150,7 @@ impl ServerState {
             &lint_config,
         ));
         // Cross-file "cannot resolve symbol" diagnostics, only for files in an indexed project.
-        if let Some(workspace) = &self.workspace
+        if let Some(workspace) = self.workspace_for(uri)
             && let Some(file) = workspace.file_id(uri)
         {
             diagnostics.extend(handlers::compute_type_diagnostics(
@@ -142,7 +179,6 @@ impl LanguageServer for ServerState {
         &mut self,
         params: InitializeParams,
     ) -> BoxFuture<'static, Result<InitializeResult, Self::Error>> {
-        self.workspace_folders = workspace_folder_paths(&params);
         self.config_watch_registration_supported = params
             .capabilities
             .workspace
@@ -169,13 +205,9 @@ impl LanguageServer for ServerState {
                     .await;
             });
         }
-        // Build the project symbol index from the workspace's `jals.toml` source roots (or the
-        // folders themselves when there is no manifest). This walks the source tree, so it runs
-        // once here rather than per request.
-        let roots = source_roots(&self.workspace_folders);
-        if !roots.is_empty() {
-            self.workspace = Some(Workspace::load(roots));
-        }
+        // Project symbol indexes are built lazily, per `jals.toml` project, the first time a file
+        // in that project is opened (see `did_open`/`ensure_workspace_for`) — so a client that
+        // opens a large folder with no manifest never triggers a whole-tree walk here.
         ControlFlow::Continue(())
     }
 
@@ -199,6 +231,9 @@ impl LanguageServer for ServerState {
         let doc = params.text_document;
         let uri = doc.uri;
         self.store.upsert(uri.clone(), doc.text, doc.version);
+        // Discover (and index, once) the `jals.toml` project this file belongs to, so cross-file
+        // resolution works without ever walking a non-project folder.
+        self.ensure_workspace_for(&uri);
         self.refresh_workspace_overlay(&uri);
         self.publish_diagnostics(&uri);
         ControlFlow::Continue(())
@@ -317,8 +352,7 @@ impl LanguageServer for ServerState {
         // `goto_definition` returns `None` for any other document, which then falls back to
         // file-local resolution against the open document alone.
         let location = self
-            .workspace
-            .as_ref()
+            .workspace_for(&uri)
             .and_then(|workspace| workspace.goto_definition(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
@@ -347,8 +381,7 @@ impl LanguageServer for ServerState {
         // A file in the project index infers with cross-file type names through the workspace; any
         // other document falls back to file-local inference against the open document alone.
         let hover = self
-            .workspace
-            .as_ref()
+            .workspace_for(&uri)
             .and_then(|workspace| workspace.hover(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
@@ -411,49 +444,6 @@ impl LanguageServer for ServerState {
             }))
         })
     }
-}
-
-/// The workspace folder paths from `initialize`, preferring `workspace_folders` and falling back to
-/// the (deprecated) `root_uri`. Non-`file:` URIs are dropped.
-fn workspace_folder_paths(params: &InitializeParams) -> Vec<PathBuf> {
-    if let Some(folders) = &params.workspace_folders {
-        return folders
-            .iter()
-            .filter_map(|folder| folder.uri.to_file_path().ok())
-            .collect();
-    }
-    #[allow(deprecated)]
-    params
-        .root_uri
-        .as_ref()
-        .and_then(|uri| uri.to_file_path().ok())
-        .into_iter()
-        .collect()
-}
-
-/// The `.java` source roots to index for each workspace folder: a folder's `jals.toml`
-/// `source-dirs` (resolved against the manifest's directory) if it has one, otherwise the folder
-/// itself.
-fn source_roots(folders: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    for folder in folders {
-        match Manifest::discover_path(folder) {
-            Some(manifest_path) => {
-                let base = manifest_path
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .to_path_buf();
-                match Manifest::from_file(&manifest_path) {
-                    Ok(manifest) => {
-                        roots.extend(manifest.build.source_dirs.iter().map(|d| base.join(d)));
-                    }
-                    Err(_) => roots.push(folder.clone()),
-                }
-            }
-            None => roots.push(folder.clone()),
-        }
-    }
-    roots
 }
 
 /// Ask the client to watch `jalsfmt.toml` and `jalslint.toml` files anywhere in the
@@ -530,6 +520,67 @@ mod tests {
             }),
             ControlFlow::Continue(())
         ));
+    }
+
+    /// `did_open` builds at most one workspace per `jals.toml` project, reuses it for later files in
+    /// the same project, and builds none for a file under no manifest — so opening a file in a
+    /// manifestless folder never triggers a whole-tree index walk (the Helix freeze regression).
+    #[test]
+    fn did_open_indexes_one_workspace_per_project() {
+        use async_lsp::lsp_types::TextDocumentItem;
+
+        fn project(name: &str) -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("jals.toml"),
+                format!("[package]\nname = \"{name}\"\n[build]\nsource-dirs = [\"src\"]\n"),
+            )
+            .unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            dir
+        }
+
+        fn open(state: &mut ServerState, path: std::path::PathBuf, text: &str) {
+            std::fs::write(&path, text).unwrap();
+            let _ = state.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: Url::from_file_path(path).unwrap(),
+                    language_id: "java".into(),
+                    version: 1,
+                    text: text.into(),
+                },
+            });
+        }
+
+        let proj_a = project("a");
+        let proj_b = project("b");
+        let no_manifest = tempfile::tempdir().unwrap();
+
+        let mut state = ServerState::new(ClientSocket::new_closed());
+
+        open(&mut state, proj_a.path().join("src/A.java"), "class A {}");
+        assert_eq!(state.workspaces.len(), 1, "first file builds one workspace");
+
+        open(&mut state, proj_a.path().join("src/A2.java"), "class A2 {}");
+        assert_eq!(
+            state.workspaces.len(),
+            1,
+            "a second file in the same project reuses the workspace"
+        );
+
+        open(&mut state, proj_b.path().join("src/B.java"), "class B {}");
+        assert_eq!(
+            state.workspaces.len(),
+            2,
+            "a file in a different project adds a second workspace"
+        );
+
+        open(&mut state, no_manifest.path().join("C.java"), "class C {}");
+        assert_eq!(
+            state.workspaces.len(),
+            2,
+            "a file under no manifest builds no workspace"
+        );
     }
 
     #[test]

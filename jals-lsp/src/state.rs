@@ -130,7 +130,10 @@ impl WorkspaceFile {
     }
 }
 
-/// A project-wide symbol index plus the per-file data needed to answer cross-file queries.
+/// A single `jals.toml` project's symbol index plus the per-file data needed to answer cross-file
+/// queries. The server holds one of these per project a client has a file open in (see
+/// [`ServerState`](crate::server)), discovered lazily by walking up from each opened file — so it
+/// only ever indexes the source roots of a real manifest, never a whole git checkout.
 ///
 /// The host owns all I/O: [`load`](Workspace::load) walks the source roots and reads every `.java`
 /// file, then hands the parsed trees to the pure [`ProjectIndex`]. Open documents are kept current
@@ -138,6 +141,9 @@ impl WorkspaceFile {
 /// and rebuilds the (in-memory, no-I/O) index. The rebuild walks the cached trees of every file, so
 /// it is cheap per edit but linear in project size — adequate until an incremental index is needed.
 pub(crate) struct Workspace {
+    /// The `jals.toml` directory this workspace was discovered from; identifies the workspace so a
+    /// later open in the same project reuses it instead of building a duplicate.
+    project_root: PathBuf,
     source_roots: Vec<PathBuf>,
     files: Vec<WorkspaceFile>,
     by_uri: HashMap<Url, FileId>,
@@ -146,8 +152,10 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     /// Walk `source_roots`, parse every `.java` file found (skipping unreadable ones), and build
-    /// the symbol index. Paths are visited in sorted order so the index is deterministic.
-    pub(crate) fn load(source_roots: Vec<PathBuf>) -> Workspace {
+    /// the symbol index. `project_root` is the `jals.toml` directory this workspace was discovered
+    /// from; it identifies the workspace so a later open in the same project reuses it. Paths are
+    /// visited in sorted order so the index is deterministic.
+    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace {
         let mut paths: Vec<PathBuf> = source_roots
             .iter()
             .flat_map(|root| WalkDir::new(root).into_iter().filter_map(Result::ok))
@@ -158,6 +166,7 @@ impl Workspace {
         paths.dedup();
 
         let mut ws = Workspace {
+            project_root,
             source_roots,
             files: Vec::new(),
             by_uri: HashMap::new(),
@@ -198,6 +207,23 @@ impl Workspace {
         self.by_uri.get(uri).copied()
     }
 
+    /// The `jals.toml` project root this workspace was loaded from.
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// Whether `uri` belongs to this workspace: a file already indexed, or a path under one of its
+    /// source roots (so a project file the editor hasn't opened yet still resolves here).
+    pub(crate) fn owns_uri(&self, uri: &Url) -> bool {
+        self.by_uri.contains_key(uri) || self.under_source_root(uri)
+    }
+
+    /// Whether `uri`'s path lies under one of this workspace's source roots.
+    fn under_source_root(&self, uri: &Url) -> bool {
+        uri.to_file_path()
+            .is_ok_and(|p| self.source_roots.iter().any(|r| p.starts_with(r)))
+    }
+
     /// Reflect an open document into the index: replace the cached copy of `uri` with the editor's
     /// current text (or add it, if `uri` is a project file created after the initial load), then
     /// rebuild the index. Returns whether `uri` belongs to this workspace.
@@ -211,10 +237,7 @@ impl Workspace {
         match self.by_uri.get(uri).copied() {
             Some(id) => self.files[id.0 as usize] = file,
             None => {
-                let under_root = uri
-                    .to_file_path()
-                    .is_ok_and(|p| self.source_roots.iter().any(|r| p.starts_with(r)));
-                if !under_root {
+                if !self.under_source_root(uri) {
                     return false;
                 }
                 let id = FileId(self.files.len() as u32);
@@ -567,7 +590,7 @@ mod tests {
         )
         .unwrap();
 
-        let ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
         let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
         assert!(ws.file_id(&bar_uri).is_some());
@@ -595,7 +618,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let mut ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
         let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
         let bar = "package a; class Bar { Foo f; }";
@@ -623,7 +646,7 @@ mod tests {
         let bar = "package a; class Bar { void m() { var f = new Foo(); } }";
         std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
 
-        let ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
 
         // Hovering the `new Foo()` expression shows `Foo`, resolved against the other file.
@@ -645,7 +668,7 @@ mod tests {
     fn workspace_file_id_is_none_for_unknown_uri() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Bar.java"), "class Bar { }").unwrap();
-        let ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let other = Url::parse("file:///elsewhere/Other.java").unwrap();
         assert!(ws.file_id(&other).is_none());
     }
