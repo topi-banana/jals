@@ -900,7 +900,9 @@ dependencies = [
  "anyhow",
  "async-lsp",
  "futures",
+ "jals-build",
  "jals-fmt",
+ "jals-hir",
  "jals-lint",
  "jals-syntax",
  "serde_json",
@@ -908,6 +910,7 @@ dependencies = [
  "text-size",
  "tokio",
  "tower",
+ "walkdir",
 ]
 
 [[package]]

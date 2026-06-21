@@ -1,8 +1,9 @@
-//! Builds LSP diagnostics from parser syntax errors and `jals-lint` rule findings.
+//! Builds LSP diagnostics from parser syntax errors, `jals-lint` rule findings, and unresolved
+//! cross-file type references.
 
 use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
+use jals_hir::{FileId, ProjectIndex};
 use jals_syntax::Parse;
-use text_size::{TextRange, TextSize};
 
 use crate::line_index::LineIndex;
 
@@ -43,19 +44,45 @@ pub(crate) fn compute_lint_diagnostics(
 ) -> Vec<Diagnostic> {
     jals_lint::lint_node(&parse.syntax(), config)
         .into_iter()
-        .map(|finding| {
-            let range = TextRange::new(
-                TextSize::from(finding.range.start as u32),
-                TextSize::from(finding.range.end as u32),
-            );
-            Diagnostic {
-                range: line_index.range(text, range),
-                severity: Some(lint_severity(finding.severity)),
-                code: Some(NumberOrString::String(finding.rule.to_string())),
-                source: Some("jals".to_string()),
-                message: finding.message,
-                ..Default::default()
-            }
+        .map(|finding| Diagnostic {
+            range: line_index.byte_range(text, &finding.range),
+            severity: Some(lint_severity(finding.severity)),
+            code: Some(NumberOrString::String(finding.rule.to_string())),
+            source: Some("jals".to_string()),
+            message: finding.message,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Build "cannot resolve symbol" diagnostics for `file`'s type-name references that resolve to
+/// nothing — neither file-locally nor anywhere in the project index.
+///
+/// `parse`/`text`/`line_index` are the document's cached CST and its coordinate map; `index` is the
+/// project-wide symbol index and `file` this document's id within it. Diagnostics are suppressed
+/// entirely when the document has parse errors: a broken tree yields spurious unresolved names, and
+/// the syntax errors themselves are already reported by [`compute_diagnostics`].
+pub(crate) fn compute_type_diagnostics(
+    index: &ProjectIndex,
+    file: FileId,
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+) -> Vec<Diagnostic> {
+    if !parse.errors().is_empty() {
+        return Vec::new();
+    }
+    let resolved = jals_hir::resolve_node(&parse.syntax());
+    index
+        .unresolved_types(file, &resolved)
+        .into_iter()
+        .map(|range| Diagnostic {
+            range: line_index.byte_range(text, &range),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("cannot-resolve".to_string())),
+            source: Some("jals".to_string()),
+            message: format!("cannot resolve symbol `{}`", &text[range]),
+            ..Default::default()
         })
         .collect()
 }
@@ -120,6 +147,45 @@ mod tests {
             &LineIndex::new(text),
             &jals_lint::Config::default(),
         );
+        assert!(diags.is_empty());
+    }
+
+    /// Build a two-file project index: `file0` is `text`, `file1` declares `package a; class Foo`.
+    fn index_with_sibling_foo(text: &str) -> (ProjectIndex, Parse) {
+        let parse = jals_syntax::parse(text);
+        let sibling = jals_syntax::parse("package a; class Foo { }");
+        let index =
+            ProjectIndex::build(&[(FileId(0), parse.syntax()), (FileId(1), sibling.syntax())]);
+        (index, parse)
+    }
+
+    #[test]
+    fn type_diagnostics_flag_only_genuine_unknowns() {
+        // `Nope` is nameable from nowhere; `String` is java.lang; `Foo` is a same-package project
+        // type. Only `Nope` is reported.
+        let text = "package a; class Bar { Nope n; String s; Foo f; }";
+        let (index, parse) = index_with_sibling_foo(text);
+        let diags =
+            compute_type_diagnostics(&index, FileId(0), &parse, text, &LineIndex::new(text));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "cannot resolve symbol `Nope`");
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String("cannot-resolve".to_string()))
+        );
+        assert_eq!(diags[0].source.as_deref(), Some("jals"));
+    }
+
+    #[test]
+    fn type_diagnostics_suppressed_on_parse_errors() {
+        // A broken tree yields spurious unresolved names, so the whole pass is skipped.
+        let text = "package a; class Bar { Nope n; ";
+        let parse = jals_syntax::parse(text);
+        assert!(!parse.errors().is_empty());
+        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let diags =
+            compute_type_diagnostics(&index, FileId(0), &parse, text, &LineIndex::new(text));
         assert!(diags.is_empty());
     }
 }

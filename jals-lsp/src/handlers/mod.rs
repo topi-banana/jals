@@ -1,6 +1,7 @@
 //! Pure request handlers: each maps document text (and config) to an LSP payload, with no
 //! I/O or async. This is the unit-testable core of the server.
 
+mod definition;
 mod diagnostics;
 mod document_highlight;
 mod folding_range;
@@ -9,7 +10,10 @@ mod selection_range;
 mod semantic_tokens;
 mod symbols;
 
-pub(crate) use diagnostics::{compute_diagnostics, compute_lint_diagnostics};
+pub(crate) use definition::goto_definition_local;
+pub(crate) use diagnostics::{
+    compute_diagnostics, compute_lint_diagnostics, compute_type_diagnostics,
+};
 pub(crate) use document_highlight::document_highlight;
 pub(crate) use folding_range::folding_range;
 pub(crate) use formatting::formatting_edits;

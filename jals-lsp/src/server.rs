@@ -2,6 +2,7 @@
 //! `LanguageServer` trait, and runs the stdio event loop.
 
 use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
@@ -12,10 +13,11 @@ use async_lsp::lsp_types::{
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, GlobPattern, InitializeParams, InitializeResult,
-    InitializedParams, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
-    RenameFilesParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    FoldingRangeProviderCapability, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
+    InitializeParams, InitializeResult, InitializedParams, Location, OneOf,
+    PublishDiagnosticsParams, Registration, RegistrationParams, RenameFilesParams, SelectionRange,
+    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
     notification::{self, Notification},
@@ -27,10 +29,11 @@ use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
 use async_lsp::{ClientSocket, LanguageServer, MainLoop, ResponseError};
 use futures::future::BoxFuture;
+use jals_build::Manifest;
 use tower::ServiceBuilder;
 
 use crate::handlers;
-use crate::state::{Discovery, DocumentStore, is_config_file, is_lint_config_file};
+use crate::state::{Discovery, DocumentStore, Workspace, is_config_file, is_lint_config_file};
 
 /// Build the server and run its stdio event loop until the client disconnects.
 pub(crate) async fn run_server() -> anyhow::Result<()> {
@@ -52,13 +55,19 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Server state: the client handle, open documents, and memoized config discovery (one cache
-/// each for the formatter's `jalsfmt.toml` and the linter's `jalslint.toml`).
+/// Server state: the client handle, open documents, memoized config discovery (one cache each for
+/// the formatter's `jalsfmt.toml` and the linter's `jalslint.toml`), and the project symbol index.
 struct ServerState {
     client: ClientSocket,
     store: DocumentStore,
     discovery: Discovery<jals_fmt::Config>,
     lint_discovery: Discovery<jals_lint::Config>,
+    /// The project-wide symbol index, built at `initialized` from the workspace's source roots.
+    /// `None` until then, and for clients that open no workspace folder.
+    workspace: Option<Workspace>,
+    /// The workspace folder paths captured from the `initialize` request, used to locate the
+    /// `jals.toml` source roots when building the index.
+    workspace_folders: Vec<PathBuf>,
     /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
     /// taken from the `initialize` request. Gates the config watcher registration.
     config_watch_registration_supported: bool,
@@ -71,7 +80,19 @@ impl ServerState {
             store: DocumentStore::default(),
             discovery: Discovery::default(),
             lint_discovery: Discovery::default(),
+            workspace: None,
+            workspace_folders: Vec::new(),
             config_watch_registration_supported: false,
+        }
+    }
+
+    /// Reflect the open document at `uri` into the project index, if a workspace is loaded.
+    fn refresh_workspace_overlay(&mut self, uri: &Url) {
+        let Some(doc) = self.store.get(uri) else {
+            return;
+        };
+        if let Some(workspace) = &mut self.workspace {
+            workspace.set_overlay(uri, &doc);
         }
     }
 
@@ -91,6 +112,18 @@ impl ServerState {
             &doc.line_index,
             &lint_config,
         ));
+        // Cross-file "cannot resolve symbol" diagnostics, only for files in an indexed project.
+        if let Some(workspace) = &self.workspace
+            && let Some(file) = workspace.file_id(uri)
+        {
+            diagnostics.extend(handlers::compute_type_diagnostics(
+                workspace.index(),
+                file,
+                &doc.parse,
+                &doc.text,
+                &doc.line_index,
+            ));
+        }
         let _ = self
             .client
             .notify::<notification::PublishDiagnostics>(PublishDiagnosticsParams {
@@ -109,6 +142,7 @@ impl LanguageServer for ServerState {
         &mut self,
         params: InitializeParams,
     ) -> BoxFuture<'static, Result<InitializeResult, Self::Error>> {
+        self.workspace_folders = workspace_folder_paths(&params);
         self.config_watch_registration_supported = params
             .capabilities
             .workspace
@@ -135,6 +169,13 @@ impl LanguageServer for ServerState {
                     .await;
             });
         }
+        // Build the project symbol index from the workspace's `jals.toml` source roots (or the
+        // folders themselves when there is no manifest). This walks the source tree, so it runs
+        // once here rather than per request.
+        let roots = source_roots(&self.workspace_folders);
+        if !roots.is_empty() {
+            self.workspace = Some(Workspace::load(roots));
+        }
         ControlFlow::Continue(())
     }
 
@@ -158,6 +199,7 @@ impl LanguageServer for ServerState {
         let doc = params.text_document;
         let uri = doc.uri;
         self.store.upsert(uri.clone(), doc.text, doc.version);
+        self.refresh_workspace_overlay(&uri);
         self.publish_diagnostics(&uri);
         ControlFlow::Continue(())
     }
@@ -166,6 +208,7 @@ impl LanguageServer for ServerState {
         let uri = params.text_document.uri;
         self.store
             .apply_changes(&uri, &params.content_changes, params.text_document.version);
+        self.refresh_workspace_overlay(&uri);
         self.publish_diagnostics(&uri);
         ControlFlow::Continue(())
     }
@@ -263,6 +306,37 @@ impl LanguageServer for ServerState {
         })
     }
 
+    fn definition(
+        &mut self,
+        params: GotoDefinitionParams,
+    ) -> BoxFuture<'static, Result<Option<GotoDefinitionResponse>, Self::Error>> {
+        let pos = params.text_document_position_params;
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index resolves cross-file (and file-locally) through the workspace.
+        // `goto_definition` returns `None` for any other document, which then falls back to
+        // file-local resolution against the open document alone.
+        let location = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.goto_definition(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::goto_definition_local(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        position,
+                    )
+                    .map(|range| Location {
+                        uri: uri.clone(),
+                        range,
+                    })
+                })
+            });
+        Box::pin(async move { Ok(location.map(GotoDefinitionResponse::Scalar)) })
+    }
+
     fn formatting(
         &mut self,
         params: DocumentFormattingParams,
@@ -318,6 +392,49 @@ impl LanguageServer for ServerState {
     }
 }
 
+/// The workspace folder paths from `initialize`, preferring `workspace_folders` and falling back to
+/// the (deprecated) `root_uri`. Non-`file:` URIs are dropped.
+fn workspace_folder_paths(params: &InitializeParams) -> Vec<PathBuf> {
+    if let Some(folders) = &params.workspace_folders {
+        return folders
+            .iter()
+            .filter_map(|folder| folder.uri.to_file_path().ok())
+            .collect();
+    }
+    #[allow(deprecated)]
+    params
+        .root_uri
+        .as_ref()
+        .and_then(|uri| uri.to_file_path().ok())
+        .into_iter()
+        .collect()
+}
+
+/// The `.java` source roots to index for each workspace folder: a folder's `jals.toml`
+/// `source-dirs` (resolved against the manifest's directory) if it has one, otherwise the folder
+/// itself.
+fn source_roots(folders: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for folder in folders {
+        match Manifest::discover_path(folder) {
+            Some(manifest_path) => {
+                let base = manifest_path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .to_path_buf();
+                match Manifest::from_file(&manifest_path) {
+                    Ok(manifest) => {
+                        roots.extend(manifest.build.source_dirs.iter().map(|d| base.join(d)));
+                    }
+                    Err(_) => roots.push(folder.clone()),
+                }
+            }
+            None => roots.push(folder.clone()),
+        }
+    }
+    roots
+}
+
 /// Ask the client to watch `jalsfmt.toml` and `jalslint.toml` files anywhere in the
 /// workspace, so config edits invalidate the discovery caches without a server restart.
 fn config_watch_registration() -> RegistrationParams {
@@ -348,6 +465,7 @@ fn server_capabilities() -> ServerCapabilities {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
+        definition_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
