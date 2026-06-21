@@ -67,6 +67,12 @@ impl Resolver {
                 }
             }
             NAME_REF => self.record_ref(scope, node),
+            TYPE => {
+                // A type-name occurrence is a Type-namespace reference. Recurse so that nested type
+                // arguments (`List<Foo>` — the inner `Foo`) are recorded as their own references.
+                self.record_type_ref(scope, node);
+                self.build_children(node, scope);
+            }
             _ => self.build_children(node, scope),
         }
     }
@@ -164,6 +170,10 @@ impl Resolver {
         if let Some(tok) = first_ident_token(node) {
             self.add_def(fs, DefKind::Local, &tok);
         }
+        // The element type is a type reference (`for (Foo f : ...)`); it does not see the variable.
+        if let Some(ty) = fe.ty() {
+            self.build(ty.syntax(), fs);
+        }
         // The iterable is evaluated where the loop sits — the loop variable is not visible to it.
         if let Some(it) = fe.iterable() {
             self.build(it.syntax(), scope);
@@ -215,8 +225,11 @@ impl Resolver {
         if let Some(tok) = catch.binding() {
             self.add_def(cs, DefKind::CatchParam, &tok);
         }
-        if let Some(b) = catch.block() {
-            self.build(b.syntax(), cs);
+        // Recurse every child node (the caught type(s) and the block) in the catch scope; the
+        // binding is a bare token, not a node, so it is not revisited here. This records the
+        // exception type(s) (`catch (IOException e)`) as type references.
+        for child in node.children() {
+            self.build(&child, cs);
         }
     }
 
@@ -258,6 +271,10 @@ impl Resolver {
             for p in params.params() {
                 if let Some(tok) = first_ident_token(p.syntax()) {
                     self.add_def(ls, DefKind::LambdaParam, &tok);
+                }
+                // An explicitly-typed parameter (`(Foo f) -> ...`) contributes a type reference.
+                for ty in p.syntax().children().filter(|c| c.kind() == TYPE) {
+                    self.build(&ty, ls);
                 }
             }
         }

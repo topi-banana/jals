@@ -29,6 +29,40 @@ impl QualifiedName {
     pub fn text(&self) -> String {
         non_trivia_text(&self.syntax)
     }
+
+    /// The dotted segments in source order (`a.b.C` → `["a", "b", "C"]`). The trailing wildcard
+    /// `*` of an on-demand import is not a segment.
+    pub fn segments(&self) -> Vec<String> {
+        ident_tokens(&self.syntax)
+            .map(|t| t.text().to_string())
+            .collect()
+    }
+
+    /// The last (simple) segment (`import a.b.Foo;` → `Foo`). `None` for a wildcard import
+    /// (`a.b.*`), which names no single type.
+    pub fn last_segment(&self) -> Option<String> {
+        if self.is_wildcard() {
+            return None;
+        }
+        ident_tokens(&self.syntax)
+            .last()
+            .map(|t| t.text().to_string())
+    }
+
+    /// The qualifier (package) part: everything before the simple name (`a.b.C` → `a.b`), or the
+    /// full package of an on-demand import (`a.b.*` → `a.b`). `None` when there is no qualifier.
+    pub fn qualifier(&self) -> Option<String> {
+        let segs = self.segments();
+        let take = if self.is_wildcard() {
+            segs.len()
+        } else {
+            segs.len().saturating_sub(1)
+        };
+        if take == 0 {
+            return None;
+        }
+        Some(segs[..take].join("."))
+    }
 }
 
 impl ExportsDirective {
@@ -79,6 +113,48 @@ impl Type {
     /// Use [`AstNode::syntax`]`().text()` if you need the verbatim slice including trivia.
     pub fn text(&self) -> String {
         non_trivia_text(&self.syntax)
+    }
+
+    /// The simple-name identifier token of a reference type (the last top-level `IDENT`): `a.b.C`
+    /// → the `C` token, `List<Foo>` → the `List` token. `None` for a primitive, `var`, or `void`
+    /// (which have no identifier).
+    ///
+    /// Type arguments are nested `TYPE_ARGS` nodes, so the names inside `List<Foo>` are not direct
+    /// `IDENT` tokens — only the outer `List` is considered here.
+    pub fn simple_name_token(&self) -> Option<SyntaxToken> {
+        ident_tokens(&self.syntax).last()
+    }
+
+    /// The text of [`simple_name_token`](Type::simple_name_token): `a.b.C` → `C`.
+    pub fn simple_name(&self) -> Option<String> {
+        self.simple_name_token().map(|t| t.text().to_string())
+    }
+
+    /// Whether the type name is qualified, i.e. a dotted reference type (`a.b.C`).
+    pub fn is_qualified(&self) -> bool {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .any(|t| t.kind() == DOT)
+    }
+
+    /// The qualified name text of a reference type, with type arguments and array dimensions
+    /// removed (`java.util.List<String>[]` → `java.util.List`). `None` for a non-reference type.
+    pub fn qualified_text(&self) -> Option<String> {
+        let text: String = self
+            .syntax
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .filter(|t| matches!(t.kind(), IDENT | DOT))
+            .map(|t| t.text().to_string())
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Whether this is a primitive, `var`, or `void` type — one with no reference name to resolve.
+    /// Equivalently, a type with no top-level `IDENT` token (a reference type always has one).
+    pub fn is_primitive_or_var(&self) -> bool {
+        ident_tokens(&self.syntax).next().is_none()
     }
 }
 
@@ -183,7 +259,7 @@ impl Resource {
 #[cfg(test)]
 mod tests {
     use super::AstNode;
-    use crate::ast::{CatchClause, FieldDecl, LocalVarDecl, Resource};
+    use crate::ast::{CatchClause, FieldDecl, LocalVarDecl, QualifiedName, Resource, Type};
     use crate::parser::parse;
 
     /// Returns the first descendant of `src` that casts to `T`.
@@ -240,5 +316,55 @@ mod tests {
             resource.binding().map(|t| t.text().to_string()).as_deref(),
             Some("r")
         );
+    }
+
+    #[test]
+    fn type_qualified_reference_splits_name_and_qualifier() {
+        let ty: Type = first("class C { java.util.List<String> f; }");
+        assert_eq!(ty.simple_name().as_deref(), Some("List"));
+        assert!(ty.is_qualified());
+        assert_eq!(ty.qualified_text().as_deref(), Some("java.util.List"));
+        assert!(!ty.is_primitive_or_var());
+    }
+
+    #[test]
+    fn type_generic_simple_name_ignores_args() {
+        let ty: Type = first("class C { List<Foo> f; }");
+        assert_eq!(ty.simple_name().as_deref(), Some("List"));
+        assert!(!ty.is_qualified());
+        assert_eq!(ty.qualified_text().as_deref(), Some("List"));
+    }
+
+    #[test]
+    fn type_primitive_has_no_reference_name() {
+        let ty: Type = first("class C { int x; }");
+        assert_eq!(ty.simple_name(), None);
+        assert_eq!(ty.qualified_text(), None);
+        assert!(ty.is_primitive_or_var());
+    }
+
+    #[test]
+    fn type_array_of_reference_keeps_name() {
+        let ty: Type = first("class C { String[] xs; }");
+        assert_eq!(ty.simple_name().as_deref(), Some("String"));
+        assert!(!ty.is_primitive_or_var());
+    }
+
+    #[test]
+    fn qualified_name_segments_and_parts() {
+        let qn: QualifiedName = first("import a.b.Foo;");
+        assert_eq!(qn.segments(), ["a", "b", "Foo"]);
+        assert_eq!(qn.last_segment().as_deref(), Some("Foo"));
+        assert_eq!(qn.qualifier().as_deref(), Some("a.b"));
+        assert!(!qn.is_wildcard());
+    }
+
+    #[test]
+    fn qualified_name_wildcard_has_no_last_segment() {
+        let qn: QualifiedName = first("import a.b.*;");
+        assert_eq!(qn.segments(), ["a", "b"]);
+        assert_eq!(qn.last_segment(), None);
+        assert_eq!(qn.qualifier().as_deref(), Some("a.b"));
+        assert!(qn.is_wildcard());
     }
 }
