@@ -446,12 +446,7 @@ fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
 /// Collects the `.java` files under the manifest's source directories (resolved against `root`).
 /// Each source directory must exist, and at least one source file must be found.
 fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
-    let source_roots: Vec<PathBuf> = manifest
-        .build
-        .source_dirs
-        .iter()
-        .map(|d| root.join(d))
-        .collect();
+    let source_roots = manifest.source_roots(root);
     for dir in &source_roots {
         if !dir.is_dir() {
             return Err(anyhow!("source directory {} does not exist", dir.display()));

@@ -171,6 +171,17 @@ impl Manifest {
         Ok(())
     }
 
+    /// The absolute `.java` source roots: each `[build] source-dirs` entry resolved against
+    /// `manifest_dir` (the manifest's own directory). These feed `javac -sourcepath` and are the
+    /// roots scanned for `.java` files.
+    pub fn source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf> {
+        self.build
+            .source_dirs
+            .iter()
+            .map(|d| manifest_dir.join(d))
+            .collect()
+    }
+
     /// Search upward from `start_dir` for a `jals.toml`, returning its path.
     ///
     /// The project root is the returned path's parent directory; all manifest paths are resolved
