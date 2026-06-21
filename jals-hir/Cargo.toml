@@ -1,13 +1,10 @@
 [package]
-name = "jals-lint"
+name = "jals-hir"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-jals-hir.workspace = true
 jals-syntax.workspace = true
-serde = { workspace = true, features = ["derive"] }
-toml.workspace = true
 
 [dev-dependencies]
 expect-test = "1.5"

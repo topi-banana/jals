@@ -14,6 +14,7 @@ use crate::diagnostic::Severity;
 mod empty_catch;
 mod missing_braces;
 mod naming;
+mod unused_local;
 mod wildcard_import;
 
 /// A potential problem reported by a rule, before it is tagged with a rule name / severity.
@@ -60,4 +61,5 @@ pub(crate) const RULES: &[RuleMeta] = &[
     wildcard_import::RULE,
     empty_catch::RULE,
     missing_braces::RULE,
+    unused_local::RULE,
 ];

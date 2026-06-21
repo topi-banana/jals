@@ -139,9 +139,67 @@ fn naming_field_flagged() {
 #[test]
 fn naming_clean_ok() {
     check(
-        "class Foo { static final int MAX_VALUE = 1; int count; void doThing(int itemId) {} }",
+        "class Foo { static final int MAX_VALUE = 1; int count; void doThing(int itemId) { use(itemId); } }",
         expect![""],
     );
+}
+
+// ===== unused-local =====
+
+#[test]
+fn unused_local_flagged() {
+    check(
+        "class Foo { void m() { int x = 1; } }",
+        expect![[r#"
+        unused-local:27..28: unused local variable `x`
+    "#]],
+    );
+}
+
+#[test]
+fn used_local_ok() {
+    check(
+        "class Foo { int m() { int x = 1; return x; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn unnamed_local_ok() {
+    // `var _ = ...` binds nothing, so there is nothing to flag.
+    check("class Foo { void m() { var _ = compute(); } }", expect![""]);
+}
+
+#[test]
+fn multi_declarator_only_unused_flagged() {
+    check(
+        "class Foo { int m() { int a = 1, b = 2; return a; } }",
+        expect![[r#"
+            unused-local:33..34: unused local variable `b`
+        "#]],
+    );
+}
+
+#[test]
+fn unused_parameter_of_bodied_method_flagged() {
+    check(
+        "class Foo { void m(int p) {} }",
+        expect![[r#"
+        unused-local:23..24: unused parameter `p`
+    "#]],
+    );
+}
+
+#[test]
+fn abstract_parameter_not_flagged() {
+    // An interface method has no body; its parameter can never be used, so it is not flagged.
+    check("interface Foo { void m(int p); }", expect![""]);
+}
+
+#[test]
+fn lambda_parameter_not_flagged() {
+    // Unused lambda parameters are routinely intentional and are left alone.
+    check("class Foo { void m() { run(x -> 1); } }", expect![""]);
 }
 
 // ===== configuration =====
