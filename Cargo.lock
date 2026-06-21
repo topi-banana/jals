@@ -873,10 +873,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "jals-hir"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "jals-syntax",
+ "proptest",
+]
+
+[[package]]
 name = "jals-lint"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-hir",
  "jals-syntax",
  "proptest",
  "serde",

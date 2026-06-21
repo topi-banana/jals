@@ -7,10 +7,14 @@ Guidance for Claude Code (and other agents) working in this repository.
 `jals` is a Rust workspace providing Java tooling built on a **lossless, error-resilient**
 syntax tree. A hand-written lexer and `rowan` CST parser (`jals-syntax`) feed a Wadler/Prettier
 pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP server
-(`jals-lsp`, run via `jals lsp`) is another consumer; a linter is an intended future one.
+(`jals-lsp`, run via `jals lsp`) and a linter (`jals-lint`) are other consumers. File-local name
+resolution (`jals-hir`) is the foundation for semantic tooling — go-to-definition, unused-binding
+lints, and (later) type inference.
 
 - Edition 2024, resolver 3, workspace version `0.1.0`. Needs Rust 1.85+.
-- Crate graph: `jals-cli` → `{jals-fmt, jals-lsp, jals-build}`; `jals-lsp`/`jals-fmt` → `jals-syntax`.
+- Crate graph: `jals-cli` → `{jals-fmt, jals-lint, jals-lsp, jals-build}`;
+  `jals-lsp` → `{jals-fmt, jals-lint, jals-syntax}`; `jals-lint` → `{jals-hir, jals-syntax}`;
+  `jals-hir`/`jals-fmt` → `jals-syntax`.
   `jals-build` has no `jals-syntax` dependency (it only orchestrates `javac`/`java`).
   `jals-playground` is a separate
   Yew/Trunk browser app that runs `jals-fmt`/`jals-syntax` in the browser. It targets `wasm32`
@@ -29,6 +33,8 @@ pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP
 | Modifier layout | `jals-fmt/src/modifiers.rs` | Pure canonical reordering of a `MODIFIERS` node's keyword modifiers (`reorder-modifiers`), annotations hoisted to the front, + its `Doc` emission. |
 | Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
 | Config | `jals-fmt/src/config.rs` | `jalsfmt.toml`, kebab-case keys, all optional. |
+| Name resolution (HIR) | `jals-hir/src/` | File-local scope tree + symbol table over the CST: `resolve`/`resolve_node` → `Resolved` (`defs`, `scopes`, `references`). Two-pass: `resolve/build.rs` builds scopes and registers defs (recording each reference with its scope); then each reference is looked up its scope chain. Value/method namespaces, sequential (block/for/resources) vs. hoisting scopes. Pure, wasm-compatible, never panics. No type inference yet. |
+| Linter | `jals-lint/src/` | Rule registry (`rules/mod.rs`, `RuleMeta`) over the CST; `lint_source`/`lint_node` return byte-range `Diagnostic`s. `jalslint.toml`, kebab-case keys, all optional. Pure, wasm-compatible. The `unused-local` rule consumes `jals-hir`. |
 | Build/compile | `jals-build/src/` | `jals.toml` (`Manifest`) parsing + validation (`Manifest::validate`) + a pure `javac`/`java` invocation builder (`build_invocation`/`run_invocation`) + run-target resolution (`resolve_run_target`, picking the `main-class` from `[[bin]]`/`default-run`/`[run] main-class`) + clean-path resolution (`clean_paths`, for `jals clean`) + project scaffolding (`scaffold`, for `jals init`). Pure lib (serde/toml, no `std::process`/`std::fs`), so wasm-compatible; `jals-cli` walks sources, spawns the tools, removes the build output, and writes the scaffold files. `jals-build/README.md` has the full manifest reference and the Cargo-for-Java roadmap. |
 | CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lint`/`jals lsp`/`jals build`/`jals run`/`jals clean`/`jals init`; config discovery memoized per directory. |
 | LSP | `jals-lsp/src/` | `async-lsp` server (`jals lsp`): diagnostics, document symbols, formatting. Pure handlers + UTF-16 `LineIndex`. Host-only (tokio/stdio). |
