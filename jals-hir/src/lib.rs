@@ -4,13 +4,19 @@
 //! within a single source file. This is the foundation for go-to-definition, find-references,
 //! unused-binding detection, and — later — type inference.
 //!
-//! Scope of Phase 1:
-//! - **Resolved:** locals, parameters (method / constructor / lambda), fields (including forward
-//!   references), methods (bare-callee calls), type parameters, enum constants, and catch /
-//!   resource / for-each / pattern variables.
-//! - **Out of scope (left [`Unresolved`]):** member-access right-hand names (`obj.field` — needs a
-//!   type), type-name references, and any name with no file-local definition (imported or external
+//! Two layers:
+//! - **File-local** ([`resolve`] / [`resolve_node`] → [`Resolved`]): binds value, method, and
+//!   type-name references within one file. Resolved: locals, parameters (method / constructor /
+//!   lambda), fields (including forward references), methods (bare-callee calls), type parameters,
+//!   enum constants, catch / resource / for-each / pattern variables, and file-local type names
+//!   (a sibling class, a type parameter). Left [`Unresolved`](Resolution::Unresolved):
+//!   member-access right-hand names
+//!   (`obj.field` — needs a type) and any name with no file-local definition (imported or external
 //!   types, inherited members). `this` / `super` are not recorded as references at all.
+//! - **Project-wide** ([`ProjectIndex`]): a symbol index over many files. It resolves the
+//!   type-name references the file-local pass left [`Unresolved`](Resolution::Unresolved) against
+//!   the project's other
+//!   source files — the basis for cross-file go-to-definition and "cannot resolve symbol".
 //!
 //! It never panics: an incomplete or erroneous tree yields a best-effort result, and an
 //! unresolvable reference is recorded as [`Resolution::Unresolved`] rather than failing.
@@ -26,6 +32,7 @@
 //! ```
 
 mod def;
+mod project;
 mod reference;
 mod resolve;
 mod scope;
@@ -33,6 +40,7 @@ mod scope;
 use jals_syntax::SyntaxNode;
 
 pub use def::{Def, DefId, DefKind, Namespace};
+pub use project::{FileId, Fqn, Item, ItemId, ProjectIndex, TypeResolution};
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;
 pub use scope::{Scope, ScopeId, ScopeKind};

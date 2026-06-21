@@ -1,6 +1,7 @@
 //! Property tests: resolution never panics and produces internally consistent, in-bounds results.
 
-use jals_hir::{Resolution, resolve};
+use jals_hir::{FileId, ProjectIndex, Resolution, resolve, resolve_node};
+use jals_syntax::SyntaxNode;
 use proptest::prelude::*;
 
 /// A generator of Java-ish source built from fragments that exercise scopes and references.
@@ -91,6 +92,29 @@ proptest! {
                 prop_assert_eq!(&d.name, &r.name);
                 prop_assert_eq!(d.kind.namespace(), r.namespace);
             }
+        }
+    }
+
+    /// Building a project index over several Java-ish files and querying it never panics, and every
+    /// indexed item's name range is well-formed and within its file's bounds.
+    #[test]
+    fn project_index_never_panics(srcs in proptest::collection::vec(javaish(), 0..4)) {
+        let nodes: Vec<(FileId, SyntaxNode)> = srcs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+            .collect();
+        let index = ProjectIndex::build(&nodes);
+        for (file, root) in &nodes {
+            let resolved = resolve_node(root);
+            let _ = index.unresolved_types(*file, &resolved);
+            for r in &resolved.references {
+                let _ = index.definition_at(*file, &resolved, r.range.start);
+            }
+        }
+        for item in index.items() {
+            prop_assert!(item.name_range.start <= item.name_range.end);
+            prop_assert!(item.name_range.end <= srcs[item.file.0 as usize].len());
         }
     }
 }

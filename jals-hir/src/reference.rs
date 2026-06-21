@@ -4,31 +4,38 @@ use std::ops::Range;
 
 use crate::def::{DefId, Namespace};
 
-/// The outcome of resolving a [`Reference`].
+/// The outcome of resolving a [`Reference`] within one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     /// The reference binds to a file-local definition.
     Def(DefId),
-    /// The reference was examined but not bound. This covers names that legitimately have no
-    /// file-local definition — an imported or external type, an inherited member, `this` / `super`
-    /// — as well as a genuinely undeclared name. Phase 1 does not distinguish these.
+    /// The reference was examined but not bound to a *file-local* definition. This covers names
+    /// that legitimately have no file-local definition — an imported or external type, an
+    /// inherited member, `this` / `super` — as well as a genuinely undeclared name. The file-local
+    /// pass does not distinguish these; a [`Type`](Namespace::Type) reference left `Unresolved`
+    /// here is what the project layer ([`crate::ProjectIndex`]) then tries to bind cross-file.
     Unresolved,
 }
 
-/// A reference: an identifier occurrence in value or method-invocation position.
+/// A reference: an identifier occurrence the resolver examines.
 ///
-/// Type-name occurrences (inside a `TYPE` node) are not references in Phase 1 — they are not
-/// recorded here — because type resolution is out of scope. The right-hand name of a member access
-/// (`obj.field`) is likewise absent: it needs a type to resolve, and structurally it is a bare
-/// token rather than a name-reference node.
+/// References cover value and method-invocation positions and — since Phase 2 — type-name
+/// positions (the name inside a `TYPE` node, in [`Namespace::Type`]). The right-hand name of a
+/// member access (`obj.field`) is still absent: it needs a type to resolve, and structurally it is
+/// a bare token rather than a name-reference node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
-    /// The byte range of the referencing identifier token.
+    /// The byte range of the referencing identifier token (the simple name; for a dotted type
+    /// `a.b.C` this is the last segment `C`).
     pub range: Range<usize>,
-    /// The referenced name.
+    /// The referenced simple name.
     pub name: String,
-    /// The name-space the reference looks up in (value vs. method, decided by syntactic position).
+    /// The name-space the reference looks up in (value / method / type, by syntactic position).
     pub namespace: Namespace,
-    /// What the reference resolved to.
+    /// What the reference resolved to within the file.
     pub resolution: Resolution,
+    /// For a qualified type reference (`a.b.C`), its full dotted text (`"a.b.C"`); `None` for a
+    /// simple name. The project layer resolves a qualified type against a fully-qualified name
+    /// rather than the scope chain, so this is recorded but left [`Resolution::Unresolved`] here.
+    pub qualified: Option<String>,
 }

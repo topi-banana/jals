@@ -4,9 +4,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_lsp::lsp_types::{TextDocumentContentChangeEvent, Url};
+use async_lsp::lsp_types::{Location, Position, TextDocumentContentChangeEvent, Url};
 use jals_fmt::Config;
-use jals_syntax::Parse;
+use jals_hir::{FileId, ProjectIndex};
+use jals_syntax::{Parse, SyntaxNode};
+use walkdir::WalkDir;
 
 use crate::line_index::LineIndex;
 
@@ -103,6 +105,142 @@ pub(crate) fn apply_content_changes(
         text.replace_range(start.min(end)..start.max(end), &change.text);
     }
     text
+}
+
+/// A file tracked by the project [`Workspace`]: its URI and cached CST + coordinate map. Mirrors
+/// the open-document [`Document`], but covers every project source file (open or not) so a
+/// cross-file go-to-definition can land in a file the editor has never opened.
+struct WorkspaceFile {
+    uri: Url,
+    text: Arc<str>,
+    line_index: Arc<LineIndex>,
+    parse: Arc<Parse>,
+}
+
+impl WorkspaceFile {
+    fn new(uri: Url, text: String) -> WorkspaceFile {
+        let line_index = Arc::new(LineIndex::new(&text));
+        let parse = Arc::new(jals_syntax::parse(&text));
+        WorkspaceFile {
+            uri,
+            text: Arc::from(text),
+            line_index,
+            parse,
+        }
+    }
+}
+
+/// A project-wide symbol index plus the per-file data needed to answer cross-file queries.
+///
+/// The host owns all I/O: [`load`](Workspace::load) walks the source roots and reads every `.java`
+/// file, then hands the parsed trees to the pure [`ProjectIndex`]. Open documents are kept current
+/// via [`set_overlay`](Workspace::set_overlay), which swaps a file's cached text for the editor's
+/// and rebuilds the (in-memory, no-I/O) index. The rebuild walks the cached trees of every file, so
+/// it is cheap per edit but linear in project size — adequate until an incremental index is needed.
+pub(crate) struct Workspace {
+    source_roots: Vec<PathBuf>,
+    files: Vec<WorkspaceFile>,
+    by_uri: HashMap<Url, FileId>,
+    index: ProjectIndex,
+}
+
+impl Workspace {
+    /// Walk `source_roots`, parse every `.java` file found (skipping unreadable ones), and build
+    /// the symbol index. Paths are visited in sorted order so the index is deterministic.
+    pub(crate) fn load(source_roots: Vec<PathBuf>) -> Workspace {
+        let mut paths: Vec<PathBuf> = source_roots
+            .iter()
+            .flat_map(|root| WalkDir::new(root).into_iter().filter_map(Result::ok))
+            .map(walkdir::DirEntry::into_path)
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "java"))
+            .collect();
+        paths.sort();
+        paths.dedup();
+
+        let mut ws = Workspace {
+            source_roots,
+            files: Vec::new(),
+            by_uri: HashMap::new(),
+            index: ProjectIndex::build(&[]),
+        };
+        for path in paths {
+            if let (Ok(text), Ok(uri)) =
+                (std::fs::read_to_string(&path), Url::from_file_path(&path))
+                && !ws.by_uri.contains_key(&uri)
+            {
+                let id = FileId(ws.files.len() as u32);
+                ws.by_uri.insert(uri.clone(), id);
+                ws.files.push(WorkspaceFile::new(uri, text));
+            }
+        }
+        ws.rebuild_index();
+        ws
+    }
+
+    /// Rebuild the symbol index from the cached parses. No I/O.
+    fn rebuild_index(&mut self) {
+        let inputs: Vec<(FileId, SyntaxNode)> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (FileId(i as u32), f.parse.syntax()))
+            .collect();
+        self.index = ProjectIndex::build(&inputs);
+    }
+
+    /// The project symbol index.
+    pub(crate) fn index(&self) -> &ProjectIndex {
+        &self.index
+    }
+
+    /// The id of the file at `uri`, if it is part of this workspace.
+    pub(crate) fn file_id(&self, uri: &Url) -> Option<FileId> {
+        self.by_uri.get(uri).copied()
+    }
+
+    /// Reflect an open document into the index: replace the cached copy of `uri` with the editor's
+    /// current text (or add it, if `uri` is a project file created after the initial load), then
+    /// rebuild the index. Returns whether `uri` belongs to this workspace.
+    pub(crate) fn set_overlay(&mut self, uri: &Url, doc: &Document) -> bool {
+        let file = WorkspaceFile {
+            uri: uri.clone(),
+            text: doc.text.clone(),
+            line_index: doc.line_index.clone(),
+            parse: doc.parse.clone(),
+        };
+        match self.by_uri.get(uri).copied() {
+            Some(id) => self.files[id.0 as usize] = file,
+            None => {
+                let under_root = uri
+                    .to_file_path()
+                    .is_ok_and(|p| self.source_roots.iter().any(|r| p.starts_with(r)));
+                if !under_root {
+                    return false;
+                }
+                let id = FileId(self.files.len() as u32);
+                self.by_uri.insert(uri.clone(), id);
+                self.files.push(file);
+            }
+        }
+        self.rebuild_index();
+        true
+    }
+
+    /// Go-to-definition for the cursor at `position` in `uri`: a file-local binding if there is
+    /// one, otherwise the project type the reference names. `None` if `uri` is not in the workspace
+    /// or the reference resolves to nothing (or to an external type).
+    pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        let resolved = jals_hir::resolve_node(&source.parse.syntax());
+        let (target_file, range) = self.index.definition_at(file, &resolved, offset)?;
+        let target = &self.files[target_file.0 as usize];
+        Some(Location {
+            uri: target.uri.clone(),
+            range: target.line_index.byte_range(&target.text, &range),
+        })
+    }
 }
 
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
@@ -404,5 +542,73 @@ mod tests {
         assert!(!is_lint_config_file(&other));
         let non_file = Url::parse("untitled:jalslint.toml").unwrap();
         assert!(!is_lint_config_file(&non_file));
+    }
+
+    #[test]
+    fn workspace_resolves_definition_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        std::fs::write(
+            dir.path().join("Bar.java"),
+            "package a; class Bar { Foo f; }",
+        )
+        .unwrap();
+
+        let ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+        assert!(ws.file_id(&bar_uri).is_some());
+
+        // The `Foo` reference in Bar.java jumps to the class declaration in Foo.java.
+        let bar = "package a; class Bar { Foo f; }";
+        let use_col = bar.find("Foo").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, use_col))
+            .expect("Foo resolves cross-file");
+        assert_eq!(loc.uri, foo_uri);
+
+        let foo = "package a; class Foo { }";
+        let decl_col = foo.find("Foo").unwrap() as u32;
+        assert_eq!(loc.range.start, Position::new(0, decl_col));
+        assert_eq!(loc.range.end, Position::new(0, decl_col + 3));
+    }
+
+    #[test]
+    fn workspace_overlay_picks_up_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Bar.java"),
+            "package a; class Bar { Foo f; }",
+        )
+        .unwrap();
+
+        let mut ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+        let bar = "package a; class Bar { Foo f; }";
+        let use_col = bar.find("Foo").unwrap() as u32;
+
+        // `Foo` is unresolved before any file declares it.
+        assert!(
+            ws.goto_definition(&bar_uri, Position::new(0, use_col))
+                .is_none()
+        );
+
+        // The editor opens a new Foo.java under the source root; the overlay adds it to the index.
+        let doc = Document::new("package a; class Foo { }".to_string(), 1);
+        assert!(ws.set_overlay(&foo_uri, &doc));
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, use_col))
+            .expect("Foo resolves after the overlay");
+        assert_eq!(loc.uri, foo_uri);
+    }
+
+    #[test]
+    fn workspace_file_id_is_none_for_unknown_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Bar.java"), "class Bar { }").unwrap();
+        let ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let other = Url::parse("file:///elsewhere/Other.java").unwrap();
+        assert!(ws.file_id(&other).is_none());
     }
 }

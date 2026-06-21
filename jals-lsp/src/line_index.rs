@@ -58,6 +58,18 @@ impl LineIndex {
         }
     }
 
+    /// Convert a `std::ops::Range<usize>` of byte offsets (as `jals-syntax` / `jals-hir` report
+    /// them) to an LSP `Range`.
+    pub(crate) fn byte_range(&self, text: &str, range: &std::ops::Range<usize>) -> Range {
+        self.range(
+            text,
+            TextRange::new(
+                TextSize::from(range.start as u32),
+                TextSize::from(range.end as u32),
+            ),
+        )
+    }
+
     /// Convert an LSP `Position` to a byte offset (the inverse of `position`).
     ///
     /// Lines past the end of the document, and characters past the end of a line, are

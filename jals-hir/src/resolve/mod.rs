@@ -7,11 +7,12 @@
 //! field or method used before its declaration) resolve without a separate pre-scan.
 
 mod build;
-mod collect;
+pub(crate) mod collect;
 
 use std::collections::HashSet;
 
 use jals_syntax::SyntaxKind::CALL_EXPR;
+use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::def::{Def, DefId, DefKind, Namespace};
@@ -95,6 +96,8 @@ struct RawRef {
     name: String,
     namespace: Namespace,
     scope: ScopeId,
+    /// The full dotted text of a qualified type reference (`a.b.C`); `None` for a simple name.
+    qualified: Option<String>,
 }
 
 /// Builds the scope tree and resolves references for one file.
@@ -132,16 +135,22 @@ impl Resolver {
         let raw_refs = std::mem::take(&mut self.raw_refs);
         let mut references = Vec::with_capacity(raw_refs.len());
         for raw in raw_refs {
-            let resolution = match self.lookup(raw.scope, &raw.name, raw.namespace, raw.range.start)
-            {
-                Some(id) => Resolution::Def(id),
-                None => Resolution::Unresolved,
+            // A qualified type name (`a.b.C`) never binds to a file-local definition; leave it
+            // unresolved for the project layer, which resolves it against a fully-qualified name.
+            let resolution = if raw.qualified.is_some() {
+                Resolution::Unresolved
+            } else {
+                match self.lookup(raw.scope, &raw.name, raw.namespace, raw.range.start) {
+                    Some(id) => Resolution::Def(id),
+                    None => Resolution::Unresolved,
+                }
             };
             references.push(Reference {
                 range: raw.range,
                 name: raw.name,
                 namespace: raw.namespace,
                 resolution,
+                qualified: raw.qualified,
             });
         }
         references.sort_by_key(|r| r.range.start);
@@ -200,6 +209,32 @@ impl Resolver {
             name: tok.text().to_string(),
             namespace,
             scope,
+            qualified: None,
+        });
+    }
+
+    /// Records the type named by the `TYPE` `node` as a [`Namespace::Type`] reference in `scope`.
+    ///
+    /// A primitive, `var`, or `void` type carries no resolvable name and is skipped. The recorded
+    /// range is the simple-name identifier (the last `IDENT` of a dotted type), so go-to-definition
+    /// lands on the type name. A qualified type (`a.b.C`) keeps its full dotted text in `qualified`
+    /// and is left unresolved by the file-local pass — only the project layer can bind it.
+    fn record_type_ref(&mut self, scope: ScopeId, node: &SyntaxNode) {
+        let Some(ty) = ast::Type::cast(node.clone()) else {
+            return;
+        };
+        // A primitive / `var` / `void` type has no simple-name token, so this also skips them.
+        let Some(tok) = ty.simple_name_token() else {
+            return;
+        };
+        // The full dotted text only for a qualified type (`a.b.C`); a bare name has no `.`.
+        let qualified = ty.qualified_text().filter(|q| q.contains('.'));
+        self.raw_refs.push(RawRef {
+            range: byte_range(&tok),
+            name: tok.text().to_string(),
+            namespace: Namespace::Type,
+            scope,
+            qualified,
         });
     }
 

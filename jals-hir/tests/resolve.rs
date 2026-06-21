@@ -114,6 +114,7 @@ fn for_each_variable_and_outer_iterable() {
     check(
         "class C { int items; void m() { for (String s : items) use(s); } }",
         expect![[r#"
+            String@37..43 -> <unresolved>
             items@48..53 -> Field `items`@14..19
             use@55..58 -> <unresolved>
             s@59..60 -> Local `s`@44..45
@@ -126,6 +127,7 @@ fn catch_binding_resolves_in_block() {
     check(
         "class C { void m() { try { } catch (Exception e) { log(e); } } }",
         expect![[r#"
+            Exception@36..45 -> <unresolved>
             log@51..54 -> <unresolved>
             e@55..56 -> CatchParam `e`@46..47
         "#]],
@@ -161,7 +163,9 @@ fn switch_pattern_variable_resolves_in_arm() {
     check(
         "class C { void m(Object o) { switch (o) { case Integer i -> use(i); default -> {} } } }",
         expect![[r#"
+            Object@17..23 -> <unresolved>
             o@37..38 -> Param `o`@24..25
+            Integer@47..54 -> <unresolved>
             use@60..63 -> <unresolved>
             i@64..65 -> PatternVar `i`@55..56
         "#]],
@@ -188,6 +192,40 @@ fn var_keyword_is_not_a_reference() {
         expect![[r#"
         use@32..35 -> <unresolved>
         x@36..37 -> Local `x`@25..26
+    "#]],
+    );
+}
+
+#[test]
+fn type_reference_resolves_to_type_parameter() {
+    // The field's type `T` binds to the class type parameter (Type namespace).
+    check(
+        "class C<T> { T value; }",
+        expect![[r#"
+        T@13..14 -> TypeParam `T`@8..9
+    "#]],
+    );
+}
+
+#[test]
+fn type_reference_resolves_to_sibling_class_hoisted() {
+    // `Helper` is declared after `C`, but type names hoist: it resolves file-locally.
+    check(
+        "class C { Helper h; } class Helper { }",
+        expect![[r#"
+        Helper@10..16 -> Class `Helper`@28..34
+    "#]],
+    );
+}
+
+#[test]
+fn qualified_type_reference_stays_unresolved_file_locally() {
+    // A dotted type `a.b.D` is never bound by the file-local pass — only the project layer can.
+    // The reference range and name are the simple (last) segment `D`.
+    check(
+        "class C { a.b.D field; }",
+        expect![[r#"
+        D@14..15 -> <unresolved>
     "#]],
     );
 }
