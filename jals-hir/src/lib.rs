@@ -2,9 +2,9 @@
 //!
 //! [`resolve`] binds each *reference* (an identifier use) to the *definition* (binding) it names,
 //! within a single source file. This is the foundation for go-to-definition, find-references,
-//! unused-binding detection, and — later — type inference.
+//! unused-binding detection, and type inference.
 //!
-//! Two layers:
+//! Three layers:
 //! - **File-local** ([`resolve`] / [`resolve_node`] → [`Resolved`]): binds value, method, and
 //!   type-name references within one file. Resolved: locals, parameters (method / constructor /
 //!   lambda), fields (including forward references), methods (bare-callee calls), type parameters,
@@ -17,9 +17,14 @@
 //!   type-name references the file-local pass left [`Unresolved`](Resolution::Unresolved) against
 //!   the project's other
 //!   source files — the basis for cross-file go-to-definition and "cannot resolve symbol".
+//! - **Type inference** ([`infer`] / [`infer_node`] → [`TypeInference`]): assigns each declaration
+//!   and expression a structural [`Ty`], reusing the [`Resolved`] bindings and the [`ProjectIndex`]
+//!   for reference type names — the basis for hover. The MVP covers the structural / local subset
+//!   (literals, names, arithmetic, casts, `new`, arrays, `var`); member-dependent forms (method
+//!   calls, field access) are [`Ty::Unknown`], pending a later phase.
 //!
-//! It never panics: an incomplete or erroneous tree yields a best-effort result, and an
-//! unresolvable reference is recorded as [`Resolution::Unresolved`] rather than failing.
+//! It never panics: an incomplete or erroneous tree yields a best-effort result, an unresolvable
+//! reference is recorded as [`Resolution::Unresolved`], and an un-inferable type is [`Ty::Unknown`].
 //!
 //! # Example
 //!
@@ -32,18 +37,22 @@
 //! ```
 
 mod def;
+mod infer;
 mod project;
 mod reference;
 mod resolve;
 mod scope;
+mod ty;
 
 use jals_syntax::SyntaxNode;
 
 pub use def::{Def, DefId, DefKind, Namespace};
+pub use infer::{TypeInference, infer, infer_node};
 pub use project::{FileId, Fqn, Item, ItemId, ProjectIndex, TypeResolution};
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;
 pub use scope::{Scope, ScopeId, ScopeKind};
+pub use ty::{ClassTy, Primitive, Ty};
 
 /// Parses `src` and resolves names within it.
 pub fn resolve(src: &str) -> Resolved {

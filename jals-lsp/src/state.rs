@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_lsp::lsp_types::{Location, Position, TextDocumentContentChangeEvent, Url};
+use async_lsp::lsp_types::{Hover, Location, Position, TextDocumentContentChangeEvent, Url};
 use jals_fmt::Config;
 use jals_hir::{FileId, ProjectIndex};
 use jals_syntax::{Parse, SyntaxNode};
@@ -241,6 +241,19 @@ impl Workspace {
             range: target.line_index.byte_range(&target.text, &range),
         })
     }
+
+    /// The hover for the cursor at `position` in `uri`: the inferred type of the expression there,
+    /// with reference type names resolved against the project. `None` if `uri` is not in the
+    /// workspace or the expression has no inferred type.
+    pub(crate) fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let resolved = jals_hir::resolve_node(&root);
+        let inference = jals_hir::infer(&root, &resolved, &self.index, file);
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        crate::handlers::type_hover(inference.type_at(offset)?)
+    }
 }
 
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
@@ -319,7 +332,7 @@ pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use async_lsp::lsp_types::{Position, Range};
+    use async_lsp::lsp_types::{HoverContents, Position, Range};
 
     use super::*;
 
@@ -601,6 +614,31 @@ mod tests {
             .goto_definition(&bar_uri, Position::new(0, use_col))
             .expect("Foo resolves after the overlay");
         assert_eq!(loc.uri, foo_uri);
+    }
+
+    #[test]
+    fn workspace_hover_shows_a_cross_file_project_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        let bar = "package a; class Bar { void m() { var f = new Foo(); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Hovering the `new Foo()` expression shows `Foo`, resolved against the other file.
+        let col = bar.find("new Foo()").unwrap() as u32;
+        let hover = ws
+            .hover(&bar_uri, Position::new(0, col))
+            .expect("new Foo() has an inferred type");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert_eq!(markup.value, "```java\nFoo\n```");
+
+        // A document outside the workspace has no workspace hover.
+        let other = Url::parse("file:///elsewhere/Other.java").unwrap();
+        assert!(ws.hover(&other, Position::new(0, 0)).is_none());
     }
 
     #[test]
