@@ -14,10 +14,10 @@ use async_lsp::lsp_types::{
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
     FoldingRangeProviderCapability, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
-    InitializeParams, InitializeResult, InitializedParams, Location, OneOf,
-    PublishDiagnosticsParams, Registration, RegistrationParams, RenameFilesParams, SelectionRange,
-    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokensFullOptions,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, Location, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
+    RenameFilesParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
     notification::{self, Notification},
@@ -337,6 +337,27 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(location.map(GotoDefinitionResponse::Scalar)) })
     }
 
+    fn hover(
+        &mut self,
+        params: HoverParams,
+    ) -> BoxFuture<'static, Result<Option<Hover>, Self::Error>> {
+        let pos = params.text_document_position_params;
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index infers with cross-file type names through the workspace; any
+        // other document falls back to file-local inference against the open document alone.
+        let hover = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.hover(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::hover_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(hover) })
+    }
+
     fn formatting(
         &mut self,
         params: DocumentFormattingParams,
@@ -466,6 +487,7 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),

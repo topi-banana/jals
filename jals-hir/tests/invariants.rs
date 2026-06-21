@@ -1,6 +1,6 @@
 //! Property tests: resolution never panics and produces internally consistent, in-bounds results.
 
-use jals_hir::{FileId, ProjectIndex, Resolution, resolve, resolve_node};
+use jals_hir::{FileId, ProjectIndex, Resolution, infer, infer_node, resolve, resolve_node};
 use jals_syntax::SyntaxNode;
 use proptest::prelude::*;
 
@@ -115,6 +115,29 @@ proptest! {
         for item in index.items() {
             prop_assert!(item.name_range.start <= item.name_range.end);
             prop_assert!(item.name_range.end <= srcs[item.file.0 as usize].len());
+        }
+    }
+
+    /// Type inference never panics on Java-ish input, with or without a project index, and every
+    /// definition and source offset can be queried.
+    #[test]
+    fn infer_never_panics(src in javaish()) {
+        let node = jals_syntax::parse(&src).syntax();
+        let resolved = resolve_node(&node);
+        let index = ProjectIndex::build(&[(FileId(0), node.clone())]);
+
+        let ti = infer(&node, &resolved, &index, FileId(0));
+        for d in &resolved.defs {
+            let _ = ti.type_of_def(d.id);
+        }
+        for offset in 0..=src.len() {
+            let _ = ti.type_at(offset);
+        }
+
+        // The project-free path must hold up too.
+        let ti_local = infer_node(&node, &resolved);
+        for d in &resolved.defs {
+            let _ = ti_local.type_of_def(d.id);
         }
     }
 }

@@ -6,6 +6,7 @@ mod diagnostics;
 mod document_highlight;
 mod folding_range;
 mod formatting;
+mod hover;
 mod selection_range;
 mod semantic_tokens;
 mod symbols;
@@ -17,6 +18,7 @@ pub(crate) use diagnostics::{
 pub(crate) use document_highlight::document_highlight;
 pub(crate) use folding_range::folding_range;
 pub(crate) use formatting::formatting_edits;
+pub(crate) use hover::{hover_local, type_hover};
 pub(crate) use selection_range::selection_ranges;
 pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
 pub(crate) use symbols::document_symbols;
