@@ -48,7 +48,9 @@ use jals_syntax::SyntaxNode;
 
 pub use def::{Def, DefId, DefKind, Namespace};
 pub use infer::{TypeInference, infer, infer_node};
-pub use project::{FileId, Fqn, Item, ItemId, ProjectIndex, TypeResolution};
+pub use project::{
+    FileId, Fqn, Item, ItemId, Member, MemberId, MemberType, ProjectIndex, TypeResolution,
+};
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;
 pub use scope::{Scope, ScopeId, ScopeKind};

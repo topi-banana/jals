@@ -43,7 +43,7 @@ impl Resolved {
     }
 
     /// The reference covering byte `offset`, if any.
-    fn reference_at(&self, offset: usize) -> Option<&Reference> {
+    pub fn reference_at(&self, offset: usize) -> Option<&Reference> {
         self.references
             .iter()
             .find(|r| r.range.start <= offset && offset < r.range.end)

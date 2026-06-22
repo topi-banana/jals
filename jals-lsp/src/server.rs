@@ -379,22 +379,25 @@ impl LanguageServer for ServerState {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
-        // File-local find-references over the open document. Cross-file references (a project type
-        // used from another source file) are a later phase; gathering them needs a reverse index on
-        // the workspace.
-        let doc = self.store.get(&uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                handlers::references(
-                    &doc.parse,
-                    &doc.text,
-                    &doc.line_index,
-                    &uri,
-                    position,
-                    include_declaration,
-                )
-            }))
-        })
+        // A file in an indexed project finds references project-wide through the workspace (a project
+        // type used from any source file); any other document falls back to file-local references
+        // over the open document alone.
+        let locations = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.references(&uri, position, include_declaration))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::references(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        &uri,
+                        position,
+                        include_declaration,
+                    )
+                })
+            });
+        Box::pin(async move { Ok(locations) })
     }
 
     fn hover(

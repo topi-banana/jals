@@ -18,15 +18,17 @@
 //! from there resolves to [`TypeResolution::External`] (no diagnostic) rather than
 //! [`TypeResolution::Unresolved`], so the "cannot resolve" signal stays free of false positives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
 use jals_syntax::SyntaxKind::{
-    ANNOTATION_TYPE_DECL, CLASS_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
+    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
+    ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL, LBRACK, METHOD_DECL,
+    RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode};
-use jals_syntax::{SyntaxKind, SyntaxNode};
+use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::Namespace;
 use crate::def::DefKind;
@@ -66,6 +68,56 @@ pub struct Item {
     pub file: FileId,
     /// The byte range of the declaring name token (the go-to-definition target).
     pub name_range: Range<usize>,
+    /// The project-internal supertypes (`extends` / `implements` that resolve to indexed types), for
+    /// inherited-member lookup. A supertype outside the indexed sources (a JDK class, an unresolved
+    /// name) is simply absent, so a member search up the chain stops at it gracefully.
+    pub supertypes: Vec<ItemId>,
+}
+
+/// A dense identifier for a [`Member`] within one [`ProjectIndex`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MemberId(u32);
+
+/// A member of an indexed type: a field, method, constructor, or enum constant. Methods and
+/// constructors live in the [`Method`](Namespace::Method) name-space; fields and enum constants in
+/// [`Value`](Namespace::Value), mirroring [`DefKind::namespace`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    /// The type that declares this member.
+    pub owner: ItemId,
+    /// The member's simple name.
+    pub name: String,
+    /// What kind of member it is (`Field`, `Method`, `Constructor`, or `EnumConstant`).
+    pub kind: DefKind,
+    /// The file the declaration lives in.
+    pub file: FileId,
+    /// The byte range of the declaring name token (the go-to-definition target).
+    pub name_range: Range<usize>,
+    /// The member's declared value type — a field's type or a method's return type — captured as
+    /// resolvable data (no CST handle), to be turned into a concrete type later (type inference) in
+    /// this member's *declaring* file context. A constructor has none ([`MemberType::Unknown`]).
+    pub ty: MemberType,
+}
+
+/// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
+/// holds no CST references. A named type keeps the spelling as written (simple, plus the full dotted
+/// text when qualified) to be resolved against the declaring file later; array dimensions are kept
+/// as a count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberType {
+    /// A primitive type, by keyword spelling (`"int"`), with `dims` array levels (`int[]` → 1).
+    Primitive { keyword: String, dims: u32 },
+    /// The `void` return type.
+    Void,
+    /// A named reference type: its simple name, the full dotted text when written qualified, and the
+    /// array dimension count. Resolved cross-file later, in the declaring file's import context.
+    Named {
+        name: String,
+        qualified: Option<String>,
+        dims: u32,
+    },
+    /// No resolvable value type — a constructor, a `var` slot, or a type that could not be read.
+    Unknown,
 }
 
 /// The cross-file resolution of a type-name reference.
@@ -97,6 +149,14 @@ pub struct ProjectIndex {
     items: Vec<Item>,
     by_fqn: HashMap<String, ItemId>,
     files: HashMap<FileId, FileMeta>,
+    /// Every indexed member, by [`MemberId`].
+    members: Vec<Member>,
+    /// Members grouped by their declaring type, for member lookup.
+    members_by_owner: HashMap<ItemId, Vec<MemberId>>,
+    /// A type declaration's `(file, name-token start)` back to its [`ItemId`], so a *file-local*
+    /// type reference (one that resolved to a same-file definition) can be mapped to its project
+    /// item — the basis for whole-project find-references.
+    decl_to_item: HashMap<(FileId, usize), ItemId>,
 }
 
 impl ProjectIndex {
@@ -110,6 +170,9 @@ impl ProjectIndex {
             items: Vec::new(),
             by_fqn: HashMap::new(),
             files: HashMap::new(),
+            members: Vec::new(),
+            members_by_owner: HashMap::new(),
+            decl_to_item: HashMap::new(),
         };
         for (file, root) in files {
             let Some(src) = ast::SourceFile::cast(root.clone()) else {
@@ -149,6 +212,18 @@ impl ProjectIndex {
             );
             index.collect_types(*file, root, package.as_deref(), None);
         }
+        // Index each type's declaration site, so a same-file type reference (which resolves
+        // file-locally, not through the project) can be mapped back to its item for find-references.
+        for (i, item) in index.items.iter().enumerate() {
+            index
+                .decl_to_item
+                .insert((item.file, item.name_range.start), ItemId(i as u32));
+        }
+        // Second pass: members and project-internal inheritance. It runs after every type is indexed
+        // so a supertype declared later (or in another file) still resolves.
+        for (file, root) in files {
+            index.collect_members_and_supertypes(*file, root);
+        }
         index
     }
 
@@ -172,12 +247,48 @@ impl ProjectIndex {
                 kind,
                 file,
                 name_range: byte_range(&name_tok),
+                supertypes: Vec::new(),
             });
             self.by_fqn.entry(fqn.clone()).or_insert(id);
             next_enclosing = Some(fqn);
         }
         for child in node.children() {
             self.collect_types(file, &child, package, next_enclosing.as_deref());
+        }
+    }
+
+    /// Walks `node`, recording each type declaration's direct members and resolving its
+    /// project-internal supertypes. Runs in [`build`](ProjectIndex::build)'s second pass, when every
+    /// type is already indexed (so a forward / cross-file supertype reference resolves).
+    fn collect_members_and_supertypes(&mut self, file: FileId, node: &SyntaxNode) {
+        if type_decl_kind(node.kind()).is_some()
+            && let Some(name_tok) = first_ident_token(node)
+            && let Some(owner) = self.item_by_decl(file, byte_range(&name_tok).start)
+        {
+            // Members. Captured purely from the node; pushed here so each gets a dense `MemberId`.
+            for member in members_of_decl(owner, file, node, name_tok.text()) {
+                let id = MemberId(self.members.len() as u32);
+                self.members.push(member);
+                self.members_by_owner.entry(owner).or_default().push(id);
+            }
+            // Supertypes: keep only the ones that resolve to an indexed project type.
+            let supertypes: Vec<ItemId> = raw_supertypes_of(node)
+                .into_iter()
+                .filter_map(|(name, qualified)| {
+                    let resolution = match &qualified {
+                        Some(q) => self.resolve_qualified(q),
+                        None => self.resolve_type(file, &name),
+                    };
+                    match resolution {
+                        TypeResolution::Project(id) => Some(id),
+                        TypeResolution::External | TypeResolution::Unresolved => None,
+                    }
+                })
+                .collect();
+            self.items[owner.0 as usize].supertypes = supertypes;
+        }
+        for child in node.children() {
+            self.collect_members_and_supertypes(file, &child);
         }
     }
 
@@ -293,6 +404,176 @@ impl ProjectIndex {
     /// Every indexed type declaration.
     pub fn items(&self) -> impl Iterator<Item = &Item> {
         self.items.iter()
+    }
+
+    /// The member with the given id.
+    pub fn member(&self, id: MemberId) -> &Member {
+        &self.members[id.0 as usize]
+    }
+
+    /// The project item declared at `name_start` in `file`, if that position is a type declaration's
+    /// name. Maps a file-local type definition back to its cross-file [`ItemId`].
+    pub fn item_by_decl(&self, file: FileId, name_start: usize) -> Option<ItemId> {
+        self.decl_to_item.get(&(file, name_start)).copied()
+    }
+
+    /// Resolves a member named `name` in name-space `namespace` (value for a field / enum constant,
+    /// method for a method / constructor) on type `owner`, searching the type itself and then its
+    /// project-internal supertypes.
+    ///
+    /// The nearest declaration wins (an own member shadows an inherited one), and the inheritance
+    /// walk is cycle-guarded and stops at any supertype outside the index — the JDK and third-party
+    /// members are simply not found (returns `None`) rather than guessed.
+    pub fn resolve_member(
+        &self,
+        owner: ItemId,
+        name: &str,
+        namespace: Namespace,
+    ) -> Option<MemberId> {
+        let mut visited = HashSet::new();
+        let mut stack = vec![owner];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(ids) = self.members_by_owner.get(&current) {
+                for &id in ids {
+                    let member = &self.members[id.0 as usize];
+                    if member.name == name && member.kind.namespace() == namespace {
+                        return Some(id);
+                    }
+                }
+            }
+            // Search supertypes after the type's own members, earlier-declared ones first.
+            for &supertype in self.items[current.0 as usize].supertypes.iter().rev() {
+                stack.push(supertype);
+            }
+        }
+        None
+    }
+}
+
+/// The direct value/executable members of a type declaration `node` (owned by `owner`, in `file`):
+/// fields, methods, constructors, and enum constants. Nested type declarations are *not* members
+/// here — they are their own [`Item`]s. `owner_simple` is the declaring type's simple name, used as
+/// an enum constant's type. Pure: reads only the node.
+fn members_of_decl(
+    owner: ItemId,
+    file: FileId,
+    node: &SyntaxNode,
+    owner_simple: &str,
+) -> Vec<Member> {
+    let mut members = Vec::new();
+    // The body holds the members directly (a `ClassBody`, or an `EnumBody` whose constants and
+    // members are both direct children).
+    let Some(body) = node
+        .children()
+        .find(|c| matches!(c.kind(), CLASS_BODY | ENUM_BODY))
+    else {
+        return members;
+    };
+    let mut push = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| {
+        members.push(Member {
+            owner,
+            name: name_tok.text().to_string(),
+            kind,
+            file,
+            name_range: byte_range(name_tok),
+            ty,
+        });
+    };
+    for member in body.children() {
+        match member.kind() {
+            FIELD_DECL => {
+                if let Some(field) = ast::FieldDecl::cast(member.clone()) {
+                    let ty = member_type_of(field.ty());
+                    for name in field.names() {
+                        push(&name, DefKind::Field, ty.clone());
+                    }
+                }
+            }
+            METHOD_DECL => {
+                if let Some(name) = first_ident_token(&member) {
+                    let ty = member_type_of(
+                        ast::MethodDecl::cast(member.clone()).and_then(|m| m.return_type()),
+                    );
+                    push(&name, DefKind::Method, ty);
+                }
+            }
+            CONSTRUCTOR_DECL => {
+                if let Some(name) = first_ident_token(&member) {
+                    push(&name, DefKind::Constructor, MemberType::Unknown);
+                }
+            }
+            ENUM_CONSTANT => {
+                if let Some(name) = first_ident_token(&member) {
+                    let ty = MemberType::Named {
+                        name: owner_simple.to_string(),
+                        qualified: None,
+                        dims: 0,
+                    };
+                    push(&name, DefKind::EnumConstant, ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    members
+}
+
+/// The supertype type names of a type declaration `node`: the `extends` and `implements` clause
+/// types, each as `(simple name, full dotted text if qualified)`. Pure.
+fn raw_supertypes_of(node: &SyntaxNode) -> Vec<(String, Option<String>)> {
+    let mut supertypes = Vec::new();
+    for clause in node
+        .children()
+        .filter(|c| matches!(c.kind(), EXTENDS_CLAUSE | IMPLEMENTS_CLAUSE))
+    {
+        for ty in clause.children().filter_map(ast::Type::cast) {
+            if let Some(name) = ty.simple_name() {
+                let qualified = ty.qualified_text().filter(|q| q.contains('.'));
+                supertypes.push((name, qualified));
+            }
+        }
+    }
+    supertypes
+}
+
+/// Captures a member's declared type (`ast::Type`) as a self-contained [`MemberType`]. `None` (a
+/// missing type) and a `var` type are [`MemberType::Unknown`].
+fn member_type_of(ty: Option<ast::Type>) -> MemberType {
+    let Some(ty) = ty else {
+        return MemberType::Unknown;
+    };
+    // One pass over the type's direct tokens: count array `[`s and capture the leading keyword.
+    let mut dims = 0u32;
+    let mut keyword: Option<SyntaxToken> = None;
+    for token in ty
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+    {
+        match token.kind() {
+            LBRACK => dims += 1,
+            k if keyword.is_none() && !k.is_trivia() => keyword = Some(token),
+            _ => {}
+        }
+    }
+    if ty.is_primitive_or_var() {
+        match keyword.as_ref().map(SyntaxToken::text) {
+            Some("void") => MemberType::Void,
+            Some("var") | None => MemberType::Unknown,
+            Some(k) => MemberType::Primitive {
+                keyword: k.to_string(),
+                dims,
+            },
+        }
+    } else {
+        MemberType::Named {
+            name: ty.simple_name().unwrap_or_default(),
+            qualified: ty.qualified_text().filter(|q| q.contains('.')),
+            dims,
+        }
     }
 }
 

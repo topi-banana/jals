@@ -30,8 +30,8 @@ pub(crate) use symbols::document_symbols;
 
 /// The `IDENT` token at `offset`, preferring it when a token boundary yields two tokens — so a
 /// cursor at the end of a word still anchors to it (standard editor UX). Shared by the
-/// resolution-aware handlers (document-highlight, references).
-fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+/// resolution-aware handlers (document-highlight, references) and the project workspace.
+pub(crate) fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
     root.token_at_offset(offset)
         .find(|token| token.kind() == SyntaxKind::IDENT)
 }

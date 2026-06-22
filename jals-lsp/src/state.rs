@@ -1,12 +1,13 @@
 //! In-memory server state: open documents and memoized config discovery.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_lsp::lsp_types::{Hover, Location, Position, TextDocumentContentChangeEvent, Url};
 use jals_fmt::Config;
-use jals_hir::{FileId, ProjectIndex};
+use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, TypeResolution};
 use jals_syntax::{Parse, SyntaxNode};
 use walkdir::WalkDir;
 
@@ -126,6 +127,14 @@ impl WorkspaceFile {
             text: Arc::from(text),
             line_index,
             parse,
+        }
+    }
+
+    /// A `Location` in this file spanning byte `range`.
+    fn location(&self, range: &Range<usize>) -> Location {
+        Location {
+            uri: self.uri.clone(),
+            range: self.line_index.byte_range(&self.text, range),
         }
     }
 }
@@ -259,10 +268,7 @@ impl Workspace {
         let resolved = jals_hir::resolve_node(&source.parse.syntax());
         let (target_file, range) = self.index.definition_at(file, &resolved, offset)?;
         let target = &self.files[target_file.0 as usize];
-        Some(Location {
-            uri: target.uri.clone(),
-            range: target.line_index.byte_range(&target.text, &range),
-        })
+        Some(target.location(&range))
     }
 
     /// The hover for the cursor at `position` in `uri`: the inferred type of the expression there,
@@ -276,6 +282,102 @@ impl Workspace {
         let inference = jals_hir::infer(&root, &resolved, &self.index, file);
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
         crate::handlers::type_hover(inference.type_at(offset)?)
+    }
+
+    /// Find-references for the cursor at `position` in `uri`: every occurrence of the symbol under
+    /// the cursor — across the whole project when it is a project type, or within this one file for
+    /// a file-local binding (a local, parameter, field, method, or type parameter). The declaration
+    /// is included when `include_declaration`. `None` if `uri` is not in the workspace; an empty
+    /// vector if the cursor is on no resolvable symbol.
+    pub(crate) fn references(
+        &self,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let resolved = jals_hir::resolve_node(&root);
+        // Anchor on the identifier under the cursor (boundary-aware), as the find-references handler
+        // does, then ask name resolution for the binding it denotes.
+        let Some(ident) =
+            crate::handlers::ident_at(&root, source.line_index.offset(&source.text, position))
+        else {
+            return Some(Vec::new());
+        };
+        let anchor = usize::from(ident.text_range().start());
+
+        // The cursor denotes a file-local binding.
+        if let Some(def_id) = resolved.symbol_at(anchor) {
+            // A binding that is also a project type: gather references across every file.
+            if let Some(item) = self
+                .index
+                .item_by_decl(file, resolved.def(def_id).name_range.start)
+            {
+                return Some(self.item_references(item, include_declaration));
+            }
+            // Otherwise a local/parameter/field/method/type-parameter: occurrences within this file.
+            let locations = resolved
+                .occurrences(def_id, include_declaration)
+                .into_iter()
+                .map(|range| source.location(&range))
+                .collect();
+            return Some(locations);
+        }
+
+        // The cursor is on a cross-file type reference (one the file-local pass left unresolved).
+        if let Some(reference) = resolved.reference_at(anchor)
+            && reference.namespace == Namespace::Type
+            && let TypeResolution::Project(item) = self.index.resolve_reference(file, reference)
+        {
+            return Some(self.item_references(item, include_declaration));
+        }
+        Some(Vec::new())
+    }
+
+    /// Every reference to the project type `item` across all workspace files (plus its declaration
+    /// when `include_declaration`), as `Location`s sorted by file then position. A same-file type
+    /// reference resolves file-locally to the declaration, so it is matched through
+    /// [`ProjectIndex::item_by_decl`]; references in other files resolve through the project index.
+    fn item_references(&self, item: ItemId, include_declaration: bool) -> Vec<Location> {
+        let mut locations = Vec::new();
+        for (i, source) in self.files.iter().enumerate() {
+            let file = FileId(i as u32);
+            let resolved = jals_hir::resolve_node(&source.parse.syntax());
+            for reference in &resolved.references {
+                if reference.namespace != Namespace::Type {
+                    continue;
+                }
+                let hit = match reference.resolution {
+                    Resolution::Def(id) => {
+                        self.index
+                            .item_by_decl(file, resolved.def(id).name_range.start)
+                            == Some(item)
+                    }
+                    Resolution::Unresolved => matches!(
+                        self.index.resolve_reference(file, reference),
+                        TypeResolution::Project(target) if target == item
+                    ),
+                };
+                if hit {
+                    locations.push(source.location(&reference.range));
+                }
+            }
+        }
+        if include_declaration {
+            let decl = self.index.item(item);
+            let decl_source = &self.files[decl.file.0 as usize];
+            locations.push(decl_source.location(&decl.name_range));
+        }
+        locations.sort_by(|a, b| {
+            a.uri
+                .as_str()
+                .cmp(b.uri.as_str())
+                .then(a.range.start.line.cmp(&b.range.start.line))
+                .then(a.range.start.character.cmp(&b.range.start.character))
+        });
+        locations
     }
 }
 
@@ -671,5 +773,68 @@ mod tests {
         let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let other = Url::parse("file:///elsewhere/Other.java").unwrap();
         assert!(ws.file_id(&other).is_none());
+    }
+
+    #[test]
+    fn workspace_references_find_a_project_type_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        std::fs::write(
+            dir.path().join("Bar.java"),
+            "package a; class Bar { Foo f; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Baz.java"),
+            "package a; class Baz { Foo g; Foo h; }",
+        )
+        .unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let baz_uri = Url::from_file_path(dir.path().join("Baz.java")).unwrap();
+
+        // From the declaration of `Foo`, including the declaration: the decl plus all three uses.
+        let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
+        let refs = ws
+            .references(&foo_uri, Position::new(0, decl_col), true)
+            .expect("Foo.java is in the workspace");
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs.iter().filter(|l| l.uri == foo_uri).count(), 1); // declaration
+        assert_eq!(refs.iter().filter(|l| l.uri == bar_uri).count(), 1);
+        assert_eq!(refs.iter().filter(|l| l.uri == baz_uri).count(), 2);
+
+        // From a use in Bar.java, excluding the declaration: only the three uses, never Foo.java.
+        let use_col = "package a; class Bar { Foo f; }".find("Foo").unwrap() as u32;
+        let refs = ws
+            .references(&bar_uri, Position::new(0, use_col), false)
+            .expect("Bar.java is in the workspace");
+        assert_eq!(refs.len(), 3);
+        assert!(refs.iter().all(|l| l.uri != foo_uri));
+    }
+
+    #[test]
+    fn workspace_references_keep_a_local_binding_within_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A sibling file also declares an `x`, to prove the local does not leak across files.
+        std::fs::write(
+            dir.path().join("Foo.java"),
+            "package a; class Foo { int x; }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void m() { int x = 1; use(x); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // From the use `x` in `use(x)`: only the two occurrences in Bar.java (declaration + use).
+        let use_col = bar.rfind('x').unwrap() as u32;
+        let refs = ws
+            .references(&bar_uri, Position::new(0, use_col), true)
+            .expect("Bar.java is in the workspace");
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|l| l.uri == bar_uri));
     }
 }
