@@ -1,9 +1,16 @@
-//! Lexical occurrence highlighting (`textDocument/documentHighlight`).
+//! Occurrence highlighting (`textDocument/documentHighlight`).
 //!
-//! Purely lexical: with the cursor on an identifier, every `IDENT` token in the document with
-//! the same text is highlighted — there is no name resolution, so occurrences in unrelated
-//! roles (a field access, a type name, a label) light up too. That over-matching is intended;
-//! it is what "lexical" promises and what the syntax layer can deliver.
+//! Semantic first: with the cursor on an identifier that resolves to a file-local binding (a
+//! local, parameter, field, method, type parameter, or sibling type), every occurrence of *that
+//! binding* — its declaration and each reference to it — is highlighted, and nothing else.
+//! Shadowing and name-spaces are respected, so a local does not light up a same-named field, and a
+//! member access (`obj.field`) of the same spelling is left alone.
+//!
+//! Lexical fallback: when the identifier under the cursor has no file-local binding — an imported
+//! or external type (`String`), an inherited member, an undeclared name — name resolution has
+//! nothing to anchor to, so every `IDENT` token with the same text is highlighted instead. That
+//! over-matches across unrelated roles, but it keeps an external name highlightable; it is what the
+//! syntax layer alone can deliver.
 //!
 //! Each occurrence is classified from its syntactic context alone: declaration/binding names,
 //! simple-name assignment targets (including compound operators like `+=`, which the LSP's
@@ -13,13 +20,16 @@
 //! contextual ones like `var`, remapped at parse time), literals, trivia, and `_` yield no
 //! highlights.
 
+use std::ops::Range;
+
 use async_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode, SyntaxToken};
+use text_size::TextSize;
 
 use crate::line_index::LineIndex;
 
-/// All same-text occurrences of the identifier under `position`, in document order; empty if
-/// the cursor is not on an identifier.
+/// All occurrences of the symbol under `position`, in document order; empty if the cursor is not
+/// on an identifier.
 pub(crate) fn document_highlight(
     parse: &Parse,
     text: &str,
@@ -28,24 +38,54 @@ pub(crate) fn document_highlight(
 ) -> Vec<DocumentHighlight> {
     let root = parse.syntax();
     // `offset` is clamped into `[0, len]`, so `token_at_offset`'s precondition holds. At a
-    // boundary between two tokens it yields both; preferring the `IDENT` side keeps a cursor
-    // at the end of a word highlighting it (standard editor UX).
-    let offset = line_index.offset(text, position);
-    let Some(target) = root
-        .token_at_offset(offset)
-        .find(|token| token.kind() == SyntaxKind::IDENT)
-    else {
+    // boundary between two tokens it yields both; preferring the `IDENT` side keeps a cursor at
+    // the end of a word highlighting it (standard editor UX).
+    let Some(target) = super::ident_at(&root, line_index.offset(text, position)) else {
         return Vec::new();
     };
-    // Preorder traversal, so the results are already in document order.
-    root.descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::IDENT && token.text() == target.text())
-        .map(|token| DocumentHighlight {
-            range: line_index.range(text, token.text_range()),
-            kind: Some(classify(&token)),
-        })
-        .collect()
+
+    let resolved = jals_hir::resolve_node(&root);
+    let anchor = usize::from(target.text_range().start());
+    match resolved.symbol_at(anchor) {
+        // The identifier names a file-local binding: highlight that binding's declaration and every
+        // reference to it — and nothing of the same spelling that means something else. Name
+        // resolution yields bare byte ranges, so each token is re-found to read its Read/Write role.
+        Some(id) => resolved
+            .occurrences(id, true)
+            .into_iter()
+            .map(|range| highlight_at(&root, line_index, text, range))
+            .collect(),
+        // No file-local binding (external type, inherited member, undeclared name): fall back to
+        // every same-text `IDENT` token. Preorder traversal keeps them in document order, and each
+        // token is classified directly — no re-lookup, we already hold it.
+        None => root
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|t| t.kind() == SyntaxKind::IDENT && t.text() == target.text())
+            .map(|t| DocumentHighlight {
+                range: line_index.range(text, t.text_range()),
+                kind: Some(classify(&t)),
+            })
+            .collect(),
+    }
+}
+
+/// The highlight for the occurrence at byte `range`, classifying the token there. A binding's
+/// occurrence ranges arrive from name resolution as bare byte ranges, so the token is re-found to
+/// read its syntactic role.
+fn highlight_at(
+    root: &SyntaxNode,
+    line_index: &LineIndex,
+    text: &str,
+    range: Range<usize>,
+) -> DocumentHighlight {
+    let kind = super::ident_at(root, TextSize::from(range.start as u32))
+        .map(|token| classify(&token))
+        .unwrap_or(DocumentHighlightKind::READ);
+    DocumentHighlight {
+        range: line_index.byte_range(text, &range),
+        kind: Some(kind),
+    }
 }
 
 /// Write for declaration/binding names and mutating uses; Read for everything else.
@@ -184,7 +224,8 @@ mod tests {
 
     #[test]
     fn multiple_declarators_each_name_is_write() {
-        // Flat `FIELD_DECL`: both `p` and `q` are direct `IDENT` children of the same node.
+        // Flat `FIELD_DECL`: both `p` and `q` are direct `IDENT` children of the same node, and
+        // the initializer `q = p` references the field `p`.
         let text = "class C { int p = 1, q = p; }";
         assert_eq!(at(text, "q"), [(0, 21, 22, W)]);
         assert_eq!(at(text, "p"), [(0, 14, 15, W), (0, 25, 26, R)]);
@@ -199,7 +240,7 @@ mod tests {
     fn compound_assignment_and_inc_dec_are_writes() {
         let text = "class C { void m(int x, boolean b) { x += 2; x++; --x; int y = -x; } }";
         let kinds: Vec<_> = at(text, "x").into_iter().map(|(_, _, _, k)| k).collect();
-        // parameter, `+=` target, `x++`, `--x` are writes; the `-x` operand is a read.
+        // parameter declaration, `+=` target, `x++`, `--x` are writes; the `-x` operand is a read.
         assert_eq!(kinds, [W, W, W, W, R]);
 
         let text = "class C { void m(boolean flag) { boolean c = !flag; } }";
@@ -209,18 +250,21 @@ mod tests {
     }
 
     #[test]
-    fn field_access_matches_lexically() {
-        // No name resolution: the field `name`, the local `name`, and `o.name` all match.
+    fn field_and_shadowing_local_are_distinct() {
+        // `name` is a field and, inside `m`, a shadowing local. Name resolution keeps them apart:
+        // each highlights only itself, and the member access `o.name` (a bare token, not a name
+        // reference) is pulled into neither set.
         let text = "class C { int name; void m(C o) { int name = o.name; } }";
-        assert_eq!(
-            at(text, "name"),
-            [(0, 14, 18, W), (0, 38, 42, W), (0, 47, 51, R)]
-        );
+        // The first `name` is the field; the shadowing local and `o.name` are not its uses.
+        assert_eq!(at(text, "name"), [(0, 14, 18, W)]);
+        // The local declaration (`name = o`) likewise highlights only itself.
+        assert_eq!(at(text, "name = o"), [(0, 38, 42, W)]);
     }
 
     #[test]
-    fn type_and_variable_with_same_text_all_match() {
-        // Lexical over-matching is intended: type positions match the class name too.
+    fn type_name_highlights_its_declaration_and_uses() {
+        // The class `Foo`, its use as a field type, and the `new Foo()` constructor type are one
+        // symbol — all references to the same declaration.
         let text = "class Foo { Foo f = new Foo(); }";
         assert_eq!(
             at(text, "Foo"),
@@ -229,25 +273,27 @@ mod tests {
     }
 
     #[test]
-    fn assignment_to_field_access_lhs_is_read() {
-        // Only *simple-name* targets are writes: `o.f` keeps `f` a read even as the LHS, and
-        // the RHS `f` is a non-target child of the assignment.
+    fn simple_name_rhs_resolves_past_a_field_access_target() {
+        // In `o.f = f`, the assignment target is the member access `o.f` (not a simple name), and
+        // the simple-name RHS `f` resolves to the parameter, not the field. Highlighting the
+        // parameter covers its declaration and the RHS use; the field `f` has no file-local use.
         let text = "class C { int f; void m(C o, int f) { o.f = f; } }";
-        assert_eq!(
-            at(text, "f"),
-            [
-                (0, 14, 15, W),
-                (0, 33, 34, W),
-                (0, 40, 41, R),
-                (0, 44, 45, R)
-            ]
-        );
+        assert_eq!(at(text, "f) {"), [(0, 33, 34, W), (0, 44, 45, R)]); // the parameter `f`
+        assert_eq!(at(text, "f;"), [(0, 14, 15, W)]); // the field `f`
     }
 
     #[test]
     fn for_each_binding_is_write() {
         let text = "class C { void m(int[] xs) { for (int item : xs) use(item); } }";
         assert_eq!(at(text, "item"), [(0, 38, 42, W), (0, 53, 57, R)]);
+    }
+
+    #[test]
+    fn external_type_falls_back_to_lexical() {
+        // `String` has no file-local declaration, so resolution finds no binding and every same-text
+        // `IDENT` is highlighted instead — a read in each type position.
+        let text = "class C { String a; String b; }";
+        assert_eq!(at(text, "String"), [(0, 10, 16, R), (0, 20, 26, R)]);
     }
 
     #[test]

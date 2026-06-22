@@ -42,18 +42,19 @@ impl Resolved {
         &self.scopes[id.0 as usize]
     }
 
+    /// The reference covering byte `offset`, if any.
+    fn reference_at(&self, offset: usize) -> Option<&Reference> {
+        self.references
+            .iter()
+            .find(|r| r.range.start <= offset && offset < r.range.end)
+    }
+
     /// The definition the reference covering byte `offset` resolves to, if any.
     ///
     /// This is the go-to-definition query: pass the cursor offset, get the target definition.
     pub fn definition_at(&self, offset: usize) -> Option<&Def> {
-        let reference = self
-            .references
-            .iter()
-            .find(|r| r.range.start <= offset && offset < r.range.end)?;
-        match reference.resolution {
-            Resolution::Def(id) => Some(self.def(id)),
-            Resolution::Unresolved => None,
-        }
+        let id = self.reference_at(offset)?.resolution.def_id()?;
+        Some(self.def(id))
     }
 
     /// Every reference that resolves to `id` (the find-references query).
@@ -61,6 +62,41 @@ impl Resolved {
         self.references
             .iter()
             .filter(move |r| r.resolution == Resolution::Def(id))
+    }
+
+    /// The definition the cursor at byte `offset` denotes, whether the cursor sits on a *reference*
+    /// to it or on its own declaring name.
+    ///
+    /// This is the symbol-under-cursor query shared by find-references and document-highlight: from
+    /// either end of a binding, recover the binding. A reference covering `offset` resolves through
+    /// its [`Resolution`] (so an [`Unresolved`](Resolution::Unresolved) one yields `None`); failing
+    /// that, a definition whose name token covers `offset` is the answer. `None` if the cursor is on
+    /// neither.
+    pub fn symbol_at(&self, offset: usize) -> Option<DefId> {
+        // A reference covering the offset is authoritative — even an unresolved one yields `None`
+        // rather than falling through to a same-spanned declaring name.
+        if let Some(reference) = self.reference_at(offset) {
+            return reference.resolution.def_id();
+        }
+        self.defs
+            .iter()
+            .find(|d| d.name_range.start <= offset && offset < d.name_range.end)
+            .map(|d| d.id)
+    }
+
+    /// The declaration of `id` (when `include_declaration`) together with every reference to it, as
+    /// byte ranges in document order.
+    ///
+    /// This is the occurrence set behind find-references and document-highlight: from a binding,
+    /// the spans across the file that denote it.
+    pub fn occurrences(&self, id: DefId, include_declaration: bool) -> Vec<std::ops::Range<usize>> {
+        let mut ranges: Vec<std::ops::Range<usize>> =
+            self.references_to(id).map(|r| r.range.clone()).collect();
+        if include_declaration {
+            ranges.push(self.def(id).name_range.clone());
+        }
+        ranges.sort_by_key(|r| r.start);
+        ranges
     }
 
     /// Every definition that no reference resolves to.
@@ -72,10 +108,7 @@ impl Resolved {
         let referenced: HashSet<DefId> = self
             .references
             .iter()
-            .filter_map(|r| match r.resolution {
-                Resolution::Def(id) => Some(id),
-                Resolution::Unresolved => None,
-            })
+            .filter_map(|r| r.resolution.def_id())
             .collect();
         self.defs
             .iter()

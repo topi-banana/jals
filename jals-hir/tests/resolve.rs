@@ -2,7 +2,7 @@
 //! `name@start..end -> <target>`, where the target is the resolved definition or `<unresolved>`.
 
 use expect_test::{Expect, expect};
-use jals_hir::{Resolution, resolve};
+use jals_hir::{DefKind, Resolution, resolve};
 
 fn render(src: &str) -> String {
     let resolved = resolve(src);
@@ -228,4 +228,30 @@ fn qualified_type_reference_stays_unresolved_file_locally() {
         D@14..15 -> <unresolved>
     "#]],
     );
+}
+
+#[test]
+fn symbol_at_recovers_binding_from_use_or_declaration() {
+    // From either the use in `use(x)` or the declaration `int x`, `symbol_at` recovers the same
+    // local binding — the symbol-under-cursor query both ends of a binding share.
+    let src = "class C { void m() { int x = 1; use(x); } }";
+    let resolved = resolve(src);
+    let from_decl = resolved
+        .symbol_at(src.find('x').unwrap())
+        .expect("on the declaration");
+    let from_use = resolved
+        .symbol_at(src.rfind('x').unwrap())
+        .expect("on the use");
+    assert_eq!(from_decl, from_use);
+    assert_eq!(resolved.def(from_decl).kind, DefKind::Local);
+}
+
+#[test]
+fn symbol_at_is_none_off_a_symbol_or_on_an_unresolved_name() {
+    let src = "class C { void m() { use(nope); } }";
+    let resolved = resolve(src);
+    // The undeclared `nope` (and the unresolved call `use`) bind to no file-local definition.
+    assert_eq!(resolved.symbol_at(src.find("nope").unwrap()), None);
+    // A position on no identifier at all (the space after `class`) is likewise nothing.
+    assert_eq!(resolved.symbol_at(src.find(' ').unwrap()), None);
 }

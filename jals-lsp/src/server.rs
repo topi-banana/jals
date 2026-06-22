@@ -15,11 +15,12 @@ use async_lsp::lsp_types::{
     DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
     FoldingRangeProviderCapability, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, Location, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
-    RenameFilesParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
+    InitializedParams, Location, OneOf, PublishDiagnosticsParams, ReferenceParams, Registration,
+    RegistrationParams, RenameFilesParams, SelectionRange, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
     notification::{self, Notification},
     request,
 };
@@ -371,6 +372,31 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(location.map(GotoDefinitionResponse::Scalar)) })
     }
 
+    fn references(
+        &mut self,
+        params: ReferenceParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<Location>>, Self::Error>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+        // File-local find-references over the open document. Cross-file references (a project type
+        // used from another source file) are a later phase; gathering them needs a reverse index on
+        // the workspace.
+        let doc = self.store.get(&uri);
+        Box::pin(async move {
+            Ok(doc.map(|doc| {
+                handlers::references(
+                    &doc.parse,
+                    &doc.text,
+                    &doc.line_index,
+                    &uri,
+                    position,
+                    include_declaration,
+                )
+            }))
+        })
+    }
+
     fn hover(
         &mut self,
         params: HoverParams,
@@ -477,6 +503,7 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
