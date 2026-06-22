@@ -134,6 +134,17 @@ pub enum TypeResolution {
     Unresolved,
 }
 
+impl TypeResolution {
+    /// The indexed project item this resolved to, or `None` for an [`External`](Self::External) /
+    /// [`Unresolved`](Self::Unresolved) name. The counterpart to [`crate::Resolution::def_id`].
+    pub fn project_id(self) -> Option<ItemId> {
+        match self {
+            TypeResolution::Project(id) => Some(id),
+            TypeResolution::External | TypeResolution::Unresolved => None,
+        }
+    }
+}
+
 /// Per-file resolution context: its package and the imports that bring type names into scope.
 struct FileMeta {
     /// The declared package, or `None` for the default (unnamed) package.
@@ -275,14 +286,8 @@ impl ProjectIndex {
             let supertypes: Vec<ItemId> = raw_supertypes_of(node)
                 .into_iter()
                 .filter_map(|(name, qualified)| {
-                    let resolution = match &qualified {
-                        Some(q) => self.resolve_qualified(q),
-                        None => self.resolve_type(file, &name),
-                    };
-                    match resolution {
-                        TypeResolution::Project(id) => Some(id),
-                        TypeResolution::External | TypeResolution::Unresolved => None,
-                    }
+                    self.resolve_type_name(file, &name, qualified.as_deref())
+                        .project_id()
                 })
                 .collect();
             self.items[owner.0 as usize].supertypes = supertypes;
@@ -352,6 +357,23 @@ impl ProjectIndex {
         match &reference.qualified {
             Some(qualified) => self.resolve_qualified(qualified),
             None => self.resolve_type(file, &reference.name),
+        }
+    }
+
+    /// Resolves a type *name* from `file`: the full dotted text when `qualified`, otherwise the
+    /// simple `name` in Java's lookup order. This is the counterpart to
+    /// [`resolve_reference`](ProjectIndex::resolve_reference) for a caller holding only a captured
+    /// spelling rather than a CST [`Reference`] — namely a member's declared [`MemberType`], which
+    /// inference turns into a concrete type.
+    pub fn resolve_type_name(
+        &self,
+        file: FileId,
+        name: &str,
+        qualified: Option<&str>,
+    ) -> TypeResolution {
+        match qualified {
+            Some(qualified) => self.resolve_qualified(qualified),
+            None => self.resolve_type(file, name),
         }
     }
 
@@ -578,7 +600,7 @@ fn member_type_of(ty: Option<ast::Type>) -> MemberType {
 }
 
 /// The [`DefKind`] for a type-declaration node kind, or `None` if it is not a type declaration.
-fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
+pub(crate) fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
     match kind {
         CLASS_DECL => Some(DefKind::Class),
         INTERFACE_DECL => Some(DefKind::Interface),

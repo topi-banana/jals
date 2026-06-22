@@ -13,9 +13,11 @@
 //!    initializer here.
 //!
 //! Scope is the structural / local subset (literals, names, arithmetic with numeric promotion,
-//! casts, `new`, arrays). Member-dependent forms — method calls, field access, lambdas, switch
-//! expressions — are [`Ty::Unknown`], pending the member resolution of a later phase. The pass
-//! never panics: every accessor is `Option`/iterator and an unresolvable form is `Unknown`.
+//! casts, `new`, arrays) plus member access — `obj.field` and `recv.method()` resolve against the
+//! project member model ([`ProjectIndex::resolve_member`]) when the receiver is a project type,
+//! walking its project-internal supertypes. A member of an external (unindexed) type, and the
+//! target-typed forms (method references, lambdas, switch expressions), stay [`Ty::Unknown`]. The
+//! pass never panics: every accessor is `Option`/iterator and an unresolvable form is `Unknown`.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -24,8 +26,8 @@ use jals_syntax::SyntaxKind::*;
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
-use crate::def::DefId;
-use crate::project::{FileId, ProjectIndex, TypeResolution};
+use crate::def::{DefId, Namespace};
+use crate::project::{FileId, ItemId, MemberType, ProjectIndex, TypeResolution};
 use crate::reference::Resolution;
 use crate::resolve::Resolved;
 use crate::resolve::collect::first_ident_token;
@@ -218,12 +220,11 @@ impl<'a> Inferer<'a> {
             }
             ast::Expr::Index(i) => self.index_ty(i),
             ast::Expr::Ternary(t) => self.ternary_ty(t),
-            // Member-dependent or target-typed forms: deferred to a later phase.
-            ast::Expr::Call(_)
-            | ast::Expr::FieldAccess(_)
-            | ast::Expr::MethodRef(_)
-            | ast::Expr::Lambda(_)
-            | ast::Expr::Switch(_) => Ty::Unknown,
+            ast::Expr::FieldAccess(f) => self.field_access_ty(f),
+            ast::Expr::Call(c) => self.call_ty(c),
+            // Target-typed forms still need a later phase (a method reference / lambda takes its
+            // type from context; a switch expression unifies its arms).
+            ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) | ast::Expr::Switch(_) => Ty::Unknown,
             ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::External("Class".to_string())),
         }
     }
@@ -306,8 +307,7 @@ impl<'a> Inferer<'a> {
 
     fn new_ty(&self, n: &ast::NewExpr) -> Ty {
         let base = self.ty_of_opt_type(n.ty().as_ref());
-        let dims = lbrack_count(n.syntax());
-        (0..dims).fold(base, |acc, _| Ty::Array(Box::new(acc)))
+        array_of(base, lbrack_count(n.syntax()))
     }
 
     fn index_ty(&self, i: &ast::IndexExpr) -> Ty {
@@ -347,8 +347,7 @@ impl<'a> Inferer<'a> {
 
     fn ty_of_type(&self, ty: &ast::Type) -> Ty {
         let base = self.base_ty_of_type(ty);
-        let dims = lbrack_count(ty.syntax());
-        (0..dims).fold(base, |acc, _| Ty::Array(Box::new(acc)))
+        array_of(base, lbrack_count(ty.syntax()))
     }
 
     fn base_ty_of_type(&self, ty: &ast::Type) -> Ty {
@@ -378,6 +377,112 @@ impl<'a> Inferer<'a> {
         }
         Ty::Class(ClassTy::External(name))
     }
+
+    // --- Member-dependent inference -----------------------------------------------------------
+
+    /// `receiver.field`: the type of the field on the receiver's project type. Member-typed only
+    /// when the receiver is an indexed project type; an external receiver (a JDK type) stays
+    /// [`Ty::Unknown`], since its members are not indexed.
+    fn field_access_ty(&self, fa: &ast::FieldAccess) -> Ty {
+        self.field_access_member_ty(fa, Namespace::Value)
+    }
+
+    /// `receiver.member` resolved in `namespace`: the member's type on the receiver's project type.
+    /// Shared by a plain field access (a value) and a qualified call's `recv.method` callee (a
+    /// method), which differ only in the name-space they look the member up in.
+    fn field_access_member_ty(&self, fa: &ast::FieldAccess, namespace: Namespace) -> Ty {
+        let Some(name) = fa.field() else {
+            return Ty::Unknown;
+        };
+        let receiver = self.child_ty(fa.receiver());
+        self.member_ty(&receiver, &name, namespace)
+    }
+
+    /// `callee(args)`: the called method's return type. A qualified call `receiver.method()` looks
+    /// the method up on the receiver's type; a bare call `method()` looks it up on the enclosing
+    /// type (an implicit `this`). Only project types resolve — everything else is [`Ty::Unknown`].
+    fn call_ty(&self, call: &ast::CallExpr) -> Ty {
+        match call.callee() {
+            Some(ast::Expr::FieldAccess(fa)) => self.field_access_member_ty(&fa, Namespace::Method),
+            Some(ast::Expr::NameRef(n)) => {
+                let Some(name) = first_ident_token(n.syntax()).map(|t| t.text().to_string()) else {
+                    return Ty::Unknown;
+                };
+                match self.enclosing_item(call.syntax()) {
+                    Some(owner) => self.member_ty_of_item(owner, &name, Namespace::Method),
+                    None => Ty::Unknown,
+                }
+            }
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// The type of the member `name` (in `namespace`) reachable from receiver type `receiver` — a
+    /// field's type or a method's return type — when `receiver` is an indexed project type.
+    fn member_ty(&self, receiver: &Ty, name: &str, namespace: Namespace) -> Ty {
+        match receiver.project_id() {
+            Some(id) => self.member_ty_of_item(id, name, namespace),
+            None => Ty::Unknown,
+        }
+    }
+
+    /// The type of the member `name` (in `namespace`) reachable from project type `owner`, searching
+    /// the type and its project-internal supertypes.
+    fn member_ty_of_item(&self, owner: ItemId, name: &str, namespace: Namespace) -> Ty {
+        let Some((index, _)) = self.project else {
+            return Ty::Unknown;
+        };
+        let Some(member_id) = index.resolve_member(owner, name, namespace) else {
+            return Ty::Unknown;
+        };
+        let member = index.member(member_id);
+        self.ty_of_member_type(index, member.file, &member.ty)
+    }
+
+    /// Turns a member's captured [`MemberType`] into a concrete [`Ty`], resolving a named type
+    /// against the project from the member's *declaring* file (its import / package context).
+    fn ty_of_member_type(&self, index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty {
+        match mt {
+            MemberType::Primitive { keyword, dims } => {
+                let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
+                array_of(base, *dims as usize)
+            }
+            MemberType::Void => Ty::Void,
+            MemberType::Named {
+                name,
+                qualified,
+                dims,
+            } => {
+                let base = match index.resolve_type_name(file, name, qualified.as_deref()) {
+                    TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
+                        id,
+                        name: name.clone(),
+                    }),
+                    TypeResolution::External | TypeResolution::Unresolved => {
+                        Ty::Class(ClassTy::External(name.clone()))
+                    }
+                };
+                array_of(base, *dims as usize)
+            }
+            MemberType::Unknown => Ty::Unknown,
+        }
+    }
+
+    /// The enclosing project type of `node`: the nearest ancestor type declaration that is an
+    /// indexed item, for resolving a bare (`this`) method call.
+    fn enclosing_item(&self, node: &SyntaxNode) -> Option<ItemId> {
+        let (index, file) = self.project?;
+        let decl = node
+            .ancestors()
+            .find(|a| crate::project::type_decl_kind(a.kind()).is_some())?;
+        let name = first_ident_token(&decl)?;
+        index.item_by_decl(file, token_start(&name))
+    }
+}
+
+/// Wraps `base` in `dims` array levels (`dims = 2` → `base[][]`).
+fn array_of(base: Ty, dims: usize) -> Ty {
+    (0..dims).fold(base, |acc, _| Ty::Array(Box::new(acc)))
 }
 
 /// Whether a node kind introduces explicitly-typed value bindings whose written type is a direct

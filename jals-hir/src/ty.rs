@@ -61,6 +61,22 @@ impl Primitive {
     pub fn is_numeric(self) -> bool {
         !matches!(self, Primitive::Boolean)
     }
+
+    /// The primitive whose Java keyword spelling is `keyword` (`"int"`), if any. The inverse of
+    /// [`as_str`](Primitive::as_str), single-sourced from it so the spelling table lives in one place.
+    pub fn from_keyword(keyword: &str) -> Option<Primitive> {
+        const ALL: [Primitive; 8] = [
+            Primitive::Boolean,
+            Primitive::Byte,
+            Primitive::Short,
+            Primitive::Int,
+            Primitive::Long,
+            Primitive::Char,
+            Primitive::Float,
+            Primitive::Double,
+        ];
+        ALL.into_iter().find(|p| p.as_str() == keyword)
+    }
 }
 
 /// A nominal reference type, identified by name.
@@ -89,6 +105,14 @@ impl Ty {
     pub(crate) fn as_numeric(&self) -> Option<Primitive> {
         match self {
             Ty::Primitive(p) if p.is_numeric() => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// The indexed project type's id, if this is one ([`ClassTy::Project`]).
+    pub fn project_id(&self) -> Option<ItemId> {
+        match self {
+            Ty::Class(ClassTy::Project { id, .. }) => Some(*id),
             _ => None,
         }
     }

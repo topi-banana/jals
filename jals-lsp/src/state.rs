@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_lsp::lsp_types::{Hover, Location, Position, TextDocumentContentChangeEvent, Url};
 use jals_fmt::Config;
-use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, TypeResolution};
-use jals_syntax::{Parse, SyntaxNode};
+use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
+use jals_syntax::ast::{self, AstNode};
+use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
 use walkdir::WalkDir;
 
 use crate::line_index::LineIndex;
@@ -116,6 +117,11 @@ struct WorkspaceFile {
     text: Arc<str>,
     line_index: Arc<LineIndex>,
     parse: Arc<Parse>,
+    /// The file's name resolution, computed once on first use and cached. A pure function of
+    /// `parse`, so it stays valid for this file's lifetime — an edit replaces the whole struct
+    /// (see [`Workspace::set_overlay`]), starting fresh. Lets a project-wide query that scans every
+    /// file (find-references) resolve each one only once instead of on every request.
+    resolved: OnceLock<Resolved>,
 }
 
 impl WorkspaceFile {
@@ -127,7 +133,14 @@ impl WorkspaceFile {
             text: Arc::from(text),
             line_index,
             parse,
+            resolved: OnceLock::new(),
         }
+    }
+
+    /// The file's cached name resolution (computed on first use).
+    fn resolved(&self) -> &Resolved {
+        self.resolved
+            .get_or_init(|| jals_hir::resolve_node(&self.parse.syntax()))
     }
 
     /// A `Location` in this file spanning byte `range`.
@@ -242,6 +255,7 @@ impl Workspace {
             text: doc.text.clone(),
             line_index: doc.line_index.clone(),
             parse: doc.parse.clone(),
+            resolved: OnceLock::new(),
         };
         match self.by_uri.get(uri).copied() {
             Some(id) => self.files[id.0 as usize] = file,
@@ -258,17 +272,62 @@ impl Workspace {
         true
     }
 
-    /// Go-to-definition for the cursor at `position` in `uri`: a file-local binding if there is
-    /// one, otherwise the project type the reference names. `None` if `uri` is not in the workspace
-    /// or the reference resolves to nothing (or to an external type).
+    /// Go-to-definition for the cursor at `position` in `uri`: a file-local binding if there is one,
+    /// then the project type a reference names, then — for a member access — the member the receiver
+    /// type declares. `None` if `uri` is not in the workspace or nothing resolves.
     pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        let resolved = jals_hir::resolve_node(&source.parse.syntax());
-        let (target_file, range) = self.index.definition_at(file, &resolved, offset)?;
-        let target = &self.files[target_file.0 as usize];
-        Some(target.location(&range))
+        let root = source.parse.syntax();
+        let offset = source.line_index.offset(&source.text, position);
+        let resolved = source.resolved();
+        // A file-local binding, or the project type a reference names.
+        if let Some((target_file, range)) =
+            self.index
+                .definition_at(file, resolved, usize::from(offset))
+        {
+            return Some(self.files[target_file.0 as usize].location(&range));
+        }
+        // A member access (`obj.field` / `recv.method()`): infer the receiver and resolve the member.
+        let (target_file, range) = self.member_definition(file, &root, resolved, offset)?;
+        Some(self.files[target_file.0 as usize].location(&range))
+    }
+
+    /// Go-to-definition for the member access under `offset`: when the cursor is on the name of a
+    /// `receiver.field` / `receiver.method()`, infer the receiver's type and, if it is a project
+    /// type, resolve the member on it (through its project-internal supertypes). Returns the member
+    /// declaration's file and name range.
+    fn member_definition(
+        &self,
+        file: FileId,
+        root: &SyntaxNode,
+        resolved: &Resolved,
+        offset: text_size::TextSize,
+    ) -> Option<(FileId, Range<usize>)> {
+        // The member-name identifier sits directly under a `FIELD_ACCESS` node — both for a plain
+        // `obj.field` and for the `recv.method` callee of a call.
+        let token = crate::handlers::ident_at(root, offset)?;
+        let field_access = token
+            .parent()
+            .filter(|p| p.kind() == SyntaxKind::FIELD_ACCESS)?;
+        let access = ast::FieldAccess::cast(field_access.clone())?;
+        let name = access.field()?;
+        let receiver = access.receiver()?;
+        // A field-access used as a call's callee names a method; otherwise a field.
+        let namespace = if field_access.parent().map(|p| p.kind()) == Some(SyntaxKind::CALL_EXPR) {
+            Namespace::Method
+        } else {
+            Namespace::Value
+        };
+        let inference = jals_hir::infer(root, resolved, &self.index, file);
+        let span = receiver.syntax().text_range();
+        let owner = inference
+            .type_of_expr(usize::from(span.start())..usize::from(span.end()))?
+            .project_id()?;
+        let member = self
+            .index
+            .member(self.index.resolve_member(owner, &name, namespace)?);
+        Some((member.file, member.name_range.clone()))
     }
 
     /// The hover for the cursor at `position` in `uri`: the inferred type of the expression there,
@@ -278,8 +337,8 @@ impl Workspace {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
-        let resolved = jals_hir::resolve_node(&root);
-        let inference = jals_hir::infer(&root, &resolved, &self.index, file);
+        let resolved = source.resolved();
+        let inference = jals_hir::infer(&root, resolved, &self.index, file);
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
         crate::handlers::type_hover(inference.type_at(offset)?)
     }
@@ -298,7 +357,7 @@ impl Workspace {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
-        let resolved = jals_hir::resolve_node(&root);
+        let resolved = source.resolved();
         // Anchor on the identifier under the cursor (boundary-aware), as the find-references handler
         // does, then ask name resolution for the binding it denotes.
         let Some(ident) =
@@ -344,7 +403,7 @@ impl Workspace {
         let mut locations = Vec::new();
         for (i, source) in self.files.iter().enumerate() {
             let file = FileId(i as u32);
-            let resolved = jals_hir::resolve_node(&source.parse.syntax());
+            let resolved = source.resolved();
             for reference in &resolved.references {
                 if reference.namespace != Namespace::Type {
                     continue;
@@ -836,5 +895,65 @@ mod tests {
             .expect("Bar.java is in the workspace");
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().all(|l| l.uri == bar_uri));
+    }
+
+    #[test]
+    fn workspace_goto_definition_jumps_to_a_member_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let box_src = "package a; class Box { int size; int area() { return 0; } }";
+        std::fs::write(dir.path().join("Box.java"), box_src).unwrap();
+        let bar = "package a; class Bar { void m(Box b) { var s = b.size; var a = b.area(); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let box_uri = Url::from_file_path(dir.path().join("Box.java")).unwrap();
+
+        // `b.size` jumps to the field declaration in Box.java.
+        let size_col = bar.find("b.size").unwrap() as u32 + 2;
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, size_col))
+            .expect("the field `size` resolves to its declaration");
+        assert_eq!(loc.uri, box_uri);
+        assert_eq!(
+            loc.range.start,
+            Position::new(0, box_src.find("size").unwrap() as u32)
+        );
+
+        // `b.area()` jumps to the method declaration (a call's callee is a method).
+        let area_col = bar.find("b.area").unwrap() as u32 + 2;
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, area_col))
+            .expect("the method `area` resolves to its declaration");
+        assert_eq!(loc.uri, box_uri);
+        assert_eq!(
+            loc.range.start,
+            Position::new(0, box_src.find("area").unwrap() as u32)
+        );
+    }
+
+    #[test]
+    fn workspace_hover_shows_a_member_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Box.java"),
+            "package a; class Box { long id; }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void m(Box b) { var v = b.id; } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Hovering the field access `b.id` shows the field's type, resolved cross-file.
+        let col = bar.find("b.id").unwrap() as u32 + 2;
+        let hover = ws
+            .hover(&bar_uri, Position::new(0, col))
+            .expect("b.id has an inferred type");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert_eq!(markup.value, "```java\nlong\n```");
     }
 }

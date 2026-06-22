@@ -153,15 +153,57 @@ fn field_type_is_visible_to_an_earlier_method() {
     assert_eq!(expr_ty(src, "field"), "int");
 }
 
-// --- Deferred forms -------------------------------------------------------------------------------
+// --- Member access (fields and method calls) ------------------------------------------------------
 
 #[test]
-fn member_dependent_forms_are_unknown_for_now() {
-    // Method calls and field access need member resolution (a later phase): no type yet.
-    let calls = "class C { void m() { var r = compute(); } int compute() { return 0; } }";
-    assert_eq!(expr_ty(calls, "compute()"), "?");
+fn field_access_resolves_to_the_field_type() {
+    let src = "class Box { int size; String label; } class C { void m(Box b) { var a = b.size; var s = b.label; } }";
+    assert_eq!(expr_ty(src, "b.size"), "int");
+    assert_eq!(expr_ty(src, "b.label"), "String");
+}
+
+#[test]
+fn method_call_resolves_to_the_return_type() {
+    let src = "class Box { int area() { return 0; } Box grow() { return this; } } class C { void m(Box b) { var n = b.area(); var g = b.grow(); } }";
+    assert_eq!(expr_ty(src, "b.area()"), "int");
+    assert_eq!(expr_ty(src, "b.grow()"), "Box");
+}
+
+#[test]
+fn bare_method_call_resolves_on_the_enclosing_type() {
+    let src = "class C { int compute() { return 0; } void m() { var r = compute(); } }";
+    assert_eq!(expr_ty(src, "compute()"), "int");
+}
+
+#[test]
+fn inherited_member_is_accessible() {
+    let src = "class Base { int shared() { return 0; } } class Sub extends Base { } class C { void m(Sub s) { var r = s.shared(); } }";
+    assert_eq!(expr_ty(src, "s.shared()"), "int");
+}
+
+#[test]
+fn member_access_chains_through_inferred_types() {
+    let src = "class Inner { int leaf; } class Outer { Inner inner() { return null; } } class C { void m(Outer o) { var r = o.inner().leaf; } }";
+    assert_eq!(expr_ty(src, "o.inner().leaf"), "int");
+}
+
+#[test]
+fn var_local_takes_a_member_type() {
+    let src = "class Box { long id; } class C { void m(Box b) { var v = b.id; } }";
+    assert_eq!(def_ty(src, "v"), "long");
+}
+
+#[test]
+fn an_external_receivers_members_are_unknown() {
+    // `xs` is `java.util.List` (external, unindexed): its members are not resolved.
     let access = "class C { void m(java.util.List xs) { var r = xs.size; } }";
     assert_eq!(expr_ty(access, "xs.size"), "?");
+}
+
+#[test]
+fn a_missing_member_on_a_project_type_is_unknown() {
+    let src = "class Box { int size; } class C { void m(Box b) { var r = b.nope; } }";
+    assert_eq!(expr_ty(src, "b.nope"), "?");
 }
 
 // --- Project vs. project-free resolution ----------------------------------------------------------
