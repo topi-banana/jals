@@ -452,21 +452,44 @@ impl ProjectIndex {
         name: &str,
         namespace: Namespace,
     ) -> Option<MemberId> {
+        self.walk_supertypes(owner, |current| {
+            // The type's own members win over inherited ones — the walk reaches `current`'s
+            // supertypes only after this returns `None`.
+            let ids = self.members_by_owner.get(&current)?;
+            ids.iter().copied().find(|&id| {
+                let member = &self.members[id.0 as usize];
+                member.name == name && member.kind.namespace() == namespace
+            })
+        })
+    }
+
+    /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
+    /// supertype chain. Reflexive (`s == t` is `true`) and cycle-guarded — the reference-subtyping
+    /// half of assignment conversion ([`Ty::is_assignable_to`](crate::Ty::is_assignable_to)).
+    pub fn is_subtype(&self, s: ItemId, t: ItemId) -> bool {
+        self.walk_supertypes(s, |current| (current == t).then_some(()))
+            .is_some()
+    }
+
+    /// Walks `start` and its project-internal supertypes, each visited once with a cycle guard in
+    /// nearest-first / earlier-declared-first order, calling `visit` on each. The first `Some`
+    /// `visit` yields stops the walk and is returned; an exhausted walk yields `None`. The shared
+    /// inheritance traversal behind member resolution ([`resolve_member`](Self::resolve_member)) and
+    /// subtyping ([`is_subtype`](Self::is_subtype)).
+    fn walk_supertypes<R>(
+        &self,
+        start: ItemId,
+        mut visit: impl FnMut(ItemId) -> Option<R>,
+    ) -> Option<R> {
         let mut visited = HashSet::new();
-        let mut stack = vec![owner];
+        let mut stack = vec![start];
         while let Some(current) = stack.pop() {
             if !visited.insert(current) {
                 continue;
             }
-            if let Some(ids) = self.members_by_owner.get(&current) {
-                for &id in ids {
-                    let member = &self.members[id.0 as usize];
-                    if member.name == name && member.kind.namespace() == namespace {
-                        return Some(id);
-                    }
-                }
+            if let Some(result) = visit(current) {
+                return Some(result);
             }
-            // Search supertypes after the type's own members, earlier-declared ones first.
             for &supertype in self.items[current.0 as usize].supertypes.iter().rev() {
                 stack.push(supertype);
             }

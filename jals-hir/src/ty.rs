@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::project::ItemId;
+use crate::project::{ItemId, ProjectIndex};
 
 /// An inferred Java type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +77,22 @@ impl Primitive {
         ];
         ALL.into_iter().find(|p| p.as_str() == keyword)
     }
+
+    /// Widening primitive conversion (JLS §5.1.2): can a value of `self` widen to `target`
+    /// without a cast? `boolean` widens to nothing. Reflexive pairs (`self == target`) are *not*
+    /// widenings — the caller handles identity separately.
+    pub fn widens_to(self, target: Primitive) -> bool {
+        use Primitive::*;
+        matches!(
+            (self, target),
+            (Byte, Short | Int | Long | Float | Double)
+                | (Short, Int | Long | Float | Double)
+                | (Char, Int | Long | Float | Double)
+                | (Int, Long | Float | Double)
+                | (Long, Float | Double)
+                | (Float, Double)
+        )
+    }
 }
 
 /// A nominal reference type, identified by name.
@@ -114,6 +130,80 @@ impl Ty {
         match self {
             Ty::Class(ClassTy::Project { id, .. }) => Some(*id),
             _ => None,
+        }
+    }
+
+    /// Assignment conversion (JLS §5.2): may a value of `self` be assigned to a slot of type
+    /// `target` without a cast?
+    ///
+    /// **Conservative — never a false mismatch.** It returns `true` whenever the answer is not
+    /// fully knowable: either side [`Unknown`](Ty::Unknown), an external ([`ClassTy::External`])
+    /// type whose hierarchy we do not index, or a primitive/reference pair that boxing or unboxing
+    /// could bridge. It returns `false` only for combinations we model completely — primitives
+    /// among themselves (widening only), `null`, arrays, and the indexed project class hierarchy —
+    /// so a consumer that emits a diagnostic on `false` never reports a spurious one.
+    ///
+    /// `index` supplies the project class hierarchy for reference subtyping; without it (the
+    /// [`infer_node`](crate::infer_node) path, which has no [`ProjectIndex`]) subtyping between two
+    /// distinct project types is unknowable, so it too stays conservatively `true`.
+    pub fn is_assignable_to(&self, target: &Ty, index: Option<&ProjectIndex>) -> bool {
+        use ClassTy::{External, Project};
+        use Ty::*;
+
+        // Unknown on either side: defer, never claim a mismatch.
+        if matches!(self, Unknown) || matches!(target, Unknown) {
+            return true;
+        }
+        // Identity covers equal primitives, the same project item, an equally-spelled external
+        // type, and `void` to `void`; the structural `PartialEq` handles each.
+        if self == target {
+            return true;
+        }
+
+        match (self, target) {
+            // `null` is assignable to any reference type, never to a primitive or `void`.
+            (Null, Class(_) | Array(_)) => true,
+            (Null, _) => false,
+
+            // Widening primitive conversion; identity (equal primitives) handled above.
+            (Primitive(s), Primitive(t)) => s.widens_to(*t),
+            // Boxing: a primitive may box to an external wrapper / `Object`, never to a user type
+            // or an array.
+            (Primitive(_), Class(External(_))) => true,
+            (Primitive(_), Class(Project { .. }) | Array(_) | Void) => false,
+
+            // Unboxing: an external reference may be a numeric wrapper; a user type or array is not.
+            (Class(External(_)), Primitive(_)) => true,
+            (Class(Project { .. }) | Array(_), Primitive(_)) => false,
+
+            // Reference subtyping between two project types: walk the indexed supertype chain.
+            (Class(Project { id: s, .. }), Class(Project { id: t, .. })) => match index {
+                Some(index) => index.is_subtype(*s, *t),
+                // No hierarchy to consult: stay conservative rather than claim a mismatch.
+                None => true,
+            },
+            // A project type may widen to an external supertype (`Object`, a JDK interface); an
+            // external type might really be an unindexed project type — both conservatively `true`.
+            (Class(Project { .. }), Class(External(_)))
+            | (Class(External(_)), Class(Project { .. }))
+            | (Class(External(_)), Class(External(_))) => true,
+
+            // Arrays: invariant for primitive elements, covariant for reference elements.
+            (Array(s), Array(t)) => match (s.as_ref(), t.as_ref()) {
+                (Primitive(a), Primitive(b)) => a == b,
+                _ => s.is_assignable_to(t, index),
+            },
+            // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`
+            // (external), but never to a user class.
+            (Array(_), Class(External(_))) => true,
+            (Array(_), Class(Project { .. })) => false,
+
+            // `void` is assignable only to itself (handled by identity above).
+            (Void, _) => false,
+
+            // Anything left (e.g. a reference assigned where the `null`/array cases did not match)
+            // is a confident mismatch.
+            _ => false,
         }
     }
 }
@@ -205,5 +295,73 @@ mod tests {
             binary_numeric(&Ty::Primitive(Primitive::Boolean), &int),
             Ty::Unknown
         );
+    }
+
+    #[test]
+    fn widening_primitive_conversion() {
+        use Primitive::*;
+        assert!(Int.widens_to(Long));
+        assert!(Byte.widens_to(Int));
+        assert!(Char.widens_to(Int));
+        assert!(Long.widens_to(Double));
+        // Narrowing, sideways, and `boolean` never widen.
+        assert!(!Double.widens_to(Int));
+        assert!(!Long.widens_to(Int));
+        assert!(!Byte.widens_to(Char));
+        assert!(!Boolean.widens_to(Int));
+        assert!(!Int.widens_to(Boolean));
+        // Not reflexive: identity is the caller's responsibility.
+        assert!(!Int.widens_to(Int));
+    }
+
+    /// The index-free (`infer_node`) cases: primitives, `null`, `void`, externals, `Unknown`.
+    #[test]
+    fn assignability_without_an_index() {
+        let int = Ty::Primitive(Primitive::Int);
+        let long = Ty::Primitive(Primitive::Long);
+        let boolean = Ty::Primitive(Primitive::Boolean);
+        let obj = Ty::Class(ClassTy::External("Object".to_string()));
+
+        // Identity and widening; narrowing is a mismatch.
+        assert!(int.is_assignable_to(&int, None));
+        assert!(int.is_assignable_to(&long, None));
+        assert!(!long.is_assignable_to(&int, None));
+        assert!(!boolean.is_assignable_to(&int, None));
+
+        // `null` flows to a reference type, not to a primitive.
+        assert!(Ty::Null.is_assignable_to(&obj, None));
+        assert!(!Ty::Null.is_assignable_to(&int, None));
+
+        // Boxing / unboxing against an external type stays lenient (no false mismatch).
+        assert!(int.is_assignable_to(&obj, None));
+        assert!(obj.is_assignable_to(&int, None));
+
+        // `Unknown` is compatible in both directions.
+        assert!(Ty::Unknown.is_assignable_to(&int, None));
+        assert!(int.is_assignable_to(&Ty::Unknown, None));
+
+        // `void` is assignable only to `void`.
+        assert!(Ty::Void.is_assignable_to(&Ty::Void, None));
+        assert!(!Ty::Void.is_assignable_to(&int, None));
+        assert!(!int.is_assignable_to(&Ty::Void, None));
+    }
+
+    #[test]
+    fn assignability_of_arrays() {
+        let int_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Int)));
+        let long_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Long)));
+        let obj = Ty::Class(ClassTy::External("Object".to_string()));
+        let str_arr = Ty::Array(Box::new(string_ty()));
+        let cs_arr = Ty::Array(Box::new(Ty::Class(ClassTy::External(
+            "CharSequence".to_string(),
+        ))));
+
+        // Primitive element arrays are invariant.
+        assert!(int_arr.is_assignable_to(&int_arr, None));
+        assert!(!long_arr.is_assignable_to(&int_arr, None));
+        // Reference element arrays are covariant (external elements stay lenient).
+        assert!(str_arr.is_assignable_to(&cs_arr, None));
+        // An array is a reference type: assignable to `Object`.
+        assert!(int_arr.is_assignable_to(&obj, None));
     }
 }
