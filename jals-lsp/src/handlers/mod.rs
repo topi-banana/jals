@@ -18,6 +18,7 @@ mod symbols;
 pub(crate) use definition::goto_definition_local;
 pub(crate) use diagnostics::{
     compute_diagnostics, compute_lint_diagnostics, compute_type_diagnostics,
+    compute_type_mismatch_diagnostics,
 };
 pub(crate) use document_highlight::document_highlight;
 pub(crate) use folding_range::folding_range;

@@ -86,6 +86,152 @@ pub fn infer_node(root: &SyntaxNode, resolved: &Resolved) -> TypeInference {
     Inferer::new(root, resolved, None).run()
 }
 
+/// A type incompatibility in an assignment context: a value whose type is not assignable to the
+/// slot it is written into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeMismatch {
+    /// The byte range of the offending value expression (where a diagnostic is anchored).
+    pub range: Range<usize>,
+    /// The slot's type — a declared variable's type, or an assignment target's type.
+    pub expected: Ty,
+    /// The value's inferred type.
+    pub found: Ty,
+}
+
+impl TypeMismatch {
+    /// A human-readable description of the incompatibility.
+    pub fn message(&self) -> String {
+        format!(
+            "incompatible types: `{}` cannot be assigned to `{}`",
+            self.found, self.expected
+        )
+    }
+}
+
+/// Reports the assignment-context type mismatches in `root` (a `SOURCE_FILE`): a variable
+/// initializer or a simple `=` assignment whose value type is not assignable to its slot type.
+///
+/// `project = Some((index, file))` infers reference types against the project, so a project-internal
+/// subtyping mismatch (a `Sub`/`Base` confusion) is caught; `None` infers file-locally, where
+/// reference types stay external and lenient, so only primitive, `null`, and array mismatches
+/// surface. Conservative throughout (it builds on [`Ty::is_assignable_to`]): an `Unknown` type, an
+/// external/boxing pair, and a numeric constant that narrowing could rescue are never reported, so a
+/// consumer turning these into diagnostics never shows a false positive. Pure; never panics.
+pub fn type_mismatches(
+    root: &SyntaxNode,
+    resolved: &Resolved,
+    project: Option<(&ProjectIndex, FileId)>,
+) -> Vec<TypeMismatch> {
+    let ti = match project {
+        Some((index, file)) => infer(root, resolved, index, file),
+        None => infer_node(root, resolved),
+    };
+    let index = project.map(|(index, _)| index);
+    let mut out = Vec::new();
+    for node in root.descendants() {
+        match node.kind() {
+            LOCAL_VAR_DECL | FIELD_DECL => check_initializer(&node, resolved, &ti, index, &mut out),
+            ASSIGNMENT_EXPR => check_assignment(&node, &ti, index, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Checks a variable / field declarator's initializer against its declared type. Only single-name
+/// declarators are checked: a multi-declarator's name↔initializer pairing (`int a = 1, b = 2.0;`)
+/// is ambiguous from the flat CST, so it is skipped rather than risk a wrong pairing. A `var`
+/// binding has no written type to disagree with and is skipped.
+fn check_initializer(
+    node: &SyntaxNode,
+    resolved: &Resolved,
+    ti: &TypeInference,
+    index: Option<&ProjectIndex>,
+    out: &mut Vec<TypeMismatch>,
+) {
+    let names: Vec<SyntaxToken> = direct_ident_tokens(node).collect();
+    let [name] = names.as_slice() else {
+        return;
+    };
+    if node
+        .children()
+        .find_map(ast::Type::cast)
+        .as_ref()
+        .is_some_and(is_var_type)
+    {
+        return;
+    }
+    // The declarator name is a *definition*, recovered with `symbol_at` (not `definition_at`, which
+    // looks up a reference).
+    let Some(def_id) = resolved.symbol_at(token_start(name)) else {
+        return;
+    };
+    let Some(value) = node.children().find_map(ast::Expr::cast) else {
+        return;
+    };
+    record_if_mismatch(value.syntax(), ti.type_of_def(def_id), ti, index, out);
+}
+
+/// Checks a simple `=` assignment's value against its target's type. Compound assignments
+/// (`+=`, `>>=`, …) carry an implicit narrowing cast, so only a lone `=` is checked.
+fn check_assignment(
+    node: &SyntaxNode,
+    ti: &TypeInference,
+    index: Option<&ProjectIndex>,
+    out: &mut Vec<TypeMismatch>,
+) {
+    if op_kinds(node).as_slice() != [EQ] {
+        return;
+    }
+    let Some(assign) = ast::AssignmentExpr::cast(node.clone()) else {
+        return;
+    };
+    let (Some(target), Some(value)) = (assign.target(), assign.value()) else {
+        return;
+    };
+    let tr = target.syntax().text_range();
+    let Some(expected) = ti.type_of_expr(usize::from(tr.start())..usize::from(tr.end())) else {
+        return;
+    };
+    record_if_mismatch(value.syntax(), expected, ti, index, out);
+}
+
+/// Pushes a [`TypeMismatch`] for `value` against `expected` when the value's inferred type is not
+/// assignable there — unless the value is untyped (no entry) or the pair is a constant narrowing the
+/// type system cannot see is legal.
+fn record_if_mismatch(
+    value: &SyntaxNode,
+    expected: &Ty,
+    ti: &TypeInference,
+    index: Option<&ProjectIndex>,
+    out: &mut Vec<TypeMismatch>,
+) {
+    let r = value.text_range();
+    let span = usize::from(r.start())..usize::from(r.end());
+    let Some(found) = ti.type_of_expr(span.clone()) else {
+        return;
+    };
+    if found.is_assignable_to(expected, index) || rescued_by_constant_narrowing(expected, found) {
+        return;
+    }
+    out.push(TypeMismatch {
+        range: span,
+        expected: expected.clone(),
+        found: found.clone(),
+    });
+}
+
+/// Whether a primitive mismatch could be a legal narrowing of a constant expression (JLS §5.2): a
+/// numeric value assigned to a `byte` / `short` / `char` slot. Without a constant evaluator we cannot
+/// tell whether the value is a constant in range, so we never report these — under-reporting (missing
+/// `byte b = someInt;`) rather than risk a false positive on the legal, common `byte b = 1;`.
+fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
+    matches!(
+        expected,
+        Ty::Primitive(Primitive::Byte | Primitive::Short | Primitive::Char)
+    ) && found.as_numeric().is_some()
+}
+
 /// The working state of one inference run.
 struct Inferer<'a> {
     root: SyntaxNode,

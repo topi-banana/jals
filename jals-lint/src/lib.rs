@@ -18,6 +18,11 @@ use jals_syntax::SyntaxNode;
 pub use config::{Config, ConfigError};
 pub use diagnostic::{Diagnostic, LintOutput, Severity};
 
+/// The kebab-case name of the `type-mismatch` rule, exposed so a consumer holding a project index
+/// (the language server) can suppress this file-local rule and run its index-aware variant under
+/// the same config key instead of double-reporting.
+pub const TYPE_MISMATCH_RULE: &str = "type-mismatch";
+
 /// Lint `src` according to `config`.
 pub fn lint_source(src: &str, config: &Config) -> LintOutput {
     let parse = jals_syntax::parse(src);

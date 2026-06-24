@@ -14,6 +14,7 @@ use crate::diagnostic::Severity;
 mod empty_catch;
 mod missing_braces;
 mod naming;
+mod type_mismatch;
 mod unused_local;
 mod wildcard_import;
 
@@ -62,4 +63,5 @@ pub(crate) const RULES: &[RuleMeta] = &[
     empty_catch::RULE,
     missing_braces::RULE,
     unused_local::RULE,
+    type_mismatch::RULE,
 ];
