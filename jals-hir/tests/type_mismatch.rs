@@ -168,3 +168,67 @@ fn external_target_stays_lenient_even_with_an_index() {
     let src = "class C { void m() { String s = 1; } }";
     assert!(indexed(&[src], 0).is_empty());
 }
+
+// ===== method argument checking (index-only) =====
+
+#[test]
+fn argument_type_is_checked_against_the_parameter() {
+    let bad = "class C { void f(int x) {} void g() { f(1.0); } }";
+    assert_eq!(indexed(&[bad], 0).len(), 1); // double argument to an int parameter
+    // A widening / exact argument is fine.
+    assert!(indexed(&["class C { void f(long x) {} void g() { f(1); } }"], 0).is_empty());
+    assert!(indexed(&["class C { void f(int x) {} void g() { f(1); } }"], 0).is_empty());
+}
+
+#[test]
+fn argument_checking_needs_the_index() {
+    // The parameter types live in the project member model; the index-free path cannot see them.
+    let src = "class C { void f(int x) {} void g() { f(1.0); } }";
+    assert!(free(src).is_empty());
+}
+
+#[test]
+fn argument_invocation_does_not_allow_constant_narrowing() {
+    // Unlike `byte b = 1;` (assignment), `f(1)` for a `byte` parameter is a compile error (JLS §5.3
+    // has no constant narrowing), so it *is* flagged.
+    let src = "class C { void f(byte b) {} void g() { f(1); } }";
+    assert_eq!(indexed(&[src], 0).len(), 1);
+}
+
+#[test]
+fn argument_project_subtyping() {
+    let bad = "class Base {} class Sub extends Base {} \
+               class C { void f(Sub s) {} void g() { f(new Base()); } }";
+    assert_eq!(indexed(&[bad], 0).len(), 1);
+    let ok = "class Base {} class Sub extends Base {} \
+              class C { void f(Base b) {} void g() { f(new Sub()); } }";
+    assert!(indexed(&[ok], 0).is_empty());
+}
+
+#[test]
+fn ambiguous_overloads_are_skipped() {
+    // Two same-arity overloads; without type-based resolution we cannot pick, so nothing is flagged.
+    let src = "class C { void f(int x) {} void f(String s) {} void g() { f(1.0); } }";
+    assert!(indexed(&[src], 0).is_empty());
+}
+
+#[test]
+fn an_override_is_still_checked() {
+    // The same signature in a subclass collapses to one candidate, so the call is checked.
+    let src = "class B { void f(int x) {} } class S extends B { void f(int x) {} } \
+               class C { void g(S s) { s.f(1.0); } }";
+    assert_eq!(indexed(&[src], 0).len(), 1);
+}
+
+#[test]
+fn varargs_methods_are_skipped() {
+    let src = "class C { void v(int... xs) {} void g() { v(1.0); } }";
+    assert!(indexed(&[src], 0).is_empty());
+}
+
+#[test]
+fn arity_mismatch_is_not_a_type_error() {
+    // Wrong number of arguments is a separate error class; this rule reports only type mismatches.
+    let src = "class C { void f(int x) {} void g() { f(); f(1, 2); } }";
+    assert!(indexed(&[src], 0).is_empty());
+}

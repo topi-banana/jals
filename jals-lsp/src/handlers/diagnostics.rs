@@ -273,6 +273,25 @@ mod tests {
     }
 
     #[test]
+    fn type_mismatch_diagnostics_flag_a_bad_call_argument() {
+        let text = "class C { void f(int x) {} void g() { f(1.0); } }";
+        let parse = jals_syntax::parse(text);
+        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let diags = compute_type_mismatch_diagnostics(
+            &index,
+            FileId(0),
+            &parse,
+            &resolved,
+            text,
+            &LineIndex::new(text),
+            &jals_lint::Config::default(),
+        );
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("double") && diags[0].message.contains("int"));
+    }
+
+    #[test]
     fn type_mismatch_diagnostics_respect_allow_config() {
         let parse = jals_syntax::parse(SUBTYPING_SRC);
         let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);

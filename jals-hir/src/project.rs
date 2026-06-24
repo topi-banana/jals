@@ -23,9 +23,9 @@ use std::fmt;
 use std::ops::Range;
 
 use jals_syntax::SyntaxKind::{
-    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
-    ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL, LBRACK, METHOD_DECL,
-    RECORD_DECL,
+    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
+    ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
+    LBRACK, METHOD_DECL, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -97,6 +97,12 @@ pub struct Member {
     /// resolvable data (no CST handle), to be turned into a concrete type later (type inference) in
     /// this member's *declaring* file context. A constructor has none ([`MemberType::Unknown`]).
     pub ty: MemberType,
+    /// A method's formal parameter types, in order (captured like [`ty`](Member::ty), resolved in the
+    /// declaring file's context). Empty for non-methods. Used to check call arguments.
+    pub params: Vec<MemberType>,
+    /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
+    /// variable arity, so argument checking skips it. Always `false` for non-methods.
+    pub varargs: bool,
 }
 
 /// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
@@ -463,6 +469,32 @@ impl ProjectIndex {
         })
     }
 
+    /// Every member named `name` in name-space `namespace` reachable from `owner` (the type and its
+    /// project-internal supertypes), nearest-first. Unlike [`resolve_member`](Self::resolve_member),
+    /// which returns the single nearest match, this returns *all* candidates — the overload set a
+    /// call's arguments must be checked against.
+    pub fn resolve_members_all(
+        &self,
+        owner: ItemId,
+        name: &str,
+        namespace: Namespace,
+    ) -> Vec<MemberId> {
+        let mut out = Vec::new();
+        // Always returning `None` walks the whole (cycle-guarded) chain, accumulating into `out`.
+        self.walk_supertypes(owner, |current| {
+            if let Some(ids) = self.members_by_owner.get(&current) {
+                for &id in ids {
+                    let member = &self.members[id.0 as usize];
+                    if member.name == name && member.kind.namespace() == namespace {
+                        out.push(id);
+                    }
+                }
+            }
+            None::<()>
+        });
+        out
+    }
+
     /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
     /// supertype chain. Reflexive (`s == t` is `true`) and cycle-guarded — the reference-subtyping
     /// half of assignment conversion ([`Ty::is_assignable_to`](crate::Ty::is_assignable_to)).
@@ -517,7 +549,11 @@ fn members_of_decl(
     else {
         return members;
     };
-    let mut push = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| {
+    let mut push = |name_tok: &SyntaxToken,
+                    kind: DefKind,
+                    ty: MemberType,
+                    params: Vec<MemberType>,
+                    varargs| {
         members.push(Member {
             owner,
             name: name_tok.text().to_string(),
@@ -525,6 +561,8 @@ fn members_of_decl(
             file,
             name_range: byte_range(name_tok),
             ty,
+            params,
+            varargs,
         });
     };
     for member in body.children() {
@@ -533,7 +571,7 @@ fn members_of_decl(
                 if let Some(field) = ast::FieldDecl::cast(member.clone()) {
                     let ty = member_type_of(field.ty());
                     for name in field.names() {
-                        push(&name, DefKind::Field, ty.clone());
+                        push(&name, DefKind::Field, ty.clone(), Vec::new(), false);
                     }
                 }
             }
@@ -542,12 +580,19 @@ fn members_of_decl(
                     let ty = member_type_of(
                         ast::MethodDecl::cast(member.clone()).and_then(|m| m.return_type()),
                     );
-                    push(&name, DefKind::Method, ty);
+                    let (params, varargs) = params_of(&member);
+                    push(&name, DefKind::Method, ty, params, varargs);
                 }
             }
             CONSTRUCTOR_DECL => {
                 if let Some(name) = first_ident_token(&member) {
-                    push(&name, DefKind::Constructor, MemberType::Unknown);
+                    push(
+                        &name,
+                        DefKind::Constructor,
+                        MemberType::Unknown,
+                        Vec::new(),
+                        false,
+                    );
                 }
             }
             ENUM_CONSTANT => {
@@ -557,13 +602,35 @@ fn members_of_decl(
                         qualified: None,
                         dims: 0,
                     };
-                    push(&name, DefKind::EnumConstant, ty);
+                    push(&name, DefKind::EnumConstant, ty, Vec::new(), false);
                 }
             }
             _ => {}
         }
     }
     members
+}
+
+/// A method declaration's formal parameter types (in order) and whether it is varargs (its last
+/// parameter is `int... xs`). Each parameter type is captured as a self-contained [`MemberType`],
+/// like a field's. Pure.
+fn params_of(method: &SyntaxNode) -> (Vec<MemberType>, bool) {
+    let mut params = Vec::new();
+    let mut varargs = false;
+    if let Some(list) = ast::MethodDecl::cast(method.clone()).and_then(|m| m.params()) {
+        for param in list.params() {
+            if param
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|it| it.into_token())
+                .any(|t| t.kind() == ELLIPSIS)
+            {
+                varargs = true;
+            }
+            params.push(member_type_of(param.ty()));
+        }
+    }
+    (params, varargs)
 }
 
 /// The supertype type names of a type declaration `node`: the `extends` and `implements` clause

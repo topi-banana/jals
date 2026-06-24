@@ -133,6 +133,13 @@ pub fn type_mismatches(
             LOCAL_VAR_DECL | FIELD_DECL => check_initializer(&node, resolved, &ti, index, &mut out),
             ASSIGNMENT_EXPR => check_assignment(&node, &ti, index, &mut out),
             RETURN_STMT => check_return(&node, resolved, &ti, index, &mut out),
+            // Argument checking needs the project member model (formal parameter types), so it runs
+            // only with an index — like project subtyping.
+            CALL_EXPR => {
+                if let Some((index, file)) = project {
+                    check_call(&node, &ti, index, file, &mut out);
+                }
+            }
             _ => {}
         }
     }
@@ -199,8 +206,7 @@ fn check_assignment(
     let (Some(target), Some(value)) = (assign.target(), assign.value()) else {
         return;
     };
-    let tr = target.syntax().text_range();
-    let Some(expected) = ti.type_of_expr(usize::from(tr.start())..usize::from(tr.end())) else {
+    let Some(expected) = ti.type_of_expr(node_span(target.syntax())) else {
         return;
     };
     record_if_mismatch(value.syntax(), expected, ti, index, out);
@@ -234,6 +240,84 @@ fn check_return(
     record_if_mismatch(value.syntax(), ti.type_of_def(def_id), ti, index, out);
 }
 
+/// Checks a method call's arguments against the called method's formal parameter types.
+///
+/// Conservative: the call must resolve to a single overload by name + arity (a varargs candidate, or
+/// several distinct same-arity signatures, are skipped — no type-based overload resolution yet).
+/// Argument conversion is method-invocation conversion (JLS §5.3), which — unlike assignment — does
+/// *not* permit constant narrowing, so a plain [`Ty::is_assignable_to`] is used (no constant-narrow
+/// rescue): `f(1)` for a `byte` parameter is a real error.
+fn check_call(
+    node: &SyntaxNode,
+    ti: &TypeInference,
+    index: &ProjectIndex,
+    file: FileId,
+    out: &mut Vec<TypeMismatch>,
+) {
+    let Some(call) = ast::CallExpr::cast(node.clone()) else {
+        return;
+    };
+    let Some((owner, name)) = call_target(&call, ti, index, file) else {
+        return;
+    };
+    let args: Vec<ast::Expr> = call
+        .args()
+        .map(|list| list.args().collect())
+        .unwrap_or_default();
+    // Candidates of the right arity (a varargs method is skipped — its arity is variable).
+    let matching: Vec<&crate::Member> = index
+        .resolve_members_all(owner, &name, Namespace::Method)
+        .into_iter()
+        .map(|id| index.member(id))
+        .filter(|m| !m.varargs && m.params.len() == args.len())
+        .collect();
+    let Some(first) = matching.first() else {
+        return;
+    };
+    // Only check when the call binds unambiguously: a single signature (overrides share one; genuine
+    // same-arity overloads do not, and resolving between them needs the argument types).
+    if !matching.iter().all(|m| m.params == first.params) {
+        return;
+    }
+    for (arg, param) in args.iter().zip(&first.params) {
+        let param_ty = member_type_to_ty(index, first.file, param);
+        let span = node_span(arg.syntax());
+        if let Some(arg_ty) = ti.type_of_expr(span.clone())
+            && !arg_ty.is_assignable_to(&param_ty, Some(index))
+        {
+            out.push(TypeMismatch {
+                range: span,
+                expected: param_ty,
+                found: arg_ty.clone(),
+            });
+        }
+    }
+}
+
+/// The `(owner type, method name)` a call resolves against: a qualified call `recv.m(..)` on the
+/// receiver's project type, or a bare call `m(..)` on the enclosing type (an implicit `this`).
+/// `None` when the receiver is not an indexed project type or the callee is neither a name nor a
+/// field access.
+fn call_target(
+    call: &ast::CallExpr,
+    ti: &TypeInference,
+    index: &ProjectIndex,
+    file: FileId,
+) -> Option<(ItemId, String)> {
+    match call.callee()? {
+        ast::Expr::FieldAccess(fa) => {
+            let name = fa.field()?;
+            let receiver = ti.type_of_expr(node_span(fa.receiver()?.syntax()))?;
+            Some((receiver.project_id()?, name))
+        }
+        ast::Expr::NameRef(n) => {
+            let name = first_ident_token(n.syntax())?.text().to_string();
+            Some((enclosing_item(index, file, call.syntax())?, name))
+        }
+        _ => None,
+    }
+}
+
 /// Pushes a [`TypeMismatch`] for `value` against `expected` when the value's inferred type is not
 /// assignable there — unless the value is untyped (no entry) or the pair is a constant narrowing the
 /// type system cannot see is legal.
@@ -244,8 +328,7 @@ fn record_if_mismatch(
     index: Option<&ProjectIndex>,
     out: &mut Vec<TypeMismatch>,
 ) {
-    let r = value.text_range();
-    let span = usize::from(r.start())..usize::from(r.end());
+    let span = node_span(value);
     let Some(found) = ti.type_of_expr(span.clone()) else {
         return;
     };
@@ -620,48 +703,55 @@ impl<'a> Inferer<'a> {
             return Ty::Unknown;
         };
         let member = index.member(member_id);
-        self.ty_of_member_type(index, member.file, &member.ty)
-    }
-
-    /// Turns a member's captured [`MemberType`] into a concrete [`Ty`], resolving a named type
-    /// against the project from the member's *declaring* file (its import / package context).
-    fn ty_of_member_type(&self, index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty {
-        match mt {
-            MemberType::Primitive { keyword, dims } => {
-                let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
-                array_of(base, *dims as usize)
-            }
-            MemberType::Void => Ty::Void,
-            MemberType::Named {
-                name,
-                qualified,
-                dims,
-            } => {
-                let base = match index.resolve_type_name(file, name, qualified.as_deref()) {
-                    TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
-                        id,
-                        name: name.clone(),
-                    }),
-                    TypeResolution::External | TypeResolution::Unresolved => {
-                        Ty::Class(ClassTy::External(name.clone()))
-                    }
-                };
-                array_of(base, *dims as usize)
-            }
-            MemberType::Unknown => Ty::Unknown,
-        }
+        member_type_to_ty(index, member.file, &member.ty)
     }
 
     /// The enclosing project type of `node`: the nearest ancestor type declaration that is an
     /// indexed item, for resolving a bare (`this`) method call.
     fn enclosing_item(&self, node: &SyntaxNode) -> Option<ItemId> {
         let (index, file) = self.project?;
-        let decl = node
-            .ancestors()
-            .find(|a| crate::project::type_decl_kind(a.kind()).is_some())?;
-        let name = first_ident_token(&decl)?;
-        index.item_by_decl(file, token_start(&name))
+        enclosing_item(index, file, node)
     }
+}
+
+/// Turns a member's captured [`MemberType`] into a concrete [`Ty`], resolving a named type against
+/// the project from the member's *declaring* `file` (its import / package context). A free function
+/// so a caller holding only a [`TypeInference`] (e.g. argument checking) can use it too.
+fn member_type_to_ty(index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty {
+    match mt {
+        MemberType::Primitive { keyword, dims } => {
+            let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
+            array_of(base, *dims as usize)
+        }
+        MemberType::Void => Ty::Void,
+        MemberType::Named {
+            name,
+            qualified,
+            dims,
+        } => {
+            let base = match index.resolve_type_name(file, name, qualified.as_deref()) {
+                TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
+                    id,
+                    name: name.clone(),
+                }),
+                TypeResolution::External | TypeResolution::Unresolved => {
+                    Ty::Class(ClassTy::External(name.clone()))
+                }
+            };
+            array_of(base, *dims as usize)
+        }
+        MemberType::Unknown => Ty::Unknown,
+    }
+}
+
+/// The nearest ancestor type declaration of `node` that is an indexed project item, in `file`. A
+/// free function shared by the [`Inferer`] (bare-call resolution) and argument checking.
+fn enclosing_item(index: &ProjectIndex, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
+    let decl = node
+        .ancestors()
+        .find(|a| crate::project::type_decl_kind(a.kind()).is_some())?;
+    let name = first_ident_token(&decl)?;
+    index.item_by_decl(file, token_start(&name))
 }
 
 /// Wraps `base` in `dims` array levels (`dims = 2` → `base[][]`).
@@ -773,4 +863,11 @@ fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
 
 fn token_start(tok: &SyntaxToken) -> usize {
     usize::from(tok.text_range().start())
+}
+
+/// The byte span of `node` in the source — the key shape used to look an expression's type up in a
+/// [`TypeInference`] and to anchor a [`TypeMismatch`].
+fn node_span(node: &SyntaxNode) -> Range<usize> {
+    let r = node.text_range();
+    usize::from(r.start())..usize::from(r.end())
 }
