@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use jals_build::Manifest;
 use jals_fmt::Config;
+use jals_hir::{FileId, ProjectIndex};
 use jals_lint::Config as LintConfig;
 
 #[derive(Parser)]
@@ -252,22 +253,43 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
     let mut any_finding = false;
 
     if args.paths.is_empty() {
-        // stdin
+        // stdin: a one-file "project". Building a single-file index still lets `type-mismatch` see
+        // in-file project subtyping (a `Sub`/`Base` confusion), matching the multi-file path below.
         let mut src = String::new();
         std::io::stdin()
             .read_to_string(&mut src)
             .context("reading stdin")?;
         let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
-        let out = jals_lint::lint_source(&src, &cfg);
+        let parse = jals_syntax::parse(&src);
+        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let out = jals_lint::lint_parse_with_index(&parse, &cfg, Some((&index, FileId(0))));
         any_finding |= report::report_lint("<stdin>", &src, &out);
     } else {
+        // Read and parse every file once, then build a project-wide symbol index from the parsed
+        // trees so the `type-mismatch` rule resolves reference types across files (project
+        // subtyping, cross-file call arguments) — the same checks the language server runs. The
+        // host owns the I/O; `ProjectIndex` itself is pure. Holding every parse at once costs more
+        // memory than the old file-at-a-time pass, but is bounded by the set of files being linted.
+        let mut files = Vec::new();
         for path in collect_java_files(&args.paths)? {
             let src = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
+            let parse = jals_syntax::parse(&src);
+            files.push((path, src, parse));
+        }
+        let inputs: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
+            .collect();
+        let index = ProjectIndex::build(&inputs);
+
+        for (i, (path, src, parse)) in files.iter().enumerate() {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));
             let cfg = discovery.for_dir(parent)?;
-            let out = jals_lint::lint_source(&src, &cfg);
-            any_finding |= report::report_lint(&path.display().to_string(), &src, &out);
+            let out =
+                jals_lint::lint_parse_with_index(parse, &cfg, Some((&index, FileId(i as u32))));
+            any_finding |= report::report_lint(&path.display().to_string(), src, &out);
         }
     }
 

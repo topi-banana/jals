@@ -8,20 +8,19 @@
 //! parameters remain a known source of false positives — suppress the rule via `jalslint.toml`
 //! where that matters.
 
-use jals_hir::DefKind;
+use jals_hir::{DefKind, Resolved};
 use jals_syntax::SyntaxNode;
 
 use crate::diagnostic::Severity;
-use crate::rules::{Finding, RuleMeta};
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-local",
     default: Severity::Warn,
-    check,
+    check: Checker::Resolved(check),
 };
 
-fn check(root: &SyntaxNode) -> Vec<Finding> {
-    let resolved = jals_hir::resolve_node(root);
+fn check(_root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
     let mut out = Vec::new();
     for def in resolved.unused_defs() {
         let what = match def.kind {

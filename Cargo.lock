@@ -854,8 +854,10 @@ dependencies = [
  "clap",
  "jals-build",
  "jals-fmt",
+ "jals-hir",
  "jals-lint",
  "jals-lsp",
+ "jals-syntax",
  "similar",
  "tempfile",
 ]

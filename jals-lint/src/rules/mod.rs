@@ -7,7 +7,10 @@
 
 use std::ops::Range;
 
+use jals_hir::Resolved;
 use jals_syntax::{SyntaxNode, SyntaxToken};
+
+use crate::IndexCtx;
 
 use crate::diagnostic::Severity;
 
@@ -46,14 +49,29 @@ impl Finding {
     }
 }
 
+/// How a rule is invoked. Most rules need only the CST; resolution-based rules additionally take
+/// the file-local name resolution, which the library computes at most once per lint (see
+/// [`crate::lint_node`]) and shares across every [`Checker::Resolved`] / [`Checker::Indexed`] rule.
+#[derive(Clone, Copy)]
+pub(crate) enum Checker {
+    /// A pure syntactic rule: given the CST root, return every finding.
+    Syntactic(fn(&SyntaxNode) -> Vec<Finding>),
+    /// A rule that also consumes `jals-hir` file-local name resolution.
+    Resolved(fn(&SyntaxNode, &Resolved) -> Vec<Finding>),
+    /// A rule that, in addition to name resolution, may resolve reference types against a
+    /// project-wide symbol index when the caller supplies one ([`IndexCtx`]); with no index it
+    /// falls back to the file-local behavior. The basis for cross-file type checking.
+    Indexed(fn(&SyntaxNode, &Resolved, Option<IndexCtx>) -> Vec<Finding>),
+}
+
 /// A rule: its identity and its checker.
 pub(crate) struct RuleMeta {
     /// Stable kebab-case name, used as the config key and shown in diagnostics.
     pub name: &'static str,
     /// Severity used when the rule is not configured.
     pub default: Severity,
-    /// The checker: given the CST root, return every finding.
-    pub check: fn(&SyntaxNode) -> Vec<Finding>,
+    /// The checker, syntactic or resolution-based.
+    pub check: Checker,
 }
 
 /// Every rule, in a stable order.

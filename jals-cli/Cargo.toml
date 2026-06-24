@@ -13,8 +13,10 @@ ariadne.workspace = true
 clap.workspace = true
 jals-build.workspace = true
 jals-fmt.workspace = true
+jals-hir.workspace = true
 jals-lint.workspace = true
 jals-lsp.workspace = true
+jals-syntax.workspace = true
 similar.workspace = true
 
 [dev-dependencies]
