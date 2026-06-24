@@ -56,6 +56,19 @@ impl fmt::Display for Fqn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(u32);
 
+/// Where an indexed [`Item`] comes from: the project's own sources, or an embedded standard-library
+/// stub. The two are indexed by the same machinery but treated differently at the edges — a stub has
+/// no real file the host can open, so navigation into it is suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemOrigin {
+    /// Declared in one of the project source files the host supplied to [`ProjectIndex::build`].
+    Project,
+    /// Declared in an embedded `java.lang` stub (see [`crate::stdlib`]); present only via
+    /// [`ProjectIndex::build_with_stdlib`]. Carries signatures for inference and hover, but no
+    /// host-openable location.
+    Stdlib,
+}
+
 /// An indexed type declaration: a class / interface / enum / record / annotation type, identified
 /// by its fully-qualified name and locatable for go-to-definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +77,8 @@ pub struct Item {
     pub fqn: Fqn,
     /// Which kind of type declaration it is (always a [`Namespace::Type`] kind).
     pub kind: DefKind,
+    /// Whether this comes from the project sources or an embedded stub.
+    pub origin: ItemOrigin,
     /// The file the declaration lives in.
     pub file: FileId,
     /// The byte range of the declaring name token (the go-to-definition target).
@@ -196,8 +211,24 @@ impl ProjectIndex {
     ///
     /// Each file contributes its package, its type-name imports, and every type declaration it
     /// holds (top-level and nested). When two files declare the same fully-qualified name, the
-    /// first one indexed wins.
+    /// first one indexed wins. The JDK / classpath is *not* indexed — see
+    /// [`build_with_stdlib`](ProjectIndex::build_with_stdlib) to also fold in the embedded
+    /// `java.lang` stubs.
     pub fn build(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
+        Self::build_inner(files, false)
+    }
+
+    /// Like [`build`](ProjectIndex::build), but also indexes the embedded `java.lang` stubs
+    /// ([`crate::stdlib`]) as [`Stdlib`](ItemOrigin::Stdlib)-origin types. With them, a reference to
+    /// a core JDK type (`String`, `Object`, …) resolves to a real [`Item`] with members and
+    /// supertypes, so inference and hover see through it instead of stopping at an external name.
+    ///
+    /// Still pure and `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
+    pub fn build_with_stdlib(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
+        Self::build_inner(files, true)
+    }
+
+    fn build_inner(files: &[(FileId, SyntaxNode)], stdlib: bool) -> ProjectIndex {
         let mut index = ProjectIndex {
             items: Vec::new(),
             by_fqn: HashMap::new(),
@@ -206,43 +237,42 @@ impl ProjectIndex {
             members_by_owner: HashMap::new(),
             decl_to_item: HashMap::new(),
         };
-        for (file, root) in files {
-            let Some(src) = ast::SourceFile::cast(root.clone()) else {
-                continue;
-            };
-            let package = src
-                .package()
-                .and_then(|p| p.name())
-                .map(|n| n.text())
-                .filter(|p| !p.is_empty());
 
-            let mut single_imports = Vec::new();
-            let mut on_demand = Vec::new();
-            for import in src.imports() {
-                // Type-name resolution ignores static and module imports.
-                if import.is_static() || import.is_module() {
-                    continue;
-                }
-                let Some(name) = import.name() else {
-                    continue;
-                };
-                if name.is_wildcard() {
-                    if let Some(pkg) = name.qualifier() {
-                        on_demand.push(pkg);
-                    }
-                } else if let Some(simple) = name.last_segment() {
-                    single_imports.push((simple, name.text()));
-                }
-            }
-            index.files.insert(
-                *file,
-                FileMeta {
-                    package: package.clone(),
-                    single_imports,
-                    on_demand,
-                },
-            );
-            index.collect_types(*file, root, package.as_deref(), None);
+        // Stub compilation units are parsed here and given reserved high `FileId`s (counting down
+        // from `u32::MAX`) so they never collide with the host's low, sequential ids. Each parsed
+        // `SyntaxNode` keeps its tree alive for the duration of this build; afterwards every `Item` /
+        // `Member` is self-contained data, so the nodes can be dropped.
+        let stubs: Vec<(FileId, SyntaxNode)> = if stdlib {
+            crate::stdlib::stub_sources()
+                .iter()
+                .enumerate()
+                .map(|(i, src)| {
+                    (
+                        FileId(u32::MAX - i as u32),
+                        jals_syntax::parse(src).syntax(),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Every compilation unit to index, in priority order: the host's project files first, then
+        // the embedded stubs — so a user type with the same fully-qualified name as a stub wins
+        // (`by_fqn` keeps the first insert). Both passes below walk this one origin-tagged list.
+        let units: Vec<(FileId, &SyntaxNode, ItemOrigin)> = files
+            .iter()
+            .map(|(file, root)| (*file, root, ItemOrigin::Project))
+            .chain(
+                stubs
+                    .iter()
+                    .map(|(file, root)| (*file, root, ItemOrigin::Stdlib)),
+            )
+            .collect();
+
+        // First pass: package, imports, and type declarations.
+        for &(file, root, origin) in &units {
+            index.collect_file(file, root, origin);
         }
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
@@ -252,11 +282,53 @@ impl ProjectIndex {
                 .insert((item.file, item.name_range.start), ItemId(i as u32));
         }
         // Second pass: members and project-internal inheritance. It runs after every type is indexed
-        // so a supertype declared later (or in another file) still resolves.
-        for (file, root) in files {
-            index.collect_members_and_supertypes(*file, root);
+        // so a supertype declared later (or in another file / stub) still resolves.
+        for &(file, root, _) in &units {
+            index.collect_members_and_supertypes(file, root);
         }
         index
+    }
+
+    /// Records one file's package, type-name imports, and type declarations (with the given
+    /// `origin`). The first pass of [`build_inner`](ProjectIndex::build_inner), shared by project and
+    /// stub files.
+    fn collect_file(&mut self, file: FileId, root: &SyntaxNode, origin: ItemOrigin) {
+        let Some(src) = ast::SourceFile::cast(root.clone()) else {
+            return;
+        };
+        let package = src
+            .package()
+            .and_then(|p| p.name())
+            .map(|n| n.text())
+            .filter(|p| !p.is_empty());
+
+        let mut single_imports = Vec::new();
+        let mut on_demand = Vec::new();
+        for import in src.imports() {
+            // Type-name resolution ignores static and module imports.
+            if import.is_static() || import.is_module() {
+                continue;
+            }
+            let Some(name) = import.name() else {
+                continue;
+            };
+            if name.is_wildcard() {
+                if let Some(pkg) = name.qualifier() {
+                    on_demand.push(pkg);
+                }
+            } else if let Some(simple) = name.last_segment() {
+                single_imports.push((simple, name.text()));
+            }
+        }
+        self.files.insert(
+            file,
+            FileMeta {
+                package: package.clone(),
+                single_imports,
+                on_demand,
+            },
+        );
+        self.collect_types(file, root, package.as_deref(), None, origin);
     }
 
     /// Walks `node`, recording each type declaration with its fully-qualified name and threading the
@@ -267,6 +339,7 @@ impl ProjectIndex {
         node: &SyntaxNode,
         package: Option<&str>,
         enclosing: Option<&str>,
+        origin: ItemOrigin,
     ) {
         let mut next_enclosing = enclosing.map(str::to_string);
         if let Some(kind) = type_decl_kind(node.kind())
@@ -277,6 +350,7 @@ impl ProjectIndex {
             self.items.push(Item {
                 fqn: Fqn(fqn.clone()),
                 kind,
+                origin,
                 file,
                 name_range: byte_range(&name_tok),
                 supertypes: Vec::new(),
@@ -286,7 +360,7 @@ impl ProjectIndex {
             next_enclosing = Some(fqn);
         }
         for child in node.children() {
-            self.collect_types(file, &child, package, next_enclosing.as_deref());
+            self.collect_types(file, &child, package, next_enclosing.as_deref(), origin);
         }
     }
 
@@ -357,13 +431,21 @@ impl ProjectIndex {
             };
         }
 
-        // 4. Reachable from outside the index: an implicit `java.lang` type, or any on-demand
-        //    import that could supply an unindexed type. Either way, no diagnostic.
+        // 4. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
+        //    from `java.lang`. When the stubs are indexed ([`build_with_stdlib`]) it binds to one;
+        //    when they are not, `java.lang.*` is absent from `by_fqn` and this falls through to the
+        //    external handling below — identical to the pre-stub behaviour.
+        if let Some(&id) = self.by_fqn.get(&format!("java.lang.{name}")) {
+            return TypeResolution::Project(id);
+        }
+
+        // 5. Reachable from outside the index: an (unstubbed) implicit `java.lang` type, or any
+        //    on-demand import that could supply an unindexed type. Either way, no diagnostic.
         if is_java_lang(name) || !meta.on_demand.is_empty() {
             return TypeResolution::External;
         }
 
-        // 5. Nameable from nowhere.
+        // 6. Nameable from nowhere.
         TypeResolution::Unresolved
     }
 
@@ -424,6 +506,10 @@ impl ProjectIndex {
         match self.resolve_reference(file, reference) {
             TypeResolution::Project(id) => {
                 let item = &self.items[id.0 as usize];
+                // A stub type has no host-openable file; do not offer it as a navigation target.
+                if item.origin == ItemOrigin::Stdlib {
+                    return None;
+                }
                 Some((item.file, item.name_range.clone()))
             }
             TypeResolution::External | TypeResolution::Unresolved => None,

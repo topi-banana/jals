@@ -44,6 +44,7 @@ mod project;
 mod reference;
 mod resolve;
 mod scope;
+mod stdlib;
 mod ty;
 
 use jals_syntax::SyntaxNode;
@@ -54,7 +55,8 @@ pub use infer::{
     type_mismatches,
 };
 pub use project::{
-    FileId, Fqn, Item, ItemId, Member, MemberId, MemberType, Param, ProjectIndex, TypeResolution,
+    FileId, Fqn, Item, ItemId, ItemOrigin, Member, MemberId, MemberType, Param, ProjectIndex,
+    TypeResolution,
 };
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;
