@@ -72,6 +72,10 @@ pub struct Item {
     /// inherited-member lookup. A supertype outside the indexed sources (a JDK class, an unresolved
     /// name) is simply absent, so a member search up the chain stops at it gracefully.
     pub supertypes: Vec<ItemId>,
+    /// Whether any `extends` / `implements` clause names a type *outside* the indexed project (a JDK
+    /// or third-party class). When true, this type may inherit members — including method overloads —
+    /// that the index cannot see, so a "no member / no overload" conclusion is not trustworthy.
+    pub has_external_supertype: bool,
 }
 
 /// A dense identifier for a [`Member`] within one [`ProjectIndex`].
@@ -265,6 +269,7 @@ impl ProjectIndex {
                 file,
                 name_range: byte_range(&name_tok),
                 supertypes: Vec::new(),
+                has_external_supertype: false,
             });
             self.by_fqn.entry(fqn.clone()).or_insert(id);
             next_enclosing = Some(fqn);
@@ -288,15 +293,18 @@ impl ProjectIndex {
                 self.members.push(member);
                 self.members_by_owner.entry(owner).or_default().push(id);
             }
-            // Supertypes: keep only the ones that resolve to an indexed project type.
-            let supertypes: Vec<ItemId> = raw_supertypes_of(node)
-                .into_iter()
-                .filter_map(|(name, qualified)| {
-                    self.resolve_type_name(file, &name, qualified.as_deref())
-                        .project_id()
-                })
-                .collect();
+            // Supertypes: keep the ones that resolve to an indexed project type, and note whether any
+            // resolves *outside* the project (so the type's full member set is not knowable).
+            let mut supertypes = Vec::new();
+            let mut has_external = false;
+            for (name, qualified) in raw_supertypes_of(node) {
+                match self.resolve_type_name(file, &name, qualified.as_deref()) {
+                    TypeResolution::Project(id) => supertypes.push(id),
+                    TypeResolution::External | TypeResolution::Unresolved => has_external = true,
+                }
+            }
             self.items[owner.0 as usize].supertypes = supertypes;
+            self.items[owner.0 as usize].has_external_supertype = has_external;
         }
         for child in node.children() {
             self.collect_members_and_supertypes(file, &child);
@@ -493,6 +501,24 @@ impl ProjectIndex {
             None::<()>
         });
         out
+    }
+
+    /// Whether the full set of overloads named `name` on `owner` is knowable from the index — a
+    /// precondition for concluding "no overload matches" without a false positive.
+    ///
+    /// It is *not* knowable when `name` is an [`Object`](is_object_method) method (every type inherits
+    /// `Object`'s overloads, which are not indexed) or when `owner` or any project supertype `extends`
+    /// / `implements` a type outside the project (which may declare further overloads we cannot see).
+    pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
+        if is_object_method(name) {
+            return false;
+        }
+        self.walk_supertypes(owner, |current| {
+            self.items[current.0 as usize]
+                .has_external_supertype
+                .then_some(())
+        })
+        .is_none()
     }
 
     /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
@@ -716,6 +742,23 @@ fn qualify(package: Option<&str>, simple: &str) -> String {
         Some(p) => format!("{p}.{simple}"),
         None => simple.to_string(),
     }
+}
+
+/// Whether `name` is a method every type inherits from `java.lang.Object`. A call to one of these
+/// may bind to `Object`'s declaration (not indexed), so the project member set for it is incomplete.
+fn is_object_method(name: &str) -> bool {
+    const OBJECT_METHODS: &[&str] = &[
+        "equals",
+        "hashCode",
+        "toString",
+        "getClass",
+        "clone",
+        "notify",
+        "notifyAll",
+        "wait",
+        "finalize",
+    ];
+    OBJECT_METHODS.contains(&name)
 }
 
 /// Whether `name` is a commonly-used implicit `java.lang` type (imported into every file). Kept

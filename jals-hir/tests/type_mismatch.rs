@@ -49,8 +49,6 @@ fn boolean_and_null_mismatches_are_flagged() {
     assert_eq!(free(&in_method("int x = null;")).len(), 1);
 
     let m = &free(&in_method("int x = null;"))[0];
-    assert_eq!(m.expected.to_string(), "int");
-    assert_eq!(m.found.to_string(), "null");
     assert!(m.message().contains("`null`"));
     assert!(m.message().contains("`int`"));
 }
@@ -206,10 +204,14 @@ fn argument_project_subtyping() {
 }
 
 #[test]
-fn ambiguous_overloads_are_skipped() {
-    // Two same-arity overloads; without type-based resolution we cannot pick, so nothing is flagged.
+fn an_applicable_overload_silences_the_call() {
+    // `f(String)` leniently accepts a `double` (external boxing target), so the call binds — nothing
+    // is flagged even though `f(int)` rejects it.
     let src = "class C { void f(int x) {} void f(String s) {} void g() { f(1.0); } }";
     assert!(indexed(&[src], 0).is_empty());
+    // An exactly-applicable overload also silences it.
+    let ok = "class C { void f(int x) {} void f(boolean b) {} void g() { f(1); f(true); } }";
+    assert!(indexed(&[ok], 0).is_empty());
 }
 
 #[test]
@@ -230,5 +232,47 @@ fn varargs_methods_are_skipped() {
 fn arity_mismatch_is_not_a_type_error() {
     // Wrong number of arguments is a separate error class; this rule reports only type mismatches.
     let src = "class C { void f(int x) {} void g() { f(); f(1, 2); } }";
+    assert!(indexed(&[src], 0).is_empty());
+}
+
+// ===== type-based overload resolution (B4) =====
+
+#[test]
+fn no_applicable_overload_is_reported_once() {
+    // Both overloads definitively reject `double`, so the call matches none.
+    let src = "class C { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
+    let found = indexed(&[src], 0);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].message().contains("no overload") && found[0].message().contains("`f`"));
+}
+
+#[test]
+fn no_applicable_overload_with_project_parameter_types() {
+    let bad = "class A {} class B {} \
+               class C { void f(A a) {} void f(B b) {} void g() { f(1.0); } }";
+    assert_eq!(indexed(&[bad], 0).len(), 1);
+    // An exactly-matching project argument binds one overload — nothing flagged.
+    let ok = "class A {} class B {} \
+              class C { void f(A a) {} void f(B b) {} void g() { f(new A()); } }";
+    assert!(indexed(&[ok], 0).is_empty());
+}
+
+#[test]
+fn overload_reporting_is_guarded_by_method_set_completeness() {
+    // `C extends Foo` where `Foo` is external: `Foo` may declare `f(double)`, so a "no overload"
+    // conclusion is unsafe and suppressed.
+    let external =
+        "class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
+    assert!(indexed(&[external], 0).is_empty());
+    // The same source with `Foo` defined in the project makes the set complete, so it is reported.
+    let complete = "class Foo {} \
+                    class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
+    assert_eq!(indexed(&[complete], 0).len(), 1);
+}
+
+#[test]
+fn object_method_names_are_not_reported() {
+    // `equals` is an `Object` method, so the call may bind to `Object.equals(Object)` — not flagged.
+    let src = "class C { void equals(int x) {} void g() { equals(1.0); } }";
     assert!(indexed(&[src], 0).is_empty());
 }

@@ -86,25 +86,58 @@ pub fn infer_node(root: &SyntaxNode, resolved: &Resolved) -> TypeInference {
     Inferer::new(root, resolved, None).run()
 }
 
-/// A type incompatibility in an assignment context: a value whose type is not assignable to the
-/// slot it is written into.
+/// A type error: a value not assignable to the slot it is written into, or a call matching no
+/// overload of the named method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeMismatch {
-    /// The byte range of the offending value expression (where a diagnostic is anchored).
+    /// The byte range the diagnostic is anchored at (the offending value / argument, or the call).
     pub range: Range<usize>,
-    /// The slot's type — a declared variable's type, or an assignment target's type.
-    pub expected: Ty,
-    /// The value's inferred type.
-    pub found: Ty,
+    kind: MismatchKind,
+}
+
+/// What kind of type error a [`TypeMismatch`] is — its `message` differs by kind, but consumers read
+/// only [`TypeMismatch::range`] and [`TypeMismatch::message`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MismatchKind {
+    /// A value of type `found` assigned where `expected` is required.
+    Assignment { expected: Ty, found: Ty },
+    /// A call to `name` whose argument types `args` match none of its overloads.
+    NoOverload { name: String, args: Vec<Ty> },
 }
 
 impl TypeMismatch {
-    /// A human-readable description of the incompatibility.
+    /// An assignment-context mismatch (initializer, assignment, return, or a single-overload call
+    /// argument): `found` is not assignable to `expected`.
+    fn assignment(range: Range<usize>, expected: Ty, found: Ty) -> TypeMismatch {
+        TypeMismatch {
+            range,
+            kind: MismatchKind::Assignment { expected, found },
+        }
+    }
+
+    /// A call to `name` with argument types `args` that no same-arity overload accepts.
+    fn no_overload(range: Range<usize>, name: String, args: Vec<Ty>) -> TypeMismatch {
+        TypeMismatch {
+            range,
+            kind: MismatchKind::NoOverload { name, args },
+        }
+    }
+
+    /// A human-readable description of the type error.
     pub fn message(&self) -> String {
-        format!(
-            "incompatible types: `{}` cannot be assigned to `{}`",
-            self.found, self.expected
-        )
+        match &self.kind {
+            MismatchKind::Assignment { expected, found } => {
+                format!("incompatible types: `{found}` cannot be assigned to `{expected}`")
+            }
+            MismatchKind::NoOverload { name, args } => {
+                let list = args
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("no overload of `{name}` accepts the argument types ({list})")
+            }
+        }
     }
 }
 
@@ -242,11 +275,15 @@ fn check_return(
 
 /// Checks a method call's arguments against the called method's formal parameter types.
 ///
-/// Conservative: the call must resolve to a single overload by name + arity (a varargs candidate, or
-/// several distinct same-arity signatures, are skipped — no type-based overload resolution yet).
-/// Argument conversion is method-invocation conversion (JLS §5.3), which — unlike assignment — does
-/// *not* permit constant narrowing, so a plain [`Ty::is_assignable_to`] is used (no constant-narrow
-/// rescue): `f(1)` for a `byte` parameter is a real error.
+/// Resolves the call against the named method's overloads by argument type, then reports a mismatch
+/// only when *no* overload accepts the arguments. Argument conversion is method-invocation conversion
+/// (JLS §5.3), which — unlike assignment — does not permit constant narrowing, so a plain
+/// [`Ty::is_assignable_to`] is used: `f(1)` for a `byte` parameter is a real error.
+///
+/// Conservative: a varargs method is skipped (variable arity), an `Unknown`/external argument keeps a
+/// candidate applicable (no false positive), and a "no overload" conclusion is reported only when the
+/// method set is fully known ([`ProjectIndex::method_set_complete`]) — a type extending an external
+/// class, or an `Object` method, may have overloads the index cannot see.
 fn check_call(
     node: &SyntaxNode,
     ti: &TypeInference,
@@ -271,26 +308,57 @@ fn check_call(
         .map(|id| index.member(id))
         .filter(|m| !m.varargs && m.params.len() == args.len())
         .collect();
-    let Some(first) = matching.first() else {
-        return;
-    };
-    // Only check when the call binds unambiguously: a single signature (overrides share one; genuine
-    // same-arity overloads do not, and resolving between them needs the argument types).
-    if !matching.iter().all(|m| m.params == first.params) {
+    if matching.is_empty() {
         return;
     }
-    for (arg, param) in args.iter().zip(&first.params) {
-        let param_ty = member_type_to_ty(index, first.file, param);
-        let span = node_span(arg.syntax());
-        if let Some(arg_ty) = ti.type_of_expr(span.clone())
-            && !arg_ty.is_assignable_to(&param_ty, Some(index))
-        {
-            out.push(TypeMismatch {
-                range: span,
-                expected: param_ty,
-                found: arg_ty.clone(),
-            });
+    // Argument spans and inferred types, computed once and reused across every overload (an
+    // un-inferred argument is `None`, and treated as applicable — never blocking).
+    let arg_spans: Vec<Range<usize>> = args.iter().map(|a| node_span(a.syntax())).collect();
+    let arg_tys: Vec<Option<&Ty>> = arg_spans
+        .iter()
+        .map(|s| ti.type_of_expr(s.clone()))
+        .collect();
+    // A candidate is applicable when every argument is assignable to its parameter.
+    let applicable = |m: &crate::Member| {
+        arg_tys.iter().zip(&m.params).all(|(arg_ty, param)| {
+            arg_ty.is_none_or(|ty| {
+                ty.is_assignable_to(&member_type_to_ty(index, m.file, param), Some(index))
+            })
+        })
+    };
+    // The call binds to some overload — no argument error to report.
+    if matching.iter().any(|&m| applicable(m)) {
+        return;
+    }
+    // No overload accepts the arguments; report only when the overload set is fully known.
+    if !index.method_set_complete(owner, &name) {
+        return;
+    }
+    if let [only] = matching.as_slice() {
+        // A single overload: precise per-argument diagnostics against it.
+        for ((arg_ty, span), param) in arg_tys.iter().zip(&arg_spans).zip(&only.params) {
+            let param_ty = member_type_to_ty(index, only.file, param);
+            if let Some(ty) = arg_ty
+                && !ty.is_assignable_to(&param_ty, Some(index))
+            {
+                out.push(TypeMismatch::assignment(
+                    span.clone(),
+                    param_ty,
+                    (*ty).clone(),
+                ));
+            }
         }
+    } else {
+        // Several same-arity overloads, none applicable: the call matches no overload.
+        let arg_tys = arg_tys
+            .iter()
+            .map(|ty| ty.cloned().unwrap_or(Ty::Unknown))
+            .collect();
+        out.push(TypeMismatch::no_overload(
+            node_span(call.syntax()),
+            name,
+            arg_tys,
+        ));
     }
 }
 
@@ -335,11 +403,11 @@ fn record_if_mismatch(
     if found.is_assignable_to(expected, index) || rescued_by_constant_narrowing(expected, found) {
         return;
     }
-    out.push(TypeMismatch {
-        range: span,
-        expected: expected.clone(),
-        found: found.clone(),
-    });
+    out.push(TypeMismatch::assignment(
+        span,
+        expected.clone(),
+        found.clone(),
+    ));
 }
 
 /// Whether a primitive mismatch could be a legal narrowing of a constant expression (JLS §5.2): a
