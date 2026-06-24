@@ -1,15 +1,20 @@
-//! Builds LSP semantic tokens from the lossless CST.
+//! Builds LSP semantic tokens from the lossless CST, refined by file-local name resolution.
 //!
-//! Every significant token is classified purely from the syntax tree: the token's own
-//! [`SyntaxKind`] plus, for identifiers, the kind of its parent (and sometimes grandparent)
-//! node. There is no name resolution, so classification is best-effort — e.g. a bare name
-//! reference is always `variable`, since without types we cannot tell a field from a local.
-//! The lossless tree still pins down most tokens (declarations, type positions, call
-//! callees, annotations) unambiguously.
+//! Identifiers are classified first from `jals-hir`'s file-local resolution ([`resolve_node`]): a
+//! resolved reference takes the kind of the binding it names (a field is `property`, a parameter
+//! `parameter`, a sibling type `class`/`enum`/...), and a declaring name takes its own kind plus the
+//! `declaration` modifier. Everything resolution cannot place — an unresolved reference (an imported
+//! or external type, an inherited member), a member-access right-hand name, a qualified/annotation
+//! name — falls back to a purely syntactic classification from the token's [`SyntaxKind`] and its
+//! parent (sometimes grandparent) node. The fallback is what classified *every* identifier before
+//! resolution was wired in, so it never regresses; resolution only sharpens what it can place.
+
+use std::collections::HashMap;
 
 use async_lsp::lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensLegend,
 };
+use jals_hir::DefKind;
 use jals_syntax::{Parse, SyntaxKind, SyntaxToken};
 
 use crate::line_index::LineIndex;
@@ -68,6 +73,7 @@ pub(crate) fn legend() -> SemanticTokensLegend {
 /// one per line — multi-line tokens are split, as the protocol requires).
 pub(crate) fn semantic_tokens(parse: &Parse, text: &str, line_index: &LineIndex) -> SemanticTokens {
     let root = parse.syntax();
+    let by_start = resolution_classes(&root);
     let mut data: Vec<SemanticToken> = Vec::new();
     // Anchor for delta encoding: the line/start of the previously emitted token.
     let (mut prev_line, mut prev_start) = (0u32, 0u32);
@@ -76,7 +82,7 @@ pub(crate) fn semantic_tokens(parse: &Parse, text: &str, line_index: &LineIndex)
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
     {
-        let Some((token_type, token_modifiers_bitset)) = classify(&token) else {
+        let Some((token_type, token_modifiers_bitset)) = classify(&token, &by_start) else {
             continue;
         };
         let start = line_index.position(text, token.text_range().start());
@@ -114,24 +120,82 @@ pub(crate) fn semantic_tokens(parse: &Parse, text: &str, line_index: &LineIndex)
     }
 }
 
+/// A map from a token's start byte offset to its resolution-derived `(token_type, modifier_bits)`,
+/// built once per request from `jals-hir`'s file-local name resolution.
+///
+/// Equivalent to calling [`jals_hir::Resolved::symbol_at`] for every identifier, but precomputed in
+/// one pass (O(references + defs)) so each token is an O(1) lookup instead of a linear scan. A
+/// resolved reference maps to the kind of the binding it names (no `declaration` modifier); a
+/// declaring name maps to its own kind plus [`MOD_DECLARATION`]. References are inserted first and
+/// declarations only fill gaps (`symbol_at` treats a covering reference as authoritative), though in
+/// practice a reference and a declaring name never share a start offset. Unresolved references are
+/// omitted, leaving those tokens to the syntactic fallback.
+fn resolution_classes(root: &jals_syntax::SyntaxNode) -> HashMap<usize, (u32, u32)> {
+    let resolved = jals_hir::resolve_node(root);
+    let mut by_start: HashMap<usize, (u32, u32)> = HashMap::new();
+    for reference in &resolved.references {
+        if let Some(id) = reference.resolution.def_id() {
+            by_start.insert(
+                reference.range.start,
+                (token_type_for(resolved.def(id).kind), 0),
+            );
+        }
+    }
+    for def in &resolved.defs {
+        by_start
+            .entry(def.name_range.start)
+            .or_insert((token_type_for(def.kind), MOD_DECLARATION));
+    }
+    by_start
+}
+
+/// The legend token-type index for a resolved binding's [`DefKind`]. Mirrors the declaration-site
+/// mapping in [`classify_ident_syntactic`], so a declaration classifies the same whether it is
+/// placed by resolution or syntax.
+fn token_type_for(kind: DefKind) -> u32 {
+    match kind {
+        DefKind::Class | DefKind::Record => ty::CLASS,
+        DefKind::Interface | DefKind::AnnotationType => ty::INTERFACE,
+        DefKind::Enum => ty::ENUM,
+        DefKind::TypeParam => ty::TYPE_PARAMETER,
+        DefKind::Param | DefKind::LambdaParam => ty::PARAMETER,
+        DefKind::Field => ty::PROPERTY,
+        DefKind::EnumConstant => ty::ENUM_MEMBER,
+        DefKind::Method | DefKind::Constructor => ty::METHOD,
+        DefKind::Local | DefKind::CatchParam | DefKind::Resource | DefKind::PatternVar => {
+            ty::VARIABLE
+        }
+    }
+}
+
 /// Classify a single token into a `(token_type, modifier_bits)` pair, or `None` to skip it
 /// (whitespace/newlines, operators, delimiters, and unclassifiable identifiers).
-fn classify(token: &SyntaxToken) -> Option<(u32, u32)> {
+///
+/// An identifier is taken from `by_start` (name resolution) when present, otherwise classified
+/// syntactically.
+fn classify(token: &SyntaxToken, by_start: &HashMap<usize, (u32, u32)>) -> Option<(u32, u32)> {
     use SyntaxKind::*;
     match token.kind() {
         WHITESPACE | NEWLINE => None,
         LINE_COMMENT | BLOCK_COMMENT | DOC_COMMENT => Some((ty::COMMENT, 0)),
         STRING_LITERAL | TEXT_BLOCK | CHAR_LITERAL => Some((ty::STRING, 0)),
         INT_LITERAL | FLOAT_LITERAL => Some((ty::NUMBER, 0)),
-        IDENT | UNDERSCORE => classify_ident(token),
+        IDENT | UNDERSCORE => {
+            let start = usize::from(token.text_range().start());
+            by_start
+                .get(&start)
+                .copied()
+                .or_else(|| classify_ident_syntactic(token))
+        }
         k if is_keyword(k) => Some((ty::KEYWORD, 0)),
         _ => None,
     }
 }
 
 /// Classify an identifier from the kind of its parent node, falling back to grandparent
-/// context to distinguish a method call from a plain name/field access.
-fn classify_ident(token: &SyntaxToken) -> Option<(u32, u32)> {
+/// context to distinguish a method call from a plain name/field access. The syntactic fallback for
+/// identifiers name resolution cannot place.
+fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(u32, u32)> {
     use SyntaxKind::*;
     let parent = token.parent()?;
     let grandparent = || parent.parent().map(|n| n.kind());
@@ -295,6 +359,16 @@ mod tests {
             .unwrap_or_else(|| panic!("no token at column {col} for {needle:?}"))
     }
 
+    /// Find the single token covering `needle`'s *last* occurrence (by column on line 0). Used to
+    /// target a *use* of a name when its declaration appears earlier on the same line.
+    fn at_last(text: &str, needle: &str) -> Tok {
+        let col = text.rfind(needle).expect("needle present") as u32;
+        decode(text)
+            .into_iter()
+            .find(|t| t.line == 0 && t.start == col)
+            .unwrap_or_else(|| panic!("no token at column {col} for {needle:?}"))
+    }
+
     #[test]
     fn legend_indices_match() {
         let legend = legend();
@@ -340,6 +414,45 @@ mod tests {
         assert_eq!(at(src, "obj").ty, "variable");
         assert_eq!(at(src, "bar").ty, "method");
         assert_eq!(at(src, "field").ty, "property");
+    }
+
+    #[test]
+    fn name_references_resolve_to_their_kind() {
+        // A bare name reference is classified by what it resolves to, not a flat `variable`.
+        // Each `_last` targets the *use*, not the earlier declaration of the same name.
+        let field = at_last("class C { int f; int g() { return f; } }", "f");
+        assert_eq!(field.ty, "property");
+        assert_eq!(
+            field.mods, 0,
+            "a use must not carry the declaration modifier"
+        );
+
+        assert_eq!(
+            at_last("class C { int m(int p) { return p; } }", "p").ty,
+            "parameter"
+        );
+        assert_eq!(
+            at_last("class C { int g() { int x = 0; return x; } }", "x").ty,
+            "variable"
+        );
+    }
+
+    #[test]
+    fn type_reference_to_a_sibling_is_precise() {
+        // A type reference to a file-local sibling resolves to its declared kind (`enum`), where the
+        // syntactic fallback could only say `type`.
+        assert_eq!(at_last("enum E {} class C { E e; }", "E").ty, "enum");
+    }
+
+    #[test]
+    fn unresolved_names_keep_the_syntactic_fallback() {
+        // An external/unresolved type and a member access have no file-local binding, so they fall
+        // back to syntax: `List` stays `type`, the member `field` stays `property`.
+        assert_eq!(at("class C { List x; }", "List").ty, "type");
+        assert_eq!(
+            at("class C { void m() { var v = obj.field; } }", "field").ty,
+            "property"
+        );
     }
 
     #[test]
