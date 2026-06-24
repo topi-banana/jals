@@ -49,9 +49,12 @@ mod ty;
 use jals_syntax::SyntaxNode;
 
 pub use def::{Def, DefId, DefKind, Namespace};
-pub use infer::{TypeInference, TypeMismatch, infer, infer_node, type_mismatches};
+pub use infer::{
+    Signature, SignatureHelp, TypeInference, TypeMismatch, infer, infer_node, signature_help,
+    type_mismatches,
+};
 pub use project::{
-    FileId, Fqn, Item, ItemId, Member, MemberId, MemberType, ProjectIndex, TypeResolution,
+    FileId, Fqn, Item, ItemId, Member, MemberId, MemberType, Param, ProjectIndex, TypeResolution,
 };
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;

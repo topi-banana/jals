@@ -322,7 +322,7 @@ fn check_call(
     let applicable = |m: &crate::Member| {
         arg_tys.iter().zip(&m.params).all(|(arg_ty, param)| {
             arg_ty.is_none_or(|ty| {
-                ty.is_assignable_to(&member_type_to_ty(index, m.file, param), Some(index))
+                ty.is_assignable_to(&member_type_to_ty(index, m.file, &param.ty), Some(index))
             })
         })
     };
@@ -337,7 +337,7 @@ fn check_call(
     if let [only] = matching.as_slice() {
         // A single overload: precise per-argument diagnostics against it.
         for ((arg_ty, span), param) in arg_tys.iter().zip(&arg_spans).zip(&only.params) {
-            let param_ty = member_type_to_ty(index, only.file, param);
+            let param_ty = member_type_to_ty(index, only.file, &param.ty);
             if let Some(ty) = arg_ty
                 && !ty.is_assignable_to(&param_ty, Some(index))
             {
@@ -938,4 +938,122 @@ fn token_start(tok: &SyntaxToken) -> usize {
 fn node_span(node: &SyntaxNode) -> Range<usize> {
     let r = node.text_range();
     usize::from(r.start())..usize::from(r.end())
+}
+
+// ===== Signature help =====
+
+/// Signature help for a call site: the callee's overloads and where the cursor sits.
+///
+/// Produced by [`signature_help`]. A pure data shape (no LSP types), so a host can map it to its
+/// protocol — the language server turns each [`Signature`] into an LSP `SignatureInformation`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureHelp {
+    /// The callee's overloads, nearest-type first (the order of
+    /// [`ProjectIndex::resolve_members_all`]).
+    pub signatures: Vec<Signature>,
+    /// The overload to highlight: the first that has a parameter at [`active_parameter`], else 0.
+    pub active_signature: usize,
+    /// The zero-based index of the argument the cursor is in (the count of commas before it).
+    pub active_parameter: usize,
+}
+
+/// One overload's rendered signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signature {
+    /// The full signature text, e.g. `area(int width, int height)`.
+    pub label: String,
+    /// The byte range within [`label`](Signature::label) of each parameter, for client-side
+    /// highlighting of the active one.
+    pub parameters: Vec<Range<usize>>,
+}
+
+/// Signature help for the call whose argument list contains byte `offset`: the overloads of the
+/// method being called, plus the argument index the cursor is on.
+///
+/// Resolves the callee like [`check_call`] — a qualified `recv.m(..)` on the receiver's project
+/// type, or a bare `m(..)` on the enclosing type — then renders every overload. Returns `None` when
+/// the cursor is in no call, the receiver is not an indexed project type (e.g. an external/JDK
+/// type), or the method names no project member. Never panics.
+pub fn signature_help(
+    root: &SyntaxNode,
+    resolved: &Resolved,
+    index: &ProjectIndex,
+    file: FileId,
+    offset: usize,
+) -> Option<SignatureHelp> {
+    let (call, active_parameter) = enclosing_call(root, offset)?;
+    let ti = infer(root, resolved, index, file);
+    let (owner, name) = call_target(&call, &ti, index, file)?;
+    let signatures: Vec<Signature> = index
+        .resolve_members_all(owner, &name, Namespace::Method)
+        .into_iter()
+        .map(|id| render_signature(index, index.member(id)))
+        .collect();
+    if signatures.is_empty() {
+        return None;
+    }
+    // Highlight the overload that actually has a parameter at the cursor's index; if none does (the
+    // cursor is past every overload's arity), fall back to the first.
+    let active_signature = signatures
+        .iter()
+        .position(|s| s.parameters.len() > active_parameter)
+        .unwrap_or(0);
+    Some(SignatureHelp {
+        signatures,
+        active_signature,
+        active_parameter,
+    })
+}
+
+/// The innermost call whose argument list (between the parens) contains `offset`, with the cursor's
+/// argument index (commas before it). Scans every call so a nested `outer(inner(|))` picks `inner`
+/// (the smallest containing argument list).
+fn enclosing_call(root: &SyntaxNode, offset: usize) -> Option<(ast::CallExpr, usize)> {
+    let (call, args, _) = root
+        .descendants()
+        .filter_map(ast::CallExpr::cast)
+        .filter_map(|call| {
+            let args = call.args()?;
+            let span = node_span(args.syntax());
+            (span.start <= offset && offset <= span.end).then_some((
+                call,
+                args,
+                span.end - span.start,
+            ))
+        })
+        .min_by_key(|(.., width)| *width)?;
+    let active = active_parameter(&args, offset);
+    Some((call, active))
+}
+
+/// The argument index the cursor at `offset` is on: the number of top-level commas in `args` that
+/// end at or before it. `f(|)` → 0, `f(a, |)` → 1.
+fn active_parameter(args: &ast::ArgList, offset: usize) -> usize {
+    direct_tokens(args.syntax())
+        .filter(|t| t.kind() == COMMA && usize::from(t.text_range().end()) <= offset)
+        .count()
+}
+
+/// Renders one member's signature as `name(type1 p1, type2 p2)`, recording each parameter's byte
+/// range within the label. A parameter with no readable name is rendered as its type alone.
+fn render_signature(index: &ProjectIndex, member: &crate::Member) -> Signature {
+    let mut label = String::new();
+    label.push_str(&member.name);
+    label.push('(');
+    let mut parameters = Vec::with_capacity(member.params.len());
+    for (i, param) in member.params.iter().enumerate() {
+        if i > 0 {
+            label.push_str(", ");
+        }
+        let ty = member_type_to_ty(index, member.file, &param.ty).to_string();
+        let text = match &param.name {
+            Some(name) => format!("{ty} {name}"),
+            None => ty,
+        };
+        let start = label.len();
+        label.push_str(&text);
+        parameters.push(start..label.len());
+    }
+    label.push(')');
+    Signature { label, parameters }
 }

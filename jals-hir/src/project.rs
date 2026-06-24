@@ -101,12 +101,23 @@ pub struct Member {
     /// resolvable data (no CST handle), to be turned into a concrete type later (type inference) in
     /// this member's *declaring* file context. A constructor has none ([`MemberType::Unknown`]).
     pub ty: MemberType,
-    /// A method's formal parameter types, in order (captured like [`ty`](Member::ty), resolved in the
-    /// declaring file's context). Empty for non-methods. Used to check call arguments.
-    pub params: Vec<MemberType>,
+    /// A method's formal parameters, in order (each a name plus a type captured like
+    /// [`ty`](Member::ty), resolved in the declaring file's context). Empty for non-methods. Used to
+    /// check call arguments and to render signature help.
+    pub params: Vec<Param>,
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
     pub varargs: bool,
+}
+
+/// A method's formal parameter: its declared name (absent for a `_` / unreadable parameter) and its
+/// type, captured as self-contained data like [`Member::ty`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    /// The parameter's declared name, or `None` for an unnamed (`_`) or unreadable parameter.
+    pub name: Option<String>,
+    /// The parameter's declared type.
+    pub ty: MemberType,
 }
 
 /// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
@@ -575,22 +586,19 @@ fn members_of_decl(
     else {
         return members;
     };
-    let mut push = |name_tok: &SyntaxToken,
-                    kind: DefKind,
-                    ty: MemberType,
-                    params: Vec<MemberType>,
-                    varargs| {
-        members.push(Member {
-            owner,
-            name: name_tok.text().to_string(),
-            kind,
-            file,
-            name_range: byte_range(name_tok),
-            ty,
-            params,
-            varargs,
-        });
-    };
+    let mut push =
+        |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType, params: Vec<Param>, varargs| {
+            members.push(Member {
+                owner,
+                name: name_tok.text().to_string(),
+                kind,
+                file,
+                name_range: byte_range(name_tok),
+                ty,
+                params,
+                varargs,
+            });
+        };
     for member in body.children() {
         match member.kind() {
             FIELD_DECL => {
@@ -637,10 +645,10 @@ fn members_of_decl(
     members
 }
 
-/// A method declaration's formal parameter types (in order) and whether it is varargs (its last
-/// parameter is `int... xs`). Each parameter type is captured as a self-contained [`MemberType`],
-/// like a field's. Pure.
-fn params_of(method: &SyntaxNode) -> (Vec<MemberType>, bool) {
+/// A method declaration's formal parameters (in order) and whether it is varargs (its last
+/// parameter is `int... xs`). Each parameter's name and type are captured as self-contained data,
+/// the type like a field's. Pure.
+fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
     let mut params = Vec::new();
     let mut varargs = false;
     if let Some(list) = ast::MethodDecl::cast(method.clone()).and_then(|m| m.params()) {
@@ -653,7 +661,10 @@ fn params_of(method: &SyntaxNode) -> (Vec<MemberType>, bool) {
             {
                 varargs = true;
             }
-            params.push(member_type_of(param.ty()));
+            params.push(Param {
+                name: param.name(),
+                ty: member_type_of(param.ty()),
+            });
         }
     }
     (params, varargs)
