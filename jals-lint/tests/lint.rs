@@ -246,3 +246,14 @@ fn type_mismatch_constant_narrowing_ok() {
     // `byte b = 1;` is legal constant narrowing — must not be flagged.
     check("class C { byte b = 1; }", expect![""]);
 }
+
+#[test]
+fn type_mismatch_return_flagged() {
+    // The method has no locals, so only `type-mismatch` fires.
+    check(
+        "class C { int m() { return 1.0; } }",
+        expect![[r#"
+            type-mismatch:26..30: incompatible types: `double` cannot be assigned to `int`
+        "#]],
+    );
+}

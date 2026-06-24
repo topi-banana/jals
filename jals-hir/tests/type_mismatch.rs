@@ -102,9 +102,41 @@ fn simple_assignment_is_checked_but_compound_is_not() {
 }
 
 #[test]
-fn multi_declarator_is_skipped() {
-    // The name<->initializer pairing is ambiguous from the flat CST, so it is not checked.
-    assert!(free(&in_method("int a = 1, b = 2.0;")).is_empty());
+fn multi_declarator_each_initializer_is_checked() {
+    // Each declarator is paired with its own initializer.
+    assert_eq!(free(&in_method("int a = 1, b = 2.0;")).len(), 1); // only `b`
+    assert_eq!(free(&in_method("int a = 1.0, b = 2;")).len(), 1); // only `a`
+    assert_eq!(free(&in_method("int a = 1.0, b = 2.0;")).len(), 2); // both
+    assert_eq!(free(&in_method("int a, b = 2.0;")).len(), 1); // `a` has no initializer
+    assert!(free(&in_method("int a = 1, b = 2;")).is_empty()); // both fine
+}
+
+#[test]
+fn return_mismatch_is_flagged() {
+    assert_eq!(free("class C { int m() { return 1.0; } }").len(), 1);
+    assert!(free("class C { int m() { return 1; } }").is_empty());
+    // Constant narrowing applies to a `return` too (JLS §5.2).
+    assert!(free("class C { byte m() { return 1; } }").is_empty());
+    // A bare `return;` has no value to check.
+    assert!(free("class C { void m() { return; } }").is_empty());
+}
+
+#[test]
+fn return_inside_a_lambda_is_not_attributed_to_the_method() {
+    // The `return 1.0` belongs to the lambda (target-typed), not to the `void` method.
+    assert!(free("class C { void m() { run(() -> { return 1.0; }); } }").is_empty());
+}
+
+#[test]
+fn return_subtyping_needs_the_index() {
+    let mismatch = "class Base {} class Sub extends Base {} \
+                    class C { Sub make() { return new Base(); } }";
+    assert!(free(mismatch).is_empty()); // index-free: external & lenient
+    assert_eq!(indexed(&[mismatch], 0).len(), 1); // returning a `Base` where `Sub` is required
+
+    let upcast = "class Base {} class Sub extends Base {} \
+                  class C { Base make() { return new Sub(); } }";
+    assert!(indexed(&[upcast], 0).is_empty());
 }
 
 #[test]

@@ -132,16 +132,20 @@ pub fn type_mismatches(
         match node.kind() {
             LOCAL_VAR_DECL | FIELD_DECL => check_initializer(&node, resolved, &ti, index, &mut out),
             ASSIGNMENT_EXPR => check_assignment(&node, &ti, index, &mut out),
+            RETURN_STMT => check_return(&node, resolved, &ti, index, &mut out),
             _ => {}
         }
     }
     out
 }
 
-/// Checks a variable / field declarator's initializer against its declared type. Only single-name
-/// declarators are checked: a multi-declarator's name↔initializer pairing (`int a = 1, b = 2.0;`)
-/// is ambiguous from the flat CST, so it is skipped rather than risk a wrong pairing. A `var`
-/// binding has no written type to disagree with and is skipped.
+/// Checks each declarator's initializer in a variable / field declaration against its declared type.
+///
+/// A declaration may bind several variables at once (`int a = 1, b = 2.0;`); the CST is flat, so the
+/// declarators are paired by walking the direct children in order — each `IDENT` declarator name
+/// takes the next direct expression child as its initializer (a declarator without one is skipped
+/// when the next name arrives). A `var` declaration (always single-name) has no written type to
+/// disagree with and is skipped whole.
 fn check_initializer(
     node: &SyntaxNode,
     resolved: &Resolved,
@@ -149,10 +153,6 @@ fn check_initializer(
     index: Option<&ProjectIndex>,
     out: &mut Vec<TypeMismatch>,
 ) {
-    let names: Vec<SyntaxToken> = direct_ident_tokens(node).collect();
-    let [name] = names.as_slice() else {
-        return;
-    };
     if node
         .children()
         .find_map(ast::Type::cast)
@@ -162,14 +162,24 @@ fn check_initializer(
         return;
     }
     // The declarator name is a *definition*, recovered with `symbol_at` (not `definition_at`, which
-    // looks up a reference).
-    let Some(def_id) = resolved.symbol_at(token_start(name)) else {
-        return;
-    };
-    let Some(value) = node.children().find_map(ast::Expr::cast) else {
-        return;
-    };
-    record_if_mismatch(value.syntax(), ti.type_of_def(def_id), ti, index, out);
+    // looks up a reference). The declared `TYPE` / `MODIFIERS` children are not expressions, so they
+    // are skipped by the `Expr::cast` below and never mistaken for an initializer.
+    let mut current: Option<SyntaxToken> = None;
+    for elem in node.children_with_tokens() {
+        if let Some(token) = elem.as_token() {
+            if token.kind() == IDENT {
+                current = Some(token.clone());
+            }
+            continue;
+        }
+        if let Some(value) = elem.into_node().and_then(ast::Expr::cast)
+            && let Some(def_id) = current
+                .take()
+                .and_then(|n| resolved.symbol_at(token_start(&n)))
+        {
+            record_if_mismatch(value.syntax(), ti.type_of_def(def_id), ti, index, out);
+        }
+    }
 }
 
 /// Checks a simple `=` assignment's value against its target's type. Compound assignments
@@ -194,6 +204,34 @@ fn check_assignment(
         return;
     };
     record_if_mismatch(value.syntax(), expected, ti, index, out);
+}
+
+/// Checks a `return <expr>;` against the enclosing method's return type. Only methods are checked:
+/// a `return` whose nearest function-like ancestor is a lambda (its return type is target-typed and
+/// unknown here) or a constructor (no return type) is skipped, as is a bare `return;`.
+fn check_return(
+    node: &SyntaxNode,
+    resolved: &Resolved,
+    ti: &TypeInference,
+    index: Option<&ProjectIndex>,
+    out: &mut Vec<TypeMismatch>,
+) {
+    let Some(value) = ast::ReturnStmt::cast(node.clone()).and_then(|r| r.expr()) else {
+        return;
+    };
+    // The nearest enclosing function-like node decides whose return this is.
+    let enclosing = node
+        .ancestors()
+        .find(|a| matches!(a.kind(), METHOD_DECL | LAMBDA_EXPR | CONSTRUCTOR_DECL));
+    let Some(method) = enclosing.filter(|a| a.kind() == METHOD_DECL) else {
+        return;
+    };
+    // The method's definition is typed with its return type (see `declares_typed_bindings`).
+    let Some(def_id) = first_ident_token(&method).and_then(|n| resolved.symbol_at(token_start(&n)))
+    else {
+        return;
+    };
+    record_if_mismatch(value.syntax(), ti.type_of_def(def_id), ti, index, out);
 }
 
 /// Pushes a [`TypeMismatch`] for `value` against `expected` when the value's inferred type is not
@@ -631,8 +669,10 @@ fn array_of(base: Ty, dims: usize) -> Ty {
     (0..dims).fold(base, |acc, _| Ty::Array(Box::new(acc)))
 }
 
-/// Whether a node kind introduces explicitly-typed value bindings whose written type is a direct
-/// `TYPE` child and whose names are direct `IDENT` tokens.
+/// Whether a node kind has an explicitly-written type as a direct `TYPE` child and its declared
+/// name(s) as direct `IDENT` tokens. For a `METHOD_DECL` the direct `TYPE` child is the *return*
+/// type and the direct `IDENT` is the method name, so the method's definition is typed with its
+/// return type — used to check `return` statements (its parameters' types are nested and unaffected).
 fn declares_typed_bindings(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -643,6 +683,7 @@ fn declares_typed_bindings(kind: SyntaxKind) -> bool {
             | CATCH_CLAUSE
             | FOR_EACH_STMT
             | RESOURCE
+            | METHOD_DECL
     )
 }
 
