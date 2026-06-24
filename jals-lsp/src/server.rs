@@ -19,8 +19,9 @@ use async_lsp::lsp_types::{
     RegistrationParams, RenameFilesParams, SelectionRange, SelectionRangeParams,
     SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
     SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
+    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams,
+    WorkDoneProgressCancelParams,
     notification::{self, Notification},
     request,
 };
@@ -447,6 +448,26 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(hover) })
     }
 
+    fn signature_help(
+        &mut self,
+        params: SignatureHelpParams,
+    ) -> BoxFuture<'static, Result<Option<SignatureHelp>, Self::Error>> {
+        let pos = params.text_document_position_params;
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index resolves overloads with cross-file type names through the
+        // workspace; any other document falls back to a single-file index of the open document.
+        let help = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.signature_help(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::signature_help_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(help) })
+    }
+
     fn formatting(
         &mut self,
         params: DocumentFormattingParams,
@@ -535,6 +556,11 @@ fn server_capabilities() -> ServerCapabilities {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),

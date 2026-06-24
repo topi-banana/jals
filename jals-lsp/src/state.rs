@@ -5,7 +5,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use async_lsp::lsp_types::{Hover, Location, Position, TextDocumentContentChangeEvent, Url};
+use async_lsp::lsp_types::{
+    Hover, Location, Position, SignatureHelp, TextDocumentContentChangeEvent, Url,
+};
 use jals_fmt::Config;
 use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
 use jals_syntax::ast::{self, AstNode};
@@ -341,6 +343,18 @@ impl Workspace {
         let inference = jals_hir::infer(&root, resolved, &self.index, file);
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
         crate::handlers::type_hover(inference.type_at(offset)?)
+    }
+
+    /// The signature help for the call at `position` in `uri`, with cross-file type resolution (so a
+    /// receiver of a sibling-file type resolves). `None` if `uri` is not in the workspace or the
+    /// cursor is in no resolvable call.
+    pub(crate) fn signature_help(&self, uri: &Url, position: Position) -> Option<SignatureHelp> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        let help = jals_hir::signature_help(&root, source.resolved(), &self.index, file, offset)?;
+        Some(crate::handlers::signature_help_to_lsp(&help))
     }
 
     /// Find-references for the cursor at `position` in `uri`: every occurrence of the symbol under
@@ -955,5 +969,30 @@ mod tests {
             panic!("expected markup hover");
         };
         assert_eq!(markup.value, "```java\nlong\n```");
+    }
+
+    #[test]
+    fn workspace_signature_help_on_a_cross_file_method() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Box.java"),
+            "package a; class Box { int area(int w, int h) { return 0; } }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void g(Box b) { b.area(1, ); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Cursor on the second argument of `b.area(1, )`: the receiver `b` is a cross-file `Box`.
+        let needle = "area(1, ";
+        let col = bar.find(needle).unwrap() as u32 + needle.len() as u32;
+        let help = ws
+            .signature_help(&bar_uri, Position::new(0, col))
+            .expect("signature help on b.area");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "area(int w, int h)");
+        assert_eq!(help.active_parameter, Some(1));
     }
 }

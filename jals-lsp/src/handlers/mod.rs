@@ -13,6 +13,7 @@ mod hover;
 mod references;
 mod selection_range;
 mod semantic_tokens;
+mod signature_help;
 mod symbols;
 
 pub(crate) use definition::goto_definition_local;
@@ -27,6 +28,7 @@ pub(crate) use hover::{hover_local, type_hover};
 pub(crate) use references::references;
 pub(crate) use selection_range::selection_ranges;
 pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
+pub(crate) use signature_help::{signature_help_local, signature_help_to_lsp};
 pub(crate) use symbols::document_symbols;
 
 /// The `IDENT` token at `offset`, preferring it when a token boundary yields two tokens — so a
