@@ -145,11 +145,16 @@ impl ServerState {
         let mut diagnostics = handlers::compute_diagnostics(&doc.parse, &doc.text, &doc.line_index);
         let lint_config = self.lint_discovery.for_uri(uri);
 
+        // The workspace (if any) that owns this file, paired with its id within that workspace's
+        // index — looked up once and reused by both the lint-rule suppression and the cross-file
+        // passes below.
+        let workspace_file = self
+            .workspace_for(uri)
+            .and_then(|ws| Some((ws, ws.file_id(uri)?)));
         // Files in an indexed project get the index-aware `type-mismatch` check below; suppress the
         // file-local lint rule of the same name there so the two never double-report.
-        let file = self.workspace_for(uri).and_then(|ws| ws.file_id(uri));
         let mut rule_config = lint_config.clone();
-        if file.is_some() {
+        if workspace_file.is_some() {
             rule_config.rules.insert(
                 jals_lint::TYPE_MISMATCH_RULE.to_string(),
                 jals_lint::Severity::Allow,
@@ -164,9 +169,7 @@ impl ServerState {
         // Cross-file diagnostics ("cannot resolve symbol" + index-aware type mismatches), only for
         // files in an indexed project. Both passes read the same file-local resolution, so resolve
         // the tree once here and share it rather than resolving twice per publish.
-        if let Some(file) = file
-            && let Some(workspace) = self.workspace_for(uri)
-        {
+        if let Some((workspace, file)) = workspace_file {
             let resolved = jals_hir::resolve_node(&doc.parse.syntax());
             diagnostics.extend(handlers::compute_type_diagnostics(
                 workspace.index(),
