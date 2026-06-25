@@ -26,7 +26,7 @@ use jals_syntax::SyntaxKind::*;
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
-use crate::def::{DefId, DefKind, Namespace};
+use crate::def::{Def, DefId, DefKind, Namespace};
 use crate::project::{FileId, ItemId, MemberType, ProjectIndex, TypeResolution};
 use crate::reference::Resolution;
 use crate::resolve::Resolved;
@@ -1148,14 +1148,7 @@ fn receiver_owner(
     file: FileId,
     offset: usize,
 ) -> Option<ItemId> {
-    let token = token_left_of(root, offset)?;
-    // The `.` of the member access: the token itself for `receiver.|`, or the token before a
-    // partially-typed member name for `receiver.fo|`.
-    let dot = match token.kind() {
-        DOT => token,
-        IDENT => prev_significant(&token).filter(|t| t.kind() == DOT)?,
-        _ => return None,
-    };
+    let dot = member_access_dot(root, offset)?;
     let before = prev_significant(&dot)?;
     // A `this` / `super` receiver has no inferred type; its members are the enclosing type's (for
     // `super` the strictly-inherited ones — approximated here by the whole enclosing member set).
@@ -1213,4 +1206,87 @@ fn prev_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
         current = tok.prev_token();
     }
     None
+}
+
+/// The `.` of the member access at byte `offset`, if the cursor is in one: the `.` token itself for
+/// `receiver.|`, or the `.` before a partially-typed member name for `receiver.fo|`. The anchor both
+/// member completion and [`at_member_access`] are built on.
+fn member_access_dot(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+    let token = token_left_of(root, offset)?;
+    match token.kind() {
+        DOT => Some(token),
+        IDENT => prev_significant(&token).filter(|t| t.kind() == DOT),
+        _ => None,
+    }
+}
+
+/// Whether the cursor at byte `offset` is in a member-access position (just after a `.`, or in a
+/// member name following one). The host dispatches on this: a member access completes members
+/// ([`member_completions`]); any other position completes the scope ([`scope_completions`]).
+pub fn at_member_access(root: &SyntaxNode, offset: usize) -> bool {
+    member_access_dot(root, offset).is_some()
+}
+
+// ===== Scope completion =====
+
+/// The scope completions at byte `offset`: every binding visible there plus every project type by
+/// simple name — the candidates for a bare identifier position (not after a `.`; the host gates on
+/// [`at_member_access`]).
+///
+/// Bindings come from the cursor's scope chain, innermost outward: a block / `for` / resources scope
+/// contributes only the locals declared before the cursor (sequential visibility), every other scope
+/// all of its bindings (parameters, type parameters, and hoisted type members — a field or method is
+/// reachable without `this.`). An inner binding shadows an outer one of the same name and name-space.
+/// Project types from other files are then added by simple name. One entry per (name, name-space);
+/// the editor filters by the typed prefix. Never panics.
+pub fn scope_completions(
+    root: &SyntaxNode,
+    resolved: &Resolved,
+    index: &ProjectIndex,
+    file: FileId,
+    offset: usize,
+) -> Vec<Completion> {
+    let ti = infer(root, resolved, index, file);
+    let mut seen: HashSet<(String, Namespace)> = HashSet::new();
+    let mut out = Vec::new();
+    // Visible bindings, innermost scope outward (the first seen per name / name-space wins, so an
+    // inner binding shadows an outer one).
+    for def in resolved.visible_defs(offset) {
+        // A constructor is not a name completed in an expression position.
+        if def.kind == DefKind::Constructor {
+            continue;
+        }
+        if seen.insert((def.name.clone(), def.kind.namespace())) {
+            out.push(binding_completion(def, &ti));
+        }
+    }
+    // Project type names from other files (a sibling type already in scope is deduped away). The
+    // simple name completes; the fully-qualified name is the detail.
+    for item in index.items() {
+        let name = item.fqn.simple_name().to_string();
+        if seen.insert((name.clone(), Namespace::Type)) {
+            out.push(Completion {
+                label: name,
+                kind: item.kind,
+                detail: item.fqn.to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// Builds a [`Completion`] for a visible binding: a value / method binding shows its inferred type as
+/// the detail (when known); a type binding (a sibling class, a type parameter) has none.
+fn binding_completion(def: &Def, ti: &TypeInference) -> Completion {
+    let ty = ti.type_of_def(def.id);
+    let detail = if def.kind.namespace() == Namespace::Type || *ty == Ty::Unknown {
+        String::new()
+    } else {
+        ty.to_string()
+    };
+    Completion {
+        label: def.name.clone(),
+        kind: def.kind,
+        detail,
+    }
 }

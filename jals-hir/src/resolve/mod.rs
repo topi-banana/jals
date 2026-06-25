@@ -42,6 +42,41 @@ impl Resolved {
         &self.scopes[id.0 as usize]
     }
 
+    /// The innermost (narrowest) scope whose range covers byte `offset` — the cursor's scope. `None`
+    /// only for an offset outside the file; otherwise the file scope (which covers everything) bounds
+    /// the search, and the chain then climbs `parent`.
+    pub fn scope_at(&self, offset: usize) -> Option<ScopeId> {
+        self.scopes
+            .iter()
+            .filter(|scope| scope.range.start <= offset && offset <= scope.range.end)
+            .min_by_key(|scope| scope.range.end - scope.range.start)
+            .map(|scope| scope.id)
+    }
+
+    /// Every definition visible at byte `offset`, innermost scope outward. A sequential scope (block /
+    /// `for` / resources) contributes only the bindings declared before `offset`; every other scope
+    /// hoists all of its bindings (parameters, type parameters, fields, methods). The same visibility
+    /// rule [`Resolver::lookup`] applies, but yielding every visible binding rather than resolving one
+    /// name. Not deduped — a binding and an outer one it shadows both appear, inner first; a caller
+    /// wanting one-per-name keeps the first seen.
+    pub fn visible_defs(&self, offset: usize) -> impl Iterator<Item = &Def> {
+        let mut chain = Vec::new();
+        let mut scope = self.scope_at(offset);
+        while let Some(sid) = scope {
+            chain.push(sid);
+            scope = self.scope(sid).parent;
+        }
+        chain.into_iter().flat_map(move |sid| {
+            let scope = self.scope(sid);
+            let sequential = scope.kind.is_sequential();
+            scope
+                .defs
+                .iter()
+                .map(move |&did| self.def(did))
+                .filter(move |def| !(sequential && def.name_range.start >= offset))
+        })
+    }
+
     /// The reference covering byte `offset`, if any.
     pub fn reference_at(&self, offset: usize) -> Option<&Reference> {
         self.references

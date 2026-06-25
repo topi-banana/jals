@@ -51,8 +51,8 @@ use jals_syntax::SyntaxNode;
 
 pub use def::{Def, DefId, DefKind, Namespace};
 pub use infer::{
-    Completion, Signature, SignatureHelp, TypeInference, TypeMismatch, infer, infer_node,
-    member_completions, signature_help, type_mismatches,
+    Completion, Signature, SignatureHelp, TypeInference, TypeMismatch, at_member_access, infer,
+    infer_node, member_completions, scope_completions, signature_help, type_mismatches,
 };
 pub use project::{
     FileId, Fqn, Item, ItemId, ItemOrigin, Member, MemberId, MemberType, Param, ProjectIndex,

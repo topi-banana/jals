@@ -46,6 +46,14 @@ pub struct FileId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Fqn(String);
 
+impl Fqn {
+    /// The simple (unqualified) name: the last dotted segment (`a.b.Outer.Inner` → `Inner`). Correct
+    /// because every level — packages and nested types alike — is dotted.
+    pub fn simple_name(&self) -> &str {
+        self.0.rsplit('.').next().unwrap_or(&self.0)
+    }
+}
+
 impl fmt::Display for Fqn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
