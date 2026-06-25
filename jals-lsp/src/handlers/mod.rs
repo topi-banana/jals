@@ -11,6 +11,7 @@ mod folding_range;
 mod formatting;
 mod hover;
 mod references;
+mod rename;
 mod selection_range;
 mod semantic_tokens;
 mod signature_help;
@@ -26,6 +27,9 @@ pub(crate) use folding_range::folding_range;
 pub(crate) use formatting::formatting_edits;
 pub(crate) use hover::{hover_local, type_hover};
 pub(crate) use references::references;
+pub(crate) use rename::{
+    is_renamable_kind, is_valid_identifier, prepare_rename_local, rename_local,
+};
 pub(crate) use selection_range::selection_ranges;
 pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
 pub(crate) use signature_help::{signature_help_local, signature_help_to_lsp};

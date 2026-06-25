@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use async_lsp::lsp_types::{
-    Hover, Location, Position, SignatureHelp, TextDocumentContentChangeEvent, Url,
+    Hover, Location, Position, SignatureHelp, TextDocumentContentChangeEvent, TextEdit, Url,
+    WorkspaceEdit,
 };
 use jals_fmt::Config;
 use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
@@ -452,6 +453,83 @@ impl Workspace {
         });
         locations
     }
+
+    /// Whether the symbol anchored at byte `anchor` in `file` may be renamed soundly. A file-local
+    /// binding qualifies by kind (locals and project types yes, members no — see
+    /// [`is_renamable_kind`](crate::handlers::is_renamable_kind)); a cross-file *use* of a project
+    /// type (one the file-local pass left unresolved) qualifies too, since the workspace rewrites it
+    /// project-wide. Mirrors what [`references`](Workspace::references) actually gathers, so a
+    /// renamable symbol always has a complete occurrence set.
+    fn is_renamable(&self, file: FileId, resolved: &Resolved, anchor: usize) -> bool {
+        if let Some(id) = resolved.symbol_at(anchor) {
+            return crate::handlers::is_renamable_kind(resolved.def(id).kind);
+        }
+        resolved.reference_at(anchor).is_some_and(|reference| {
+            reference.namespace == Namespace::Type
+                && matches!(
+                    self.index.resolve_reference(file, reference),
+                    TypeResolution::Project(_)
+                )
+        })
+    }
+
+    /// prepareRename for the cursor at `position` in `uri`: the range of the identifier under the
+    /// cursor when it names a renamable symbol, else `None` (an external name, a keyword/literal, or
+    /// a withheld member). The editor uses this to validate a rename before prompting.
+    pub(crate) fn prepare_rename(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<async_lsp::lsp_types::Range> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let ident =
+            crate::handlers::ident_at(&root, source.line_index.offset(&source.text, position))?;
+        if !self.is_renamable(
+            file,
+            source.resolved(),
+            usize::from(ident.text_range().start()),
+        ) {
+            return None;
+        }
+        Some(source.line_index.range(&source.text, ident.text_range()))
+    }
+
+    /// Rename the symbol under `position` in `uri` to `new_name`: a [`WorkspaceEdit`] rewriting every
+    /// occurrence — project-wide for a project type, within the file for a file-local binding.
+    /// `None` if `uri` is not in the workspace, the cursor is on no renamable symbol, or there is
+    /// nothing to change. The caller validates `new_name` is a legal identifier.
+    pub(crate) fn rename(
+        &self,
+        uri: &Url,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        // Gate on the same renamability check `prepareRename` performs, then rewrite every
+        // occurrence the find-references pass gathers.
+        self.prepare_rename(uri, position)?;
+        workspace_edit(self.references(uri, position, true)?, new_name)
+    }
+}
+
+/// Group `locations` into a [`WorkspaceEdit`] that rewrites each occurrence to `new_name`, keyed by
+/// file. `None` if there is nothing to rewrite.
+fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceEdit> {
+    if locations.is_empty() {
+        return None;
+    }
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for location in locations {
+        changes.entry(location.uri).or_default().push(TextEdit {
+            range: location.range,
+            new_text: new_name.to_owned(),
+        });
+    }
+    Some(WorkspaceEdit {
+        changes: Some(changes),
+        ..Default::default()
+    })
 }
 
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
@@ -909,6 +987,74 @@ mod tests {
             .expect("Bar.java is in the workspace");
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().all(|l| l.uri == bar_uri));
+    }
+
+    #[test]
+    fn workspace_rename_rewrites_a_project_type_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        std::fs::write(
+            dir.path().join("Bar.java"),
+            "package a; class Bar { Foo f; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Baz.java"),
+            "package a; class Baz { Foo g; Foo h; }",
+        )
+        .unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let baz_uri = Url::from_file_path(dir.path().join("Baz.java")).unwrap();
+
+        // Rename `Foo` from its declaration: the edit rewrites the declaration plus every use in
+        // every file, each to the new name.
+        let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
+        let edit = ws
+            .rename(&foo_uri, Position::new(0, decl_col), "Renamed")
+            .expect("Foo is a renamable project type");
+        let changes = edit.changes.expect("a plain-edit workspace edit");
+        assert_eq!(changes[&foo_uri].len(), 1); // the declaration
+        assert_eq!(changes[&bar_uri].len(), 1);
+        assert_eq!(changes[&baz_uri].len(), 2);
+        assert!(changes.values().flatten().all(|e| e.new_text == "Renamed"));
+
+        // prepareRename on the same position reports the identifier's range.
+        let range = ws
+            .prepare_rename(&foo_uri, Position::new(0, decl_col))
+            .expect("Foo is renamable");
+        assert_eq!(range.start, Position::new(0, decl_col));
+        assert_eq!(range.end, Position::new(0, decl_col + 3));
+    }
+
+    #[test]
+    fn workspace_rename_withholds_members_and_external_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let foo = "package a; class Foo { int size; String s; }";
+        std::fs::write(dir.path().join("Foo.java"), foo).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+
+        // A field is a member: its cross-file uses are not indexed, so rename is withheld.
+        let size_col = foo.find("size").unwrap() as u32;
+        assert!(
+            ws.prepare_rename(&foo_uri, Position::new(0, size_col))
+                .is_none()
+        );
+        assert!(
+            ws.rename(&foo_uri, Position::new(0, size_col), "len")
+                .is_none()
+        );
+
+        // An external type has no project declaration to rewrite.
+        let string_col = foo.find("String").unwrap() as u32;
+        assert!(
+            ws.prepare_rename(&foo_uri, Position::new(0, string_col))
+                .is_none()
+        );
     }
 
     #[test]

@@ -15,13 +15,14 @@ use async_lsp::lsp_types::{
     DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
     FoldingRangeProviderCapability, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, Location, OneOf, PublishDiagnosticsParams, ReferenceParams, Registration,
-    RegistrationParams, RenameFilesParams, SelectionRange, SelectionRangeParams,
-    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams,
-    WorkDoneProgressCancelParams,
+    InitializedParams, Location, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
+    ReferenceParams, Registration, RegistrationParams, RenameFilesParams, RenameOptions,
+    RenameParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
+    WorkspaceEdit,
     notification::{self, Notification},
     request,
 };
@@ -29,7 +30,7 @@ use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
 use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
-use async_lsp::{ClientSocket, LanguageServer, MainLoop, ResponseError};
+use async_lsp::{ClientSocket, ErrorCode, LanguageServer, MainLoop, ResponseError};
 use futures::future::BoxFuture;
 use jals_build::Manifest;
 use tower::ServiceBuilder;
@@ -428,6 +429,62 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(locations) })
     }
 
+    fn prepare_rename(
+        &mut self,
+        params: TextDocumentPositionParams,
+    ) -> BoxFuture<'static, Result<Option<PrepareRenameResponse>, Self::Error>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+        // A file in an indexed project validates project types project-wide through the workspace;
+        // any other document falls back to file-local renamability over the open document alone.
+        let range = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.prepare_rename(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::prepare_rename_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(range.map(PrepareRenameResponse::Range)) })
+    }
+
+    fn rename(
+        &mut self,
+        params: RenameParams,
+    ) -> BoxFuture<'static, Result<Option<WorkspaceEdit>, Self::Error>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+        // Reject a new name that is not a single legal Java identifier before producing any edit, so
+        // the editor surfaces the error instead of writing broken source.
+        if !handlers::is_valid_identifier(&new_name) {
+            return Box::pin(async move {
+                Err(ResponseError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("`{new_name}` is not a valid Java identifier"),
+                ))
+            });
+        }
+        // A file in an indexed project renames project types project-wide through the workspace;
+        // any other document falls back to a file-local rename over the open document alone.
+        let edit = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.rename(&uri, position, &new_name))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::rename_local(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        &uri,
+                        position,
+                        &new_name,
+                    )
+                })
+            });
+        Box::pin(async move { Ok(edit) })
+    }
+
     fn hover(
         &mut self,
         params: HoverParams,
@@ -555,6 +612,10 @@ fn server_capabilities() -> ServerCapabilities {
         document_highlight_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
@@ -664,6 +725,15 @@ mod tests {
             2,
             "a file under no manifest builds no workspace"
         );
+    }
+
+    #[test]
+    fn advertises_rename_with_prepare_support() {
+        let caps = server_capabilities();
+        let Some(OneOf::Right(rename)) = caps.rename_provider else {
+            panic!("rename provider advertised with options");
+        };
+        assert_eq!(rename.prepare_provider, Some(true));
     }
 
     #[test]
