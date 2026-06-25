@@ -358,6 +358,24 @@ impl Workspace {
         Some(crate::handlers::signature_help_to_lsp(&help))
     }
 
+    /// Member-access completions for the cursor at `position` in `uri`: the fields and methods
+    /// reachable on the receiver before the `.`, resolved against the project (so a receiver of a
+    /// sibling-file type completes). `None` if `uri` is not in the workspace; an empty vector if the
+    /// cursor is on no member access or the receiver is not an indexed project type.
+    pub(crate) fn completions(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Vec<async_lsp::lsp_types::CompletionItem>> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        let completions =
+            jals_hir::member_completions(&root, source.resolved(), &self.index, file, offset);
+        Some(crate::handlers::completions_to_lsp(completions))
+    }
+
     /// Find-references for the cursor at `position` in `uri`: every occurrence of the symbol under
     /// the cursor — across the whole project when it is a project type, or within this one file for
     /// a file-local binding (a local, parameter, field, method, or type parameter). The declaration
@@ -1140,5 +1158,35 @@ mod tests {
         assert_eq!(help.signatures.len(), 1);
         assert_eq!(help.signatures[0].label, "area(int w, int h)");
         assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn workspace_completes_members_of_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Box.java"),
+            "package a; class Box { int size; int area() { return 0; } }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void g(Box b) { b. } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Cursor right after `b.`: the receiver `b` is a cross-file `Box`, so its members complete.
+        let col = bar.find("b. ").unwrap() as u32 + 2;
+        let mut labels: Vec<String> = ws
+            .completions(&bar_uri, Position::new(0, col))
+            .expect("Bar.java is in the workspace")
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        labels.sort();
+        assert_eq!(labels, ["area", "size"]);
+
+        // A document outside the workspace has no workspace completions.
+        let other = Url::parse("file:///elsewhere/Other.java").unwrap();
+        assert!(ws.completions(&other, Position::new(0, 0)).is_none());
     }
 }

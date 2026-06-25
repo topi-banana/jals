@@ -7,8 +7,8 @@ use std::path::Path;
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
-    CreateFilesParams, DeleteFilesParams, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    CompletionOptions, CompletionParams, CompletionResponse, CreateFilesParams, DeleteFilesParams,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
@@ -485,6 +485,26 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(edit) })
     }
 
+    fn completion(
+        &mut self,
+        params: CompletionParams,
+    ) -> BoxFuture<'static, Result<Option<CompletionResponse>, Self::Error>> {
+        let pos = params.text_document_position;
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index completes members with cross-file type names through the
+        // workspace; any other document falls back to a single-file index of the open document.
+        let items = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.completions(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::completions_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(items.map(CompletionResponse::Array)) })
+    }
+
     fn hover(
         &mut self,
         params: HoverParams,
@@ -612,6 +632,10 @@ fn server_capabilities() -> ServerCapabilities {
         document_highlight_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..CompletionOptions::default()
+        }),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
@@ -734,6 +758,14 @@ mod tests {
             panic!("rename provider advertised with options");
         };
         assert_eq!(rename.prepare_provider, Some(true));
+    }
+
+    #[test]
+    fn advertises_completion_triggered_on_dot() {
+        let completion = server_capabilities()
+            .completion_provider
+            .expect("completion provider advertised");
+        assert_eq!(completion.trigger_characters, Some(vec![".".to_string()]));
     }
 
     #[test]
