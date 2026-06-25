@@ -19,14 +19,14 @@
 //! target-typed forms (method references, lambdas, switch expressions), stay [`Ty::Unknown`]. The
 //! pass never panics: every accessor is `Option`/iterator and an unresolvable form is `Unknown`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use jals_syntax::SyntaxKind::*;
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
-use crate::def::{DefId, Namespace};
+use crate::def::{DefId, DefKind, Namespace};
 use crate::project::{FileId, ItemId, MemberType, ProjectIndex, TypeResolution};
 use crate::reference::Resolution;
 use crate::resolve::Resolved;
@@ -1056,4 +1056,161 @@ fn render_signature(index: &ProjectIndex, member: &crate::Member) -> Signature {
     }
     label.push(')');
     Signature { label, parameters }
+}
+
+// ===== Member completion =====
+
+/// One member-access completion candidate: a field or method reachable on the receiver's type.
+///
+/// Produced by [`member_completions`]. A pure data shape (no LSP types), so a host maps it to its
+/// protocol — the language server turns each into an LSP `CompletionItem`, using [`kind`](Completion::kind)
+/// for the item icon and [`detail`](Completion::detail) for the type / signature shown beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The member's simple name — what is inserted and what the editor filters the typed prefix on.
+    pub label: String,
+    /// Whether the member is a [`Field`](DefKind::Field) or a [`Method`](DefKind::Method), for the
+    /// completion-item kind.
+    pub kind: DefKind,
+    /// The type / signature shown beside the label: a field's type (`int`), or a method's parameter
+    /// list and return type (`(int w, int h): int`).
+    pub detail: String,
+}
+
+/// The member-access completions for `receiver.` at byte `offset`: the fields and methods reachable
+/// on the receiver's type, when that receiver is an indexed project type.
+///
+/// Anchors on the `.` just left of the cursor — both for a bare `receiver.` (which does not parse as
+/// a field access, the dot having no member name yet) and a partially-typed `receiver.fo` — then
+/// infers the receiver and enumerates its members (its own and inherited, [`ProjectIndex::members_of`]).
+/// A `this.` / `super.` receiver completes the enclosing type's members. Returns an empty list when
+/// the cursor is on no member access, or the receiver is not an indexed project type (an external /
+/// JDK type, whose members are not indexed). One entry per distinct name (a field shadows, overloads
+/// collapse to one); the editor filters by the typed prefix. Never panics.
+pub fn member_completions(
+    root: &SyntaxNode,
+    resolved: &Resolved,
+    index: &ProjectIndex,
+    file: FileId,
+    offset: usize,
+) -> Vec<Completion> {
+    let Some(owner) = receiver_owner(root, resolved, index, file, offset) else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<(String, Namespace)> = HashSet::new();
+    let mut out = Vec::new();
+    for id in index.members_of(owner) {
+        let member = index.member(id);
+        // Only instance-accessible members complete after `.`: fields and methods, not constructors
+        // or enum constants.
+        if !matches!(member.kind, DefKind::Field | DefKind::Method) {
+            continue;
+        }
+        // Nearest-first order means an own / overriding member is seen before the one it hides; keep
+        // the first per (name, name-space) and drop the rest (a shadowed field, a further overload).
+        if seen.insert((member.name.clone(), member.kind.namespace())) {
+            out.push(completion_of(index, member));
+        }
+    }
+    out
+}
+
+/// Builds a [`Completion`] for `member`: a field's detail is its type; a method's is its parameter
+/// list and return type (`(int w, int h): int`), reusing [`render_signature`] for the parameters.
+fn completion_of(index: &ProjectIndex, member: &crate::Member) -> Completion {
+    let detail = match member.kind {
+        DefKind::Method => {
+            let signature = render_signature(index, member);
+            let params = &signature.label[member.name.len()..];
+            let ret = member_type_to_ty(index, member.file, &member.ty);
+            format!("{params}: {ret}")
+        }
+        _ => member_type_to_ty(index, member.file, &member.ty).to_string(),
+    };
+    Completion {
+        label: member.name.clone(),
+        kind: member.kind,
+        detail,
+    }
+}
+
+/// The indexed project type whose member is being completed at `offset`: the inferred type of the
+/// expression before the `.` just left of the cursor, or — for a `this.` / `super.` receiver — the
+/// enclosing type. `None` when the cursor is on no member access or the receiver is not a project type.
+///
+/// Anchors structurally first and only runs the (whole-file) type inference once a real receiver
+/// expression is found — so a cursor on no member access, or a `this.` / `super.` receiver, costs no
+/// inference at all (member completion is triggered on every `.`).
+fn receiver_owner(
+    root: &SyntaxNode,
+    resolved: &Resolved,
+    index: &ProjectIndex,
+    file: FileId,
+    offset: usize,
+) -> Option<ItemId> {
+    let token = token_left_of(root, offset)?;
+    // The `.` of the member access: the token itself for `receiver.|`, or the token before a
+    // partially-typed member name for `receiver.fo|`.
+    let dot = match token.kind() {
+        DOT => token,
+        IDENT => prev_significant(&token).filter(|t| t.kind() == DOT)?,
+        _ => return None,
+    };
+    let before = prev_significant(&dot)?;
+    // A `this` / `super` receiver has no inferred type; its members are the enclosing type's (for
+    // `super` the strictly-inherited ones — approximated here by the whole enclosing member set).
+    if matches!(before.kind(), THIS_KW | SUPER_KW) {
+        return enclosing_item(index, file, &before.parent()?);
+    }
+    let dot_start = usize::from(dot.text_range().start());
+    let receiver = receiver_node(&before, dot_start)?;
+    let ti = infer(root, resolved, index, file);
+    ti.type_of_expr(node_span(&receiver))?.project_id()
+}
+
+/// The receiver expression that ends at the `.`: the outermost expression node containing `before`
+/// (the token just before the dot) that still ends at or before `dot_start` — so for `a.b.c.|` it is
+/// `a.b.c`, and for a partial `recv.fo|` it is `recv` (the enclosing `recv.fo` field access ends
+/// *after* the dot and is excluded).
+fn receiver_node(before: &SyntaxToken, dot_start: usize) -> Option<SyntaxNode> {
+    // The nearest expression ancestor of `before`.
+    let mut node = before.parent()?;
+    while ast::Expr::cast(node.clone()).is_none() {
+        node = node.parent()?;
+    }
+    // Climb to the outermost expression that still ends before the dot.
+    while let Some(parent) = node.parent() {
+        if ast::Expr::cast(parent.clone()).is_some()
+            && usize::from(parent.text_range().end()) <= dot_start
+        {
+            node = parent;
+        } else {
+            break;
+        }
+    }
+    Some(node)
+}
+
+/// The token just left of byte `offset`: the one ending at or covering it (left-biased at a
+/// boundary, so a cursor right after `.` lands on the `.`). `None` before the first token.
+fn token_left_of(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+    root.descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| {
+            let range = token.text_range();
+            usize::from(range.start()) < offset && offset <= usize::from(range.end())
+        })
+        .max_by_key(|token| usize::from(token.text_range().start()))
+}
+
+/// The nearest non-trivia token before `token`, or `None` at the start of the file.
+fn prev_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
+    let mut current = token.prev_token();
+    while let Some(tok) = current {
+        if !tok.kind().is_trivia() {
+            return Some(tok);
+        }
+        current = tok.prev_token();
+    }
+    None
 }

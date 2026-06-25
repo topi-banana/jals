@@ -600,6 +600,23 @@ impl ProjectIndex {
         out
     }
 
+    /// Every member reachable from `owner` — its own and those of its project-internal supertypes —
+    /// in nearest-first order (the type itself, then each supertype, cycle-guarded). Unlike
+    /// [`resolve_member`](Self::resolve_member) / [`resolve_members_all`](Self::resolve_members_all),
+    /// which look one name up, this enumerates *every* member, for member completion. An inherited
+    /// member overridden or shadowed nearer appears more than once (nearest first); the caller applies
+    /// its own de-duplication policy. A member of an external supertype is not reachable and absent.
+    pub fn members_of(&self, owner: ItemId) -> Vec<MemberId> {
+        let mut out = Vec::new();
+        self.walk_supertypes(owner, |current| {
+            if let Some(ids) = self.members_by_owner.get(&current) {
+                out.extend_from_slice(ids);
+            }
+            None::<()>
+        });
+        out
+    }
+
     /// Whether the full set of overloads named `name` on `owner` is knowable from the index — a
     /// precondition for concluding "no overload matches" without a false positive.
     ///
