@@ -18,7 +18,7 @@ mod semantic_tokens;
 mod signature_help;
 mod symbols;
 
-pub(crate) use completion::{completions_local, completions_to_lsp};
+pub(crate) use completion::{completions, completions_local};
 pub(crate) use definition::goto_definition_local;
 pub(crate) use diagnostics::{
     compute_diagnostics, compute_lint_diagnostics, compute_type_diagnostics,

@@ -358,10 +358,9 @@ impl Workspace {
         Some(crate::handlers::signature_help_to_lsp(&help))
     }
 
-    /// Member-access completions for the cursor at `position` in `uri`: the fields and methods
-    /// reachable on the receiver before the `.`, resolved against the project (so a receiver of a
-    /// sibling-file type completes). `None` if `uri` is not in the workspace; an empty vector if the
-    /// cursor is on no member access or the receiver is not an indexed project type.
+    /// Completions for the cursor at `position` in `uri`, resolved against the project (so a receiver
+    /// or a type name from a sibling file completes): the members after a `.`, otherwise the in-scope
+    /// bindings, project types, and keywords. `None` if `uri` is not in the workspace.
     pub(crate) fn completions(
         &self,
         uri: &Url,
@@ -371,9 +370,13 @@ impl Workspace {
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        let completions =
-            jals_hir::member_completions(&root, source.resolved(), &self.index, file, offset);
-        Some(crate::handlers::completions_to_lsp(completions))
+        Some(crate::handlers::completions(
+            &root,
+            source.resolved(),
+            &self.index,
+            file,
+            offset,
+        ))
     }
 
     /// Find-references for the cursor at `position` in `uri`: every occurrence of the symbol under
@@ -1188,5 +1191,36 @@ mod tests {
         // A document outside the workspace has no workspace completions.
         let other = Url::parse("file:///elsewhere/Other.java").unwrap();
         assert!(ws.completions(&other, Position::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn workspace_scope_completion_offers_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Helper.java"),
+            "package a; class Helper { }",
+        )
+        .unwrap();
+        let main = "package a; class Main { void m() { int x = 1;  } }";
+        std::fs::write(dir.path().join("Main.java"), main).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let main_uri = Url::from_file_path(dir.path().join("Main.java")).unwrap();
+
+        // A bare position inside `m`: the sibling type `Helper`, the local `x`, and keywords are all
+        // offered (not a member access, so the scope path runs).
+        let col = main.find("1; ").unwrap() as u32 + 3;
+        let labels: Vec<String> = ws
+            .completions(&main_uri, Position::new(0, col))
+            .expect("Main.java is in the workspace")
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            labels.contains(&"Helper".to_string()),
+            "cross-file type in {labels:?}"
+        );
+        assert!(labels.contains(&"x".to_string()));
+        assert!(labels.contains(&"return".to_string()));
     }
 }

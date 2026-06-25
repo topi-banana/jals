@@ -1,46 +1,154 @@
 //! Completion (`textDocument/completion`).
 //!
-//! Member-access completion: with the cursor after `receiver.` (or a partially-typed `receiver.fo`),
-//! offer the fields and methods reachable on the receiver's type. The semantic work —
-//! anchoring on the dot, inferring the receiver, enumerating members — is
-//! [`jals_hir::member_completions`], which needs the project member model. The cross-file path lives
-//! on the workspace ([`Workspace::completions`](crate::state::Workspace::completions)), which holds
-//! the index; this module holds the **file-local** fallback ([`completions_local`], which builds a
-//! single-file index so the document's own types complete) and [`completions_to_lsp`] — the mapping
-//! from `jals-hir`'s pure shape to the LSP payload that both paths share.
+//! Two contexts, dispatched on [`jals_hir::at_member_access`]:
+//!
+//! - **Member access** (`receiver.` / a partial `receiver.fo`): the fields and methods reachable on
+//!   the receiver's type ([`jals_hir::member_completions`]). No keywords.
+//! - **Bare identifier** (anywhere else): the in-scope bindings and project type names
+//!   ([`jals_hir::scope_completions`]), plus the Java keywords (added here, the only non-semantic
+//!   part).
+//!
+//! Both semantic halves need the project member model. The cross-file path lives on the workspace
+//! ([`Workspace::completions`](crate::state::Workspace::completions)), which holds the index; this
+//! module holds the shared dispatch ([`completions`]), the **file-local** fallback
+//! ([`completions_local`], which builds a single-file index so the document's own types complete),
+//! and [`completions_to_lsp`] — the mapping from `jals-hir`'s pure shape to the LSP payload.
 
 use async_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
-use jals_hir::{Completion, DefKind, FileId, ProjectIndex};
-use jals_syntax::Parse;
+use jals_hir::{Completion, DefKind, FileId, ProjectIndex, Resolved};
+use jals_syntax::{Parse, SyntaxNode};
 
 use crate::line_index::LineIndex;
 
-/// Maps `jals-hir`'s pure member completions to LSP `CompletionItem`s: the member name is the label,
-/// its kind drives the item icon, and its rendered type / signature is the detail shown beside it.
+/// Maps `jals-hir`'s pure completions to LSP `CompletionItem`s: the name is the label, its kind
+/// drives the item icon, and its rendered type / signature (when any) is the detail shown beside it.
 pub(crate) fn completions_to_lsp(completions: Vec<Completion>) -> Vec<CompletionItem> {
     completions
         .into_iter()
         .map(|completion| CompletionItem {
             label: completion.label,
             kind: Some(item_kind(completion.kind)),
-            detail: Some(completion.detail),
+            detail: (!completion.detail.is_empty()).then_some(completion.detail),
             ..CompletionItem::default()
         })
         .collect()
 }
 
-/// The LSP completion-item kind for a member's [`DefKind`]. Member completion only yields fields and
-/// methods; any other kind (it should not occur) falls back to a plain field icon.
+/// The LSP completion-item kind for a completion's [`DefKind`] — the icon the editor shows.
 fn item_kind(kind: DefKind) -> CompletionItemKind {
+    use DefKind::*;
     match kind {
-        DefKind::Method => CompletionItemKind::METHOD,
-        _ => CompletionItemKind::FIELD,
+        Method | Constructor => CompletionItemKind::METHOD,
+        Field => CompletionItemKind::FIELD,
+        EnumConstant => CompletionItemKind::ENUM_MEMBER,
+        Local | Param | LambdaParam | CatchParam | Resource | PatternVar => {
+            CompletionItemKind::VARIABLE
+        }
+        TypeParam => CompletionItemKind::TYPE_PARAMETER,
+        Class | Record => CompletionItemKind::CLASS,
+        Interface | AnnotationType => CompletionItemKind::INTERFACE,
+        Enum => CompletionItemKind::ENUM,
     }
 }
 
-/// The member completions at `position`, computed over this one file by building a single-file
-/// project index (so the document's own types' members are visible). The fallback for a file outside
-/// any indexed project; the cross-file path is
+/// The completions at byte `offset`, dispatched on context: members after a `.`, otherwise the
+/// in-scope bindings and project types plus the Java keywords. The shared core of the workspace and
+/// file-local entry points.
+pub(crate) fn completions(
+    root: &SyntaxNode,
+    resolved: &Resolved,
+    index: &ProjectIndex,
+    file: FileId,
+    offset: usize,
+) -> Vec<CompletionItem> {
+    if jals_hir::at_member_access(root, offset) {
+        completions_to_lsp(jals_hir::member_completions(
+            root, resolved, index, file, offset,
+        ))
+    } else {
+        let mut items = completions_to_lsp(jals_hir::scope_completions(
+            root, resolved, index, file, offset,
+        ));
+        items.extend(keyword_items());
+        items
+    }
+}
+
+/// The Java reserved words, literals, and restricted keywords offered at a bare identifier position.
+/// A flat list — the editor filters by the typed prefix; positions are not gated.
+const JAVA_KEYWORDS: &[&str] = &[
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "try",
+    "void",
+    "volatile",
+    "while",
+    "true",
+    "false",
+    "null",
+    "var",
+    "yield",
+    "record",
+    "sealed",
+    "permits",
+];
+
+/// The Java keywords as LSP completion items.
+fn keyword_items() -> impl Iterator<Item = CompletionItem> {
+    JAVA_KEYWORDS.iter().map(|keyword| CompletionItem {
+        label: (*keyword).to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        ..CompletionItem::default()
+    })
+}
+
+/// The completions at `position`, computed over this one file by building a single-file project
+/// index (so the document's own types are visible). The fallback for a file outside any indexed
+/// project; the cross-file path is
 /// [`Workspace::completions`](crate::state::Workspace::completions).
 pub(crate) fn completions_local(
     parse: &Parse,
@@ -52,8 +160,7 @@ pub(crate) fn completions_local(
     let offset = u32::from(line_index.offset(text, position)) as usize;
     let index = ProjectIndex::build(&[(FileId(0), root.clone())]);
     let resolved = jals_hir::resolve_node(&root);
-    let completions = jals_hir::member_completions(&root, &resolved, &index, FileId(0), offset);
-    completions_to_lsp(completions)
+    completions(&root, &resolved, &index, FileId(0), offset)
 }
 
 #[cfg(test)]
@@ -92,5 +199,29 @@ mod tests {
     fn no_members_for_an_external_receiver() {
         let text = "class C { void m(String s) { s. } }";
         assert!(complete_at(text, "s.").is_empty());
+    }
+
+    #[test]
+    fn scope_offers_locals_and_keywords() {
+        // A bare position (after `= `): the local `x` (a variable) and the Java keywords are offered,
+        // but no member icons. `return` is a keyword, `x` a variable.
+        let text = "class C { void m() { int x = 1; int y = } }";
+        let items = complete_at(text, "int y = ");
+        assert!(items.contains(&("x".to_string(), CompletionItemKind::VARIABLE)));
+        assert!(items.contains(&("return".to_string(), CompletionItemKind::KEYWORD)));
+        assert!(items.contains(&("class".to_string(), CompletionItemKind::KEYWORD)));
+    }
+
+    #[test]
+    fn no_keywords_after_a_dot() {
+        // A member-access context offers no keywords (so `class`, `return`, etc. never appear).
+        let text = "class Box { int size; void m(Box b) { b. } }";
+        let items = complete_at(text, "b.");
+        assert!(
+            items
+                .iter()
+                .all(|(_, kind)| *kind != CompletionItemKind::KEYWORD)
+        );
+        assert!(items.iter().any(|(label, _)| label == "size"));
     }
 }
