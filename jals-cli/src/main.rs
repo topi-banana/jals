@@ -261,7 +261,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .context("reading stdin")?;
         let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
         let parse = jals_syntax::parse(&src);
-        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let index = ProjectIndex::build_with_stdlib(&[(FileId(0), parse.syntax())]);
         let out = jals_lint::lint_parse_with_index(&parse, &cfg, Some((&index, FileId(0))));
         any_finding |= report::report_lint("<stdin>", &src, &out);
     } else {
@@ -282,7 +282,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .enumerate()
             .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
             .collect();
-        let index = ProjectIndex::build(&inputs);
+        let index = ProjectIndex::build_with_stdlib(&inputs);
 
         for (i, (path, src, parse)) in files.iter().enumerate() {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));

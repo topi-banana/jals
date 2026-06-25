@@ -10,7 +10,9 @@ use async_lsp::lsp_types::{
     TextDocumentContentChangeEvent, TextEdit, Url, WorkspaceEdit,
 };
 use jals_fmt::Config;
-use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
+use jals_hir::{
+    FileId, ItemId, ItemOrigin, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution,
+};
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
 use walkdir::WalkDir;
@@ -195,7 +197,7 @@ impl Workspace {
             source_roots,
             files: Vec::new(),
             by_uri: HashMap::new(),
-            index: ProjectIndex::build(&[]),
+            index: ProjectIndex::build_with_stdlib(&[]),
         };
         for path in paths {
             if let (Ok(text), Ok(uri)) =
@@ -212,6 +214,10 @@ impl Workspace {
     }
 
     /// Rebuild the symbol index from the cached parses. No I/O.
+    ///
+    /// Built with the embedded `java.lang` stubs folded in, so a core JDK type (`String`,
+    /// `Object`, …) resolves to a real item with members and supertypes — hover, completion,
+    /// member navigation, and assignment checks see through it instead of stopping at a bare name.
     fn rebuild_index(&mut self) {
         let inputs: Vec<(FileId, SyntaxNode)> = self
             .files
@@ -219,7 +225,7 @@ impl Workspace {
             .enumerate()
             .map(|(i, f)| (FileId(i as u32), f.parse.syntax()))
             .collect();
-        self.index = ProjectIndex::build(&inputs);
+        self.index = ProjectIndex::build_with_stdlib(&inputs);
     }
 
     /// The project symbol index.
@@ -512,8 +518,11 @@ impl Workspace {
     /// binding qualifies by kind (locals and project types yes, members no — see
     /// [`is_renamable_kind`](crate::handlers::is_renamable_kind)); a cross-file *use* of a project
     /// type (one the file-local pass left unresolved) qualifies too, since the workspace rewrites it
-    /// project-wide. Mirrors what [`references`](Workspace::references) actually gathers, so a
-    /// renamable symbol always has a complete occurrence set.
+    /// project-wide. A use that resolves to a `java.lang` stub does *not* qualify: the stub has no
+    /// host-editable file, so its name is as un-renamable as any external one (mirroring how
+    /// [`definition_at`](jals_hir::ProjectIndex::definition_at) withholds navigation into a stub).
+    /// Mirrors what [`references`](Workspace::references) actually gathers, so a renamable symbol
+    /// always has a complete occurrence set.
     fn is_renamable(&self, file: FileId, resolved: &Resolved, anchor: usize) -> bool {
         if let Some(id) = resolved.symbol_at(anchor) {
             return crate::handlers::is_renamable_kind(resolved.def(id).kind);
@@ -522,7 +531,7 @@ impl Workspace {
             reference.namespace == Namespace::Type
                 && matches!(
                     self.index.resolve_reference(file, reference),
-                    TypeResolution::Project(_)
+                    TypeResolution::Project(id) if self.index.item(id).origin != ItemOrigin::Stdlib
                 )
         })
     }
@@ -1103,7 +1112,8 @@ mod tests {
                 .is_none()
         );
 
-        // An external type has no project declaration to rewrite.
+        // `String` now resolves to a `java.lang` stub item, but a stub has no host-editable file,
+        // so rename stays withheld (just as navigation into it is).
         let string_col = foo.find("String").unwrap() as u32;
         assert!(
             ws.prepare_rename(&foo_uri, Position::new(0, string_col))

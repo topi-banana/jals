@@ -147,8 +147,8 @@ fn keyword_items() -> impl Iterator<Item = CompletionItem> {
 }
 
 /// The completions at `position`, computed over this one file by building a single-file project
-/// index (so the document's own types are visible). The fallback for a file outside any indexed
-/// project; the cross-file path is
+/// index with the `java.lang` stubs folded in (so the document's own types and the core JDK types
+/// are visible). The fallback for a file outside any indexed project; the cross-file path is
 /// [`Workspace::completions`](crate::state::Workspace::completions).
 pub(crate) fn completions_local(
     parse: &Parse,
@@ -158,7 +158,7 @@ pub(crate) fn completions_local(
 ) -> Vec<CompletionItem> {
     let root = parse.syntax();
     let offset = u32::from(line_index.offset(text, position)) as usize;
-    let index = ProjectIndex::build(&[(FileId(0), root.clone())]);
+    let index = ProjectIndex::build_with_stdlib(&[(FileId(0), root.clone())]);
     let resolved = jals_hir::resolve_node(&root);
     completions(&root, &resolved, &index, FileId(0), offset)
 }
@@ -197,8 +197,23 @@ mod tests {
 
     #[test]
     fn no_members_for_an_external_receiver() {
-        let text = "class C { void m(String s) { s. } }";
+        // `Widget` is neither declared here nor a `java.lang` stub, so its type is external — we
+        // know no members for it and offer none. (A stubbed receiver like `String` does offer them.)
+        let text = "class C { void m(Widget s) { s. } }";
         assert!(complete_at(text, "s.").is_empty());
+    }
+
+    #[test]
+    fn members_of_a_stubbed_jdk_receiver() {
+        // The `java.lang` stubs are folded into the single-file index, so a `String` receiver
+        // offers its stubbed methods — the payoff of building with stdlib.
+        let text = "class C { void m(String s) { s. } }";
+        let labels: Vec<String> = complete_at(text, "s.")
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        assert!(labels.contains(&"length".to_string()), "got {labels:?}");
+        assert!(labels.contains(&"charAt".to_string()), "got {labels:?}");
     }
 
     #[test]

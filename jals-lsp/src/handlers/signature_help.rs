@@ -53,9 +53,9 @@ fn utf16_len(s: &str) -> u32 {
 }
 
 /// The signature help for the call at `position`, computed over this one file by building a
-/// single-file project index (so the document's own methods are visible). The fallback for a file
-/// outside any indexed project; the cross-file path is
-/// [`Workspace::signature_help`](crate::state::Workspace::signature_help).
+/// single-file project index with the `java.lang` stubs folded in (so the document's own methods
+/// and the core JDK methods are visible). The fallback for a file outside any indexed project; the
+/// cross-file path is [`Workspace::signature_help`](crate::state::Workspace::signature_help).
 pub(crate) fn signature_help_local(
     parse: &Parse,
     text: &str,
@@ -64,7 +64,7 @@ pub(crate) fn signature_help_local(
 ) -> Option<SignatureHelp> {
     let root = parse.syntax();
     let offset = u32::from(line_index.offset(text, position)) as usize;
-    let index = ProjectIndex::build(&[(FileId(0), root.clone())]);
+    let index = ProjectIndex::build_with_stdlib(&[(FileId(0), root.clone())]);
     let resolved = jals_hir::resolve_node(&root);
     let help = jals_hir::signature_help(&root, &resolved, &index, FileId(0), offset)?;
     Some(signature_help_to_lsp(&help))
