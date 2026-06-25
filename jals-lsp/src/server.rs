@@ -363,12 +363,26 @@ impl LanguageServer for ServerState {
         params: DocumentHighlightParams,
     ) -> BoxFuture<'static, Result<Option<Vec<DocumentHighlight>>, Self::Error>> {
         let pos = params.text_document_position_params;
-        let doc = self.store.get(&pos.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                handlers::document_highlight(&doc.parse, &doc.text, &doc.line_index, pos.position)
-            }))
-        })
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index highlights cross-file type names precisely through the
+        // workspace; any other document falls back to file-local highlighting (a lexical match for
+        // such a name) over the open document alone.
+        let highlights = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.document_highlight(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::document_highlight(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        position,
+                        None,
+                    )
+                })
+            });
+        Box::pin(async move { Ok(highlights) })
     }
 
     fn definition(
@@ -560,16 +574,19 @@ impl LanguageServer for ServerState {
         &mut self,
         params: SemanticTokensParams,
     ) -> BoxFuture<'static, Result<Option<SemanticTokensResult>, Self::Error>> {
-        let doc = self.store.get(&params.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                SemanticTokensResult::Tokens(handlers::semantic_tokens(
-                    &doc.parse,
-                    &doc.text,
-                    &doc.line_index,
-                ))
-            }))
-        })
+        let uri = params.text_document.uri;
+        // A file in the project index classifies cross-file type names by their declared kind through
+        // the workspace; any other document falls back to file-local classification (the generic
+        // `type` for such a name) over the open document alone.
+        let tokens = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.semantic_tokens(&uri))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::semantic_tokens(&doc.parse, &doc.text, &doc.line_index, None)
+                })
+            });
+        Box::pin(async move { Ok(tokens.map(SemanticTokensResult::Tokens)) })
     }
 
     fn folding_range(

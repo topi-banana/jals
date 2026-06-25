@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use async_lsp::lsp_types::{
-    Hover, Location, Position, SignatureHelp, TextDocumentContentChangeEvent, TextEdit, Url,
-    WorkspaceEdit,
+    DocumentHighlight, Hover, Location, Position, SemanticTokens, SignatureHelp,
+    TextDocumentContentChangeEvent, TextEdit, Url, WorkspaceEdit,
 };
 use jals_fmt::Config;
 use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
@@ -376,6 +376,39 @@ impl Workspace {
             &self.index,
             file,
             offset,
+        ))
+    }
+
+    /// Occurrence highlights for the cursor at `position` in `uri`, resolved against the project so a
+    /// cross-file type name highlights precisely (only its references in this file, never a
+    /// same-spelled variable). `None` if `uri` is not in the workspace.
+    pub(crate) fn document_highlight(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Vec<DocumentHighlight>> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        Some(crate::handlers::document_highlight(
+            &source.parse,
+            &source.text,
+            &source.line_index,
+            position,
+            Some((&self.index, file)),
+        ))
+    }
+
+    /// Semantic tokens for `uri`, resolved against the project so a cross-file type name is classified
+    /// by its declared kind (`class` / `enum` / `interface`) rather than the generic `type`. `None` if
+    /// `uri` is not in the workspace.
+    pub(crate) fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        Some(crate::handlers::semantic_tokens(
+            &source.parse,
+            &source.text,
+            &source.line_index,
+            Some((&self.index, file)),
         ))
     }
 
@@ -1222,5 +1255,67 @@ mod tests {
         );
         assert!(labels.contains(&"x".to_string()));
         assert!(labels.contains(&"return".to_string()));
+    }
+
+    #[test]
+    fn workspace_document_highlight_is_precise_for_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        // A same-package sibling uses `Foo` twice and also has a same-spelled local.
+        let bar = "package a; class Bar { Foo a; Foo b; void m() { int Foo = 0; } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Cursor on the first `Foo` type use: only the two cross-file type references highlight,
+        // never the `int Foo` local.
+        let col = bar.find("Foo").unwrap() as u32;
+        let highlights = ws
+            .document_highlight(&bar_uri, Position::new(0, col))
+            .expect("Bar.java is in the workspace");
+        assert_eq!(highlights.len(), 2);
+    }
+
+    #[test]
+    fn workspace_semantic_tokens_classify_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Color.java"),
+            "package a; enum Color { RED }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { Color c; }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // The `Color` reference is delta-encoded; decode to the first token's absolute column and
+        // confirm the cross-file `enum` kind (index 3 in the legend) was applied.
+        let tokens = ws
+            .semantic_tokens(&bar_uri)
+            .expect("Bar.java is in the workspace");
+        let legend = crate::handlers::semantic_tokens_legend();
+        let enum_index = legend
+            .token_types
+            .iter()
+            .position(|t| t.as_str() == "enum")
+            .unwrap() as u32;
+        let color_col = bar.find("Color").unwrap() as u32;
+        let (mut line, mut start) = (0u32, 0u32);
+        let mut found = None;
+        for token in &tokens.data {
+            if token.delta_line == 0 {
+                start += token.delta_start;
+            } else {
+                line += token.delta_line;
+                start = token.delta_start;
+            }
+            if line == 0 && start == color_col {
+                found = Some(token.token_type);
+            }
+        }
+        assert_eq!(found, Some(enum_index));
     }
 }

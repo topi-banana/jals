@@ -1,20 +1,23 @@
-//! Builds LSP semantic tokens from the lossless CST, refined by file-local name resolution.
+//! Builds LSP semantic tokens from the lossless CST, refined by name resolution.
 //!
 //! Identifiers are classified first from `jals-hir`'s file-local resolution ([`resolve_node`]): a
 //! resolved reference takes the kind of the binding it names (a field is `property`, a parameter
 //! `parameter`, a sibling type `class`/`enum`/...), and a declaring name takes its own kind plus the
-//! `declaration` modifier. Everything resolution cannot place — an unresolved reference (an imported
-//! or external type, an inherited member), a member-access right-hand name, a qualified/annotation
-//! name — falls back to a purely syntactic classification from the token's [`SyntaxKind`] and its
-//! parent (sometimes grandparent) node. The fallback is what classified *every* identifier before
-//! resolution was wired in, so it never regresses; resolution only sharpens what it can place.
+//! `declaration` modifier. A type name the file-local pass could not place — an imported or
+//! same-package sibling declared in another file — is resolved against the project index when one is
+//! supplied, so it too is classified by its declared kind rather than the generic `type`. Everything
+//! still unplaced — an external (JDK) type, an inherited member, a member-access right-hand name, a
+//! qualified/annotation name — falls back to a purely syntactic classification from the token's
+//! [`SyntaxKind`] and its parent (sometimes grandparent) node. The fallback is what classified
+//! *every* identifier before resolution was wired in, so it never regresses; resolution only sharpens
+//! what it can place.
 
 use std::collections::HashMap;
 
 use async_lsp::lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensLegend,
 };
-use jals_hir::DefKind;
+use jals_hir::{DefKind, FileId, Namespace, ProjectIndex, TypeResolution};
 use jals_syntax::{Parse, SyntaxKind, SyntaxToken};
 
 use crate::line_index::LineIndex;
@@ -71,9 +74,14 @@ pub(crate) fn legend() -> SemanticTokensLegend {
 
 /// Classify every significant token in `text` and emit LSP semantic tokens (delta-encoded,
 /// one per line — multi-line tokens are split, as the protocol requires).
-pub(crate) fn semantic_tokens(parse: &Parse, text: &str, line_index: &LineIndex) -> SemanticTokens {
+pub(crate) fn semantic_tokens(
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+    project: Option<(&ProjectIndex, FileId)>,
+) -> SemanticTokens {
     let root = parse.syntax();
-    let by_start = resolution_classes(&root);
+    let by_start = resolution_classes(&root, project);
     let mut data: Vec<SemanticToken> = Vec::new();
     // Anchor for delta encoding: the line/start of the previously emitted token.
     let (mut prev_line, mut prev_start) = (0u32, 0u32);
@@ -128,9 +136,13 @@ pub(crate) fn semantic_tokens(parse: &Parse, text: &str, line_index: &LineIndex)
 /// resolved reference maps to the kind of the binding it names (no `declaration` modifier); a
 /// declaring name maps to its own kind plus [`MOD_DECLARATION`]. References are inserted first and
 /// declarations only fill gaps (`symbol_at` treats a covering reference as authoritative), though in
-/// practice a reference and a declaring name never share a start offset. Unresolved references are
-/// omitted, leaving those tokens to the syntactic fallback.
-fn resolution_classes(root: &jals_syntax::SyntaxNode) -> HashMap<usize, (u32, u32)> {
+/// practice a reference and a declaring name never share a start offset. A reference the file-local
+/// pass left unresolved is placed only when `project` binds it to a cross-file type (by its declared
+/// kind); any other unresolved reference is omitted, leaving its token to the syntactic fallback.
+fn resolution_classes(
+    root: &jals_syntax::SyntaxNode,
+    project: Option<(&ProjectIndex, FileId)>,
+) -> HashMap<usize, (u32, u32)> {
     let resolved = jals_hir::resolve_node(root);
     let mut by_start: HashMap<usize, (u32, u32)> = HashMap::new();
     for reference in &resolved.references {
@@ -138,6 +150,16 @@ fn resolution_classes(root: &jals_syntax::SyntaxNode) -> HashMap<usize, (u32, u3
             by_start.insert(
                 reference.range.start,
                 (token_type_for(resolved.def(id).kind), 0),
+            );
+        } else if let Some((index, file)) = project
+            && reference.namespace == Namespace::Type
+            && let TypeResolution::Project(item) = index.resolve_reference(file, reference)
+        {
+            // A cross-file type the file-local pass could not place: classify by the indexed
+            // declaration's kind, sharper than the syntactic fallback's generic `type`.
+            by_start.insert(
+                reference.range.start,
+                (token_type_for(index.item(item).kind), 0),
             );
         }
     }
@@ -323,14 +345,13 @@ mod tests {
         mods: u32,
     }
 
-    /// Decode the delta-encoded tokens back to absolute positions and type names, so tests
+    /// Decode an already-built token stream back to absolute positions and type names, so tests
     /// can assert on what a client would actually render.
-    fn decode(text: &str) -> Vec<Tok> {
-        let toks = semantic_tokens(&jals_syntax::parse(text), text, &LineIndex::new(text));
+    fn decode_tokens(toks: &SemanticTokens) -> Vec<Tok> {
         let legend = legend();
         let (mut line, mut start) = (0u32, 0u32);
         let mut out = Vec::new();
-        for t in toks.data {
+        for t in &toks.data {
             if t.delta_line == 0 {
                 start += t.delta_start;
             } else {
@@ -348,6 +369,16 @@ mod tests {
             });
         }
         out
+    }
+
+    /// Decode the tokens produced for `text` (with no project index).
+    fn decode(text: &str) -> Vec<Tok> {
+        decode_tokens(&semantic_tokens(
+            &jals_syntax::parse(text),
+            text,
+            &LineIndex::new(text),
+            None,
+        ))
     }
 
     /// Find the single token covering `needle`'s first occurrence (by column on line 0).
@@ -518,10 +549,47 @@ mod tests {
     }
 
     #[test]
+    fn cross_file_type_is_classified_by_its_kind() {
+        use jals_hir::{FileId, ProjectIndex};
+
+        // `Color` is declared as an `enum` in another file and imported here. The file-local pass
+        // leaves the reference unresolved (a generic `type`); the project index sharpens it to `enum`.
+        let other = "package a; enum Color { RED }";
+        let main = "package a; class C { Color c; }";
+        let nodes = [
+            (FileId(0), jals_syntax::parse(other).syntax()),
+            (FileId(1), jals_syntax::parse(main).syntax()),
+        ];
+        let index = ProjectIndex::build(&nodes);
+
+        // Without the index: the syntactic fallback can only say `type`.
+        let local = semantic_tokens(&jals_syntax::parse(main), main, &LineIndex::new(main), None);
+        let col = main.find("Color").unwrap() as u32;
+        let kind_at = |toks: &SemanticTokens| {
+            decode_tokens(toks)
+                .into_iter()
+                .find(|t| t.line == 0 && t.start == col)
+                .map(|t| t.ty)
+                .expect("no token at the `Color` reference")
+        };
+        assert_eq!(kind_at(&local), "type");
+
+        // With the index: the cross-file `enum` is recognized.
+        let indexed = semantic_tokens(
+            &jals_syntax::parse(main),
+            main,
+            &LineIndex::new(main),
+            Some((&index, FileId(1))),
+        );
+        assert_eq!(kind_at(&indexed), "enum");
+    }
+
+    #[test]
     fn does_not_panic_on_garbage_or_empty() {
         // Invariant: handlers never panic, even on broken / arbitrary input.
-        let panics =
-            |text: &str| semantic_tokens(&jals_syntax::parse(text), text, &LineIndex::new(text));
+        let panics = |text: &str| {
+            semantic_tokens(&jals_syntax::parse(text), text, &LineIndex::new(text), None)
+        };
         let _ = panics("");
         let _ = panics("class");
         let _ = panics("@#$%^ <<< class {");
