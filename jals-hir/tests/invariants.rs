@@ -1,6 +1,8 @@
 //! Property tests: resolution never panics and produces internally consistent, in-bounds results.
 
-use jals_hir::{FileId, ProjectIndex, Resolution, infer, infer_node, resolve, resolve_node};
+use jals_hir::{
+    FileId, ProjectIndex, Resolution, infer, infer_node, resolve, resolve_node, type_mismatches,
+};
 use jals_syntax::SyntaxNode;
 use proptest::prelude::*;
 
@@ -138,6 +140,27 @@ proptest! {
         let ti_local = infer_node(&node, &resolved);
         for d in &resolved.defs {
             let _ = ti_local.type_of_def(d.id);
+        }
+    }
+
+    /// Type-mismatch collection never panics, with or without an index, and every reported range is
+    /// well-formed and within the source bounds.
+    #[test]
+    fn type_mismatches_never_panic(src in javaish()) {
+        let node = jals_syntax::parse(&src).syntax();
+        let resolved = resolve_node(&node);
+        let index = ProjectIndex::build(&[(FileId(0), node.clone())]);
+        let n = src.len();
+
+        for mismatches in [
+            type_mismatches(&node, &resolved, Some((&index, FileId(0)))),
+            type_mismatches(&node, &resolved, None),
+        ] {
+            for m in &mismatches {
+                prop_assert!(m.range.start <= m.range.end);
+                prop_assert!(m.range.end <= n);
+                let _ = m.message();
+            }
         }
     }
 }

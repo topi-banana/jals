@@ -12,12 +12,12 @@ use jals_syntax::SyntaxKind::{self, *};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::diagnostic::Severity;
-use crate::rules::{Finding, RuleMeta};
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "naming-convention",
     default: Severity::Warn,
-    check,
+    check: Checker::Syntactic(check),
 };
 
 fn check(root: &SyntaxNode) -> Vec<Finding> {

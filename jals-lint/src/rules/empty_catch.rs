@@ -7,12 +7,12 @@ use jals_syntax::ast::{AstNode, CatchClause};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 
 use crate::diagnostic::Severity;
-use crate::rules::{Finding, RuleMeta};
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "empty-catch",
     default: Severity::Warn,
-    check,
+    check: Checker::Syntactic(check),
 };
 
 fn check(root: &SyntaxNode) -> Vec<Finding> {

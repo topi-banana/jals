@@ -19,9 +19,11 @@
 //!   source files — the basis for cross-file go-to-definition and "cannot resolve symbol".
 //! - **Type inference** ([`infer`] / [`infer_node`] → [`TypeInference`]): assigns each declaration
 //!   and expression a structural [`Ty`], reusing the [`Resolved`] bindings and the [`ProjectIndex`]
-//!   for reference type names — the basis for hover. The MVP covers the structural / local subset
-//!   (literals, names, arithmetic, casts, `new`, arrays, `var`); member-dependent forms (method
-//!   calls, field access) are [`Ty::Unknown`], pending a later phase.
+//!   for reference type names and members — the basis for hover and member go-to-definition. It
+//!   covers the structural / local subset (literals, names, arithmetic, casts, `new`, arrays,
+//!   `var`) and member access (`obj.field`, `recv.method()`) on project types, resolved through the
+//!   [`ProjectIndex`] member model; an external type's members and target-typed forms (lambdas,
+//!   method references, switch expressions) stay [`Ty::Unknown`].
 //!
 //! It never panics: an incomplete or erroneous tree yields a best-effort result, an unresolvable
 //! reference is recorded as [`Resolution::Unresolved`], and an un-inferable type is [`Ty::Unknown`].
@@ -42,13 +44,20 @@ mod project;
 mod reference;
 mod resolve;
 mod scope;
+mod stdlib;
 mod ty;
 
 use jals_syntax::SyntaxNode;
 
 pub use def::{Def, DefId, DefKind, Namespace};
-pub use infer::{TypeInference, infer, infer_node};
-pub use project::{FileId, Fqn, Item, ItemId, ProjectIndex, TypeResolution};
+pub use infer::{
+    Completion, Signature, SignatureHelp, TypeInference, TypeMismatch, at_member_access, infer,
+    infer_node, member_completions, scope_completions, signature_help, type_mismatches,
+};
+pub use project::{
+    FileId, Fqn, Item, ItemId, ItemOrigin, Member, MemberId, MemberType, Param, ProjectIndex,
+    TypeResolution,
+};
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;
 pub use scope::{Scope, ScopeId, ScopeKind};

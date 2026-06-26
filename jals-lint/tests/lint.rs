@@ -227,3 +227,33 @@ fn severity_is_resolved_from_config() {
     assert_eq!(out.diagnostics.len(), 1);
     assert_eq!(out.diagnostics[0].severity, Severity::Error);
 }
+
+// ===== type-mismatch =====
+
+#[test]
+fn type_mismatch_narrowing_flagged() {
+    // A field initializer (fields are not subject to `unused-local`, isolating this rule).
+    check(
+        "class C { int x = 1.0; }",
+        expect![[r#"
+            type-mismatch:17..21: incompatible types: `double` cannot be assigned to `int`
+        "#]],
+    );
+}
+
+#[test]
+fn type_mismatch_constant_narrowing_ok() {
+    // `byte b = 1;` is legal constant narrowing — must not be flagged.
+    check("class C { byte b = 1; }", expect![""]);
+}
+
+#[test]
+fn type_mismatch_return_flagged() {
+    // The method has no locals, so only `type-mismatch` fires.
+    check(
+        "class C { int m() { return 1.0; } }",
+        expect![[r#"
+            type-mismatch:26..30: incompatible types: `double` cannot be assigned to `int`
+        "#]],
+    );
+}

@@ -9,3 +9,6 @@ extend-exclude = ["jals-tests/sources/"]
 # Unicode general category short names appear in lexer regexes (e.g. \p{Nd});
 # they are not typos of English words such as "And".
 Nd = "Nd"
+# `fo` is a placeholder for a partially-typed member name in completion docs
+# (e.g. `receiver.fo`), not a misspelling of "for"/"of".
+fo = "fo"

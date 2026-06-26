@@ -17,6 +17,17 @@ pub enum Resolution {
     Unresolved,
 }
 
+impl Resolution {
+    /// The definition this reference bound to, or `None` if it stayed
+    /// [`Unresolved`](Self::Unresolved).
+    pub fn def_id(self) -> Option<DefId> {
+        match self {
+            Resolution::Def(id) => Some(id),
+            Resolution::Unresolved => None,
+        }
+    }
+}
+
 /// A reference: an identifier occurrence the resolver examines.
 ///
 /// References cover value and method-invocation positions and — since Phase 2 — type-name

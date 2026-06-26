@@ -2,7 +2,7 @@
 //! cross-file type references.
 
 use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
-use jals_hir::{FileId, ProjectIndex};
+use jals_hir::{FileId, ProjectIndex, Resolved};
 use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
@@ -58,23 +58,25 @@ pub(crate) fn compute_lint_diagnostics(
 /// Build "cannot resolve symbol" diagnostics for `file`'s type-name references that resolve to
 /// nothing — neither file-locally nor anywhere in the project index.
 ///
-/// `parse`/`text`/`line_index` are the document's cached CST and its coordinate map; `index` is the
-/// project-wide symbol index and `file` this document's id within it. Diagnostics are suppressed
-/// entirely when the document has parse errors: a broken tree yields spurious unresolved names, and
-/// the syntax errors themselves are already reported by [`compute_diagnostics`].
+/// `parse`/`text`/`line_index` are the document's cached CST and its coordinate map; `resolved` is
+/// its file-local name resolution (shared with [`compute_type_mismatch_diagnostics`] so the tree is
+/// resolved once per publish); `index` is the project-wide symbol index and `file` this document's
+/// id within it. Diagnostics are suppressed entirely when the document has parse errors: a broken
+/// tree yields spurious unresolved names, and the syntax errors themselves are already reported by
+/// [`compute_diagnostics`].
 pub(crate) fn compute_type_diagnostics(
     index: &ProjectIndex,
     file: FileId,
     parse: &Parse,
+    resolved: &Resolved,
     text: &str,
     line_index: &LineIndex,
 ) -> Vec<Diagnostic> {
     if !parse.errors().is_empty() {
         return Vec::new();
     }
-    let resolved = jals_hir::resolve_node(&parse.syntax());
     index
-        .unresolved_types(file, &resolved)
+        .unresolved_types(file, resolved)
         .into_iter()
         .map(|range| Diagnostic {
             range: line_index.byte_range(text, &range),
@@ -82,6 +84,45 @@ pub(crate) fn compute_type_diagnostics(
             code: Some(NumberOrString::String("cannot-resolve".to_string())),
             source: Some("jals".to_string()),
             message: format!("cannot resolve symbol `{}`", &text[range]),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Build index-aware type-mismatch diagnostics for `file`: a variable initializer or simple `=`
+/// assignment whose value type is not assignable to its slot, resolving reference types against the
+/// project `index` (so a `Sub`/`Base` confusion is caught, which the file-local `type-mismatch` lint
+/// rule cannot see).
+///
+/// This is the project-wide counterpart of the `jals-lint` `type-mismatch` rule, sharing the same
+/// `jals_hir::type_mismatches` core and the same config key — so the server suppresses the
+/// file-local rule when it runs this, and the user's `type-mismatch` severity (`allow` to disable,
+/// `error` to escalate) governs both. `resolved` is the document's file-local name resolution,
+/// shared with [`compute_type_diagnostics`]. Suppressed on parse errors, like
+/// [`compute_type_diagnostics`].
+pub(crate) fn compute_type_mismatch_diagnostics(
+    index: &ProjectIndex,
+    file: FileId,
+    parse: &Parse,
+    resolved: &Resolved,
+    text: &str,
+    line_index: &LineIndex,
+    config: &jals_lint::Config,
+) -> Vec<Diagnostic> {
+    let severity = config.severity(jals_lint::TYPE_MISMATCH_RULE, jals_lint::Severity::Warn);
+    if severity == jals_lint::Severity::Allow || !parse.errors().is_empty() {
+        return Vec::new();
+    }
+    jals_hir::type_mismatches(&parse.syntax(), resolved, Some((index, file)))
+        .into_iter()
+        .map(|m| Diagnostic {
+            range: line_index.byte_range(text, &m.range),
+            severity: Some(lint_severity(severity)),
+            code: Some(NumberOrString::String(
+                jals_lint::TYPE_MISMATCH_RULE.to_string(),
+            )),
+            source: Some("jals".to_string()),
+            message: m.message(),
             ..Default::default()
         })
         .collect()
@@ -165,8 +206,15 @@ mod tests {
         // type. Only `Nope` is reported.
         let text = "package a; class Bar { Nope n; String s; Foo f; }";
         let (index, parse) = index_with_sibling_foo(text);
-        let diags =
-            compute_type_diagnostics(&index, FileId(0), &parse, text, &LineIndex::new(text));
+        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let diags = compute_type_diagnostics(
+            &index,
+            FileId(0),
+            &parse,
+            &resolved,
+            text,
+            &LineIndex::new(text),
+        );
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "cannot resolve symbol `Nope`");
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
@@ -184,8 +232,83 @@ mod tests {
         let parse = jals_syntax::parse(text);
         assert!(!parse.errors().is_empty());
         let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
-        let diags =
-            compute_type_diagnostics(&index, FileId(0), &parse, text, &LineIndex::new(text));
+        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let diags = compute_type_diagnostics(
+            &index,
+            FileId(0),
+            &parse,
+            &resolved,
+            text,
+            &LineIndex::new(text),
+        );
+        assert!(diags.is_empty());
+    }
+
+    /// A single-file index with `Base`, `Sub extends Base`, and a `Sub s = new Base();` slot.
+    const SUBTYPING_SRC: &str =
+        "class Base {} class Sub extends Base {} class C { void m() { Sub s = new Base(); } }";
+
+    #[test]
+    fn type_mismatch_diagnostics_flag_project_subtyping() {
+        let parse = jals_syntax::parse(SUBTYPING_SRC);
+        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let diags = compute_type_mismatch_diagnostics(
+            &index,
+            FileId(0),
+            &parse,
+            &resolved,
+            SUBTYPING_SRC,
+            &LineIndex::new(SUBTYPING_SRC),
+            &jals_lint::Config::default(),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String("type-mismatch".to_string()))
+        );
+        assert_eq!(diags[0].source.as_deref(), Some("jals"));
+        assert!(diags[0].message.contains("Base") && diags[0].message.contains("Sub"));
+    }
+
+    #[test]
+    fn type_mismatch_diagnostics_flag_a_bad_call_argument() {
+        let text = "class C { void f(int x) {} void g() { f(1.0); } }";
+        let parse = jals_syntax::parse(text);
+        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let diags = compute_type_mismatch_diagnostics(
+            &index,
+            FileId(0),
+            &parse,
+            &resolved,
+            text,
+            &LineIndex::new(text),
+            &jals_lint::Config::default(),
+        );
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("double") && diags[0].message.contains("int"));
+    }
+
+    #[test]
+    fn type_mismatch_diagnostics_respect_allow_config() {
+        let parse = jals_syntax::parse(SUBTYPING_SRC);
+        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let mut config = jals_lint::Config::default();
+        config
+            .rules
+            .insert("type-mismatch".to_string(), jals_lint::Severity::Allow);
+        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let diags = compute_type_mismatch_diagnostics(
+            &index,
+            FileId(0),
+            &parse,
+            &resolved,
+            SUBTYPING_SRC,
+            &LineIndex::new(SUBTYPING_SRC),
+            &config,
+        );
         assert!(diags.is_empty());
     }
 }

@@ -1,13 +1,20 @@
 //! In-memory server state: open documents and memoized config discovery.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use async_lsp::lsp_types::{Hover, Location, Position, TextDocumentContentChangeEvent, Url};
+use async_lsp::lsp_types::{
+    DocumentHighlight, Hover, Location, Position, SemanticTokens, SignatureHelp,
+    TextDocumentContentChangeEvent, TextEdit, Url, WorkspaceEdit,
+};
 use jals_fmt::Config;
-use jals_hir::{FileId, ProjectIndex};
-use jals_syntax::{Parse, SyntaxNode};
+use jals_hir::{
+    FileId, ItemId, ItemOrigin, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution,
+};
+use jals_syntax::ast::{self, AstNode};
+use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
 use walkdir::WalkDir;
 
 use crate::line_index::LineIndex;
@@ -115,6 +122,11 @@ struct WorkspaceFile {
     text: Arc<str>,
     line_index: Arc<LineIndex>,
     parse: Arc<Parse>,
+    /// The file's name resolution, computed once on first use and cached. A pure function of
+    /// `parse`, so it stays valid for this file's lifetime — an edit replaces the whole struct
+    /// (see [`Workspace::set_overlay`]), starting fresh. Lets a project-wide query that scans every
+    /// file (find-references) resolve each one only once instead of on every request.
+    resolved: OnceLock<Resolved>,
 }
 
 impl WorkspaceFile {
@@ -126,6 +138,21 @@ impl WorkspaceFile {
             text: Arc::from(text),
             line_index,
             parse,
+            resolved: OnceLock::new(),
+        }
+    }
+
+    /// The file's cached name resolution (computed on first use).
+    fn resolved(&self) -> &Resolved {
+        self.resolved
+            .get_or_init(|| jals_hir::resolve_node(&self.parse.syntax()))
+    }
+
+    /// A `Location` in this file spanning byte `range`.
+    fn location(&self, range: &Range<usize>) -> Location {
+        Location {
+            uri: self.uri.clone(),
+            range: self.line_index.byte_range(&self.text, range),
         }
     }
 }
@@ -170,7 +197,7 @@ impl Workspace {
             source_roots,
             files: Vec::new(),
             by_uri: HashMap::new(),
-            index: ProjectIndex::build(&[]),
+            index: ProjectIndex::build_with_stdlib(&[]),
         };
         for path in paths {
             if let (Ok(text), Ok(uri)) =
@@ -187,6 +214,10 @@ impl Workspace {
     }
 
     /// Rebuild the symbol index from the cached parses. No I/O.
+    ///
+    /// Built with the embedded `java.lang` stubs folded in, so a core JDK type (`String`,
+    /// `Object`, …) resolves to a real item with members and supertypes — hover, completion,
+    /// member navigation, and assignment checks see through it instead of stopping at a bare name.
     fn rebuild_index(&mut self) {
         let inputs: Vec<(FileId, SyntaxNode)> = self
             .files
@@ -194,7 +225,7 @@ impl Workspace {
             .enumerate()
             .map(|(i, f)| (FileId(i as u32), f.parse.syntax()))
             .collect();
-        self.index = ProjectIndex::build(&inputs);
+        self.index = ProjectIndex::build_with_stdlib(&inputs);
     }
 
     /// The project symbol index.
@@ -233,6 +264,7 @@ impl Workspace {
             text: doc.text.clone(),
             line_index: doc.line_index.clone(),
             parse: doc.parse.clone(),
+            resolved: OnceLock::new(),
         };
         match self.by_uri.get(uri).copied() {
             Some(id) => self.files[id.0 as usize] = file,
@@ -249,20 +281,62 @@ impl Workspace {
         true
     }
 
-    /// Go-to-definition for the cursor at `position` in `uri`: a file-local binding if there is
-    /// one, otherwise the project type the reference names. `None` if `uri` is not in the workspace
-    /// or the reference resolves to nothing (or to an external type).
+    /// Go-to-definition for the cursor at `position` in `uri`: a file-local binding if there is one,
+    /// then the project type a reference names, then — for a member access — the member the receiver
+    /// type declares. `None` if `uri` is not in the workspace or nothing resolves.
     pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        let resolved = jals_hir::resolve_node(&source.parse.syntax());
-        let (target_file, range) = self.index.definition_at(file, &resolved, offset)?;
-        let target = &self.files[target_file.0 as usize];
-        Some(Location {
-            uri: target.uri.clone(),
-            range: target.line_index.byte_range(&target.text, &range),
-        })
+        let root = source.parse.syntax();
+        let offset = source.line_index.offset(&source.text, position);
+        let resolved = source.resolved();
+        // A file-local binding, or the project type a reference names.
+        if let Some((target_file, range)) =
+            self.index
+                .definition_at(file, resolved, usize::from(offset))
+        {
+            return Some(self.files[target_file.0 as usize].location(&range));
+        }
+        // A member access (`obj.field` / `recv.method()`): infer the receiver and resolve the member.
+        let (target_file, range) = self.member_definition(file, &root, resolved, offset)?;
+        Some(self.files[target_file.0 as usize].location(&range))
+    }
+
+    /// Go-to-definition for the member access under `offset`: when the cursor is on the name of a
+    /// `receiver.field` / `receiver.method()`, infer the receiver's type and, if it is a project
+    /// type, resolve the member on it (through its project-internal supertypes). Returns the member
+    /// declaration's file and name range.
+    fn member_definition(
+        &self,
+        file: FileId,
+        root: &SyntaxNode,
+        resolved: &Resolved,
+        offset: text_size::TextSize,
+    ) -> Option<(FileId, Range<usize>)> {
+        // The member-name identifier sits directly under a `FIELD_ACCESS` node — both for a plain
+        // `obj.field` and for the `recv.method` callee of a call.
+        let token = crate::handlers::ident_at(root, offset)?;
+        let field_access = token
+            .parent()
+            .filter(|p| p.kind() == SyntaxKind::FIELD_ACCESS)?;
+        let access = ast::FieldAccess::cast(field_access.clone())?;
+        let name = access.field()?;
+        let receiver = access.receiver()?;
+        // A field-access used as a call's callee names a method; otherwise a field.
+        let namespace = if field_access.parent().map(|p| p.kind()) == Some(SyntaxKind::CALL_EXPR) {
+            Namespace::Method
+        } else {
+            Namespace::Value
+        };
+        let inference = jals_hir::infer(root, resolved, &self.index, file);
+        let span = receiver.syntax().text_range();
+        let owner = inference
+            .type_of_expr(usize::from(span.start())..usize::from(span.end()))?
+            .project_id()?;
+        let member = self
+            .index
+            .member(self.index.resolve_member(owner, &name, namespace)?);
+        Some((member.file, member.name_range.clone()))
     }
 
     /// The hover for the cursor at `position` in `uri`: the inferred type of the expression there,
@@ -272,11 +346,253 @@ impl Workspace {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
-        let resolved = jals_hir::resolve_node(&root);
-        let inference = jals_hir::infer(&root, &resolved, &self.index, file);
+        let resolved = source.resolved();
+        let inference = jals_hir::infer(&root, resolved, &self.index, file);
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
         crate::handlers::type_hover(inference.type_at(offset)?)
     }
+
+    /// The signature help for the call at `position` in `uri`, with cross-file type resolution (so a
+    /// receiver of a sibling-file type resolves). `None` if `uri` is not in the workspace or the
+    /// cursor is in no resolvable call.
+    pub(crate) fn signature_help(&self, uri: &Url, position: Position) -> Option<SignatureHelp> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        let help = jals_hir::signature_help(&root, source.resolved(), &self.index, file, offset)?;
+        Some(crate::handlers::signature_help_to_lsp(&help))
+    }
+
+    /// Completions for the cursor at `position` in `uri`, resolved against the project (so a receiver
+    /// or a type name from a sibling file completes): the members after a `.`, otherwise the in-scope
+    /// bindings, project types, and keywords. `None` if `uri` is not in the workspace.
+    pub(crate) fn completions(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Vec<async_lsp::lsp_types::CompletionItem>> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        Some(crate::handlers::completions(
+            &root,
+            source.resolved(),
+            &self.index,
+            file,
+            offset,
+        ))
+    }
+
+    /// Occurrence highlights for the cursor at `position` in `uri`, resolved against the project so a
+    /// cross-file type name highlights precisely (only its references in this file, never a
+    /// same-spelled variable). `None` if `uri` is not in the workspace.
+    pub(crate) fn document_highlight(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Vec<DocumentHighlight>> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        Some(crate::handlers::document_highlight(
+            &source.parse,
+            &source.text,
+            &source.line_index,
+            position,
+            Some((&self.index, file)),
+        ))
+    }
+
+    /// Semantic tokens for `uri`, resolved against the project so a cross-file type name is classified
+    /// by its declared kind (`class` / `enum` / `interface`) rather than the generic `type`. `None` if
+    /// `uri` is not in the workspace.
+    pub(crate) fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        Some(crate::handlers::semantic_tokens(
+            &source.parse,
+            &source.text,
+            &source.line_index,
+            Some((&self.index, file)),
+        ))
+    }
+
+    /// Find-references for the cursor at `position` in `uri`: every occurrence of the symbol under
+    /// the cursor — across the whole project when it is a project type, or within this one file for
+    /// a file-local binding (a local, parameter, field, method, or type parameter). The declaration
+    /// is included when `include_declaration`. `None` if `uri` is not in the workspace; an empty
+    /// vector if the cursor is on no resolvable symbol.
+    pub(crate) fn references(
+        &self,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let resolved = source.resolved();
+        // Anchor on the identifier under the cursor (boundary-aware), as the find-references handler
+        // does, then ask name resolution for the binding it denotes.
+        let Some(ident) =
+            crate::handlers::ident_at(&root, source.line_index.offset(&source.text, position))
+        else {
+            return Some(Vec::new());
+        };
+        let anchor = usize::from(ident.text_range().start());
+
+        // The cursor denotes a file-local binding.
+        if let Some(def_id) = resolved.symbol_at(anchor) {
+            // A binding that is also a project type: gather references across every file.
+            if let Some(item) = self
+                .index
+                .item_by_decl(file, resolved.def(def_id).name_range.start)
+            {
+                return Some(self.item_references(item, include_declaration));
+            }
+            // Otherwise a local/parameter/field/method/type-parameter: occurrences within this file.
+            let locations = resolved
+                .occurrences(def_id, include_declaration)
+                .into_iter()
+                .map(|range| source.location(&range))
+                .collect();
+            return Some(locations);
+        }
+
+        // The cursor is on a cross-file type reference (one the file-local pass left unresolved).
+        if let Some(reference) = resolved.reference_at(anchor)
+            && reference.namespace == Namespace::Type
+            && let TypeResolution::Project(item) = self.index.resolve_reference(file, reference)
+        {
+            return Some(self.item_references(item, include_declaration));
+        }
+        Some(Vec::new())
+    }
+
+    /// Every reference to the project type `item` across all workspace files (plus its declaration
+    /// when `include_declaration`), as `Location`s sorted by file then position. A same-file type
+    /// reference resolves file-locally to the declaration, so it is matched through
+    /// [`ProjectIndex::item_by_decl`]; references in other files resolve through the project index.
+    fn item_references(&self, item: ItemId, include_declaration: bool) -> Vec<Location> {
+        let mut locations = Vec::new();
+        for (i, source) in self.files.iter().enumerate() {
+            let file = FileId(i as u32);
+            let resolved = source.resolved();
+            for reference in &resolved.references {
+                if reference.namespace != Namespace::Type {
+                    continue;
+                }
+                let hit = match reference.resolution {
+                    Resolution::Def(id) => {
+                        self.index
+                            .item_by_decl(file, resolved.def(id).name_range.start)
+                            == Some(item)
+                    }
+                    Resolution::Unresolved => matches!(
+                        self.index.resolve_reference(file, reference),
+                        TypeResolution::Project(target) if target == item
+                    ),
+                };
+                if hit {
+                    locations.push(source.location(&reference.range));
+                }
+            }
+        }
+        if include_declaration {
+            let decl = self.index.item(item);
+            let decl_source = &self.files[decl.file.0 as usize];
+            locations.push(decl_source.location(&decl.name_range));
+        }
+        locations.sort_by(|a, b| {
+            a.uri
+                .as_str()
+                .cmp(b.uri.as_str())
+                .then(a.range.start.line.cmp(&b.range.start.line))
+                .then(a.range.start.character.cmp(&b.range.start.character))
+        });
+        locations
+    }
+
+    /// Whether the symbol anchored at byte `anchor` in `file` may be renamed soundly. A file-local
+    /// binding qualifies by kind (locals and project types yes, members no — see
+    /// [`is_renamable_kind`](crate::handlers::is_renamable_kind)); a cross-file *use* of a project
+    /// type (one the file-local pass left unresolved) qualifies too, since the workspace rewrites it
+    /// project-wide. A use that resolves to a `java.lang` stub does *not* qualify: the stub has no
+    /// host-editable file, so its name is as un-renamable as any external one (mirroring how
+    /// [`definition_at`](jals_hir::ProjectIndex::definition_at) withholds navigation into a stub).
+    /// Mirrors what [`references`](Workspace::references) actually gathers, so a renamable symbol
+    /// always has a complete occurrence set.
+    fn is_renamable(&self, file: FileId, resolved: &Resolved, anchor: usize) -> bool {
+        if let Some(id) = resolved.symbol_at(anchor) {
+            return crate::handlers::is_renamable_kind(resolved.def(id).kind);
+        }
+        resolved.reference_at(anchor).is_some_and(|reference| {
+            reference.namespace == Namespace::Type
+                && matches!(
+                    self.index.resolve_reference(file, reference),
+                    TypeResolution::Project(id) if self.index.item(id).origin != ItemOrigin::Stdlib
+                )
+        })
+    }
+
+    /// prepareRename for the cursor at `position` in `uri`: the range of the identifier under the
+    /// cursor when it names a renamable symbol, else `None` (an external name, a keyword/literal, or
+    /// a withheld member). The editor uses this to validate a rename before prompting.
+    pub(crate) fn prepare_rename(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<async_lsp::lsp_types::Range> {
+        let file = self.file_id(uri)?;
+        let source = &self.files[file.0 as usize];
+        let root = source.parse.syntax();
+        let ident =
+            crate::handlers::ident_at(&root, source.line_index.offset(&source.text, position))?;
+        if !self.is_renamable(
+            file,
+            source.resolved(),
+            usize::from(ident.text_range().start()),
+        ) {
+            return None;
+        }
+        Some(source.line_index.range(&source.text, ident.text_range()))
+    }
+
+    /// Rename the symbol under `position` in `uri` to `new_name`: a [`WorkspaceEdit`] rewriting every
+    /// occurrence — project-wide for a project type, within the file for a file-local binding.
+    /// `None` if `uri` is not in the workspace, the cursor is on no renamable symbol, or there is
+    /// nothing to change. The caller validates `new_name` is a legal identifier.
+    pub(crate) fn rename(
+        &self,
+        uri: &Url,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        // Gate on the same renamability check `prepareRename` performs, then rewrite every
+        // occurrence the find-references pass gathers.
+        self.prepare_rename(uri, position)?;
+        workspace_edit(self.references(uri, position, true)?, new_name)
+    }
+}
+
+/// Group `locations` into a [`WorkspaceEdit`] that rewrites each occurrence to `new_name`, keyed by
+/// file. `None` if there is nothing to rewrite.
+fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceEdit> {
+    if locations.is_empty() {
+        return None;
+    }
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for location in locations {
+        changes.entry(location.uri).or_default().push(TextEdit {
+            range: location.range,
+            new_text: new_name.to_owned(),
+        });
+    }
+    Some(WorkspaceEdit {
+        changes: Some(changes),
+        ..Default::default()
+    })
 }
 
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
@@ -671,5 +987,345 @@ mod tests {
         let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
         let other = Url::parse("file:///elsewhere/Other.java").unwrap();
         assert!(ws.file_id(&other).is_none());
+    }
+
+    #[test]
+    fn workspace_references_find_a_project_type_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        std::fs::write(
+            dir.path().join("Bar.java"),
+            "package a; class Bar { Foo f; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Baz.java"),
+            "package a; class Baz { Foo g; Foo h; }",
+        )
+        .unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let baz_uri = Url::from_file_path(dir.path().join("Baz.java")).unwrap();
+
+        // From the declaration of `Foo`, including the declaration: the decl plus all three uses.
+        let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
+        let refs = ws
+            .references(&foo_uri, Position::new(0, decl_col), true)
+            .expect("Foo.java is in the workspace");
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs.iter().filter(|l| l.uri == foo_uri).count(), 1); // declaration
+        assert_eq!(refs.iter().filter(|l| l.uri == bar_uri).count(), 1);
+        assert_eq!(refs.iter().filter(|l| l.uri == baz_uri).count(), 2);
+
+        // From a use in Bar.java, excluding the declaration: only the three uses, never Foo.java.
+        let use_col = "package a; class Bar { Foo f; }".find("Foo").unwrap() as u32;
+        let refs = ws
+            .references(&bar_uri, Position::new(0, use_col), false)
+            .expect("Bar.java is in the workspace");
+        assert_eq!(refs.len(), 3);
+        assert!(refs.iter().all(|l| l.uri != foo_uri));
+    }
+
+    #[test]
+    fn workspace_references_keep_a_local_binding_within_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A sibling file also declares an `x`, to prove the local does not leak across files.
+        std::fs::write(
+            dir.path().join("Foo.java"),
+            "package a; class Foo { int x; }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void m() { int x = 1; use(x); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // From the use `x` in `use(x)`: only the two occurrences in Bar.java (declaration + use).
+        let use_col = bar.rfind('x').unwrap() as u32;
+        let refs = ws
+            .references(&bar_uri, Position::new(0, use_col), true)
+            .expect("Bar.java is in the workspace");
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|l| l.uri == bar_uri));
+    }
+
+    #[test]
+    fn workspace_rename_rewrites_a_project_type_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        std::fs::write(
+            dir.path().join("Bar.java"),
+            "package a; class Bar { Foo f; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Baz.java"),
+            "package a; class Baz { Foo g; Foo h; }",
+        )
+        .unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let baz_uri = Url::from_file_path(dir.path().join("Baz.java")).unwrap();
+
+        // Rename `Foo` from its declaration: the edit rewrites the declaration plus every use in
+        // every file, each to the new name.
+        let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
+        let edit = ws
+            .rename(&foo_uri, Position::new(0, decl_col), "Renamed")
+            .expect("Foo is a renamable project type");
+        let changes = edit.changes.expect("a plain-edit workspace edit");
+        assert_eq!(changes[&foo_uri].len(), 1); // the declaration
+        assert_eq!(changes[&bar_uri].len(), 1);
+        assert_eq!(changes[&baz_uri].len(), 2);
+        assert!(changes.values().flatten().all(|e| e.new_text == "Renamed"));
+
+        // prepareRename on the same position reports the identifier's range.
+        let range = ws
+            .prepare_rename(&foo_uri, Position::new(0, decl_col))
+            .expect("Foo is renamable");
+        assert_eq!(range.start, Position::new(0, decl_col));
+        assert_eq!(range.end, Position::new(0, decl_col + 3));
+    }
+
+    #[test]
+    fn workspace_rename_withholds_members_and_external_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let foo = "package a; class Foo { int size; String s; }";
+        std::fs::write(dir.path().join("Foo.java"), foo).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+
+        // A field is a member: its cross-file uses are not indexed, so rename is withheld.
+        let size_col = foo.find("size").unwrap() as u32;
+        assert!(
+            ws.prepare_rename(&foo_uri, Position::new(0, size_col))
+                .is_none()
+        );
+        assert!(
+            ws.rename(&foo_uri, Position::new(0, size_col), "len")
+                .is_none()
+        );
+
+        // `String` now resolves to a `java.lang` stub item, but a stub has no host-editable file,
+        // so rename stays withheld (just as navigation into it is).
+        let string_col = foo.find("String").unwrap() as u32;
+        assert!(
+            ws.prepare_rename(&foo_uri, Position::new(0, string_col))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn workspace_goto_definition_jumps_to_a_member_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let box_src = "package a; class Box { int size; int area() { return 0; } }";
+        std::fs::write(dir.path().join("Box.java"), box_src).unwrap();
+        let bar = "package a; class Bar { void m(Box b) { var s = b.size; var a = b.area(); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+        let box_uri = Url::from_file_path(dir.path().join("Box.java")).unwrap();
+
+        // `b.size` jumps to the field declaration in Box.java.
+        let size_col = bar.find("b.size").unwrap() as u32 + 2;
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, size_col))
+            .expect("the field `size` resolves to its declaration");
+        assert_eq!(loc.uri, box_uri);
+        assert_eq!(
+            loc.range.start,
+            Position::new(0, box_src.find("size").unwrap() as u32)
+        );
+
+        // `b.area()` jumps to the method declaration (a call's callee is a method).
+        let area_col = bar.find("b.area").unwrap() as u32 + 2;
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, area_col))
+            .expect("the method `area` resolves to its declaration");
+        assert_eq!(loc.uri, box_uri);
+        assert_eq!(
+            loc.range.start,
+            Position::new(0, box_src.find("area").unwrap() as u32)
+        );
+    }
+
+    #[test]
+    fn workspace_hover_shows_a_member_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Box.java"),
+            "package a; class Box { long id; }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void m(Box b) { var v = b.id; } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Hovering the field access `b.id` shows the field's type, resolved cross-file.
+        let col = bar.find("b.id").unwrap() as u32 + 2;
+        let hover = ws
+            .hover(&bar_uri, Position::new(0, col))
+            .expect("b.id has an inferred type");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert_eq!(markup.value, "```java\nlong\n```");
+    }
+
+    #[test]
+    fn workspace_signature_help_on_a_cross_file_method() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Box.java"),
+            "package a; class Box { int area(int w, int h) { return 0; } }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void g(Box b) { b.area(1, ); } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Cursor on the second argument of `b.area(1, )`: the receiver `b` is a cross-file `Box`.
+        let needle = "area(1, ";
+        let col = bar.find(needle).unwrap() as u32 + needle.len() as u32;
+        let help = ws
+            .signature_help(&bar_uri, Position::new(0, col))
+            .expect("signature help on b.area");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "area(int w, int h)");
+        assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn workspace_completes_members_of_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Box.java"),
+            "package a; class Box { int size; int area() { return 0; } }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { void g(Box b) { b. } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Cursor right after `b.`: the receiver `b` is a cross-file `Box`, so its members complete.
+        let col = bar.find("b. ").unwrap() as u32 + 2;
+        let mut labels: Vec<String> = ws
+            .completions(&bar_uri, Position::new(0, col))
+            .expect("Bar.java is in the workspace")
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        labels.sort();
+        assert_eq!(labels, ["area", "size"]);
+
+        // A document outside the workspace has no workspace completions.
+        let other = Url::parse("file:///elsewhere/Other.java").unwrap();
+        assert!(ws.completions(&other, Position::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn workspace_scope_completion_offers_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Helper.java"),
+            "package a; class Helper { }",
+        )
+        .unwrap();
+        let main = "package a; class Main { void m() { int x = 1;  } }";
+        std::fs::write(dir.path().join("Main.java"), main).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let main_uri = Url::from_file_path(dir.path().join("Main.java")).unwrap();
+
+        // A bare position inside `m`: the sibling type `Helper`, the local `x`, and keywords are all
+        // offered (not a member access, so the scope path runs).
+        let col = main.find("1; ").unwrap() as u32 + 3;
+        let labels: Vec<String> = ws
+            .completions(&main_uri, Position::new(0, col))
+            .expect("Main.java is in the workspace")
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            labels.contains(&"Helper".to_string()),
+            "cross-file type in {labels:?}"
+        );
+        assert!(labels.contains(&"x".to_string()));
+        assert!(labels.contains(&"return".to_string()));
+    }
+
+    #[test]
+    fn workspace_document_highlight_is_precise_for_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+        // A same-package sibling uses `Foo` twice and also has a same-spelled local.
+        let bar = "package a; class Bar { Foo a; Foo b; void m() { int Foo = 0; } }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // Cursor on the first `Foo` type use: only the two cross-file type references highlight,
+        // never the `int Foo` local.
+        let col = bar.find("Foo").unwrap() as u32;
+        let highlights = ws
+            .document_highlight(&bar_uri, Position::new(0, col))
+            .expect("Bar.java is in the workspace");
+        assert_eq!(highlights.len(), 2);
+    }
+
+    #[test]
+    fn workspace_semantic_tokens_classify_a_cross_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Color.java"),
+            "package a; enum Color { RED }",
+        )
+        .unwrap();
+        let bar = "package a; class Bar { Color c; }";
+        std::fs::write(dir.path().join("Bar.java"), bar).unwrap();
+
+        let ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+
+        // The `Color` reference is delta-encoded; decode to the first token's absolute column and
+        // confirm the cross-file `enum` kind (index 3 in the legend) was applied.
+        let tokens = ws
+            .semantic_tokens(&bar_uri)
+            .expect("Bar.java is in the workspace");
+        let legend = crate::handlers::semantic_tokens_legend();
+        let enum_index = legend
+            .token_types
+            .iter()
+            .position(|t| t.as_str() == "enum")
+            .unwrap() as u32;
+        let color_col = bar.find("Color").unwrap() as u32;
+        let (mut line, mut start) = (0u32, 0u32);
+        let mut found = None;
+        for token in &tokens.data {
+            if token.delta_line == 0 {
+                start += token.delta_start;
+            } else {
+                line += token.delta_line;
+                start = token.delta_start;
+            }
+            if line == 0 && start == color_col {
+                found = Some(token.token_type);
+            }
+        }
+        assert_eq!(found, Some(enum_index));
     }
 }

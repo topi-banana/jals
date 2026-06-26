@@ -4,12 +4,12 @@ use jals_syntax::SyntaxKind;
 use jals_syntax::ast::{AstNode, ImportDecl};
 
 use crate::diagnostic::Severity;
-use crate::rules::{Finding, RuleMeta};
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "wildcard-import",
     default: Severity::Warn,
-    check,
+    check: Checker::Syntactic(check),
 };
 
 fn check(root: &jals_syntax::SyntaxNode) -> Vec<Finding> {

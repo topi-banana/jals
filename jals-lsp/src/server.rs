@@ -7,19 +7,22 @@ use std::path::Path;
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
-    CreateFilesParams, DeleteFilesParams, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    CompletionOptions, CompletionParams, CompletionResponse, CreateFilesParams, DeleteFilesParams,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
     FoldingRangeProviderCapability, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, Location, OneOf, PublishDiagnosticsParams, Registration, RegistrationParams,
-    RenameFilesParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
+    InitializedParams, Location, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
+    ReferenceParams, Registration, RegistrationParams, RenameFilesParams, RenameOptions,
+    RenameParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
     SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
+    WorkspaceEdit,
     notification::{self, Notification},
     request,
 };
@@ -27,7 +30,7 @@ use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
 use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
-use async_lsp::{ClientSocket, LanguageServer, MainLoop, ResponseError};
+use async_lsp::{ClientSocket, ErrorCode, LanguageServer, MainLoop, ResponseError};
 use futures::future::BoxFuture;
 use jals_build::Manifest;
 use tower::ServiceBuilder;
@@ -143,22 +146,49 @@ impl ServerState {
         };
         let mut diagnostics = handlers::compute_diagnostics(&doc.parse, &doc.text, &doc.line_index);
         let lint_config = self.lint_discovery.for_uri(uri);
+
+        // The workspace (if any) that owns this file, paired with its id within that workspace's
+        // index — looked up once and reused by both the lint-rule suppression and the cross-file
+        // passes below.
+        let workspace_file = self
+            .workspace_for(uri)
+            .and_then(|ws| Some((ws, ws.file_id(uri)?)));
+        // Files in an indexed project get the index-aware `type-mismatch` check below; suppress the
+        // file-local lint rule of the same name there so the two never double-report.
+        let mut rule_config = lint_config.clone();
+        if workspace_file.is_some() {
+            rule_config.rules.insert(
+                jals_lint::TYPE_MISMATCH_RULE.to_string(),
+                jals_lint::Severity::Allow,
+            );
+        }
         diagnostics.extend(handlers::compute_lint_diagnostics(
             &doc.parse,
             &doc.text,
             &doc.line_index,
-            &lint_config,
+            &rule_config,
         ));
-        // Cross-file "cannot resolve symbol" diagnostics, only for files in an indexed project.
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(file) = workspace.file_id(uri)
-        {
+        // Cross-file diagnostics ("cannot resolve symbol" + index-aware type mismatches), only for
+        // files in an indexed project. Both passes read the same file-local resolution, so resolve
+        // the tree once here and share it rather than resolving twice per publish.
+        if let Some((workspace, file)) = workspace_file {
+            let resolved = jals_hir::resolve_node(&doc.parse.syntax());
             diagnostics.extend(handlers::compute_type_diagnostics(
                 workspace.index(),
                 file,
                 &doc.parse,
+                &resolved,
                 &doc.text,
                 &doc.line_index,
+            ));
+            diagnostics.extend(handlers::compute_type_mismatch_diagnostics(
+                workspace.index(),
+                file,
+                &doc.parse,
+                &resolved,
+                &doc.text,
+                &doc.line_index,
+                &lint_config,
             ));
         }
         let _ = self
@@ -333,12 +363,26 @@ impl LanguageServer for ServerState {
         params: DocumentHighlightParams,
     ) -> BoxFuture<'static, Result<Option<Vec<DocumentHighlight>>, Self::Error>> {
         let pos = params.text_document_position_params;
-        let doc = self.store.get(&pos.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                handlers::document_highlight(&doc.parse, &doc.text, &doc.line_index, pos.position)
-            }))
-        })
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index highlights cross-file type names precisely through the
+        // workspace; any other document falls back to file-local highlighting (a lexical match for
+        // such a name) over the open document alone.
+        let highlights = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.document_highlight(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::document_highlight(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        position,
+                        None,
+                    )
+                })
+            });
+        Box::pin(async move { Ok(highlights) })
     }
 
     fn definition(
@@ -371,6 +415,110 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(location.map(GotoDefinitionResponse::Scalar)) })
     }
 
+    fn references(
+        &mut self,
+        params: ReferenceParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<Location>>, Self::Error>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+        // A file in an indexed project finds references project-wide through the workspace (a project
+        // type used from any source file); any other document falls back to file-local references
+        // over the open document alone.
+        let locations = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.references(&uri, position, include_declaration))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::references(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        &uri,
+                        position,
+                        include_declaration,
+                    )
+                })
+            });
+        Box::pin(async move { Ok(locations) })
+    }
+
+    fn prepare_rename(
+        &mut self,
+        params: TextDocumentPositionParams,
+    ) -> BoxFuture<'static, Result<Option<PrepareRenameResponse>, Self::Error>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+        // A file in an indexed project validates project types project-wide through the workspace;
+        // any other document falls back to file-local renamability over the open document alone.
+        let range = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.prepare_rename(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::prepare_rename_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(range.map(PrepareRenameResponse::Range)) })
+    }
+
+    fn rename(
+        &mut self,
+        params: RenameParams,
+    ) -> BoxFuture<'static, Result<Option<WorkspaceEdit>, Self::Error>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+        // Reject a new name that is not a single legal Java identifier before producing any edit, so
+        // the editor surfaces the error instead of writing broken source.
+        if !handlers::is_valid_identifier(&new_name) {
+            return Box::pin(async move {
+                Err(ResponseError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("`{new_name}` is not a valid Java identifier"),
+                ))
+            });
+        }
+        // A file in an indexed project renames project types project-wide through the workspace;
+        // any other document falls back to a file-local rename over the open document alone.
+        let edit = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.rename(&uri, position, &new_name))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::rename_local(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        &uri,
+                        position,
+                        &new_name,
+                    )
+                })
+            });
+        Box::pin(async move { Ok(edit) })
+    }
+
+    fn completion(
+        &mut self,
+        params: CompletionParams,
+    ) -> BoxFuture<'static, Result<Option<CompletionResponse>, Self::Error>> {
+        let pos = params.text_document_position;
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index completes members with cross-file type names through the
+        // workspace; any other document falls back to a single-file index of the open document.
+        let items = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.completions(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::completions_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(items.map(CompletionResponse::Array)) })
+    }
+
     fn hover(
         &mut self,
         params: HoverParams,
@@ -391,6 +539,26 @@ impl LanguageServer for ServerState {
         Box::pin(async move { Ok(hover) })
     }
 
+    fn signature_help(
+        &mut self,
+        params: SignatureHelpParams,
+    ) -> BoxFuture<'static, Result<Option<SignatureHelp>, Self::Error>> {
+        let pos = params.text_document_position_params;
+        let uri = pos.text_document.uri;
+        let position = pos.position;
+        // A file in the project index resolves overloads with cross-file type names through the
+        // workspace; any other document falls back to a single-file index of the open document.
+        let help = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.signature_help(&uri, position))
+            .or_else(|| {
+                self.store.get(&uri).and_then(|doc| {
+                    handlers::signature_help_local(&doc.parse, &doc.text, &doc.line_index, position)
+                })
+            });
+        Box::pin(async move { Ok(help) })
+    }
+
     fn formatting(
         &mut self,
         params: DocumentFormattingParams,
@@ -406,16 +574,19 @@ impl LanguageServer for ServerState {
         &mut self,
         params: SemanticTokensParams,
     ) -> BoxFuture<'static, Result<Option<SemanticTokensResult>, Self::Error>> {
-        let doc = self.store.get(&params.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                SemanticTokensResult::Tokens(handlers::semantic_tokens(
-                    &doc.parse,
-                    &doc.text,
-                    &doc.line_index,
-                ))
-            }))
-        })
+        let uri = params.text_document.uri;
+        // A file in the project index classifies cross-file type names by their declared kind through
+        // the workspace; any other document falls back to file-local classification (the generic
+        // `type` for such a name) over the open document alone.
+        let tokens = self
+            .workspace_for(&uri)
+            .and_then(|workspace| workspace.semantic_tokens(&uri))
+            .or_else(|| {
+                self.store.get(&uri).map(|doc| {
+                    handlers::semantic_tokens(&doc.parse, &doc.text, &doc.line_index, None)
+                })
+            });
+        Box::pin(async move { Ok(tokens.map(SemanticTokensResult::Tokens)) })
     }
 
     fn folding_range(
@@ -477,7 +648,21 @@ fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..CompletionOptions::default()
+        }),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
@@ -581,6 +766,23 @@ mod tests {
             2,
             "a file under no manifest builds no workspace"
         );
+    }
+
+    #[test]
+    fn advertises_rename_with_prepare_support() {
+        let caps = server_capabilities();
+        let Some(OneOf::Right(rename)) = caps.rename_provider else {
+            panic!("rename provider advertised with options");
+        };
+        assert_eq!(rename.prepare_provider, Some(true));
+    }
+
+    #[test]
+    fn advertises_completion_triggered_on_dot() {
+        let completion = server_capabilities()
+            .completion_provider
+            .expect("completion provider advertised");
+        assert_eq!(completion.trigger_characters, Some(vec![".".to_string()]));
     }
 
     #[test]
