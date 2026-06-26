@@ -130,6 +130,28 @@ fn new_array_is_an_array_type() {
 }
 
 #[test]
+fn new_and_cast_carry_type_arguments() {
+    // An external generic type: both `ArrayList` and `String` are unindexed, rendered by spelling.
+    let ext = "class C { void m() { var r = new ArrayList<String>(); } }";
+    assert_eq!(expr_ty(ext, "new ArrayList<String>()"), "ArrayList<String>");
+
+    // A project generic type keeps its argument too; `Box` and `Helper` both resolve to project items.
+    let proj =
+        "class Box<T> { } class C { void m() { var r = new Box<Helper>(); } } class Helper { }";
+    assert_eq!(expr_ty(proj, "new Box<Helper>()"), "Box<Helper>");
+
+    // A cast target's type arguments are carried through.
+    let cast = "class C { void m(Object o) { var r = (List<String>) o; } }";
+    assert_eq!(expr_ty(cast, "(List<String>) o"), "List<String>");
+
+    // A bare wildcard argument (`<?>`) is a token, not a nameable type node, so it is not carried —
+    // the type degrades to its raw spelling rather than failing. Wildcards are modelled in a later
+    // phase (generic subtyping).
+    let wild = "class C { void m(Object o) { var r = (List<?>) o; } }";
+    assert_eq!(expr_ty(wild, "(List<?>) o"), "List");
+}
+
+#[test]
 fn array_field_and_index_peel_one_dimension() {
     let src = "class C { int[] xs; void m() { var r = xs; } }";
     assert_eq!(def_ty(src, "xs"), "int[]");

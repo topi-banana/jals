@@ -3,8 +3,8 @@
 //! [`Ty`] is distinct from the syntactic [`jals_syntax::ast::Type`]. That is a CST node, the type
 //! *as written* (`List<String>`, `int[]`); this is the resolved, structural type that inference
 //! produces and a consumer (hover) displays. The MVP is deliberately shallow — type arguments are
-//! dropped, and anything inference cannot work out is [`Ty::Unknown`] rather than an error, so the
-//! pass never panics and degrades to a best effort.
+//! carried for display but not yet consulted in subtyping, and anything inference cannot work out is
+//! [`Ty::Unknown`] rather than an error, so the pass never panics and degrades to a best effort.
 
 use std::fmt;
 
@@ -21,8 +21,8 @@ pub enum Ty {
     Null,
     /// An array; the boxed type is the element type (`int[][]` nests).
     Array(Box<Ty>),
-    /// A nominal reference type (class / interface / enum / record), by name. Type arguments are
-    /// dropped in the MVP.
+    /// A nominal reference type (class / interface / enum / record), by name, with its type
+    /// arguments (see [`ClassTy`]) carried for display but not yet used in subtyping.
     Class(ClassTy),
     /// The error / could-not-infer type. Propagates instead of failing; never surfaced as a real
     /// type to a consumer (hover suppresses it).
@@ -95,26 +95,57 @@ impl Primitive {
     }
 }
 
-/// A nominal reference type, identified by name.
+/// A nominal reference type, identified by name and carrying its type arguments as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClassTy {
     /// Resolved to a type declared in the indexed project. `name` is the simple name, kept so the
     /// type displays without the index (and so a [`DefId`]-free `Ty` stays self-describing).
-    Project { id: ItemId, name: String },
+    Project {
+        id: ItemId,
+        name: String,
+        /// The type arguments as written (`List<String>` → `[String]`). Empty for a raw or
+        /// argument-free use (`List`). Carried for display and future generic substitution; the
+        /// MVP's subtyping ([`Ty::is_assignable_to`]) does not yet consult them.
+        args: Vec<Ty>,
+    },
     /// A type known only by name — a JDK / external type, or one we chose not to resolve (the
     /// project-free [`infer_node`](crate::infer_node) path). Carries the spelling as written.
-    External(String),
+    External {
+        name: String,
+        /// The type arguments as written, like [`Project`](ClassTy::Project)'s `args`.
+        args: Vec<Ty>,
+    },
+}
+
+impl ClassTy {
+    /// An external (JDK / unindexed) class type with no type arguments.
+    pub fn external(name: impl Into<String>) -> ClassTy {
+        ClassTy::External {
+            name: name.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// The simple class name, common to both variants.
+    pub fn name(&self) -> &str {
+        match self {
+            ClassTy::Project { name, .. } | ClassTy::External { name, .. } => name,
+        }
+    }
+
+    /// The type arguments as written; empty for a raw or argument-free use.
+    pub fn args(&self) -> &[Ty] {
+        match self {
+            ClassTy::Project { args, .. } | ClassTy::External { args, .. } => args,
+        }
+    }
 }
 
 impl Ty {
     /// Whether this is the `String` class type (the only reference type the MVP recognises by
     /// name, for `+` string-concatenation).
     pub fn is_string(&self) -> bool {
-        match self {
-            Ty::Class(ClassTy::External(s)) => s == "String",
-            Ty::Class(ClassTy::Project { name, .. }) => name == "String",
-            _ => false,
-        }
+        matches!(self, Ty::Class(c) if c.name() == "String")
     }
 
     /// The numeric primitive this type is, if any (`boolean` excluded).
@@ -169,11 +200,11 @@ impl Ty {
             (Primitive(s), Primitive(t)) => s.widens_to(*t),
             // Boxing: a primitive may box to an external wrapper / `Object`, never to a user type
             // or an array.
-            (Primitive(_), Class(External(_))) => true,
+            (Primitive(_), Class(External { .. })) => true,
             (Primitive(_), Class(Project { .. }) | Array(_) | Void) => false,
 
             // Unboxing: an external reference may be a numeric wrapper; a user type or array is not.
-            (Class(External(_)), Primitive(_)) => true,
+            (Class(External { .. }), Primitive(_)) => true,
             (Class(Project { .. }) | Array(_), Primitive(_)) => false,
 
             // Reference subtyping between two project types: walk the indexed supertype chain.
@@ -184,9 +215,9 @@ impl Ty {
             },
             // A project type may widen to an external supertype (`Object`, a JDK interface); an
             // external type might really be an unindexed project type — both conservatively `true`.
-            (Class(Project { .. }), Class(External(_)))
-            | (Class(External(_)), Class(Project { .. }))
-            | (Class(External(_)), Class(External(_))) => true,
+            (Class(Project { .. }), Class(External { .. }))
+            | (Class(External { .. }), Class(Project { .. }))
+            | (Class(External { .. }), Class(External { .. })) => true,
 
             // Arrays: invariant for primitive elements, covariant for reference elements.
             (Array(s), Array(t)) => match (s.as_ref(), t.as_ref()) {
@@ -195,7 +226,7 @@ impl Ty {
             },
             // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`
             // (external), but never to a user class.
-            (Array(_), Class(External(_))) => true,
+            (Array(_), Class(External { .. })) => true,
             (Array(_), Class(Project { .. })) => false,
 
             // `void` is assignable only to itself (handled by identity above).
@@ -215,8 +246,17 @@ impl fmt::Display for Ty {
             Ty::Void => f.write_str("void"),
             Ty::Null => f.write_str("null"),
             Ty::Array(elem) => write!(f, "{elem}[]"),
-            Ty::Class(ClassTy::Project { name, .. }) => f.write_str(name),
-            Ty::Class(ClassTy::External(name)) => f.write_str(name),
+            Ty::Class(c) => {
+                f.write_str(c.name())?;
+                if let [first, rest @ ..] = c.args() {
+                    write!(f, "<{first}")?;
+                    for arg in rest {
+                        write!(f, ", {arg}")?;
+                    }
+                    f.write_str(">")?;
+                }
+                Ok(())
+            }
             Ty::Unknown => f.write_str("?"),
         }
     }
@@ -224,7 +264,7 @@ impl fmt::Display for Ty {
 
 /// The `java.lang.String` type as the MVP models it.
 pub(crate) fn string_ty() -> Ty {
-    Ty::Class(ClassTy::External("String".to_string()))
+    Ty::Class(ClassTy::external("String"))
 }
 
 /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
@@ -278,6 +318,28 @@ mod tests {
     }
 
     #[test]
+    fn display_renders_type_arguments() {
+        // A raw / argument-free class renders as the bare name.
+        assert_eq!(
+            Ty::Class(ClassTy::external("List")).to_string(),
+            "List",
+            "no args: bare name"
+        );
+        // A single type argument: `List<String>`.
+        let list_of_string = Ty::Class(ClassTy::External {
+            name: "List".to_string(),
+            args: vec![string_ty()],
+        });
+        assert_eq!(list_of_string.to_string(), "List<String>");
+        // Several arguments, comma-separated, and nesting: `Map<String, List<int>>`.
+        let map = Ty::Class(ClassTy::External {
+            name: "Map".to_string(),
+            args: vec![string_ty(), list_of_string],
+        });
+        assert_eq!(map.to_string(), "Map<String, List<String>>");
+    }
+
+    #[test]
     fn numeric_promotion_widens_to_the_larger_operand() {
         let byte = Ty::Primitive(Primitive::Byte);
         let int = Ty::Primitive(Primitive::Int);
@@ -320,7 +382,7 @@ mod tests {
         let int = Ty::Primitive(Primitive::Int);
         let long = Ty::Primitive(Primitive::Long);
         let boolean = Ty::Primitive(Primitive::Boolean);
-        let obj = Ty::Class(ClassTy::External("Object".to_string()));
+        let obj = Ty::Class(ClassTy::external("Object"));
 
         // Identity and widening; narrowing is a mismatch.
         assert!(int.is_assignable_to(&int, None));
@@ -350,11 +412,9 @@ mod tests {
     fn assignability_of_arrays() {
         let int_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Int)));
         let long_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Long)));
-        let obj = Ty::Class(ClassTy::External("Object".to_string()));
+        let obj = Ty::Class(ClassTy::external("Object"));
         let str_arr = Ty::Array(Box::new(string_ty()));
-        let cs_arr = Ty::Array(Box::new(Ty::Class(ClassTy::External(
-            "CharSequence".to_string(),
-        ))));
+        let cs_arr = Ty::Array(Box::new(Ty::Class(ClassTy::external("CharSequence"))));
 
         // Primitive element arrays are invariant.
         assert!(int_arr.is_assignable_to(&int_arr, None));

@@ -560,7 +560,7 @@ impl<'a> Inferer<'a> {
             // Target-typed forms still need a later phase (a method reference / lambda takes its
             // type from context; a switch expression unifies its arms).
             ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) | ast::Expr::Switch(_) => Ty::Unknown,
-            ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::External("Class".to_string())),
+            ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::external("Class")),
         }
     }
 
@@ -703,14 +703,24 @@ impl<'a> Inferer<'a> {
             return Ty::Unknown;
         };
         let name = tok.text().to_string();
+        let args = self.type_args_of(ty);
         if let Some((index, file)) = self.project
             && let Some(&ri) = self.ref_by_start.get(&token_start(&tok))
             && let TypeResolution::Project(id) =
                 index.resolve_reference(file, &self.resolved.references[ri])
         {
-            return Ty::Class(ClassTy::Project { id, name });
+            return Ty::Class(ClassTy::Project { id, name, args });
         }
-        Ty::Class(ClassTy::External(name))
+        Ty::Class(ClassTy::External { name, args })
+    }
+
+    /// The type arguments written on a reference type (`List<String>` → `[String]`), each converted
+    /// to a [`Ty`]; empty when the type is raw or argument-free. A wildcard argument (`?`,
+    /// `? extends T`) has no nameable type and converts to [`Ty::Unknown`].
+    fn type_args_of(&self, ty: &ast::Type) -> Vec<Ty> {
+        ty.type_args()
+            .map(|ta| ta.args().map(|arg| self.ty_of_type(&arg)).collect())
+            .unwrap_or_default()
     }
 
     // --- Member-dependent inference -----------------------------------------------------------
@@ -798,12 +808,15 @@ fn member_type_to_ty(index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty 
             dims,
         } => {
             let base = match index.resolve_type_name(file, name, qualified.as_deref()) {
+                // A member's declared type carries no type arguments yet (the index drops them at
+                // capture time); generic substitution of inherited / field types is a later phase.
                 TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
                     id,
                     name: name.clone(),
+                    args: Vec::new(),
                 }),
                 TypeResolution::External | TypeResolution::Unresolved => {
-                    Ty::Class(ClassTy::External(name.clone()))
+                    Ty::Class(ClassTy::external(name.clone()))
                 }
             };
             array_of(base, *dims as usize)
