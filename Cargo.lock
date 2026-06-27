@@ -846,6 +846,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jals-classfile"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jals-cli"
 version = "0.1.0"
 dependencies = [

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "jals-build",
+  "jals-classfile",
   "jals-cli",
   "jals-fmt",
   "jals-hir",
