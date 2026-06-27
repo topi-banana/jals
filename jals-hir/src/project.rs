@@ -695,16 +695,18 @@ impl ProjectIndex {
     /// precondition for concluding "no overload matches" without a false positive.
     ///
     /// It is *not* knowable when `name` is an [`Object`](is_object_method) method (every type inherits
-    /// `Object`'s overloads, which are not indexed) or when `owner` or any project supertype `extends`
-    /// / `implements` a type outside the project (which may declare further overloads we cannot see).
+    /// `Object`'s overloads, which are not indexed), when `owner` or any project supertype `extends`
+    /// / `implements` a type outside the project (which may declare further overloads we cannot see),
+    /// or when the walk reaches a standard-library *stub* type, whose member set is deliberately
+    /// partial (the common members only) — so a stub-owned or stub-inherited overload set is treated
+    /// as incomplete, never yielding a "no overload" conclusion.
     pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
         if is_object_method(name) {
             return false;
         }
         self.walk_supertypes(owner, |current| {
-            self.items[current.0 as usize]
-                .has_external_supertype
-                .then_some(())
+            let item = &self.items[current.0 as usize];
+            (item.origin == ItemOrigin::Stdlib || item.has_external_supertype).then_some(())
         })
         .is_none()
     }

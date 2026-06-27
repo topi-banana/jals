@@ -759,7 +759,9 @@ impl<'a> Inferer<'a> {
                     return Ty::Unknown;
                 };
                 match self.enclosing_item(call.syntax()) {
-                    Some(owner) => self.member_ty_of_item(owner, &name, Namespace::Method),
+                    // A bare (`this`) call: the enclosing type is used raw, so its own type variables
+                    // stay un-substituted (they survive by name).
+                    Some(owner) => self.member_ty_in(owner, &[], &name, Namespace::Method),
                     None => Ty::Unknown,
                 }
             }
@@ -778,13 +780,6 @@ impl<'a> Inferer<'a> {
             }
             _ => Ty::Unknown,
         }
-    }
-
-    /// The type of the member `name` (in `namespace`) reachable from project type `owner` (an
-    /// implicit `this`), searching the type and its project-internal supertypes. The enclosing type
-    /// is used raw — its own type variables stay un-substituted (they survive by name).
-    fn member_ty_of_item(&self, owner: ItemId, name: &str, namespace: Namespace) -> Ty {
-        self.member_ty_in(owner, &[], name, namespace)
     }
 
     /// The type of member `name` (in `namespace`) on project type `owner` with type arguments
@@ -887,19 +882,42 @@ fn member_ty_substituted(
             |current, args| {
                 let member_id = index.declared_member(current, name, namespace)?;
                 let member = index.member(member_id);
-                let bind = subst_fn(index, current, args);
-                Some(member_type_to_ty(index, member.file, current, &member.ty).substitute(&bind))
+                Some(subst_member_ty(
+                    index,
+                    current,
+                    args,
+                    member.file,
+                    &member.ty,
+                ))
             },
             |current, args, sup| {
-                let bind = subst_fn(index, current, args);
                 let file = index.item(current).file;
                 sup.args
                     .iter()
-                    .map(|mt| member_type_to_ty(index, file, current, mt).substitute(&bind))
+                    .map(|mt| subst_member_ty(index, current, args, file, mt))
                     .collect()
             },
         )
         .unwrap_or(Ty::Unknown)
+}
+
+/// [`member_type_to_ty`] for a member-type `mt` declared in `current` (in `file`), with `current`'s
+/// type parameters bound to `args`. A raw frame (`args` empty — a non-generic or raw receiver, the
+/// common case) needs no binding, so the converted type is returned directly instead of cloning the
+/// whole tree through a no-op [`Ty::substitute`].
+fn subst_member_ty(
+    index: &ProjectIndex,
+    current: ItemId,
+    args: &[Ty],
+    file: FileId,
+    mt: &MemberType,
+) -> Ty {
+    let ty = member_type_to_ty(index, file, current, mt);
+    if args.is_empty() {
+        ty
+    } else {
+        ty.substitute(&subst_fn(index, current, args))
+    }
 }
 
 /// The substitution for a use of `owner` with type arguments `args`: a function binding each of
