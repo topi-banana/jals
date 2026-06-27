@@ -210,6 +210,40 @@ fn bare_method_call_resolves_on_the_enclosing_type() {
 }
 
 #[test]
+fn generic_member_access_substitutes_type_arguments() {
+    // A direct type-variable member binds to the receiver's argument: `Box<String>.get() : String`.
+    let direct = "class Box<E> { E get() { return null; } E item; } \
+                  class C { void m(Box<String> b) { var g = b.get(); var f = b.item; } }";
+    assert_eq!(expr_ty(direct, "b.get()"), "String");
+    assert_eq!(expr_ty(direct, "b.item"), "String");
+
+    // Substitution recurses into a nested generic: a `List<E>` field becomes `List<String>`.
+    let nested = "class Box<E> { List<E> xs; } \
+                  class C { void m(Box<String> b) { var r = b.xs; } }";
+    assert_eq!(expr_ty(nested, "b.xs"), "List<String>");
+
+    // A raw receiver leaves the type variable un-substituted (it survives by name).
+    let raw = "class Box<E> { E get() { return null; } } \
+               class C { void m(Box b) { var r = b.get(); } }";
+    assert_eq!(expr_ty(raw, "b.get()"), "E");
+}
+
+#[test]
+fn inherited_generic_member_substitutes_through_the_chain() {
+    // A concrete supertype argument binds the inherited member: `Sub extends Base<String>`.
+    let concrete = "class Base<T> { T get() { return null; } } \
+                    class Sub extends Base<String> { } \
+                    class C { void m(Sub s) { var r = s.get(); } }";
+    assert_eq!(expr_ty(concrete, "s.get()"), "String");
+
+    // The receiver's own argument threads through to the supertype: `Sub<U> extends Base<U>`.
+    let threaded = "class Base<T> { T get() { return null; } } \
+                    class Sub<U> extends Base<U> { } \
+                    class C { void m(Sub<String> s) { var r = s.get(); } }";
+    assert_eq!(expr_ty(threaded, "s.get()"), "String");
+}
+
+#[test]
 fn inherited_member_is_accessible() {
     let src = "class Base { int shared() { return 0; } } class Sub extends Base { } class C { void m(Sub s) { var r = s.shared(); } }";
     assert_eq!(expr_ty(src, "s.shared()"), "int");

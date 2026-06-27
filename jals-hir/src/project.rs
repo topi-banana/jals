@@ -602,6 +602,32 @@ impl ProjectIndex {
         self.decl_to_item.get(&(file, name_start)).copied()
     }
 
+    /// The member named `name` in name-space `namespace` declared *directly* on `owner` (no
+    /// inheritance walk), if any. The single-level building block of the inheritance-aware
+    /// [`resolve_member`](Self::resolve_member); used by generic member substitution, which threads
+    /// type arguments down the chain one level at a time.
+    pub fn declared_member(
+        &self,
+        owner: ItemId,
+        name: &str,
+        namespace: Namespace,
+    ) -> Option<MemberId> {
+        self.members_by_owner
+            .get(&owner)?
+            .iter()
+            .copied()
+            .find(|&id| {
+                let member = &self.members[id.0 as usize];
+                member.name == name && member.kind.namespace() == namespace
+            })
+    }
+
+    /// Whether `name` is one of type `owner`'s own declared type parameters (`class Box<E>` → `E` is
+    /// a type parameter). Used to tell a bare type-variable reference apart from a real type name.
+    pub(crate) fn is_type_param(&self, owner: ItemId, name: &str) -> bool {
+        self.item(owner).type_params.iter().any(|p| p.name == name)
+    }
+
     /// Resolves a member named `name` in name-space `namespace` (value for a field / enum constant,
     /// method for a method / constructor) on type `owner`, searching the type itself and then its
     /// project-internal supertypes.
@@ -615,14 +641,10 @@ impl ProjectIndex {
         name: &str,
         namespace: Namespace,
     ) -> Option<MemberId> {
+        // The type's own members win over inherited ones — the walk reaches `current`'s
+        // supertypes only after `declared_member` returns `None`.
         self.walk_supertypes(owner, |current| {
-            // The type's own members win over inherited ones — the walk reaches `current`'s
-            // supertypes only after this returns `None`.
-            let ids = self.members_by_owner.get(&current)?;
-            ids.iter().copied().find(|&id| {
-                let member = &self.members[id.0 as usize];
-                member.name == name && member.kind.namespace() == namespace
-            })
+            self.declared_member(current, name, namespace)
         })
     }
 
@@ -705,17 +727,32 @@ impl ProjectIndex {
         start: ItemId,
         mut visit: impl FnMut(ItemId) -> Option<R>,
     ) -> Option<R> {
+        self.walk_supertypes_stateful(start, (), |current, ()| visit(current), |_, (), _| ())
+    }
+
+    /// [`walk_supertypes`](Self::walk_supertypes) threading a per-type state `S` down the chain: each
+    /// frame carries the state `descend` derives from its parent's (and the linking [`Supertype`]),
+    /// so a stateful traversal — e.g. propagating generic type arguments to inherited members —
+    /// rides on the single cycle-guarded walk rather than re-implementing it.
+    pub(crate) fn walk_supertypes_stateful<S, R>(
+        &self,
+        start: ItemId,
+        init: S,
+        mut visit: impl FnMut(ItemId, &S) -> Option<R>,
+        mut descend: impl FnMut(ItemId, &S, &Supertype) -> S,
+    ) -> Option<R> {
         let mut visited = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(current) = stack.pop() {
+        let mut stack = vec![(start, init)];
+        while let Some((current, state)) = stack.pop() {
             if !visited.insert(current) {
                 continue;
             }
-            if let Some(result) = visit(current) {
+            if let Some(result) = visit(current, &state) {
                 return Some(result);
             }
             for sup in self.items[current.0 as usize].supertypes.iter().rev() {
-                stack.push(sup.id);
+                let next = descend(current, &state, sup);
+                stack.push((sup.id, next));
             }
         }
         None

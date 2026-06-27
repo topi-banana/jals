@@ -24,6 +24,11 @@ pub enum Ty {
     /// A nominal reference type (class / interface / enum / record), by name, with its type
     /// arguments (see [`ClassTy`]) carried for display but not yet used in subtyping.
     Class(ClassTy),
+    /// An un-substituted type variable: a reference to the type parameter `name` of the indexed type
+    /// `owner` (`class Box<E>` → `E` is `TypeVar { owner: Box, name: "E" }`). Substituted by a
+    /// concrete type when a use supplies arguments (`Box<String>`); left as-is for a raw use, where
+    /// it displays as its name. Treated leniently in subtyping (like [`Unknown`](Ty::Unknown)).
+    TypeVar { owner: ItemId, name: String },
     /// The error / could-not-infer type. Propagates instead of failing; never surfaced as a real
     /// type to a consumer (hover suppresses it).
     Unknown,
@@ -181,8 +186,10 @@ impl Ty {
         use ClassTy::{External, Project};
         use Ty::*;
 
-        // Unknown on either side: defer, never claim a mismatch.
-        if matches!(self, Unknown) || matches!(target, Unknown) {
+        // Unknown or an un-substituted type variable on either side: defer, never claim a mismatch.
+        // A type variable stands for an unknown concrete type (its bound is not yet modelled), so
+        // treating it leniently keeps the "never a false positive" guarantee.
+        if matches!(self, Unknown | TypeVar { .. }) || matches!(target, Unknown | TypeVar { .. }) {
             return true;
         }
         // Identity covers equal primitives, the same project item, an equally-spelled external
@@ -237,6 +244,27 @@ impl Ty {
             _ => false,
         }
     }
+
+    /// Returns a copy with every [`TypeVar`](Ty::TypeVar) replaced by `f(owner, name)` where that
+    /// yields `Some`, recursing through array elements and class type arguments. A type variable `f`
+    /// does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged. The
+    /// basis for binding a generic type's parameters to the arguments a use supplies.
+    pub fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Ty>) -> Ty {
+        match self {
+            Ty::TypeVar { owner, name } => f(*owner, name).unwrap_or_else(|| self.clone()),
+            Ty::Array(elem) => Ty::Array(Box::new(elem.substitute(f))),
+            Ty::Class(ClassTy::Project { id, name, args }) => Ty::Class(ClassTy::Project {
+                id: *id,
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute(f)).collect(),
+            }),
+            Ty::Class(ClassTy::External { name, args }) => Ty::Class(ClassTy::External {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute(f)).collect(),
+            }),
+            Ty::Primitive(_) | Ty::Void | Ty::Null | Ty::Unknown => self.clone(),
+        }
+    }
 }
 
 impl fmt::Display for Ty {
@@ -257,6 +285,7 @@ impl fmt::Display for Ty {
                 }
                 Ok(())
             }
+            Ty::TypeVar { name, .. } => f.write_str(name),
             Ty::Unknown => f.write_str("?"),
         }
     }
