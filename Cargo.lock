@@ -889,6 +889,7 @@ name = "jals-hir"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-classfile",
  "jals-syntax",
  "proptest",
 ]

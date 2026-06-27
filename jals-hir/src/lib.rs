@@ -38,6 +38,7 @@
 //! assert_eq!(resolved.def(id).name, "x");
 //! ```
 
+mod classpath;
 mod def;
 mod infer;
 mod project;

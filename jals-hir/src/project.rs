@@ -75,6 +75,11 @@ pub enum ItemOrigin {
     /// [`ProjectIndex::build_with_stdlib`]. Carries signatures for inference and hover, but no
     /// host-openable location.
     Stdlib,
+    /// Decoded from a `.class` file on the classpath (see [`crate::classpath`]); present only via
+    /// [`ProjectIndex::build_with_classpath`]. Like a stub it has no host-openable source, but its
+    /// declared member set is *complete* for that class, so it is not treated leniently the way a
+    /// (deliberately partial) stub is.
+    Classpath,
 }
 
 /// An indexed type declaration: a class / interface / enum / record / annotation type, identified
@@ -256,7 +261,7 @@ impl ProjectIndex {
     /// [`build_with_stdlib`](ProjectIndex::build_with_stdlib) to also fold in the embedded
     /// `java.lang` stubs.
     pub fn build(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
-        Self::build_inner(files, false)
+        Self::build_inner(files, false, &[])
     }
 
     /// Like [`build`](ProjectIndex::build), but also indexes the embedded `java.lang` stubs
@@ -266,10 +271,30 @@ impl ProjectIndex {
     ///
     /// Still pure and `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
     pub fn build_with_stdlib(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
-        Self::build_inner(files, true)
+        Self::build_inner(files, true, &[])
     }
 
-    fn build_inner(files: &[(FileId, SyntaxNode)], stdlib: bool) -> ProjectIndex {
+    /// Like [`build_with_stdlib`](ProjectIndex::build_with_stdlib), but also folds in the type,
+    /// member, and generic signatures decoded from `classfiles` (the project's classpath `.class`
+    /// files) as [`Classpath`](ItemOrigin::Classpath)-origin types. With them, a reference to an
+    /// external library type resolves to a real [`Item`] with members and supertypes, so inference
+    /// sees through it — `List<String>.get(0)` infers `String` through a loaded `java/util/List`.
+    ///
+    /// The host owns the I/O: it reads the `.class` bytes (from disk or a JAR) and parses them with
+    /// `jals_classfile`, keeping this layer pure and `wasm32`-compatible. A project or stub type wins
+    /// over a classpath type of the same fully-qualified name.
+    pub fn build_with_classpath(
+        files: &[(FileId, SyntaxNode)],
+        classfiles: &[jals_classfile::ClassFile],
+    ) -> ProjectIndex {
+        Self::build_inner(files, true, classfiles)
+    }
+
+    fn build_inner(
+        files: &[(FileId, SyntaxNode)],
+        stdlib: bool,
+        classfiles: &[jals_classfile::ClassFile],
+    ) -> ProjectIndex {
         let mut index = ProjectIndex {
             items: Vec::new(),
             by_fqn: HashMap::new(),
@@ -315,6 +340,21 @@ impl ProjectIndex {
         for &(file, root, origin) in &units {
             index.collect_file(file, root, origin);
         }
+        // Classpath `.class` files, lowered to self-contained data and registered like source types.
+        // Their reserved `FileId`s sit just below the stub block so they never collide.
+        let classfiles: Vec<(FileId, crate::classpath::ClassfileClass)> = classfiles
+            .iter()
+            .enumerate()
+            .filter_map(|(j, cf)| {
+                let class = crate::classpath::lower(cf)?;
+                let file = FileId(u32::MAX - stubs.len() as u32 - 1 - j as u32);
+                Some((file, class))
+            })
+            .collect();
+        let classfile_owners: Vec<ItemId> = classfiles
+            .iter()
+            .map(|(file, class)| index.collect_classfile_type(*file, class))
+            .collect();
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
         for (i, item) in index.items.iter().enumerate() {
@@ -326,6 +366,11 @@ impl ProjectIndex {
         // so a supertype declared later (or in another file / stub) still resolves.
         for &(file, root, _) in &units {
             index.collect_members_and_supertypes(file, root);
+        }
+        // The same second pass for classpath types, now that every type (project, stub, classpath) is
+        // registered, so their supertypes resolve by fully-qualified name.
+        for ((file, class), &owner) in classfiles.into_iter().zip(&classfile_owners) {
+            index.collect_classfile_members_and_supertypes(file, owner, class);
         }
         index
     }
@@ -406,6 +451,42 @@ impl ProjectIndex {
         }
     }
 
+    /// Pushes a fully-built [`Member`], giving it a dense [`MemberId`] and recording it under its
+    /// owner. Shared by the source-file and classpath second passes.
+    fn register_member(&mut self, owner: ItemId, member: Member) {
+        let id = MemberId(self.members.len() as u32);
+        self.members.push(member);
+        self.members_by_owner.entry(owner).or_default().push(id);
+    }
+
+    /// Resolves a list of supertype references (each a [`MemberType::Named`]) against the index,
+    /// keeping the ones that land on an indexed project type (with the arguments the clause supplied)
+    /// and noting whether any resolves *outside* the project (so the type's full member set is not
+    /// knowable). Shared by the source-file and classpath second passes.
+    fn resolve_supertypes(&self, file: FileId, supers: &[MemberType]) -> (Vec<Supertype>, bool) {
+        let mut supertypes = Vec::new();
+        let mut has_external = false;
+        for sup in supers {
+            let MemberType::Named {
+                name,
+                qualified,
+                args,
+                ..
+            } = sup
+            else {
+                continue;
+            };
+            match self.resolve_type_name(file, name, qualified.as_deref()) {
+                TypeResolution::Project(id) => supertypes.push(Supertype {
+                    id,
+                    args: args.clone(),
+                }),
+                TypeResolution::External | TypeResolution::Unresolved => has_external = true,
+            }
+        }
+        (supertypes, has_external)
+    }
+
     /// Walks `node`, recording each type declaration's direct members and resolving its
     /// project-internal supertypes. Runs in [`build`](ProjectIndex::build)'s second pass, when every
     /// type is already indexed (so a forward / cross-file supertype reference resolves).
@@ -416,36 +497,83 @@ impl ProjectIndex {
         {
             // Members. Captured purely from the node; pushed here so each gets a dense `MemberId`.
             for member in members_of_decl(owner, file, node, name_tok.text()) {
-                let id = MemberId(self.members.len() as u32);
-                self.members.push(member);
-                self.members_by_owner.entry(owner).or_default().push(id);
+                self.register_member(owner, member);
             }
-            // Supertypes: keep the ones that resolve to an indexed project type (with the arguments
-            // the clause supplied), and note whether any resolves *outside* the project (so the
-            // type's full member set is not knowable).
-            let mut supertypes = Vec::new();
-            let mut has_external = false;
-            for sup in raw_supertypes_of(node) {
-                let MemberType::Named {
-                    name,
-                    qualified,
-                    args,
-                    ..
-                } = sup
-                else {
-                    continue;
-                };
-                match self.resolve_type_name(file, &name, qualified.as_deref()) {
-                    TypeResolution::Project(id) => supertypes.push(Supertype { id, args }),
-                    TypeResolution::External | TypeResolution::Unresolved => has_external = true,
-                }
-            }
-            self.items[owner.0 as usize].supertypes = supertypes;
-            self.items[owner.0 as usize].has_external_supertype = has_external;
+            let (supertypes, has_external) =
+                self.resolve_supertypes(file, &raw_supertypes_of(node));
+            let item = &mut self.items[owner.0 as usize];
+            item.supertypes = supertypes;
+            item.has_external_supertype = has_external;
         }
         for child in node.children() {
             self.collect_members_and_supertypes(file, &child);
         }
+    }
+
+    /// Registers a classpath type (first pass): pushes its [`Item`] and a per-file [`FileMeta`], and
+    /// returns the new [`ItemId`]. Members and supertypes are filled in by
+    /// [`collect_classfile_members_and_supertypes`](Self::collect_classfile_members_and_supertypes),
+    /// mirroring the two-pass source path so a forward / cross-file supertype still resolves.
+    fn collect_classfile_type(
+        &mut self,
+        file: FileId,
+        class: &crate::classpath::ClassfileClass,
+    ) -> ItemId {
+        let id = ItemId(self.items.len() as u32);
+        self.items.push(Item {
+            fqn: Fqn(class.fqn.clone()),
+            kind: class.kind,
+            origin: ItemOrigin::Classpath,
+            file,
+            name_range: 0..0,
+            type_params: class.type_params.clone(),
+            supertypes: Vec::new(),
+            has_external_supertype: false,
+        });
+        // A project or stub type of the same name wins (first insert).
+        self.by_fqn.entry(class.fqn.clone()).or_insert(id);
+        // Each classpath type gets its own pseudo-file with empty imports: every captured type name is
+        // emitted fully-qualified, so it resolves through `resolve_qualified` without an import context.
+        let package = class.fqn.rsplit_once('.').map(|(pkg, _)| pkg.to_string());
+        self.files.insert(
+            file,
+            FileMeta {
+                package,
+                single_imports: Vec::new(),
+                on_demand: Vec::new(),
+            },
+        );
+        id
+    }
+
+    /// Registers a classpath type's members and resolves its supertypes by fully-qualified name
+    /// (second pass), the classfile counterpart of
+    /// [`collect_members_and_supertypes`](Self::collect_members_and_supertypes).
+    fn collect_classfile_members_and_supertypes(
+        &mut self,
+        file: FileId,
+        owner: ItemId,
+        class: crate::classpath::ClassfileClass,
+    ) {
+        for member in class.members {
+            self.register_member(
+                owner,
+                Member {
+                    owner,
+                    name: member.name,
+                    kind: member.kind,
+                    file,
+                    name_range: 0..0,
+                    ty: member.ty,
+                    params: member.params,
+                    varargs: member.varargs,
+                },
+            );
+        }
+        let (supertypes, has_external) = self.resolve_supertypes(file, &class.supertypes);
+        let item = &mut self.items[owner.0 as usize];
+        item.supertypes = supertypes;
+        item.has_external_supertype = has_external;
     }
 
     /// Resolves a simple type name `name` referenced from `file`, in Java's lookup order.
@@ -558,8 +686,8 @@ impl ProjectIndex {
         match self.resolve_reference(file, reference) {
             TypeResolution::Project(id) => {
                 let item = &self.items[id.0 as usize];
-                // A stub type has no host-openable file; do not offer it as a navigation target.
-                if item.origin == ItemOrigin::Stdlib {
+                // A stub or classpath type has no host-openable source; not a navigation target.
+                if item.origin != ItemOrigin::Project {
                     return None;
                 }
                 Some((item.file, item.name_range.clone()))
