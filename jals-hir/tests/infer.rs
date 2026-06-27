@@ -185,6 +185,18 @@ fn field_access_resolves_to_the_field_type() {
 }
 
 #[test]
+fn field_access_carries_type_arguments() {
+    // A concrete argument flows through the member's declared type: `xs : List<String>`.
+    let src = "class Box { List<String> xs; } class C { void m(Box b) { var r = b.xs; } }";
+    assert_eq!(expr_ty(src, "b.xs"), "List<String>");
+
+    // A type-variable argument is carried by spelling (`E`); binding it to the receiver's actual
+    // argument is the substitution phase, not yet done — so it shows as the declared `List<E>`.
+    let generic = "class Box<E> { List<E> xs; } class C { void m(Box b) { var r = b.xs; } }";
+    assert_eq!(expr_ty(generic, "b.xs"), "List<E>");
+}
+
+#[test]
 fn method_call_resolves_to_the_return_type() {
     let src = "class Box { int area() { return 0; } Box grow() { return this; } } class C { void m(Box b) { var n = b.area(); var g = b.grow(); } }";
     assert_eq!(expr_ty(src, "b.area()"), "int");

@@ -718,9 +718,9 @@ impl<'a> Inferer<'a> {
     /// to a [`Ty`]; empty when the type is raw or argument-free. A wildcard argument (`?`,
     /// `? extends T`) has no nameable type and converts to [`Ty::Unknown`].
     fn type_args_of(&self, ty: &ast::Type) -> Vec<Ty> {
-        ty.type_args()
-            .map(|ta| ta.args().map(|arg| self.ty_of_type(&arg)).collect())
-            .unwrap_or_default()
+        ty.type_arg_types()
+            .map(|arg| self.ty_of_type(&arg))
+            .collect()
     }
 
     // --- Member-dependent inference -----------------------------------------------------------
@@ -806,17 +806,26 @@ fn member_type_to_ty(index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty 
             name,
             qualified,
             dims,
+            args,
         } => {
+            // Concrete arguments are carried into the `Ty` (`List<String>` → element `String`). A
+            // type-variable argument (`List<E>`) resolves to an external by-name type for now;
+            // binding it to the receiver's actual argument is a later phase (substitution).
+            let ty_args = args
+                .iter()
+                .map(|a| member_type_to_ty(index, file, a))
+                .collect();
             let base = match index.resolve_type_name(file, name, qualified.as_deref()) {
-                // A member's declared type carries no type arguments yet (the index drops them at
-                // capture time); generic substitution of inherited / field types is a later phase.
                 TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
                     id,
                     name: name.clone(),
-                    args: Vec::new(),
+                    args: ty_args,
                 }),
                 TypeResolution::External | TypeResolution::Unresolved => {
-                    Ty::Class(ClassTy::external(name.clone()))
+                    Ty::Class(ClassTy::External {
+                        name: name.clone(),
+                        args: ty_args,
+                    })
                 }
             };
             array_of(base, *dims as usize)
