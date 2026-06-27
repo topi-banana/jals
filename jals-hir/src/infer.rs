@@ -14,10 +14,12 @@
 //!
 //! Scope is the structural / local subset (literals, names, arithmetic with numeric promotion,
 //! casts, `new`, arrays) plus member access — `obj.field` and `recv.method()` resolve against the
-//! project member model ([`ProjectIndex::resolve_member`]) when the receiver is a project type,
-//! walking its project-internal supertypes. A member of an external (unindexed) type, and the
-//! target-typed forms (method references, lambdas, switch expressions), stay [`Ty::Unknown`]. The
-//! pass never panics: every accessor is `Option`/iterator and an unresolvable form is `Unknown`.
+//! project member model when the receiver is a project type, walking its project-internal
+//! supertypes and substituting the receiver's generic type arguments into the member's type
+//! ([`member_ty_substituted`]), so `Box<String>.get()` is `String`. A member of an external
+//! (unindexed) type, and the target-typed forms (method references, lambdas, switch expressions),
+//! stay [`Ty::Unknown`]. The pass never panics: every accessor is `Option`/iterator and an
+//! unresolvable form is `Unknown`.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -322,7 +324,10 @@ fn check_call(
     let applicable = |m: &crate::Member| {
         arg_tys.iter().zip(&m.params).all(|(arg_ty, param)| {
             arg_ty.is_none_or(|ty| {
-                ty.is_assignable_to(&member_type_to_ty(index, m.file, &param.ty), Some(index))
+                ty.is_assignable_to(
+                    &member_type_to_ty(index, m.file, m.owner, &param.ty),
+                    Some(index),
+                )
             })
         })
     };
@@ -337,7 +342,7 @@ fn check_call(
     if let [only] = matching.as_slice() {
         // A single overload: precise per-argument diagnostics against it.
         for ((arg_ty, span), param) in arg_tys.iter().zip(&arg_spans).zip(&only.params) {
-            let param_ty = member_type_to_ty(index, only.file, &param.ty);
+            let param_ty = member_type_to_ty(index, only.file, only.owner, &param.ty);
             if let Some(ty) = arg_ty
                 && !ty.is_assignable_to(&param_ty, Some(index))
             {
@@ -560,7 +565,7 @@ impl<'a> Inferer<'a> {
             // Target-typed forms still need a later phase (a method reference / lambda takes its
             // type from context; a switch expression unifies its arms).
             ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) | ast::Expr::Switch(_) => Ty::Unknown,
-            ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::External("Class".to_string())),
+            ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::external("Class")),
         }
     }
 
@@ -703,14 +708,24 @@ impl<'a> Inferer<'a> {
             return Ty::Unknown;
         };
         let name = tok.text().to_string();
+        let args = self.type_args_of(ty);
         if let Some((index, file)) = self.project
             && let Some(&ri) = self.ref_by_start.get(&token_start(&tok))
             && let TypeResolution::Project(id) =
                 index.resolve_reference(file, &self.resolved.references[ri])
         {
-            return Ty::Class(ClassTy::Project { id, name });
+            return Ty::Class(ClassTy::Project { id, name, args });
         }
-        Ty::Class(ClassTy::External(name))
+        Ty::Class(ClassTy::External { name, args })
+    }
+
+    /// The type arguments written on a reference type (`List<String>` → `[String]`), each converted
+    /// to a [`Ty`]; empty when the type is raw or argument-free. A wildcard argument (`?`,
+    /// `? extends T`) has no nameable type and converts to [`Ty::Unknown`].
+    fn type_args_of(&self, ty: &ast::Type) -> Vec<Ty> {
+        ty.type_arg_types()
+            .map(|arg| self.ty_of_type(&arg))
+            .collect()
     }
 
     // --- Member-dependent inference -----------------------------------------------------------
@@ -744,7 +759,9 @@ impl<'a> Inferer<'a> {
                     return Ty::Unknown;
                 };
                 match self.enclosing_item(call.syntax()) {
-                    Some(owner) => self.member_ty_of_item(owner, &name, Namespace::Method),
+                    // A bare (`this`) call: the enclosing type is used raw, so its own type variables
+                    // stay un-substituted (they survive by name).
+                    Some(owner) => self.member_ty_in(owner, &[], &name, Namespace::Method),
                     None => Ty::Unknown,
                 }
             }
@@ -755,23 +772,29 @@ impl<'a> Inferer<'a> {
     /// The type of the member `name` (in `namespace`) reachable from receiver type `receiver` — a
     /// field's type or a method's return type — when `receiver` is an indexed project type.
     fn member_ty(&self, receiver: &Ty, name: &str, namespace: Namespace) -> Ty {
-        match receiver.project_id() {
-            Some(id) => self.member_ty_of_item(id, name, namespace),
-            None => Ty::Unknown,
+        // A project receiver carries the type arguments to substitute into the member's type; any
+        // other receiver (primitive, external, array, type variable) has no indexed members.
+        match receiver {
+            Ty::Class(ClassTy::Project { id, args, .. }) => {
+                self.member_ty_in(*id, args, name, namespace)
+            }
+            _ => Ty::Unknown,
         }
     }
 
-    /// The type of the member `name` (in `namespace`) reachable from project type `owner`, searching
-    /// the type and its project-internal supertypes.
-    fn member_ty_of_item(&self, owner: ItemId, name: &str, namespace: Namespace) -> Ty {
-        let Some((index, _)) = self.project else {
-            return Ty::Unknown;
-        };
-        let Some(member_id) = index.resolve_member(owner, name, namespace) else {
-            return Ty::Unknown;
-        };
-        let member = index.member(member_id);
-        member_type_to_ty(index, member.file, &member.ty)
+    /// The type of member `name` (in `namespace`) on project type `owner` with type arguments
+    /// `owner_args` bound — [`member_ty_substituted`] guarded by the project index being present.
+    fn member_ty_in(
+        &self,
+        owner: ItemId,
+        owner_args: &[Ty],
+        name: &str,
+        namespace: Namespace,
+    ) -> Ty {
+        match self.project {
+            Some((index, _)) => member_ty_substituted(index, owner, owner_args, name, namespace),
+            None => Ty::Unknown,
+        }
     }
 
     /// The enclosing project type of `node`: the nearest ancestor type declaration that is an
@@ -783,9 +806,11 @@ impl<'a> Inferer<'a> {
 }
 
 /// Turns a member's captured [`MemberType`] into a concrete [`Ty`], resolving a named type against
-/// the project from the member's *declaring* `file` (its import / package context). A free function
-/// so a caller holding only a [`TypeInference`] (e.g. argument checking) can use it too.
-fn member_type_to_ty(index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty {
+/// the project from the member's *declaring* `file` (its import / package context). `owner` is the
+/// type whose declaration the `MemberType` lives in: a bare name matching one of its type parameters
+/// becomes a [`Ty::TypeVar`] (to be substituted by the caller) rather than an external by-name type.
+/// A free function so a caller holding only a [`TypeInference`] (e.g. argument checking) can use it.
+fn member_type_to_ty(index: &ProjectIndex, file: FileId, owner: ItemId, mt: &MemberType) -> Ty {
     match mt {
         MemberType::Primitive { keyword, dims } => {
             let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
@@ -796,20 +821,122 @@ fn member_type_to_ty(index: &ProjectIndex, file: FileId, mt: &MemberType) -> Ty 
             name,
             qualified,
             dims,
+            args,
         } => {
-            let base = match index.resolve_type_name(file, name, qualified.as_deref()) {
-                TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
-                    id,
+            let base = if qualified.is_none() && index.is_type_param(owner, name) {
+                // A bare name matching one of `owner`'s type parameters is a type variable (`E`),
+                // recorded for later substitution (a type variable takes no arguments of its own).
+                Ty::TypeVar {
+                    owner,
                     name: name.clone(),
-                }),
-                TypeResolution::External | TypeResolution::Unresolved => {
-                    Ty::Class(ClassTy::External(name.clone()))
+                }
+            } else {
+                // Otherwise a project / external type, with its concrete arguments carried
+                // recursively (`List<String>` → element `String`; `List<E>` → element type var `E`).
+                let ty_args = args
+                    .iter()
+                    .map(|a| member_type_to_ty(index, file, owner, a))
+                    .collect();
+                match index.resolve_type_name(file, name, qualified.as_deref()) {
+                    TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
+                        id,
+                        name: name.clone(),
+                        args: ty_args,
+                    }),
+                    TypeResolution::External | TypeResolution::Unresolved => {
+                        Ty::Class(ClassTy::External {
+                            name: name.clone(),
+                            args: ty_args,
+                        })
+                    }
                 }
             };
             array_of(base, *dims as usize)
         }
         MemberType::Unknown => Ty::Unknown,
     }
+}
+
+/// The concrete type of member `name` (in `namespace`) accessed on a receiver of project type
+/// `owner` with type arguments `owner_args` — i.e. [`member_type_to_ty`] with the receiver's generic
+/// arguments bound. Searches `owner` and its project-internal supertypes nearest-first (mirroring
+/// [`ProjectIndex::resolve_member`]'s shadowing), substituting each type variable by the argument
+/// propagated down the inheritance chain (`Sub extends Base<String>` binds `Base`'s `T` to
+/// `String`). [`Ty::Unknown`] when no such member resolves. A raw receiver (no arguments) leaves the
+/// member's type variables un-substituted, so they survive by name.
+fn member_ty_substituted(
+    index: &ProjectIndex,
+    owner: ItemId,
+    owner_args: &[Ty],
+    name: &str,
+    namespace: Namespace,
+) -> Ty {
+    // Each frame's state is a type's concrete type arguments, as seen from the original receiver;
+    // the shared inheritance walk threads them down — binding a supertype's arguments through the
+    // current type's substitution so a type variable threaded `Sub<U> extends Base<U>` resolves all
+    // the way down.
+    index
+        .walk_supertypes_stateful(
+            owner,
+            owner_args.to_vec(),
+            |current, args| {
+                let member_id = index.declared_member(current, name, namespace)?;
+                let member = index.member(member_id);
+                Some(subst_member_ty(
+                    index,
+                    current,
+                    args,
+                    member.file,
+                    &member.ty,
+                ))
+            },
+            |current, args, sup| {
+                let file = index.item(current).file;
+                sup.args
+                    .iter()
+                    .map(|mt| subst_member_ty(index, current, args, file, mt))
+                    .collect()
+            },
+        )
+        .unwrap_or(Ty::Unknown)
+}
+
+/// [`member_type_to_ty`] for a member-type `mt` declared in `current` (in `file`), with `current`'s
+/// type parameters bound to `args`. A raw frame (`args` empty — a non-generic or raw receiver, the
+/// common case) needs no binding, so the converted type is returned directly instead of cloning the
+/// whole tree through a no-op [`Ty::substitute`].
+fn subst_member_ty(
+    index: &ProjectIndex,
+    current: ItemId,
+    args: &[Ty],
+    file: FileId,
+    mt: &MemberType,
+) -> Ty {
+    let ty = member_type_to_ty(index, file, current, mt);
+    if args.is_empty() {
+        ty
+    } else {
+        ty.substitute(&subst_fn(index, current, args))
+    }
+}
+
+/// The substitution for a use of `owner` with type arguments `args`: a function binding each of
+/// `owner`'s type parameters, by position, to the supplied argument (suitable for [`Ty::substitute`]).
+/// A raw use (fewer arguments than parameters, typically none) leaves the surplus parameters unbound,
+/// so they stay type variables.
+fn subst_fn(
+    index: &ProjectIndex,
+    owner: ItemId,
+    args: &[Ty],
+) -> impl Fn(ItemId, &str) -> Option<Ty> {
+    let bindings: HashMap<String, Ty> = index
+        .item(owner)
+        .type_params
+        .iter()
+        .zip(args)
+        .map(|(p, arg)| (p.name.clone(), arg.clone()))
+        .collect();
+    move |o, n| (o == owner).then(|| bindings.get(n).cloned()).flatten()
 }
 
 /// The nearest ancestor type declaration of `node` that is an indexed project item, in `file`. A
@@ -1045,7 +1172,7 @@ fn render_signature(index: &ProjectIndex, member: &crate::Member) -> Signature {
         if i > 0 {
             label.push_str(", ");
         }
-        let ty = member_type_to_ty(index, member.file, &param.ty).to_string();
+        let ty = member_type_to_ty(index, member.file, member.owner, &param.ty).to_string();
         let text = match &param.name {
             Some(name) => format!("{ty} {name}"),
             None => ty,
@@ -1122,10 +1249,10 @@ fn completion_of(index: &ProjectIndex, member: &crate::Member) -> Completion {
         DefKind::Method => {
             let signature = render_signature(index, member);
             let params = &signature.label[member.name.len()..];
-            let ret = member_type_to_ty(index, member.file, &member.ty);
+            let ret = member_type_to_ty(index, member.file, member.owner, &member.ty);
             format!("{params}: {ret}")
         }
-        _ => member_type_to_ty(index, member.file, &member.ty).to_string(),
+        _ => member_type_to_ty(index, member.file, member.owner, &member.ty).to_string(),
     };
     Completion {
         label: member.name.clone(),

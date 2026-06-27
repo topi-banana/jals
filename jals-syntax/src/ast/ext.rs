@@ -156,6 +156,13 @@ impl Type {
     pub fn is_primitive_or_var(&self) -> bool {
         ident_tokens(&self.syntax).next().is_none()
     }
+
+    /// The type-argument `Type` nodes written on this type, in order (`List<String>` → one `String`,
+    /// `Map<K, V>` → `K`, `V`); empty for a raw or argument-free type. A bare wildcard (`?`) appears
+    /// as a node with no reference name (see [`is_primitive_or_var`](Type::is_primitive_or_var)).
+    pub fn type_arg_types(&self) -> impl Iterator<Item = Type> {
+        self.type_args().into_iter().flat_map(|ta| ta.args())
+    }
 }
 
 impl Literal {

@@ -1,7 +1,7 @@
 //! Tests for the project member model: member indexing, declared-type capture, and member
 //! resolution through project-internal inheritance.
 
-use jals_hir::{DefKind, FileId, MemberType, Namespace, ProjectIndex};
+use jals_hir::{DefKind, FileId, MemberType, Namespace, ProjectIndex, Supertype, TypeParamDecl};
 use jals_syntax::SyntaxNode;
 
 /// Parses each source (keeping the `SOURCE_FILE` nodes alive) and builds a [`ProjectIndex`].
@@ -52,7 +52,8 @@ fn fields_and_methods_are_indexed_with_their_declared_type() {
         MemberType::Named {
             name: "String".into(),
             qualified: None,
-            dims: 0
+            dims: 0,
+            args: Vec::new(),
         }
     );
     assert_eq!(field("f").kind, DefKind::Field);
@@ -60,6 +61,99 @@ fn fields_and_methods_are_indexed_with_their_declared_type() {
     let m = index.member(index.resolve_member(t, "m", Namespace::Method).unwrap());
     assert_eq!(m.kind, DefKind::Method);
     assert_eq!(m.ty, MemberType::Void);
+}
+
+/// A named member type captures its type arguments (`List<String>`, `Map<String, Integer>`),
+/// recursively, as data — the basis for later generic substitution.
+#[test]
+fn field_type_captures_type_arguments() {
+    let sources = ["class T { List<String> xs; Map<String, Integer> m; }"];
+    let (_nodes, index) = build(&sources);
+    let t = item(&index, &sources, 0, "T");
+    let field = |name: &str| {
+        index
+            .member(index.resolve_member(t, name, Namespace::Value).unwrap())
+            .ty
+            .clone()
+    };
+
+    let named = |n: &str| MemberType::Named {
+        name: n.into(),
+        qualified: None,
+        dims: 0,
+        args: Vec::new(),
+    };
+    assert_eq!(
+        field("xs"),
+        MemberType::Named {
+            name: "List".into(),
+            qualified: None,
+            dims: 0,
+            args: vec![named("String")],
+        }
+    );
+    assert_eq!(
+        field("m"),
+        MemberType::Named {
+            name: "Map".into(),
+            qualified: None,
+            dims: 0,
+            args: vec![named("String"), named("Integer")],
+        }
+    );
+}
+
+/// A type's declared type parameters are recorded in order, each with its `extends` bounds.
+#[test]
+fn type_parameters_are_recorded_with_their_bounds() {
+    let sources = ["class Box<T> { } class Holder<K extends Number, V> { }"];
+    let (_nodes, index) = build(&sources);
+
+    let box_ty = index.item(item(&index, &sources, 0, "Box"));
+    assert_eq!(
+        box_ty.type_params,
+        vec![TypeParamDecl {
+            name: "T".into(),
+            bounds: Vec::new(),
+        }]
+    );
+
+    let holder = index.item(item(&index, &sources, 0, "Holder"));
+    assert_eq!(holder.type_params.len(), 2);
+    assert_eq!(holder.type_params[0].name, "K");
+    assert_eq!(
+        holder.type_params[0].bounds,
+        vec![MemberType::Named {
+            name: "Number".into(),
+            qualified: None,
+            dims: 0,
+            args: Vec::new(),
+        }]
+    );
+    assert_eq!(holder.type_params[1].name, "V");
+    assert!(holder.type_params[1].bounds.is_empty());
+}
+
+/// A project-internal supertype records the type arguments the clause supplies (`extends
+/// Base<String>` → `[String]`), keyed to the resolved supertype item.
+#[test]
+fn supertype_arguments_are_recorded() {
+    let sources = ["class Base<T> { } class Sub extends Base<String> { }"];
+    let (_nodes, index) = build(&sources);
+    let base_id = item(&index, &sources, 0, "Base");
+    let sub = index.item(item(&index, &sources, 0, "Sub"));
+    assert_eq!(
+        sub.supertypes,
+        vec![Supertype {
+            id: base_id,
+            args: vec![MemberType::Named {
+                name: "String".into(),
+                qualified: None,
+                dims: 0,
+                args: Vec::new(),
+            }],
+        }]
+    );
 }
 
 #[test]

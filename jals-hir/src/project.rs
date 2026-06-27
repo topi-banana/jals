@@ -91,14 +91,41 @@ pub struct Item {
     pub file: FileId,
     /// The byte range of the declaring name token (the go-to-definition target).
     pub name_range: Range<usize>,
-    /// The project-internal supertypes (`extends` / `implements` that resolve to indexed types), for
+    /// The type's own type parameters in declaration order (`class Box<T>` → one `T`). Empty for a
+    /// non-generic type. Recorded so generic member substitution (a later phase) can bind them to the
+    /// arguments a use supplies.
+    pub type_params: Vec<TypeParamDecl>,
+    /// The project-internal supertypes (`extends` / `implements` that resolve to indexed types), each
+    /// with the type arguments the clause supplies (`extends Container<String>` → `[String]`), for
     /// inherited-member lookup. A supertype outside the indexed sources (a JDK class, an unresolved
     /// name) is simply absent, so a member search up the chain stops at it gracefully.
-    pub supertypes: Vec<ItemId>,
+    pub supertypes: Vec<Supertype>,
     /// Whether any `extends` / `implements` clause names a type *outside* the indexed project (a JDK
     /// or third-party class). When true, this type may inherit members — including method overloads —
     /// that the index cannot see, so a "no member / no overload" conclusion is not trustworthy.
     pub has_external_supertype: bool,
+}
+
+/// A type's declared type parameter (`<T>`, `<T extends Number>`): its name and its bounds, captured
+/// as self-contained data like a [`Member`]'s type, to be resolved / substituted in a later phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParamDecl {
+    /// The parameter's name (`T`).
+    pub name: String,
+    /// The upper bounds after `extends` (`<T extends A & B>` → `[A, B]`); empty for an unbounded
+    /// parameter (implicitly `Object`).
+    pub bounds: Vec<MemberType>,
+}
+
+/// A resolved project-internal supertype: the indexed type it names, plus the type arguments the
+/// `extends` / `implements` clause supplied to it (`extends Container<String>` → `[String]`). The
+/// arguments are kept for generic inherited-member substitution; plain subtyping ignores them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Supertype {
+    /// The indexed supertype.
+    pub id: ItemId,
+    /// The type arguments supplied to it, captured like a [`Member`]'s type; empty for a raw use.
+    pub args: Vec<MemberType>,
 }
 
 /// A dense identifier for a [`Member`] within one [`ProjectIndex`].
@@ -153,12 +180,18 @@ pub enum MemberType {
     Primitive { keyword: String, dims: u32 },
     /// The `void` return type.
     Void,
-    /// A named reference type: its simple name, the full dotted text when written qualified, and the
-    /// array dimension count. Resolved cross-file later, in the declaring file's import context.
+    /// A named reference type: its simple name, the full dotted text when written qualified, the
+    /// array dimension count, and its type arguments. Resolved cross-file later, in the declaring
+    /// file's import context.
     Named {
         name: String,
         qualified: Option<String>,
         dims: u32,
+        /// The type arguments as written (`List<String>` → `[String]`, `Map<K, V>` → `[K, V]`),
+        /// each captured recursively like the outer type. Empty for a raw / non-generic use. A bare
+        /// wildcard (`<?>`) is not captured. Resolved (and, later, substituted) in the declaring
+        /// file's context.
+        args: Vec<MemberType>,
     },
     /// No resolvable value type — a constructor, a `var` slot, or a type that could not be read.
     Unknown,
@@ -361,6 +394,7 @@ impl ProjectIndex {
                 origin,
                 file,
                 name_range: byte_range(&name_tok),
+                type_params: type_params_of(node),
                 supertypes: Vec::new(),
                 has_external_supertype: false,
             });
@@ -386,13 +420,23 @@ impl ProjectIndex {
                 self.members.push(member);
                 self.members_by_owner.entry(owner).or_default().push(id);
             }
-            // Supertypes: keep the ones that resolve to an indexed project type, and note whether any
-            // resolves *outside* the project (so the type's full member set is not knowable).
+            // Supertypes: keep the ones that resolve to an indexed project type (with the arguments
+            // the clause supplied), and note whether any resolves *outside* the project (so the
+            // type's full member set is not knowable).
             let mut supertypes = Vec::new();
             let mut has_external = false;
-            for (name, qualified) in raw_supertypes_of(node) {
+            for sup in raw_supertypes_of(node) {
+                let MemberType::Named {
+                    name,
+                    qualified,
+                    args,
+                    ..
+                } = sup
+                else {
+                    continue;
+                };
                 match self.resolve_type_name(file, &name, qualified.as_deref()) {
-                    TypeResolution::Project(id) => supertypes.push(id),
+                    TypeResolution::Project(id) => supertypes.push(Supertype { id, args }),
                     TypeResolution::External | TypeResolution::Unresolved => has_external = true,
                 }
             }
@@ -558,6 +602,32 @@ impl ProjectIndex {
         self.decl_to_item.get(&(file, name_start)).copied()
     }
 
+    /// The member named `name` in name-space `namespace` declared *directly* on `owner` (no
+    /// inheritance walk), if any. The single-level building block of the inheritance-aware
+    /// [`resolve_member`](Self::resolve_member); used by generic member substitution, which threads
+    /// type arguments down the chain one level at a time.
+    pub fn declared_member(
+        &self,
+        owner: ItemId,
+        name: &str,
+        namespace: Namespace,
+    ) -> Option<MemberId> {
+        self.members_by_owner
+            .get(&owner)?
+            .iter()
+            .copied()
+            .find(|&id| {
+                let member = &self.members[id.0 as usize];
+                member.name == name && member.kind.namespace() == namespace
+            })
+    }
+
+    /// Whether `name` is one of type `owner`'s own declared type parameters (`class Box<E>` → `E` is
+    /// a type parameter). Used to tell a bare type-variable reference apart from a real type name.
+    pub(crate) fn is_type_param(&self, owner: ItemId, name: &str) -> bool {
+        self.item(owner).type_params.iter().any(|p| p.name == name)
+    }
+
     /// Resolves a member named `name` in name-space `namespace` (value for a field / enum constant,
     /// method for a method / constructor) on type `owner`, searching the type itself and then its
     /// project-internal supertypes.
@@ -571,14 +641,10 @@ impl ProjectIndex {
         name: &str,
         namespace: Namespace,
     ) -> Option<MemberId> {
+        // The type's own members win over inherited ones — the walk reaches `current`'s
+        // supertypes only after `declared_member` returns `None`.
         self.walk_supertypes(owner, |current| {
-            // The type's own members win over inherited ones — the walk reaches `current`'s
-            // supertypes only after this returns `None`.
-            let ids = self.members_by_owner.get(&current)?;
-            ids.iter().copied().find(|&id| {
-                let member = &self.members[id.0 as usize];
-                member.name == name && member.kind.namespace() == namespace
-            })
+            self.declared_member(current, name, namespace)
         })
     }
 
@@ -629,16 +695,18 @@ impl ProjectIndex {
     /// precondition for concluding "no overload matches" without a false positive.
     ///
     /// It is *not* knowable when `name` is an [`Object`](is_object_method) method (every type inherits
-    /// `Object`'s overloads, which are not indexed) or when `owner` or any project supertype `extends`
-    /// / `implements` a type outside the project (which may declare further overloads we cannot see).
+    /// `Object`'s overloads, which are not indexed), when `owner` or any project supertype `extends`
+    /// / `implements` a type outside the project (which may declare further overloads we cannot see),
+    /// or when the walk reaches a standard-library *stub* type, whose member set is deliberately
+    /// partial (the common members only) — so a stub-owned or stub-inherited overload set is treated
+    /// as incomplete, never yielding a "no overload" conclusion.
     pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
         if is_object_method(name) {
             return false;
         }
         self.walk_supertypes(owner, |current| {
-            self.items[current.0 as usize]
-                .has_external_supertype
-                .then_some(())
+            let item = &self.items[current.0 as usize];
+            (item.origin == ItemOrigin::Stdlib || item.has_external_supertype).then_some(())
         })
         .is_none()
     }
@@ -661,17 +729,32 @@ impl ProjectIndex {
         start: ItemId,
         mut visit: impl FnMut(ItemId) -> Option<R>,
     ) -> Option<R> {
+        self.walk_supertypes_stateful(start, (), |current, ()| visit(current), |_, (), _| ())
+    }
+
+    /// [`walk_supertypes`](Self::walk_supertypes) threading a per-type state `S` down the chain: each
+    /// frame carries the state `descend` derives from its parent's (and the linking [`Supertype`]),
+    /// so a stateful traversal — e.g. propagating generic type arguments to inherited members —
+    /// rides on the single cycle-guarded walk rather than re-implementing it.
+    pub(crate) fn walk_supertypes_stateful<S, R>(
+        &self,
+        start: ItemId,
+        init: S,
+        mut visit: impl FnMut(ItemId, &S) -> Option<R>,
+        mut descend: impl FnMut(ItemId, &S, &Supertype) -> S,
+    ) -> Option<R> {
         let mut visited = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(current) = stack.pop() {
+        let mut stack = vec![(start, init)];
+        while let Some((current, state)) = stack.pop() {
             if !visited.insert(current) {
                 continue;
             }
-            if let Some(result) = visit(current) {
+            if let Some(result) = visit(current, &state) {
                 return Some(result);
             }
-            for &supertype in self.items[current.0 as usize].supertypes.iter().rev() {
-                stack.push(supertype);
+            for sup in self.items[current.0 as usize].supertypes.iter().rev() {
+                let next = descend(current, &state, sup);
+                stack.push((sup.id, next));
             }
         }
         None
@@ -746,6 +829,7 @@ fn members_of_decl(
                         name: owner_simple.to_string(),
                         qualified: None,
                         dims: 0,
+                        args: Vec::new(),
                     };
                     push(&name, DefKind::EnumConstant, ty, Vec::new(), false);
                 }
@@ -781,22 +865,36 @@ fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
     (params, varargs)
 }
 
-/// The supertype type names of a type declaration `node`: the `extends` and `implements` clause
-/// types, each as `(simple name, full dotted text if qualified)`. Pure.
-fn raw_supertypes_of(node: &SyntaxNode) -> Vec<(String, Option<String>)> {
+/// The supertypes of a type declaration `node`: the `extends` and `implements` clause types, each
+/// captured as a [`MemberType`] (so its name, qualifier, and type arguments are all kept). Always a
+/// [`MemberType::Named`] for a well-formed clause. Pure.
+fn raw_supertypes_of(node: &SyntaxNode) -> Vec<MemberType> {
     let mut supertypes = Vec::new();
     for clause in node
         .children()
         .filter(|c| matches!(c.kind(), EXTENDS_CLAUSE | IMPLEMENTS_CLAUSE))
     {
         for ty in clause.children().filter_map(ast::Type::cast) {
-            if let Some(name) = ty.simple_name() {
-                let qualified = ty.qualified_text().filter(|q| q.contains('.'));
-                supertypes.push((name, qualified));
-            }
+            supertypes.push(member_type_of(Some(ty)));
         }
     }
     supertypes
+}
+
+/// The declared type parameters of a type declaration `node`, in order (`class Box<K, V>` → `K`,
+/// `V`), each with its `extends` bounds captured. Empty for a non-generic type. Pure.
+fn type_params_of(node: &SyntaxNode) -> Vec<TypeParamDecl> {
+    node.children()
+        .find_map(ast::TypeParams::cast)
+        .map(|tps| {
+            tps.params()
+                .map(|tp| TypeParamDecl {
+                    name: tp.name().unwrap_or_default(),
+                    bounds: tp.bounds().map(|b| member_type_of(Some(b))).collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Captures a member's declared type (`ast::Type`) as a self-contained [`MemberType`]. `None` (a
@@ -822,17 +920,23 @@ fn member_type_of(ty: Option<ast::Type>) -> MemberType {
     if ty.is_primitive_or_var() {
         match keyword.as_ref().map(SyntaxToken::text) {
             Some("void") => MemberType::Void,
-            Some("var") | None => MemberType::Unknown,
+            // `var`, a bare wildcard (`?`), or a missing keyword: no nameable type.
+            Some("var" | "?") | None => MemberType::Unknown,
             Some(k) => MemberType::Primitive {
                 keyword: k.to_string(),
                 dims,
             },
         }
     } else {
+        let args = ty
+            .type_arg_types()
+            .map(|a| member_type_of(Some(a)))
+            .collect();
         MemberType::Named {
             name: ty.simple_name().unwrap_or_default(),
             qualified: ty.qualified_text().filter(|q| q.contains('.')),
             dims,
+            args,
         }
     }
 }

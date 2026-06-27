@@ -1,20 +1,24 @@
-//! Embedded, signature-only stubs for the most common `java.lang` types.
+//! Embedded, signature-only stubs for the most common `java.lang` and `java.util` types.
 //!
 //! The type analysis indexes only the project's own sources, so any reference to a JDK type
-//! ([`String`], [`Object`], …) is otherwise [`External`](crate::ClassTy::External) — known by name
+//! ([`String`], [`List`], …) is otherwise [`External`](crate::ClassTy::External) — known by name
 //! but with no members, no supertypes, no inferable method return types. These stubs close the gap
-//! for the core of `java.lang`: each is an ordinary Java type declaration carrying *signatures only*
-//! (method bodies omitted, `;`-terminated), which [`ProjectIndex::build_with_stdlib`] parses with the
-//! real parser and folds into the index as just-another-set-of-files
-//! (origin [`Stdlib`](crate::ItemOrigin::Stdlib)).
+//! for the core of `java.lang` and `java.util`: each is an ordinary Java type declaration carrying
+//! *signatures only* (method bodies omitted, `;`-terminated), which
+//! [`ProjectIndex::build_with_stdlib`] parses with the real parser and folds into the index as
+//! just-another-set-of-files (origin [`Stdlib`](crate::ItemOrigin::Stdlib)).
 //!
 //! This is the "stubs-as-source" approach: it reuses the whole project-indexing machinery
-//! (member lookup, the supertype walk, inference) with no new resolution path. It stays **pure** and
-//! `wasm32`-compatible — the stub text is a compile-time constant, parsed in memory, with no I/O.
+//! (member lookup, the supertype walk, inference, generic substitution) with no new resolution path.
+//! It stays **pure** and `wasm32`-compatible — the stub text is a compile-time constant, parsed in
+//! memory, with no I/O.
 //!
-//! Scope is deliberately small (the names that show up in nearly every file). The stubs carry no
-//! generics (type arguments are dropped throughout the MVP) and no implicit `Object` supertype is
-//! synthesised for user types — these only make the listed JDK types *visible*, nothing more.
+//! Scope is deliberately small (the names that show up in nearly every file), but the generic
+//! containers *are* parameterised (`List<E>`, `Map<K, V>`, …), so `List<String>.get(0)` infers
+//! `String` through the same member-substitution machinery user generics use. No implicit `Object`
+//! supertype is synthesised for user types — the stubs only make the listed JDK types *visible*.
+//! In type **checking** a stub type is treated leniently (demoted to external), since its hierarchy
+//! and member set are deliberately partial; see [`Ty::is_assignable_to`](crate::Ty::is_assignable_to).
 
 /// The `java.lang` core, as one compilation unit. Top-level types here become `java.lang.<Name>`.
 const JAVA_LANG: &str = r#"
@@ -36,7 +40,7 @@ public interface Comparable {
     public int compareTo(Object o);
 }
 
-public interface Iterable {
+public interface Iterable<T> {
 }
 
 public class String extends Object implements CharSequence, Comparable {
@@ -133,8 +137,86 @@ public class Error extends Throwable {
 }
 "#;
 
-/// The embedded stub sources, each a self-contained compilation unit. One entry today
-/// (`java.lang`); future packages (`java.util`, `java.io`) are added as further entries.
+/// The `java.util` containers, as one compilation unit. Top-level types here become `java.util.<Name>`.
+/// These are the generic ones: their type parameters and the type arguments their members and
+/// supertypes carry are indexed, so a use like `List<String>` substitutes `E := String` into `get`
+/// (`String`) through the same machinery user generics use. References to `java.lang` types resolve
+/// via the implicit `java.lang` import.
+const JAVA_UTIL: &str = r#"
+package java.util;
+
+public interface Iterator<E> {
+    public boolean hasNext();
+    public E next();
+}
+
+public interface Collection<E> extends Iterable<E> {
+    public int size();
+    public boolean isEmpty();
+    public boolean add(E e);
+    public boolean remove(Object o);
+    public boolean contains(Object o);
+    public Iterator<E> iterator();
+}
+
+public interface List<E> extends Collection<E> {
+    public E get(int index);
+    public E set(int index, E element);
+    public void add(int index, E element);
+    public E remove(int index);
+    public int indexOf(Object o);
+}
+
+public interface Set<E> extends Collection<E> {
+}
+
+public interface Map<K, V> {
+    public int size();
+    public boolean isEmpty();
+    public V get(Object key);
+    public V put(K key, V value);
+    public V remove(Object key);
+    public boolean containsKey(Object key);
+    public Set<K> keySet();
+    public Collection<V> values();
+}
+
+public class ArrayList<E> implements List<E> {
+    public int size();
+    public boolean isEmpty();
+    public boolean add(E e);
+    public E get(int index);
+    public E set(int index, E element);
+    public Iterator<E> iterator();
+}
+
+public class HashSet<E> implements Set<E> {
+    public int size();
+    public boolean add(E e);
+    public boolean contains(Object o);
+    public Iterator<E> iterator();
+}
+
+public class HashMap<K, V> implements Map<K, V> {
+    public int size();
+    public V get(Object key);
+    public V put(K key, V value);
+    public Set<K> keySet();
+    public Collection<V> values();
+}
+
+public class Optional<T> {
+    public T get();
+    public boolean isPresent();
+    public boolean isEmpty();
+    public T orElse(T other);
+}
+"#;
+
+/// The embedded stub sources, each a self-contained compilation unit (`java.lang`, then
+/// `java.util`). `java.util` comes second so its references to `java.lang` types resolve against the
+/// already-collectible first unit; build order does not actually matter (members and supertypes are
+/// resolved in a second pass over all units), but it keeps the list in package-dependency order.
 pub(crate) fn stub_sources() -> &'static [&'static str] {
-    &[JAVA_LANG]
+    &[JAVA_LANG, JAVA_UTIL]
 }

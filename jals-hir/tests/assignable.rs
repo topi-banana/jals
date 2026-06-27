@@ -27,12 +27,13 @@ fn project_ty(index: &ProjectIndex, sources: &[&str], file: u32, decl_name: &str
     Ty::Class(ClassTy::Project {
         id,
         name: decl_name.to_string(),
+        args: Vec::new(),
     })
 }
 
 /// An external (JDK / unindexed) reference type, by name.
 fn external(name: &str) -> Ty {
-    Ty::Class(ClassTy::External(name.to_string()))
+    Ty::Class(ClassTy::external(name))
 }
 
 #[test]

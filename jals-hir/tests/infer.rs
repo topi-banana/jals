@@ -130,6 +130,28 @@ fn new_array_is_an_array_type() {
 }
 
 #[test]
+fn new_and_cast_carry_type_arguments() {
+    // An external generic type: both `ArrayList` and `String` are unindexed, rendered by spelling.
+    let ext = "class C { void m() { var r = new ArrayList<String>(); } }";
+    assert_eq!(expr_ty(ext, "new ArrayList<String>()"), "ArrayList<String>");
+
+    // A project generic type keeps its argument too; `Box` and `Helper` both resolve to project items.
+    let proj =
+        "class Box<T> { } class C { void m() { var r = new Box<Helper>(); } } class Helper { }";
+    assert_eq!(expr_ty(proj, "new Box<Helper>()"), "Box<Helper>");
+
+    // A cast target's type arguments are carried through.
+    let cast = "class C { void m(Object o) { var r = (List<String>) o; } }";
+    assert_eq!(expr_ty(cast, "(List<String>) o"), "List<String>");
+
+    // A bare wildcard argument (`<?>`) is a token, not a nameable type node, so it is not carried —
+    // the type degrades to its raw spelling rather than failing. Wildcards are modelled in a later
+    // phase (generic subtyping).
+    let wild = "class C { void m(Object o) { var r = (List<?>) o; } }";
+    assert_eq!(expr_ty(wild, "(List<?>) o"), "List");
+}
+
+#[test]
 fn array_field_and_index_peel_one_dimension() {
     let src = "class C { int[] xs; void m() { var r = xs; } }";
     assert_eq!(def_ty(src, "xs"), "int[]");
@@ -163,6 +185,18 @@ fn field_access_resolves_to_the_field_type() {
 }
 
 #[test]
+fn field_access_carries_type_arguments() {
+    // A concrete argument flows through the member's declared type: `xs : List<String>`.
+    let src = "class Box { List<String> xs; } class C { void m(Box b) { var r = b.xs; } }";
+    assert_eq!(expr_ty(src, "b.xs"), "List<String>");
+
+    // A type-variable argument is carried by spelling (`E`); binding it to the receiver's actual
+    // argument is the substitution phase, not yet done — so it shows as the declared `List<E>`.
+    let generic = "class Box<E> { List<E> xs; } class C { void m(Box b) { var r = b.xs; } }";
+    assert_eq!(expr_ty(generic, "b.xs"), "List<E>");
+}
+
+#[test]
 fn method_call_resolves_to_the_return_type() {
     let src = "class Box { int area() { return 0; } Box grow() { return this; } } class C { void m(Box b) { var n = b.area(); var g = b.grow(); } }";
     assert_eq!(expr_ty(src, "b.area()"), "int");
@@ -173,6 +207,40 @@ fn method_call_resolves_to_the_return_type() {
 fn bare_method_call_resolves_on_the_enclosing_type() {
     let src = "class C { int compute() { return 0; } void m() { var r = compute(); } }";
     assert_eq!(expr_ty(src, "compute()"), "int");
+}
+
+#[test]
+fn generic_member_access_substitutes_type_arguments() {
+    // A direct type-variable member binds to the receiver's argument: `Box<String>.get() : String`.
+    let direct = "class Box<E> { E get() { return null; } E item; } \
+                  class C { void m(Box<String> b) { var g = b.get(); var f = b.item; } }";
+    assert_eq!(expr_ty(direct, "b.get()"), "String");
+    assert_eq!(expr_ty(direct, "b.item"), "String");
+
+    // Substitution recurses into a nested generic: a `List<E>` field becomes `List<String>`.
+    let nested = "class Box<E> { List<E> xs; } \
+                  class C { void m(Box<String> b) { var r = b.xs; } }";
+    assert_eq!(expr_ty(nested, "b.xs"), "List<String>");
+
+    // A raw receiver leaves the type variable un-substituted (it survives by name).
+    let raw = "class Box<E> { E get() { return null; } } \
+               class C { void m(Box b) { var r = b.get(); } }";
+    assert_eq!(expr_ty(raw, "b.get()"), "E");
+}
+
+#[test]
+fn inherited_generic_member_substitutes_through_the_chain() {
+    // A concrete supertype argument binds the inherited member: `Sub extends Base<String>`.
+    let concrete = "class Base<T> { T get() { return null; } } \
+                    class Sub extends Base<String> { } \
+                    class C { void m(Sub s) { var r = s.get(); } }";
+    assert_eq!(expr_ty(concrete, "s.get()"), "String");
+
+    // The receiver's own argument threads through to the supertype: `Sub<U> extends Base<U>`.
+    let threaded = "class Base<T> { T get() { return null; } } \
+                    class Sub<U> extends Base<U> { } \
+                    class C { void m(Sub<String> s) { var r = s.get(); } }";
+    assert_eq!(expr_ty(threaded, "s.get()"), "String");
 }
 
 #[test]
