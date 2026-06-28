@@ -36,6 +36,13 @@ jals-syntax = { path = "jals-syntax" }
 num-derive = { version = "0.4.2" }
 num-traits = { version = "0.2.19" }
 rayon = { version = "1" }
+# Host-only (jals-classpath downloads dependency jars). `rustls-tls` for pure-Rust TLS (no system
+# OpenSSL, so it cross-compiles cleanly); `blocking` fits the sync CLI. `default-features = false`
+# drops the OpenSSL-backed default TLS, keeping it out of the pure/`wasm32` crates.
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "rustls-tls",
+] }
 rowan = { version = "0.16.1" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0" }

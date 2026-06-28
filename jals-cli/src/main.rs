@@ -333,7 +333,10 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
         jals_build::resolve_run_target(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
     }
     let sources = discover_sources(&manifest, &root)?;
-    let invocation = jals_build::build_invocation(&manifest, &root, &sources, path_sep());
+    // Resolve `[dependencies]` (downloading remotes) and put the resulting jars on javac's classpath.
+    let extra_classpath = resolve_project_dependencies(&manifest, &root);
+    let invocation =
+        jals_build::build_invocation(&manifest, &root, &sources, &extra_classpath, path_sep());
 
     if args.dry_run || args.verbose {
         println!("{}", invocation.display_command());
@@ -360,9 +363,18 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
             .to_string(),
     };
     let sources = discover_sources(&manifest, &root)?;
+    // Resolve `[dependencies]` once and put the resulting jars on both the compile and run classpaths.
+    let extra_classpath = resolve_project_dependencies(&manifest, &root);
     let sep = path_sep();
-    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, sep);
-    let run_inv = jals_build::run_invocation(&manifest, &root, &main_class, &args.args, sep);
+    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, &extra_classpath, sep);
+    let run_inv = jals_build::run_invocation(
+        &manifest,
+        &root,
+        &main_class,
+        &args.args,
+        &extra_classpath,
+        sep,
+    );
 
     if args.dry_run || args.verbose {
         println!("{}", build_inv.display_command());
@@ -493,7 +505,11 @@ fn load_project_classpath(start_dir: &Path) -> jals_classpath::ClasspathLoad {
         return jals_classpath::ClasspathLoad::default();
     };
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let entries = manifest.classpath_entries(root);
+    let mut entries = manifest.classpath_entries(root);
+    // Fold the resolved `[dependencies]` jars (downloaded remotes / local `file://` jars) into the
+    // classpath, so external library types from named dependencies — not just `[build] classpath`
+    // entries — resolve during linting.
+    entries.extend(resolve_project_dependencies(&manifest, root));
     if entries.is_empty() {
         return jals_classpath::ClasspathLoad::default();
     }
@@ -506,6 +522,16 @@ fn load_project_classpath(start_dir: &Path) -> jals_classpath::ClasspathLoad {
         );
     }
     load
+}
+
+/// Resolve the project's `[dependencies]` to local jar paths, downloading remote ones into
+/// `<root>/target/jals/deps` (a cache; `target/` is already build output). Best-effort like the rest
+/// of the classpath load: a classification problem or a download failure is reported on stderr and
+/// skipped, never aborting. `jals-cli` is synchronous, so the blocking downloader is called directly.
+fn resolve_project_dependencies(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
+    jals_classpath::resolve_project_dependencies(manifest, root, |message| {
+        eprintln!("warning: dependency: {message}");
+    })
 }
 
 /// Collects the `.java` files under the manifest's source directories (resolved against `root`).

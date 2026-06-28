@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+jals-build.workspace = true
 jals-classfile.workspace = true
+reqwest.workspace = true
 walkdir.workspace = true
 zip.workspace = true
 

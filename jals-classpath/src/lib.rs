@@ -16,11 +16,17 @@
 //!
 //! [`ProjectIndex::build_with_classpath`]: https://docs.rs/jals-hir
 
+mod resolve;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use jals_classfile::ClassFile;
 use walkdir::WalkDir;
+
+pub use resolve::{
+    ResolvedDependencies, cached_jar_path, resolve_dependencies, resolve_project_dependencies,
+};
 
 /// The outcome of loading a classpath: every `.class` file that parsed, plus any non-fatal
 /// [`Warning`]s for entries that could not be read.
@@ -41,6 +47,17 @@ pub struct Warning {
     pub path: PathBuf,
     /// A human-readable reason, suitable for a CLI/LSP diagnostic.
     pub message: String,
+}
+
+impl Warning {
+    /// Build a [`Warning`] for `path` with `message`, owning both. The single construction site
+    /// shared by the load (`lib.rs`) and resolve (`resolve.rs`) halves of this crate.
+    pub(crate) fn new(path: &Path, message: &str) -> Warning {
+        Warning {
+            path: path.to_path_buf(),
+            message: message.to_owned(),
+        }
+    }
 }
 
 /// Load every `.class` file reachable from `entries` (a project's resolved classpath).
@@ -153,9 +170,6 @@ fn has_ext(path: &Path, ext: &str) -> bool {
 
 impl ClasspathLoad {
     fn warn(&mut self, path: &Path, message: &str) {
-        self.warnings.push(Warning {
-            path: path.to_path_buf(),
-            message: message.to_owned(),
-        });
+        self.warnings.push(Warning::new(path, message));
     }
 }

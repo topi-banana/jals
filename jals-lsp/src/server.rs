@@ -122,19 +122,36 @@ impl ServerState {
                 return;
             }
         };
+        // The classpath the index reads from: the manifest's `[build] classpath` entries, plus the
+        // jars resolved from `[dependencies]` (downloaded remotes / local `file://` jars).
+        let mut entries = manifest.classpath_entries(&root);
+        let source_roots = manifest.source_roots(&root);
+        // `reqwest`'s blocking downloader panics if run inside the Tokio runtime this server uses, so
+        // resolve `[dependencies]` on a dedicated thread (`manifest` moves in; everything needed after
+        // is already read out above). This blocks workspace load once per project, like the
+        // synchronous classpath read below.
+        let deps_root = root.clone();
+        let jars = std::thread::spawn(move || {
+            jals_classpath::resolve_project_dependencies(&manifest, &deps_root, |message| {
+                // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
+                eprintln!("jals-lsp: dependency: {message}");
+            })
+        })
+        .join()
+        .expect("dependency resolution thread panicked");
+        entries.extend(jars);
+
         // Read and parse the project's classpath jars/dirs once, so external library types resolve
         // in this workspace's index. Unreadable entries are skipped (logged), never fatal — the
         // project still gets analysis from its sources, stubs, and the rest of the classpath.
-        let load = jals_classpath::load_classpath(&manifest.classpath_entries(&root));
+        let load = jals_classpath::load_classpath(&entries);
         for warning in &load.warnings {
-            // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
             eprintln!(
                 "jals-lsp: classpath: {}: {}",
                 warning.path.display(),
                 warning.message
             );
         }
-        let source_roots = manifest.source_roots(&root);
         self.workspaces.push(Workspace::load_with_classpath(
             root,
             source_roots,

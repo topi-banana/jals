@@ -53,8 +53,8 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
 ## The manifest (`jals.toml`)
 
 Every key is optional and falls back to its default; keys are kebab-case and grouped into
-`[package]`, `[build]`, `[run]`, and the repeatable `[[bin]]`. The defaults encode the
-Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent) section just
+`[package]`, `[build]`, `[run]`, the repeatable `[[bin]]`, and `[dependencies]`. The defaults encode
+the Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent) section just
 uses them.
 
 ```toml
@@ -83,6 +83,12 @@ main-class = "com.example.Main"   # entry point for `jals run` (used only when n
 # [[bin]]
 # name = "cli"
 # main-class = "com.example.Cli"
+
+[dependencies]
+# A local jar (file:// URL or a bare path relative to the manifest dir):
+guava = { jar = "libs/guava.jar" }
+# A remote jar, downloaded into target/jals/deps and cached:
+junit = { jar = "https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar" }
 ```
 
 ### `[package]`
@@ -137,6 +143,33 @@ The run target for `jals run` is resolved in this order (`resolve_run_target`):
 Once any `[[bin]]` exists, `[run] main-class` is ignored for selection. Duplicate bin names and a
 `default-run` that names no bin are rejected at manifest load (`Manifest::validate`).
 
+### `[dependencies]`
+
+A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Today the only form is
+a single `jar`:
+
+| Key | Type | Maps to |
+| --- | --- | --- |
+| `jar` | string | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir) |
+
+```toml
+[dependencies]
+guava = { jar = "libs/guava.jar" }                          # local path
+other = { jar = "file:///opt/libs/other.jar" }              # file:// URL
+junit = { jar = "https://example.com/junit-4.13.2.jar" }    # remote, downloaded
+```
+
+Each entry is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via `jals-classpath`),
+and those jars are folded into the classpath for both **analysis** (`jals lint`, the LSP — so external
+types resolve in hover/diagnostics) and **compilation** (`jals build`/`run` put them on `javac`/`java`'s
+`-classpath`). Remote jars are downloaded once into `target/jals/deps` and cached (skip-if-exists).
+An empty `jar`, an unknown URL scheme, or a missing form is rejected at manifest load
+(`Manifest::validate`); a *runtime* failure (a download error, a local jar that does not exist) is a
+best-effort warning that skips just that dependency, never aborting. `jals-build` itself only
+*classifies* each spec (`Manifest::dependency_sources` → `DependencySource::{Url, Path}`), staying
+pure — it performs no I/O. Maven-coordinate resolution (`group:artifact:version` + transitive
+download + lockfile) is still future work (see the roadmap §3); list explicit jar URLs/paths for now.
+
 ## Usage
 
 ```sh
@@ -154,10 +187,10 @@ jals clean                  # remove target/classes
 ## Library API
 
 ```rust
-pub fn build_invocation(manifest: &Manifest, project_root: &Path,
-                        sources: &[PathBuf], path_sep: char) -> Invocation;
+pub fn build_invocation(manifest: &Manifest, project_root: &Path, sources: &[PathBuf],
+                        extra_classpath: &[PathBuf], path_sep: char) -> Invocation;
 pub fn run_invocation(manifest: &Manifest, project_root: &Path, main_class: &str,
-                      program_args: &[String], path_sep: char) -> Invocation;
+                      program_args: &[String], extra_classpath: &[PathBuf], path_sep: char) -> Invocation;
 pub fn resolve_run_target<'m>(manifest: &'m Manifest, bin: Option<&str>)
                           -> Result<&'m str, ResolveTargetError>;
 pub fn clean_paths(manifest: &Manifest, project_root: &Path) -> Vec<PathBuf>;
@@ -165,13 +198,18 @@ pub fn scaffold(options: &InitOptions) -> Vec<ScaffoldFile>;
 ```
 
 `Invocation { program, args }` is a resolved command line as pure data; `display_command()`
-renders it for `--dry-run`/`-v`. `resolve_run_target` picks the `main-class` `jals run` should
-execute from `[[bin]]`/`default-run`/`[run] main-class`. `Manifest::from_file` loads, parses, and
-validates (`Manifest::validate`) `jals.toml`; `Manifest::discover_path` locates it.
-`Manifest::source_roots` and `Manifest::classpath_entries` resolve the `[build] source-dirs` and
-`[build] classpath` entries against the manifest directory, as absolute paths, for the host to read:
-sources to compile, and — new — the classpath jars/dirs the host (`jals-classpath`) reads `.class`
-files from to feed `jals-hir`'s analysis (so `jals lint` / the LSP see external library types).
+renders it for `--dry-run`/`-v`. `build_invocation`/`run_invocation` take an `extra_classpath` of
+already-resolved jar paths (the host's resolved `[dependencies]` jars), appended after the
+`[build] classpath` entries on `javac`/`java`'s `-classpath`. `resolve_run_target` picks the
+`main-class` `jals run` should execute from `[[bin]]`/`default-run`/`[run] main-class`.
+`Manifest::from_file` loads, parses, and validates (`Manifest::validate`) `jals.toml`;
+`Manifest::discover_path` locates it. `Manifest::source_roots` and `Manifest::classpath_entries`
+resolve the `[build] source-dirs` and `[build] classpath` entries against the manifest directory, as
+absolute paths, for the host to read: sources to compile, and the classpath jars/dirs the host
+(`jals-classpath`) reads `.class` files from to feed `jals-hir`'s analysis. `Manifest::dependency_sources`
+classifies each `[dependencies]` entry into a `DependencySource::{Url, Path}` (pure, no I/O); the host
+(`jals-classpath::resolve_dependencies`) downloads the URLs and confirms the paths, so `jals lint` /
+the LSP / `jals build` see external library types from named dependencies, not just `[build] classpath`.
 
 ## Development
 
@@ -245,7 +283,7 @@ metadata on packaging. (`default-run` is already implemented — see [`[[bin]]`]
 
 | Section | Cargo analogue | Purpose |
 | --- | --- | --- |
-| `[dependencies]` | `[dependencies]` | Maven coordinates (`group:artifact:version`); resolved into the classpath (§3) |
+| `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
 | `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
 | `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]` | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels) |
@@ -269,15 +307,20 @@ already consumes. The pure/`wasm32` split is preserved by keeping resolution's I
 `jals-build` itself only needs the *result*: the resolved classpath, fed in like sources are
 today. No part of this changes the crate's purity.
 
-**Already wired (analysis side):** the *consumption* of a classpath for semantic analysis is done.
-`Manifest::classpath_entries` resolves the `[build] classpath` to paths; the host-only
-`jals-classpath` crate reads the `.class` files out of those jars/dirs and parses them with
-`jals-classfile`; and `jals-hir`'s `ProjectIndex::build_with_classpath` folds them in so external
-library types resolve in `jals lint` and the language server. What is still missing is the
-*resolver* above — turning Maven coordinates into those classpath entries (download + cache +
-lockfile). Until then, a project lists already-present jars/dirs under `[build] classpath` by hand.
-JDK standard-library classes are not loaded this way either; the embedded `java.lang`/`java.util`
-stubs stand in for them (reading the JDK's `jimage`/`modules` is a separate, still-unwired step).
+**Already wired (analysis + compile side):** the *consumption* of a classpath is done, and the
+explicit-jar form of `[dependencies]` now resolves end-to-end. `Manifest::classpath_entries`
+resolves the `[build] classpath` to paths, and `Manifest::dependency_sources` classifies each
+`[dependencies]` `{ jar = "..." }` into a URL or local path; the host-only `jals-classpath` crate
+reads the `.class` files out of those jars/dirs (and **downloads** the remote dependency jars into a
+`target/jals/deps` cache via `resolve_dependencies`) and parses them with `jals-classfile`; and
+`jals-hir`'s `ProjectIndex::build_with_classpath` folds them in so external library types resolve in
+`jals lint` and the language server, while `jals build`/`run` put the same jars on `javac`/`java`'s
+classpath. What is still missing is the *resolver* above — turning **Maven coordinates** into those
+classpath entries (POM walking + transitive graph + version conflict resolution + lockfile). Until
+then, a project lists explicit jar URLs/paths under `[dependencies]` (or jars/dirs under
+`[build] classpath`) by hand. JDK standard-library classes are not loaded this way either; the
+embedded `java.lang`/`java.util` stubs stand in for them (reading the JDK's `jimage`/`modules` is a
+separate, still-unwired step).
 
 ## 4. Packaging
 

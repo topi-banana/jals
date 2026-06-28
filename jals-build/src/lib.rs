@@ -24,5 +24,8 @@ mod target;
 pub use clean::clean_paths;
 pub use init::{InitOptions, ScaffoldFile, scaffold};
 pub use invocation::{Invocation, build_invocation, run_invocation};
-pub use manifest::{Bin, Build, Manifest, ManifestError, Package, Run, ValidationError};
+pub use manifest::{
+    Bin, Build, Dependency, DependencyError, DependencySource, Manifest, ManifestError, Package,
+    Run, ValidationError,
+};
 pub use target::{ResolveTargetError, resolve_run_target};

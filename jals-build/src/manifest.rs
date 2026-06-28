@@ -5,6 +5,7 @@
 //! `src/main/java` -> `target/classes` layout. Keys are kebab-case and grouped into `[package]`,
 //! `[build]`, and `[run]` sections.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -25,7 +26,85 @@ pub struct Manifest {
     /// `[run] main-class`; otherwise the run target is selected from these. See
     /// [`crate::resolve_run_target`].
     pub bin: Vec<Bin>,
+    /// External dependencies (`[dependencies]`), keyed by name (the Java analogue of Cargo's
+    /// `[dependencies]`). A `BTreeMap` so iteration order is deterministic — the resolved classpath
+    /// and any diagnostics come out in a stable order. Each value is a [`Dependency`] spec; today
+    /// only the `jar` form is supported. The host (`jals-cli`/`jals-lsp`) resolves each entry to a
+    /// local `.jar` (downloading remote ones) and folds it into the classpath; this crate only
+    /// classifies the specs (see [`Manifest::dependency_sources`]), staying pure.
+    pub dependencies: BTreeMap<String, Dependency>,
 }
+
+/// A single `[dependencies]` entry.
+///
+/// Modeled as a struct of optional fields rather than an enum so future forms (`version`, a Maven
+/// coordinate, a local `path`) can be added without breaking existing manifests; exactly which forms
+/// are mutually exclusive is enforced by [`Manifest::validate`]. Today only `jar` is supported.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Dependency {
+    /// A `.jar` location: an `https://`/`http://` URL (the host downloads it), a `file://` URL, or a
+    /// bare path (relative to the manifest directory). Resolved to a local `.jar` by the host, never
+    /// here — see [`Dependency::source`].
+    pub jar: Option<String>,
+}
+
+/// Where a dependency's jar is obtained, classified purely from its spec (no I/O), so the host knows
+/// whether to download it or read it off disk. Produced by [`Dependency::source`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencySource {
+    /// An `https://`/`http://` URL the host must download.
+    Url(String),
+    /// A local `.jar` path — from a `file://` URL or a bare path, the latter resolved against the
+    /// manifest directory when relative.
+    Path(PathBuf),
+}
+
+/// A `[dependencies]` entry whose form could not be classified, found by [`Dependency::source`] /
+/// [`Manifest::dependency_sources`]. Carries the dependency name for an actionable message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencyError {
+    /// The `jar` value is empty.
+    EmptyJar {
+        /// The dependency's name.
+        name: String,
+    },
+    /// The `jar` value uses an unsupported URL scheme (only `https`/`http`/`file` are known).
+    UnknownScheme {
+        /// The dependency's name.
+        name: String,
+        /// The offending `jar` value.
+        value: String,
+    },
+    /// No recognised form was specified (no `jar`).
+    NoForm {
+        /// The dependency's name.
+        name: String,
+    },
+}
+
+impl fmt::Display for DependencyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DependencyError::EmptyJar { name } => {
+                write!(f, "dependency `{name}` has an empty `jar`")
+            }
+            DependencyError::UnknownScheme { name, value } => write!(
+                f,
+                "dependency `{name}` has an unsupported `jar` URL scheme `{value}` \
+                 (expected `https://`, `http://`, `file://`, or a path)"
+            ),
+            DependencyError::NoForm { name } => {
+                write!(
+                    f,
+                    "dependency `{name}` specifies no source (expected `jar`)"
+                )
+            }
+        }
+    }
+}
+
+impl Error for DependencyError {}
 
 /// Project metadata (`[package]`).
 ///
@@ -108,6 +187,45 @@ impl Default for Build {
     }
 }
 
+impl Dependency {
+    /// Classify this dependency's source without any I/O, so the host knows whether to download it
+    /// (`Url`) or read it off disk (`Path`). `name` is only used to label errors; `manifest_dir` is
+    /// joined onto bare relative paths (pure path arithmetic, exactly like [`Manifest::classpath_entries`]).
+    ///
+    /// # Errors
+    /// Returns [`DependencyError`] when no form is given, the `jar` value is empty, or it uses an
+    /// unsupported URL scheme.
+    pub fn source(
+        &self,
+        name: &str,
+        manifest_dir: &Path,
+    ) -> Result<DependencySource, DependencyError> {
+        let jar = self
+            .jar
+            .as_deref()
+            .ok_or_else(|| DependencyError::NoForm { name: name.into() })?;
+        if jar.is_empty() {
+            return Err(DependencyError::EmptyJar { name: name.into() });
+        }
+        if let Some(rest) = jar.strip_prefix("file://") {
+            // `file:///abs/path` -> `/abs/path`. A full file-URL decode (percent-encoding, Windows
+            // drive letters) can come later; this is enough for the common Unix absolute-path form.
+            return Ok(DependencySource::Path(PathBuf::from(rest)));
+        }
+        if jar.starts_with("https://") || jar.starts_with("http://") {
+            return Ok(DependencySource::Url(jar.to_string()));
+        }
+        if jar.contains("://") {
+            return Err(DependencyError::UnknownScheme {
+                name: name.into(),
+                value: jar.to_string(),
+            });
+        }
+        // No scheme: a path relative to the manifest directory (mirrors `classpath_entries`).
+        Ok(DependencySource::Path(manifest_dir.join(jar)))
+    }
+}
+
 impl Manifest {
     /// Load, parse, and validate a specific `jals.toml` file.
     ///
@@ -168,6 +286,15 @@ impl Manifest {
             });
         }
 
+        // `[dependencies]`: every entry must classify (a non-empty `jar` with a known scheme).
+        // Structural problems are hard errors, like Cargo; runtime I/O failures (a download that
+        // fails, a missing local jar) are soft warnings handled later by the host's resolver. The
+        // `manifest_dir` is irrelevant to the error cases, so a placeholder is fine.
+        for (name, dep) in &self.dependencies {
+            dep.source(name, Path::new("."))
+                .map_err(ValidationError::Dependency)?;
+        }
+
         Ok(())
     }
 
@@ -194,6 +321,28 @@ impl Manifest {
             .iter()
             .map(|c| manifest_dir.join(c))
             .collect()
+    }
+
+    /// Classify every `[dependencies]` entry into a host-resolvable [`DependencySource`], paired with
+    /// its name (used for cache filenames and diagnostics), separating the ones that classified from
+    /// any [`DependencyError`]s. Pure — no I/O; the host downloads `Url`s and reads `Path`s.
+    ///
+    /// In practice [`Manifest::validate`] (run by [`Manifest::from_file`]) already rejects the error
+    /// cases, so a manifest loaded through `from_file` yields an empty error list; the errors are
+    /// surfaced here too for callers that classify a `Manifest` they built or parsed directly.
+    pub fn dependency_sources(
+        &self,
+        manifest_dir: &Path,
+    ) -> (Vec<(String, DependencySource)>, Vec<DependencyError>) {
+        let mut sources = Vec::new();
+        let mut errors = Vec::new();
+        for (name, dep) in &self.dependencies {
+            match dep.source(name, manifest_dir) {
+                Ok(src) => sources.push((name.clone(), src)),
+                Err(err) => errors.push(err),
+            }
+        }
+        (sources, errors)
     }
 
     /// Search upward from `start_dir` for a `jals.toml`, returning its path.
@@ -288,6 +437,10 @@ pub enum ValidationError {
         /// Which field was empty (`"name"` or `"main-class"`).
         field: &'static str,
     },
+    /// A `[dependencies]` entry could not be classified — an empty `jar`, an unsupported URL scheme,
+    /// or no recognised form. Wraps the classification [`DependencyError`] so the two layers share a
+    /// single message and the variant set never drifts apart.
+    Dependency(DependencyError),
 }
 
 impl fmt::Display for ValidationError {
@@ -304,11 +457,19 @@ impl fmt::Display for ValidationError {
             ValidationError::EmptyBinField { field } => {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
+            ValidationError::Dependency(err) => write!(f, "{err}"),
         }
     }
 }
 
-impl Error for ValidationError {}
+impl Error for ValidationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ValidationError::Dependency(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -326,6 +487,7 @@ mod tests {
         assert_eq!(m.package.default_run, None);
         assert_eq!(m.run.main_class, None);
         assert!(m.bin.is_empty());
+        assert!(m.dependencies.is_empty());
     }
 
     #[test]
@@ -506,6 +668,140 @@ mod tests {
             Err(ValidationError::EmptyBinField {
                 field: "main-class"
             })
+        );
+    }
+
+    #[test]
+    fn parses_dependencies_table() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            testlib = { jar = "https://example.com/lib.jar" }
+            otherlib = { jar = "file:///abs/path/lib.jar" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(m.dependencies.len(), 2);
+        assert_eq!(
+            m.dependencies.get("testlib").and_then(|d| d.jar.as_deref()),
+            Some("https://example.com/lib.jar")
+        );
+        assert_eq!(
+            m.dependencies
+                .get("otherlib")
+                .and_then(|d| d.jar.as_deref()),
+            Some("file:///abs/path/lib.jar")
+        );
+    }
+
+    #[test]
+    fn dependency_source_classifies_https_as_url() {
+        let dep = Dependency {
+            jar: Some("https://example.com/lib.jar".to_string()),
+        };
+        assert_eq!(
+            dep.source("testlib", Path::new("/proj")),
+            Ok(DependencySource::Url(
+                "https://example.com/lib.jar".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn dependency_source_classifies_file_url_as_path() {
+        let dep = Dependency {
+            jar: Some("file:///abs/path/lib.jar".to_string()),
+        };
+        assert_eq!(
+            dep.source("otherlib", Path::new("/proj")),
+            Ok(DependencySource::Path(PathBuf::from("/abs/path/lib.jar")))
+        );
+    }
+
+    #[test]
+    fn dependency_source_classifies_bare_path_relative_to_manifest_dir() {
+        let dep = Dependency {
+            jar: Some("libs/lib.jar".to_string()),
+        };
+        assert_eq!(
+            dep.source("locallib", Path::new("/proj")),
+            Ok(DependencySource::Path(PathBuf::from("/proj/libs/lib.jar")))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_jar() {
+        let m = Manifest {
+            dependencies: BTreeMap::from([(
+                "bad".to_string(),
+                Dependency {
+                    jar: Some(String::new()),
+                },
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::Dependency(DependencyError::EmptyJar {
+                name: "bad".to_string()
+            }))
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_scheme() {
+        let m = Manifest {
+            dependencies: BTreeMap::from([(
+                "bad".to_string(),
+                Dependency {
+                    jar: Some("ftp://example.com/lib.jar".to_string()),
+                },
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::Dependency(
+                DependencyError::UnknownScheme {
+                    name: "bad".to_string(),
+                    value: "ftp://example.com/lib.jar".to_string(),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn dependency_sources_separates_ok_and_errors() {
+        let m = Manifest {
+            dependencies: BTreeMap::from([
+                (
+                    "good".to_string(),
+                    Dependency {
+                        jar: Some("file:///abs/good.jar".to_string()),
+                    },
+                ),
+                (
+                    "empty".to_string(),
+                    Dependency {
+                        jar: Some(String::new()),
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let (sources, errors) = m.dependency_sources(Path::new("/proj"));
+        assert_eq!(
+            sources,
+            vec![(
+                "good".to_string(),
+                DependencySource::Path(PathBuf::from("/abs/good.jar"))
+            )]
+        );
+        assert_eq!(
+            errors,
+            vec![DependencyError::EmptyJar {
+                name: "empty".to_string()
+            }]
         );
     }
 }
