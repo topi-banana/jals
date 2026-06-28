@@ -128,14 +128,27 @@ impl ServerState {
         let source_roots = manifest.source_roots(&root);
         // `reqwest`'s blocking downloader panics if run inside the Tokio runtime this server uses, so
         // resolve `[dependencies]` on a dedicated thread (`manifest` moves in; everything needed after
-        // is already read out above). This blocks workspace load once per project, like the
-        // synchronous classpath read below.
+        // is already read out above). The same thread also resolves each dependency's optional `sources`
+        // jar (the `.java` for go-to-definition into a classpath type's library source) and clones /
+        // reads each `git`/`path` source dependency (the `.java` folded into the index for analysis +
+        // navigation). This blocks workspace load once per project, like the synchronous classpath read
+        // below.
         let deps_root = root.clone();
-        let jars = std::thread::spawn(move || {
-            jals_classpath::resolve_project_dependencies(&manifest, &deps_root, |message| {
-                // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
-                eprintln!("jals-lsp: dependency: {message}");
-            })
+        let (jars, library_sources, source_dep_sources) = std::thread::spawn(move || {
+            // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
+            let jars =
+                jals_classpath::resolve_project_dependencies(&manifest, &deps_root, |message| {
+                    eprintln!("jals-lsp: dependency: {message}");
+                });
+            let sources =
+                jals_classpath::resolve_project_sources(&manifest, &deps_root, |message| {
+                    eprintln!("jals-lsp: sources: {message}");
+                });
+            let source_deps =
+                jals_classpath::resolve_project_source_deps(&manifest, &deps_root, |message| {
+                    eprintln!("jals-lsp: source dependency: {message}");
+                });
+            (jars, sources, source_deps)
         })
         .join()
         .expect("dependency resolution thread panicked");
@@ -152,11 +165,14 @@ impl ServerState {
                 warning.message
             );
         }
-        self.workspaces.push(Workspace::load_with_classpath(
-            root,
-            source_roots,
-            load.classes,
-        ));
+        self.workspaces
+            .push(Workspace::load_with_classpath_and_sources(
+                root,
+                source_roots,
+                load.classes,
+                library_sources,
+                source_dep_sources,
+            ));
     }
 
     /// The loaded workspace that owns `uri`, if any.

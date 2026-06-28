@@ -64,9 +64,10 @@ impl fmt::Display for Fqn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(u32);
 
-/// Where an indexed [`Item`] comes from: the project's own sources, or an embedded standard-library
-/// stub. The two are indexed by the same machinery but treated differently at the edges — a stub has
-/// no real file the host can open, so navigation into it is suppressed.
+/// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
+/// sources, an external `.class` file, or an embedded standard-library stub. All are indexed by the
+/// same machinery but treated differently at the edges — e.g. a stub has no real file the host can
+/// open, so navigation into it is suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemOrigin {
     /// Declared in one of the project source files the host supplied to [`ProjectIndex::build`].
@@ -80,6 +81,28 @@ pub enum ItemOrigin {
     /// declared member set is *complete* for that class, so it is not treated leniently the way a
     /// (deliberately partial) stub is.
     Classpath,
+    /// Declared in an external **library source** file — the `.java` of a `git`/`path`
+    /// `[dependencies]` entry the host folds in via
+    /// [`build_with_source_deps`](ProjectIndex::build_with_source_deps). Indexed from real source (so
+    /// its member set is complete and it is *not* treated leniently) and locatable at its real
+    /// [`file`](Item::file) / [`name_range`](Item::name_range), so it resolves types and is a
+    /// go-to-definition target — yet it is not one of the project's own files, so the host never lints
+    /// or renames it.
+    Source,
+}
+
+impl ItemOrigin {
+    /// Whether an item of this origin lives in a file the host owns and may rewrite — the only origin
+    /// the LSP renames or treats as a project input. Every other origin (a `java.lang` stub, a
+    /// classpath `.class`, or a `git`/`path` library source) is external: navigable at most, never
+    /// edited. An exhaustive match so a new origin must explicitly opt in here rather than silently
+    /// becoming renamable.
+    pub fn is_host_editable(self) -> bool {
+        match self {
+            ItemOrigin::Project => true,
+            ItemOrigin::Stdlib | ItemOrigin::Classpath | ItemOrigin::Source => false,
+        }
+    }
 }
 
 /// An indexed type declaration: a class / interface / enum / record / annotation type, identified
@@ -109,6 +132,13 @@ pub struct Item {
     /// or third-party class). When true, this type may inherit members — including method overloads —
     /// that the index cannot see, so a "no member / no overload" conclusion is not trustworthy.
     pub has_external_supertype: bool,
+    /// A real-source go-to-definition override, for a [`Classpath`](ItemOrigin::Classpath) type whose
+    /// library *sources* jar is available: the `(file, name range)` of the matching `.java`
+    /// declaration. `None` for a project type (its own [`file`](Item::file) / [`name_range`](Item::name_range)
+    /// already point at real source) and for a classpath/stub type with no source. Kept separate from
+    /// [`file`](Item::file), which doubles as the type's member-resolution context (a classpath
+    /// pseudo-file) and must not be repointed at the source.
+    pub source_location: Option<(FileId, Range<usize>)>,
 }
 
 /// A type's declared type parameter (`<T>`, `<T extends Number>`): its name and its bounds, captured
@@ -163,6 +193,11 @@ pub struct Member {
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
     pub varargs: bool,
+    /// A real-source go-to-definition override for a classpath member whose library *sources* jar is
+    /// available — the `(file, name range)` of the matching `.java` declaration. `None` for a project
+    /// member and for a classpath member with no source. Kept separate from [`file`](Member::file),
+    /// which is the member's type-resolution context and must stay the classpath pseudo-file.
+    pub source_location: Option<(FileId, Range<usize>)>,
 }
 
 /// A method's formal parameter: its declared name (absent for a `_` / unreadable parameter) and its
@@ -260,6 +295,56 @@ pub struct LoweredClasspath {
     classes: Vec<crate::classpath::ClassfileClass>,
 }
 
+/// Where the types and members of a project's **library sources** are declared, keyed so a
+/// `.class`-derived [`Classpath`](ItemOrigin::Classpath) item can be pointed at its real `.java`
+/// declaration for go-to-definition. Built once by
+/// [`index_source_locations`](ProjectIndex::index_source_locations) from the host's extracted library
+/// sources (the `sources` jars of `[dependencies]`) and folded in by
+/// [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources). Pure data — the host
+/// owns the file I/O and maps each [`FileId`] back to a real URL.
+#[derive(Debug, Default)]
+pub struct SourceLocations {
+    /// Each type's fully-qualified name to its declaring `(file, name-token range)`.
+    types: HashMap<String, (FileId, Range<usize>)>,
+    /// A member by `(owner fqn, name, parameter count)` to its declaring `(file, name-token range)`,
+    /// the precise key that disambiguates overloads.
+    members: HashMap<(String, String, usize), (FileId, Range<usize>)>,
+    /// A member by `(owner fqn, name)` only — the fallback when the parameter count does not match
+    /// (a generic / varargs / synthetic-parameter mismatch between the `.class` and its source).
+    members_by_name: HashMap<(String, String), (FileId, Range<usize>)>,
+}
+
+impl SourceLocations {
+    /// The declaring location of the type named `fqn`, if its source is indexed.
+    fn type_location(&self, fqn: &str) -> Option<(FileId, Range<usize>)> {
+        self.types.get(fqn).cloned()
+    }
+
+    /// The declaring location of `owner`'s member `name`, preferring an exact `params`-arity match and
+    /// falling back to name-only (so an overload whose arity does not line up still lands in the right
+    /// file).
+    fn member_location(
+        &self,
+        owner_fqn: &str,
+        name: &str,
+        params: usize,
+    ) -> Option<(FileId, Range<usize>)> {
+        // No source overlay (the common case — every caller without a `sources` jar): skip building
+        // the owned lookup keys entirely.
+        if self.members.is_empty() && self.members_by_name.is_empty() {
+            return None;
+        }
+        // Build the arity-keyed lookup once; on a miss, reuse its strings for the name-only fallback
+        // rather than re-allocating them, so a miss costs two allocations instead of four.
+        let key = (owner_fqn.to_owned(), name.to_owned(), params);
+        if let Some(loc) = self.members.get(&key) {
+            return Some(loc.clone());
+        }
+        let (owner, member, _) = key;
+        self.members_by_name.get(&(owner, member)).cloned()
+    }
+}
+
 impl ProjectIndex {
     /// Builds the index from each file's `SOURCE_FILE` root. Pure: no I/O, never panics.
     ///
@@ -269,7 +354,7 @@ impl ProjectIndex {
     /// [`build_with_stdlib`](ProjectIndex::build_with_stdlib) to also fold in the embedded
     /// `java.lang` stubs.
     pub fn build(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
-        Self::build_inner(files, false, &[])
+        Self::build_inner(files, &[], false, &[], &SourceLocations::default())
     }
 
     /// Like [`build`](ProjectIndex::build), but also indexes the embedded `java.lang` stubs
@@ -279,7 +364,7 @@ impl ProjectIndex {
     ///
     /// Still pure and `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
     pub fn build_with_stdlib(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
-        Self::build_inner(files, true, &[])
+        Self::build_inner(files, &[], true, &[], &SourceLocations::default())
     }
 
     /// Like [`build_with_stdlib`](ProjectIndex::build_with_stdlib), but also folds in the type,
@@ -320,13 +405,76 @@ impl ProjectIndex {
         files: &[(FileId, SyntaxNode)],
         classpath: &LoweredClasspath,
     ) -> ProjectIndex {
-        Self::build_inner(files, true, &classpath.classes)
+        Self::build_inner(
+            files,
+            &[],
+            true,
+            &classpath.classes,
+            &SourceLocations::default(),
+        )
+    }
+
+    /// Like [`build_with_lowered_classpath`](ProjectIndex::build_with_lowered_classpath), but also
+    /// folds in a [`SourceLocations`] overlay so each classpath type/member that has matching library
+    /// *source* gets a real `.java` go-to-definition target ([`Item::source_location`] /
+    /// [`Member::source_location`]). Typing is unchanged — the `.class` files remain authoritative; the
+    /// overlay only adds navigation. Build the overlay once with
+    /// [`index_source_locations`](ProjectIndex::index_source_locations).
+    pub fn build_with_classpath_sources(
+        files: &[(FileId, SyntaxNode)],
+        classpath: &LoweredClasspath,
+        sources: &SourceLocations,
+    ) -> ProjectIndex {
+        Self::build_inner(files, &[], true, &classpath.classes, sources)
+    }
+
+    /// Like [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources), but also
+    /// indexes `source_files` — the `.java` of `git`/`path` `[dependencies]` — as
+    /// [`Source`](ItemOrigin::Source)-origin types. Unlike a classpath `.class` (typed from bytecode,
+    /// navigated via a separate [`SourceLocations`] overlay) or a `-sources.jar` (navigation only),
+    /// these files are the typing authority *and* the navigation target: their types resolve for
+    /// inference/hover/completion and a reference into one goes to its real declaration. They are not
+    /// project files, so the host neither lints nor renames them.
+    ///
+    /// `files` are the project's own sources (first, so a project type wins a fully-qualified-name
+    /// clash); `source_files` are the library sources; `classpath`/`sources` are the classpath
+    /// `.class` facts and their optional source overlay, exactly as for
+    /// [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources). Pure and
+    /// `wasm32`-compatible — the host reads and parses the library `.java` and assigns their
+    /// [`FileId`]s.
+    pub fn build_with_source_deps(
+        files: &[(FileId, SyntaxNode)],
+        source_files: &[(FileId, SyntaxNode)],
+        classpath: &LoweredClasspath,
+        sources: &SourceLocations,
+    ) -> ProjectIndex {
+        Self::build_inner(files, source_files, true, &classpath.classes, sources)
+    }
+
+    /// Index where the types and members of the host's extracted library *sources* are declared, once,
+    /// so [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources) can reuse the
+    /// result across rebuilds (the sources of a fixed dependency do not change). Each entry of
+    /// `sources` is a library `.java` file's `(FileId, SOURCE_FILE root)`; the host registers those
+    /// `FileId`s so it can map a match back to a real URL. Pure and `wasm32`-compatible.
+    pub fn index_source_locations(sources: &[(FileId, SyntaxNode)]) -> SourceLocations {
+        let mut locs = SourceLocations::default();
+        for (file, root) in sources {
+            let package = ast::SourceFile::cast(root.clone())
+                .and_then(|s| s.package())
+                .and_then(|p| p.name())
+                .map(|n| n.text())
+                .filter(|p| !p.is_empty());
+            collect_source_locations(*file, root, package.as_deref(), None, &mut locs);
+        }
+        locs
     }
 
     fn build_inner(
         files: &[(FileId, SyntaxNode)],
+        source_files: &[(FileId, SyntaxNode)],
         stdlib: bool,
         classes: &[crate::classpath::ClassfileClass],
+        sources: &SourceLocations,
     ) -> ProjectIndex {
         let mut index = ProjectIndex {
             items: Vec::new(),
@@ -357,11 +505,17 @@ impl ProjectIndex {
         };
 
         // Every compilation unit to index, in priority order: the host's project files first, then
-        // the embedded stubs — so a user type with the same fully-qualified name as a stub wins
-        // (`by_fqn` keeps the first insert). Both passes below walk this one origin-tagged list.
+        // the `git`/`path` library sources, then the embedded stubs — so on a fully-qualified-name
+        // clash a project type wins over a library type wins over a stub (`by_fqn` keeps the first
+        // insert). All three passes below walk this one origin-tagged list.
         let units: Vec<(FileId, &SyntaxNode, ItemOrigin)> = files
             .iter()
             .map(|(file, root)| (*file, root, ItemOrigin::Project))
+            .chain(
+                source_files
+                    .iter()
+                    .map(|(file, root)| (*file, root, ItemOrigin::Source)),
+            )
             .chain(
                 stubs
                     .iter()
@@ -383,7 +537,7 @@ impl ProjectIndex {
             .collect();
         let classfile_owners: Vec<ItemId> = classfiles
             .iter()
-            .map(|&(file, class)| index.collect_classfile_type(file, class))
+            .map(|&(file, class)| index.collect_classfile_type(file, class, sources))
             .collect();
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
@@ -400,7 +554,7 @@ impl ProjectIndex {
         // The same second pass for classpath types, now that every type (project, stub, classpath) is
         // registered, so their supertypes resolve by fully-qualified name.
         for ((file, class), &owner) in classfiles.iter().copied().zip(&classfile_owners) {
-            index.collect_classfile_members_and_supertypes(file, owner, class);
+            index.collect_classfile_members_and_supertypes(file, owner, class, sources);
         }
         index
     }
@@ -472,6 +626,8 @@ impl ProjectIndex {
                 type_params: type_params_of(node),
                 supertypes: Vec::new(),
                 has_external_supertype: false,
+                // A project / stub type's own `file` already points at real (or no) source.
+                source_location: None,
             });
             self.by_fqn.entry(fqn.clone()).or_insert(id);
             next_enclosing = Some(fqn);
@@ -548,6 +704,7 @@ impl ProjectIndex {
         &mut self,
         file: FileId,
         class: &crate::classpath::ClassfileClass,
+        sources: &SourceLocations,
     ) -> ItemId {
         let id = ItemId(self.items.len() as u32);
         self.items.push(Item {
@@ -559,6 +716,8 @@ impl ProjectIndex {
             type_params: class.type_params.clone(),
             supertypes: Vec::new(),
             has_external_supertype: false,
+            // A real-source go-to-definition target, when this type's library source is indexed.
+            source_location: sources.type_location(&class.fqn),
         });
         // A project or stub type of the same name wins (first insert).
         self.by_fqn.entry(class.fqn.clone()).or_insert(id);
@@ -584,6 +743,7 @@ impl ProjectIndex {
         file: FileId,
         owner: ItemId,
         class: &crate::classpath::ClassfileClass,
+        sources: &SourceLocations,
     ) {
         for member in &class.members {
             self.register_member(
@@ -597,6 +757,12 @@ impl ProjectIndex {
                     ty: member.ty.clone(),
                     params: member.params.clone(),
                     varargs: member.varargs,
+                    // A real-source go-to-definition target, when the library source is indexed.
+                    source_location: sources.member_location(
+                        &class.fqn,
+                        &member.name,
+                        member.params.len(),
+                    ),
                 },
             );
         }
@@ -716,11 +882,17 @@ impl ProjectIndex {
         match self.resolve_reference(file, reference) {
             TypeResolution::Project(id) => {
                 let item = &self.items[id.0 as usize];
-                // A stub or classpath type has no host-openable source; not a navigation target.
-                if item.origin != ItemOrigin::Project {
-                    return None;
+                match item.origin {
+                    // A project or library-source type's own `(file, name_range)` is its real source.
+                    ItemOrigin::Project | ItemOrigin::Source => {
+                        Some((item.file, item.name_range.clone()))
+                    }
+                    // A classpath type navigates into its library source when that source is indexed;
+                    // otherwise it has no host-openable location.
+                    ItemOrigin::Classpath => item.source_location.clone(),
+                    // A stub has no real source at all.
+                    ItemOrigin::Stdlib => None,
                 }
-                Some((item.file, item.name_range.clone()))
             }
             TypeResolution::External | TypeResolution::Unresolved => None,
         }
@@ -919,6 +1091,42 @@ impl ProjectIndex {
     }
 }
 
+/// Walk a library source tree, mirroring [`ProjectIndex::collect_types`]'s recursion, and record each
+/// type's and member's declaring `(file, name range)` into `locs` (first declaration wins, like
+/// `by_fqn`). Member ranges and parameter counts come straight from [`members_of_decl`] so they line
+/// up with how the index reads members; the `ItemId(0)` owner is a placeholder, only the member name,
+/// arity, and range are read.
+fn collect_source_locations(
+    file: FileId,
+    node: &SyntaxNode,
+    package: Option<&str>,
+    enclosing: Option<&str>,
+    locs: &mut SourceLocations,
+) {
+    let mut next_enclosing = enclosing.map(str::to_string);
+    if type_decl_kind(node.kind()).is_some()
+        && let Some(name_tok) = first_ident_token(node)
+    {
+        let fqn = build_fqn(package, enclosing, name_tok.text());
+        locs.types
+            .entry(fqn.clone())
+            .or_insert_with(|| (file, byte_range(&name_tok)));
+        for member in members_of_decl(ItemId(0), file, node, name_tok.text()) {
+            let loc = (member.file, member.name_range.clone());
+            locs.members
+                .entry((fqn.clone(), member.name.clone(), member.params.len()))
+                .or_insert_with(|| loc.clone());
+            locs.members_by_name
+                .entry((fqn.clone(), member.name.clone()))
+                .or_insert(loc);
+        }
+        next_enclosing = Some(fqn);
+    }
+    for child in node.children() {
+        collect_source_locations(file, &child, package, next_enclosing.as_deref(), locs);
+    }
+}
+
 /// The direct value/executable members of a type declaration `node` (owned by `owner`, in `file`):
 /// fields, methods, constructors, and enum constants. Nested type declarations are *not* members
 /// here — they are their own [`Item`]s. `owner_simple` is the declaring type's simple name, used as
@@ -949,6 +1157,8 @@ fn members_of_decl(
                 ty,
                 params,
                 varargs,
+                // A project / stub member's own `file` already points at real (or no) source.
+                source_location: None,
             });
         };
     for member in body.children() {

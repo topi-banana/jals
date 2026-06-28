@@ -89,6 +89,8 @@ main-class = "com.example.Main"   # entry point for `jals run` (used only when n
 guava = { jar = "libs/guava.jar" }
 # A remote jar, downloaded into target/jals/deps and cached:
 junit = { jar = "https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar" }
+# An optional companion sources jar enables go-to-definition into the library's real .java source:
+gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.com/gson-2.11-sources.jar" }
 ```
 
 ### `[package]`
@@ -145,30 +147,59 @@ Once any `[[bin]]` exists, `[run] main-class` is ignored for selection. Duplicat
 
 ### `[dependencies]`
 
-A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Today the only form is
-a single `jar`:
+A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Each entry picks exactly
+one **primary form** — `jar` (compiled classes), `git` (a checked-out source repo), or `path` (a local
+source tree) — plus form-specific options:
 
-| Key | Type | Maps to |
-| --- | --- | --- |
-| `jar` | string | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir) |
+| Key | Type | Form | Maps to |
+| --- | --- | --- | --- |
+| `jar` | string | jar | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir) |
+| `sources` | string | jar | *optional* companion **sources** `.jar` (the library's `.java`), located like `jar`. Editor go-to-definition only — never a compile or analysis input |
+| `git` | string | git | a repository URL to clone for its `.java` source |
+| `branch` / `tag` / `rev` | string | git | *optional*, **at most one** — which commit to check out (default: the repo's default branch) |
+| `path` | string | path | a local directory tree of `.java` source (relative to the manifest dir) |
+| `dir` | string | git, path | *optional* source root **within** the repo/dir (e.g. `core/src/main/java`); omit to auto-detect (`src/main/java` → `src` → the root) |
 
 ```toml
 [dependencies]
 guava = { jar = "libs/guava.jar" }                          # local path
 other = { jar = "file:///opt/libs/other.jar" }              # file:// URL
 junit = { jar = "https://example.com/junit-4.13.2.jar" }    # remote, downloaded
+# A sources jar lets the editor jump into the library's real .java on go-to-definition:
+gson  = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.com/gson-2.11-sources.jar" }
+# Source directly from a git repo (pin with branch/tag/rev), or a local checkout:
+mylib = { git = "https://github.com/owner/mylib", tag = "v1.2" }
+local = { path = "../sibling-lib" }
+# A non-standard layout names its source root explicitly:
+core  = { git = "https://github.com/owner/mono", rev = "abc123", dir = "core/src/main/java" }
 ```
 
-Each entry is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via `jals-classpath`),
-and those jars are folded into the classpath for both **analysis** (`jals lint`, the LSP — so external
-types resolve in hover/diagnostics) and **compilation** (`jals build`/`run` put them on `javac`/`java`'s
-`-classpath`). Remote jars are downloaded once into `target/jals/deps` and cached (skip-if-exists).
-An empty `jar`, an unknown URL scheme, or a missing form is rejected at manifest load
-(`Manifest::validate`); a *runtime* failure (a download error, a local jar that does not exist) is a
-best-effort warning that skips just that dependency, never aborting. `jals-build` itself only
-*classifies* each spec (`Manifest::dependency_sources` → `DependencySource::{Url, Path}`), staying
-pure — it performs no I/O. Maven-coordinate resolution (`group:artifact:version` + transitive
-download + lockfile) is still future work (see the roadmap §3); list explicit jar URLs/paths for now.
+A **`jar`** dependency is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via
+`jals-classpath`) and folded into the classpath for both **analysis** (`jals lint`, the LSP) and
+**compilation** (`jals build`/`run` add it to `javac`/`java`'s `-classpath`). Remote jars are
+downloaded once into `target/jals/deps` and cached. Its optional `sources` jar is purely an **editor**
+aid: `jals-lsp` extracts the `.java` into `target/jals/deps/sources` and points go-to-definition at the
+real declaration; never a compile or analysis classpath input.
+
+A **`git`** / **`path`** dependency supplies `.java` **source** directly. It is an **editor** input
+only: `jals-lsp` clones each git repo (into `target/jals/deps/git`, the requested ref checked out) or
+reads each path in place, folds the located `.java` into its index as library-source types — so the
+project's references to them resolve for inference, hover, completion, and go-to-definition into the
+real source — but it is **never** a compile or `lint` input (`jals build`/`run`/`lint` ignore source
+dependencies; put a `jar` on the classpath if you need them compiled).
+
+A malformed entry is rejected when the manifest loads, in two stages. `Dependency` is a
+`#[serde(untagged)]` enum whose `Jar`/`Git`/`Path` variants each `deny_unknown_fields`, so the
+**structural** errors — more than one primary form (`{ jar, git }`), no form at all (`{}`), or a field
+misplaced for its form (`branch` without `git`, `sources` with `git`) — match no variant and fail at
+**parse** time (a TOML error). The remaining **value-level** errors — an empty value, an unknown URL
+scheme, conflicting git refs (`branch` + `tag`) — are caught by `Manifest::validate`. A *runtime*
+failure (a download/clone error, a local jar/dir that does not exist) is a best-effort warning that
+skips just that dependency, never aborting. `jals-build` itself only *classifies* each spec
+(`Manifest::dependency_sources` → `DependencySource`, `dependency_source_jars` → the `sources` jar,
+`dependency_source_dirs` → `SourceDependency::{Git, Path}`), staying pure — it performs no I/O.
+Maven-coordinate resolution (`group:artifact:version` + transitive download + lockfile) is still future
+work (see the roadmap §3).
 
 ## Usage
 
@@ -207,9 +238,18 @@ already-resolved jar paths (the host's resolved `[dependencies]` jars), appended
 resolve the `[build] source-dirs` and `[build] classpath` entries against the manifest directory, as
 absolute paths, for the host to read: sources to compile, and the classpath jars/dirs the host
 (`jals-classpath`) reads `.class` files from to feed `jals-hir`'s analysis. `Manifest::dependency_sources`
-classifies each `[dependencies]` entry into a `DependencySource::{Url, Path}` (pure, no I/O); the host
-(`jals-classpath::resolve_dependencies`) downloads the URLs and confirms the paths, so `jals lint` /
-the LSP / `jals build` see external library types from named dependencies, not just `[build] classpath`.
+classifies each `jar` `[dependencies]` entry into a `DependencySource::{Url, Path}` (pure, no I/O),
+`Manifest::dependency_source_jars` does the same for the optional `sources` jars, and
+`Manifest::dependency_source_dirs` classifies each `git`/`path` entry into a `SourceDependency::{Git, Path}`
+(`Dependency` is itself the classification — a `#[serde(untagged)]` enum of `Jar`/`Git`/`Path` variants,
+each `deny_unknown_fields`, so serde picks the form at parse time and rejects co-occurring/missing/misplaced
+forms as a parse error; the resolution accessors `Dependency::{jar_source, sources_source, source_dependency}`
+back the three methods above); the host
+(`jals-classpath::resolve_dependencies` / `resolve_project_source_deps`) downloads the URLs, confirms the
+paths, and clones the git repos, so `jals lint` / the LSP / `jals build` see external library types from
+named `jar` dependencies, and `jals-lsp` additionally extracts the `sources` jars and folds each
+`git`/`path` source tree into its index for go-to-definition into (and analysis of references to) library
+source.
 
 ## Development
 
@@ -283,7 +323,7 @@ metadata on packaging. (`default-run` is already implemented — see [`[[bin]]`]
 
 | Section | Cargo analogue | Purpose |
 | --- | --- | --- |
-| `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
+| `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath, plus an optional `sources` jar for editor go-to-definition), as are the source forms `{ git = "url", branch/tag/rev, dir }` and `{ path = "...", dir }` (cloned/read `.java` folded into the LSP index for analysis + navigation, editor-only); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
 | `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
 | `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]` | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels) |

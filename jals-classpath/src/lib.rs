@@ -18,14 +18,17 @@
 
 mod resolve;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use jals_classfile::ClassFile;
 use walkdir::WalkDir;
 
 pub use resolve::{
     ResolvedDependencies, cached_jar_path, resolve_dependencies, resolve_project_dependencies,
+    resolve_project_source_deps, resolve_project_sources,
 };
 
 /// The outcome of loading a classpath: every `.class` file that parsed, plus any non-fatal
@@ -169,6 +172,135 @@ fn has_ext(path: &Path, ext: &str) -> bool {
 }
 
 impl ClasspathLoad {
+    fn warn(&mut self, path: &Path, message: &str) {
+        self.warnings.push(Warning::new(path, message));
+    }
+}
+
+/// The outcome of extracting dependency **sources** jars: the `.java` files written to disk, plus any
+/// non-fatal [`Warning`]s for jars/members that could not be read.
+#[derive(Debug, Default)]
+pub struct SourcesExtraction {
+    /// The extracted `.java` file paths on disk, in jar/archive order. The host registers these as
+    /// (read-only) navigation files so go-to-definition can land in a library's real source.
+    pub java_files: Vec<PathBuf>,
+    /// One per jar or member that could not be read/extracted. Extraction continues regardless.
+    pub warnings: Vec<Warning>,
+}
+
+/// Extract every `*.java` member of each sources jar in `jars` into `dest_dir`, returning the paths of
+/// the `.java` files written to disk.
+///
+/// Each jar's members are placed under `dest_dir/<jar-stem>-<hash>/<entry-path>` (e.g.
+/// `.../sources/foo-sources-0badc0de/java/util/List.java`). The `<hash>` of the jar's own path keeps
+/// two jars that share a filename from colliding. Member paths are sanitized — an entry that would
+/// escape `dest_dir` (an absolute path or a `..` component, a zip-slip attempt) is skipped.
+///
+/// Idempotent and cheap to re-run: a member already present on disk (non-empty) is left untouched (a
+/// fixed dependency's sources jar does not change), so re-opening a project does not re-inflate. Like
+/// [`load_classpath`], it is **error-resilient**: an unreadable jar/member becomes a [`Warning`] and is
+/// skipped, never aborting.
+pub fn extract_sources(jars: &[PathBuf], dest_dir: &Path) -> SourcesExtraction {
+    let mut out = SourcesExtraction::default();
+    for jar in jars {
+        extract_one(jar, &dest_dir.join(jar_subdir(jar)), &mut out);
+    }
+    out
+}
+
+/// Extract one sources jar's `*.java` members into `into` (its dedicated subdir of the extraction root).
+fn extract_one(jar: &Path, into: &Path, out: &mut SourcesExtraction) {
+    let file = match std::fs::File::open(jar) {
+        Ok(f) => f,
+        Err(err) => return out.warn(jar, &format!("failed to open sources jar: {err}")),
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(err) => return out.warn(jar, &format!("failed to read sources jar: {err}")),
+    };
+    for i in 0..archive.len() {
+        let mut member = match archive.by_index(i) {
+            Ok(m) => m,
+            Err(err) => {
+                out.warn(jar, &format!("failed to read sources jar entry {i}: {err}"));
+                continue;
+            }
+        };
+        if member.is_dir() || !member.name().ends_with(".java") {
+            continue;
+        }
+        // `joined` names the failing member within the jar, e.g. `dep.jar!java/util/List.java`.
+        let joined = jar.join(member.name());
+        let Some(rel) = safe_relative(member.name()) else {
+            out.warn(&joined, "skipped sources jar member with an unsafe path");
+            continue;
+        };
+        let dest = into.join(rel);
+        // Already extracted (immutable for a fixed jar): reuse without re-reading the member.
+        if dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            out.java_files.push(dest);
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(member.size() as usize);
+        if let Err(err) = member.read_to_end(&mut bytes) {
+            out.warn(&joined, &format!("failed to read source from jar: {err}"));
+            continue;
+        }
+        match write_atomic(&dest, &bytes) {
+            Ok(()) => out.java_files.push(dest),
+            Err(message) => out.warn(&joined, &message),
+        }
+    }
+}
+
+/// A 16-hex-digit [`DefaultHasher`] digest of `value`, used to disambiguate cache filenames / subdirs
+/// (e.g. two URLs or jar paths that share a name). [`DefaultHasher`] is fixed-keyed, so the digest is
+/// stable across runs — only disambiguation matters here, not collision resistance.
+pub(crate) fn hash_hex(value: impl Hash) -> String {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// The per-jar extraction subdir name: `<file-stem>-<hash of the jar's path>`. Hashing the jar path
+/// disambiguates two jars that share a filename.
+fn jar_subdir(jar: &Path) -> String {
+    let stem = jar
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sources".to_string());
+    format!("{stem}-{}", hash_hex(jar.to_string_lossy()))
+}
+
+/// Sanitize a zip member name into a relative path that stays inside the extraction dir: keep only
+/// `Normal` components, drop `.`, and reject anything else (an absolute path or a `..`, which could
+/// escape — a zip-slip). `None` for an empty or unsafe path.
+fn safe_relative(name: &str) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for comp in Path::new(name).components() {
+        match comp {
+            Component::Normal(c) => out.push(c),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+/// Write `bytes` to `dest`, creating parents, via a `.part` sibling renamed into place so an
+/// interrupted write never leaves a truncated file a later run would mistake for a complete extraction.
+fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating dir {}: {e}", parent.display()))?;
+    }
+    let tmp = dest.with_extension("java.part");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).map_err(|e| format!("finalizing {}: {e}", dest.display()))?;
+    Ok(())
+}
+
+impl SourcesExtraction {
     fn warn(&mut self, path: &Path, message: &str) {
         self.warnings.push(Warning::new(path, message));
     }
