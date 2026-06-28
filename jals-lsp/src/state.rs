@@ -11,7 +11,8 @@ use async_lsp::lsp_types::{
 };
 use jals_fmt::Config;
 use jals_hir::{
-    FileId, ItemId, ItemOrigin, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution,
+    FileId, ItemId, ItemOrigin, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
+    TypeResolution,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
@@ -174,6 +175,11 @@ pub(crate) struct Workspace {
     source_roots: Vec<PathBuf>,
     files: Vec<WorkspaceFile>,
     by_uri: HashMap<Url, FileId>,
+    /// The project's classpath `.class` files (parsed from the `[build] classpath` jars/dirs), lowered
+    /// once at construction to the facts the index folds in. Reused on every index rebuild so external
+    /// library types resolve; static for the workspace's lifetime (a dependency jar does not change
+    /// under us), so the expensive lowering happens here once instead of on every edit.
+    classpath: LoweredClasspath,
     index: ProjectIndex,
 }
 
@@ -182,7 +188,22 @@ impl Workspace {
     /// the symbol index. `project_root` is the `jals.toml` directory this workspace was discovered
     /// from; it identifies the workspace so a later open in the same project reuses it. Paths are
     /// visited in sorted order so the index is deterministic.
+    ///
+    /// The workspace has an empty classpath; use [`load_with_classpath`](Workspace::load_with_classpath)
+    /// to fold a project's external library types into the index.
     pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace {
+        Self::load_with_classpath(project_root, source_roots, Vec::new())
+    }
+
+    /// Like [`load`](Workspace::load), but also folds the project's classpath `.class` files into the
+    /// symbol index (as `Classpath`-origin types), so references to external library types resolve to
+    /// real items with members and generics — for hover, completion, and the `type-mismatch` check.
+    /// The caller (the server) reads and parses the jars/dirs; this keeps the I/O at the edge.
+    pub(crate) fn load_with_classpath(
+        project_root: PathBuf,
+        source_roots: Vec<PathBuf>,
+        classfiles: Vec<jals_classfile::ClassFile>,
+    ) -> Workspace {
         let mut paths: Vec<PathBuf> = source_roots
             .iter()
             .flat_map(|root| WalkDir::new(root).into_iter().filter_map(Result::ok))
@@ -198,6 +219,7 @@ impl Workspace {
             files: Vec::new(),
             by_uri: HashMap::new(),
             index: ProjectIndex::build_with_stdlib(&[]),
+            classpath: ProjectIndex::lower_classpath(&classfiles),
         };
         for path in paths {
             if let (Ok(text), Ok(uri)) =
@@ -213,11 +235,12 @@ impl Workspace {
         ws
     }
 
-    /// Rebuild the symbol index from the cached parses. No I/O.
+    /// Rebuild the symbol index from the cached parses and classpath. No I/O.
     ///
-    /// Built with the embedded `java.lang` stubs folded in, so a core JDK type (`String`,
-    /// `Object`, …) resolves to a real item with members and supertypes — hover, completion,
-    /// member navigation, and assignment checks see through it instead of stopping at a bare name.
+    /// Built with the embedded `java.lang` stubs and the project's classpath `.class` files folded
+    /// in, so a core JDK type (`String`, `Object`, …) or an external library type resolves to a real
+    /// item with members and supertypes — hover, completion, member navigation, and assignment
+    /// checks see through it instead of stopping at a bare name.
     fn rebuild_index(&mut self) {
         let inputs: Vec<(FileId, SyntaxNode)> = self
             .files
@@ -225,7 +248,7 @@ impl Workspace {
             .enumerate()
             .map(|(i, f)| (FileId(i as u32), f.parse.syntax()))
             .collect();
-        self.index = ProjectIndex::build_with_stdlib(&inputs);
+        self.index = ProjectIndex::build_with_lowered_classpath(&inputs, &self.classpath);
     }
 
     /// The project symbol index.
@@ -894,6 +917,39 @@ mod tests {
         assert!(!is_lint_config_file(&other));
         let non_file = Url::parse("untitled:jalslint.toml").unwrap();
         assert!(!is_lint_config_file(&non_file));
+    }
+
+    #[test]
+    fn workspace_folds_classpath_types_into_the_index() {
+        // A project whose classpath carries a compiled `Box.class`: the workspace folds it into the
+        // index as a `Classpath`-origin type, so external library types resolve here.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Main.java"), "class Main { }").unwrap();
+        let box_class = jals_classfile::read(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/Box.class"
+        )))
+        .expect("parse Box.class");
+
+        let ws = Workspace::load_with_classpath(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            vec![box_class],
+        );
+        assert!(
+            ws.index()
+                .items()
+                .any(|item| item.origin == ItemOrigin::Classpath),
+            "the classpath `.class` file should be indexed as a Classpath-origin type"
+        );
+        // Without a classpath, the same project has no Classpath-origin items.
+        let bare = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        assert!(
+            !bare
+                .index()
+                .items()
+                .any(|item| item.origin == ItemOrigin::Classpath)
+        );
     }
 
     #[test]

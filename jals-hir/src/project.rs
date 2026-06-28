@@ -252,6 +252,14 @@ pub struct ProjectIndex {
     decl_to_item: HashMap<(FileId, usize), ItemId>,
 }
 
+/// A project's classpath `.class` files lowered to the index facts they contribute, ready to fold
+/// into a [`ProjectIndex`]. Produced once by [`ProjectIndex::lower_classpath`] and reused across
+/// rebuilds via [`ProjectIndex::build_with_lowered_classpath`], so a host that re-indexes on every
+/// edit decodes the (unchanging) classpath only once.
+pub struct LoweredClasspath {
+    classes: Vec<crate::classpath::ClassfileClass>,
+}
+
 impl ProjectIndex {
     /// Builds the index from each file's `SOURCE_FILE` root. Pure: no I/O, never panics.
     ///
@@ -287,13 +295,38 @@ impl ProjectIndex {
         files: &[(FileId, SyntaxNode)],
         classfiles: &[jals_classfile::ClassFile],
     ) -> ProjectIndex {
-        Self::build_inner(files, true, classfiles)
+        Self::build_with_lowered_classpath(files, &Self::lower_classpath(classfiles))
+    }
+
+    /// Lower the classpath `.class` files to the index facts they contribute, once, so a host that
+    /// re-indexes on every edit can reuse the result via
+    /// [`build_with_lowered_classpath`](ProjectIndex::build_with_lowered_classpath) instead of
+    /// re-decoding the (unchanging) classpath each time. Lowering decodes every member's descriptor
+    /// and generic signature — the expensive half of folding a classpath in; registering the
+    /// resulting facts (the cheap half) still runs per rebuild. Pure and `wasm32`-compatible.
+    pub fn lower_classpath(classfiles: &[jals_classfile::ClassFile]) -> LoweredClasspath {
+        LoweredClasspath {
+            classes: classfiles
+                .iter()
+                .filter_map(crate::classpath::lower)
+                .collect(),
+        }
+    }
+
+    /// Like [`build_with_classpath`](ProjectIndex::build_with_classpath), but takes a classpath
+    /// already lowered by [`lower_classpath`](ProjectIndex::lower_classpath) — folding the
+    /// pre-decoded facts in without re-decoding them.
+    pub fn build_with_lowered_classpath(
+        files: &[(FileId, SyntaxNode)],
+        classpath: &LoweredClasspath,
+    ) -> ProjectIndex {
+        Self::build_inner(files, true, &classpath.classes)
     }
 
     fn build_inner(
         files: &[(FileId, SyntaxNode)],
         stdlib: bool,
-        classfiles: &[jals_classfile::ClassFile],
+        classes: &[crate::classpath::ClassfileClass],
     ) -> ProjectIndex {
         let mut index = ProjectIndex {
             items: Vec::new(),
@@ -340,20 +373,17 @@ impl ProjectIndex {
         for &(file, root, origin) in &units {
             index.collect_file(file, root, origin);
         }
-        // Classpath `.class` files, lowered to self-contained data and registered like source types.
-        // Their reserved `FileId`s sit just below the stub block so they never collide.
-        let classfiles: Vec<(FileId, crate::classpath::ClassfileClass)> = classfiles
+        // Classpath `.class` files (already lowered to self-contained data) registered like source
+        // types. Their reserved `FileId`s sit just below the stub block so they never collide.
+        let classfile_block_start = u32::MAX - stubs.len() as u32 - 1;
+        let classfiles: Vec<(FileId, &crate::classpath::ClassfileClass)> = classes
             .iter()
             .enumerate()
-            .filter_map(|(j, cf)| {
-                let class = crate::classpath::lower(cf)?;
-                let file = FileId(u32::MAX - stubs.len() as u32 - 1 - j as u32);
-                Some((file, class))
-            })
+            .map(|(j, class)| (FileId(classfile_block_start - j as u32), class))
             .collect();
         let classfile_owners: Vec<ItemId> = classfiles
             .iter()
-            .map(|(file, class)| index.collect_classfile_type(*file, class))
+            .map(|&(file, class)| index.collect_classfile_type(file, class))
             .collect();
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
@@ -369,7 +399,7 @@ impl ProjectIndex {
         }
         // The same second pass for classpath types, now that every type (project, stub, classpath) is
         // registered, so their supertypes resolve by fully-qualified name.
-        for ((file, class), &owner) in classfiles.into_iter().zip(&classfile_owners) {
+        for ((file, class), &owner) in classfiles.iter().copied().zip(&classfile_owners) {
             index.collect_classfile_members_and_supertypes(file, owner, class);
         }
         index
@@ -553,19 +583,19 @@ impl ProjectIndex {
         &mut self,
         file: FileId,
         owner: ItemId,
-        class: crate::classpath::ClassfileClass,
+        class: &crate::classpath::ClassfileClass,
     ) {
-        for member in class.members {
+        for member in &class.members {
             self.register_member(
                 owner,
                 Member {
                     owner,
-                    name: member.name,
+                    name: member.name.clone(),
                     kind: member.kind,
                     file,
                     name_range: 0..0,
-                    ty: member.ty,
-                    params: member.params,
+                    ty: member.ty.clone(),
+                    params: member.params.clone(),
                     varargs: member.varargs,
                 },
             );

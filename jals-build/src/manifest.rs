@@ -182,6 +182,20 @@ impl Manifest {
             .collect()
     }
 
+    /// The absolute classpath entries: each `[build] classpath` entry (a jar or a directory of
+    /// `.class` files) resolved against `manifest_dir`. Symmetric with [`source_roots`]; the host
+    /// reads the `.class` files from these (directly or out of a jar) to feed `jals-hir`'s classpath
+    /// bridge, keeping this crate pure and `wasm32`-compatible.
+    ///
+    /// [`source_roots`]: Manifest::source_roots
+    pub fn classpath_entries(&self, manifest_dir: &Path) -> Vec<PathBuf> {
+        self.build
+            .classpath
+            .iter()
+            .map(|c| manifest_dir.join(c))
+            .collect()
+    }
+
     /// Search upward from `start_dir` for a `jals.toml`, returning its path.
     ///
     /// The project root is the returned path's parent directory; all manifest paths are resolved
@@ -361,6 +375,25 @@ mod tests {
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.run.main_class, None);
         assert!(m.bin.is_empty());
+    }
+
+    #[test]
+    fn classpath_entries_resolve_against_manifest_dir() {
+        let m: Manifest =
+            toml::from_str("[build]\nclasspath = [\"libs/guava.jar\", \"out/classes\"]\n").unwrap();
+        assert_eq!(
+            m.classpath_entries(Path::new("/proj")),
+            vec![
+                PathBuf::from("/proj/libs/guava.jar"),
+                PathBuf::from("/proj/out/classes"),
+            ]
+        );
+        // The default (empty) classpath resolves to no entries.
+        assert!(
+            Manifest::default()
+                .classpath_entries(Path::new("/proj"))
+                .is_empty()
+        );
     }
 
     #[test]

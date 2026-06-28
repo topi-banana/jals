@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "jals-build",
   "jals-classfile",
+  "jals-classpath",
   "jals-cli",
   "jals-fmt",
   "jals-hir",
@@ -26,6 +27,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 futures = { version = "0.3" }
 jals-build = { path = "jals-build" }
 jals-classfile = { path = "jals-classfile" }
+jals-classpath = { path = "jals-classpath" }
 jals-fmt = { path = "jals-fmt" }
 jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }
@@ -48,3 +50,6 @@ ungrammar = { version = "1.16" }
 unicode-properties = { version = "=0.1.4" }
 unicode-width = { version = "0.2.1" }
 walkdir = { version = "2" }
+# Host-only (jals-classpath reads jars). `deflate` is the only compression jars use; disabling the
+# rest keeps the dependency tree small and out of the pure/`wasm32` crates.
+zip = { version = "2", default-features = false, features = ["deflate"] }

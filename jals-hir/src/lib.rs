@@ -56,8 +56,8 @@ pub use infer::{
     infer_node, member_completions, scope_completions, signature_help, type_mismatches,
 };
 pub use project::{
-    FileId, Fqn, Item, ItemId, ItemOrigin, Member, MemberId, MemberType, Param, ProjectIndex,
-    Supertype, TypeParamDecl, TypeResolution,
+    FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId, MemberType, Param,
+    ProjectIndex, Supertype, TypeParamDecl, TypeResolution,
 };
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;

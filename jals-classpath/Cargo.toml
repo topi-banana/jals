@@ -1,0 +1,12 @@
+[package]
+name = "jals-classpath"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jals-classfile.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

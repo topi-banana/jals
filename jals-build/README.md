@@ -168,6 +168,10 @@ pub fn scaffold(options: &InitOptions) -> Vec<ScaffoldFile>;
 renders it for `--dry-run`/`-v`. `resolve_run_target` picks the `main-class` `jals run` should
 execute from `[[bin]]`/`default-run`/`[run] main-class`. `Manifest::from_file` loads, parses, and
 validates (`Manifest::validate`) `jals.toml`; `Manifest::discover_path` locates it.
+`Manifest::source_roots` and `Manifest::classpath_entries` resolve the `[build] source-dirs` and
+`[build] classpath` entries against the manifest directory, as absolute paths, for the host to read:
+sources to compile, and — new — the classpath jars/dirs the host (`jals-classpath`) reads `.class`
+files from to feed `jals-hir`'s analysis (so `jals lint` / the LSP see external library types).
 
 ## Development
 
@@ -264,6 +268,16 @@ already consumes. The pure/`wasm32` split is preserved by keeping resolution's I
 
 `jals-build` itself only needs the *result*: the resolved classpath, fed in like sources are
 today. No part of this changes the crate's purity.
+
+**Already wired (analysis side):** the *consumption* of a classpath for semantic analysis is done.
+`Manifest::classpath_entries` resolves the `[build] classpath` to paths; the host-only
+`jals-classpath` crate reads the `.class` files out of those jars/dirs and parses them with
+`jals-classfile`; and `jals-hir`'s `ProjectIndex::build_with_classpath` folds them in so external
+library types resolve in `jals lint` and the language server. What is still missing is the
+*resolver* above — turning Maven coordinates into those classpath entries (download + cache +
+lockfile). Until then, a project lists already-present jars/dirs under `[build] classpath` by hand.
+JDK standard-library classes are not loaded this way either; the embedded `java.lang`/`java.util`
+stubs stand in for them (reading the JDK's `jimage`/`modules` is a separate, still-unwired step).
 
 ## 4. Packaging
 

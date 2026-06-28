@@ -113,11 +113,33 @@ impl ServerState {
         if self.workspaces.iter().any(|ws| ws.project_root() == root) {
             return;
         }
-        let source_roots = match Manifest::from_file(&manifest_path) {
-            Ok(manifest) => manifest.source_roots(&root),
-            Err(_) => vec![root.clone()],
+        let manifest = match Manifest::from_file(&manifest_path) {
+            Ok(manifest) => manifest,
+            // An unparseable manifest: index the project root as a lone source root, no classpath.
+            Err(_) => {
+                self.workspaces
+                    .push(Workspace::load(root.clone(), vec![root]));
+                return;
+            }
         };
-        self.workspaces.push(Workspace::load(root, source_roots));
+        // Read and parse the project's classpath jars/dirs once, so external library types resolve
+        // in this workspace's index. Unreadable entries are skipped (logged), never fatal — the
+        // project still gets analysis from its sources, stubs, and the rest of the classpath.
+        let load = jals_classpath::load_classpath(&manifest.classpath_entries(&root));
+        for warning in &load.warnings {
+            // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
+            eprintln!(
+                "jals-lsp: classpath: {}: {}",
+                warning.path.display(),
+                warning.message
+            );
+        }
+        let source_roots = manifest.source_roots(&root);
+        self.workspaces.push(Workspace::load_with_classpath(
+            root,
+            source_roots,
+            load.classes,
+        ));
     }
 
     /// The loaded workspace that owns `uri`, if any.
