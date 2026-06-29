@@ -196,7 +196,8 @@ mod tests {
         let parse = jals_syntax::parse(text);
         let sibling = jals_syntax::parse("package a; class Foo { }");
         let index =
-            ProjectIndex::build(&[(FileId(0), parse.syntax()), (FileId(1), sibling.syntax())]);
+            ProjectIndex::builder(&[(FileId(0), parse.syntax()), (FileId(1), sibling.syntax())])
+                .build();
         (index, parse)
     }
 
@@ -231,7 +232,7 @@ mod tests {
         let text = "package a; class Bar { Nope n; ";
         let parse = jals_syntax::parse(text);
         assert!(!parse.errors().is_empty());
-        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
         let resolved = jals_hir::resolve_node(&parse.syntax());
         let diags = compute_type_diagnostics(
             &index,
@@ -251,7 +252,7 @@ mod tests {
     #[test]
     fn type_mismatch_diagnostics_flag_project_subtyping() {
         let parse = jals_syntax::parse(SUBTYPING_SRC);
-        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
         let resolved = jals_hir::resolve_node(&parse.syntax());
         let diags = compute_type_mismatch_diagnostics(
             &index,
@@ -276,7 +277,7 @@ mod tests {
     fn type_mismatch_diagnostics_flag_a_bad_call_argument() {
         let text = "class C { void f(int x) {} void g() { f(1.0); } }";
         let parse = jals_syntax::parse(text);
-        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
         let resolved = jals_hir::resolve_node(&parse.syntax());
         let diags = compute_type_mismatch_diagnostics(
             &index,
@@ -294,7 +295,7 @@ mod tests {
     #[test]
     fn type_mismatch_diagnostics_respect_allow_config() {
         let parse = jals_syntax::parse(SUBTYPING_SRC);
-        let index = ProjectIndex::build(&[(FileId(0), parse.syntax())]);
+        let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
         let mut config = jals_lint::Config::default();
         config
             .rules

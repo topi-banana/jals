@@ -383,7 +383,7 @@ mod tests {
             (FileId(0), jals_syntax::parse(other).syntax()),
             (FileId(1), jals_syntax::parse(main).syntax()),
         ];
-        let index = ProjectIndex::build(&nodes);
+        let index = ProjectIndex::builder(&nodes).build();
         let idx = LineIndex::new(main);
         let parse = jals_syntax::parse(main);
 

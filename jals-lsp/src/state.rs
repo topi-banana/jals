@@ -311,7 +311,7 @@ impl Workspace {
             by_uri: HashMap::new(),
             library_files,
             source_dep_files,
-            index: ProjectIndex::build_with_stdlib(&[]),
+            index: ProjectIndex::builder(&[]).with_stdlib().build(),
             classpath: ProjectIndex::lower_classpath(&classfiles),
             source_locations: ProjectIndex::index_source_locations(&library_inputs),
         };
@@ -341,12 +341,12 @@ impl Workspace {
         // their own `SOURCE_DEP_FILE_BASE` ids so they navigate back to the right files. The
         // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
         let source_deps = file_inputs(&self.source_dep_files, SOURCE_DEP_FILE_BASE);
-        self.index = ProjectIndex::build_with_source_deps(
-            &inputs,
-            &source_deps,
-            &self.classpath,
-            &self.source_locations,
-        );
+        self.index = ProjectIndex::builder(&inputs)
+            .with_stdlib()
+            .with_source_deps(&source_deps)
+            .with_classpath(&self.classpath)
+            .with_source_locations(&self.source_locations)
+            .build();
     }
 
     /// The workspace file a [`FileId`] addresses: a project file by its low id, a `git`/`path` library

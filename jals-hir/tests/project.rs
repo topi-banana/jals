@@ -20,7 +20,7 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
 
 fn render(sources: &[&str]) -> String {
     let nodes = nodes(sources);
-    let index = ProjectIndex::build(&nodes);
+    let index = ProjectIndex::builder(&nodes).build();
     let mut out = String::new();
     for (file, root) in &nodes {
         let resolved = resolve_node(root);
@@ -181,7 +181,7 @@ fn definition_at_jumps_across_files() {
         "package a; class Bar { Foo f; }",
     ];
     let nodes = nodes(&srcs);
-    let index = ProjectIndex::build(&nodes);
+    let index = ProjectIndex::builder(&nodes).build();
     let resolved = resolve_node(&nodes[1].1);
     let offset = srcs[1].find("Foo").unwrap();
 
@@ -198,7 +198,7 @@ fn unresolved_types_reports_only_genuine_unknowns() {
     // file-locally. Only `Nope` is a diagnostic span.
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);
-    let index = ProjectIndex::build(&nodes);
+    let index = ProjectIndex::builder(&nodes).build();
     let resolved = resolve_node(&nodes[0].1);
 
     let spans = index.unresolved_types(FileId(0), &resolved);

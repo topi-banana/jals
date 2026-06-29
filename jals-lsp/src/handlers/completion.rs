@@ -158,7 +158,9 @@ pub(crate) fn completions_local(
 ) -> Vec<CompletionItem> {
     let root = parse.syntax();
     let offset = u32::from(line_index.offset(text, position)) as usize;
-    let index = ProjectIndex::build_with_stdlib(&[(FileId(0), root.clone())]);
+    let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
+        .with_stdlib()
+        .build();
     let resolved = jals_hir::resolve_node(&root);
     completions(&root, &resolved, &index, FileId(0), offset)
 }

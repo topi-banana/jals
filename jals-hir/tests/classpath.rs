@@ -26,7 +26,10 @@ fn parse(src: &str) -> SyntaxNode {
 fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
     let node = parse(src);
     let resolved = resolve_node(&node);
-    let index = ProjectIndex::build_with_classpath(&[(FileId(0), node.clone())], classfiles);
+    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+        .with_stdlib()
+        .with_classpath(&ProjectIndex::lower_classpath(classfiles))
+        .build();
     let ti = infer(&node, &resolved, &index, FileId(0));
     let expr = node
         .descendants()
@@ -63,10 +66,12 @@ fn classpath_type_is_not_a_navigation_target() {
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
     let resolved = resolve_node(&node);
-    let index = ProjectIndex::build_with_classpath(
-        &[(FileId(0), node.clone())],
-        std::slice::from_ref(&box_classfile()),
-    );
+    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+        .with_stdlib()
+        .with_classpath(&ProjectIndex::lower_classpath(std::slice::from_ref(
+            &box_classfile(),
+        )))
+        .build();
     let offset = src.find("Box").expect("Box in source");
     assert!(
         index.definition_at(FileId(0), &resolved, offset).is_none(),
@@ -85,11 +90,11 @@ fn classpath_type_navigates_to_library_source() {
     let lib = FileId(100);
     let sources = ProjectIndex::index_source_locations(&[(lib, parse(BOX_SOURCE))]);
     let classpath = ProjectIndex::lower_classpath(std::slice::from_ref(&box_classfile()));
-    let index = ProjectIndex::build_with_classpath_sources(
-        &[(FileId(0), node.clone())],
-        &classpath,
-        &sources,
-    );
+    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+        .with_stdlib()
+        .with_classpath(&classpath)
+        .with_source_locations(&sources)
+        .build();
 
     let offset = src.find("Box").expect("Box in source");
     let (file, range) = index
@@ -111,12 +116,12 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
 
     let lib = FileId(100);
     let lib_box = parse(BOX_SOURCE);
-    let index = ProjectIndex::build_with_source_deps(
-        &[(FileId(0), node.clone())],
-        &[(lib, lib_box)],
-        &ProjectIndex::lower_classpath(&[]),
-        &SourceLocations::default(),
-    );
+    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+        .with_stdlib()
+        .with_source_deps(&[(lib, lib_box)])
+        .with_classpath(&ProjectIndex::lower_classpath(&[]))
+        .with_source_locations(&SourceLocations::default())
+        .build();
 
     // Typing flows through the library source: `Box<String>.get()` substitutes `T` ↦ `String`.
     let ti = infer(&node, &resolved, &index, FileId(0));
@@ -170,8 +175,11 @@ fn classpath_member_navigates_to_library_source() {
     let lib = FileId(100);
     let sources = ProjectIndex::index_source_locations(&[(lib, parse(BOX_SOURCE))]);
     let classpath = ProjectIndex::lower_classpath(std::slice::from_ref(&box_classfile()));
-    let index =
-        ProjectIndex::build_with_classpath_sources(&[(FileId(0), node)], &classpath, &sources);
+    let index = ProjectIndex::builder(&[(FileId(0), node)])
+        .with_stdlib()
+        .with_classpath(&classpath)
+        .with_source_locations(&sources)
+        .build();
 
     let box_id = index
         .resolve_type_name(FileId(0), "Box", None)

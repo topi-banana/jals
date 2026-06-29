@@ -265,8 +265,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
         // Fold in the project's classpath (discovered from the cwd) so `type-mismatch` sees external
         // library types, exactly as the multi-file path does.
         let classpath = load_project_classpath(&cwd);
-        let index =
-            ProjectIndex::build_with_classpath(&[(FileId(0), parse.syntax())], &classpath.classes);
+        let index = build_lint_index(&[(FileId(0), parse.syntax())], &classpath);
         let out = jals_lint::lint_parse_with_index(&parse, &cfg, Some((&index, FileId(0))));
         any_finding |= report::report_lint("<stdin>", &src, &out);
     } else {
@@ -296,7 +295,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let classpath = load_project_classpath(&start_dir);
-        let index = ProjectIndex::build_with_classpath(&inputs, &classpath.classes);
+        let index = build_lint_index(&inputs, &classpath);
 
         for (i, (path, src, parse)) in files.iter().enumerate() {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -496,6 +495,20 @@ fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
 /// check. Unlike `jals build`, a missing manifest or an unreadable classpath entry is **not** an
 /// error here — linting still runs with the project sources and stdlib stubs, just without external
 /// library types. Any unreadable entry is reported as a warning on stderr and skipped.
+/// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and the
+/// project's classpath `.class` files so the index-aware `type-mismatch` rule resolves stdlib and
+/// external library types. Shared by the stdin and multi-file lint paths.
+fn build_lint_index(
+    files: &[(FileId, jals_syntax::SyntaxNode)],
+    classpath: &jals_classpath::ClasspathLoad,
+) -> ProjectIndex {
+    let lowered = ProjectIndex::lower_classpath(&classpath.classes);
+    ProjectIndex::builder(files)
+        .with_stdlib()
+        .with_classpath(&lowered)
+        .build()
+}
+
 fn load_project_classpath(start_dir: &Path) -> jals_classpath::ClasspathLoad {
     let Some(manifest_path) = Manifest::discover_path(start_dir) else {
         return jals_classpath::ClasspathLoad::default();

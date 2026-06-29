@@ -5,7 +5,7 @@
 //! but with no members, no supertypes, no inferable method return types. These stubs close the gap
 //! for the core of `java.lang` and `java.util`: each is an ordinary Java type declaration carrying
 //! *signatures only* (method bodies omitted, `;`-terminated), which
-//! [`ProjectIndex::build_with_stdlib`] parses with the real parser and folds into the index as
+//! [`ProjectIndexBuilder::with_stdlib`] parses with the real parser and folds into the index as
 //! just-another-set-of-files (origin [`Stdlib`](crate::ItemOrigin::Stdlib)).
 //!
 //! This is the "stubs-as-source" approach: it reuses the whole project-indexing machinery

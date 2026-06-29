@@ -1,7 +1,7 @@
-//! Tests for the embedded `java.lang` stubs, indexed via [`ProjectIndex::build_with_stdlib`].
+//! Tests for the embedded `java.lang` stubs, indexed via [`ProjectIndexBuilder::with_stdlib`].
 //!
 //! They pin the Step-1 contract: core JDK types become real (stub-origin) project items, so a
-//! reference to one resolves and its members infer — while the default [`ProjectIndex::build`] is
+//! reference to one resolves and its members infer — while the default [`ProjectIndex::builder`] is
 //! unchanged (those types stay `external`), and a stub is never offered as a navigation target.
 
 use jals_hir::{
@@ -23,7 +23,9 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
 fn analyse_with_stdlib(src: &str) -> (SyntaxNode, Resolved, TypeInference, ProjectIndex) {
     let node = jals_syntax::parse(src).syntax();
     let resolved = resolve_node(&node);
-    let index = ProjectIndex::build_with_stdlib(&[(FileId(0), node.clone())]);
+    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+        .with_stdlib()
+        .build();
     let ti = infer(&node, &resolved, &index, FileId(0));
     (node, resolved, ti, index)
 }
@@ -99,7 +101,7 @@ fn stdlib_symbol_goto_is_none() {
 fn default_build_keeps_string_external() {
     // Regression guard: without the stubs, `String` is external exactly as before.
     let src = "class C { String f; }";
-    let index = ProjectIndex::build(&nodes(&[src]));
+    let index = ProjectIndex::builder(&nodes(&[src])).build();
     assert_eq!(
         index.resolve_type_name(FileId(0), "String", None),
         TypeResolution::External,
@@ -272,7 +274,7 @@ fn a_real_primitive_narrowing_is_still_flagged() {
 }
 
 #[test]
-fn build_with_stdlib_never_panics_and_project_items_are_in_bounds() {
+fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
     let sources = [
         "",
         "class C { String s; void m() { var n = s.length(); } }",
@@ -280,7 +282,7 @@ fn build_with_stdlib_never_panics_and_project_items_are_in_bounds() {
         "🦀 class Broken { int (}",
     ];
     let nodes = nodes(&sources);
-    let index = ProjectIndex::build_with_stdlib(&nodes);
+    let index = ProjectIndex::builder(&nodes).with_stdlib().build();
     // Every *project* item's name range stays within its source; stub items live at reserved high
     // file ids and are excluded from this host-source bounds check.
     for item in index.items().filter(|it| it.origin == ItemOrigin::Project) {
