@@ -18,6 +18,7 @@ use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
 use walkdir::WalkDir;
 
+use crate::file_id::WorkspaceFileId;
 use crate::line_index::LineIndex;
 
 /// An open document: its text, the client's version, a precomputed line index, and the
@@ -176,18 +177,19 @@ pub(crate) struct Workspace {
     files: Vec<WorkspaceFile>,
     by_uri: HashMap<Url, FileId>,
     /// Extracted library *source* files (the `.java` of a `[dependencies]` `sources` jar), kept so a
-    /// classpath type/member can be navigated into its real source. Addressed by a [`FileId`] of
-    /// [`LIBRARY_FILE_BASE`]` + index`, disjoint from the project files' low ids, so [`ws_file`](Workspace::ws_file)
-    /// can route a go-to-definition target to the right vec. Never project inputs and never linted —
-    /// they are navigation targets only.
+    /// classpath type/member can be navigated into its real source. Addressed by a
+    /// [`Library`](WorkspaceFileId::Library) [`FileId`], disjoint from the project files' low ids, so
+    /// [`ws_file`](Workspace::ws_file) can route a go-to-definition target to the right vec. Never
+    /// project inputs and never linted — they are navigation targets only.
     library_files: Vec<WorkspaceFile>,
     /// Library **source** files of a `git` / `path` `[dependencies]` entry. Unlike
     /// [`library_files`](Workspace::library_files) (navigation-only overlays paired with a binary
     /// `-sources.jar`), these have no `.class` backing them, so they *are* index inputs — folded in as
     /// [`Source`](jals_hir::ItemOrigin::Source)-origin types that resolve for inference/hover and are
-    /// go-to-definition targets in their own right. Addressed by a [`FileId`] of
-    /// [`SOURCE_DEP_FILE_BASE`]` + index`, a third id space disjoint from both the project files and
-    /// [`library_files`](Workspace::library_files). Still never linted — they are not project files.
+    /// go-to-definition targets in their own right. Addressed by a
+    /// [`SourceDep`](WorkspaceFileId::SourceDep) [`FileId`], a third id space disjoint from both the
+    /// project files and [`library_files`](Workspace::library_files). Still never linted — they are not
+    /// project files.
     source_dep_files: Vec<WorkspaceFile>,
     /// The project's classpath `.class` files (parsed from the `[build] classpath` jars/dirs), lowered
     /// once at construction to the facts the index folds in. Reused on every index rebuild so external
@@ -200,16 +202,6 @@ pub(crate) struct Workspace {
     source_locations: SourceLocations,
     index: ProjectIndex,
 }
-
-/// Base [`FileId`] for extracted library source files (the `-sources.jar` overlays), far above any
-/// project file's id (a project has nowhere near 2³¹ files) and below
-/// [`SOURCE_DEP_FILE_BASE`]/`jals-hir`'s reserved stub/classfile block, so the id spaces never collide.
-const LIBRARY_FILE_BASE: u32 = 1 << 31;
-
-/// Base [`FileId`] for `git`/`path` library-source files, a third id space above
-/// [`LIBRARY_FILE_BASE`] (giving each space ~2³⁰ ids) and still below `jals-hir`'s reserved
-/// stub/classfile block near `u32::MAX`, so project / `-sources.jar` / `git`-`path` ids never collide.
-const SOURCE_DEP_FILE_BASE: u32 = (1 << 31) + (1 << 30);
 
 /// Read and parse each library `.java` in `paths`, skipping unreadable / non-`file://` ones and
 /// de-duplicating by URI, into [`WorkspaceFile`]s. Shared by both library-source kinds (the
@@ -227,15 +219,19 @@ fn read_library_files(paths: Vec<PathBuf>) -> Vec<WorkspaceFile> {
     files
 }
 
-/// Pair each file in `files` with a sequential [`FileId`] starting at `base`, reading its cached parse
-/// — the `(FileId, SOURCE_FILE root)` inputs the index builds from. Shared by the project files
-/// (`base = 0`) and the two library-source id-spaces ([`LIBRARY_FILE_BASE`] / [`SOURCE_DEP_FILE_BASE`]),
-/// so every id space derives its inputs the same way.
-fn file_inputs(files: &[WorkspaceFile], base: u32) -> Vec<(FileId, SyntaxNode)> {
+/// Pair each file in `files` with a sequential [`FileId`] in the id-space named by `space`, reading
+/// its cached parse — the `(FileId, SOURCE_FILE root)` inputs the index builds from. Shared by the
+/// project files ([`WorkspaceFileId::Project`]) and the two library-source id-spaces
+/// ([`Library`](WorkspaceFileId::Library) / [`SourceDep`](WorkspaceFileId::SourceDep)), so every id
+/// space derives its inputs the same way — the base offset lives only in [`WorkspaceFileId::to_raw`].
+fn file_inputs(
+    files: &[WorkspaceFile],
+    space: fn(u32) -> WorkspaceFileId,
+) -> Vec<(FileId, SyntaxNode)> {
     files
         .iter()
         .enumerate()
-        .map(|(k, f)| (FileId(base + k as u32), f.parse.syntax()))
+        .map(|(k, f)| (space(k as u32).to_raw(), f.parse.syntax()))
         .collect()
 }
 
@@ -295,10 +291,10 @@ impl Workspace {
         paths.sort();
         paths.dedup();
 
-        // Extracted library sources, each a navigation file with a `LIBRARY_FILE_BASE`-based id. Read
-        // and parsed once; the resulting trees feed `index_source_locations` below.
+        // Extracted library sources, each a navigation file in the `Library` id-space. Read and
+        // parsed once; the resulting trees feed `index_source_locations` below.
         let library_files = read_library_files(library_sources);
-        let library_inputs = file_inputs(&library_files, LIBRARY_FILE_BASE);
+        let library_inputs = file_inputs(&library_files, WorkspaceFileId::Library);
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types on
         // every rebuild (their `FileId`s are assigned in `rebuild_index`).
@@ -320,7 +316,7 @@ impl Workspace {
                 (std::fs::read_to_string(&path), Url::from_file_path(&path))
                 && !ws.by_uri.contains_key(&uri)
             {
-                let id = FileId(ws.files.len() as u32);
+                let id = WorkspaceFileId::Project(ws.files.len() as u32).to_raw();
                 ws.by_uri.insert(uri.clone(), id);
                 ws.files.push(WorkspaceFile::new(uri, text));
             }
@@ -336,11 +332,11 @@ impl Workspace {
     /// item with members and supertypes — hover, completion, member navigation, and assignment
     /// checks see through it instead of stopping at a bare name.
     fn rebuild_index(&mut self) {
-        let inputs = file_inputs(&self.files, 0);
+        let inputs = file_inputs(&self.files, WorkspaceFileId::Project);
         // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types), under
-        // their own `SOURCE_DEP_FILE_BASE` ids so they navigate back to the right files. The
-        // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
-        let source_deps = file_inputs(&self.source_dep_files, SOURCE_DEP_FILE_BASE);
+        // their own `SourceDep` ids so they navigate back to the right files. The `-sources.jar`
+        // overlays remain navigation-only (folded in via `source_locations`).
+        let source_deps = file_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep);
         self.index = ProjectIndex::builder(&inputs)
             .with_stdlib()
             .with_source_deps(&source_deps)
@@ -349,19 +345,17 @@ impl Workspace {
             .build();
     }
 
-    /// The workspace file a [`FileId`] addresses: a project file by its low id, a `git`/`path` library
-    /// source by its [`SOURCE_DEP_FILE_BASE`]-based id, or a `-sources.jar` overlay by its
-    /// [`LIBRARY_FILE_BASE`]-based id. `None` for an id in none of the three spaces (e.g. a classpath
-    /// member with no source, whose reserved id is not a real file) — so a go-to-definition target that
-    /// points nowhere openable yields no location instead of panicking.
+    /// The workspace file a [`FileId`] addresses, routed by its id-space: a project file, a
+    /// `git`/`path` library source ([`SourceDep`](WorkspaceFileId::SourceDep)), or a `-sources.jar`
+    /// overlay ([`Library`](WorkspaceFileId::Library)). `None` when the within-space index addresses no
+    /// real file — e.g. a classpath member with no source, whose reserved id decodes into `SourceDep`
+    /// far past any extracted file — so a go-to-definition target that points nowhere openable yields
+    /// no location instead of panicking.
     fn ws_file(&self, id: FileId) -> Option<&WorkspaceFile> {
-        if id.0 >= SOURCE_DEP_FILE_BASE {
-            self.source_dep_files
-                .get((id.0 - SOURCE_DEP_FILE_BASE) as usize)
-        } else if id.0 >= LIBRARY_FILE_BASE {
-            self.library_files.get((id.0 - LIBRARY_FILE_BASE) as usize)
-        } else {
-            self.files.get(id.0 as usize)
+        match WorkspaceFileId::from_raw(id) {
+            WorkspaceFileId::Project(i) => self.files.get(i as usize),
+            WorkspaceFileId::Library(i) => self.library_files.get(i as usize),
+            WorkspaceFileId::SourceDep(i) => self.source_dep_files.get(i as usize),
         }
     }
 
@@ -409,7 +403,7 @@ impl Workspace {
                 if !self.under_source_root(uri) {
                     return false;
                 }
-                let id = FileId(self.files.len() as u32);
+                let id = WorkspaceFileId::Project(self.files.len() as u32).to_raw();
                 self.by_uri.insert(uri.clone(), id);
                 self.files.push(file);
             }
@@ -622,7 +616,7 @@ impl Workspace {
     fn item_references(&self, item: ItemId, include_declaration: bool) -> Vec<Location> {
         let mut locations = Vec::new();
         for (i, source) in self.files.iter().enumerate() {
-            let file = FileId(i as u32);
+            let file = WorkspaceFileId::Project(i as u32).to_raw();
             let resolved = source.resolved();
             for reference in &resolved.references {
                 if reference.namespace != Namespace::Type {

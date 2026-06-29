@@ -4,6 +4,7 @@
 //! for `wasm32` (same exemption as `jals-cli`). The parsing and formatting engines it
 //! drives (`jals-syntax`, `jals-fmt`) remain wasm-compatible.
 
+mod file_id;
 mod handlers;
 mod line_index;
 mod server;
