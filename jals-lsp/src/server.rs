@@ -115,7 +115,7 @@ impl ServerState {
         }
         let manifest = match Manifest::from_file(&manifest_path) {
             Ok(manifest) => manifest,
-            // An unparseable manifest: index the project root as a lone source root, no classpath.
+            // An unparsable manifest: index the project root as a lone source root, no classpath.
             Err(_) => {
                 self.workspaces
                     .push(Workspace::load(root.clone(), vec![root]));
