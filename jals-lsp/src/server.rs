@@ -113,11 +113,80 @@ impl ServerState {
         if self.workspaces.iter().any(|ws| ws.project_root() == root) {
             return;
         }
-        let source_roots = match Manifest::from_file(&manifest_path) {
-            Ok(manifest) => manifest.source_roots(&root),
-            Err(_) => vec![root.clone()],
+        let manifest = match Manifest::from_file(&manifest_path) {
+            Ok(manifest) => manifest,
+            // An unparsable manifest: index the project root as a lone source root, no classpath.
+            Err(_) => {
+                self.workspaces
+                    .push(Workspace::load(root.clone(), vec![root]));
+                return;
+            }
         };
-        self.workspaces.push(Workspace::load(root, source_roots));
+        // The classpath the index reads from: the manifest's `[build] classpath` entries, plus the
+        // jars resolved from `[dependencies]` (downloaded remotes / local `file://` jars).
+        let mut entries = manifest.classpath_entries(&root);
+        let source_roots = manifest.source_roots(&root);
+        // `reqwest`'s blocking downloader panics if run inside the Tokio runtime this server uses, so
+        // resolve `[dependencies]` on a dedicated thread (`manifest` moves in; everything needed after
+        // is already read out above). The same thread also resolves each dependency's optional `sources`
+        // jar (the `.java` for go-to-definition into a classpath type's library source) and clones /
+        // reads each `git`/`path` source dependency (the `.java` folded into the index for analysis +
+        // navigation). This blocks workspace load once per project, like the synchronous classpath read
+        // below.
+        let deps_root = root.clone();
+        let (jars, library_sources, source_dep_sources) = std::thread::spawn(move || {
+            // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
+            let jars =
+                jals_classpath::resolve_project_dependencies(&manifest, &deps_root, |message| {
+                    eprintln!("jals-lsp: dependency: {message}");
+                });
+            let sources =
+                jals_classpath::resolve_project_sources(&manifest, &deps_root, |message| {
+                    eprintln!("jals-lsp: sources: {message}");
+                });
+            let source_deps =
+                jals_classpath::resolve_project_source_deps(&manifest, &deps_root, |message| {
+                    eprintln!("jals-lsp: source dependency: {message}");
+                });
+            (jars, sources, source_deps)
+        })
+        .join()
+        .expect("dependency resolution thread panicked");
+        entries.extend(jars);
+
+        // Read and parse the project's classpath jars/dirs once, so external library types resolve
+        // in this workspace's index. Unreadable entries are skipped (logged), never fatal — the
+        // project still gets analysis from its sources, stubs, and the rest of the classpath.
+        let load = jals_classpath::load_classpath(&entries);
+        for warning in &load.warnings {
+            eprintln!(
+                "jals-lsp: classpath: {}: {}",
+                warning.path.display(),
+                warning.message
+            );
+        }
+
+        // Fallback go-to-definition source: synthesize a signature-only `.java` skeleton from every
+        // classpath `.class`. Appended **after** the real library sources, so the source-location
+        // overlay (first-declaration-wins) keeps real source authoritative — a skeleton is only ever
+        // navigated to for a class that ships no real source (no `-sources.jar`, no `git`/`path`
+        // source dep), filling the gaps so jump-to-definition lands somewhere for any library type.
+        // Pure rendering + local writes (no network), so this stays on the main thread.
+        let mut library_sources = library_sources;
+        library_sources.extend(jals_classpath::synthesize_classpath_sources(
+            &load.classes,
+            &root,
+            |message| eprintln!("jals-lsp: decompile: {message}"),
+        ));
+
+        self.workspaces
+            .push(Workspace::load_with_classpath_and_sources(
+                root,
+                source_roots,
+                load.classes,
+                library_sources,
+                source_dep_sources,
+            ));
     }
 
     /// The loaded workspace that owns `uri`, if any.

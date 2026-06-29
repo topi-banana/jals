@@ -259,9 +259,14 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
         std::io::stdin()
             .read_to_string(&mut src)
             .context("reading stdin")?;
-        let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
+        let cwd = std::env::current_dir().context("getting current dir")?;
+        let cfg = discovery.for_dir(&cwd)?;
         let parse = jals_syntax::parse(&src);
-        let index = ProjectIndex::build_with_stdlib(&[(FileId(0), parse.syntax())]);
+        // Fold in the project's classpath (discovered from the cwd) so `type-mismatch` sees external
+        // library types, exactly as the multi-file path does.
+        let classpath = load_project_classpath(&cwd);
+        let index =
+            ProjectIndex::build_with_classpath(&[(FileId(0), parse.syntax())], &classpath.classes);
         let out = jals_lint::lint_parse_with_index(&parse, &cfg, Some((&index, FileId(0))));
         any_finding |= report::report_lint("<stdin>", &src, &out);
     } else {
@@ -282,7 +287,16 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .enumerate()
             .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
             .collect();
-        let index = ProjectIndex::build_with_stdlib(&inputs);
+        // Discover the project from the first linted file's directory and fold its classpath in, so
+        // the cross-file `type-mismatch` check resolves external library types (e.g. a method whose
+        // argument type comes from a dependency jar) — not just project and stdlib types.
+        let start_dir = files
+            .first()
+            .and_then(|(path, _, _)| path.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let classpath = load_project_classpath(&start_dir);
+        let index = ProjectIndex::build_with_classpath(&inputs, &classpath.classes);
 
         for (i, (path, src, parse)) in files.iter().enumerate() {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -319,7 +333,10 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
         jals_build::resolve_run_target(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
     }
     let sources = discover_sources(&manifest, &root)?;
-    let invocation = jals_build::build_invocation(&manifest, &root, &sources, path_sep());
+    // Resolve `[dependencies]` (downloading remotes) and put the resulting jars on javac's classpath.
+    let extra_classpath = resolve_project_dependencies(&manifest, &root);
+    let invocation =
+        jals_build::build_invocation(&manifest, &root, &sources, &extra_classpath, path_sep());
 
     if args.dry_run || args.verbose {
         println!("{}", invocation.display_command());
@@ -346,9 +363,18 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
             .to_string(),
     };
     let sources = discover_sources(&manifest, &root)?;
+    // Resolve `[dependencies]` once and put the resulting jars on both the compile and run classpaths.
+    let extra_classpath = resolve_project_dependencies(&manifest, &root);
     let sep = path_sep();
-    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, sep);
-    let run_inv = jals_build::run_invocation(&manifest, &root, &main_class, &args.args, sep);
+    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, &extra_classpath, sep);
+    let run_inv = jals_build::run_invocation(
+        &manifest,
+        &root,
+        &main_class,
+        &args.args,
+        &extra_classpath,
+        sep,
+    );
 
     if args.dry_run || args.verbose {
         println!("{}", build_inv.display_command());
@@ -463,6 +489,49 @@ fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     Ok((manifest, root))
+}
+
+/// Discover the project manifest upward from `start_dir` and load the `.class` files on its
+/// `[build] classpath` (out of jars and class directories), for the cross-file `type-mismatch`
+/// check. Unlike `jals build`, a missing manifest or an unreadable classpath entry is **not** an
+/// error here — linting still runs with the project sources and stdlib stubs, just without external
+/// library types. Any unreadable entry is reported as a warning on stderr and skipped.
+fn load_project_classpath(start_dir: &Path) -> jals_classpath::ClasspathLoad {
+    let Some(manifest_path) = Manifest::discover_path(start_dir) else {
+        return jals_classpath::ClasspathLoad::default();
+    };
+    let Ok(manifest) = Manifest::from_file(&manifest_path) else {
+        // A malformed manifest is the business of `jals build`; lint stays best-effort.
+        return jals_classpath::ClasspathLoad::default();
+    };
+    let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut entries = manifest.classpath_entries(root);
+    // Fold the resolved `[dependencies]` jars (downloaded remotes / local `file://` jars) into the
+    // classpath, so external library types from named dependencies — not just `[build] classpath`
+    // entries — resolve during linting.
+    entries.extend(resolve_project_dependencies(&manifest, root));
+    if entries.is_empty() {
+        return jals_classpath::ClasspathLoad::default();
+    }
+    let load = jals_classpath::load_classpath(&entries);
+    for warning in &load.warnings {
+        eprintln!(
+            "warning: classpath: {}: {}",
+            warning.path.display(),
+            warning.message
+        );
+    }
+    load
+}
+
+/// Resolve the project's `[dependencies]` to local jar paths, downloading remote ones into
+/// `<root>/target/jals/deps` (a cache; `target/` is already build output). Best-effort like the rest
+/// of the classpath load: a classification problem or a download failure is reported on stderr and
+/// skipped, never aborting. `jals-cli` is synchronous, so the blocking downloader is called directly.
+fn resolve_project_dependencies(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
+    jals_classpath::resolve_project_dependencies(manifest, root, |message| {
+        eprintln!("warning: dependency: {message}");
+    })
 }
 
 /// Collects the `.java` files under the manifest's source directories (resolved against `root`).

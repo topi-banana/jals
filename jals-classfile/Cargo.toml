@@ -1,0 +1,12 @@
+[package]
+name = "jals-classfile"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+expect-test = "1.5"
+proptest = "1"
+serde_json = { workspace = true }

@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
   "jals-build",
+  "jals-classfile",
+  "jals-classpath",
   "jals-cli",
   "jals-fmt",
   "jals-hir",
@@ -24,6 +26,8 @@ async-lsp = { version = "0.2.4" }
 clap = { version = "4.6.1", features = ["derive"] }
 futures = { version = "0.3" }
 jals-build = { path = "jals-build" }
+jals-classfile = { path = "jals-classfile" }
+jals-classpath = { path = "jals-classpath" }
 jals-fmt = { path = "jals-fmt" }
 jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }
@@ -32,6 +36,13 @@ jals-syntax = { path = "jals-syntax" }
 num-derive = { version = "0.4.2" }
 num-traits = { version = "0.2.19" }
 rayon = { version = "1" }
+# Host-only (jals-classpath downloads dependency jars). `rustls-tls` for pure-Rust TLS (no system
+# OpenSSL, so it cross-compiles cleanly); `blocking` fits the sync CLI. `default-features = false`
+# drops the OpenSSL-backed default TLS, keeping it out of the pure/`wasm32` crates.
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "rustls-tls",
+] }
 rowan = { version = "0.16.1" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0" }
@@ -46,3 +57,6 @@ ungrammar = { version = "1.16" }
 unicode-properties = { version = "=0.1.4" }
 unicode-width = { version = "0.2.1" }
 walkdir = { version = "2" }
+# Host-only (jals-classpath reads jars). `deflate` is the only compression jars use; disabling the
+# rest keeps the dependency tree small and out of the pure/`wasm32` crates.
+zip = { version = "2", default-features = false, features = ["deflate"] }

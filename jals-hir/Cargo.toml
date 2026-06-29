@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+jals-classfile.workspace = true
 jals-syntax.workspace = true
 
 [dev-dependencies]

@@ -102,7 +102,7 @@ jobs:
             packages: --workspace
           - name: wasm
             target: wasm32-unknown-unknown
-            packages: --package jals-syntax
+            packages: --package jals-syntax --package jals-classfile --package jals-hir
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

@@ -12,3 +12,7 @@ Nd = "Nd"
 # `fo` is a placeholder for a partially-typed member name in completion docs
 # (e.g. `receiver.fo`), not a misspelling of "for"/"of".
 fo = "fo"
+# `ifle` is the JVM bytecode opcode "if less than or equal" (JVMS §6),
+# modelled as the `Ifle` instruction variant; not a misspelling of "file".
+ifle = "ifle"
+Ifle = "Ifle"

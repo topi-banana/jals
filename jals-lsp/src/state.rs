@@ -1,6 +1,6 @@
 //! In-memory server state: open documents and memoized config discovery.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -11,7 +11,8 @@ use async_lsp::lsp_types::{
 };
 use jals_fmt::Config;
 use jals_hir::{
-    FileId, ItemId, ItemOrigin, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution,
+    FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
+    SourceLocations, TypeResolution,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
@@ -174,7 +175,68 @@ pub(crate) struct Workspace {
     source_roots: Vec<PathBuf>,
     files: Vec<WorkspaceFile>,
     by_uri: HashMap<Url, FileId>,
+    /// Extracted library *source* files (the `.java` of a `[dependencies]` `sources` jar), kept so a
+    /// classpath type/member can be navigated into its real source. Addressed by a [`FileId`] of
+    /// [`LIBRARY_FILE_BASE`]` + index`, disjoint from the project files' low ids, so [`ws_file`](Workspace::ws_file)
+    /// can route a go-to-definition target to the right vec. Never project inputs and never linted —
+    /// they are navigation targets only.
+    library_files: Vec<WorkspaceFile>,
+    /// Library **source** files of a `git` / `path` `[dependencies]` entry. Unlike
+    /// [`library_files`](Workspace::library_files) (navigation-only overlays paired with a binary
+    /// `-sources.jar`), these have no `.class` backing them, so they *are* index inputs — folded in as
+    /// [`Source`](jals_hir::ItemOrigin::Source)-origin types that resolve for inference/hover and are
+    /// go-to-definition targets in their own right. Addressed by a [`FileId`] of
+    /// [`SOURCE_DEP_FILE_BASE`]` + index`, a third id space disjoint from both the project files and
+    /// [`library_files`](Workspace::library_files). Still never linted — they are not project files.
+    source_dep_files: Vec<WorkspaceFile>,
+    /// The project's classpath `.class` files (parsed from the `[build] classpath` jars/dirs), lowered
+    /// once at construction to the facts the index folds in. Reused on every index rebuild so external
+    /// library types resolve; static for the workspace's lifetime (a dependency jar does not change
+    /// under us), so the expensive lowering happens here once instead of on every edit.
+    classpath: LoweredClasspath,
+    /// Where each library type/member is declared in [`library_files`](Workspace::library_files),
+    /// indexed once at construction (the sources of a fixed dependency do not change) and folded into
+    /// every rebuild so a classpath item gets a real-source go-to-definition target.
+    source_locations: SourceLocations,
     index: ProjectIndex,
+}
+
+/// Base [`FileId`] for extracted library source files (the `-sources.jar` overlays), far above any
+/// project file's id (a project has nowhere near 2³¹ files) and below
+/// [`SOURCE_DEP_FILE_BASE`]/`jals-hir`'s reserved stub/classfile block, so the id spaces never collide.
+const LIBRARY_FILE_BASE: u32 = 1 << 31;
+
+/// Base [`FileId`] for `git`/`path` library-source files, a third id space above
+/// [`LIBRARY_FILE_BASE`] (giving each space ~2³⁰ ids) and still below `jals-hir`'s reserved
+/// stub/classfile block near `u32::MAX`, so project / `-sources.jar` / `git`-`path` ids never collide.
+const SOURCE_DEP_FILE_BASE: u32 = (1 << 31) + (1 << 30);
+
+/// Read and parse each library `.java` in `paths`, skipping unreadable / non-`file://` ones and
+/// de-duplicating by URI, into [`WorkspaceFile`]s. Shared by both library-source kinds (the
+/// `-sources.jar` overlays and the `git`/`path` source dependencies).
+fn read_library_files(paths: Vec<PathBuf>) -> Vec<WorkspaceFile> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths {
+        if let (Ok(text), Ok(uri)) = (std::fs::read_to_string(&path), Url::from_file_path(&path))
+            && seen.insert(uri.clone())
+        {
+            files.push(WorkspaceFile::new(uri, text));
+        }
+    }
+    files
+}
+
+/// Pair each file in `files` with a sequential [`FileId`] starting at `base`, reading its cached parse
+/// — the `(FileId, SOURCE_FILE root)` inputs the index builds from. Shared by the project files
+/// (`base = 0`) and the two library-source id-spaces ([`LIBRARY_FILE_BASE`] / [`SOURCE_DEP_FILE_BASE`]),
+/// so every id space derives its inputs the same way.
+fn file_inputs(files: &[WorkspaceFile], base: u32) -> Vec<(FileId, SyntaxNode)> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(k, f)| (FileId(base + k as u32), f.parse.syntax()))
+        .collect()
 }
 
 impl Workspace {
@@ -182,7 +244,48 @@ impl Workspace {
     /// the symbol index. `project_root` is the `jals.toml` directory this workspace was discovered
     /// from; it identifies the workspace so a later open in the same project reuses it. Paths are
     /// visited in sorted order so the index is deterministic.
+    ///
+    /// The workspace has an empty classpath; use [`load_with_classpath`](Workspace::load_with_classpath)
+    /// to fold a project's external library types into the index.
     pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace {
+        Self::load_with_classpath(project_root, source_roots, Vec::new())
+    }
+
+    /// Like [`load`](Workspace::load), but also folds the project's classpath `.class` files into the
+    /// symbol index (as `Classpath`-origin types), so references to external library types resolve to
+    /// real items with members and generics — for hover, completion, and the `type-mismatch` check.
+    /// The caller (the server) reads and parses the jars/dirs; this keeps the I/O at the edge.
+    pub(crate) fn load_with_classpath(
+        project_root: PathBuf,
+        source_roots: Vec<PathBuf>,
+        classfiles: Vec<jals_classfile::ClassFile>,
+    ) -> Workspace {
+        Self::load_with_classpath_and_sources(
+            project_root,
+            source_roots,
+            classfiles,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Like [`load_with_classpath`](Workspace::load_with_classpath), but also registers two kinds of
+    /// library `.java`:
+    /// - `library_sources` — the `.java` of each `[dependencies]` `sources` jar, navigation-only
+    ///   overlays so go-to-definition can land in a classpath type/member's real source (see
+    ///   `jals_classpath::resolve_project_sources`);
+    /// - `source_dep_sources` — the `.java` of each `git`/`path` `[dependencies]` entry, which are
+    ///   *also* index inputs (`Source`-origin types that resolve for analysis) as well as navigation
+    ///   targets (see `jals_classpath::resolve_project_source_deps`).
+    ///
+    /// Both are read and parsed once here; neither is ever linted (they are not project files).
+    pub(crate) fn load_with_classpath_and_sources(
+        project_root: PathBuf,
+        source_roots: Vec<PathBuf>,
+        classfiles: Vec<jals_classfile::ClassFile>,
+        library_sources: Vec<PathBuf>,
+        source_dep_sources: Vec<PathBuf>,
+    ) -> Workspace {
         let mut paths: Vec<PathBuf> = source_roots
             .iter()
             .flat_map(|root| WalkDir::new(root).into_iter().filter_map(Result::ok))
@@ -192,12 +295,25 @@ impl Workspace {
         paths.sort();
         paths.dedup();
 
+        // Extracted library sources, each a navigation file with a `LIBRARY_FILE_BASE`-based id. Read
+        // and parsed once; the resulting trees feed `index_source_locations` below.
+        let library_files = read_library_files(library_sources);
+        let library_inputs = file_inputs(&library_files, LIBRARY_FILE_BASE);
+
+        // `git`/`path` library sources, read once; folded into the index as `Source`-origin types on
+        // every rebuild (their `FileId`s are assigned in `rebuild_index`).
+        let source_dep_files = read_library_files(source_dep_sources);
+
         let mut ws = Workspace {
             project_root,
             source_roots,
             files: Vec::new(),
             by_uri: HashMap::new(),
+            library_files,
+            source_dep_files,
             index: ProjectIndex::build_with_stdlib(&[]),
+            classpath: ProjectIndex::lower_classpath(&classfiles),
+            source_locations: ProjectIndex::index_source_locations(&library_inputs),
         };
         for path in paths {
             if let (Ok(text), Ok(uri)) =
@@ -213,19 +329,40 @@ impl Workspace {
         ws
     }
 
-    /// Rebuild the symbol index from the cached parses. No I/O.
+    /// Rebuild the symbol index from the cached parses and classpath. No I/O.
     ///
-    /// Built with the embedded `java.lang` stubs folded in, so a core JDK type (`String`,
-    /// `Object`, …) resolves to a real item with members and supertypes — hover, completion,
-    /// member navigation, and assignment checks see through it instead of stopping at a bare name.
+    /// Built with the embedded `java.lang` stubs and the project's classpath `.class` files folded
+    /// in, so a core JDK type (`String`, `Object`, …) or an external library type resolves to a real
+    /// item with members and supertypes — hover, completion, member navigation, and assignment
+    /// checks see through it instead of stopping at a bare name.
     fn rebuild_index(&mut self) {
-        let inputs: Vec<(FileId, SyntaxNode)> = self
-            .files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| (FileId(i as u32), f.parse.syntax()))
-            .collect();
-        self.index = ProjectIndex::build_with_stdlib(&inputs);
+        let inputs = file_inputs(&self.files, 0);
+        // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types), under
+        // their own `SOURCE_DEP_FILE_BASE` ids so they navigate back to the right files. The
+        // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
+        let source_deps = file_inputs(&self.source_dep_files, SOURCE_DEP_FILE_BASE);
+        self.index = ProjectIndex::build_with_source_deps(
+            &inputs,
+            &source_deps,
+            &self.classpath,
+            &self.source_locations,
+        );
+    }
+
+    /// The workspace file a [`FileId`] addresses: a project file by its low id, a `git`/`path` library
+    /// source by its [`SOURCE_DEP_FILE_BASE`]-based id, or a `-sources.jar` overlay by its
+    /// [`LIBRARY_FILE_BASE`]-based id. `None` for an id in none of the three spaces (e.g. a classpath
+    /// member with no source, whose reserved id is not a real file) — so a go-to-definition target that
+    /// points nowhere openable yields no location instead of panicking.
+    fn ws_file(&self, id: FileId) -> Option<&WorkspaceFile> {
+        if id.0 >= SOURCE_DEP_FILE_BASE {
+            self.source_dep_files
+                .get((id.0 - SOURCE_DEP_FILE_BASE) as usize)
+        } else if id.0 >= LIBRARY_FILE_BASE {
+            self.library_files.get((id.0 - LIBRARY_FILE_BASE) as usize)
+        } else {
+            self.files.get(id.0 as usize)
+        }
     }
 
     /// The project symbol index.
@@ -295,11 +432,11 @@ impl Workspace {
             self.index
                 .definition_at(file, resolved, usize::from(offset))
         {
-            return Some(self.files[target_file.0 as usize].location(&range));
+            return Some(self.ws_file(target_file)?.location(&range));
         }
         // A member access (`obj.field` / `recv.method()`): infer the receiver and resolve the member.
         let (target_file, range) = self.member_definition(file, &root, resolved, offset)?;
-        Some(self.files[target_file.0 as usize].location(&range))
+        Some(self.ws_file(target_file)?.location(&range))
     }
 
     /// Go-to-definition for the member access under `offset`: when the cursor is on the name of a
@@ -336,7 +473,15 @@ impl Workspace {
         let member = self
             .index
             .member(self.index.resolve_member(owner, &name, namespace)?);
-        Some((member.file, member.name_range.clone()))
+        // Prefer the library-source location (a classpath member with sources); otherwise the
+        // member's own declaration (a project member). A classpath member without sources keeps a
+        // reserved id `ws_file` will reject, so navigation simply yields nothing.
+        Some(
+            member
+                .source_location
+                .clone()
+                .unwrap_or_else(|| (member.file, member.name_range.clone())),
+        )
     }
 
     /// The hover for the cursor at `position` in `uri`: the inferred type of the expression there,
@@ -501,8 +646,12 @@ impl Workspace {
         }
         if include_declaration {
             let decl = self.index.item(item);
-            let decl_source = &self.files[decl.file.0 as usize];
-            locations.push(decl_source.location(&decl.name_range));
+            // Route through `ws_file`, not a raw `self.files` index: a `Source`-origin (library) type's
+            // declaration lives in `source_dep_files`, and a stub / source-less classpath type has a
+            // reserved id that is no real file — both of which a raw index would panic on.
+            if let Some(decl_source) = self.ws_file(decl.file) {
+                locations.push(decl_source.location(&decl.name_range));
+            }
         }
         locations.sort_by(|a, b| {
             a.uri
@@ -518,11 +667,12 @@ impl Workspace {
     /// binding qualifies by kind (locals and project types yes, members no — see
     /// [`is_renamable_kind`](crate::handlers::is_renamable_kind)); a cross-file *use* of a project
     /// type (one the file-local pass left unresolved) qualifies too, since the workspace rewrites it
-    /// project-wide. A use that resolves to a `java.lang` stub does *not* qualify: the stub has no
-    /// host-editable file, so its name is as un-renamable as any external one (mirroring how
-    /// [`definition_at`](jals_hir::ProjectIndex::definition_at) withholds navigation into a stub).
-    /// Mirrors what [`references`](Workspace::references) actually gathers, so a renamable symbol
-    /// always has a complete occurrence set.
+    /// project-wide. A use that resolves to anything *outside* the project's own sources — a
+    /// `java.lang` stub, a classpath `.class` type, or a `git`/`path` library-source type — does
+    /// *not* qualify: those have no host-editable project file, so their names are as un-renamable as
+    /// any external one (mirroring how [`definition_at`](jals_hir::ProjectIndex::definition_at) treats
+    /// non-project origins). Mirrors what [`references`](Workspace::references) actually rewrites, so a
+    /// renamable symbol always has a complete, in-project occurrence set.
     fn is_renamable(&self, file: FileId, resolved: &Resolved, anchor: usize) -> bool {
         if let Some(id) = resolved.symbol_at(anchor) {
             return crate::handlers::is_renamable_kind(resolved.def(id).kind);
@@ -531,7 +681,7 @@ impl Workspace {
             reference.namespace == Namespace::Type
                 && matches!(
                     self.index.resolve_reference(file, reference),
-                    TypeResolution::Project(id) if self.index.item(id).origin != ItemOrigin::Stdlib
+                    TypeResolution::Project(id) if self.index.item(id).origin.is_host_editable()
                 )
         })
     }
@@ -672,6 +822,7 @@ pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use async_lsp::lsp_types::{HoverContents, Position, Range};
+    use jals_hir::ItemOrigin;
 
     use super::*;
 
@@ -894,6 +1045,230 @@ mod tests {
         assert!(!is_lint_config_file(&other));
         let non_file = Url::parse("untitled:jalslint.toml").unwrap();
         assert!(!is_lint_config_file(&non_file));
+    }
+
+    #[test]
+    fn workspace_folds_classpath_types_into_the_index() {
+        // A project whose classpath carries a compiled `Box.class`: the workspace folds it into the
+        // index as a `Classpath`-origin type, so external library types resolve here.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Main.java"), "class Main { }").unwrap();
+        let box_class = jals_classfile::read(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/Box.class"
+        )))
+        .expect("parse Box.class");
+
+        let ws = Workspace::load_with_classpath(
+            dir.path().to_path_buf(),
+            vec![dir.path().to_path_buf()],
+            vec![box_class],
+        );
+        assert!(
+            ws.index()
+                .items()
+                .any(|item| item.origin == ItemOrigin::Classpath),
+            "the classpath `.class` file should be indexed as a Classpath-origin type"
+        );
+        // Without a classpath, the same project has no Classpath-origin items.
+        let bare = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        assert!(
+            !bare
+                .index()
+                .items()
+                .any(|item| item.origin == ItemOrigin::Classpath)
+        );
+    }
+
+    /// Shared scaffolding for the go-to-definition-into-`Box` tests: a `src/Main.java` referencing
+    /// `Box<String>`, the `Box.class` fixture on the classpath, and a navigation `.java` for `Box`
+    /// folded in as a library source. `nav_source` produces that `.java` (real or synthesized) given
+    /// the workspace dir and the parsed class, returning its path and its text. Returns the workspace,
+    /// the project file URI, its text, the navigation source URI, and its text.
+    fn workspace_with_box(
+        nav_source: impl FnOnce(&Path, &jals_classfile::ClassFile) -> (PathBuf, String),
+    ) -> (Workspace, Url, &'static str, Url, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let main = "class Main { void m(Box<String> b) { b.get(); } }";
+        std::fs::write(src_dir.join("Main.java"), main).unwrap();
+
+        let box_class = jals_classfile::read(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/Box.class"
+        )))
+        .expect("parse Box.class");
+        let (box_java, box_src) = nav_source(dir.path(), &box_class);
+
+        let ws = Workspace::load_with_classpath_and_sources(
+            dir.path().to_path_buf(),
+            vec![src_dir.clone()],
+            vec![box_class],
+            vec![box_java.clone()],
+            Vec::new(),
+        );
+        let main_uri = Url::from_file_path(src_dir.join("Main.java")).unwrap();
+        let box_uri = Url::from_file_path(&box_java).unwrap();
+        // The workspace read every file eagerly at load, and go-to-definition returns only cached
+        // URIs/ranges, so the tempdir can drop here without affecting the assertions.
+        drop(dir);
+        (ws, main_uri, main, box_uri, box_src)
+    }
+
+    /// [`workspace_with_box`] with a real `Box.java` library source on disk (a `file://` URL the
+    /// editor can open), placed outside the project's source root so it is a navigation file, not a
+    /// project source.
+    fn workspace_with_box_sources() -> (Workspace, Url, &'static str, Url, String) {
+        workspace_with_box(|dir, _class| {
+            let box_src = "public class Box<T> { public T get() { return null; } }".to_string();
+            let lib_dir = dir.join("libsrc");
+            std::fs::create_dir_all(&lib_dir).unwrap();
+            let box_java = lib_dir.join("Box.java");
+            std::fs::write(&box_java, &box_src).unwrap();
+            (box_java, box_src)
+        })
+    }
+
+    #[test]
+    fn goto_definition_into_classpath_type_lands_in_library_source() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_box_sources();
+        // Cursor on the `Box` type reference in the project file.
+        let col = main.find("Box").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("Box navigates into its library source");
+        assert_eq!(loc.uri, box_uri);
+        let want = box_src.find("class Box").unwrap() + "class ".len();
+        assert_eq!(loc.range.start, Position::new(0, want as u32));
+    }
+
+    #[test]
+    fn goto_definition_into_classpath_member_lands_in_library_source() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_box_sources();
+        // Cursor on the `get` member name in `b.get()`.
+        let col = main.find("get(").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("Box.get navigates into its library source");
+        assert_eq!(loc.uri, box_uri);
+        let want = box_src.find("get(").unwrap();
+        assert_eq!(loc.range.start, Position::new(0, want as u32));
+    }
+
+    /// [`workspace_with_box`] with **no real source** — instead a signature-only `.java` skeleton is
+    /// synthesized from the class file (exactly as the server does for a dependency that ships no
+    /// `-sources.jar`) and fed as the navigation source.
+    fn workspace_with_synthesized_box() -> (Workspace, Url, &'static str, Url, String) {
+        workspace_with_box(|dir, box_class| {
+            let synthesized = jals_classpath::synthesize_classpath_sources(
+                std::slice::from_ref(box_class),
+                dir,
+                |message| panic!("unexpected synthesis warning: {message}"),
+            );
+            assert_eq!(synthesized.len(), 1);
+            let box_java = synthesized[0].clone();
+            let box_src = std::fs::read_to_string(&box_java).unwrap();
+            (box_java, box_src)
+        })
+    }
+
+    #[test]
+    fn goto_definition_into_a_synthesized_skeleton_type() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_synthesized_box();
+        let col = main.find("Box").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("Box navigates into its synthesized skeleton");
+        assert_eq!(loc.uri, box_uri);
+        // The range starts exactly on the `Box` name token in the parsed skeleton.
+        let line_index = crate::line_index::LineIndex::new(&box_src);
+        let off = u32::from(line_index.offset(&box_src, loc.range.start)) as usize;
+        assert!(box_src[off..].starts_with("Box"), "{box_src}");
+    }
+
+    #[test]
+    fn goto_definition_into_a_synthesized_skeleton_member() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_synthesized_box();
+        let col = main.find("get(").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("Box.get navigates into its synthesized skeleton");
+        assert_eq!(loc.uri, box_uri);
+        let line_index = crate::line_index::LineIndex::new(&box_src);
+        let off = u32::from(line_index.offset(&box_src, loc.range.start)) as usize;
+        assert!(box_src[off..].starts_with("get"), "{box_src}");
+    }
+
+    /// Build a workspace whose project (under `src/`) references `Box`, supplied by a `git`/`path`
+    /// **source dependency** (`Box.java` outside the source root, fed as a source-dep input — NOT on
+    /// the classpath and with NO `.class`). Returns the workspace, the project file URI + text, and the
+    /// library source URI + text.
+    fn workspace_with_source_dep() -> (Workspace, Url, &'static str, Url, &'static str) {
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let main = "class Main { void m(Box<String> b) { var x = b.get(); } }";
+        std::fs::write(src_dir.join("Main.java"), main).unwrap();
+
+        // The dependency's source, outside the project source root (a `git`/`path` checkout).
+        let box_src = "public class Box<T> { public T get() { return null; } }";
+        let lib_dir = dir.path().join("dep");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let box_java = lib_dir.join("Box.java");
+        std::fs::write(&box_java, box_src).unwrap();
+
+        let ws = Workspace::load_with_classpath_and_sources(
+            dir.path().to_path_buf(),
+            vec![src_dir.clone()],
+            Vec::new(),             // no classpath `.class`
+            Vec::new(),             // no `-sources.jar` overlay
+            vec![box_java.clone()], // the source dependency's `.java`
+        );
+        let main_uri = Url::from_file_path(src_dir.join("Main.java")).unwrap();
+        let box_uri = Url::from_file_path(&box_java).unwrap();
+        drop(dir);
+        (ws, main_uri, main, box_uri, box_src)
+    }
+
+    #[test]
+    fn goto_definition_into_source_dep_type_lands_in_library_source() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_source_dep();
+        let col = main.find("Box").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("a source-dep type navigates to its source");
+        assert_eq!(loc.uri, box_uri);
+        let want = box_src.find("class Box").unwrap() + "class ".len();
+        assert_eq!(loc.range.start, Position::new(0, want as u32));
+    }
+
+    #[test]
+    fn goto_definition_into_source_dep_member_lands_in_library_source() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_source_dep();
+        let col = main.find("get(").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("a source-dep member navigates to its source");
+        assert_eq!(loc.uri, box_uri);
+        let want = box_src.find("get(").unwrap();
+        assert_eq!(loc.range.start, Position::new(0, want as u32));
+    }
+
+    #[test]
+    fn source_dep_type_resolves_for_hover() {
+        // Folding the source dependency in as a `Source`-origin type means it is an analysis input,
+        // not just a navigation target: the parameter `b` hovers as the resolved generic type
+        // `Box<String>` (an unresolved external `Box` would carry no type argument).
+        let (ws, main_uri, main, _, _) = workspace_with_source_dep();
+        let col = main.find("b.get()").unwrap() as u32;
+        let hover = ws
+            .hover(&main_uri, Position::new(0, col))
+            .expect("b has an inferred type");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert_eq!(markup.value, "```java\nBox<String>\n```");
     }
 
     #[test]

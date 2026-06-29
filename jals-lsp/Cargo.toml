@@ -8,6 +8,8 @@ anyhow.workspace = true
 async-lsp = { workspace = true, features = ["tokio"] }
 futures.workspace = true
 jals-build.workspace = true
+jals-classfile.workspace = true
+jals-classpath.workspace = true
 jals-fmt.workspace = true
 jals-hir.workspace = true
 jals-lint.workspace = true
