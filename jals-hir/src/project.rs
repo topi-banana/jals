@@ -329,13 +329,9 @@ impl SourceLocations {
         name: &str,
         params: usize,
     ) -> Option<(FileId, Range<usize>)> {
-        // No source overlay (the common case — every caller without a `sources` jar): skip building
-        // the owned lookup keys entirely.
-        if self.members.is_empty() && self.members_by_name.is_empty() {
-            return None;
-        }
         // Build the arity-keyed lookup once; on a miss, reuse its strings for the name-only fallback
-        // rather than re-allocating them, so a miss costs two allocations instead of four.
+        // rather than re-allocating them, so a miss costs two allocations instead of four. (Empty maps
+        // — the common no-`sources`-jar case — just miss both `get`s and return `None`.)
         let key = (owner_fqn.to_owned(), name.to_owned(), params);
         if let Some(loc) = self.members.get(&key) {
             return Some(loc.clone());

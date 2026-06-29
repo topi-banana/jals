@@ -203,54 +203,154 @@ pub struct SourcesExtraction {
 pub fn extract_sources(jars: &[PathBuf], dest_dir: &Path) -> SourcesExtraction {
     let mut out = SourcesExtraction::default();
     for jar in jars {
-        extract_one(jar, &dest_dir.join(jar_subdir(jar)), &mut out);
+        let into = dest_dir.join(jar_subdir(jar));
+        extract_members(
+            jar,
+            &into,
+            ".java",
+            "sources jar",
+            &mut out.warnings,
+            &mut out.java_files,
+        );
     }
     out
 }
 
-/// Extract one sources jar's `*.java` members into `into` (its dedicated subdir of the extraction root).
-fn extract_one(jar: &Path, into: &Path, out: &mut SourcesExtraction) {
+/// Extract every member of `jar` whose name ends with `ext` into `into` (its dedicated subdir of the
+/// extraction root), appending each written-or-reused path to `extracted` and each non-fatal problem to
+/// `warnings` (worded with `noun`, e.g. `"sources jar"` / `"jar"`). The shared member-walk spine of
+/// [`extract_sources`] (`.java`) and [`extract_nested_jars`] (bundled `.jar`s): open the zip, skip
+/// directories and non-`ext` members, sanitize each member path against zip-slip, and write it via
+/// [`write_atomic`] — unless an identical non-empty file is already on disk (skip-if-exists). A
+/// jar/member that cannot be read becomes a [`Warning`]; extraction never aborts.
+fn extract_members(
+    jar: &Path,
+    into: &Path,
+    ext: &str,
+    noun: &str,
+    warnings: &mut Vec<Warning>,
+    extracted: &mut Vec<PathBuf>,
+) {
     let file = match std::fs::File::open(jar) {
         Ok(f) => f,
-        Err(err) => return out.warn(jar, &format!("failed to open sources jar: {err}")),
+        Err(err) => {
+            warnings.push(Warning::new(jar, &format!("failed to open {noun}: {err}")));
+            return;
+        }
     };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
-        Err(err) => return out.warn(jar, &format!("failed to read sources jar: {err}")),
+        Err(err) => {
+            warnings.push(Warning::new(jar, &format!("failed to read {noun}: {err}")));
+            return;
+        }
     };
     for i in 0..archive.len() {
         let mut member = match archive.by_index(i) {
             Ok(m) => m,
             Err(err) => {
-                out.warn(jar, &format!("failed to read sources jar entry {i}: {err}"));
+                warnings.push(Warning::new(
+                    jar,
+                    &format!("failed to read {noun} entry {i}: {err}"),
+                ));
                 continue;
             }
         };
-        if member.is_dir() || !member.name().ends_with(".java") {
+        if member.is_dir() || !member.name().ends_with(ext) {
             continue;
         }
-        // `joined` names the failing member within the jar, e.g. `dep.jar!java/util/List.java`.
-        let joined = jar.join(member.name());
         let Some(rel) = safe_relative(member.name()) else {
-            out.warn(&joined, "skipped sources jar member with an unsafe path");
+            // `jar.join(member.name())` names the failing member, e.g. `dep.jar!java/util/List.java`.
+            let joined = jar.join(member.name());
+            warnings.push(Warning::new(
+                &joined,
+                &format!("skipped {noun} member with an unsafe path"),
+            ));
             continue;
         };
         let dest = into.join(rel);
         // Already extracted (immutable for a fixed jar): reuse without re-reading the member.
-        if dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-            out.java_files.push(dest);
+        if is_nonempty_file(&dest) {
+            extracted.push(dest);
             continue;
         }
         let mut bytes = Vec::with_capacity(member.size() as usize);
         if let Err(err) = member.read_to_end(&mut bytes) {
-            out.warn(&joined, &format!("failed to read source from jar: {err}"));
+            let joined = jar.join(member.name());
+            warnings.push(Warning::new(
+                &joined,
+                &format!("failed to read {noun} member: {err}"),
+            ));
             continue;
         }
         match write_atomic(&dest, &bytes) {
-            Ok(()) => out.java_files.push(dest),
-            Err(message) => out.warn(&joined, &message),
+            Ok(()) => extracted.push(dest),
+            Err(message) => {
+                let joined = jar.join(member.name());
+                warnings.push(Warning::new(&joined, &message));
+            }
         }
     }
+}
+
+/// The outcome of recursively unpacking a jar's **bundled jars**: the nested `*.jar` files written to
+/// disk (at every depth), plus any non-fatal [`Warning`]s for jars/members that could not be read.
+#[derive(Debug, Default)]
+pub struct NestedJarsExtraction {
+    /// The extracted nested jar paths on disk. The host appends these to the classpath so the bundled
+    /// libraries' `.class` files load — `recursive = true` on a `[dependencies]` jar opts into this.
+    pub jars: Vec<PathBuf>,
+    /// One per jar or member that could not be read/extracted. Extraction continues regardless.
+    pub warnings: Vec<Warning>,
+}
+
+/// The recursion-depth cap for [`extract_nested_jars`]. A jar cannot contain itself, so genuine nesting
+/// is shallow (a fat jar's `BOOT-INF/lib/*.jar` is one level); this only guards against a pathological
+/// or adversarial archive, well above any real layering.
+const MAX_NESTED_JAR_DEPTH: usize = 64;
+
+/// Recursively extract every **bundled jar** (`*.jar` member, at any depth) of `jar` into `dest_dir`,
+/// returning the paths of the nested jars written to disk for the host to add to the classpath.
+///
+/// This is what `recursive = true` on a `[dependencies]` jar opts into: a fat jar (e.g. a Spring-Boot
+/// layout with `BOOT-INF/lib/*.jar`) bundles its dependencies as nested jars that [`load_classpath`]
+/// would otherwise skip (it reads a jar's own `.class` members only). Each nested jar is written under
+/// `dest_dir/<jar-stem>-<hash>/<entry-path>` (the `<hash>` of the parent jar's path keeps two jars that
+/// share a filename from colliding), then itself scanned for further nested jars, so a jar-in-jar-in-jar
+/// resolves too. Member paths are sanitized — an entry that would escape `dest_dir` (a zip-slip) is
+/// skipped.
+///
+/// Idempotent and cheap to re-run (skip-if-exists, like [`extract_sources`]) and **error-resilient**, the
+/// same as [`load_classpath`]: an unreadable jar/member becomes a [`Warning`] and is skipped, never
+/// aborting.
+pub fn extract_nested_jars(jar: &Path, dest_dir: &Path) -> NestedJarsExtraction {
+    let mut out = NestedJarsExtraction::default();
+    extract_nested_into(jar, dest_dir, 0, &mut out);
+    out
+}
+
+/// One level of [`extract_nested_jars`]: write `jar`'s `*.jar` members into their dedicated subdir of
+/// `dest_dir`, then recurse into each extracted jar (`depth`-bounded by [`MAX_NESTED_JAR_DEPTH`]).
+fn extract_nested_into(jar: &Path, dest_dir: &Path, depth: usize, out: &mut NestedJarsExtraction) {
+    if depth >= MAX_NESTED_JAR_DEPTH {
+        return out.warn(jar, "nested jar recursion too deep; not unpacking further");
+    }
+    // Write out this level's nested jars first, then recurse into them — descending while the parent
+    // archive is still open would tangle the borrow; the extracted jars are independent files.
+    let into = dest_dir.join(jar_subdir(jar));
+    let mut extracted = Vec::new();
+    extract_members(jar, &into, ".jar", "jar", &mut out.warnings, &mut extracted);
+    for nested in extracted {
+        extract_nested_into(&nested, dest_dir, depth + 1, out);
+        out.jars.push(nested);
+    }
+}
+
+/// Whether `path` is an existing, non-empty file — the skip-if-exists cache-hit test shared by the jar
+/// downloader (`resolve`) and the member extractor ([`extract_members`]): a fixed dependency's
+/// already-written file is reused untouched, so re-opening a project does no redundant download/inflate.
+pub(crate) fn is_nonempty_file(path: &Path) -> bool {
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
 /// A 16-hex-digit [`DefaultHasher`] digest of `value`, used to disambiguate cache filenames / subdirs
@@ -268,7 +368,7 @@ fn jar_subdir(jar: &Path) -> String {
     let stem = jar
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "sources".to_string());
+        .unwrap_or_else(|| "jar".to_string());
     format!("{stem}-{}", hash_hex(jar.to_string_lossy()))
 }
 
@@ -289,18 +389,22 @@ fn safe_relative(name: &str) -> Option<PathBuf> {
 
 /// Write `bytes` to `dest`, creating parents, via a `.part` sibling renamed into place so an
 /// interrupted write never leaves a truncated file a later run would mistake for a complete extraction.
+/// The temp file keeps `dest`'s own extension (e.g. `List.java` → `List.java.part`, `inner.jar` →
+/// `inner.jar.part`) so two extractions targeting the same dir never collide on the temp name.
 fn write_atomic(dest: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("creating dir {}: {e}", parent.display()))?;
     }
-    let tmp = dest.with_extension("java.part");
+    let mut tmp = dest.as_os_str().to_os_string();
+    tmp.push(".part");
+    let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, bytes).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, dest).map_err(|e| format!("finalizing {}: {e}", dest.display()))?;
     Ok(())
 }
 
-impl SourcesExtraction {
+impl NestedJarsExtraction {
     fn warn(&mut self, path: &Path, message: &str) {
         self.warnings.push(Warning::new(path, message));
     }

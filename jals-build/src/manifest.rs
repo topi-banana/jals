@@ -5,7 +5,7 @@
 //! `src/main/java` -> `target/classes` layout. Keys are kebab-case and grouped into `[package]`,
 //! `[build]`, and `[run]` sections.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -84,6 +84,12 @@ pub struct JarDependency {
     /// `.java` sources, used only for editor navigation (go-to-definition into the real source); it is
     /// never a compile or analysis input. Resolved by the host — see [`Dependency::sources_source`].
     pub sources: Option<String>,
+    /// Whether to recursively unpack the jar's **bundled jars** (`*.jar` members nested inside it, as in
+    /// a Spring-Boot-style fat jar's `BOOT-INF/lib/*.jar`) onto the classpath. With `recursive = true`
+    /// the host extracts every nested jar — at any depth — and adds them as classpath entries, so the
+    /// bundled libraries are loaded for both compilation and analysis; the default (`None`/`false`) reads
+    /// only the jar's own top-level `.class` files. A bundled-jar-less jar is unaffected.
+    pub recursive: Option<bool>,
 }
 
 /// The `git` form of a [`Dependency`]: a repository to clone for its `.java` source.
@@ -414,30 +420,26 @@ impl GitDependency {
     /// [`DependencyError::ConflictingGitRef`] when more than one is set, [`DependencyError::Empty`]
     /// when the one set is empty.
     fn git_ref(&self, name: &str) -> Result<GitRef, DependencyError> {
-        let refs: [(&'static str, Option<&str>); 3] = [
-            ("branch", self.branch.as_deref()),
-            ("tag", self.tag.as_deref()),
-            ("rev", self.rev.as_deref()),
-        ];
-        let present: Vec<(&'static str, &str)> = refs
-            .iter()
-            .filter_map(|(f, v)| v.map(|v| (*f, v)))
-            .collect();
-        match present.as_slice() {
-            [] => Ok(GitRef::Default),
-            [(field, value)] => {
-                if value.is_empty() {
-                    return Err(DependencyError::Empty {
-                        name: name.into(),
-                        field,
-                    });
-                }
-                Ok(match *field {
-                    "branch" => GitRef::Branch(value.to_string()),
-                    "tag" => GitRef::Tag(value.to_string()),
-                    _ => GitRef::Rev(value.to_string()),
+        // Validate the one ref that is set, rejecting an empty value. Matching the tuple of options
+        // directly picks the variant in one step — no separate "how many are set?" count and no second
+        // match on a field name to re-derive which kind it is.
+        let non_empty = |value: &str, field| {
+            (!value.is_empty())
+                .then(|| value.to_string())
+                .ok_or(DependencyError::Empty {
+                    name: name.into(),
+                    field,
                 })
-            }
+        };
+        match (
+            self.branch.as_deref(),
+            self.tag.as_deref(),
+            self.rev.as_deref(),
+        ) {
+            (None, None, None) => Ok(GitRef::Default),
+            (Some(branch), None, None) => Ok(GitRef::Branch(non_empty(branch, "branch")?)),
+            (None, Some(tag), None) => Ok(GitRef::Tag(non_empty(tag, "tag")?)),
+            (None, None, Some(rev)) => Ok(GitRef::Rev(non_empty(rev, "rev")?)),
             _ => Err(DependencyError::ConflictingGitRef { name: name.into() }),
         }
     }
@@ -625,6 +627,21 @@ impl Manifest {
     ) -> (Vec<(String, DependencySource)>, Vec<DependencyError>) {
         // `jar_source` is `None` for `git`/`path` source deps (no classpath jar).
         self.collect_dependencies(manifest_dir, Dependency::jar_source)
+    }
+
+    /// The names of every `jar` `[dependencies]` entry that opted into recursive **bundled-jar**
+    /// unpacking (`recursive = true`). The host pairs these names with the resolved jars from
+    /// [`dependency_sources`](Manifest::dependency_sources) to decide which jars to scan for nested
+    /// `*.jar` members. Pure — no I/O; only the `jar` form carries `recursive`, so `git`/`path` entries
+    /// are never present.
+    pub fn recursive_jar_dependencies(&self) -> BTreeSet<&str> {
+        self.dependencies
+            .iter()
+            .filter_map(|(name, dep)| match dep {
+                Dependency::Jar(jar) if jar.recursive == Some(true) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Classify every `[dependencies]` entry through `classify`, collecting the `Some(Ok)` values
@@ -1004,11 +1021,12 @@ mod tests {
         );
     }
 
-    /// A `jar`-form dependency with no companion `sources` jar.
+    /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.
     fn jar_dep(jar: &str) -> Dependency {
         Dependency::Jar(JarDependency {
             jar: jar.to_string(),
             sources: None,
+            recursive: None,
         })
     }
 
@@ -1142,6 +1160,7 @@ mod tests {
             Some(&Dependency::Jar(JarDependency {
                 jar: "libs/lib.jar".to_string(),
                 sources: Some("libs/lib-sources.jar".to_string()),
+                recursive: None,
             }))
         );
     }
@@ -1157,6 +1176,7 @@ mod tests {
         let dep = Dependency::Jar(JarDependency {
             jar: "libs/lib.jar".to_string(),
             sources: Some("https://example.com/lib-sources.jar".to_string()),
+            recursive: None,
         });
         assert_eq!(
             dep.sources_source("lib", Path::new("/proj")),
@@ -1168,6 +1188,7 @@ mod tests {
         let local = Dependency::Jar(JarDependency {
             jar: "libs/lib.jar".to_string(),
             sources: Some("libs/lib-sources.jar".to_string()),
+            recursive: None,
         });
         assert_eq!(
             local.sources_source("lib", Path::new("/proj")),
@@ -1184,6 +1205,7 @@ mod tests {
             Dependency::Jar(JarDependency {
                 jar: "libs/lib.jar".to_string(),
                 sources: Some("ftp://example.com/lib-sources.jar".to_string()),
+                recursive: None,
             }),
         );
         assert_eq!(
@@ -1207,6 +1229,7 @@ mod tests {
                     Dependency::Jar(JarDependency {
                         jar: "file:///abs/a.jar".to_string(),
                         sources: Some("file:///abs/a-sources.jar".to_string()),
+                        recursive: None,
                     }),
                 ),
                 ("nosrc".to_string(), jar_dep("file:///abs/b.jar")),
@@ -1353,6 +1376,77 @@ mod tests {
             "#,
         );
         assert!(on_git.is_err(), "sources on a git dep must not parse");
+
+        // `recursive` is a `jar`-only flag: on a `git` entry it matches no variant.
+        let recursive_on_git: Result<Manifest, _> = toml::from_str(
+            r#"
+            [dependencies]
+            bad = { git = "https://example.com/r.git", recursive = true }
+            "#,
+        );
+        assert!(
+            recursive_on_git.is_err(),
+            "recursive on a git dep must not parse"
+        );
+    }
+
+    #[test]
+    fn parses_recursive_flag() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            fat = { jar = "libs/fat.jar", recursive = true }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            m.dependencies.get("fat"),
+            Some(&Dependency::Jar(JarDependency {
+                jar: "libs/fat.jar".to_string(),
+                sources: None,
+                recursive: Some(true),
+            }))
+        );
+    }
+
+    #[test]
+    fn recursive_jar_dependencies_collects_flagged() {
+        let m = Manifest {
+            dependencies: BTreeMap::from([
+                (
+                    "fat".to_string(),
+                    Dependency::Jar(JarDependency {
+                        jar: "libs/fat.jar".to_string(),
+                        sources: None,
+                        recursive: Some(true),
+                    }),
+                ),
+                // A plain jar (no flag) and an explicit `recursive = false` are both excluded.
+                ("plain".to_string(), jar_dep("libs/plain.jar")),
+                (
+                    "off".to_string(),
+                    Dependency::Jar(JarDependency {
+                        jar: "libs/off.jar".to_string(),
+                        sources: None,
+                        recursive: Some(false),
+                    }),
+                ),
+                // `git`/`path` forms never carry the flag.
+                (
+                    "src".to_string(),
+                    Dependency::Path(PathDependency {
+                        path: "../sibling".to_string(),
+                        dir: None,
+                    }),
+                ),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            m.recursive_jar_dependencies(),
+            BTreeSet::from(["fat"]),
+            "only the `recursive = true` jar dep is collected"
+        );
     }
 
     #[test]

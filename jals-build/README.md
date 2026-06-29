@@ -155,6 +155,7 @@ source tree) — plus form-specific options:
 | --- | --- | --- | --- |
 | `jar` | string | jar | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir) |
 | `sources` | string | jar | *optional* companion **sources** `.jar` (the library's `.java`), located like `jar`. Editor go-to-definition only — never a compile or analysis input |
+| `recursive` | bool | jar | *optional* (default `false`) — recursively unpack the jar's **bundled jars** (`*.jar` members nested inside it, as in a fat jar's `BOOT-INF/lib/*.jar`) onto the classpath, at any depth |
 | `git` | string | git | a repository URL to clone for its `.java` source |
 | `branch` / `tag` / `rev` | string | git | *optional*, **at most one** — which commit to check out (default: the repo's default branch) |
 | `path` | string | path | a local directory tree of `.java` source (relative to the manifest dir) |
@@ -167,6 +168,8 @@ other = { jar = "file:///opt/libs/other.jar" }              # file:// URL
 junit = { jar = "https://example.com/junit-4.13.2.jar" }    # remote, downloaded
 # A sources jar lets the editor jump into the library's real .java on go-to-definition:
 gson  = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.com/gson-2.11-sources.jar" }
+# A fat jar bundles its dependencies as nested jars; `recursive` unpacks them onto the classpath:
+app   = { jar = "libs/app-all.jar", recursive = true }
 # Source directly from a git repo (pin with branch/tag/rev), or a local checkout:
 mylib = { git = "https://github.com/owner/mylib", tag = "v1.2" }
 local = { path = "../sibling-lib" }
@@ -177,9 +180,14 @@ core  = { git = "https://github.com/owner/mono", rev = "abc123", dir = "core/src
 A **`jar`** dependency is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via
 `jals-classpath`) and folded into the classpath for both **analysis** (`jals lint`, the LSP) and
 **compilation** (`jals build`/`run` add it to `javac`/`java`'s `-classpath`). Remote jars are
-downloaded once into `target/jals/deps` and cached. Its optional `sources` jar is purely an **editor**
-aid: `jals-lsp` extracts the `.java` into `target/jals/deps/sources` and points go-to-definition at the
-real declaration; never a compile or analysis classpath input.
+downloaded once into `target/jals/deps` and cached. With **`recursive = true`** the host also unpacks
+the jar's **bundled jars** — the `*.jar` members a fat jar nests inside itself (e.g. a Spring-Boot
+layout's `BOOT-INF/lib/*.jar`), which the classpath loader otherwise skips — into
+`target/jals/deps/nested`, recursively (a jar-in-jar-in-jar resolves too), and adds them to the same
+classpath, so the bundled libraries are available for both analysis and compilation. Its optional
+`sources` jar is purely an **editor** aid: `jals-lsp` extracts the `.java` into
+`target/jals/deps/sources` and points go-to-definition at the real declaration; never a compile or
+analysis classpath input.
 
 A **`git`** / **`path`** dependency supplies `.java` **source** directly. It is an **editor** input
 only: `jals-lsp` clones each git repo (into `target/jals/deps/git`, the requested ref checked out) or

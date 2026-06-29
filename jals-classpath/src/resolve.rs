@@ -55,24 +55,40 @@ pub fn resolve_dependencies(
     // default; only the requests below can fail.
     let client = reqwest::blocking::Client::new();
     for (name, source) in sources {
+        let dest = source_jar_path(name, source, cache_dir);
         match source {
-            DependencySource::Path(path) => {
-                if path.is_file() {
-                    resolved.jars.push(path.clone());
+            DependencySource::Path(_) => {
+                if dest.is_file() {
+                    resolved.jars.push(dest);
                 } else {
-                    resolved.warn(path, "dependency jar does not exist");
+                    resolved.warn(&dest, "dependency jar does not exist");
                 }
             }
-            DependencySource::Url(url) => {
-                let dest = cached_jar_path(name, url, cache_dir);
-                match download(&client, url, &dest) {
-                    Ok(()) => resolved.jars.push(dest),
-                    Err(message) => resolved.warn(Path::new(url), &message),
-                }
-            }
+            DependencySource::Url(url) => match download(&client, url, &dest) {
+                Ok(()) => resolved.jars.push(dest),
+                Err(message) => resolved.warn(Path::new(url), &message),
+            },
         }
     }
     resolved
+}
+
+/// The local jar path a classified dependency `source` resolves to: a [`Path`](DependencySource::Path)
+/// verbatim, a [`Url`](DependencySource::Url) at its [`cached_jar_path`] cache location. The single
+/// place mapping a source to its on-disk jar, shared by [`resolve_dependencies`] and the recursive
+/// bundled-jar pass so the two never diverge on where a jar landed.
+fn source_jar_path(name: &str, source: &DependencySource, cache_dir: &Path) -> PathBuf {
+    match source {
+        DependencySource::Path(path) => path.clone(),
+        DependencySource::Url(url) => cached_jar_path(name, url, cache_dir),
+    }
+}
+
+/// The project's dependency cache root, `<root>/target/jals/deps` — downloads, git clones, extracted
+/// sources, and unpacked nested jars all live under it (`target/` is already build output). The single
+/// definition of the cache layout the three `resolve_project_*` resolvers share.
+fn deps_cache_dir(root: &Path) -> PathBuf {
+    root.join("target/jals/deps")
 }
 
 /// Resolve a project's `[dependencies]` to local jar paths, the host-side end-to-end orchestration
@@ -98,12 +114,36 @@ pub fn resolve_project_dependencies(
     for error in errors {
         warn(error.to_string());
     }
-    let cache_dir = root.join("target/jals/deps");
+    let cache_dir = deps_cache_dir(root);
     let resolved = resolve_dependencies(&sources, &cache_dir);
     for warning in resolved.warnings {
         warn(format!("{}: {}", warning.path.display(), warning.message));
     }
-    resolved.jars
+    let mut jars = resolved.jars;
+
+    // Second pass: for `recursive = true` jar deps, unpack their bundled (nested) jars and add them to
+    // the classpath too. The top-level jar is already resolved (and downloaded, for a `Url`) above, so
+    // ask `source_jar_path` where it landed — the same mapping `resolve_dependencies` used — and scan
+    // it. A dep whose top-level jar failed to resolve is skipped (it was already warned).
+    let recursive = manifest.recursive_jar_dependencies();
+    if !recursive.is_empty() {
+        let nested_dir = cache_dir.join("nested");
+        for (name, source) in &sources {
+            if !recursive.contains(name.as_str()) {
+                continue;
+            }
+            let jar_path = source_jar_path(name, source, &cache_dir);
+            if !jar_path.is_file() {
+                continue;
+            }
+            let extraction = crate::extract_nested_jars(&jar_path, &nested_dir);
+            for warning in extraction.warnings {
+                warn(format!("{}: {}", warning.path.display(), warning.message));
+            }
+            jars.extend(extraction.jars);
+        }
+    }
+    jars
 }
 
 /// Resolve a project's `[dependencies]` **sources** jars (the optional `sources = "..."` of each entry)
@@ -133,7 +173,7 @@ pub fn resolve_project_sources(
     if sources.is_empty() {
         return Vec::new();
     }
-    let cache_dir = root.join("target/jals/deps");
+    let cache_dir = deps_cache_dir(root);
     let resolved = resolve_dependencies(&sources, &cache_dir);
     for warning in resolved.warnings {
         warn(format!("{}: {}", warning.path.display(), warning.message));
@@ -179,7 +219,7 @@ pub fn resolve_project_source_deps(
     if specs.is_empty() {
         return Vec::new();
     }
-    let git_cache = root.join("target/jals/deps/git");
+    let git_cache = deps_cache_dir(root).join("git");
     let mut java_files = Vec::new();
     for (name, spec) in specs {
         let base = match spec {
@@ -322,7 +362,7 @@ pub fn cached_jar_path(name: &str, url: &str, cache_dir: &Path) -> PathBuf {
 /// a `.part` sibling first and renames into place, so an interrupted download never leaves a
 /// truncated file that a later run would mistake for a valid cache hit.
 fn download(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), String> {
-    if dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+    if crate::is_nonempty_file(dest) {
         return Ok(()); // cache hit
     }
     if let Some(parent) = dest.parent() {
