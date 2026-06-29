@@ -165,6 +165,20 @@ impl ServerState {
                 warning.message
             );
         }
+
+        // Fallback go-to-definition source: synthesize a signature-only `.java` skeleton from every
+        // classpath `.class`. Appended **after** the real library sources, so the source-location
+        // overlay (first-declaration-wins) keeps real source authoritative — a skeleton is only ever
+        // navigated to for a class that ships no real source (no `-sources.jar`, no `git`/`path`
+        // source dep), filling the gaps so jump-to-definition lands somewhere for any library type.
+        // Pure rendering + local writes (no network), so this stays on the main thread.
+        let mut library_sources = library_sources;
+        library_sources.extend(jals_classpath::synthesize_classpath_sources(
+            &load.classes,
+            &root,
+            |message| eprintln!("jals-lsp: decompile: {message}"),
+        ));
+
         self.workspaces
             .push(Workspace::load_with_classpath_and_sources(
                 root,

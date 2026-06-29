@@ -1080,30 +1080,26 @@ mod tests {
         );
     }
 
-    /// Build a workspace whose project (under `src/`) references the classpath type `Box`, with
-    /// `Box.class` on the classpath and a `Box.java` library source folded in (placed outside the
-    /// source root so it is a navigation file, not a project source). Returns the workspace, the
-    /// project file URI, its text, the library source URI, and its text.
-    fn workspace_with_box_sources() -> (Workspace, Url, &'static str, Url, &'static str) {
+    /// Shared scaffolding for the go-to-definition-into-`Box` tests: a `src/Main.java` referencing
+    /// `Box<String>`, the `Box.class` fixture on the classpath, and a navigation `.java` for `Box`
+    /// folded in as a library source. `nav_source` produces that `.java` (real or synthesized) given
+    /// the workspace dir and the parsed class, returning its path and its text. Returns the workspace,
+    /// the project file URI, its text, the navigation source URI, and its text.
+    fn workspace_with_box(
+        nav_source: impl FnOnce(&Path, &jals_classfile::ClassFile) -> (PathBuf, String),
+    ) -> (Workspace, Url, &'static str, Url, String) {
         let dir = tempfile::tempdir().unwrap();
         let src_dir = dir.path().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
         let main = "class Main { void m(Box<String> b) { b.get(); } }";
         std::fs::write(src_dir.join("Main.java"), main).unwrap();
 
-        // The library source for `Box`, on disk (a real `file://` URL the editor can open), outside
-        // the project's source root.
-        let box_src = "public class Box<T> { public T get() { return null; } }";
-        let lib_dir = dir.path().join("libsrc");
-        std::fs::create_dir_all(&lib_dir).unwrap();
-        let box_java = lib_dir.join("Box.java");
-        std::fs::write(&box_java, box_src).unwrap();
-
         let box_class = jals_classfile::read(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/Box.class"
         )))
         .expect("parse Box.class");
+        let (box_java, box_src) = nav_source(dir.path(), &box_class);
 
         let ws = Workspace::load_with_classpath_and_sources(
             dir.path().to_path_buf(),
@@ -1118,6 +1114,20 @@ mod tests {
         // URIs/ranges, so the tempdir can drop here without affecting the assertions.
         drop(dir);
         (ws, main_uri, main, box_uri, box_src)
+    }
+
+    /// [`workspace_with_box`] with a real `Box.java` library source on disk (a `file://` URL the
+    /// editor can open), placed outside the project's source root so it is a navigation file, not a
+    /// project source.
+    fn workspace_with_box_sources() -> (Workspace, Url, &'static str, Url, String) {
+        workspace_with_box(|dir, _class| {
+            let box_src = "public class Box<T> { public T get() { return null; } }".to_string();
+            let lib_dir = dir.join("libsrc");
+            std::fs::create_dir_all(&lib_dir).unwrap();
+            let box_java = lib_dir.join("Box.java");
+            std::fs::write(&box_java, &box_src).unwrap();
+            (box_java, box_src)
+        })
     }
 
     #[test]
@@ -1144,6 +1154,50 @@ mod tests {
         assert_eq!(loc.uri, box_uri);
         let want = box_src.find("get(").unwrap();
         assert_eq!(loc.range.start, Position::new(0, want as u32));
+    }
+
+    /// [`workspace_with_box`] with **no real source** — instead a signature-only `.java` skeleton is
+    /// synthesized from the class file (exactly as the server does for a dependency that ships no
+    /// `-sources.jar`) and fed as the navigation source.
+    fn workspace_with_synthesized_box() -> (Workspace, Url, &'static str, Url, String) {
+        workspace_with_box(|dir, box_class| {
+            let synthesized = jals_classpath::synthesize_classpath_sources(
+                std::slice::from_ref(box_class),
+                dir,
+                |message| panic!("unexpected synthesis warning: {message}"),
+            );
+            assert_eq!(synthesized.len(), 1);
+            let box_java = synthesized[0].clone();
+            let box_src = std::fs::read_to_string(&box_java).unwrap();
+            (box_java, box_src)
+        })
+    }
+
+    #[test]
+    fn goto_definition_into_a_synthesized_skeleton_type() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_synthesized_box();
+        let col = main.find("Box").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("Box navigates into its synthesized skeleton");
+        assert_eq!(loc.uri, box_uri);
+        // The range starts exactly on the `Box` name token in the parsed skeleton.
+        let line_index = crate::line_index::LineIndex::new(&box_src);
+        let off = u32::from(line_index.offset(&box_src, loc.range.start)) as usize;
+        assert!(box_src[off..].starts_with("Box"), "{box_src}");
+    }
+
+    #[test]
+    fn goto_definition_into_a_synthesized_skeleton_member() {
+        let (ws, main_uri, main, box_uri, box_src) = workspace_with_synthesized_box();
+        let col = main.find("get(").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&main_uri, Position::new(0, col))
+            .expect("Box.get navigates into its synthesized skeleton");
+        assert_eq!(loc.uri, box_uri);
+        let line_index = crate::line_index::LineIndex::new(&box_src);
+        let off = u32::from(line_index.offset(&box_src, loc.range.start)) as usize;
+        assert!(box_src[off..].starts_with("get"), "{box_src}");
     }
 
     /// Build a workspace whose project (under `src/`) references `Box`, supplied by a `git`/`path`

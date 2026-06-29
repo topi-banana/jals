@@ -187,7 +187,11 @@ layout's `BOOT-INF/lib/*.jar`), which the classpath loader otherwise skips — i
 classpath, so the bundled libraries are available for both analysis and compilation. Its optional
 `sources` jar is purely an **editor** aid: `jals-lsp` extracts the `.java` into
 `target/jals/deps/sources` and points go-to-definition at the real declaration; never a compile or
-analysis classpath input.
+analysis classpath input. When a jar ships **no** `sources` jar, `jals-lsp` still makes
+go-to-definition work: it synthesizes a signature-only `.java` **skeleton** from each classpath
+`.class` (every type and member declaration, no method bodies) into `target/jals/deps/decompiled` and
+navigates there — so jump-to-definition lands on a declaration for *any* library type, with a real
+`sources` jar taking precedence when present. (Editor-only; never a compile or `lint` input.)
 
 A **`git`** / **`path`** dependency supplies `.java` **source** directly. It is an **editor** input
 only: `jals-lsp` clones each git repo (into `target/jals/deps/git`, the requested ref checked out) or

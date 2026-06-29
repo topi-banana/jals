@@ -17,6 +17,7 @@
 //! [`ProjectIndex::build_with_classpath`]: https://docs.rs/jals-hir
 
 mod resolve;
+mod skeleton;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -28,7 +29,7 @@ use walkdir::WalkDir;
 
 pub use resolve::{
     ResolvedDependencies, cached_jar_path, resolve_dependencies, resolve_project_dependencies,
-    resolve_project_source_deps, resolve_project_sources,
+    resolve_project_source_deps, resolve_project_sources, synthesize_classpath_sources,
 };
 
 /// The outcome of loading a classpath: every `.class` file that parsed, plus any non-fatal

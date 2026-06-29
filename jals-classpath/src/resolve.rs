@@ -20,9 +20,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use jals_build::{DependencySource, GitRef, GitSource, Manifest, PathSource, SourceDependency};
+use jals_classfile::ClassFile;
 use walkdir::WalkDir;
 
 use crate::Warning;
+use crate::skeleton::skeleton_groups;
 
 /// The outcome of resolving `[dependencies]`: the local `.jar` paths to add to the classpath, plus
 /// any non-fatal [`Warning`]s for sources that could not be resolved.
@@ -259,6 +261,50 @@ pub fn resolve_project_source_deps(
         collect_java_files(&base, &mut java_files);
     }
     java_files
+}
+
+/// Synthesize signature-only `.java` **skeletons** for a project's classpath `.class` files and write
+/// them to `<root>/target/jals/deps/decompiled`, returning the written `.java` paths for the host to
+/// register as go-to-definition targets. The decompiled-source counterpart of
+/// [`resolve_project_sources`] (real `-sources.jar` `.java`) and
+/// [`resolve_project_source_deps`] (`git`/`path` `.java`): the fallback that makes jump-to-definition
+/// work for a dependency that ships *no* source at all.
+///
+/// `classes` are the already-parsed classpath class files (from [`crate::load_classpath`]). Each
+/// top-level type is rendered to one `.java` (nested types inlined) carrying every member's signature
+/// but no bodies — the same shape `jals-hir`'s stdlib stubs take — and written under
+/// `decompiled/<package-path>/<TopLevel>.java`. The host appends these to the navigation files it
+/// already feeds the source-location overlay, **after** any real `-sources.jar` `.java`, so a class
+/// that *does* have real source keeps it (the overlay is first-declaration-wins) and the synthesized
+/// skeleton only fills the gaps.
+///
+/// Idempotent and cheap to re-run: a skeleton already on disk (non-empty) is reused untouched
+/// (skip-if-exists), and writes are atomic (`.part` → rename). Error-resilient like the other
+/// resolvers — a class that fails to write is reported through `warn` and skipped, never aborting.
+/// Pure rendering plus local file writes (no network), so unlike [`resolve_project_dependencies`] it
+/// needs no dedicated thread, though an async host resolving it alongside the jars should keep the
+/// whole batch off the Tokio runtime.
+pub fn synthesize_classpath_sources(
+    classes: &[ClassFile],
+    root: &Path,
+    mut warn: impl FnMut(String),
+) -> Vec<PathBuf> {
+    let dest_dir = deps_cache_dir(root).join("decompiled");
+    let mut out = Vec::new();
+    for group in skeleton_groups(classes) {
+        let dest = dest_dir.join(group.rel_path());
+        // Already synthesized (a class file does not change under us): reuse the cached file without
+        // re-rendering its text.
+        if crate::is_nonempty_file(&dest) {
+            out.push(dest);
+            continue;
+        }
+        match crate::write_atomic(&dest, group.render().as_bytes()) {
+            Ok(()) => out.push(dest),
+            Err(message) => warn(format!("{}: {message}", dest.display())),
+        }
+    }
+    out
 }
 
 /// The per-dependency git checkout subdir: `<name>-<hash of (url, ref)>`. Hashing the ref alongside the
