@@ -59,4 +59,4 @@ unicode-width = { version = "0.2.1" }
 walkdir = { version = "2" }
 # Host-only (jals-classpath reads jars). `deflate` is the only compression jars use; disabling the
 # rest keeps the dependency tree small and out of the pure/`wasm32` crates.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
