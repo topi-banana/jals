@@ -11,7 +11,7 @@ fn build(sources: &[&str]) -> (Vec<(FileId, SyntaxNode)>, ProjectIndex) {
         .enumerate()
         .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
         .collect();
-    let index = ProjectIndex::build(&nodes);
+    let index = ProjectIndex::builder(&nodes).build();
     (nodes, index)
 }
 

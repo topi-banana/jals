@@ -9,7 +9,7 @@
 //! `java.lang` / unindexed). This is the basis for cross-file go-to-definition and the "cannot
 //! resolve symbol" diagnostic.
 //!
-//! The layer is **pure**: [`ProjectIndex::build`] takes already-parsed CST roots, so the host
+//! The layer is **pure**: [`ProjectIndex::builder`] takes already-parsed CST roots, so the host
 //! (the language server / CLI) owns all filesystem work and this module stays `wasm32`-compatible.
 //! It never panics — an incomplete tree simply contributes whatever type declarations it has.
 //!
@@ -70,20 +70,20 @@ pub struct ItemId(u32);
 /// open, so navigation into it is suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemOrigin {
-    /// Declared in one of the project source files the host supplied to [`ProjectIndex::build`].
+    /// Declared in one of the project source files the host supplied to [`ProjectIndex::builder`].
     Project,
     /// Declared in an embedded `java.lang` stub (see [`crate::stdlib`]); present only via
-    /// [`ProjectIndex::build_with_stdlib`]. Carries signatures for inference and hover, but no
+    /// [`ProjectIndexBuilder::with_stdlib`]. Carries signatures for inference and hover, but no
     /// host-openable location.
     Stdlib,
     /// Decoded from a `.class` file on the classpath (see [`crate::classpath`]); present only via
-    /// [`ProjectIndex::build_with_classpath`]. Like a stub it has no host-openable source, but its
+    /// [`ProjectIndexBuilder::with_classpath`]. Like a stub it has no host-openable source, but its
     /// declared member set is *complete* for that class, so it is not treated leniently the way a
     /// (deliberately partial) stub is.
     Classpath,
     /// Declared in an external **library source** file — the `.java` of a `git`/`path`
     /// `[dependencies]` entry the host folds in via
-    /// [`build_with_source_deps`](ProjectIndex::build_with_source_deps). Indexed from real source (so
+    /// [`with_source_deps`](ProjectIndexBuilder::with_source_deps). Indexed from real source (so
     /// its member set is complete and it is *not* treated leniently) and locatable at its real
     /// [`file`](Item::file) / [`name_range`](Item::name_range), so it resolves types and is a
     /// go-to-definition target — yet it is not one of the project's own files, so the host never lints
@@ -289,7 +289,7 @@ pub struct ProjectIndex {
 
 /// A project's classpath `.class` files lowered to the index facts they contribute, ready to fold
 /// into a [`ProjectIndex`]. Produced once by [`ProjectIndex::lower_classpath`] and reused across
-/// rebuilds via [`ProjectIndex::build_with_lowered_classpath`], so a host that re-indexes on every
+/// rebuilds via [`ProjectIndexBuilder::with_classpath`], so a host that re-indexes on every
 /// edit decodes the (unchanging) classpath only once.
 pub struct LoweredClasspath {
     classes: Vec<crate::classpath::ClassfileClass>,
@@ -300,7 +300,7 @@ pub struct LoweredClasspath {
 /// declaration for go-to-definition. Built once by
 /// [`index_source_locations`](ProjectIndex::index_source_locations) from the host's extracted library
 /// sources (the `sources` jars of `[dependencies]`) and folded in by
-/// [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources). Pure data — the host
+/// [`ProjectIndexBuilder::with_source_locations`]. Pure data — the host
 /// owns the file I/O and maps each [`FileId`] back to a real URL.
 #[derive(Debug, Default)]
 pub struct SourceLocations {
@@ -341,47 +341,104 @@ impl SourceLocations {
     }
 }
 
+/// Fluent builder for a [`ProjectIndex`], created by [`ProjectIndex::builder`]. Each `with_*` turns
+/// on one orthogonal input — the embedded `java.lang` stubs, the classpath `.class` facts, a
+/// source-location overlay, and `git`/`path` source dependencies — and [`build`](Self::build) folds
+/// every configured one in. Omit what you don't need; a project type still wins a fully-qualified-name
+/// clash over a library/stub type. Pure and `wasm32`-compatible.
+pub struct ProjectIndexBuilder<'a> {
+    files: &'a [(FileId, SyntaxNode)],
+    source_files: &'a [(FileId, SyntaxNode)],
+    stdlib: bool,
+    classpath: Option<&'a LoweredClasspath>,
+    sources: Option<&'a SourceLocations>,
+}
+
+impl<'a> ProjectIndexBuilder<'a> {
+    /// Also index the embedded `java.lang` stubs ([`crate::stdlib`]) as
+    /// [`Stdlib`](ItemOrigin::Stdlib)-origin types. With them, a reference to a core JDK type
+    /// (`String`, `Object`, …) resolves to a real [`Item`] with members and supertypes, so inference
+    /// and hover see through it instead of stopping at an external name. Still pure and
+    /// `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
+    #[must_use]
+    pub fn with_stdlib(mut self) -> Self {
+        self.stdlib = true;
+        self
+    }
+
+    /// Fold in the type, member, and generic signatures decoded from the project's classpath
+    /// `.class` files as [`Classpath`](ItemOrigin::Classpath)-origin types. With them, a reference to
+    /// an external library type resolves to a real [`Item`] with members and supertypes, so inference
+    /// sees through it — `List<String>.get(0)` infers `String` through a loaded `java/util/List`.
+    /// Lower the raw `.class` files once with [`ProjectIndex::lower_classpath`] and reuse the result
+    /// across rebuilds. Does **not** imply [`with_stdlib`](Self::with_stdlib) — opt into both.
+    #[must_use]
+    pub fn with_classpath(mut self, classpath: &'a LoweredClasspath) -> Self {
+        self.classpath = Some(classpath);
+        self
+    }
+
+    /// Add a [`SourceLocations`] overlay so each classpath type/member that has matching library
+    /// *source* gets a real `.java` go-to-definition target ([`Item::source_location`] /
+    /// [`Member::source_location`]). Typing is unchanged — the `.class` files remain authoritative;
+    /// the overlay only adds navigation. Build it once with
+    /// [`ProjectIndex::index_source_locations`].
+    #[must_use]
+    pub fn with_source_locations(mut self, sources: &'a SourceLocations) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    /// Index `source_files` — the `.java` of `git`/`path` `[dependencies]` — as
+    /// [`Source`](ItemOrigin::Source)-origin types. Unlike a classpath `.class` (typed from bytecode,
+    /// navigated via a separate [`SourceLocations`] overlay) or a `-sources.jar` (navigation only),
+    /// these files are the typing authority *and* the navigation target: their types resolve for
+    /// inference/hover/completion and a reference into one goes to its real declaration. They are not
+    /// project files, so the host neither lints nor renames them. Pure and `wasm32`-compatible — the
+    /// host reads and parses the library `.java` and assigns their [`FileId`]s.
+    #[must_use]
+    pub fn with_source_deps(mut self, source_files: &'a [(FileId, SyntaxNode)]) -> Self {
+        self.source_files = source_files;
+        self
+    }
+
+    /// Build the index, folding in every configured input.
+    #[must_use]
+    pub fn build(self) -> ProjectIndex {
+        let empty = SourceLocations::default();
+        let sources = self.sources.unwrap_or(&empty);
+        let classes = self.classpath.map_or(&[][..], |cp| &cp.classes[..]);
+        ProjectIndex::build_inner(self.files, self.source_files, self.stdlib, classes, sources)
+    }
+}
+
 impl ProjectIndex {
-    /// Builds the index from each file's `SOURCE_FILE` root. Pure: no I/O, never panics.
+    /// Start building the index from each file's `SOURCE_FILE` root. Returns a
+    /// [`ProjectIndexBuilder`]; chain `with_*` options and finish with
+    /// [`build`](ProjectIndexBuilder::build). Pure: no I/O, never panics.
     ///
     /// Each file contributes its package, its type-name imports, and every type declaration it
     /// holds (top-level and nested). When two files declare the same fully-qualified name, the
-    /// first one indexed wins. The JDK / classpath is *not* indexed — see
-    /// [`build_with_stdlib`](ProjectIndex::build_with_stdlib) to also fold in the embedded
-    /// `java.lang` stubs.
-    pub fn build(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
-        Self::build_inner(files, &[], false, &[], &SourceLocations::default())
-    }
-
-    /// Like [`build`](ProjectIndex::build), but also indexes the embedded `java.lang` stubs
-    /// ([`crate::stdlib`]) as [`Stdlib`](ItemOrigin::Stdlib)-origin types. With them, a reference to
-    /// a core JDK type (`String`, `Object`, …) resolves to a real [`Item`] with members and
-    /// supertypes, so inference and hover see through it instead of stopping at an external name.
-    ///
-    /// Still pure and `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
-    pub fn build_with_stdlib(files: &[(FileId, SyntaxNode)]) -> ProjectIndex {
-        Self::build_inner(files, &[], true, &[], &SourceLocations::default())
-    }
-
-    /// Like [`build_with_stdlib`](ProjectIndex::build_with_stdlib), but also folds in the type,
-    /// member, and generic signatures decoded from `classfiles` (the project's classpath `.class`
-    /// files) as [`Classpath`](ItemOrigin::Classpath)-origin types. With them, a reference to an
-    /// external library type resolves to a real [`Item`] with members and supertypes, so inference
-    /// sees through it — `List<String>.get(0)` infers `String` through a loaded `java/util/List`.
-    ///
-    /// The host owns the I/O: it reads the `.class` bytes (from disk or a JAR) and parses them with
-    /// `jals_classfile`, keeping this layer pure and `wasm32`-compatible. A project or stub type wins
-    /// over a classpath type of the same fully-qualified name.
-    pub fn build_with_classpath(
-        files: &[(FileId, SyntaxNode)],
-        classfiles: &[jals_classfile::ClassFile],
-    ) -> ProjectIndex {
-        Self::build_with_lowered_classpath(files, &Self::lower_classpath(classfiles))
+    /// first one indexed wins. With no options the JDK / classpath is *not* indexed — opt in with
+    /// [`with_stdlib`](ProjectIndexBuilder::with_stdlib),
+    /// [`with_classpath`](ProjectIndexBuilder::with_classpath),
+    /// [`with_source_locations`](ProjectIndexBuilder::with_source_locations), and
+    /// [`with_source_deps`](ProjectIndexBuilder::with_source_deps), each turning on one orthogonal
+    /// input.
+    #[must_use]
+    pub fn builder(files: &[(FileId, SyntaxNode)]) -> ProjectIndexBuilder<'_> {
+        ProjectIndexBuilder {
+            files,
+            source_files: &[],
+            stdlib: false,
+            classpath: None,
+            sources: None,
+        }
     }
 
     /// Lower the classpath `.class` files to the index facts they contribute, once, so a host that
     /// re-indexes on every edit can reuse the result via
-    /// [`build_with_lowered_classpath`](ProjectIndex::build_with_lowered_classpath) instead of
+    /// [`ProjectIndexBuilder::with_classpath`] instead of
     /// re-decoding the (unchanging) classpath each time. Lowering decodes every member's descriptor
     /// and generic signature — the expensive half of folding a classpath in; registering the
     /// resulting facts (the cheap half) still runs per rebuild. Pure and `wasm32`-compatible.
@@ -394,61 +451,8 @@ impl ProjectIndex {
         }
     }
 
-    /// Like [`build_with_classpath`](ProjectIndex::build_with_classpath), but takes a classpath
-    /// already lowered by [`lower_classpath`](ProjectIndex::lower_classpath) — folding the
-    /// pre-decoded facts in without re-decoding them.
-    pub fn build_with_lowered_classpath(
-        files: &[(FileId, SyntaxNode)],
-        classpath: &LoweredClasspath,
-    ) -> ProjectIndex {
-        Self::build_inner(
-            files,
-            &[],
-            true,
-            &classpath.classes,
-            &SourceLocations::default(),
-        )
-    }
-
-    /// Like [`build_with_lowered_classpath`](ProjectIndex::build_with_lowered_classpath), but also
-    /// folds in a [`SourceLocations`] overlay so each classpath type/member that has matching library
-    /// *source* gets a real `.java` go-to-definition target ([`Item::source_location`] /
-    /// [`Member::source_location`]). Typing is unchanged — the `.class` files remain authoritative; the
-    /// overlay only adds navigation. Build the overlay once with
-    /// [`index_source_locations`](ProjectIndex::index_source_locations).
-    pub fn build_with_classpath_sources(
-        files: &[(FileId, SyntaxNode)],
-        classpath: &LoweredClasspath,
-        sources: &SourceLocations,
-    ) -> ProjectIndex {
-        Self::build_inner(files, &[], true, &classpath.classes, sources)
-    }
-
-    /// Like [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources), but also
-    /// indexes `source_files` — the `.java` of `git`/`path` `[dependencies]` — as
-    /// [`Source`](ItemOrigin::Source)-origin types. Unlike a classpath `.class` (typed from bytecode,
-    /// navigated via a separate [`SourceLocations`] overlay) or a `-sources.jar` (navigation only),
-    /// these files are the typing authority *and* the navigation target: their types resolve for
-    /// inference/hover/completion and a reference into one goes to its real declaration. They are not
-    /// project files, so the host neither lints nor renames them.
-    ///
-    /// `files` are the project's own sources (first, so a project type wins a fully-qualified-name
-    /// clash); `source_files` are the library sources; `classpath`/`sources` are the classpath
-    /// `.class` facts and their optional source overlay, exactly as for
-    /// [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources). Pure and
-    /// `wasm32`-compatible — the host reads and parses the library `.java` and assigns their
-    /// [`FileId`]s.
-    pub fn build_with_source_deps(
-        files: &[(FileId, SyntaxNode)],
-        source_files: &[(FileId, SyntaxNode)],
-        classpath: &LoweredClasspath,
-        sources: &SourceLocations,
-    ) -> ProjectIndex {
-        Self::build_inner(files, source_files, true, &classpath.classes, sources)
-    }
-
     /// Index where the types and members of the host's extracted library *sources* are declared, once,
-    /// so [`build_with_classpath_sources`](ProjectIndex::build_with_classpath_sources) can reuse the
+    /// so [`ProjectIndexBuilder::with_source_locations`] can reuse the
     /// result across rebuilds (the sources of a fixed dependency do not change). Each entry of
     /// `sources` is a library `.java` file's `(FileId, SOURCE_FILE root)`; the host registers those
     /// `FileId`s so it can map a match back to a real URL. Pure and `wasm32`-compatible.
@@ -670,7 +674,7 @@ impl ProjectIndex {
     }
 
     /// Walks `node`, recording each type declaration's direct members and resolving its
-    /// project-internal supertypes. Runs in [`build`](ProjectIndex::build)'s second pass, when every
+    /// project-internal supertypes. Runs in [`build`](ProjectIndexBuilder::build)'s second pass, when every
     /// type is already indexed (so a forward / cross-file supertype reference resolves).
     fn collect_members_and_supertypes(&mut self, file: FileId, node: &SyntaxNode) {
         if type_decl_kind(node.kind()).is_some()
@@ -804,7 +808,7 @@ impl ProjectIndex {
         }
 
         // 4. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
-        //    from `java.lang`. When the stubs are indexed ([`build_with_stdlib`]) it binds to one;
+        //    from `java.lang`. When the stubs are indexed (via `with_stdlib`) it binds to one;
         //    when they are not, `java.lang.*` is absent from `by_fqn` and this falls through to the
         //    external handling below — identical to the pre-stub behaviour.
         if let Some(&id) = self.by_fqn.get(&format!("java.lang.{name}")) {

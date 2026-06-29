@@ -106,7 +106,7 @@ proptest! {
             .enumerate()
             .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
             .collect();
-        let index = ProjectIndex::build(&nodes);
+        let index = ProjectIndex::builder(&nodes).build();
         for (file, root) in &nodes {
             let resolved = resolve_node(root);
             let _ = index.unresolved_types(*file, &resolved);
@@ -126,7 +126,7 @@ proptest! {
     fn infer_never_panics(src in javaish()) {
         let node = jals_syntax::parse(&src).syntax();
         let resolved = resolve_node(&node);
-        let index = ProjectIndex::build(&[(FileId(0), node.clone())]);
+        let index = ProjectIndex::builder(&[(FileId(0), node.clone())]).build();
 
         let ti = infer(&node, &resolved, &index, FileId(0));
         for d in &resolved.defs {
@@ -149,7 +149,7 @@ proptest! {
     fn type_mismatches_never_panic(src in javaish()) {
         let node = jals_syntax::parse(&src).syntax();
         let resolved = resolve_node(&node);
-        let index = ProjectIndex::build(&[(FileId(0), node.clone())]);
+        let index = ProjectIndex::builder(&[(FileId(0), node.clone())]).build();
         let n = src.len();
 
         for mismatches in [

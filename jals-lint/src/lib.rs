@@ -170,7 +170,8 @@ mod tests {
         );
 
         // Index-aware: it is flagged.
-        let index = jals_hir::ProjectIndex::build(&[(jals_hir::FileId(0), parse.syntax())]);
+        let index =
+            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())]).build();
         let out = lint_parse_with_index(&parse, &cfg, Some((&index, jals_hir::FileId(0))));
         assert!(
             out.diagnostics.iter().any(|d| d.rule == TYPE_MISMATCH_RULE

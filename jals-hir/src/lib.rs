@@ -57,7 +57,7 @@ pub use infer::{
 };
 pub use project::{
     FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId, MemberType, Param,
-    ProjectIndex, SourceLocations, Supertype, TypeParamDecl, TypeResolution,
+    ProjectIndex, ProjectIndexBuilder, SourceLocations, Supertype, TypeParamDecl, TypeResolution,
 };
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;

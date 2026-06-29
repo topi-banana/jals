@@ -2,7 +2,7 @@
 //! contributes: one [`Item`](crate::Item)-worth of type info plus its [`Member`](crate::Member)s.
 //!
 //! This module is the *pure* half of the classpath bridge — it produces self-contained data
-//! ([`ClassfileClass`]), and [`ProjectIndex::build_with_classpath`](crate::ProjectIndex) folds it in
+//! ([`ClassfileClass`]), and [`ProjectIndexBuilder::with_classpath`](crate::ProjectIndexBuilder) folds it in
 //! exactly like a source file (register types, then resolve members and supertypes by name). Generic
 //! signatures (JVMS §4.7.9) are mapped through the same [`MemberType`] / [`TypeParamDecl`] shapes the
 //! source path produces, so member access and generic substitution work unchanged: a type variable is

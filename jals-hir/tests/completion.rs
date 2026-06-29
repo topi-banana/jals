@@ -22,7 +22,7 @@ fn at(
         .enumerate()
         .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
         .collect();
-    let index = ProjectIndex::build(&nodes);
+    let index = ProjectIndex::builder(&nodes).build();
     let (fid, root) = &nodes[file];
     let resolved = resolve_node(root);
     run(root, &resolved, &index, *fid, offset)
@@ -196,7 +196,7 @@ fn never_panics_on_broken_input() {
         "class C { .$0 }",
     ] {
         let nodes = [(FileId(0), jals_syntax::parse(src).syntax())];
-        let index = ProjectIndex::build(&nodes);
+        let index = ProjectIndex::builder(&nodes).build();
         let resolved = resolve_node(&nodes[0].1);
         for offset in [0, src.len(), src.len().saturating_sub(1)] {
             let _ = member_completions(&nodes[0].1, &resolved, &index, FileId(0), offset);

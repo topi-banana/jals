@@ -1,7 +1,7 @@
 //! Host-side classpath loading: turn the classpath *entries* a `jals.toml` lists (jars and
 //! directories of `.class` files, resolved by [`jals_build::Manifest::classpath_entries`]) into the
 //! parsed [`ClassFile`]s that `jals-hir`'s classpath bridge consumes
-//! ([`ProjectIndex::build_with_classpath`]).
+//! ([`ProjectIndexBuilder::with_classpath`]).
 //!
 //! This is the missing connective tissue between [`jals_classfile`] (a pure `.class` codec) and
 //! `jals-hir`: the bridge in `jals-hir` is pure and `wasm32`-compatible, so it takes
@@ -14,7 +14,7 @@
 //! get analysis from the dependencies that *did* load. The caller decides whether to surface the
 //! warnings.
 //!
-//! [`ProjectIndex::build_with_classpath`]: https://docs.rs/jals-hir
+//! [`ProjectIndexBuilder::with_classpath`]: https://docs.rs/jals-hir
 
 mod resolve;
 mod skeleton;
@@ -36,7 +36,7 @@ pub use resolve::{
 /// [`Warning`]s for entries that could not be read.
 #[derive(Debug, Default)]
 pub struct ClasspathLoad {
-    /// The parsed class files, ready to hand to `ProjectIndex::build_with_classpath`. The order
+    /// The parsed class files, ready to hand to `ProjectIndexBuilder::with_classpath`. The order
     /// follows the classpath entries (and, within a directory/jar, the filesystem/archive order).
     pub classes: Vec<ClassFile>,
     /// One per entry or member file that could not be read or parsed. Loading continues regardless.

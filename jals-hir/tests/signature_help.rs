@@ -15,7 +15,7 @@ fn help(sources: &[&str], file: usize) -> Option<SignatureHelp> {
         .enumerate()
         .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
         .collect();
-    let index = ProjectIndex::build(&nodes);
+    let index = ProjectIndex::builder(&nodes).build();
     let (fid, root) = &nodes[file];
     let resolved = resolve_node(root);
     signature_help(root, &resolved, &index, *fid, offset)

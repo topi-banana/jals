@@ -365,7 +365,7 @@ resolves the `[build] classpath` to paths, and `Manifest::dependency_sources` cl
 `[dependencies]` `{ jar = "..." }` into a URL or local path; the host-only `jals-classpath` crate
 reads the `.class` files out of those jars/dirs (and **downloads** the remote dependency jars into a
 `target/jals/deps` cache via `resolve_dependencies`) and parses them with `jals-classfile`; and
-`jals-hir`'s `ProjectIndex::build_with_classpath` folds them in so external library types resolve in
+`jals-hir`'s `ProjectIndex::builder().with_classpath()` folds them in so external library types resolve in
 `jals lint` and the language server, while `jals build`/`run` put the same jars on `javac`/`java`'s
 classpath. What is still missing is the *resolver* above — turning **Maven coordinates** into those
 classpath entries (POM walking + transitive graph + version conflict resolution + lockfile). Until

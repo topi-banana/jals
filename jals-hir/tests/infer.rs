@@ -20,7 +20,7 @@ fn parse(src: &str) -> SyntaxNode {
 fn analyse(src: &str) -> (SyntaxNode, Resolved, TypeInference) {
     let node = parse(src);
     let resolved = resolve_node(&node);
-    let index = ProjectIndex::build(&[(FileId(0), node.clone())]);
+    let index = ProjectIndex::builder(&[(FileId(0), node.clone())]).build();
     let ti = infer(&node, &resolved, &index, FileId(0));
     (node, resolved, ti)
 }

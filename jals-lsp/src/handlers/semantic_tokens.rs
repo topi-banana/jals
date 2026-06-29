@@ -560,7 +560,7 @@ mod tests {
             (FileId(0), jals_syntax::parse(other).syntax()),
             (FileId(1), jals_syntax::parse(main).syntax()),
         ];
-        let index = ProjectIndex::build(&nodes);
+        let index = ProjectIndex::builder(&nodes).build();
 
         // Without the index: the syntactic fallback can only say `type`.
         let local = semantic_tokens(&jals_syntax::parse(main), main, &LineIndex::new(main), None);
