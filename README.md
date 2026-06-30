@@ -52,8 +52,29 @@ jals/
 
 ## Installation
 
+### Prebuilt binary (cargo-binstall)
+
+[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) downloads a prebuilt `jals`
+binary from the GitHub release assets — no compilation needed:
+
+```sh
+cargo binstall --git https://github.com/topi-banana/jals jals-cli
+```
+
+### From source (git)
+
 Requires a Rust toolchain with the **2024 edition** (Rust 1.85 or newer; CI builds on
-stable).
+stable). This compiles `jals` from the latest source:
+
+```sh
+cargo install --git https://github.com/topi-banana/jals jals-cli
+```
+
+The `jals-cli` package name is required: this is a Cargo workspace that ships several
+binaries, and `cargo install --git` searches the whole repo, so it cannot pick one without
+being told which package to install.
+
+### From a local checkout
 
 ```sh
 # Build the workspace
@@ -328,5 +349,14 @@ is the intended next consumer of the syntax layer.
 
 ## License
 
-No license has been declared yet. Until one is added, all rights are reserved by the
-authors.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed
+as above, without any additional terms or conditions.

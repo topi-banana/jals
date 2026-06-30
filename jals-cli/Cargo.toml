@@ -2,10 +2,29 @@
 name = "jals-cli"
 version.workspace = true
 edition.workspace = true
+description = "A Java toolchain (formatter, LSP, build front end) built on a lossless syntax tree"
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "jals"
 path = "src/main.rs"
+
+# cargo-binstall: fetch a prebuilt `jals` binary from the GitHub release assets the
+# `.github/workflows/release.yml` workflow publishes (`jals-v<version>-<target>.<ext>`).
+# `{ repo }` comes from `repository`, `{ version }` from the manifest on the default branch
+# (kept in lockstep with the `v<version>` tag).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/jals-v{ version }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [dependencies]
 anyhow.workspace = true

@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  upload-assets:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Builds only the `jals` binary (the jals-cli tree), so jals-playground's
+      # git `yew` dependency is never compiled. The action cross-compiles the
+      # aarch64-unknown-linux-gnu target via `cross`, target-adds the second
+      # apple target on the arm runner, and uploads the archive + sha256 to the
+      # release for this tag (creating it if needed). The asset name lines up
+      # with `[package.metadata.binstall].pkg-url` in jals-cli/Cargo.toml.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: jals
+          target: ${{ matrix.target }}
+          archive: jals-$tag-$target
+          tar: unix
+          zip: windows
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

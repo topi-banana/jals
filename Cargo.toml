@@ -18,6 +18,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/topi-banana/jals"
+homepage = "https://github.com/topi-banana/jals"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99" }
