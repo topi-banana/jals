@@ -200,6 +200,10 @@ pub(crate) struct Workspace {
     /// indexed once at construction (the sources of a fixed dependency do not change) and folded into
     /// every rebuild so a classpath item gets a real-source go-to-definition target.
     source_locations: SourceLocations,
+    /// The project's target Java feature version, from the manifest's `[package] edition`. Fed to the
+    /// edition-gated lint rules (e.g. `compact-source-file`); `None` when the manifest declares no
+    /// edition (or could not be parsed), disabling those gates.
+    target_java_version: Option<u32>,
     index: ProjectIndex,
 }
 
@@ -262,6 +266,7 @@ impl Workspace {
             classfiles,
             Vec::new(),
             Vec::new(),
+            None,
         )
     }
 
@@ -275,12 +280,16 @@ impl Workspace {
     ///   targets (see `jals_classpath::resolve_project_source_deps`).
     ///
     /// Both are read and parsed once here; neither is ever linted (they are not project files).
+    ///
+    /// `target_java_version` is the project's Java feature version (from `[package] edition`), used by
+    /// the edition-gated lint rules; `None` leaves those gates off.
     pub(crate) fn load_with_classpath_and_sources(
         project_root: PathBuf,
         source_roots: Vec<PathBuf>,
         classfiles: Vec<jals_classfile::ClassFile>,
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
+        target_java_version: Option<u32>,
     ) -> Workspace {
         let mut paths: Vec<PathBuf> = source_roots
             .iter()
@@ -310,6 +319,7 @@ impl Workspace {
             index: ProjectIndex::builder(&[]).with_stdlib().build(),
             classpath: ProjectIndex::lower_classpath(&classfiles),
             source_locations: ProjectIndex::index_source_locations(&library_inputs),
+            target_java_version,
         };
         for path in paths {
             if let (Ok(text), Ok(uri)) =
@@ -362,6 +372,12 @@ impl Workspace {
     /// The project symbol index.
     pub(crate) fn index(&self) -> &ProjectIndex {
         &self.index
+    }
+
+    /// The project's target Java feature version (from `[package] edition`), if declared. Feeds the
+    /// edition-gated lint rules.
+    pub(crate) fn target_java_version(&self) -> Option<u32> {
+        self.target_java_version
     }
 
     /// The id of the file at `uri`, if it is part of this workspace.
@@ -1101,6 +1117,7 @@ mod tests {
             vec![box_class],
             vec![box_java.clone()],
             Vec::new(),
+            None,
         );
         let main_uri = Url::from_file_path(src_dir.join("Main.java")).unwrap();
         let box_uri = Url::from_file_path(&box_java).unwrap();
@@ -1218,6 +1235,7 @@ mod tests {
             Vec::new(),             // no classpath `.class`
             Vec::new(),             // no `-sources.jar` overlay
             vec![box_java.clone()], // the source dependency's `.java`
+            None,
         );
         let main_uri = Url::from_file_path(src_dir.join("Main.java")).unwrap();
         let box_uri = Url::from_file_path(&box_java).unwrap();

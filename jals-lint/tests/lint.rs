@@ -257,3 +257,69 @@ fn type_mismatch_return_flagged() {
         "#]],
     );
 }
+
+// ===== compact-source-file =====
+
+/// Lint `src` with the project's target Java version set to `version` (the host injects this from
+/// `[package] edition`), rendered like [`lint`].
+fn lint_edition(src: &str, version: Option<u32>) -> String {
+    let config = Config {
+        target_java_version: version,
+        ..Default::default()
+    };
+    render(&lint_source(src, &config))
+}
+
+#[test]
+fn compact_source_file_top_level_main_flagged_on_java24() {
+    // A top-level `main` (JEP 512) is only a preview feature before Java 25.
+    expect![[r#"
+        compact-source-file:0..14: top-level declarations like `main` are a preview feature before Java 25; this project targets Java 24, so declare it inside a class or set `edition = "java25"`
+    "#]]
+    .assert_eq(&lint_edition("void main() {}", Some(24)));
+}
+
+#[test]
+fn compact_source_file_top_level_field_flagged_on_java24() {
+    // Any top-level member — not just `main` — is an implicit-class declaration.
+    expect![[r#"
+        compact-source-file:0..14: top-level declarations like `main` are a preview feature before Java 25; this project targets Java 24, so declare it inside a class or set `edition = "java25"`
+    "#]]
+    .assert_eq(&lint_edition("int count = 0;", Some(24)));
+}
+
+#[test]
+fn compact_source_file_allowed_on_java25() {
+    assert_eq!(lint_edition("void main() {}", Some(25)), "");
+}
+
+#[test]
+fn compact_source_file_not_gated_without_edition() {
+    // No declared edition (the common case): the syntax is not flagged.
+    assert_eq!(lint_edition("void main() {}", None), "");
+}
+
+#[test]
+fn compact_source_file_class_member_main_ok_on_java24() {
+    // A `main` inside a class is ordinary Java, never a compact source file.
+    assert_eq!(lint_edition("class C { void main() {} }", Some(24)), "");
+}
+
+#[test]
+fn compact_source_file_respects_allow_config() {
+    let mut config = Config {
+        target_java_version: Some(24),
+        ..Default::default()
+    };
+    config
+        .rules
+        .insert("compact-source-file".to_string(), Severity::Allow);
+    let out = lint_source("void main() {}", &config);
+    assert!(
+        out.diagnostics
+            .iter()
+            .all(|d| d.rule != "compact-source-file"),
+        "expected the rule to be suppressed: {:?}",
+        out.diagnostics
+    );
+}

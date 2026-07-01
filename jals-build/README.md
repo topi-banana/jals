@@ -61,6 +61,7 @@ uses them.
 [package]
 name = "hello"
 version = "0.1.0"
+# edition = "java25"               # Java language edition (java24 | java25); gates analysis, not javac
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
 [build]
@@ -99,6 +100,7 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 | --- | --- | --- | --- |
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
+| `edition` | `"java24"` \| `"java25"` | — | the Java language edition. A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `java24` flags a top-level `main` (compact source files are a preview feature there; permanent in `java25`) via the `compact-source-file` lint. Unset means no edition gate. |
 | `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
 
 ### `[build]`
@@ -307,9 +309,10 @@ discovered source list is fed in today.
 
 ### `[package]` expansion (Cargo `[package]`)
 
-`description`, `authors`, `license`, `repository`, `homepage`, `keywords`, and
-`edition` / `java-version` (a default `release`). These become a jar's `MANIFEST.MF` / POM
-metadata on packaging. (`default-run` is already implemented — see [`[[bin]]`](#bin).)
+`description`, `authors`, `license`, `repository`, `homepage`, and `keywords`. These become a jar's
+`MANIFEST.MF` / POM metadata on packaging. (`default-run` is already implemented — see
+[`[[bin]]`](#bin); `edition` too, as an analysis-only language-feature gate — see [`[package]`](#package).
+Making `edition` also imply a default `javac --release` is still open.)
 
 ### `[build]` additions
 

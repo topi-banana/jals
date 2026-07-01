@@ -106,6 +106,7 @@ fn lint_node_with_index(
                 resolved.get_or_init(|| jals_hir::resolve_node(root)),
                 index,
             ),
+            Checker::Versioned(check) => check(root, config.target_java_version),
         };
         for finding in findings {
             diagnostics.push(Diagnostic::new(rule.name, severity, finding));

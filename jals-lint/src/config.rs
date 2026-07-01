@@ -20,6 +20,13 @@ pub struct Config {
     /// Per-rule severity overrides. Keys are rule names (kebab-case); a missing key means the
     /// rule keeps its built-in default severity.
     pub rules: BTreeMap<String, Severity>,
+    /// The project's target Java version (feature release, e.g. `24`), injected by the host from
+    /// the manifest's `[package] edition` — **not** a `jalslint.toml` key (hence `serde(skip)`).
+    ///
+    /// It drives version-gated rules (`Checker::Versioned`): e.g. compact source files with a
+    /// top-level `main` are a preview feature before Java 25. `None` disables every such gate.
+    #[serde(skip)]
+    pub target_java_version: Option<u32>,
 }
 
 impl Config {

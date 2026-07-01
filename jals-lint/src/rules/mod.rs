@@ -14,6 +14,7 @@ use crate::IndexCtx;
 
 use crate::diagnostic::Severity;
 
+mod compact_source_file;
 mod empty_catch;
 mod missing_braces;
 mod naming;
@@ -62,6 +63,11 @@ pub(crate) enum Checker {
     /// project-wide symbol index when the caller supplies one ([`IndexCtx`]); with no index it
     /// falls back to the file-local behavior. The basis for cross-file type checking.
     Indexed(fn(&SyntaxNode, &Resolved, Option<IndexCtx>) -> Vec<Finding>),
+    /// A syntactic rule gated on the project's target Java version (feature release), threaded from
+    /// the host via [`Config::target_java_version`](crate::Config::target_java_version). `None`
+    /// disables the gate (the rule reports nothing), so an edition-specific check never fires for a
+    /// project that did not declare its edition.
+    Versioned(fn(&SyntaxNode, Option<u32>) -> Vec<Finding>),
 }
 
 /// A rule: its identity and its checker.
@@ -80,6 +86,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     wildcard_import::RULE,
     empty_catch::RULE,
     missing_braces::RULE,
+    compact_source_file::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
 ];
