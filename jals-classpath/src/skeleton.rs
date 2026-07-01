@@ -1,13 +1,16 @@
-//! Synthesizing signature-only `.java` **skeletons** from compiled `.class` files.
+//! Synthesizing `.java` **skeletons** from compiled `.class` files.
 //!
 //! When a `[dependencies]` jar ships no `sources` jar (and no `git`/`path` source dependency provides
 //! its `.java`), an editor has nowhere to land a go-to-definition on one of its types. This module
 //! renders a *skeleton* `.java` for each such class straight from its [`jals_classfile`] model — every
-//! type and member declaration, **signatures only** (no method bodies, `;`-terminated), exactly the
-//! shape `jals-hir`'s embedded stdlib stubs take. The host writes these to disk
-//! ([`synthesize_classpath_sources`](crate::synthesize_classpath_sources)) and registers them as
-//! navigation files, so the existing source-location overlay points a classpath type/member at its
-//! synthesized declaration and jump-to-definition works even without library source.
+//! type and member declaration, with member details and method bodies decompiled through
+//! [`jals_decompile`] (`ConstantValue` initializers, declared `throws`, real parameter names, and
+//! straight-line method bodies reconstructed from bytecode; a body that cannot be reconstructed falls
+//! back to a placeholder suited to the method's shape). The
+//! host writes these to disk ([`synthesize_classpath_sources`](crate::synthesize_classpath_sources))
+//! and registers them as navigation files, so the existing source-location overlay points a classpath
+//! type/member at its synthesized declaration and jump-to-definition works even without library
+//! source. The output is always valid Java — an un-reconstructable member falls back to a safe form.
 //!
 //! Pure (no I/O): driven entirely off [`jals_classfile`]'s public model. The host half — writing the
 //! files, skip-if-exists caching — lives in `resolve.rs`. One file is emitted per **top-level** type;
@@ -19,10 +22,13 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use jals_classfile::{
-    Attribute, AttributeBody, ClassAccessFlags, ClassFile, ClassSignature, ClassTypeSignature,
-    ConstantPool, FieldAccessFlags, FieldType, MethodAccessFlags, MethodInfo, ResultSignature,
-    ReturnType, ThrowsSignature, TypeArgument, TypeParameter, TypeSignature, parse_class_signature,
-    parse_field_descriptor, parse_field_signature, parse_method_descriptor, parse_method_signature,
+    Attribute, AttributeBody, ClassAccessFlags, ClassFile, ClassSignature, ConstantPool,
+    FieldAccessFlags, MethodAccessFlags, MethodInfo, ResultSignature, ReturnType, TypeParameter,
+    parse_class_signature, parse_field_descriptor, parse_field_signature, parse_method_descriptor,
+    parse_method_signature,
+};
+use jals_decompile::{
+    internal_to_java, render_class_type_sig, render_field_type, render_throws, render_type_sig,
 };
 
 /// One top-level type's worth of class files, ready to render into a single `.java`: its output path
@@ -45,7 +51,7 @@ impl SkeletonGroup<'_> {
         source_rel_path(&self.package, &self.top)
     }
 
-    /// Render this group's signature-only `.java` text: every type/member declaration, no bodies.
+    /// Render this group's `.java` text: every type/member declaration, with M0 bodies.
     pub(crate) fn render(&self) -> String {
         let mut text = String::new();
         if !self.package.is_empty() {
@@ -307,9 +313,14 @@ fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize)
             continue;
         };
         let ty = field_type_java(&field.attributes, field.descriptor_index, pool);
+        // A `static final` field's compile-time constant becomes its initializer (`= 42`), so a
+        // navigated declaration shows the value.
+        let init = jals_decompile::constant_value_initializer(field, pool)
+            .map(|value| format!(" = {value}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "{pad}{}{ty} {name};",
+            "{pad}{}{ty} {name}{init};",
             tokens_prefix(&field_modifiers(flags))
         );
     }
@@ -326,38 +337,97 @@ fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize)
         if raw_name == "<clinit>" {
             continue;
         }
-        render_method(out, method, pool, &raw_name, simple, &pad);
+        render_method(out, method, cf, &raw_name, simple, &pad);
     }
 }
 
-/// Render one method or constructor declaration (signature only, `;`-terminated).
+/// Render one method or constructor declaration. The signature is followed by its body: `;` for an
+/// `abstract`/`native` method (which holds none), else the method's decompiled body when
+/// reconstructable ([`jals_decompile::decompile_method_body`]), else a safe placeholder
+/// ([`safe_body`]). Recovered source parameter names are used when available.
 fn render_method(
     out: &mut String,
     method: &MethodInfo,
-    pool: &ConstantPool,
+    cf: &ClassFile,
     raw_name: &str,
     simple: &str,
     pad: &str,
 ) {
+    let pool = &cf.constant_pool;
+    let flags = method.access_flags;
     let pieces = method_pieces(method, pool);
-    let params = render_params(&pieces.params, method.access_flags.is_varargs());
+    let names =
+        jals_decompile::parameter_names(method, pool, flags.is_static(), pieces.params.len())
+            .unwrap_or_else(|| {
+                (0..pieces.params.len())
+                    .map(|i| format!("arg{i}"))
+                    .collect()
+            });
+    let params = render_params(&pieces.params, &names, flags.is_varargs());
     let throws = if pieces.throws.is_empty() {
         String::new()
     } else {
         format!(" throws {}", pieces.throws.join(", "))
     };
-    let mods = tokens_prefix(&method_modifiers(method.access_flags));
+    let mods = tokens_prefix(&method_modifiers(flags));
     let type_params = space_suffix(render_type_params(&pieces.type_params));
-    if raw_name == "<init>" {
+    let is_ctor = raw_name == "<init>";
+    let head = if is_ctor {
         // A constructor has no return type; its source name is the class's simple name.
-        let _ = writeln!(out, "{pad}{mods}{type_params}{simple}({params}){throws};");
+        format!("{pad}{mods}{type_params}{simple}({params}){throws}")
     } else {
         let ret = pieces.ret.as_deref().unwrap_or("void");
-        let _ = writeln!(
-            out,
-            "{pad}{mods}{type_params}{ret} {raw_name}({params}){throws};"
-        );
+        format!("{pad}{mods}{type_params}{ret} {raw_name}({params}){throws}")
+    };
+    let body = method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad);
+    let _ = writeln!(out, "{head}{body}");
+}
+
+/// The body to place after a rendered signature. An `abstract`/`native` method holds none (`;`).
+/// Otherwise, prefer the decompiled body (using the same parameter `names` the signature renders); if
+/// it cannot be reconstructed, fall back to a safe placeholder — `{}` for a `void` method /
+/// constructor, `{ throw new RuntimeException(); }` for a value-returning one (valid for any return
+/// type, so the output always parses).
+fn method_body(
+    method: &MethodInfo,
+    cf: &ClassFile,
+    names: &[String],
+    is_ctor: bool,
+    returns_value: bool,
+    pad: &str,
+) -> String {
+    let flags = method.access_flags;
+    if flags.is_abstract() || flags.contains(MethodAccessFlags::NATIVE) {
+        return ";".to_string();
     }
+    if let Some(stmts) = jals_decompile::decompile_method_body(method, cf, names) {
+        return render_body_block(&stmts, pad);
+    }
+    safe_body(is_ctor, returns_value).to_string()
+}
+
+/// The safe placeholder body used when a method's real body cannot be decompiled.
+fn safe_body(is_ctor: bool, returns_value: bool) -> &'static str {
+    if is_ctor || !returns_value {
+        " {}"
+    } else {
+        " { throw new RuntimeException(); }"
+    }
+}
+
+/// Wrap decompiled statement lines in a block, indented one level past `pad`. An empty body renders
+/// inline as ` {}`.
+fn render_body_block(stmts: &[String], pad: &str) -> String {
+    if stmts.is_empty() {
+        return " {}".to_string();
+    }
+    let mut block = String::from(" {\n");
+    for stmt in stmts {
+        let _ = writeln!(block, "{pad}    {stmt}");
+    }
+    block.push_str(pad);
+    block.push('}');
+    block
 }
 
 /// The rendered signature pieces of a method: from its generic `Signature` when present, else its
@@ -372,6 +442,16 @@ struct MethodPieces {
 }
 
 fn method_pieces(method: &MethodInfo, pool: &ConstantPool) -> MethodPieces {
+    let mut pieces = signature_or_descriptor_pieces(method, pool);
+    // A non-generic `throws` clause lives in the `Exceptions` attribute, not the descriptor — and a
+    // generic `Signature` omits its throws entirely when no thrown type is generic — so fill it in.
+    if pieces.throws.is_empty() {
+        pieces.throws = jals_decompile::declared_throws(method, pool);
+    }
+    pieces
+}
+
+fn signature_or_descriptor_pieces(method: &MethodInfo, pool: &ConstantPool) -> MethodPieces {
     if let Some(sig) = signature_string(&method.attributes, pool)
         && let Ok(ms) = parse_method_signature(&sig)
     {
@@ -401,20 +481,21 @@ fn method_pieces(method: &MethodInfo, pool: &ConstantPool) -> MethodPieces {
     MethodPieces::default()
 }
 
-/// Render a parameter list, naming each parameter `arg0`, `arg1`, … (only the count is meaningful —
-/// the overlay matches members by arity). A trailing array becomes `...` for a varargs method.
-fn render_params(params: &[String], varargs: bool) -> String {
+/// Render a parameter list, naming each parameter from `names` (its recovered source name, or an
+/// `argN` fallback the caller supplies). A trailing array becomes `...` for a varargs method.
+fn render_params(params: &[String], names: &[String], varargs: bool) -> String {
     params
         .iter()
+        .zip(names)
         .enumerate()
-        .map(|(i, ty)| {
+        .map(|(i, (ty, name))| {
             let last = i + 1 == params.len();
             let ty = if varargs && last && ty.ends_with("[]") {
                 format!("{}...", &ty[..ty.len() - 2])
             } else {
                 ty.clone()
             };
-            format!("{ty} arg{i}")
+            format!("{ty} {name}")
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -516,7 +597,7 @@ fn render_type_params(params: &[TypeParameter]) -> String {
         .map(|p| {
             let mut bounds = Vec::new();
             if let Some(class_bound) = &p.class_bound
-                && !is_object_sig(class_bound)
+                && !class_bound.is_java_lang_object()
             {
                 bounds.push(render_type_sig(class_bound));
             }
@@ -529,76 +610,6 @@ fn render_type_params(params: &[TypeParameter]) -> String {
         })
         .collect();
     format!("<{}>", rendered.join(", "))
-}
-
-/// Render a field-descriptor type to Java source (`[Ljava/lang/String;` → `java.lang.String[]`).
-fn render_field_type(ft: &FieldType) -> String {
-    match ft {
-        FieldType::Base(b) => b.keyword().to_string(),
-        FieldType::Object(internal) => internal_to_java(internal),
-        FieldType::Array(inner) => format!("{}[]", render_field_type(inner)),
-    }
-}
-
-/// Render a generic type signature to Java source
-/// (`Ljava/util/List<Ljava/lang/String;>;` → `java.util.List<java.lang.String>`).
-fn render_type_sig(ts: &TypeSignature) -> String {
-    match ts {
-        TypeSignature::Base(b) => b.keyword().to_string(),
-        TypeSignature::TypeVariable(name) => name.clone(),
-        TypeSignature::Array(inner) => format!("{}[]", render_type_sig(inner)),
-        TypeSignature::Class(c) => render_class_type_sig(c),
-    }
-}
-
-/// Render a class type signature: fold the inner-class suffixes into one dotted name, keeping the
-/// innermost type arguments (matching the HIR bridge; a navigation skeleton needs only a well-formed
-/// reference).
-fn render_class_type_sig(c: &ClassTypeSignature) -> String {
-    let mut name = internal_to_java(&c.name);
-    let mut args = &c.type_arguments;
-    for suffix in &c.suffixes {
-        name.push('.');
-        name.push_str(&suffix.name);
-        args = &suffix.type_arguments;
-    }
-    format!("{name}{}", render_type_args(args))
-}
-
-/// Render a `<...>` type-argument list, or `""` for none.
-fn render_type_args(args: &[TypeArgument]) -> String {
-    if args.is_empty() {
-        return String::new();
-    }
-    let rendered: Vec<String> = args.iter().map(render_type_arg).collect();
-    format!("<{}>", rendered.join(", "))
-}
-
-fn render_type_arg(arg: &TypeArgument) -> String {
-    match arg {
-        TypeArgument::Any => "?".to_string(),
-        TypeArgument::Exact(t) => render_type_sig(t),
-        TypeArgument::Extends(t) => format!("? extends {}", render_type_sig(t)),
-        TypeArgument::Super(t) => format!("? super {}", render_type_sig(t)),
-    }
-}
-
-fn render_throws(t: &ThrowsSignature) -> String {
-    match t {
-        ThrowsSignature::Class(c) => render_class_type_sig(c),
-        ThrowsSignature::TypeVariable(name) => name.clone(),
-    }
-}
-
-/// Convert a JVM internal binary name (`a/b/Outer$Inner`) to its dotted Java form (`a.b.Outer.Inner`).
-fn internal_to_java(internal: &str) -> String {
-    internal.replace(['/', '$'], ".")
-}
-
-/// Whether a type signature is exactly `java.lang.Object` (a non-restrictive class bound to omit).
-fn is_object_sig(ts: &TypeSignature) -> bool {
-    matches!(ts, TypeSignature::Class(c)
-        if c.name == "java/lang/Object" && c.suffixes.is_empty() && c.type_arguments.is_empty())
 }
 
 /// The `Signature` attribute's string, if present.
@@ -637,13 +648,15 @@ mod tests {
         // `Box` is in the default package, so it is `Box.java` at the root.
         assert_eq!(group.rel_path(), PathBuf::from("Box.java"));
         let text = group.render();
-        // The generic type, its field, and its methods, signatures only.
+        // The generic type, its field, and its methods — each with its decompiled body (Box.class
+        // carries no debug info, so parameters keep their `argN` fallback names).
         assert!(text.contains("public class Box<T> {"), "{text}");
         assert!(text.contains("private T value;"), "{text}");
-        assert!(text.contains("public T get();"), "{text}");
-        assert!(text.contains("public void set(T arg0);"), "{text}");
-        // No method bodies leak in.
-        assert!(!text.contains("return"), "{text}");
+        assert!(text.contains("public T get() {"), "{text}");
+        assert!(text.contains("return this.value;"), "{text}");
+        assert!(text.contains("public void set(T arg0) {"), "{text}");
+        assert!(text.contains("this.value = arg0;"), "{text}");
+        assert!(text.contains("public Box() {}"), "{text}");
     }
 
     #[test]

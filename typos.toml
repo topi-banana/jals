@@ -16,3 +16,6 @@ fo = "fo"
 # modelled as the `Ifle` instruction variant; not a misspelling of "file".
 ifle = "ifle"
 Ifle = "Ifle"
+# `mis` is the hyphenated prefix in prose like `mis-read` / `mis-structured` /
+# `mis-associating` (jals-decompile docs); not a misspelling of "miss"/"mist".
+mis = "mis"

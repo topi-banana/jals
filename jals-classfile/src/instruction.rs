@@ -949,6 +949,25 @@ impl Instruction {
             }
         }
     }
+
+    /// The number of bytes this instruction occupies when written at code offset `pc` — exactly what
+    /// [`write`](Self::write) emits. `pc` matters only for `tableswitch` / `lookupswitch`, whose
+    /// alignment padding is relative to the instruction's position. Summing `encoded_len` across a
+    /// `code` array reconstructs each instruction's byte offset, so branch offsets (stored relative to
+    /// their instruction) can be resolved to targets.
+    ///
+    /// Measured from [`write`](Self::write) itself — the single source of truth for the encoding, so the
+    /// two can never drift: a scratch encode is primed to `pc`'s 4-byte alignment (all a switch's
+    /// padding depends on), and the length is how far past that priming `write` advances.
+    pub fn encoded_len(&self, pc: usize) -> usize {
+        let align = pc % 4;
+        let mut w = Writer::new();
+        for _ in 0..align {
+            w.u8(0);
+        }
+        self.write(&mut w);
+        w.len() - align
+    }
 }
 
 impl WideInstruction {
@@ -1048,5 +1067,63 @@ fn write_switch_padding(w: &mut Writer) {
     let pad = (4 - (w.len() % 4)) % 4;
     for _ in 0..pad {
         w.u8(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Instruction, WideInstruction, encode_code};
+    use crate::bytes::Reader;
+
+    /// `encoded_len(pc)` must report exactly the bytes `write`/`read` use at that offset — including
+    /// the position-dependent `switch` padding and the `wide` forms.
+    #[test]
+    fn encoded_len_matches_the_written_encoding() {
+        let code = vec![
+            Instruction::Iconst0,
+            Instruction::Bipush(7),
+            Instruction::Sipush(300),
+            Instruction::Iload(4),
+            Instruction::Goto(3),
+            Instruction::Iinc {
+                index: 2,
+                value: -1,
+            },
+            Instruction::InvokeInterface { index: 5, count: 2 },
+            Instruction::InvokeDynamic { index: 6 },
+            Instruction::MultiANewArray {
+                index: 7,
+                dimensions: 3,
+            },
+            Instruction::GotoW(9),
+            Instruction::Wide(WideInstruction::Iload(300)),
+            Instruction::Wide(WideInstruction::Iinc {
+                index: 300,
+                value: -5,
+            }),
+            // Placed at varying offsets so the 0–3 alignment padding is exercised.
+            Instruction::TableSwitch {
+                default: 10,
+                low: 0,
+                high: 2,
+                offsets: vec![1, 2, 3],
+            },
+            Instruction::LookupSwitch {
+                default: 4,
+                pairs: vec![(1, 2), (3, 4)],
+            },
+            Instruction::Return,
+        ];
+        let bytes = encode_code(&code);
+        let mut r = Reader::new(&bytes);
+        let mut pc = 0usize;
+        for ins in &code {
+            assert_eq!(r.pos(), pc, "reader drifted before {ins:?}");
+            let decoded = Instruction::read(&mut r).expect("decode");
+            assert_eq!(&decoded, ins, "round-trip mismatch");
+            pc += ins.encoded_len(pc);
+            assert_eq!(r.pos(), pc, "encoded_len wrong for {ins:?}");
+        }
+        assert_eq!(pc, bytes.len());
     }
 }

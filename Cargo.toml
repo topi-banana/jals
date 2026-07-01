@@ -5,6 +5,7 @@ members = [
   "jals-classfile",
   "jals-classpath",
   "jals-cli",
+  "jals-decompile",
   "jals-fmt",
   "jals-hir",
   "jals-lint",
@@ -31,6 +32,7 @@ futures = { version = "0.3" }
 jals-build = { path = "jals-build" }
 jals-classfile = { path = "jals-classfile" }
 jals-classpath = { path = "jals-classpath" }
+jals-decompile = { path = "jals-decompile" }
 jals-fmt = { path = "jals-fmt" }
 jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }

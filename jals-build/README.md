@@ -190,10 +190,12 @@ classpath, so the bundled libraries are available for both analysis and compilat
 `sources` jar is purely an **editor** aid: `jals-lsp` extracts the `.java` into
 `target/jals/deps/sources` and points go-to-definition at the real declaration; never a compile or
 analysis classpath input. When a jar ships **no** `sources` jar, `jals-lsp` still makes
-go-to-definition work: it synthesizes a signature-only `.java` **skeleton** from each classpath
-`.class` (every type and member declaration, no method bodies) into `target/jals/deps/decompiled` and
-navigates there — so jump-to-definition lands on a declaration for *any* library type, with a real
-`sources` jar taking precedence when present. (Editor-only; never a compile or `lint` input.)
+go-to-definition work: it decompiles a `.java` **skeleton** from each classpath `.class` (every type
+and member declaration, with increasingly real method bodies reconstructed from the bytecode) into
+`target/jals/deps/decompiled` and navigates there — so jump-to-definition lands on a declaration for
+*any* library type, with a real `sources` jar taking precedence when present. The decompiled output
+is always valid Java (an un-reconstructable method falls back to a safe placeholder body rather than
+emit broken source). (Editor-only; never a compile or `lint` input.)
 
 A **`git`** / **`path`** dependency supplies `.java` **source** directly. The host clones each git repo
 (into `target/jals/deps/git`, the requested ref checked out) or reads each path in place, locates its

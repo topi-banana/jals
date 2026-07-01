@@ -124,7 +124,7 @@ fn lower_type_params(params: &[TypeParameter]) -> Vec<TypeParamDecl> {
             bounds: tp
                 .class_bound
                 .iter()
-                .filter(|t| !is_object(t))
+                .filter(|t| !t.is_java_lang_object())
                 .chain(tp.interface_bounds.iter())
                 .map(type_sig_to_member_type)
                 .collect(),
@@ -352,10 +352,4 @@ fn named(fqn: &str, dims: u32, args: Vec<MemberType>) -> MemberType {
         dims,
         args,
     }
-}
-
-/// Whether a type signature is exactly `java.lang.Object` (a non-restrictive class bound).
-fn is_object(ts: &TypeSignature) -> bool {
-    matches!(ts, TypeSignature::Class(c)
-        if c.name == "java/lang/Object" && c.suffixes.is_empty() && c.type_arguments.is_empty())
 }

@@ -1,0 +1,7 @@
+[package]
+name = "jals-decompile"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jals-classfile.workspace = true
