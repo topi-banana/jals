@@ -339,8 +339,17 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
     let sources = discover_sources(&manifest, &root)?;
     // Resolve `[dependencies]` (downloading remotes) and put the resulting jars on javac's classpath.
     let extra_classpath = resolve_project_dependencies(&manifest, &root);
-    let invocation =
-        jals_build::build_invocation(&manifest, &root, &sources, &extra_classpath, path_sep());
+    // Resolve `git`/`path` source dependencies (cloning/reading their `.java`) and compile them
+    // alongside the project's own sources, so a project that depends on a source dependency builds.
+    let source_deps = resolve_project_source_deps(&manifest, &root);
+    let invocation = jals_build::build_invocation(
+        &manifest,
+        &root,
+        &sources,
+        &source_deps,
+        &extra_classpath,
+        path_sep(),
+    );
 
     if args.dry_run || args.verbose {
         println!("{}", invocation.display_command());
@@ -369,8 +378,18 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
     let sources = discover_sources(&manifest, &root)?;
     // Resolve `[dependencies]` once and put the resulting jars on both the compile and run classpaths.
     let extra_classpath = resolve_project_dependencies(&manifest, &root);
+    // Resolve `git`/`path` source dependencies and compile them alongside the project's own sources;
+    // their `.class` land in the run classpath's `classes-dir`, so no change to the run invocation.
+    let source_deps = resolve_project_source_deps(&manifest, &root);
     let sep = path_sep();
-    let build_inv = jals_build::build_invocation(&manifest, &root, &sources, &extra_classpath, sep);
+    let build_inv = jals_build::build_invocation(
+        &manifest,
+        &root,
+        &sources,
+        &source_deps,
+        &extra_classpath,
+        sep,
+    );
     let run_inv = jals_build::run_invocation(
         &manifest,
         &root,
@@ -572,6 +591,17 @@ fn load_project_classpath(manifest: &Manifest, root: &Path) -> jals_classpath::C
 fn resolve_project_dependencies(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
     jals_classpath::resolve_project_dependencies(manifest, root, |message| {
         eprintln!("warning: dependency: {message}");
+    })
+}
+
+/// Resolve the project's `git`/`path` source `[dependencies]` to the `.java` files under each one's
+/// source root, cloning `git` repos into `<root>/target/jals/deps/git` (a cache) and reading `path`
+/// trees in place. These are compiled alongside the project's own sources by `jals build`/`run`.
+/// Best-effort like the rest of dependency resolution: a missing path, a failed clone, or a missing
+/// source directory is reported on stderr and skipped, never aborting.
+fn resolve_project_source_deps(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
+    jals_classpath::resolve_project_source_deps(manifest, root, |message| {
+        eprintln!("warning: source dependency: {message}");
     })
 }
 
