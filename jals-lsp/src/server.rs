@@ -1,6 +1,7 @@
 //! The LSP server: wires the document store and pure handlers to async-lsp's
 //! `LanguageServer` trait, and runs the stdio event loop.
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::Path;
 
@@ -18,11 +19,12 @@ use async_lsp::lsp_types::{
     InitializedParams, Location, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
     ReferenceParams, Registration, RegistrationParams, RenameFilesParams, RenameOptions,
     RenameParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
-    WorkspaceEdit,
+    SemanticToken, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WillSaveTextDocumentParams, WorkDoneProgressCancelParams, WorkspaceEdit,
     notification::{self, Notification},
     request,
 };
@@ -74,6 +76,13 @@ struct ServerState {
     /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
     /// taken from the `initialize` request. Gates the config watcher registration.
     config_watch_registration_supported: bool,
+    /// The last semantic-tokens response published per document — its `result_id` and the
+    /// delta-encoded token array — so a `textDocument/semanticTokens/full/delta` request can be
+    /// answered with just the edits turning the client's copy into the current one. Evicted on
+    /// `did_close`; a `previous_result_id` the cache no longer holds falls back to a full response.
+    semantic_tokens_cache: HashMap<Url, (String, Vec<SemanticToken>)>,
+    /// Monotonic counter minting a fresh `result_id` for each semantic-tokens response.
+    semantic_tokens_result_id: u64,
 }
 
 impl ServerState {
@@ -85,6 +94,8 @@ impl ServerState {
             lint_discovery: Discovery::default(),
             workspaces: Vec::new(),
             config_watch_registration_supported: false,
+            semantic_tokens_cache: HashMap::new(),
+            semantic_tokens_result_id: 0,
         }
     }
 
@@ -274,6 +285,73 @@ impl ServerState {
                 version: Some(doc.version),
             });
     }
+
+    /// The document's delta-encoded semantic tokens: cross-file-aware through the workspace that
+    /// owns `uri` when there is one, otherwise a file-local classification over the open document
+    /// alone. `None` if the document is not open.
+    fn compute_semantic_tokens(&self, uri: &Url) -> Option<Vec<SemanticToken>> {
+        self.workspace_for(uri)
+            .and_then(|workspace| workspace.semantic_tokens(uri))
+            .or_else(|| {
+                self.store.get(uri).map(|doc| {
+                    handlers::semantic_tokens(&doc.parse, &doc.text, &doc.line_index, None)
+                })
+            })
+            .map(|tokens| tokens.data)
+    }
+
+    /// Mint a fresh `result_id` for a semantic-tokens response.
+    fn next_semantic_tokens_result_id(&mut self) -> String {
+        self.semantic_tokens_result_id += 1;
+        self.semantic_tokens_result_id.to_string()
+    }
+
+    /// The full semantic-tokens response for `uri`, tagged with a fresh `result_id` and cached as the
+    /// baseline for a later `full/delta`. `None` if the document is not open.
+    fn semantic_tokens_full_response(&mut self, uri: &Url) -> Option<SemanticTokensResult> {
+        let data = self.compute_semantic_tokens(uri)?;
+        let result_id = self.next_semantic_tokens_result_id();
+        self.semantic_tokens_cache
+            .insert(uri.clone(), (result_id.clone(), data.clone()));
+        Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: Some(result_id),
+            data,
+        }))
+    }
+
+    /// The `full/delta` response for `uri` against the client's `previous_result_id`: just the edits
+    /// since that baseline when the server still holds it, otherwise the full token set. Either way a
+    /// fresh `result_id` is minted and cached. `None` if the document is not open.
+    fn semantic_tokens_delta_response(
+        &mut self,
+        uri: &Url,
+        previous_result_id: &str,
+    ) -> Option<SemanticTokensFullDeltaResult> {
+        let data = self.compute_semantic_tokens(uri)?;
+        let result_id = self.next_semantic_tokens_result_id();
+        // If the client still holds the baseline we cached under `previous_result_id`, compute the
+        // edits turning it into the current tokens — borrowing it in place, before we overwrite the
+        // cache below, so a stale/evicted id costs no clone of the previous token array.
+        let edits = self
+            .semantic_tokens_cache
+            .get(uri)
+            .filter(|(cached_id, _)| *cached_id == previous_result_id)
+            .map(|(_, cached_data)| handlers::semantic_tokens_delta(cached_data, &data));
+        self.semantic_tokens_cache
+            .insert(uri.clone(), (result_id.clone(), data.clone()));
+        Some(match edits {
+            // A matching baseline: reply with just the edits turning it into the current tokens.
+            Some(edits) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                result_id: Some(result_id),
+                edits,
+            }),
+            // No matching baseline (evicted, or a stale id): reply with the full token set.
+            None => SemanticTokensFullDeltaResult::Tokens(SemanticTokens {
+                result_id: Some(result_id),
+                data,
+            }),
+        })
+    }
 }
 
 impl LanguageServer for ServerState {
@@ -356,6 +434,8 @@ impl LanguageServer for ServerState {
     fn did_close(&mut self, params: DidCloseTextDocumentParams) -> Self::NotifyResult {
         let uri = params.text_document.uri;
         self.store.remove(&uri);
+        // Drop the cached semantic-tokens baseline; a reopened document starts a fresh result id.
+        self.semantic_tokens_cache.remove(&uri);
         // Clear stale diagnostics for the now-closed document.
         let _ = self
             .client
@@ -649,19 +729,19 @@ impl LanguageServer for ServerState {
         &mut self,
         params: SemanticTokensParams,
     ) -> BoxFuture<'static, Result<Option<SemanticTokensResult>, Self::Error>> {
-        let uri = params.text_document.uri;
-        // A file in the project index classifies cross-file type names by their declared kind through
-        // the workspace; any other document falls back to file-local classification (the generic
-        // `type` for such a name) over the open document alone.
-        let tokens = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.semantic_tokens(&uri))
-            .or_else(|| {
-                self.store.get(&uri).map(|doc| {
-                    handlers::semantic_tokens(&doc.parse, &doc.text, &doc.line_index, None)
-                })
-            });
-        Box::pin(async move { Ok(tokens.map(SemanticTokensResult::Tokens)) })
+        // Classifies cross-file type names by their declared kind through the owning workspace when
+        // there is one, else file-locally over the open document alone (see the response builder).
+        let result = self.semantic_tokens_full_response(&params.text_document.uri);
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn semantic_tokens_full_delta(
+        &mut self,
+        params: SemanticTokensDeltaParams,
+    ) -> BoxFuture<'static, Result<Option<SemanticTokensFullDeltaResult>, Self::Error>> {
+        let result = self
+            .semantic_tokens_delta_response(&params.text_document.uri, &params.previous_result_id);
+        Box::pin(async move { Ok(result) })
     }
 
     fn folding_range(
@@ -745,7 +825,7 @@ fn server_capabilities() -> ServerCapabilities {
             SemanticTokensOptions {
                 legend: handlers::semantic_tokens_legend(),
                 range: Some(false),
-                full: Some(SemanticTokensFullOptions::Bool(true)),
+                full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
                 ..SemanticTokensOptions::default()
             },
         )),
@@ -850,6 +930,63 @@ mod tests {
             panic!("rename provider advertised with options");
         };
         assert_eq!(rename.prepare_provider, Some(true));
+    }
+
+    #[test]
+    fn advertises_semantic_tokens_full_delta() {
+        let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(options)) =
+            server_capabilities().semantic_tokens_provider
+        else {
+            panic!("semantic tokens options advertised");
+        };
+        assert!(matches!(
+            options.full,
+            Some(SemanticTokensFullOptions::Delta { delta: Some(true) })
+        ));
+    }
+
+    #[test]
+    fn semantic_tokens_delta_reflects_edits_and_falls_back_when_stale() {
+        let mut state = ServerState::new(ClientSocket::new_closed());
+        // A path under no manifest, so no workspace is built and tokens come from the open document.
+        let uri = Url::parse("file:///no-manifest/A.java").unwrap();
+        state.store.upsert(uri.clone(), "class A {}".into(), 1);
+
+        // A full request tags the response with a result id and caches it as the delta baseline.
+        let Some(SemanticTokensResult::Tokens(first)) = state.semantic_tokens_full_response(&uri)
+        else {
+            panic!("full request returns tokens");
+        };
+        let baseline = first.result_id.expect("full response carries a result id");
+
+        // Edit the document, then ask for a delta against the baseline the client still holds.
+        state
+            .store
+            .upsert(uri.clone(), "class A { int x; }".into(), 2);
+        match state.semantic_tokens_delta_response(&uri, &baseline) {
+            Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => {
+                assert!(
+                    !delta.edits.is_empty(),
+                    "the added field changes the token stream"
+                );
+                assert_ne!(
+                    delta.result_id.as_deref(),
+                    Some(baseline.as_str()),
+                    "each response mints a fresh result id"
+                );
+            }
+            other => panic!("expected a token delta, got {other:?}"),
+        }
+
+        // A `previous_result_id` the server no longer holds falls back to a full token set.
+        assert!(matches!(
+            state.semantic_tokens_delta_response(&uri, "does-not-exist"),
+            Some(SemanticTokensFullDeltaResult::Tokens(_))
+        ));
+
+        // Closing the document drops the cached baseline.
+        state.semantic_tokens_cache.remove(&uri);
+        assert!(!state.semantic_tokens_cache.contains_key(&uri));
     }
 
     #[test]
