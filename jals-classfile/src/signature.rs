@@ -24,6 +24,15 @@ pub enum TypeSignature {
     Array(Box<TypeSignature>),
 }
 
+impl TypeSignature {
+    /// Whether this signature is exactly `java.lang.Object` (a raw, non-restrictive class bound —
+    /// the implicit bound that renderers omit).
+    pub fn is_java_lang_object(&self) -> bool {
+        matches!(self, TypeSignature::Class(c)
+            if c.name == "java/lang/Object" && c.suffixes.is_empty() && c.type_arguments.is_empty())
+    }
+}
+
 /// A `ClassTypeSignature`: an outer class (with optional type arguments) plus any `.`-separated inner
 /// classes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

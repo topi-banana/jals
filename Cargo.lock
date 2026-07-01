@@ -1016,6 +1016,8 @@ version = "0.1.0"
 dependencies = [
  "jals-build",
  "jals-classfile",
+ "jals-decompile",
+ "jals-syntax",
  "reqwest",
  "tempfile",
  "walkdir",
@@ -1038,6 +1040,13 @@ dependencies = [
  "jals-syntax",
  "similar",
  "tempfile",
+]
+
+[[package]]
+name = "jals-decompile"
+version = "0.1.0"
+dependencies = [
+ "jals-classfile",
 ]
 
 [[package]]

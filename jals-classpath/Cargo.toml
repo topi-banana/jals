@@ -6,9 +6,11 @@ edition.workspace = true
 [dependencies]
 jals-build.workspace = true
 jals-classfile.workspace = true
+jals-decompile.workspace = true
 reqwest.workspace = true
 walkdir.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+jals-syntax.workspace = true
 tempfile = "3"
