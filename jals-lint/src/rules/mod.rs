@@ -8,6 +8,7 @@
 use std::ops::Range;
 
 use jals_hir::Resolved;
+use jals_syntax::ast::{AstNode, SourceFile};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::IndexCtx;
@@ -17,6 +18,7 @@ use crate::diagnostic::Severity;
 mod compact_source_file;
 mod empty_catch;
 mod missing_braces;
+mod module_import;
 mod naming;
 mod type_mismatch;
 mod unused_local;
@@ -48,6 +50,22 @@ impl Finding {
             message: message.into(),
         }
     }
+}
+
+/// The shared preamble of an edition-gated ([`Checker::Versioned`]) rule: gate on the project's
+/// target Java version, then cast the root to a [`SourceFile`]. Returns `Some((version, file))` —
+/// the target feature version to name in the diagnostic and the file to scan — only when a feature
+/// that stabilized in `stable_in` is still a *preview* at the target (`target_java_version` is
+/// declared and *below* `stable_in`). Returns `None` (so the rule reports nothing) when no edition
+/// is declared, the target is already at/above `stable_in`, or the root is not a source file.
+pub(crate) fn gated_source_file(
+    target_java_version: Option<u32>,
+    stable_in: u32,
+    root: &SyntaxNode,
+) -> Option<(u32, SourceFile)> {
+    let version = target_java_version.filter(|&v| v < stable_in)?;
+    let file = SourceFile::cast(root.clone())?;
+    Some((version, file))
 }
 
 /// How a rule is invoked. Most rules need only the CST; resolution-based rules additionally take
@@ -87,6 +105,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     empty_catch::RULE,
     missing_braces::RULE,
     compact_source_file::RULE,
+    module_import::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
 ];

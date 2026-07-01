@@ -9,10 +9,10 @@
 //! target feature version (see [`Config::target_java_version`](crate::Config::target_java_version)).
 
 use jals_syntax::SyntaxNode;
-use jals_syntax::ast::{AstNode, Decl, SourceFile};
+use jals_syntax::ast::{AstNode, Decl};
 
 use crate::diagnostic::Severity;
-use crate::rules::{Checker, Finding, RuleMeta};
+use crate::rules::{Checker, Finding, RuleMeta, gated_source_file};
 
 /// The Java feature release in which compact source files / instance main methods became a
 /// permanent (non-preview) feature. At or above this version the syntax is allowed.
@@ -25,30 +25,23 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 };
 
 fn check(root: &SyntaxNode, target_java_version: Option<u32>) -> Vec<Finding> {
-    // Only gate when the project declares an edition below the stabilization version. An undeclared
-    // edition (`None`) or Java 25+ allows the syntax, so report nothing.
-    let Some(version) = target_java_version.filter(|&v| v < STABLE_VERSION) else {
-        return Vec::new();
-    };
-    let Some(file) = SourceFile::cast(root.clone()) else {
+    // Gate on the edition (report nothing when it is unset, Java 25+, or the root is not a source
+    // file) and grab the source file to scan in one step.
+    let Some((version, file)) = gated_source_file(target_java_version, STABLE_VERSION, root) else {
         return Vec::new();
     };
     file.decls()
-        .filter_map(|decl| match decl {
-            // A field or method declared directly at the top level is a compact source file's
-            // implicit-class member (JEP 512); a type declaration (class/interface/enum/record) is
-            // ordinary Java and never flagged.
-            Decl::Method(m) => Some(m.syntax().clone()),
-            Decl::Field(f) => Some(f.syntax().clone()),
-            _ => None,
-        })
-        .map(|node| {
+        // A field or method declared directly at the top level is a compact source file's
+        // implicit-class member (JEP 512); a type declaration (class/interface/enum/record) is
+        // ordinary Java and never flagged.
+        .filter(|decl| matches!(decl, Decl::Method(_) | Decl::Field(_)))
+        .map(|decl| {
             Finding::at_node(
-                &node,
+                decl.syntax(),
                 format!(
-                    "top-level declarations like `main` are a preview feature before Java 25; \
-                     this project targets Java {version}, so declare it inside a class or set \
-                     `edition = \"java25\"`",
+                    "top-level declarations like `main` are a preview feature before Java \
+                     {STABLE_VERSION}; this project targets Java {version}, so declare it inside a \
+                     class or set `edition = \"java{STABLE_VERSION}\"`",
                 ),
             )
         })

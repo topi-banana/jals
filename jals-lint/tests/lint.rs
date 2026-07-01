@@ -323,3 +323,50 @@ fn compact_source_file_respects_allow_config() {
         out.diagnostics
     );
 }
+
+// ===== module-import =====
+
+#[test]
+fn module_import_flagged_on_java24() {
+    // `import module M;` (JEP 511) is only a preview feature before Java 25.
+    expect![[r#"
+        module-import:0..24: module import declarations (`import module …;`) are a preview feature before Java 25; this project targets Java 24, so import the individual types or set `edition = "java25"`
+    "#]]
+    .assert_eq(&lint_edition("import module java.base;", Some(24)));
+}
+
+#[test]
+fn module_import_allowed_on_java25() {
+    assert_eq!(lint_edition("import module java.base;", Some(25)), "");
+}
+
+#[test]
+fn module_import_not_gated_without_edition() {
+    // No declared edition (the common case): the syntax is not flagged.
+    assert_eq!(lint_edition("import module java.base;", None), "");
+}
+
+#[test]
+fn ordinary_import_not_flagged_on_java24() {
+    // An ordinary type import — including one of a package/type literally named `module` — is not
+    // a module import declaration (`is_module()` stays false), so it is never flagged.
+    assert_eq!(lint_edition("import java.util.List;", Some(24)), "");
+    assert_eq!(lint_edition("import module.foo.Bar;", Some(24)), "");
+}
+
+#[test]
+fn module_import_respects_allow_config() {
+    let mut config = Config {
+        target_java_version: Some(24),
+        ..Default::default()
+    };
+    config
+        .rules
+        .insert("module-import".to_string(), Severity::Allow);
+    let out = lint_source("import module java.base;", &config);
+    assert!(
+        out.diagnostics.iter().all(|d| d.rule != "module-import"),
+        "expected the rule to be suppressed: {:?}",
+        out.diagnostics
+    );
+}
