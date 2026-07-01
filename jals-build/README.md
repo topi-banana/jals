@@ -195,12 +195,20 @@ go-to-definition work: it synthesizes a signature-only `.java` **skeleton** from
 navigates there — so jump-to-definition lands on a declaration for *any* library type, with a real
 `sources` jar taking precedence when present. (Editor-only; never a compile or `lint` input.)
 
-A **`git`** / **`path`** dependency supplies `.java` **source** directly. It is an **editor** input
-only: `jals-lsp` clones each git repo (into `target/jals/deps/git`, the requested ref checked out) or
-reads each path in place, folds the located `.java` into its index as library-source types — so the
-project's references to them resolve for inference, hover, completion, and go-to-definition into the
-real source — but it is **never** a compile or `lint` input (`jals build`/`run`/`lint` ignore source
-dependencies; put a `jar` on the classpath if you need them compiled).
+A **`git`** / **`path`** dependency supplies `.java` **source** directly. The host clones each git repo
+(into `target/jals/deps/git`, the requested ref checked out) or reads each path in place, locates its
+`.java` source root, and uses those `.java` two ways:
+
+- **compilation** (`jals build`/`run`): the located `.java` are passed to `javac` as additional
+  sources, compiled alongside the project's own into the `[build] classes-dir` — so a project that
+  depends on a source dependency builds and runs. (The dependency's `.class` land in `classes-dir`,
+  already first on the run classpath, so `jals run` needs nothing extra.)
+- **editor analysis + navigation** (`jals-lsp`): the same `.java` are folded into the LSP index as
+  library-source types, so references resolve for inference, hover, completion, and go-to-definition
+  lands in the real source.
+
+They are **not** a `jals lint` input, so a `jals lint` run may report unresolved types for code that
+uses a source dependency even though `jals build` compiles it.
 
 A malformed entry is rejected when the manifest loads, in two stages. `Dependency` is a
 `#[serde(untagged)]` enum whose `Jar`/`Git`/`Path` variants each `deny_unknown_fields`, so the
@@ -338,7 +346,7 @@ Making `edition` also imply a default `javac --release` is still open.)
 
 | Section | Cargo analogue | Purpose |
 | --- | --- | --- |
-| `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath, plus an optional `sources` jar for editor go-to-definition), as are the source forms `{ git = "url", branch/tag/rev, dir }` and `{ path = "...", dir }` (cloned/read `.java` folded into the LSP index for analysis + navigation, editor-only); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
+| `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath, plus an optional `sources` jar for editor go-to-definition), as are the source forms `{ git = "url", branch/tag/rev, dir }` and `{ path = "...", dir }` (cloned/read `.java` folded into the LSP index for analysis + navigation **and** compiled by `jals build`/`run` as extra `javac` sources, not a `lint` input); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
 | `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
 | `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]` | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels) |

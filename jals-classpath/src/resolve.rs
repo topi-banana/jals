@@ -188,7 +188,8 @@ pub fn resolve_project_sources(
 }
 
 /// Resolve a project's **source-form** `[dependencies]` (`git` / `path`) to the `.java` files the host
-/// indexes for analysis and go-to-definition. The source-tree counterpart of
+/// indexes for analysis and go-to-definition, and compiles alongside the project's own sources
+/// (`jals build`/`run` pass them as `javac`'s `extra_sources`). The source-tree counterpart of
 /// [`resolve_project_sources`] (which handles `-sources.jar`s) and of
 /// [`resolve_project_dependencies`] (which handles binary jars).
 ///
@@ -201,8 +202,9 @@ pub fn resolve_project_sources(
 ///
 /// Within each, the source root is the dependency's explicit `dir`, or (when absent) auto-detected
 /// (`src/main/java` → `src` → the dependency root); every `*.java` under it is returned. These sources
-/// are an editor analysis + navigation input only — never a compile input — so a project with no
-/// `git`/`path` dependency (the common case) does no work.
+/// feed the editor's analysis + navigation index **and** `jals build`/`run`'s `javac` inputs (they are
+/// **not** a `jals lint` input) — so a project with no `git`/`path` dependency (the common case) does
+/// no work.
 ///
 /// Best-effort and synchronous: a missing path, a failed `git` clone/checkout (including `git` not
 /// being installed), or a missing source directory is reported through `warn` and skipped, never
