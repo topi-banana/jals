@@ -15,7 +15,8 @@
 use std::collections::HashMap;
 
 use async_lsp::lsp_types::{
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensLegend,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensEdit,
+    SemanticTokensLegend,
 };
 use jals_hir::{DefKind, FileId, Namespace, ProjectIndex, TypeResolution};
 use jals_syntax::{Parse, SyntaxKind, SyntaxToken};
@@ -126,6 +127,40 @@ pub(crate) fn semantic_tokens(
         result_id: None,
         data,
     }
+}
+
+/// The LSP semantic-tokens *delta* (edit script) turning `prev` into `next`, as a single splice of
+/// the one differing middle range. `prev` and `next` are the delta-encoded token arrays of two
+/// consecutive [`semantic_tokens`] results for the same document (the client's last copy and the
+/// current one).
+///
+/// A `SemanticTokensEdit`'s `start` / `delete_count` count entries of the *flattened* integer array
+/// the tokens encode to — 5 ints per token — so the token indices are multiplied by 5. Returns an
+/// empty vector when the arrays are identical (no edits to apply).
+pub(crate) fn tokens_delta(
+    prev: &[SemanticToken],
+    next: &[SemanticToken],
+) -> Vec<SemanticTokensEdit> {
+    let max = prev.len().min(next.len());
+    // The longest common prefix, then the longest common suffix that does not overlap it.
+    let mut prefix = 0;
+    while prefix < max && prev[prefix] == next[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < max - prefix && prev[prev.len() - 1 - suffix] == next[next.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    let deleted = prev.len() - prefix - suffix;
+    let inserted = &next[prefix..next.len() - suffix];
+    if deleted == 0 && inserted.is_empty() {
+        return Vec::new();
+    }
+    vec![SemanticTokensEdit {
+        start: (prefix * 5) as u32,
+        delete_count: (deleted * 5) as u32,
+        data: Some(inserted.to_vec()),
+    }]
 }
 
 /// A map from a token's start byte offset to its resolution-derived `(token_type, modifier_bits)`,
@@ -582,6 +617,62 @@ mod tests {
             Some((&index, FileId(1))),
         );
         assert_eq!(kind_at(&indexed), "enum");
+    }
+
+    /// A token with the given fields; modifiers default to none.
+    fn tok(delta_line: u32, delta_start: u32, length: u32, token_type: u32) -> SemanticToken {
+        SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        }
+    }
+
+    #[test]
+    fn tokens_delta_splices_only_the_changed_middle() {
+        let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2), tok(1, 0, 5, 3)];
+        // Change only the middle token: the edit deletes 1 token at index 1 and inserts its
+        // replacement, in flattened-int units (×5).
+        let mut b = a.clone();
+        b[1] = tok(0, 4, 2, 7);
+        let edits = tokens_delta(&a, &b);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].start, 5);
+        assert_eq!(edits[0].delete_count, 5);
+        assert_eq!(edits[0].data.as_deref(), Some(&[tok(0, 4, 2, 7)][..]));
+    }
+
+    #[test]
+    fn tokens_delta_identical_is_empty() {
+        let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2)];
+        assert!(tokens_delta(&a, &a).is_empty());
+    }
+
+    #[test]
+    fn tokens_delta_pure_append_deletes_nothing() {
+        let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2)];
+        let mut b = a.clone();
+        b.push(tok(1, 0, 1, 4));
+        let edits = tokens_delta(&a, &b);
+        assert_eq!(edits.len(), 1);
+        // Prefix of 2 tokens (10 ints), nothing deleted, one token inserted.
+        assert_eq!(edits[0].start, 10);
+        assert_eq!(edits[0].delete_count, 0);
+        assert_eq!(edits[0].data.as_deref(), Some(&[tok(1, 0, 1, 4)][..]));
+    }
+
+    #[test]
+    fn tokens_delta_pure_delete_inserts_nothing() {
+        let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2), tok(1, 0, 5, 3)];
+        let mut b = a.clone();
+        b.remove(1); // drop the middle token
+        let edits = tokens_delta(&a, &b);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].start, 5);
+        assert_eq!(edits[0].delete_count, 5);
+        assert_eq!(edits[0].data.as_deref(), Some(&[][..]));
     }
 
     #[test]

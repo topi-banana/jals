@@ -33,7 +33,9 @@ pub(crate) use rename::{
     is_renamable_kind, is_valid_identifier, prepare_rename_local, rename_local,
 };
 pub(crate) use selection_range::selection_ranges;
-pub(crate) use semantic_tokens::{legend as semantic_tokens_legend, semantic_tokens};
+pub(crate) use semantic_tokens::{
+    legend as semantic_tokens_legend, semantic_tokens, tokens_delta as semantic_tokens_delta,
+};
 pub(crate) use signature_help::{signature_help_local, signature_help_to_lsp};
 pub(crate) use symbols::document_symbols;
 
