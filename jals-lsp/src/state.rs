@@ -11,7 +11,7 @@ use async_lsp::lsp_types::{
 };
 use jals_fmt::Config;
 use jals_hir::{
-    FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
+    FileFacts, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
     SourceLocations, TypeResolution,
 };
 use jals_syntax::ast::{self, AstNode};
@@ -129,6 +129,12 @@ struct WorkspaceFile {
     /// (see [`Workspace::set_overlay`]), starting fresh. Lets a project-wide query that scans every
     /// file (find-references) resolve each one only once instead of on every request.
     resolved: OnceLock<Resolved>,
+    /// The file's cached index facts — the CST-walking half of building the [`ProjectIndex`],
+    /// computed once on first use. Like `resolved`, a pure function of `parse`, so an edit (which
+    /// replaces the whole struct) re-extracts them while every other file reuses its cache. This is
+    /// what makes [`rebuild_index`](Workspace::rebuild_index) re-walk only the changed file rather
+    /// than every file in the project.
+    facts: OnceLock<FileFacts>,
 }
 
 impl WorkspaceFile {
@@ -141,6 +147,7 @@ impl WorkspaceFile {
             line_index,
             parse,
             resolved: OnceLock::new(),
+            facts: OnceLock::new(),
         }
     }
 
@@ -148,6 +155,13 @@ impl WorkspaceFile {
     fn resolved(&self) -> &Resolved {
         self.resolved
             .get_or_init(|| jals_hir::resolve_node(&self.parse.syntax()))
+    }
+
+    /// The file's cached index facts (computed on first use), the input to the incremental
+    /// [`ProjectIndex::assemble`].
+    fn facts(&self) -> &FileFacts {
+        self.facts
+            .get_or_init(|| ProjectIndex::extract_file(&self.parse.syntax()))
     }
 
     /// A `Location` in this file spanning byte `range`.
@@ -204,6 +218,10 @@ pub(crate) struct Workspace {
     /// edition-gated lint rules (e.g. `compact-source-file`); `None` when the manifest declares no
     /// edition (or could not be parsed), disabling those gates.
     target_java_version: Option<u32>,
+    /// The embedded `java.lang` stub facts, extracted once at construction and reused on every rebuild
+    /// (they never change), so the stubs are never re-parsed per edit. Their reserved [`FileId`]s are
+    /// disjoint from the project / library id-spaces.
+    stub_facts: Vec<(FileId, FileFacts)>,
     index: ProjectIndex,
 }
 
@@ -223,19 +241,25 @@ fn read_library_files(paths: Vec<PathBuf>) -> Vec<WorkspaceFile> {
     files
 }
 
-/// Pair each file in `files` with a sequential [`FileId`] in the id-space named by `space`, reading
-/// its cached parse — the `(FileId, SOURCE_FILE root)` inputs the index builds from. Shared by the
-/// project files ([`WorkspaceFileId::Project`]) and the two library-source id-spaces
+/// Pair each file in `files` with a sequential [`FileId`] in the id-space named by `space`, mapping
+/// it through `extract` — the `(FileId, T)` inputs the index builds from. Shared by the project files
+/// ([`WorkspaceFileId::Project`]) and the two library-source id-spaces
 /// ([`Library`](WorkspaceFileId::Library) / [`SourceDep`](WorkspaceFileId::SourceDep)), so every id
 /// space derives its inputs the same way — the base offset lives only in [`WorkspaceFileId::to_raw`].
-fn file_inputs(
-    files: &[WorkspaceFile],
+///
+/// `extract` picks the per-file input: the cached parse tree ([`parse`](WorkspaceFile::parse)) for the
+/// from-scratch [`ProjectIndex::builder`] path, or the cached index [`FileFacts`]
+/// ([`facts`](WorkspaceFile::facts)) for the incremental [`ProjectIndex::assemble`] path — where only
+/// the just-edited file re-extracts and the rest return their cache, so a rebuild re-walks one file.
+fn file_inputs<'a, T>(
+    files: &'a [WorkspaceFile],
     space: fn(u32) -> WorkspaceFileId,
-) -> Vec<(FileId, SyntaxNode)> {
+    extract: impl Fn(&'a WorkspaceFile) -> T,
+) -> Vec<(FileId, T)> {
     files
         .iter()
         .enumerate()
-        .map(|(k, f)| (space(k as u32).to_raw(), f.parse.syntax()))
+        .map(|(k, f)| (space(k as u32).to_raw(), extract(f)))
         .collect()
 }
 
@@ -303,7 +327,9 @@ impl Workspace {
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
         let library_files = read_library_files(library_sources);
-        let library_inputs = file_inputs(&library_files, WorkspaceFileId::Library);
+        let library_inputs = file_inputs(&library_files, WorkspaceFileId::Library, |f| {
+            f.parse.syntax()
+        });
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types on
         // every rebuild (their `FileId`s are assigned in `rebuild_index`).
@@ -320,6 +346,8 @@ impl Workspace {
             classpath: ProjectIndex::lower_classpath(&classfiles),
             source_locations: ProjectIndex::index_source_locations(&library_inputs),
             target_java_version,
+            // Extracted once; reused on every rebuild (the stubs never change).
+            stub_facts: ProjectIndex::stub_facts(),
         };
         for path in paths {
             if let (Ok(text), Ok(uri)) =
@@ -335,24 +363,39 @@ impl Workspace {
         ws
     }
 
-    /// Rebuild the symbol index from the cached parses and classpath. No I/O.
+    /// Rebuild the symbol index from the cached per-file facts, stubs, and classpath. No I/O.
     ///
     /// Built with the embedded `java.lang` stubs and the project's classpath `.class` files folded
     /// in, so a core JDK type (`String`, `Object`, …) or an external library type resolves to a real
     /// item with members and supertypes — hover, completion, member navigation, and assignment
     /// checks see through it instead of stopping at a bare name.
+    ///
+    /// Incremental: [`file_inputs`] over each file's [`facts`](WorkspaceFile::facts) re-extracts only
+    /// the file whose facts cache was cleared (the one just edited, via
+    /// [`set_overlay`](Workspace::set_overlay)); every other file, plus the stubs,
+    /// reuses its cache. So a keystroke re-walks a single file's CST, and this step (which allocates
+    /// and resolves supertypes but walks nothing) reassembles the whole index — identical to a
+    /// from-scratch build, but without re-walking the project.
     fn rebuild_index(&mut self) {
-        let inputs = file_inputs(&self.files, WorkspaceFileId::Project);
-        // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types), under
-        // their own `SourceDep` ids so they navigate back to the right files. The `-sources.jar`
-        // overlays remain navigation-only (folded in via `source_locations`).
-        let source_deps = file_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep);
-        self.index = ProjectIndex::builder(&inputs)
-            .with_stdlib()
-            .with_source_deps(&source_deps)
-            .with_classpath(&self.classpath)
-            .with_source_locations(&self.source_locations)
-            .build();
+        let project = file_inputs(&self.files, WorkspaceFileId::Project, |f| f.facts());
+        // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types),
+        // under their own `SourceDep` ids so they navigate back to the right files. The
+        // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
+        let source_deps = file_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep, |f| {
+            f.facts()
+        });
+        let stub: Vec<(FileId, &FileFacts)> = self
+            .stub_facts
+            .iter()
+            .map(|(file, ff)| (*file, ff))
+            .collect();
+        self.index = ProjectIndex::assemble(
+            &project,
+            &source_deps,
+            &stub,
+            &self.classpath,
+            &self.source_locations,
+        );
     }
 
     /// The workspace file a [`FileId`] addresses, routed by its id-space: a project file, a
@@ -412,6 +455,9 @@ impl Workspace {
             line_index: doc.line_index.clone(),
             parse: doc.parse.clone(),
             resolved: OnceLock::new(),
+            // Fresh facts cache: this file re-extracts on the next rebuild; every other file reuses
+            // its cache, so a keystroke re-walks only the edited file.
+            facts: OnceLock::new(),
         };
         match self.by_uri.get(uri).copied() {
             Some(id) => self.files[id.0 as usize] = file,
@@ -1340,6 +1386,36 @@ mod tests {
             .goto_definition(&bar_uri, Position::new(0, use_col))
             .expect("Foo resolves after the overlay");
         assert_eq!(loc.uri, foo_uri);
+    }
+
+    #[test]
+    fn workspace_overlay_reindexes_an_edited_file() {
+        // The incremental path: editing one file re-extracts only it, and the reassembled index
+        // reflects the change for a sibling file that depends on it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Types.java"), "package a; class A { }").unwrap();
+        std::fs::write(dir.path().join("Use.java"), "package a; class Use { B b; }").unwrap();
+
+        let mut ws = Workspace::load(dir.path().to_path_buf(), vec![dir.path().to_path_buf()]);
+        let types_uri = Url::from_file_path(dir.path().join("Types.java")).unwrap();
+        let use_uri = Url::from_file_path(dir.path().join("Use.java")).unwrap();
+        let use_src = "package a; class Use { B b; }";
+        let use_col = use_src.find("B b").unwrap() as u32;
+
+        // `B` is unresolved: Types.java declares only `A`.
+        assert!(
+            ws.goto_definition(&use_uri, Position::new(0, use_col))
+                .is_none()
+        );
+
+        // Editing Types.java to add a sibling `B` re-extracts just that file; Use.java's reference
+        // to `B` now resolves through the reassembled index.
+        let edited = Document::new("package a; class A { } class B { }".to_string(), 2);
+        assert!(ws.set_overlay(&types_uri, &edited));
+        let loc = ws
+            .goto_definition(&use_uri, Position::new(0, use_col))
+            .expect("B resolves after the edit");
+        assert_eq!(loc.uri, types_uri);
     }
 
     #[test]

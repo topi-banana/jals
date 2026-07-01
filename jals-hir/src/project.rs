@@ -263,6 +263,7 @@ impl TypeResolution {
 }
 
 /// Per-file resolution context: its package and the imports that bring type names into scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileMeta {
     /// The declared package, or `None` for the default (unnamed) package.
     package: Option<String>,
@@ -270,6 +271,41 @@ struct FileMeta {
     single_imports: Vec<(String, String)>,
     /// On-demand imports `import a.b.*;` as the package prefix (`a.b`).
     on_demand: Vec<String>,
+}
+
+/// One type declaration's cacheable facts: everything a single [`ProjectIndex`] build extracts from
+/// its CST node, captured as self-contained data (no CST handle, no cross-file [`ItemId`]). A
+/// [`FileFacts`] holds these in the pre-order the build assigns [`ItemId`]s, so re-assembling from
+/// cached facts reproduces the exact same index a from-scratch walk would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawType {
+    /// The type's fully-qualified name (package + enclosing types + simple name).
+    fqn: String,
+    /// Which kind of type declaration it is.
+    kind: DefKind,
+    /// The byte range of the declaring name token.
+    name_range: Range<usize>,
+    /// The type's own type parameters, in declaration order.
+    type_params: Vec<TypeParamDecl>,
+    /// The type's direct members, in body order, as [`members_of_decl`] captures them. Their
+    /// [`owner`](Member::owner) / [`file`](Member::file) are placeholders (unknown until assembly) and
+    /// are fixed up when the type is registered into an index.
+    members: Vec<Member>,
+    /// The raw `extends` / `implements` clause types, unresolved (resolution needs the whole index).
+    raw_supertypes: Vec<MemberType>,
+}
+
+/// One source file's cacheable contribution to a [`ProjectIndex`]: its resolution context (package +
+/// imports) and its type declarations' [`RawType`] facts. Produced by [`ProjectIndex::extract_file`]
+/// — the CST-walking half of indexing — and folded into an index by [`ProjectIndex::assemble`]
+/// without re-walking. A host that re-indexes on every edit caches these per file and re-extracts
+/// only the file that changed, so a keystroke costs one file's walk plus a (cheap) reassembly rather
+/// than a walk of every file. `meta` is `None` for a root that is not a source file (an unreadable
+/// tree contributes nothing, exactly as a from-scratch build skips it). Pure and `wasm32`-compatible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFacts {
+    meta: Option<FileMeta>,
+    types: Vec<RawType>,
 }
 
 /// A symbol index over a set of source files, resolving type names across them.
@@ -476,95 +512,42 @@ impl ProjectIndex {
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
     ) -> ProjectIndex {
-        let mut index = ProjectIndex {
-            items: Vec::new(),
-            by_fqn: HashMap::new(),
-            files: HashMap::new(),
-            members: Vec::new(),
-            members_by_owner: HashMap::new(),
-            decl_to_item: HashMap::new(),
-        };
-
-        // Stub compilation units are parsed here and given reserved high `FileId`s (counting down
-        // from `u32::MAX`) so they never collide with the host's low, sequential ids. Each parsed
-        // `SyntaxNode` keeps its tree alive for the duration of this build; afterwards every `Item` /
-        // `Member` is self-contained data, so the nodes can be dropped.
-        let stubs: Vec<(FileId, SyntaxNode)> = if stdlib {
-            crate::stdlib::stub_sources()
-                .iter()
-                .enumerate()
-                .map(|(i, src)| {
-                    (
-                        FileId(u32::MAX - i as u32),
-                        jals_syntax::parse(src).syntax(),
-                    )
-                })
-                .collect()
+        // The CST-walking half: extract each file's cacheable facts. A from-scratch build extracts
+        // every file; an incremental host (the LSP) caches these and re-extracts only the file that
+        // changed, then calls `assemble` (below) — which folds them in with no CST walking.
+        let project: Vec<(FileId, FileFacts)> = files
+            .iter()
+            .map(|(file, root)| (*file, Self::extract_file(root)))
+            .collect();
+        let source: Vec<(FileId, FileFacts)> = source_files
+            .iter()
+            .map(|(file, root)| (*file, Self::extract_file(root)))
+            .collect();
+        let stub: Vec<(FileId, FileFacts)> = if stdlib {
+            Self::stub_facts()
         } else {
             Vec::new()
         };
-
-        // Every compilation unit to index, in priority order: the host's project files first, then
-        // the `git`/`path` library sources, then the embedded stubs — so on a fully-qualified-name
-        // clash a project type wins over a library type wins over a stub (`by_fqn` keeps the first
-        // insert). All three passes below walk this one origin-tagged list.
-        let units: Vec<(FileId, &SyntaxNode, ItemOrigin)> = files
-            .iter()
-            .map(|(file, root)| (*file, root, ItemOrigin::Project))
-            .chain(
-                source_files
-                    .iter()
-                    .map(|(file, root)| (*file, root, ItemOrigin::Source)),
-            )
-            .chain(
-                stubs
-                    .iter()
-                    .map(|(file, root)| (*file, root, ItemOrigin::Stdlib)),
-            )
-            .collect();
-
-        // First pass: package, imports, and type declarations.
-        for &(file, root, origin) in &units {
-            index.collect_file(file, root, origin);
-        }
-        // Classpath `.class` files (already lowered to self-contained data) registered like source
-        // types. Their reserved `FileId`s sit just below the stub block so they never collide.
-        let classfile_block_start = u32::MAX - stubs.len() as u32 - 1;
-        let classfiles: Vec<(FileId, &crate::classpath::ClassfileClass)> = classes
-            .iter()
-            .enumerate()
-            .map(|(j, class)| (FileId(classfile_block_start - j as u32), class))
-            .collect();
-        let classfile_owners: Vec<ItemId> = classfiles
-            .iter()
-            .map(|&(file, class)| index.collect_classfile_type(file, class, sources))
-            .collect();
-        // Index each type's declaration site, so a same-file type reference (which resolves
-        // file-locally, not through the project) can be mapped back to its item for find-references.
-        for (i, item) in index.items.iter().enumerate() {
-            index
-                .decl_to_item
-                .insert((item.file, item.name_range.start), ItemId(i as u32));
-        }
-        // Second pass: members and project-internal inheritance. It runs after every type is indexed
-        // so a supertype declared later (or in another file / stub) still resolves.
-        for &(file, root, _) in &units {
-            index.collect_members_and_supertypes(file, root);
-        }
-        // The same second pass for classpath types, now that every type (project, stub, classpath) is
-        // registered, so their supertypes resolve by fully-qualified name.
-        for ((file, class), &owner) in classfiles.iter().copied().zip(&classfile_owners) {
-            index.collect_classfile_members_and_supertypes(file, owner, class, sources);
-        }
-        index
+        Self::assemble_inner(
+            &borrow_facts(&project),
+            &borrow_facts(&source),
+            &borrow_facts(&stub),
+            classes,
+            sources,
+        )
     }
 
-    /// Records one file's package, type-name imports, and type declarations (with the given
-    /// `origin`). The first pass of [`build_inner`](ProjectIndex::build_inner), shared by project and
-    /// stub files.
-    fn collect_file(&mut self, file: FileId, root: &SyntaxNode, origin: ItemOrigin) {
+    /// Extract one source file's cacheable [`FileFacts`] — the CST-walking half of indexing, isolated
+    /// so a host can cache it per file and re-extract only the file that changed (then re-`assemble`).
+    /// Captures both build passes' per-file data in one walk. Pure and `wasm32`-compatible; a root that
+    /// is not a source file yields empty facts that contribute nothing.
+    #[must_use]
+    pub fn extract_file(root: &SyntaxNode) -> FileFacts {
         let Some(src) = ast::SourceFile::cast(root.clone()) else {
-            return;
+            return FileFacts {
+                meta: None,
+                types: Vec::new(),
+            };
         };
         let package = src
             .package()
@@ -590,50 +573,173 @@ impl ProjectIndex {
                 single_imports.push((simple, name.text()));
             }
         }
-        self.files.insert(
-            file,
-            FileMeta {
-                package: package.clone(),
+        let mut types = Vec::new();
+        extract_types(root, package.as_deref(), None, &mut types);
+        FileFacts {
+            meta: Some(FileMeta {
+                package,
                 single_imports,
                 on_demand,
-            },
-        );
-        self.collect_types(file, root, package.as_deref(), None, origin);
+            }),
+            types,
+        }
     }
 
-    /// Walks `node`, recording each type declaration with its fully-qualified name and threading the
-    /// enclosing type's FQN into its descendants (so a nested `Inner` becomes `Outer.Inner`).
-    fn collect_types(
-        &mut self,
-        file: FileId,
-        node: &SyntaxNode,
-        package: Option<&str>,
-        enclosing: Option<&str>,
-        origin: ItemOrigin,
-    ) {
-        let mut next_enclosing = enclosing.map(str::to_string);
-        if let Some(kind) = type_decl_kind(node.kind())
-            && let Some(name_tok) = first_ident_token(node)
-        {
-            let fqn = build_fqn(package, enclosing, name_tok.text());
+    /// The embedded `java.lang` stub facts, each under a reserved high [`FileId`] (counting down from
+    /// `u32::MAX`, disjoint from the host's low ids). The stubs never change, so a host that
+    /// re-indexes on every edit extracts these once and reuses them across every
+    /// [`assemble`](Self::assemble).
+    #[must_use]
+    pub fn stub_facts() -> Vec<(FileId, FileFacts)> {
+        crate::stdlib::stub_sources()
+            .iter()
+            .enumerate()
+            .map(|(i, src)| {
+                (
+                    FileId(u32::MAX - i as u32),
+                    Self::extract_file(&jals_syntax::parse(src).syntax()),
+                )
+            })
+            .collect()
+    }
+
+    /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts and
+    /// the source-location overlay — the non-CST-walking half of indexing. `project` (host-editable
+    /// sources), `source` (`git`/`path` library sources), and `stub` (from
+    /// [`stub_facts`](Self::stub_facts)) are indexed in that priority order, so on a
+    /// fully-qualified-name clash a project type wins over a library type wins over a stub. Cheap
+    /// relative to extraction (allocations, hashing, and supertype resolution only), so re-running it
+    /// on every edit — reusing cached facts for the unchanged files — is the incremental path, bit-for
+    /// -bit identical to a from-scratch [`builder`](Self::builder) build over the same inputs. Pure and
+    /// `wasm32`-compatible.
+    #[must_use]
+    pub fn assemble(
+        project: &[(FileId, &FileFacts)],
+        source: &[(FileId, &FileFacts)],
+        stub: &[(FileId, &FileFacts)],
+        classpath: &LoweredClasspath,
+        sources: &SourceLocations,
+    ) -> ProjectIndex {
+        Self::assemble_inner(project, source, stub, &classpath.classes, sources)
+    }
+
+    fn assemble_inner(
+        project: &[(FileId, &FileFacts)],
+        source: &[(FileId, &FileFacts)],
+        stub: &[(FileId, &FileFacts)],
+        classes: &[crate::classpath::ClassfileClass],
+        sources: &SourceLocations,
+    ) -> ProjectIndex {
+        let mut index = ProjectIndex {
+            items: Vec::new(),
+            by_fqn: HashMap::new(),
+            files: HashMap::new(),
+            members: Vec::new(),
+            members_by_owner: HashMap::new(),
+            decl_to_item: HashMap::new(),
+        };
+
+        // Every compilation unit to index, in priority order: the host's project files first, then the
+        // `git`/`path` library sources, then the embedded stubs — so on a fully-qualified-name clash a
+        // project type wins over a library type wins over a stub (`by_fqn` keeps the first insert). All
+        // passes below walk this one origin-tagged list.
+        let units: Vec<(FileId, &FileFacts, ItemOrigin)> = project
+            .iter()
+            .map(|(file, facts)| (*file, *facts, ItemOrigin::Project))
+            .chain(
+                source
+                    .iter()
+                    .map(|(file, facts)| (*file, *facts, ItemOrigin::Source)),
+            )
+            .chain(
+                stub.iter()
+                    .map(|(file, facts)| (*file, *facts, ItemOrigin::Stdlib)),
+            )
+            .collect();
+
+        // First pass: package, imports, and type declarations.
+        for &(file, facts, origin) in &units {
+            index.register_file_types(file, facts, origin);
+        }
+        // Classpath `.class` files (already lowered to self-contained data) registered like source
+        // types. Their reserved `FileId`s sit just below the stub block so they never collide.
+        let classfile_block_start = u32::MAX - stub.len() as u32 - 1;
+        let classfiles: Vec<(FileId, &crate::classpath::ClassfileClass)> = classes
+            .iter()
+            .enumerate()
+            .map(|(j, class)| (FileId(classfile_block_start - j as u32), class))
+            .collect();
+        let classfile_owners: Vec<ItemId> = classfiles
+            .iter()
+            .map(|&(file, class)| index.collect_classfile_type(file, class, sources))
+            .collect();
+        // Index each type's declaration site, so a same-file type reference (which resolves
+        // file-locally, not through the project) can be mapped back to its item for find-references.
+        for (i, item) in index.items.iter().enumerate() {
+            index
+                .decl_to_item
+                .insert((item.file, item.name_range.start), ItemId(i as u32));
+        }
+        // Second pass: members and project-internal inheritance. It runs after every type is indexed
+        // so a supertype declared later (or in another file / stub) still resolves.
+        for &(file, facts, _) in &units {
+            index.register_file_members(file, facts);
+        }
+        // The same second pass for classpath types, now that every type (project, stub, classpath) is
+        // registered, so their supertypes resolve by fully-qualified name.
+        for ((file, class), &owner) in classfiles.iter().copied().zip(&classfile_owners) {
+            index.collect_classfile_members_and_supertypes(file, owner, class, sources);
+        }
+        index
+    }
+
+    /// Registers one file's [`FileMeta`] and its [`RawType`] declarations as [`Item`]s of `origin` —
+    /// the first pass of [`assemble_inner`](Self::assemble_inner). A file with no
+    /// [`meta`](FileFacts::meta) (not a source file) contributes nothing, exactly as a from-scratch
+    /// walk skips it. The `RawType`s are in pre-order, so the assigned [`ItemId`]s match a whole-tree
+    /// walk's.
+    fn register_file_types(&mut self, file: FileId, facts: &FileFacts, origin: ItemOrigin) {
+        let Some(meta) = &facts.meta else {
+            return;
+        };
+        self.files.insert(file, meta.clone());
+        for raw in &facts.types {
             let id = ItemId(self.items.len() as u32);
             self.items.push(Item {
-                fqn: Fqn(fqn.clone()),
-                kind,
+                fqn: Fqn(raw.fqn.clone()),
+                kind: raw.kind,
                 origin,
                 file,
-                name_range: byte_range(&name_tok),
-                type_params: type_params_of(node),
+                name_range: raw.name_range.clone(),
+                type_params: raw.type_params.clone(),
                 supertypes: Vec::new(),
                 has_external_supertype: false,
-                // A project / stub type's own `file` already points at real (or no) source.
+                // A project / stub / source type's own `file` already points at real (or no) source.
                 source_location: None,
             });
-            self.by_fqn.entry(fqn.clone()).or_insert(id);
-            next_enclosing = Some(fqn);
+            self.by_fqn.entry(raw.fqn.clone()).or_insert(id);
         }
-        for child in node.children() {
-            self.collect_types(file, &child, package, next_enclosing.as_deref(), origin);
+    }
+
+    /// Registers one file's members and resolves its types' project-internal supertypes — the second
+    /// pass of [`assemble_inner`](Self::assemble_inner). Each cached member's placeholder
+    /// [`owner`](Member::owner) / [`file`](Member::file) is fixed to the now-assigned item and this
+    /// `file`. Runs after every type is indexed, so a forward / cross-file supertype resolves.
+    fn register_file_members(&mut self, file: FileId, facts: &FileFacts) {
+        for raw in &facts.types {
+            let Some(owner) = self.item_by_decl(file, raw.name_range.start) else {
+                continue;
+            };
+            for member in &raw.members {
+                let mut member = member.clone();
+                member.owner = owner;
+                member.file = file;
+                self.register_member(owner, member);
+            }
+            let (supertypes, has_external) = self.resolve_supertypes(file, &raw.raw_supertypes);
+            let item = &mut self.items[owner.0 as usize];
+            item.supertypes = supertypes;
+            item.has_external_supertype = has_external;
         }
     }
 
@@ -671,29 +777,6 @@ impl ProjectIndex {
             }
         }
         (supertypes, has_external)
-    }
-
-    /// Walks `node`, recording each type declaration's direct members and resolving its
-    /// project-internal supertypes. Runs in [`build`](ProjectIndexBuilder::build)'s second pass, when every
-    /// type is already indexed (so a forward / cross-file supertype reference resolves).
-    fn collect_members_and_supertypes(&mut self, file: FileId, node: &SyntaxNode) {
-        if type_decl_kind(node.kind()).is_some()
-            && let Some(name_tok) = first_ident_token(node)
-            && let Some(owner) = self.item_by_decl(file, byte_range(&name_tok).start)
-        {
-            // Members. Captured purely from the node; pushed here so each gets a dense `MemberId`.
-            for member in members_of_decl(owner, file, node, name_tok.text()) {
-                self.register_member(owner, member);
-            }
-            let (supertypes, has_external) =
-                self.resolve_supertypes(file, &raw_supertypes_of(node));
-            let item = &mut self.items[owner.0 as usize];
-            item.supertypes = supertypes;
-            item.has_external_supertype = has_external;
-        }
-        for child in node.children() {
-            self.collect_members_and_supertypes(file, &child);
-        }
     }
 
     /// Registers a classpath type (first pass): pushes its [`Item`] and a per-file [`FileMeta`], and
@@ -1127,6 +1210,47 @@ fn collect_source_locations(
     }
 }
 
+/// Borrow each owned `(FileId, FileFacts)` as `(FileId, &FileFacts)`, the shape
+/// [`ProjectIndex::assemble`] takes. Lets [`build_inner`](ProjectIndex::build_inner) reuse the same
+/// assembly path an incremental host drives from its cached facts.
+fn borrow_facts(facts: &[(FileId, FileFacts)]) -> Vec<(FileId, &FileFacts)> {
+    facts.iter().map(|(file, facts)| (*file, facts)).collect()
+}
+
+/// Walks `node` in pre-order, capturing each type declaration as a [`RawType`] — threading the
+/// enclosing type's FQN into its descendants (so a nested `Inner` becomes `Outer.Inner`) — in the
+/// order [`assemble_inner`](ProjectIndex::assemble_inner) assigns [`ItemId`]s. The single walk
+/// captures both build passes' data: the type's own facts and its members / raw supertypes. The
+/// members' [`owner`](Member::owner) / [`file`](Member::file) are placeholders (unknown until the
+/// facts are folded into a specific index) and are fixed up in
+/// [`register_file_members`](ProjectIndex::register_file_members).
+fn extract_types(
+    node: &SyntaxNode,
+    package: Option<&str>,
+    enclosing: Option<&str>,
+    out: &mut Vec<RawType>,
+) {
+    let mut next_enclosing = enclosing.map(str::to_string);
+    if let Some(kind) = type_decl_kind(node.kind())
+        && let Some(name_tok) = first_ident_token(node)
+    {
+        let fqn = build_fqn(package, enclosing, name_tok.text());
+        out.push(RawType {
+            fqn: fqn.clone(),
+            kind,
+            name_range: byte_range(&name_tok),
+            type_params: type_params_of(node),
+            // Placeholder owner/file, fixed up when these facts are folded into an index.
+            members: members_of_decl(ItemId(0), FileId(0), node, name_tok.text()),
+            raw_supertypes: raw_supertypes_of(node),
+        });
+        next_enclosing = Some(fqn);
+    }
+    for child in node.children() {
+        extract_types(&child, package, next_enclosing.as_deref(), out);
+    }
+}
+
 /// The direct value/executable members of a type declaration `node` (owned by `owner`, in `file`):
 /// fields, methods, constructors, and enum constants. Nested type declarations are *not* members
 /// here — they are their own [`Item`]s. `owner_simple` is the declaring type's simple name, used as
@@ -1406,4 +1530,105 @@ fn is_java_lang(name: &str) -> bool {
         "SafeVarargs",
     ];
     JAVA_LANG.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A canonical, comparable projection of an index: each [`Item`] (which derives `PartialEq`)
+    /// paired with its members in registration order. Two indexes with identical items, members,
+    /// `by_fqn` priority, and resolved supertypes project equal.
+    fn summary(index: &ProjectIndex) -> Vec<(Item, Vec<Member>)> {
+        index
+            .items()
+            .enumerate()
+            .map(|(i, item)| {
+                let members = index
+                    .members_of(ItemId(i as u32))
+                    .into_iter()
+                    .map(|m| index.member(m).clone())
+                    .collect();
+                (item.clone(), members)
+            })
+            .collect()
+    }
+
+    /// The incremental extract/assemble path must reproduce a from-scratch `builder` build bit-for-bit
+    /// — same items, ids, members, and resolved cross-file supertypes.
+    #[test]
+    fn assemble_from_facts_matches_a_from_scratch_build() {
+        let a = "package p; class Base { int f() { return 0; } }";
+        let b = "package p; class Sub extends Base { String g(int x) { return null; } }";
+        let files = [
+            (FileId(0), jals_syntax::parse(a).syntax()),
+            (FileId(1), jals_syntax::parse(b).syntax()),
+        ];
+        let built = ProjectIndex::builder(&files).with_stdlib().build();
+
+        let facts: Vec<(FileId, FileFacts)> = files
+            .iter()
+            .map(|(f, r)| (*f, ProjectIndex::extract_file(r)))
+            .collect();
+        let stub = ProjectIndex::stub_facts();
+        let assembled = ProjectIndex::assemble(
+            &borrow_facts(&facts),
+            &[],
+            &borrow_facts(&stub),
+            &ProjectIndex::lower_classpath(&[]),
+            &SourceLocations::default(),
+        );
+
+        assert_eq!(summary(&built), summary(&assembled));
+        // Sanity: the cross-file supertype actually resolved, so the comparison is not vacuous.
+        let sub = built
+            .items()
+            .find(|i| i.fqn.to_string() == "p.Sub")
+            .expect("Sub is indexed");
+        assert_eq!(sub.supertypes.len(), 1, "Sub extends the project type Base");
+    }
+
+    /// Extraction is a pure function of the tree, so a cached fact is a valid stand-in for a fresh one.
+    #[test]
+    fn extract_file_is_deterministic() {
+        let src = "package p; import a.B; class C<T> extends B { T get() { return null; } }";
+        let root = jals_syntax::parse(src).syntax();
+        assert_eq!(
+            ProjectIndex::extract_file(&root),
+            ProjectIndex::extract_file(&root)
+        );
+    }
+
+    /// Re-extracting a single file's facts and reassembling — reusing the other files' cached facts,
+    /// as `set_overlay` does on an edit — yields the same index as extracting every file afresh.
+    #[test]
+    fn re_extracting_one_file_reproduces_the_same_index() {
+        let a = "package p; class A { B b; }";
+        let b = "package p; class B extends A { int x; }";
+        let files = [
+            (FileId(0), jals_syntax::parse(a).syntax()),
+            (FileId(1), jals_syntax::parse(b).syntax()),
+        ];
+        let mut facts: Vec<(FileId, FileFacts)> = files
+            .iter()
+            .map(|(f, r)| (*f, ProjectIndex::extract_file(r)))
+            .collect();
+        let stub = ProjectIndex::stub_facts();
+        let empty_cp = ProjectIndex::lower_classpath(&[]);
+        let assemble = |facts: &[(FileId, FileFacts)]| {
+            ProjectIndex::assemble(
+                &borrow_facts(facts),
+                &[],
+                &borrow_facts(&stub),
+                &empty_cp,
+                &SourceLocations::default(),
+            )
+        };
+        let full = assemble(&facts);
+
+        // Re-extract only file 0, then reassemble from the (partially reused) facts.
+        facts[0].1 = ProjectIndex::extract_file(&files[0].1);
+        let incremental = assemble(&facts);
+        assert_eq!(summary(&full), summary(&incremental));
+    }
 }
