@@ -260,12 +260,14 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .read_to_string(&mut src)
             .context("reading stdin")?;
         let cwd = std::env::current_dir().context("getting current dir")?;
-        let cfg = discovery.for_dir(&cwd)?;
+        let mut cfg = discovery.for_dir(&cwd)?;
         let parse = jals_syntax::parse(&src);
-        // Fold in the project's classpath (discovered from the cwd) so `type-mismatch` sees external
-        // library types, exactly as the multi-file path does.
-        let classpath = load_project_classpath(&cwd);
-        let index = build_lint_index(&[(FileId(0), parse.syntax())], &classpath);
+        // Fold in the project discovered from the cwd (in a single manifest parse): its classpath so
+        // `type-mismatch` sees external library types, and its edition (`[package] edition`) so the
+        // edition-gated rules run — exactly as the multi-file path does.
+        let ctx = load_project_lint_context(&cwd);
+        cfg.target_java_version = ctx.target_java_version;
+        let index = build_lint_index(&[(FileId(0), parse.syntax())], &ctx.classpath);
         let out = jals_lint::lint_parse_with_index(&parse, &cfg, Some((&index, FileId(0))));
         any_finding |= report::report_lint("<stdin>", &src, &out);
     } else {
@@ -286,20 +288,23 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
             .enumerate()
             .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
             .collect();
-        // Discover the project from the first linted file's directory and fold its classpath in, so
-        // the cross-file `type-mismatch` check resolves external library types (e.g. a method whose
-        // argument type comes from a dependency jar) — not just project and stdlib types.
+        // Anchor project discovery at the first linted file's directory (walked upward for the
+        // `jals.toml` in `load_project_lint_context` below).
         let start_dir = files
             .first()
             .and_then(|(path, _, _)| path.parent())
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        let classpath = load_project_classpath(&start_dir);
-        let index = build_lint_index(&inputs, &classpath);
+        // Discover the project once: its classpath (folded into the cross-file `type-mismatch` index
+        // so a method whose argument type comes from a dependency jar resolves) and its edition
+        // (`[package] edition`, shared across the project's files), from a single manifest parse.
+        let ctx = load_project_lint_context(&start_dir);
+        let index = build_lint_index(&inputs, &ctx.classpath);
 
         for (i, (path, src, parse)) in files.iter().enumerate() {
             let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            let cfg = discovery.for_dir(parent)?;
+            let mut cfg = discovery.for_dir(parent)?;
+            cfg.target_java_version = ctx.target_java_version;
             let out =
                 jals_lint::lint_parse_with_index(parse, &cfg, Some((&index, FileId(i as u32))));
             any_finding |= report::report_lint(&path.display().to_string(), src, &out);
@@ -509,20 +514,43 @@ fn build_lint_index(
         .build()
 }
 
-fn load_project_classpath(start_dir: &Path) -> jals_classpath::ClasspathLoad {
+/// The project context the linter folds in for the `jals.toml` discovered upward from `start_dir`:
+/// the classpath `.class` files (so the cross-file `type-mismatch` rule resolves external library
+/// types) and the target Java feature version from `[package] edition` (so edition-gated rules like
+/// `compact-source-file` run). Both come from a **single** best-effort parse of the manifest; a
+/// missing or malformed manifest yields an empty classpath and no edition — a malformed manifest is
+/// `jals build`'s business, not lint's.
+#[derive(Default)]
+struct ProjectLintContext {
+    classpath: jals_classpath::ClasspathLoad,
+    target_java_version: Option<u32>,
+}
+
+fn load_project_lint_context(start_dir: &Path) -> ProjectLintContext {
     let Some(manifest_path) = Manifest::discover_path(start_dir) else {
-        return jals_classpath::ClasspathLoad::default();
+        return ProjectLintContext::default();
     };
     let Ok(manifest) = Manifest::from_file(&manifest_path) else {
         // A malformed manifest is the business of `jals build`; lint stays best-effort.
-        return jals_classpath::ClasspathLoad::default();
+        return ProjectLintContext::default();
     };
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    ProjectLintContext {
+        classpath: load_project_classpath(&manifest, root),
+        target_java_version: manifest.target_java_version(),
+    }
+}
+
+/// Load the `.class` files on `manifest`'s `[build] classpath` (out of jars and class directories)
+/// plus its resolved `[dependencies]` jars, for the cross-file `type-mismatch` check. Best-effort:
+/// an unreadable classpath entry is reported as a warning on stderr and skipped, never an error —
+/// linting still runs with project sources and stdlib stubs, just without those external types.
+fn load_project_classpath(manifest: &Manifest, root: &Path) -> jals_classpath::ClasspathLoad {
     let mut entries = manifest.classpath_entries(root);
     // Fold the resolved `[dependencies]` jars (downloaded remotes / local `file://` jars) into the
     // classpath, so external library types from named dependencies — not just `[build] classpath`
     // entries — resolve during linting.
-    entries.extend(resolve_project_dependencies(&manifest, root));
+    entries.extend(resolve_project_dependencies(manifest, root));
     if entries.is_empty() {
         return jals_classpath::ClasspathLoad::default();
     }

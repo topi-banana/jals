@@ -126,6 +126,9 @@ impl ServerState {
         // jars resolved from `[dependencies]` (downloaded remotes / local `file://` jars).
         let mut entries = manifest.classpath_entries(&root);
         let source_roots = manifest.source_roots(&root);
+        // The project's Java edition, read out before `manifest` moves into the resolver thread, fed
+        // to the edition-gated lint rules (e.g. `compact-source-file`).
+        let target_java_version = manifest.target_java_version();
         // `reqwest`'s blocking downloader panics if run inside the Tokio runtime this server uses, so
         // resolve `[dependencies]` on a dedicated thread (`manifest` moves in; everything needed after
         // is already read out above). The same thread also resolves each dependency's optional `sources`
@@ -186,6 +189,7 @@ impl ServerState {
                 load.classes,
                 library_sources,
                 source_dep_sources,
+                target_java_version,
             ));
     }
 
@@ -223,13 +227,15 @@ impl ServerState {
             .workspace_for(uri)
             .and_then(|ws| Some((ws, ws.file_id(uri)?)));
         // Files in an indexed project get the index-aware `type-mismatch` check below; suppress the
-        // file-local lint rule of the same name there so the two never double-report.
+        // file-local lint rule of the same name there so the two never double-report. The workspace
+        // also carries the project's Java edition, which gates rules like `compact-source-file`.
         let mut rule_config = lint_config.clone();
-        if workspace_file.is_some() {
+        if let Some((workspace, _)) = workspace_file {
             rule_config.rules.insert(
                 jals_lint::TYPE_MISMATCH_RULE.to_string(),
                 jals_lint::Severity::Allow,
             );
+            rule_config.target_java_version = workspace.target_java_version();
         }
         diagnostics.extend(handlers::compute_lint_diagnostics(
             &doc.parse,

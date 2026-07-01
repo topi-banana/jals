@@ -179,6 +179,33 @@ mod tests {
     }
 
     #[test]
+    fn compact_source_file_flagged_when_edition_is_java24() {
+        // A top-level `main` is a preview feature before Java 25; the host injects the project's
+        // edition as `target_java_version`, and the rule reports an ERROR for Java 24.
+        let text = "void main() {}\n";
+        let parse = jals_syntax::parse(text);
+        let mut config = jals_lint::Config {
+            target_java_version: Some(24),
+            ..Default::default()
+        };
+        let diags = compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config);
+        let d = diags
+            .iter()
+            .find(|d| d.code == Some(NumberOrString::String("compact-source-file".to_string())))
+            .expect("a compact-source-file diagnostic");
+        assert_eq!(d.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(d.source.as_deref(), Some("jals"));
+
+        // Java 25 (or no edition) allows the syntax: nothing is reported.
+        config.target_java_version = Some(25);
+        assert!(
+            compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config)
+                .iter()
+                .all(|d| d.code != Some(NumberOrString::String("compact-source-file".to_string())))
+        );
+    }
+
+    #[test]
     fn clean_source_has_no_lint_diagnostics() {
         let text = "class C {}\n";
         let parse = jals_syntax::parse(text);

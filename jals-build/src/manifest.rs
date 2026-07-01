@@ -268,6 +268,36 @@ pub struct Package {
     /// Which `[[bin]]` `jals run` runs when several exist and `--bin` is not given (Cargo
     /// `[package] default-run`). Must name an existing `[[bin]]`.
     pub default_run: Option<String>,
+    /// The Java language edition the project targets (Cargo's `[package] edition`).
+    ///
+    /// Purely a *language-feature gate* for analysis (the linter / LSP): it does not affect
+    /// compilation — the `javac` version knobs remain `[build] release`/`source`/`target`. When
+    /// unset, no edition-gated feature is flagged. See [`Edition`].
+    pub edition: Option<Edition>,
+}
+
+/// The Java language edition a project targets (`[package] edition`).
+///
+/// Values are the Java feature releases whose language differences `jals` models. It drives
+/// language-feature gating in the linter (e.g. compact source files with a top-level `main` are a
+/// preview feature in Java 24 but a permanent feature in Java 25); it is *not* passed to `javac`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Edition {
+    /// Java 24, where compact source files / instance main methods are still a preview feature.
+    Java24,
+    /// Java 25, where compact source files / instance main methods are a permanent feature.
+    Java25,
+}
+
+impl Edition {
+    /// The Java feature-release version this edition targets (e.g. `24` for [`Edition::Java24`]).
+    pub fn feature_version(self) -> u32 {
+        match self {
+            Edition::Java24 => 24,
+            Edition::Java25 => 25,
+        }
+    }
 }
 
 /// Compilation settings (`[build]`).
@@ -608,6 +638,14 @@ impl Manifest {
             .collect()
     }
 
+    /// The project's target Java feature version (from `[package] edition`), if declared. The single
+    /// projection of the manifest's [`Edition`] into the bare feature release the analysis layers
+    /// consume — the host feeds it to the edition-gated lint rules (e.g. `compact-source-file`) as
+    /// the lint config's target version; `None` when no edition is declared, leaving those gates off.
+    pub fn target_java_version(&self) -> Option<u32> {
+        self.package.edition.map(Edition::feature_version)
+    }
+
     /// Classify every **`jar`** `[dependencies]` entry into a host-resolvable [`DependencySource`],
     /// paired with its name (used for cache filenames and diagnostics), separating the ones that
     /// classified from any [`DependencyError`]s. The binary-classpath half of dependency resolution.
@@ -874,6 +912,26 @@ mod tests {
         // No `[[bin]]`: the bin list is empty and selection falls back to `[run] main-class`.
         assert!(m.bin.is_empty());
         assert_eq!(m.package.default_run, None);
+        // No `[package] edition`: it is absent, disabling edition-gated feature checks.
+        assert_eq!(m.package.edition, None);
+    }
+
+    #[test]
+    fn parses_package_edition() {
+        let m: Manifest = toml::from_str("[package]\nedition = \"java24\"\n").unwrap();
+        assert_eq!(m.package.edition, Some(Edition::Java24));
+        assert_eq!(m.package.edition.unwrap().feature_version(), 24);
+
+        let m: Manifest = toml::from_str("[package]\nedition = \"java25\"\n").unwrap();
+        assert_eq!(m.package.edition, Some(Edition::Java25));
+        assert_eq!(m.package.edition.unwrap().feature_version(), 25);
+    }
+
+    #[test]
+    fn rejects_unknown_edition() {
+        // An edition outside the modelled set is a TOML parse error (serde unknown variant), so no
+        // dedicated `validate` check is needed.
+        assert!(toml::from_str::<Manifest>("[package]\nedition = \"java23\"\n").is_err());
     }
 
     #[test]
