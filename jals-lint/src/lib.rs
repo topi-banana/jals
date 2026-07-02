@@ -1,4 +1,4 @@
-#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![cfg_attr(not(test), no_std)]
 //! A lint checker for JALS/Java source, driven by the `jals-syntax` CST.
 //!
 //! [`lint_source`] parses `src` and runs every enabled rule over the lossless CST, returning a
@@ -25,7 +25,6 @@ use jals_syntax::{Parse, SyntaxNode};
 use rules::Checker;
 
 pub use config::Config;
-#[cfg(any(feature = "std", test))]
 pub use config::ConfigError;
 pub use diagnostic::{Diagnostic, LintOutput, Severity};
 

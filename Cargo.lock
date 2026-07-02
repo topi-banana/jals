@@ -1051,6 +1051,7 @@ dependencies = [
  "jals-build",
  "jals-classpath",
  "jals-fmt",
+ "jals-fs",
  "jals-hir",
  "jals-lint",
  "jals-lsp",
@@ -1071,11 +1072,19 @@ name = "jals-fmt"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-fs",
  "jals-syntax",
  "proptest",
  "serde",
  "toml",
  "unicode-width",
+]
+
+[[package]]
+name = "jals-fs"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -1094,6 +1103,7 @@ name = "jals-lint"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-fs",
  "jals-hir",
  "jals-syntax",
  "proptest",
@@ -1112,6 +1122,7 @@ dependencies = [
  "jals-classfile",
  "jals-classpath",
  "jals-fmt",
+ "jals-fs",
  "jals-hir",
  "jals-lint",
  "jals-syntax",
@@ -1120,7 +1131,6 @@ dependencies = [
  "text-size",
  "tokio",
  "tower",
- "walkdir",
 ]
 
 [[package]]

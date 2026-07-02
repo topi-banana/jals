@@ -7,6 +7,7 @@ members = [
   "jals-cli",
   "jals-decompile",
   "jals-fmt",
+  "jals-fs",
   "jals-hir",
   "jals-lint",
   "jals-lsp",
@@ -35,6 +36,7 @@ jals-classfile = { path = "jals-classfile" }
 jals-classpath = { path = "jals-classpath" }
 jals-decompile = { path = "jals-decompile" }
 jals-fmt = { path = "jals-fmt" }
+jals-fs = { path = "jals-fs" }
 jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }

@@ -180,9 +180,8 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
     let explicit_config = args
         .config
         .as_deref()
-        .map(Config::from_file)
-        .transpose()
-        .context("loading --config")?;
+        .map(|p| Config::from_file(&jals_fs::OsFileTree, path_str(p)?).context("loading --config"))
+        .transpose()?;
 
     // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
     // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
@@ -245,9 +244,10 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
     let explicit_config = args
         .config
         .as_deref()
-        .map(LintConfig::from_file)
-        .transpose()
-        .context("loading --config")?;
+        .map(|p| {
+            LintConfig::from_file(&jals_fs::OsFileTree, path_str(p)?).context("loading --config")
+        })
+        .transpose()?;
 
     let mut discovery = LintDiscovery::new(explicit_config);
     let mut any_finding = false;
@@ -689,7 +689,7 @@ impl Discovery {
         if let Some(cfg) = self.cache.get(dir) {
             return Ok(cfg.clone());
         }
-        let cfg = Config::discover(dir)
+        let cfg = Config::discover(&jals_fs::OsFileTree, path_str(dir)?)
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.cache.insert(dir.to_path_buf(), cfg.clone());
         Ok(cfg)
@@ -726,6 +726,13 @@ fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// The UTF-8 form of `path`, as required by the `jals_fs::FileTree` config-loader API. Errors on the
+/// rare non-UTF-8 host path rather than lossily converting.
+fn path_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", path.display()))
+}
+
 /// Resolves the lint config for a directory, mirroring [`Discovery`] for [`jals_lint::Config`]:
 /// either from an explicit `--config` (used for all files) or by discovering `jalslint.toml`,
 /// memoized per directory.
@@ -749,7 +756,7 @@ impl LintDiscovery {
         if let Some(cfg) = self.cache.get(dir) {
             return Ok(cfg.clone());
         }
-        let cfg = LintConfig::discover(dir)
+        let cfg = LintConfig::discover(&jals_fs::OsFileTree, path_str(dir)?)
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.cache.insert(dir.to_path_buf(), cfg.clone());
         Ok(cfg)

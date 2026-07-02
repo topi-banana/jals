@@ -12,12 +12,9 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(any(feature = "std", test))]
-use std::path::Path;
-
+use jals_fs::FileTree;
 use serde::Deserialize;
 
-#[cfg(any(feature = "std", test))]
 mod error;
 mod literals;
 mod options;
@@ -25,7 +22,6 @@ mod options;
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(feature = "std", test))]
 pub use error::ConfigError;
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase};
 pub use options::{
@@ -417,37 +413,39 @@ impl Config {
         self.line_ending.resolve(src)
     }
 
-    /// Load and parse a specific `jalsfmt.toml` file.
+    /// Load and parse the `jalsfmt.toml` at `path`, read through `fs`.
+    ///
+    /// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
+    /// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    #[cfg(any(feature = "std", test))]
-    pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
+    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
+        let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_string(),
             source,
         })?;
         toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_path_buf(),
+            path: path.to_string(),
             source,
         })
     }
 
-    /// Search upward from `start_dir` for `jalsfmt.toml`.
+    /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalsfmt.toml`, read
+    /// through `fs`.
     ///
     /// Returns the parsed config if a file is found, otherwise [`Config::default`].
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    #[cfg(any(feature = "std", test))]
-    pub fn discover(start_dir: &Path) -> Result<Config, ConfigError> {
+    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
         let mut dir = Some(start_dir);
         while let Some(d) = dir {
-            let candidate = d.join("jalsfmt.toml");
-            if candidate.is_file() {
-                return Config::from_file(&candidate);
+            let candidate = jals_fs::path::join(d, "jalsfmt.toml");
+            if fs.is_file(&candidate) {
+                return Config::from_file(fs, &candidate);
             }
-            dir = d.parent();
+            dir = jals_fs::path::parent(d);
         }
         Ok(Config::default())
     }

@@ -1,4 +1,4 @@
-#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![cfg_attr(not(test), no_std)]
 //! A pretty-printer for JALS/Java source, driven by the `jals-syntax` CST.
 //!
 //! [`format_source`] parses `src`, lowers the lossless CST into a Wadler/Prettier-style
@@ -40,7 +40,6 @@ mod render;
 mod rules;
 mod wrap;
 
-#[cfg(any(feature = "std", test))]
 pub use config::ConfigError;
 pub use config::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,

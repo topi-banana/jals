@@ -104,7 +104,7 @@ jobs:
           # jals-fmt / jals-lint stay off and `#![no_std]` is enforced for the whole set.
           - name: wasm
             target: wasm32-unknown-unknown
-            packages: --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint
+            packages: --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-fs
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
