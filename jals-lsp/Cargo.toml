@@ -10,15 +10,15 @@ futures.workspace = true
 jals-build.workspace = true
 jals-classfile.workspace = true
 jals-classpath.workspace = true
-jals-fmt = { workspace = true, features = ["std"] }
+jals-fmt.workspace = true
+jals-fs = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
-jals-lint = { workspace = true, features = ["std"] }
+jals-lint.workspace = true
 jals-syntax.workspace = true
 serde_json.workspace = true
 text-size.workspace = true
 tokio.workspace = true
 tower.workspace = true
-walkdir.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

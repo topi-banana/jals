@@ -5,16 +5,13 @@
 //! (`"allow"` / `"warn"` / `"error"`). A rule not listed uses its built-in default severity.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
-#[cfg(any(feature = "std", test))]
-use std::path::Path;
-
+use jals_fs::FileTree;
 use serde::Deserialize;
 
 use crate::diagnostic::Severity;
 
-#[cfg(any(feature = "std", test))]
 pub use error::ConfigError;
 
 /// Linter configuration.
@@ -39,64 +36,65 @@ impl Config {
         self.rules.get(rule).copied().unwrap_or(default)
     }
 
-    /// Load and parse a specific `jalslint.toml` file.
+    /// Load and parse the `jalslint.toml` at `path`, read through `fs`.
+    ///
+    /// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
+    /// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    #[cfg(any(feature = "std", test))]
-    pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
+    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
+        let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_string(),
             source,
         })?;
         toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_path_buf(),
+            path: path.to_string(),
             source,
         })
     }
 
-    /// Search upward from `start_dir` for `jalslint.toml`.
+    /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalslint.toml`, read
+    /// through `fs`.
     ///
     /// Returns the parsed config if a file is found, otherwise [`Config::default`].
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    #[cfg(any(feature = "std", test))]
-    pub fn discover(start_dir: &Path) -> Result<Config, ConfigError> {
+    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
         let mut dir = Some(start_dir);
         while let Some(d) = dir {
-            let candidate = d.join("jalslint.toml");
-            if candidate.is_file() {
-                return Config::from_file(&candidate);
+            let candidate = jals_fs::path::join(d, "jalslint.toml");
+            if fs.is_file(&candidate) {
+                return Config::from_file(fs, &candidate);
             }
-            dir = d.parent();
+            dir = jals_fs::path::parent(d);
         }
         Ok(Config::default())
     }
 }
 
-/// The error type returned when loading or parsing a `jalslint.toml` file. Gated once as a whole —
-/// its `std::io`/`std::path`/`std::error` surface only exists behind the `std` feature.
-#[cfg(any(feature = "std", test))]
+/// The error type returned when loading or parsing a `jalslint.toml` file. `no_std`: it holds a
+/// rendered path `String` and wraps [`jals_fs::FsError`] (the read failure) or [`toml::de::Error`]
+/// (the parse failure).
 mod error {
-    use std::error::Error;
-    use std::fmt;
-    use std::path::PathBuf;
+    use alloc::string::String;
+    use core::fmt;
 
     /// An error loading or parsing a config file.
-    #[derive(Debug)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum ConfigError {
         /// The file could not be read.
         Io {
             /// The path that failed to read.
-            path: PathBuf,
-            /// The underlying IO error.
-            source: std::io::Error,
+            path: String,
+            /// The underlying filesystem error.
+            source: jals_fs::FsError,
         },
         /// The file contained invalid TOML.
         Parse {
             /// The path that failed to parse.
-            path: PathBuf,
+            path: String,
             /// The underlying parse error.
             source: toml::de::Error,
         },
@@ -106,17 +104,17 @@ mod error {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 ConfigError::Io { path, source } => {
-                    write!(f, "failed to read config {}: {source}", path.display())
+                    write!(f, "failed to read config {path}: {source}")
                 }
                 ConfigError::Parse { path, source } => {
-                    write!(f, "failed to parse config {}: {source}", path.display())
+                    write!(f, "failed to parse config {path}: {source}")
                 }
             }
         }
     }
 
-    impl Error for ConfigError {
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
+    impl core::error::Error for ConfigError {
+        fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
             match self {
                 ConfigError::Io { source, .. } => Some(source),
                 ConfigError::Parse { source, .. } => Some(source),

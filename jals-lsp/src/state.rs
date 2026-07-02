@@ -10,13 +10,13 @@ use async_lsp::lsp_types::{
     TextDocumentContentChangeEvent, TextEdit, Url, WorkspaceEdit,
 };
 use jals_fmt::Config;
+use jals_fs::{FileTree, OsFileTree};
 use jals_hir::{
     FileFacts, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
     SourceLocations, TypeResolution,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
-use walkdir::WalkDir;
 
 use crate::file_id::WorkspaceFileId;
 use crate::line_index::LineIndex;
@@ -178,12 +178,18 @@ impl WorkspaceFile {
 /// [`ServerState`](crate::server)), discovered lazily by walking up from each opened file — so it
 /// only ever indexes the source roots of a real manifest, never a whole git checkout.
 ///
-/// The host owns all I/O: [`load`](Workspace::load) walks the source roots and reads every `.java`
-/// file, then hands the parsed trees to the pure [`ProjectIndex`]. Open documents are kept current
-/// via [`set_overlay`](Workspace::set_overlay), which swaps a file's cached text for the editor's
-/// and rebuilds the (in-memory, no-I/O) index. The rebuild walks the cached trees of every file, so
-/// it is cheap per edit but linear in project size — adequate until an incremental index is needed.
-pub(crate) struct Workspace {
+/// All file I/O goes through the [`FileTree`] `F`: [`load`](Workspace::load) (and friends) read the
+/// source roots off the host filesystem via [`OsFileTree`], while [`load_in`](Workspace::load_in)
+/// can build the whole workspace off any tree — an [`jals_fs::InMemoryFileTree`] drives it with no
+/// real filesystem (wasm / tests). The parsed trees are handed to the pure [`ProjectIndex`]. Open
+/// documents are kept current via [`set_overlay`](Workspace::set_overlay), which swaps a file's
+/// cached text for the editor's and rebuilds the (in-memory, no-I/O) index. The rebuild walks the
+/// cached trees of every file, so it is cheap per edit but linear in project size — adequate until
+/// an incremental index is needed.
+pub(crate) struct Workspace<F: FileTree = OsFileTree> {
+    /// The file tree every load reads through. `OsFileTree` (the default) on the host; an in-memory
+    /// tree in tests. Only used during construction — queries answer from the cached parsed trees.
+    fs: F,
     /// The `jals.toml` directory this workspace was discovered from; identifies the workspace so a
     /// later open in the same project reuses it instead of building a duplicate.
     project_root: PathBuf,
@@ -225,14 +231,18 @@ pub(crate) struct Workspace {
     index: ProjectIndex,
 }
 
-/// Read and parse each library `.java` in `paths`, skipping unreadable / non-`file://` ones and
-/// de-duplicating by URI, into [`WorkspaceFile`]s. Shared by both library-source kinds (the
-/// `-sources.jar` overlays and the `git`/`path` source dependencies).
-fn read_library_files(paths: Vec<PathBuf>) -> Vec<WorkspaceFile> {
+/// Read and parse each library `.java` in `paths` through `fs`, skipping unreadable / non-UTF-8 /
+/// non-`file://` ones and de-duplicating by URI, into [`WorkspaceFile`]s. Shared by both
+/// library-source kinds (the `-sources.jar` overlays and the `git`/`path` source dependencies). The
+/// virtual path fed to `fs` is each `PathBuf`'s UTF-8 form; the `Url` keeps the original path.
+fn read_library_files(fs: &dyn FileTree, paths: Vec<PathBuf>) -> Vec<WorkspaceFile> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     for path in paths {
-        if let (Ok(text), Ok(uri)) = (std::fs::read_to_string(&path), Url::from_file_path(&path))
+        let Some(vpath) = path.to_str() else {
+            continue;
+        };
+        if let (Ok(text), Ok(uri)) = (fs.read_to_string(vpath), Url::from_file_path(&path))
             && seen.insert(uri.clone())
         {
             files.push(WorkspaceFile::new(uri, text));
@@ -263,15 +273,15 @@ fn file_inputs<'a, T>(
         .collect()
 }
 
-impl Workspace {
-    /// Walk `source_roots`, parse every `.java` file found (skipping unreadable ones), and build
-    /// the symbol index. `project_root` is the `jals.toml` directory this workspace was discovered
-    /// from; it identifies the workspace so a later open in the same project reuses it. Paths are
-    /// visited in sorted order so the index is deterministic.
+impl Workspace<OsFileTree> {
+    /// Walk `source_roots` on the host filesystem, parse every `.java` file found (skipping
+    /// unreadable ones), and build the symbol index. `project_root` is the `jals.toml` directory
+    /// this workspace was discovered from; it identifies the workspace so a later open in the same
+    /// project reuses it. Paths are visited in sorted order so the index is deterministic.
     ///
     /// The workspace has an empty classpath; use [`load_with_classpath`](Workspace::load_with_classpath)
     /// to fold a project's external library types into the index.
-    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace {
+    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace<OsFileTree> {
         Self::load_with_classpath(project_root, source_roots, Vec::new())
     }
 
@@ -283,7 +293,7 @@ impl Workspace {
         project_root: PathBuf,
         source_roots: Vec<PathBuf>,
         classfiles: Vec<jals_classfile::ClassFile>,
-    ) -> Workspace {
+    ) -> Workspace<OsFileTree> {
         Self::load_with_classpath_and_sources(
             project_root,
             source_roots,
@@ -314,28 +324,60 @@ impl Workspace {
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
         target_java_version: Option<u32>,
-    ) -> Workspace {
-        let mut paths: Vec<PathBuf> = source_roots
+    ) -> Workspace<OsFileTree> {
+        Self::load_in(
+            OsFileTree,
+            project_root,
+            source_roots,
+            classfiles,
+            library_sources,
+            source_dep_sources,
+            target_java_version,
+        )
+    }
+}
+
+impl<F: FileTree> Workspace<F> {
+    /// Build a workspace over an arbitrary [`FileTree`] `fs`: walk `source_roots` for `.java`, read
+    /// and parse each through `fs` (skipping unreadable ones), register the library /
+    /// source-dependency `.java`, and build the symbol index. The host entry points
+    /// ([`load`](Workspace::load) & friends) call this with an [`OsFileTree`]; a
+    /// [`jals_fs::InMemoryFileTree`] drives the whole workspace off an in-memory tree (wasm /
+    /// tests). Paths (`source_roots`, `library_sources`, `source_dep_sources`) are `PathBuf`s
+    /// (host-supplied); their UTF-8 form is the `/`-separated virtual path fed to `fs`, and the file
+    /// identity stays a `file://` [`Url`] derived from it. See
+    /// [`load_with_classpath_and_sources`](Workspace::load_with_classpath_and_sources) for the roles
+    /// of `library_sources` / `source_dep_sources` / `target_java_version`.
+    pub(crate) fn load_in(
+        fs: F,
+        project_root: PathBuf,
+        source_roots: Vec<PathBuf>,
+        classfiles: Vec<jals_classfile::ClassFile>,
+        library_sources: Vec<PathBuf>,
+        source_dep_sources: Vec<PathBuf>,
+        target_java_version: Option<u32>,
+    ) -> Workspace<F> {
+        let mut paths: Vec<String> = source_roots
             .iter()
-            .flat_map(|root| WalkDir::new(root).into_iter().filter_map(Result::ok))
-            .map(walkdir::DirEntry::into_path)
-            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "java"))
+            .filter_map(|root| root.to_str())
+            .flat_map(|root| fs.walk_ext(root, "java").unwrap_or_default())
             .collect();
         paths.sort();
         paths.dedup();
 
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
-        let library_files = read_library_files(library_sources);
+        let library_files = read_library_files(&fs, library_sources);
         let library_inputs = file_inputs(&library_files, WorkspaceFileId::Library, |f| {
             f.parse.syntax()
         });
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types on
         // every rebuild (their `FileId`s are assigned in `rebuild_index`).
-        let source_dep_files = read_library_files(source_dep_sources);
+        let source_dep_files = read_library_files(&fs, source_dep_sources);
 
         let mut ws = Workspace {
+            fs,
             project_root,
             source_roots,
             files: Vec::new(),
@@ -349,9 +391,8 @@ impl Workspace {
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts(),
         };
-        for path in paths {
-            if let (Ok(text), Ok(uri)) =
-                (std::fs::read_to_string(&path), Url::from_file_path(&path))
+        for vpath in paths {
+            if let (Ok(text), Ok(uri)) = (ws.fs.read_to_string(&vpath), Url::from_file_path(&vpath))
                 && !ws.by_uri.contains_key(&uri)
             {
                 let id = WorkspaceFileId::Project(ws.files.len() as u32).to_raw();
@@ -807,21 +848,28 @@ fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceE
 pub(crate) trait DiscoverableConfig: Clone + Default {
     /// The config file name searched for (e.g. `jalsfmt.toml`).
     const FILE_NAME: &'static str;
-    /// Discover the config from `dir` upward, falling back to the default on any error.
-    fn discover_or_default(dir: &Path) -> Self;
+    /// Discover the config from `dir` (a UTF-8 virtual path) upward, `None` on any read/parse error.
+    fn discover_str(dir: &str) -> Option<Self>;
+    /// Discover the config from `dir` upward, falling back to the default on a non-UTF-8 path or any
+    /// read/parse error.
+    fn discover_or_default(dir: &Path) -> Self {
+        dir.to_str()
+            .and_then(Self::discover_str)
+            .unwrap_or_default()
+    }
 }
 
 impl DiscoverableConfig for Config {
     const FILE_NAME: &'static str = "jalsfmt.toml";
-    fn discover_or_default(dir: &Path) -> Self {
-        Config::discover(dir).unwrap_or_default()
+    fn discover_str(dir: &str) -> Option<Self> {
+        Config::discover(&OsFileTree, dir).ok()
     }
 }
 
 impl DiscoverableConfig for jals_lint::Config {
     const FILE_NAME: &'static str = "jalslint.toml";
-    fn discover_or_default(dir: &Path) -> Self {
-        jals_lint::Config::discover(dir).unwrap_or_default()
+    fn discover_str(dir: &str) -> Option<Self> {
+        jals_lint::Config::discover(&OsFileTree, dir).ok()
     }
 }
 
@@ -1352,6 +1400,40 @@ mod tests {
             .expect("Foo resolves cross-file");
         assert_eq!(loc.uri, foo_uri);
 
+        let foo = "package a; class Foo { }";
+        let decl_col = foo.find("Foo").unwrap() as u32;
+        assert_eq!(loc.range.start, Position::new(0, decl_col));
+        assert_eq!(loc.range.end, Position::new(0, decl_col + 3));
+    }
+
+    #[test]
+    fn workspace_load_in_drives_from_an_in_memory_tree() {
+        // The whole workspace can be built off an `InMemoryFileTree` with no real filesystem — the
+        // same cross-file resolution the tempfile tests exercise, driven purely in memory.
+        let fs = jals_fs::InMemoryFileTree::new()
+            .with_file("/proj/src/Foo.java", "package a; class Foo { }")
+            .with_file("/proj/src/Bar.java", "package a; class Bar { Foo f; }");
+        let ws = Workspace::load_in(
+            fs,
+            PathBuf::from("/proj"),
+            vec![PathBuf::from("/proj/src")],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        let bar_uri = Url::from_file_path("/proj/src/Bar.java").unwrap();
+        let foo_uri = Url::from_file_path("/proj/src/Foo.java").unwrap();
+        assert!(ws.file_id(&bar_uri).is_some());
+
+        // The `Foo` reference in Bar.java jumps to the class declaration in Foo.java.
+        let bar = "package a; class Bar { Foo f; }";
+        let use_col = bar.find("Foo").unwrap() as u32;
+        let loc = ws
+            .goto_definition(&bar_uri, Position::new(0, use_col))
+            .expect("Foo resolves cross-file, in memory");
+        assert_eq!(loc.uri, foo_uri);
         let foo = "package a; class Foo { }";
         let decl_col = foo.find("Foo").unwrap() as u32;
         assert_eq!(loc.range.start, Position::new(0, decl_col));
