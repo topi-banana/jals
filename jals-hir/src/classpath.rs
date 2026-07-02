@@ -9,6 +9,11 @@
 //! left as a bare name for [`is_type_param`](crate::ProjectIndex) to recognise, and every class name
 //! is emitted fully-qualified so it resolves without an import context.
 
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_classfile::{
     Attribute, AttributeBody, ClassFile, ClassSignature, ClassTypeSignature, ConstantPool,
     FieldType, ResultSignature, ReturnType, TypeArgument, TypeParameter, TypeSignature,

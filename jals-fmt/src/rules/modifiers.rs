@@ -20,6 +20,8 @@
 //! trailing type-use run stays inline against the type. This only moves whitespace, so the
 //! significant-token *sequence* is preserved exactly.
 
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{AnnotationPlacement, Config};

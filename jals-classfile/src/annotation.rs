@@ -1,6 +1,8 @@
 //! Annotation structures shared by the `Runtime[In]Visible[Parameter|Type]Annotations` and
 //! `AnnotationDefault` attributes (JVMS §4.7.16–§4.7.22).
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bytes::{Reader, Writer};

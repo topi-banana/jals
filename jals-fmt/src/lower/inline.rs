@@ -6,6 +6,9 @@
 //! (`crate::lower::chains`). Control-flow statements route through here too, with `control_flow`
 //! set so `control-brace-style = next-line` can push a `}`-anchored continuation to its own line.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::ControlBraceStyle;

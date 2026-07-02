@@ -9,8 +9,11 @@
 mod build;
 pub(crate) mod collect;
 
-use std::collections::HashSet;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
+use hashbrown::HashSet;
 use jals_syntax::SyntaxKind::CALL_EXPR;
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -124,8 +127,12 @@ impl Resolved {
     ///
     /// This is the occurrence set behind find-references and document-highlight: from a binding,
     /// the spans across the file that denote it.
-    pub fn occurrences(&self, id: DefId, include_declaration: bool) -> Vec<std::ops::Range<usize>> {
-        let mut ranges: Vec<std::ops::Range<usize>> =
+    pub fn occurrences(
+        &self,
+        id: DefId,
+        include_declaration: bool,
+    ) -> Vec<core::ops::Range<usize>> {
+        let mut ranges: Vec<core::ops::Range<usize>> =
             self.references_to(id).map(|r| r.range.clone()).collect();
         if include_declaration {
             ranges.push(self.def(id).name_range.clone());
@@ -160,7 +167,7 @@ impl Resolved {
 
 /// A reference recorded in pass 1, before its scope chain has been searched.
 struct RawRef {
-    range: std::ops::Range<usize>,
+    range: core::ops::Range<usize>,
     name: String,
     namespace: Namespace,
     scope: ScopeId,
@@ -200,7 +207,7 @@ impl Resolver {
         let root = self.root.clone();
         self.build(&root, ScopeId(0));
 
-        let raw_refs = std::mem::take(&mut self.raw_refs);
+        let raw_refs = core::mem::take(&mut self.raw_refs);
         let mut references = Vec::with_capacity(raw_refs.len());
         for raw in raw_refs {
             // A qualified type name (`a.b.C`) never binds to a file-local definition; leave it

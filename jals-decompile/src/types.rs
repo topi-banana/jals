@@ -5,6 +5,10 @@
 //! well-formed Java type reference (`[Ljava/lang/String;` → `java.lang.String[]`,
 //! `Ljava/util/List<Ljava/lang/String;>;` → `java.util.List<java.lang.String>`). Pure, never panics.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use jals_classfile::{ClassTypeSignature, FieldType, ThrowsSignature, TypeArgument, TypeSignature};
 
 /// Convert a JVM internal binary name (`a/b/Outer$Inner`) to its dotted Java form (`a.b.Outer.Inner`).

@@ -4,6 +4,8 @@
 //! 行う。これにより、トリビアの再付与や [`CompletedMarker::precede`](super::marker::CompletedMarker::precede)
 //! による後付けの親ノード化(左結合・優先順位)を、文法をトリビア非依存に保ったまま実現できる。
 
+use alloc::string::String;
+
 use crate::syntax_kind::SyntaxKind;
 
 /// 木構築のための1イベント。

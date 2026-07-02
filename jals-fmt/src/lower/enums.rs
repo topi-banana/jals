@@ -11,6 +11,9 @@
 //! constants and commas before the terminator) falls back to inline emission ([`lower_generic`]),
 //! which lays the children out in source order — never reordering or synthesizing tokens.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::AnnotationPlacement;

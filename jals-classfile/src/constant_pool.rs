@@ -6,7 +6,9 @@
 //! immediately after every `Long`/`Double`. Consumers never do offset arithmetic — they index
 //! straight in.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -347,7 +349,7 @@ impl ConstantPoolEntry {
 fn decode_modified_utf8(bytes: &[u8]) -> Cow<'_, str> {
     if bytes.is_ascii() {
         // ASCII is identical in modified UTF-8 and is valid Rust `str`.
-        return Cow::Borrowed(std::str::from_utf8(bytes).unwrap_or_default());
+        return Cow::Borrowed(core::str::from_utf8(bytes).unwrap_or_default());
     }
     let mut out = String::with_capacity(bytes.len());
     let mut i = 0;

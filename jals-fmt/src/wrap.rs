@@ -16,6 +16,10 @@
 //! (the renderer has already positioned the cursor at the comment's column); every
 //! continuation line begins with `newline` followed by `indent_str`.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use unicode_width::UnicodeWidthStr;
 
 /// Reflow a `// ...` line comment.
@@ -186,7 +190,7 @@ fn pack(words: &[&str], avail: usize) -> Vec<String> {
             cur.push_str(word);
             cur_width += 1 + word_width;
         } else {
-            lines.push(std::mem::take(&mut cur));
+            lines.push(core::mem::take(&mut cur));
             cur.push_str(word);
             cur_width = word_width;
         }

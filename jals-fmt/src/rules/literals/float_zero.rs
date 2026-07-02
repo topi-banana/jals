@@ -1,5 +1,8 @@
 //! `float-literal-trailing-zero`: normalize the trailing zero of a decimal float literal.
 
+use alloc::format;
+use alloc::string::String;
+
 use jals_syntax::SyntaxKind as S;
 
 use crate::config::FloatLiteralTrailingZero;

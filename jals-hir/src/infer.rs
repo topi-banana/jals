@@ -21,8 +21,14 @@
 //! stay [`Ty::Unknown`]. The pass never panics: every accessor is `Option`/iterator and an
 //! unresolvable form is `Unknown`.
 
-use std::collections::{HashMap, HashSet};
-use std::ops::Range;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::ops::Range;
+
+use hashbrown::{HashMap, HashSet};
 
 use jals_syntax::SyntaxKind::*;
 use jals_syntax::ast::{self, AstNode};

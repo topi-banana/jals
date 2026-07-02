@@ -1,8 +1,12 @@
 //! Field and method descriptors (JVMS §4.3): the non-generic type grammar used by
-//! `descriptor_index` entries. [`std::fmt::Display`] renders a parsed value back to its descriptor
+//! `descriptor_index` entries. [`core::fmt::Display`] renders a parsed value back to its descriptor
 //! text, so `parse → render` round-trips.
 
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 

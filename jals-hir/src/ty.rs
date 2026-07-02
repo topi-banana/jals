@@ -7,7 +7,10 @@
 //! not modelled, and anything inference cannot work out is [`Ty::Unknown`] rather than an error, so
 //! the pass never panics and degrades to a best effort.
 
-use std::fmt;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::project::{ItemId, ItemOrigin, ProjectIndex};
 

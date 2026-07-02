@@ -6,6 +6,8 @@
 //! padding and the `wide` prefix — are reproduced byte-for-byte. An unknown opcode makes
 //! `decode_code` fail, which degrades the whole `Code` attribute to `Unknown` (still byte-exact).
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bytes::{Reader, Writer};

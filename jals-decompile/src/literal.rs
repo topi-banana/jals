@@ -2,6 +2,9 @@
 //! (`ConstantValue`) and the bytecode body decompiler (`ldc` / `iconst` / …). Every result parses,
 //! including the awkward cases (NaN / infinity, control characters).
 
+use alloc::format;
+use alloc::string::{String, ToString};
+
 use crate::types::internal_to_java;
 
 /// Render a `float` constant as a valid Java literal (finite values get an `f` suffix; NaN / infinity

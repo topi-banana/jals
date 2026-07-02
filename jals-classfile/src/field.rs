@@ -1,5 +1,7 @@
 //! A `field_info` structure (JVMS §4.5).
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::attribute::{self, Attribute};

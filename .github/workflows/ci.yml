@@ -100,9 +100,11 @@ jobs:
           - name: linux-arm
             target: aarch64-unknown-linux-gnu
             packages: --workspace
+          # Built as their own package set (no host crate in it), so the `std` features of
+          # jals-fmt / jals-lint stay off and `#![no_std]` is enforced for the whole set.
           - name: wasm
             target: wasm32-unknown-unknown
-            packages: --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile
+            packages: --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

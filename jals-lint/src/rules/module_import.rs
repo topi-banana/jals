@@ -7,6 +7,9 @@
 //! Java 25 — or when no edition is declared — nothing is reported. The gate is threaded in as the
 //! project's target feature version (see [`Config::target_java_version`](crate::Config::target_java_version)).
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::AstNode;
 

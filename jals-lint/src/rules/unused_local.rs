@@ -8,6 +8,9 @@
 //! parameters remain a known source of false positives — suppress the rule via `jalslint.toml`
 //! where that matters.
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use jals_hir::{DefKind, Resolved};
 use jals_syntax::SyntaxNode;
 

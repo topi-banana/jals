@@ -6,6 +6,9 @@
 //! a unary stays tight (`-x`), spacing only inserted to avoid operator fusion (`- -x`). Malformed
 //! shapes from error recovery fall back to inline emission, byte-for-byte unchanged.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{BinopLayout, BinopSeparator};
@@ -171,7 +174,7 @@ fn flush_operator(parts: &mut Vec<Doc>, pending_op: &mut Vec<Doc>) {
         return;
     }
     parts.push(text(" "));
-    parts.push(concat(std::mem::take(pending_op)));
+    parts.push(concat(core::mem::take(pending_op)));
     parts.push(text(" "));
 }
 

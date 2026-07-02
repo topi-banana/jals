@@ -4,7 +4,8 @@
 //! Multi-declarator names (`int a, b;`) and catch / resource bindings come from the bespoke
 //! accessors added to `jals-syntax`'s `ast::ext`; this module covers the rest.
 
-use std::ops::Range;
+use alloc::vec::Vec;
+use core::ops::Range;
 
 use jals_syntax::SyntaxKind::{IDENT, TYPE_PATTERN};
 use jals_syntax::{SyntaxNode, SyntaxToken};

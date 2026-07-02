@@ -1,6 +1,7 @@
 //! 構文エラー(メッセージ + ソース範囲)。`jals-lsp` の診断などで使う。
 
-use std::fmt;
+use alloc::string::String;
+use core::fmt;
 
 use text_size::TextRange;
 

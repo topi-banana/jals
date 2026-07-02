@@ -1,5 +1,7 @@
 //! `wildcard-import`: flag star imports such as `import java.util.*;`.
 
+use alloc::vec::Vec;
+
 use jals_syntax::SyntaxKind;
 use jals_syntax::ast::{AstNode, ImportDecl};
 

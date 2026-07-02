@@ -3,6 +3,8 @@
 //! A catch that swallows an exception silently is a common bug. A block with an explanatory
 //! comment (`catch (E e) { /* ignored: ... */ }`) is treated as intentional and not flagged.
 
+use alloc::vec::Vec;
+
 use jals_syntax::ast::{AstNode, CatchClause};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 

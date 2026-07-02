@@ -14,7 +14,10 @@ mod prop;
 #[cfg(test)]
 mod tests;
 
-use std::cell::Cell;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::cell::Cell;
 
 use rowan::GreenNode;
 

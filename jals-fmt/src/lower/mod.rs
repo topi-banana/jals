@@ -23,6 +23,9 @@
 //! lists), and [`expr`] (binary / ternary / unary expressions). Items shared across submodules
 //! (and with [`crate::rules`]) are re-exported below so they stay reachable as `crate::lower::*`.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxKind as S, SyntaxNode};
 
 use crate::comments::{self, CommentMap};

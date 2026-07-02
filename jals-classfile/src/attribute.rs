@@ -9,6 +9,8 @@
 //! `StackMapTable` and the instruction stream inside `Code` are modelled in later phases; until then
 //! they ride along as `Unknown` / raw `code` bytes.
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::annotation::{Annotation, ElementValue, TypeAnnotation};

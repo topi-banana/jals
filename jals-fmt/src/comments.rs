@@ -21,7 +21,10 @@
 //! duplicated. Classification uses the fact that `WHITESPACE` never contains a newline
 //! and `NEWLINE` is a standalone token (CRLF is one token).
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -42,16 +45,16 @@ struct Comment {
 
 /// Comments anchored to significant tokens by source byte offset.
 pub(crate) struct CommentMap {
-    leading: HashMap<usize, Vec<Comment>>,
+    leading: BTreeMap<usize, Vec<Comment>>,
     /// Leading comments that hug their anchor token on the same line (parameter comments under
     /// `normalize-parameter-comments`): emitted immediately before the token text, so they wrap
     /// together with it (`/* a= */ 1`). Keyed by the anchor token's offset, like [`leading`].
-    leading_inline: HashMap<usize, Vec<Comment>>,
+    leading_inline: BTreeMap<usize, Vec<Comment>>,
     /// Same-line trailing comments (emitted as line suffixes).
-    trailing_inline: HashMap<usize, Vec<Comment>>,
+    trailing_inline: BTreeMap<usize, Vec<Comment>>,
     /// Own-line comments after the last significant token (emitted on their own lines so
     /// consecutive line comments are not merged).
-    trailing_below: HashMap<usize, Vec<Comment>>,
+    trailing_below: BTreeMap<usize, Vec<Comment>>,
     /// Comments in a file with no significant tokens at all (nothing to anchor to).
     orphans: Vec<Comment>,
 }
@@ -66,10 +69,10 @@ pub(crate) fn build(
     normalize_param_comments: bool,
     inline_block_comments: bool,
 ) -> CommentMap {
-    let mut leading: HashMap<usize, Vec<Comment>> = HashMap::new();
-    let mut leading_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
-    let mut trailing_inline: HashMap<usize, Vec<Comment>> = HashMap::new();
-    let mut trailing_below: HashMap<usize, Vec<Comment>> = HashMap::new();
+    let mut leading: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+    let mut leading_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+    let mut trailing_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+    let mut trailing_below: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
 
     let mut last_sig: Option<usize> = None;
     let mut newlines: usize = 0; // newlines since the last significant token or comment
@@ -122,7 +125,7 @@ pub(crate) fn build(
                 // to `leading`. `partition` keeps each group's source order, and the two groups
                 // never interleave at emit time (own-line above, inline hugging the token).
                 let (inline_lead, own_lead): (Vec<Comment>, Vec<Comment>) =
-                    std::mem::take(&mut pending)
+                    core::mem::take(&mut pending)
                         .into_iter()
                         .partition(|c| c.inline);
                 if !own_lead.is_empty() {

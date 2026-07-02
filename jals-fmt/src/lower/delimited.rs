@@ -9,6 +9,9 @@
 //! With `closing-paren = hug` a wrapped paren-delimited list (call / annotation args, params,
 //! record header) keeps its closing `)` on the last item's line instead of dedenting it.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{ClosingParen, FnParamsLayout, TrailingComma};
@@ -227,7 +230,7 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
                 S::COMMA => {
                     // The comma ends the current item; keep it so the trailing one can follow
                     // the `trailing-comma` policy while inter-item commas stay verbatim.
-                    rows.push((concat(std::mem::take(&mut current)), Some(t.clone())));
+                    rows.push((concat(core::mem::take(&mut current)), Some(t.clone())));
                     cur_prev = None;
                 }
                 _ if kind.is_trivia() => {}
@@ -240,7 +243,7 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         }
     }
     if !current.is_empty() {
-        rows.push((concat(std::mem::take(&mut current)), None));
+        rows.push((concat(core::mem::take(&mut current)), None));
     }
 
     if rows.is_empty() {

@@ -1,6 +1,7 @@
 //! References (uses): the identifier occurrences that name resolution tries to bind.
 
-use std::ops::Range;
+use alloc::string::String;
+use core::ops::Range;
 
 use crate::def::{DefId, Namespace};
 

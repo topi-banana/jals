@@ -3,6 +3,13 @@ name = "jals-fmt"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# `std` unlocks the filesystem config loaders (`Config::from_file` / `Config::discover`) and their
+# error type. Off by default so the crate is `#![no_std]` (host consumers — the CLI / LSP — enable
+# it; the wasm playground and the CI wasm build leave it off).
+default = []
+std = []
+
 [dependencies]
 jals-syntax.workspace = true
 serde = { workspace = true, features = ["derive"] }

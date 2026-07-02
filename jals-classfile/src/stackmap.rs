@@ -4,6 +4,8 @@
 //! itself. Each kind is a distinct [`StackMapFrame`] variant, so the exact `frame_type` byte is
 //! reconstructed on write and the attribute round-trips byte-for-byte.
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::bytes::{Reader, Writer};

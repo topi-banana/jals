@@ -6,6 +6,9 @@
 //! width exceeds `chain-width`. Anything else (a lone call, a pure field path, a malformed node)
 //! falls back to inline emission, byte-for-byte unchanged.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxKind as S, SyntaxNode};
 
 use crate::doc::{Doc, concat, continuation_indent, group_within, softline};

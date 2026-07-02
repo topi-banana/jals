@@ -9,7 +9,12 @@
 //! a control-flow shape that is not a clean tree) makes the whole method fall back to the caller's
 //! safe body — so the output is always valid Java, never a half-built or mis-structured body.
 
-use std::collections::HashMap;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use jals_classfile::{
     AttributeBody, ClassFile, ConstantPool, ConstantPoolEntry, Instruction, MethodInfo, ReturnType,
@@ -68,7 +73,7 @@ fn local_slots(
     pool: &ConstantPool,
     is_static: bool,
     param_names: &[String],
-) -> Option<HashMap<u16, String>> {
+) -> Option<BTreeMap<u16, String>> {
     let descriptor = pool.utf8(method.descriptor_index)?;
     let params = parse_method_descriptor(&descriptor).ok()?.params;
     if params.len() != param_names.len() {
@@ -97,7 +102,7 @@ struct Sim<'a> {
     /// Internal binary name of the class being decompiled (for `this`-call vs object-creation).
     owner: &'a str,
     is_static: bool,
-    locals: &'a HashMap<u16, String>,
+    locals: &'a BTreeMap<u16, String>,
     stack: Vec<Expr>,
     stmts: Vec<Stmt>,
 }
@@ -477,7 +482,7 @@ struct Structurer<'a> {
     pool: &'a ConstantPool,
     owner: String,
     is_static: bool,
-    locals: HashMap<u16, String>,
+    locals: BTreeMap<u16, String>,
 }
 
 impl Structurer<'_> {

@@ -5,7 +5,9 @@
 //! parsed CST, runs every enabled rule, and stamps each [`Finding`] with the rule name and the
 //! severity resolved from configuration. Rules never mutate the tree and never panic.
 
-use std::ops::Range;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::ops::Range;
 
 use jals_hir::Resolved;
 use jals_syntax::ast::{AstNode, SourceFile};

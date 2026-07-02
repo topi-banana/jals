@@ -4,6 +4,9 @@
 //! Covers `if` / `else`, `while`, `for`, the enhanced `for`, and `do`. An `else if` chain is not
 //! flagged for the `else` (the trailing `if` is itself checked on its own).
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use jals_syntax::SyntaxKind::{self, *};
 use jals_syntax::SyntaxNode;
 

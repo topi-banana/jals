@@ -1,9 +1,9 @@
 //! The crate's error type, hand-rolled to avoid a `thiserror` dependency.
 
-use std::fmt;
+use core::fmt;
 
 /// The result of a fallible class-file codec operation.
-pub type Result<T> = std::result::Result<T, ClassfileError>;
+pub type Result<T> = core::result::Result<T, ClassfileError>;
 
 /// A structural problem encountered while reading a class file. The codec never panics; every
 /// malformed input yields one of these instead.
@@ -60,4 +60,4 @@ impl fmt::Display for ClassfileError {
     }
 }
 
-impl std::error::Error for ClassfileError {}
+impl core::error::Error for ClassfileError {}

@@ -1,5 +1,8 @@
 //! `literal-suffix-case`: normalize the case of a numeric literal's trailing type suffix.
 
+use alloc::format;
+use alloc::string::String;
+
 use jals_syntax::SyntaxKind as S;
 
 use crate::config::LiteralSuffixCase;

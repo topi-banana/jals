@@ -8,6 +8,9 @@
 //! Constructors and enum constants are intentionally not checked. Only plain ASCII identifiers
 //! are checked; names with `$` or non-ASCII letters are left alone to avoid false positives.
 
+use alloc::format;
+use alloc::vec::Vec;
+
 use jals_syntax::SyntaxKind::{self, *};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
