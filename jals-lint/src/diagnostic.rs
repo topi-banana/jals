@@ -1,7 +1,9 @@
 //! The result of linting: the diagnostics found, plus any parser errors.
 
-use std::fmt;
-use std::ops::Range;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
+use core::ops::Range;
 
 use jals_syntax::SyntaxError;
 use serde::Deserialize;

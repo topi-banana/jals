@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), no_std)]
 //! `jals-classfile`: a complete, round-trippable model of the JVM `.class` file format (JVMS ch. 4).
 //!
 //! Reads and writes Java class files through a full struct/enum model. The binary codec
@@ -22,6 +23,10 @@
 //! let class = jals_classfile::ClassFile::read(&bytes).expect("valid class file");
 //! assert_eq!(class.write(), bytes); // byte-exact round-trip
 //! ```
+
+extern crate alloc;
+
+use alloc::vec::Vec;
 
 mod annotation;
 mod attribute;

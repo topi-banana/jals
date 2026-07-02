@@ -1,10 +1,14 @@
 //! Generic type signatures (JVMS §4.7.9.1): the grammar carried by the `Signature` attribute, which
 //! descriptors cannot express (type variables, type arguments, bounds, wildcards).
 //!
-//! [`std::fmt::Display`] renders a parsed value back to its signature text, so `parse → render`
+//! [`core::fmt::Display`] renders a parsed value back to its signature text, so `parse → render`
 //! round-trips. The internal binary names keep the `/` form (`java/util/Map`).
 
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 

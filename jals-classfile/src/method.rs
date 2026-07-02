@@ -1,5 +1,7 @@
 //! A `method_info` structure (JVMS §4.6).
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::attribute::{self, Attribute};

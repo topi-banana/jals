@@ -6,7 +6,8 @@
 //! anything the M2 structurer does not yet model — a `switch`, `jsr`/`ret`, or a branch to an offset
 //! that is not an instruction boundary — so the caller falls back to a safe body.
 
-use std::collections::{BTreeSet, HashMap};
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use jals_classfile::{Instruction, WideInstruction};
 
@@ -45,7 +46,7 @@ pub(crate) enum Term {
 impl Block {
     /// The instruction range the value-level simulator should replay: the whole block, except an
     /// explicit `goto` / conditional-branch terminator (which the structurer interprets itself).
-    pub fn body(&self) -> std::ops::Range<usize> {
+    pub fn body(&self) -> core::ops::Range<usize> {
         match self.term {
             Term::Goto(_) | Term::Branch { .. } => self.start..self.end - 1,
             Term::Fall(_) | Term::Ret | Term::Throw => self.start..self.end,
@@ -107,17 +108,17 @@ pub(crate) fn build(code: &[Instruction]) -> Option<Cfg> {
     if code.is_empty() {
         return None;
     }
-    // Byte offset (pc) of each instruction, and the reverse map for resolving branch targets.
+    // Byte offset (pc) of each instruction. Strictly increasing, so a branch target resolves to its
+    // instruction index by binary search — no reverse map to build.
     let mut pcs = Vec::with_capacity(code.len());
     let mut pc = 0usize;
     for ins in code {
         pcs.push(pc);
         pc += ins.encoded_len(pc);
     }
-    let pc_to_index: HashMap<usize, usize> = pcs.iter().enumerate().map(|(i, &p)| (p, i)).collect();
     let target = |i: usize, offset: i32| -> Option<usize> {
         let dest = i64::try_from(pcs[i]).ok()? + i64::from(offset);
-        pc_to_index.get(&usize::try_from(dest).ok()?).copied()
+        pcs.binary_search(&usize::try_from(dest).ok()?).ok()
     };
 
     // Leaders: the entry, every branch target, and the instruction after a branch / exit.
@@ -141,10 +142,10 @@ pub(crate) fn build(code: &[Instruction]) -> Option<Cfg> {
         }
     }
 
-    // Cut into blocks at the leaders; map each block's start to its index for successor lookups.
+    // Cut into blocks at the leaders. `leaders` is sorted, so a block start resolves to its block
+    // index by binary search — the successor lookups below need no side map.
     let leaders: Vec<usize> = leaders.into_iter().collect();
-    let block_of: HashMap<usize, usize> =
-        leaders.iter().enumerate().map(|(b, &s)| (s, b)).collect();
+    let block_of = |start: usize| -> Option<usize> { leaders.binary_search(&start).ok() };
     let mut blocks = Vec::with_capacity(leaders.len());
     for (b, &start) in leaders.iter().enumerate() {
         let end = leaders.get(b + 1).copied().unwrap_or(code.len());
@@ -152,13 +153,13 @@ pub(crate) fn build(code: &[Instruction]) -> Option<Cfg> {
         let term = match flow(&code[last]) {
             Flow::Cond(o) => Term::Branch {
                 instr: last,
-                taken: *block_of.get(&target(last, o)?)?,
-                fallthrough: *block_of.get(&end)?,
+                taken: block_of(target(last, o)?)?,
+                fallthrough: block_of(end)?,
             },
-            Flow::Goto(o) => Term::Goto(*block_of.get(&target(last, o)?)?),
+            Flow::Goto(o) => Term::Goto(block_of(target(last, o)?)?),
             Flow::Ret => Term::Ret,
             Flow::Throw => Term::Throw,
-            Flow::Normal => Term::Fall(*block_of.get(&end)?),
+            Flow::Normal => Term::Fall(block_of(end)?),
             Flow::Unsupported => return None,
         };
         blocks.push(Block { start, end, term });

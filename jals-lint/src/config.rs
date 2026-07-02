@@ -4,14 +4,18 @@
 //! `[rules]`, a map from rule name (kebab-case, e.g. `wildcard-import`) to a [`Severity`]
 //! (`"allow"` / `"warn"` / `"error"`). A rule not listed uses its built-in default severity.
 
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
-use std::path::{Path, PathBuf};
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+
+#[cfg(any(feature = "std", test))]
+use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::diagnostic::Severity;
+
+#[cfg(any(feature = "std", test))]
+pub use error::ConfigError;
 
 /// Linter configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -39,6 +43,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
+    #[cfg(any(feature = "std", test))]
     pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
@@ -56,6 +61,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
+    #[cfg(any(feature = "std", test))]
     pub fn discover(start_dir: &Path) -> Result<Config, ConfigError> {
         let mut dir = Some(start_dir);
         while let Some(d) = dir {
@@ -69,43 +75,52 @@ impl Config {
     }
 }
 
-/// An error loading or parsing a config file.
-#[derive(Debug)]
-pub enum ConfigError {
-    /// The file could not be read.
-    Io {
-        /// The path that failed to read.
-        path: PathBuf,
-        /// The underlying IO error.
-        source: std::io::Error,
-    },
-    /// The file contained invalid TOML.
-    Parse {
-        /// The path that failed to parse.
-        path: PathBuf,
-        /// The underlying parse error.
-        source: toml::de::Error,
-    },
-}
+/// The error type returned when loading or parsing a `jalslint.toml` file. Gated once as a whole —
+/// its `std::io`/`std::path`/`std::error` surface only exists behind the `std` feature.
+#[cfg(any(feature = "std", test))]
+mod error {
+    use std::error::Error;
+    use std::fmt;
+    use std::path::PathBuf;
 
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConfigError::Io { path, source } => {
-                write!(f, "failed to read config {}: {source}", path.display())
-            }
-            ConfigError::Parse { path, source } => {
-                write!(f, "failed to parse config {}: {source}", path.display())
+    /// An error loading or parsing a config file.
+    #[derive(Debug)]
+    pub enum ConfigError {
+        /// The file could not be read.
+        Io {
+            /// The path that failed to read.
+            path: PathBuf,
+            /// The underlying IO error.
+            source: std::io::Error,
+        },
+        /// The file contained invalid TOML.
+        Parse {
+            /// The path that failed to parse.
+            path: PathBuf,
+            /// The underlying parse error.
+            source: toml::de::Error,
+        },
+    }
+
+    impl fmt::Display for ConfigError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                ConfigError::Io { path, source } => {
+                    write!(f, "failed to read config {}: {source}", path.display())
+                }
+                ConfigError::Parse { path, source } => {
+                    write!(f, "failed to parse config {}: {source}", path.display())
+                }
             }
         }
     }
-}
 
-impl Error for ConfigError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            ConfigError::Io { source, .. } => Some(source),
-            ConfigError::Parse { source, .. } => Some(source),
+    impl Error for ConfigError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                ConfigError::Io { source, .. } => Some(source),
+                ConfigError::Parse { source, .. } => Some(source),
+            }
         }
     }
 }

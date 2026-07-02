@@ -4,6 +4,10 @@
 //! conservative — it returns `None`/empty when it cannot produce something a Java parser accepts, so
 //! the caller falls back to a safe form (no initializer, `argN` names) and the output stays valid.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use jals_classfile::{
     AttributeBody, BaseType, ConstantPool, ConstantPoolEntry, FieldInfo, FieldType, MethodInfo,
     parse_field_descriptor, parse_method_descriptor,

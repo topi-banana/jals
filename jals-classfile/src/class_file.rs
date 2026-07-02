@@ -1,5 +1,7 @@
 //! The top-level `ClassFile` structure (JVMS §4.1) and the entry-point binary codec.
 
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 use crate::attribute::{self, Attribute};

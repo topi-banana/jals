@@ -9,6 +9,10 @@
 //! own break) collapse to one, and guarantees no trailing whitespace — both essential for
 //! idempotency. Trailing comments ride on [`Doc::LineSuffix`] so they stay on their line.
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Config, IndentStyle};

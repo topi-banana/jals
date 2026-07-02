@@ -12,6 +12,8 @@
 //! external / boxing pair, and a numeric constant that narrowing could rescue (`byte b = 1;`) are
 //! never flagged, so the rule does not produce false positives.
 
+use alloc::vec::Vec;
+
 use jals_hir::Resolved;
 use jals_syntax::SyntaxNode;
 

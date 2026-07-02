@@ -5,6 +5,9 @@
 //! text, positional selection among same-typed children, parameterized
 //! queries) lives here. Both halves together form the public `ast` API.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use rowan::ast::support;
 
 use super::{

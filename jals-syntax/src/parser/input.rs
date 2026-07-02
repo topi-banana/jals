@@ -4,6 +4,8 @@
 //! 文法は significant の位置(0 起点)で進み、トリビアの再付与は [`super::sink`] が
 //! 全トークン列から行う。隣接判定([`Input::adjacent`])は `>` 系の合成に使う。
 
+use alloc::vec::Vec;
+
 use text_size::TextRange;
 
 use crate::lexer::{LexedToken, tokenize};

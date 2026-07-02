@@ -8,6 +8,10 @@
 //! the build order (trailing-zero, then hex case, then suffix case) mirrors the original to keep
 //! the output byte-identical.
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use jals_syntax::SyntaxKind as S;
 
 use crate::config::Config;

@@ -1,6 +1,7 @@
 //! Definitions (bindings): the things a name can resolve to.
 
-use std::ops::Range;
+use alloc::string::String;
+use core::ops::Range;
 
 use crate::scope::ScopeId;
 

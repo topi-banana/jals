@@ -87,7 +87,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 taplo fmt --check --diff
 cargo machete                                                # no unused deps
-cargo build --release --target wasm32-unknown-unknown -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile
+cargo build --release --target wasm32-unknown-unknown -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile -p jals-fmt -p jals-lint
 cargo run -p xtask -- codegen --check                        # generated AST is up to date
 ```
 
@@ -136,18 +136,25 @@ plus lexer/parser property tests). A change that violates one is wrong, not the 
    `group-imports`, and `reorder-modifiers` off, `trailing-comma = preserve`,
    `hex-literal-case = preserve`, `float-literal-trailing-zero = preserve`,
    `literal-suffix-case = preserve`), the exact-sequence guarantee is in full force.
-5. **`wasm32` compatibility.** Everything except `jals-cli`, `jals-lsp`, and `jals-classpath` must
-   build for `wasm32-unknown-unknown` (all three are host-only: `jals-cli` does filesystem/process
-   work, `jals-lsp` uses tokio/stdio, `jals-classpath` does `std::fs` + `zip` jar I/O + `reqwest`
-   dependency downloads). Do not add non-wasm-compatible deps or `std::fs`/process/network/IO usage
-   to `jals-syntax`, `jals-fmt`, `jals-build`, `jals-hir`, `jals-classfile`, or `jals-decompile`; keep
-   that work in `jals-cli`/`jals-lsp`/`jals-classpath` (`jals-build` only *plans* `javac`/`java`
-   commands and *classifies* `[dependencies]` specs as pure data — `jals-cli`/`jals-lsp` spawn the
-   tools and the `jals-classpath` downloader; `jals-classfile` is a pure byte-level codec and
-   `jals-decompile` a pure `.class`→Java reconstructor — `jals-classpath` reads the bytes off disk/out
-   of jars/over the network and hands the parsed class files to `jals-hir`).
-   CI builds `jals-syntax`, `jals-classfile`, `jals-hir`, and `jals-decompile` for `wasm32` in the
-   `build` matrix.
+5. **`no_std` + `wasm32` compatibility.** The six pure crates — `jals-syntax`, `jals-classfile`,
+   `jals-hir`, `jals-decompile`, `jals-fmt`, and `jals-lint` — are **`#![no_std]`** (they pull in
+   `alloc` via `extern crate alloc`, so `String`/`Vec`/`Box`/`format!`/`vec!` come from `alloc` and
+   maps use `alloc::collections::BTreeMap` or `hashbrown`, never `std::collections`). Each carries
+   `#![cfg_attr(not(test), no_std)]` (or `#![cfg_attr(not(any(feature = "std", test)), no_std)]` for
+   the two with a `std` feature), so unit tests still run with full `std` while the library build is
+   `std`-free. Use `core::`/`alloc::` paths (e.g. `core::mem::take`, `core::ops::Range`,
+   `core::fmt`, `core::error::Error`), never `std::`. `jals-fmt` and `jals-lint` gate their
+   **filesystem config loaders** (`Config::from_file` / `discover`, the `ConfigError` type) behind an
+   off-by-default **`std` feature** that the host crates (`jals-cli`, `jals-lsp`) turn on
+   (`features = ["std"]`); the wasm build and playground leave it off, so those crates stay `no_std`.
+   The host-only crates keep `std`: `jals-cli` (filesystem/process), `jals-lsp` (tokio/stdio),
+   `jals-classpath` (`std::fs` + `zip` jar I/O + `reqwest` downloads), and `jals-build` (its API is
+   built on `std::path::{Path, PathBuf}` — source-root/classpath resolution, manifest discovery via
+   `.is_file()` — which have no `core`/`alloc` equivalent). Do not add non-wasm-compatible deps or
+   `std::fs`/process/network/IO usage to the six pure crates; keep that work in
+   `jals-cli`/`jals-lsp`/`jals-classpath`. CI builds all six pure crates for `wasm32` in the `build`
+   matrix (as one package set with no host crate, so the `std` features stay off and `#![no_std]` is
+   enforced).
 
 When touching the lexer, parser, or formatter, prefer adding a snapshot test
 (`expect-test`) and confirm the property tests still pass.

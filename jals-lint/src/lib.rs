@@ -1,3 +1,4 @@
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 //! A lint checker for JALS/Java source, driven by the `jals-syntax` CST.
 //!
 //! [`lint_source`] parses `src` and runs every enabled rule over the lossless CST, returning a
@@ -9,18 +10,23 @@
 //! override any rule's severity, including `allow` to disable it. Rules are read-only and never
 //! modify the source.
 
+extern crate alloc;
+
 mod config;
 mod diagnostic;
 mod rules;
 
-use std::cell::OnceCell;
+use alloc::vec::Vec;
+use core::cell::OnceCell;
 
 use jals_hir::{FileId, ProjectIndex};
 use jals_syntax::{Parse, SyntaxNode};
 
 use rules::Checker;
 
-pub use config::{Config, ConfigError};
+pub use config::Config;
+#[cfg(any(feature = "std", test))]
+pub use config::ConfigError;
 pub use diagnostic::{Diagnostic, LintOutput, Severity};
 
 /// The project context the index-aware rules resolve reference types against: a project-wide symbol

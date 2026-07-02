@@ -6,7 +6,9 @@
 //! `node.text() == src`(lossless)が保証される。トリビアの「どのノードに属するか」という
 //! 付与ポリシーは素朴だが、lossless であることを硬い不変条件とし、整形器の着手時に精密化する。
 
-use std::mem;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::mem;
 
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 use text_size::{TextRange, TextSize};

@@ -15,6 +15,8 @@
 //! without untangling anything. `trailing-comma` likewise stays a plain function
 //! ([`trailing_comma::doc`]) — it has a single static call site and nothing to iterate.
 
+use alloc::string::String;
+
 use jals_syntax::{SyntaxKind as S, SyntaxNode};
 
 use crate::config::Config;

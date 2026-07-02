@@ -5,6 +5,9 @@
 //! aesthetic rule; [`sep`] wraps it in a fusion-safety net so the output never changes which
 //! operators lex together.
 
+use alloc::format;
+use alloc::string::ToString;
+
 use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{Config, TypePunctuationDensity};

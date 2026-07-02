@@ -8,10 +8,16 @@
 //! in [`error`]. All are re-exported here, so the whole config surface is reachable as
 //! `config::*`.
 
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+#[cfg(any(feature = "std", test))]
 use std::path::Path;
 
 use serde::Deserialize;
 
+#[cfg(any(feature = "std", test))]
 mod error;
 mod literals;
 mod options;
@@ -19,6 +25,7 @@ mod options;
 #[cfg(test)]
 mod tests;
 
+#[cfg(any(feature = "std", test))]
 pub use error::ConfigError;
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase};
 pub use options::{
@@ -414,6 +421,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
+    #[cfg(any(feature = "std", test))]
     pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
@@ -431,6 +439,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
+    #[cfg(any(feature = "std", test))]
     pub fn discover(start_dir: &Path) -> Result<Config, ConfigError> {
         let mut dir = Some(start_dir);
         while let Some(d) = dir {

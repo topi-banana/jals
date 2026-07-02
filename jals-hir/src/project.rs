@@ -18,9 +18,15 @@
 //! from there resolves to [`TypeResolution::External`] (no diagnostic) rather than
 //! [`TypeResolution::Unresolved`], so the "cannot resolve" signal stays free of false positives.
 
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::ops::Range;
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
+use core::ops::Range;
+
+use hashbrown::{HashMap, HashSet};
 
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,

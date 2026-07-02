@@ -4,6 +4,11 @@
 //! conservatively (any binary sub-expression used as an operand or receiver is wrapped), so the
 //! emitted Java always groups the way the bytecode evaluated — never mis-associating an operator.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 /// A reconstructed Java expression.
 pub(crate) enum Expr {
     /// The receiver `this`.

@@ -2,6 +2,8 @@
 
 // @generated
 
+use alloc::string::String;
+
 use rowan::ast::{AstChildren, AstNode, support};
 
 use super::name_text;

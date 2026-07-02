@@ -1,3 +1,4 @@
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 //! A pretty-printer for JALS/Java source, driven by the `jals-syntax` CST.
 //!
 //! [`format_source`] parses `src`, lowers the lossless CST into a Wadler/Prettier-style
@@ -28,6 +29,8 @@
 //!   comment is kept.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 
+extern crate alloc;
+
 mod comments;
 mod config;
 mod doc;
@@ -37,11 +40,12 @@ mod render;
 mod rules;
 mod wrap;
 
+#[cfg(any(feature = "std", test))]
+pub use config::ConfigError;
 pub use config::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
-    ConfigError, ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase,
-    IndentStyle, LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma,
-    TypePunctuationDensity,
+    ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
+    LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
 };
 pub use output::{FormatOutput, Warning};
 

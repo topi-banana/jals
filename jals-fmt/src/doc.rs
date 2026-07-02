@@ -4,6 +4,10 @@
 //! (`render.rs`) turns a [`Doc`] into the formatted string, choosing for each
 //! [`Doc::Group`] whether it fits flat on the current line or must break.
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use unicode_width::UnicodeWidthStr;
 
 /// The flavour of a comment, controlling how it reflows under `wrap-comments`.

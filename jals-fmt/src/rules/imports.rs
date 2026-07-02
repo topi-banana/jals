@@ -7,6 +7,10 @@
 //! reuses the original import nodes, so every token keeps its byte offset, attached
 //! comments travel with their import, and the significant-token *multiset* is preserved.
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
 

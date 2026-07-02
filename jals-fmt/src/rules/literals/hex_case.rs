@@ -1,5 +1,8 @@
 //! `hex-literal-case`: normalize the case of a hex literal's mantissa digits.
 
+use alloc::format;
+use alloc::string::String;
+
 use jals_syntax::SyntaxKind as S;
 
 use crate::config::HexLiteralCase;

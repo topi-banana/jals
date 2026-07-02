@@ -4,6 +4,8 @@
 //! each token's `text` reproduces the input) and never panic on any input. Unmatched bytes
 //! become [`SyntaxKind::ERROR`].
 
+use alloc::vec::Vec;
+
 use text_size::{TextRange, TextSize};
 
 use crate::syntax_kind::SyntaxKind;

@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), no_std)]
 //! `jals-syntax`: a lossless hand-written Java 26 lexer and CST parser (`rowan`).
 //!
 //! The shared foundation for `jals-fmt` / `jals-lint` / `jals-lsp`. Everything except the CLI must
@@ -25,6 +26,8 @@
 //! let class = file.decls().next().unwrap();
 //! assert_eq!(class.syntax().text().to_string(), "class Foo { }");
 //! ```
+
+extern crate alloc;
 
 pub mod ast;
 pub mod language;

@@ -1,6 +1,8 @@
 //! The result of formatting: the rendered text plus any warnings.
 
-use std::ops::Range;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::ops::Range;
 
 use jals_syntax::SyntaxError;
 

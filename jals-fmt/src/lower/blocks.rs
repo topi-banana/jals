@@ -6,6 +6,9 @@
 //! empty / single-statement cases. Blank lines from the source are preserved (clamped by the
 //! renderer).
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{BraceStyle, Config, ControlBraceStyle, SwitchCaseBody};
@@ -516,7 +519,7 @@ fn split_case_label(node: &SyntaxNode) -> Option<(SyntaxToken, Vec<CaseChunk>)> 
                 if current.is_empty() {
                     return None; // a leading / doubled comma (error recovery)
                 }
-                chunks.push((std::mem::take(&mut current), Some(t.clone())));
+                chunks.push((core::mem::take(&mut current), Some(t.clone())));
             }
             _ => current.push(el),
         }

@@ -3,6 +3,13 @@ name = "jals-lint"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# `std` unlocks the filesystem config loaders (`Config::from_file` / `Config::discover`) and their
+# error type. Off by default so the crate is `#![no_std]` (the CLI / LSP enable it; the CI wasm
+# build leaves it off).
+default = []
+std = []
+
 [dependencies]
 jals-hir.workspace = true
 jals-syntax.workspace = true

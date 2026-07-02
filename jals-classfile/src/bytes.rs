@@ -3,6 +3,8 @@
 //! The sole primitive codec layer. No external byte crate, so the crate stays `wasm32`-pure. Every
 //! read is bounds-checked and returns [`Result`] rather than panicking.
 
+use alloc::vec::Vec;
+
 use crate::error::{ClassfileError, Result};
 
 /// A big-endian cursor over an input buffer.

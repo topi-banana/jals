@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), no_std)]
 //! File-local name resolution for Java/JALS source, over the `jals-syntax` CST.
 //!
 //! [`resolve`] binds each *reference* (an identifier use) to the *definition* (binding) it names,
@@ -37,6 +38,8 @@
 //! let jals_hir::Resolution::Def(id) = r.resolution else { panic!("x should resolve") };
 //! assert_eq!(resolved.def(id).name, "x");
 //! ```
+
+extern crate alloc;
 
 mod classpath;
 mod def;

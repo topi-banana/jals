@@ -7,6 +7,9 @@
 //! `CommentsHelper.reformatParameterComment`: the *whole* comment must match
 //! `/* <name>(...)? = */`, the name a Java identifier optionally suffixed with `...` (varargs).
 
+use alloc::format;
+use alloc::string::String;
+
 /// Rewrite a `BLOCK_COMMENT` whose entire text is a parameter-name label (`/*a=*/`,
 /// `/* xs...= */`, `/*  a  =  */`) into the canonical `/* <name>= */`, collapsing interior
 /// whitespace. Returns `None` when the text is not such a comment, so the caller keeps it

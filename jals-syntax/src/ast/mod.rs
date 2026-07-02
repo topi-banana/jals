@@ -23,6 +23,8 @@
 mod ext;
 mod generated;
 
+use alloc::string::{String, ToString};
+
 pub use rowan::ast::{AstChildren, AstNode, AstPtr, SyntaxNodePtr};
 
 pub use generated::*;

@@ -1,6 +1,7 @@
 //! Lexical scopes: the nested regions that bound a name's visibility.
 
-use std::ops::Range;
+use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::def::DefId;
 
