@@ -6,11 +6,25 @@
 //! file — with the LSP-specific plumbing (async, URIs, classpath/dependency I/O) left out. It is
 //! deliberately Yew-agnostic so the UI layer stays thin.
 
+use core::ops::Range;
+
 use jals_fmt::{Config as FmtConfig, FormatOutput};
 use jals_fs::{FileTree, InMemoryFileTree};
 use jals_hir::{FileId, ProjectIndex};
-use jals_lint::Config as LintConfig;
+use jals_lint::{Config as LintConfig, Severity};
 use jals_syntax::{Parse, SyntaxNode};
+
+/// One diagnostic over the active file, in source byte offsets — the playground's neutral shape,
+/// converted to Monaco markers by the UI layer. Aggregates syntax errors, lint rule findings
+/// (including the cross-file `type-mismatch`), and cross-file unresolved type names.
+pub struct PlaygroundDiagnostic {
+    /// Byte range in the active source.
+    pub range: Range<usize>,
+    /// Human-readable message.
+    pub message: String,
+    /// Resolved severity.
+    pub severity: Severity,
+}
 
 /// Seed files, deliberately unformatted so the formatter has visible work to do, and
 /// cross-referencing so the project index resolves `Main`'s use of `Greeter` across files.
@@ -113,13 +127,24 @@ impl Workspace {
     }
 
     /// Build a [`ProjectIndex`] over *every* file (with the embedded stdlib stubs), analyse the
-    /// active file across the whole workspace, and render the result as a display report: a header
-    /// line (`<active> — <N> file(s) indexed (stdlib on)`), a blank line, then either
-    /// `No diagnostics.` or one `severity  rule  start..end  message` line per diagnostic.
+    /// active file across the whole workspace, and return the active file's source (read once)
+    /// together with its diagnostics in source byte offsets.
+    ///
+    /// The source is returned so the caller can reuse it — for parsing the active file, extracting
+    /// unresolved-type names, and mapping byte ranges to editor positions, it is read exactly once.
     ///
     /// This is the payoff of a real workspace: `Main`'s reference to `Greeter` resolves through
-    /// the *other* file's declaration, while a genuinely unknown type is reported.
-    pub fn lint_active(&self, config: &LintConfig) -> String {
+    /// the *other* file's declaration, while a genuinely unknown type is reported. The result
+    /// aggregates, over the active file:
+    /// - cross-file unresolved type names (the "cannot resolve symbol" the LSP surfaces
+    ///   separately from lint), as errors;
+    /// - the parser's syntax errors; and
+    /// - every enabled lint rule plus the index-aware cross-file `type-mismatch`.
+    pub fn analyze_active(&self, config: &LintConfig) -> (String, Vec<PlaygroundDiagnostic>) {
+        // The active file's source, read once and reused throughout (parse, name extraction, and
+        // the returned value for the caller's line mapping).
+        let source = self.active_source();
+
         // Parse every file once. The owned `SyntaxNode`s in `files` are what the builder indexes;
         // `parses` is retained only to reuse the active file's `Parse` below (for resolution and
         // the index-aware lint). A path's index into `paths` is its `FileId`.
@@ -127,7 +152,15 @@ impl Workspace {
         let parses: Vec<(FileId, Parse)> = paths
             .iter()
             .enumerate()
-            .map(|(i, path)| (FileId(i as u32), jals_syntax::parse(&self.read(path))))
+            .map(|(i, path)| {
+                // Reuse the already-read active source; read the other files from the tree.
+                let parse = if path == &self.active {
+                    jals_syntax::parse(&source)
+                } else {
+                    jals_syntax::parse(&self.read(path))
+                };
+                (FileId(i as u32), parse)
+            })
             .collect();
         let files: Vec<(FileId, SyntaxNode)> = parses
             .iter()
@@ -140,45 +173,33 @@ impl Workspace {
         let active_parse = &parses[active_idx].1;
         let root = active_parse.syntax();
         let resolved = jals_hir::resolve_node(&root);
-        let source = self.active_source();
 
-        let mut lines = Vec::new();
+        let mut diags = Vec::new();
 
-        // Cross-file unresolved type names (the "cannot resolve symbol" spans the LSP surfaces
-        // separately from lint).
+        // Cross-file unresolved type names.
         for range in index.unresolved_types(active_id, &resolved) {
             let name = source.get(range.clone()).unwrap_or("");
-            lines.push(format!(
-                "error  unresolved-type  {}..{}  cannot resolve `{}`",
-                range.start, range.end, name
-            ));
+            diags.push(PlaygroundDiagnostic {
+                message: format!("cannot resolve `{name}`"),
+                range,
+                severity: Severity::Error,
+            });
         }
 
-        // Every enabled lint rule plus the index-aware cross-file `type-mismatch`.
+        // The parser's syntax errors plus every enabled lint rule (and the index-aware cross-file
+        // `type-mismatch`). `lint.parse_errors` already carries the syntax errors, so the raw
+        // `Parse::errors` are not counted separately.
         let lint =
             jals_lint::lint_parse_with_index(active_parse, config, Some((&index, active_id)));
         for diag in lint.parse_errors.iter().chain(lint.diagnostics.iter()) {
-            lines.push(format!(
-                "{}  {}  {}..{}  {}",
-                diag.severity.as_str(),
-                diag.rule,
-                diag.range.start,
-                diag.range.end,
-                diag.message
-            ));
+            diags.push(PlaygroundDiagnostic {
+                message: format!("{}: {}", diag.rule, diag.message),
+                range: diag.range.clone(),
+                severity: diag.severity,
+            });
         }
 
-        let header = format!(
-            "{} — {} file(s) indexed (stdlib on)",
-            self.active,
-            paths.len()
-        );
-        let body = if lines.is_empty() {
-            "No diagnostics.".to_string()
-        } else {
-            lines.join("\n")
-        };
-        format!("{header}\n\n{body}")
+        (source, diags)
     }
 }
 
@@ -220,12 +241,13 @@ mod tests {
     fn cross_file_reference_resolves_and_seed_is_clean() {
         let mut ws = Workspace::new();
         ws.set_active("com/example/Main.java");
-        let report = ws.lint_active(&LintConfig::default());
+        let (_, diags) = ws.analyze_active(&LintConfig::default());
         // `Greeter` (another file), `String`/`System` (stdlib stubs) all resolve — the seed must
-        // stay clean so the "No diagnostics" demo holds.
+        // stay clean so the diagnostic-free demo holds.
         assert!(
-            report.contains("No diagnostics."),
-            "seed workspace should be diagnostic-free, got: {report}"
+            diags.is_empty(),
+            "seed workspace should be diagnostic-free, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
@@ -237,12 +259,11 @@ mod tests {
         ws.edit_active(
             "package com.example;\npublic class Main { void f(){ Missing m = null; } }\n",
         );
-        let report = ws.lint_active(&LintConfig::default());
+        let (_, diags) = ws.analyze_active(&LintConfig::default());
         assert!(
-            report
-                .lines()
-                .any(|l| l.contains("unresolved-type") && l.contains("Missing")),
-            "expected an unresolved-type diagnostic for `Missing`, got: {report}"
+            diags.iter().any(|d| d.message.contains("Missing")),
+            "expected an unresolved-type diagnostic for `Missing`, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 
