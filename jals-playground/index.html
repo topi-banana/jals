@@ -4,6 +4,33 @@
         <meta charset="utf-8" />
         <title>jals playground</title>
         <link data-trunk rel="tailwind-css" href="/style.css">
+
+        <!-- Monaco Editor, loaded from a CDN via its AMD loader. `monaco_glue.js`
+             (a wasm-bindgen snippet) drives the editor once this is ready. The
+             worker URL is a data-URL proxy that re-points Monaco's base worker at
+             the CDN, the standard workaround for the cross-origin worker
+             restriction. `java` uses a main-thread Monarch tokenizer, so no
+             language worker is needed. -->
+        <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+        <script>
+            var MONACO_CDN = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min";
+            require.config({ paths: { vs: MONACO_CDN + "/vs" } });
+            window.MonacoEnvironment = {
+                getWorkerUrl: function () {
+                    return (
+                        "data:text/javascript;charset=utf-8," +
+                        encodeURIComponent(
+                            "self.MonacoEnvironment = { baseUrl: '" +
+                                MONACO_CDN +
+                                "/' };\n" +
+                                "importScripts('" +
+                                MONACO_CDN +
+                                "/vs/base/worker/workerMain.js');"
+                        )
+                    );
+                },
+            };
+        </script>
     </head>
     <body></body>
 </html>

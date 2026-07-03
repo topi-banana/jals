@@ -1142,6 +1142,9 @@ dependencies = [
  "jals-hir",
  "jals-lint",
  "jals-syntax",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "yew",
 ]
