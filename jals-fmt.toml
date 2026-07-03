@@ -1,0 +1,65 @@
+# Google Java Style preset for jals-fmt.
+#
+# A best-effort `jalsfmt.toml` mirror of `google_config()` in `golden.rs` — the
+# config used to score jals-fmt's output against google-java-format. Only the keys
+# that diverge from `Config::default()` are listed; every omitted key keeps its
+# default. (Note: `jals` auto-discovers `jalsfmt.toml`, not `jals-fmt.toml` — rename
+# this file if you want it picked up automatically.)
+
+# Block indentation: Google style is 2 spaces.
+indent-style = "space"
+indent-width = 2
+# Continuation indentation: Google style indents wrapped lines by +4 columns
+# (double the +2 block indent).
+continuation-indent = 4
+# Column limit and blank-line policy.
+max-width = 100
+max-blank-lines = 1
+# Preserve a blank line at the start of a braced body (right after `{`), as GJF does.
+blank-line-at-block-start = true
+line-ending = "lf"
+insert-final-newline = true
+# K&R / "Egyptian" braces for both declarations and control flow.
+brace-style = "same-line"
+control-brace-style = "same-line"
+# Imports: a static group, a blank line, then a non-static group, each sorted.
+group-imports = true
+import-groups = ["static", "*"]
+# Modifiers in canonical JLS order; annotations on their own lines.
+reorder-modifiers = true
+annotation-placement = "expanded"
+inline_block_comments = true
+# Keep an embedded block comment — one with code on the same line both before and after it, e.g.
+# `java.lang./* @MarkerAnnotation */ String` — hugging the following token instead of flushing it to
+# the end of the line, as GJF does.
+inline-block-comments = true
+# Break before binary operators, packing as many operands per line as fit (fill).
+binop-separator = "front"
+binop-layout = "compressed"
+# Google style has no fixed per-construct width heuristics — it wraps purely against
+# the 100-column limit, so push every threshold up to the column limit.
+chain-width = 100
+fn-call-width = 100
+array-width = 100
+single-line-if-else-max-width = 100
+# Hug the closing `)` of a wrapped paren-delimited list (call/annotation args, parameters,
+# record header) onto the last item's line instead of dedenting it onto its own line — GJF
+# never puts that `)` on its own line. The array initializer's `}` is unaffected.
+closing-paren = "hug"
+# Preserve the tabular layout of grid-shaped array initializers (GJF keeps the source row
+# breaks of a table instead of reflowing it; e.g. `TabularMixedSignInitializer`).
+tabular-array-initializers = true
+# Break after the `=` of a variable/field initializer or assignment whose value is a `switch`
+# expression, putting the switch on its own continuation-indented line (GJF; e.g.
+# `ExpressionSwitch`). `return switch …` and switch statements are unaffected.
+switch-expression-on-new-line = true
+# Wrap a `case` label's constant list (the comma-separated `case` constants) across lines when the
+# arm overflows the column limit — each constant on its own continuation-indented line, the comma
+# kept attached, the `->` / `:` on the last constant's line (GJF; e.g. `ExpressionSwitch`'s
+# `breakLongCaseArgs`). A short list, a single constant, and `default` stay on one line.
+wrap-case-labels = true
+# Surround an "operator colon" — an enhanced `for` (`for (T x : xs)`), a ternary (`a ? b : c`),
+# and an `assert` message (`assert c : m`) — with spaces, as GJF does. The colon of an unnamed
+# `_` for-each variable stays hugged (`for (T _: xs)`), as do label / `case` colons (`label:`,
+# `case x:`).
+space-around-operator-colon = true
