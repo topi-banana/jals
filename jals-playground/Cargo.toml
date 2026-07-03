@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }
 jals-fmt = { workspace = true }
+jals-fs = { workspace = true }
+jals-hir = { workspace = true }
+jals-lint = { workspace = true }
 jals-syntax = { workspace = true }
 web-sys = { version = "0.3", features = [
   "HtmlInputElement",
