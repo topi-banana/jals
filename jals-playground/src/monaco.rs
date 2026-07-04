@@ -5,6 +5,7 @@
 //! wires the editor, while the root [`crate::app::App`] orchestrates content operations —
 //! switching files, applying a format, repainting diagnostics — through these functions.
 
+use jals_hir::DefKind;
 use jals_lint::Severity;
 use wasm_bindgen::prelude::*;
 
@@ -15,13 +16,20 @@ extern "C" {
     #[wasm_bindgen(js_name = initMonaco)]
     pub fn init_monaco() -> js_sys::Promise;
 
-    /// Create the editor in `el`, showing `path`'s model, calling `on_change` (debounced) on edits.
+    /// Eagerly create a URI-backed model for every `[path, text]` pair, so cross-file navigation and
+    /// peek-references can reach files never opened in the editor.
+    #[wasm_bindgen(js_name = createModels)]
+    pub fn create_models(files: &js_sys::Array);
+
+    /// Create the editor in `el`, showing `path`'s model, calling `on_change` (debounced) on edits
+    /// and `on_open` when a cross-file navigation switches the model to another file.
     #[wasm_bindgen(js_name = createEditor)]
     pub fn create_editor(
         el: &web_sys::Element,
         path: &str,
         value: &str,
         on_change: &js_sys::Function,
+        on_open: &js_sys::Function,
     );
 
     /// Switch the editor to `path`'s model (created from `value` if new).
@@ -54,7 +62,127 @@ extern "C" {
     /// Register the Java document-formatting provider, calling `format` for the text.
     #[wasm_bindgen(js_name = registerFormatter)]
     pub fn register_formatter(format: &js_sys::Function);
+
+    // --- Language-feature providers. Each is registered once and calls a synchronous Rust closure
+    // that runs the analysis and returns a plain Monaco payload (see `providers`). ---
+
+    /// Register the hover provider. `hover(text, line, col) -> { contents } | null`.
+    #[wasm_bindgen(js_name = registerHover)]
+    pub fn register_hover(hover: &js_sys::Function);
+
+    /// Register the completion provider. `complete(text, line, col) -> { suggestions }`.
+    #[wasm_bindgen(js_name = registerCompletion)]
+    pub fn register_completion(complete: &js_sys::Function);
+
+    /// Register the signature-help provider. `help(text, line, col) -> { value, dispose } | null`.
+    #[wasm_bindgen(js_name = registerSignatureHelp)]
+    pub fn register_signature_help(help: &js_sys::Function);
+
+    /// Register the document-symbol provider. `symbols(text) -> DocumentSymbol[]`.
+    #[wasm_bindgen(js_name = registerDocumentSymbols)]
+    pub fn register_document_symbols(symbols: &js_sys::Function);
+
+    /// Register the document-highlight provider. `highlight(text, line, col) -> DocumentHighlight[]`.
+    #[wasm_bindgen(js_name = registerDocumentHighlight)]
+    pub fn register_document_highlight(highlight: &js_sys::Function);
+
+    /// Register the definition provider. `definition(text, line, col) -> Location | null`.
+    #[wasm_bindgen(js_name = registerDefinition)]
+    pub fn register_definition(definition: &js_sys::Function);
+
+    /// Register the references provider. `references(text, line, col, includeDecl) -> Location[]`.
+    #[wasm_bindgen(js_name = registerReferences)]
+    pub fn register_references(references: &js_sys::Function);
+
+    // --- JsValue factories for provider results (plain Monaco payload objects). ---
+
+    /// A hover payload showing `markdown` as a Java-fenced code block.
+    #[wasm_bindgen(js_name = hoverResult)]
+    pub fn hover_result(markdown: &str) -> JsValue;
+
+    /// One completion suggestion (`kind` is a Monaco `CompletionItemKind`).
+    #[wasm_bindgen(js_name = completionItem)]
+    pub fn completion_item(label: &str, kind: u32, detail: &str) -> JsValue;
+
+    /// One signature (`param_offsets` is an array of `[start, end]` UTF-16 label offsets).
+    #[wasm_bindgen(js_name = signatureInfo)]
+    pub fn signature_info(label: &str, param_offsets: &js_sys::Array) -> JsValue;
+
+    /// A signature-help payload wrapping the overloads and the active signature/parameter.
+    #[wasm_bindgen(js_name = signatureHelpResult)]
+    pub fn signature_help_result(
+        signatures: &js_sys::Array,
+        active_signature: u32,
+        active_parameter: u32,
+    ) -> JsValue;
+
+    /// One document-symbol node (`kind` is a Monaco `SymbolKind`; `children` may be empty).
+    #[wasm_bindgen(js_name = symbolNode)]
+    pub fn symbol_node(
+        name: &str,
+        kind: u32,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+        children: &js_sys::Array,
+    ) -> JsValue;
+
+    /// One occurrence highlight (`write` selects Monaco's Write vs. Read kind).
+    #[wasm_bindgen(js_name = highlightResult)]
+    pub fn highlight_result(
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+        write: bool,
+    ) -> JsValue;
+
+    /// One navigation location (a target file `path` plus a range within it).
+    #[wasm_bindgen(js_name = locationResult)]
+    pub fn location_result(
+        path: &str,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    ) -> JsValue;
 }
+
+/// The Monaco `CompletionItemKind` (the item icon) for a completion's [`DefKind`].
+pub fn completion_kind(kind: DefKind) -> u32 {
+    use DefKind::*;
+    match kind {
+        Method | Constructor => 0, // Method
+        Field => 3,                // Field
+        EnumConstant => 16,        // EnumMember
+        Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 4, // Variable
+        TypeParam => 24,           // TypeParameter
+        Class | Record => 5,       // Class
+        Interface | AnnotationType => 7, // Interface
+        Enum => 15,                // Enum
+    }
+}
+
+/// The Monaco `SymbolKind` (the outline icon) for a document symbol's [`DefKind`].
+pub fn symbol_kind(kind: DefKind) -> u32 {
+    use DefKind::*;
+    match kind {
+        Class => 4,                                                             // Class
+        Record => 22,                                                           // Struct
+        Interface | AnnotationType => 10,                                       // Interface
+        Enum => 9,                                                              // Enum
+        Field => 7,                                                             // Field
+        Method => 5,                                                            // Method
+        Constructor => 8,                                                       // Constructor
+        EnumConstant => 21,                                                     // EnumMember
+        TypeParam => 25,                                                        // TypeParameter
+        Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 12, // Variable
+    }
+}
+
+/// The Monaco `CompletionItemKind` for the Java keyword items (`Keyword`).
+pub const COMPLETION_KIND_KEYWORD: u32 = 17;
 
 /// One diagnostic marker in Monaco coordinates — one-based line/column, UTF-16, ready to display.
 /// The caller maps its byte-offset diagnostics into these (via [`crate::line_index::LineIndex`]);

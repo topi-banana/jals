@@ -23,6 +23,8 @@ pub struct EditorPaneProps {
     pub on_change: Callback<String>,
     /// Emitted once, after the editor exists and is ready for the initial diagnostics.
     pub on_ready: Callback<()>,
+    /// Emitted when a cross-file navigation switches the editor to another file (its path).
+    pub on_open: Callback<String>,
     /// Shared formatter config the once-registered *Format Document* provider reads.
     pub config: Rc<RefCell<Config>>,
 }
@@ -76,6 +78,13 @@ impl Component for EditorPane {
             on_change.emit(value);
         });
 
+        // Monaco calls this when a cross-file navigation switches the model to another file, so the
+        // app can update the active file, the pane label, and the file-tree highlight.
+        let on_open = props.on_open.clone();
+        let open_closure = Closure::<dyn FnMut(String)>::new(move |path: String| {
+            on_open.emit(path);
+        });
+
         // "Format Document" (Ctrl+Shift+I) formats with the latest shared config.
         let config = props.config.clone();
         let formatter = Closure::<dyn FnMut(String) -> String>::new(move |text: String| {
@@ -86,12 +95,19 @@ impl Component for EditorPane {
         let on_ready = props.on_ready.clone();
         spawn_local(async move {
             JsFuture::from(monaco::init_monaco()).await.ok();
-            monaco::create_editor(&el, &path, &source, change_closure.as_ref().unchecked_ref());
+            monaco::create_editor(
+                &el,
+                &path,
+                &source,
+                change_closure.as_ref().unchecked_ref(),
+                open_closure.as_ref().unchecked_ref(),
+            );
             monaco::register_formatter(formatter.as_ref().unchecked_ref());
             // Keep the closures alive for the app's lifetime (a single editor instance).
             change_closure.forget();
+            open_closure.forget();
             formatter.forget();
-            // Now that the editor exists, let the app paint the initial diagnostics.
+            // Now that the editor exists, let the app register providers and paint diagnostics.
             on_ready.emit(());
         });
     }
