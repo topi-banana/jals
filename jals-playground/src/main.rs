@@ -15,6 +15,7 @@
 //! - [`components`] — the presentational pieces (header, settings bar, file tree, editor, syntax).
 //! - [`monaco`] — the typed Rust bridge to the single imperative Monaco editor instance.
 //! - [`workspace`] — the wasm-compatible in-memory multi-file workspace + analysis.
+//! - [`providers`] — wires each Monaco language-feature provider to the workspace analysis.
 //! - [`line_index`] — byte-offset → Monaco (UTF-16) position mapping for diagnostics.
 //!
 //! [`Config`]: jals_fmt::Config
@@ -23,6 +24,7 @@ mod app;
 mod components;
 mod line_index;
 mod monaco;
+mod providers;
 mod workspace;
 
 use app::App;

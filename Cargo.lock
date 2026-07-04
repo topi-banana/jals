@@ -1143,6 +1143,7 @@ dependencies = [
  "jals-lint",
  "jals-syntax",
  "js-sys",
+ "text-size",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

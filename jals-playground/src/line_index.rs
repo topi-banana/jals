@@ -53,6 +53,36 @@ impl LineIndex {
         let (el, ec) = self.position(text, range.end);
         (sl + 1, sc + 1, el + 1, ec + 1)
     }
+
+    /// Convert a Monaco position (one-based line + one-based UTF-16 column) to a byte offset — the
+    /// inverse of the per-end mapping in [`to_monaco`](Self::to_monaco).
+    ///
+    /// Lines past the end of the document, and columns past the end of a line, are clamped; a column
+    /// that would land inside a multi-byte char stops at that char's start. So this never panics and
+    /// never returns a non-boundary offset. Ported from `jals-lsp`'s `LineIndex::offset`, with the
+    /// LSP zero-based `Position` replaced by Monaco's one-based coordinates.
+    pub fn offset(&self, text: &str, line: u32, col: u32) -> usize {
+        // Monaco coordinates are one-based; drop to zero-based for the line/column math.
+        let line = line.saturating_sub(1) as usize;
+        let col = col.saturating_sub(1);
+        let Some(&line_start) = self.line_starts.get(line) else {
+            return self.len; // line past EOF -> clamp to end of document
+        };
+        let line_end = self.line_starts.get(line + 1).copied().unwrap_or(self.len);
+
+        // Walk UTF-16 columns from the line start until `col` units are consumed.
+        let mut remaining = col;
+        let mut off = line_start;
+        for c in text[line_start..line_end].chars() {
+            let w = c.len_utf16() as u32;
+            if remaining < w {
+                break; // not enough columns left to step over this char
+            }
+            remaining -= w;
+            off += c.len_utf8();
+        }
+        off
+    }
 }
 
 /// Round `off` down to the nearest UTF-8 char boundary in `text`.
@@ -137,5 +167,45 @@ mod tests {
         let idx = LineIndex::new(text);
         // bytes 1..3 = 'b' on line 0 through the start of line 1.
         assert_eq!(idx.to_monaco(text, &(1..3)), (1, 2, 2, 1));
+    }
+
+    #[test]
+    fn offset_round_trips_with_position() {
+        let text = "abc\ndef\nghi";
+        let idx = LineIndex::new(text);
+        for o in 0..=text.len() {
+            let (line, col) = idx.position(text, o);
+            // `position` is zero-based; `offset` takes one-based Monaco coordinates.
+            assert_eq!(idx.offset(text, line + 1, col + 1), o, "offset {o}");
+        }
+    }
+
+    #[test]
+    fn offset_counts_utf16_columns() {
+        // 'あ' = 3 UTF-8 bytes / 1 UTF-16 unit; '😀' = 4 bytes / 2 units.
+        let text = "aあ😀b";
+        let idx = LineIndex::new(text);
+        assert_eq!(idx.offset(text, 1, 1), 0); // before 'a'
+        assert_eq!(idx.offset(text, 1, 2), 1); // after 'a'
+        assert_eq!(idx.offset(text, 1, 3), 4); // after 'あ'
+        assert_eq!(idx.offset(text, 1, 5), 8); // after '😀' (2 UTF-16 units)
+        assert_eq!(idx.offset(text, 1, 6), 9); // after 'b'
+    }
+
+    #[test]
+    fn offset_clamps_out_of_range() {
+        let text = "ab\ncd";
+        let idx = LineIndex::new(text);
+        assert_eq!(idx.offset(text, 1, 3), 2); // exact end of line 0 content
+        assert_eq!(idx.offset(text, 1, 99), 3); // past line 0 -> clamps to its end (the '\n')
+        assert_eq!(idx.offset(text, 99, 1), 5); // line past EOF -> end of document
+    }
+
+    #[test]
+    fn offset_clamps_inside_a_multibyte_char() {
+        // A column landing inside 'あ' (byte 1) stops at that char's start (byte 1 is the char).
+        let text = "aあb";
+        let idx = LineIndex::new(text);
+        assert_eq!(idx.offset(text, 1, 2), 1); // after 'a', before 'あ'
     }
 }
