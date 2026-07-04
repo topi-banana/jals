@@ -575,11 +575,7 @@ fn load_project_classpath(manifest: &Manifest, root: &Path) -> jals_classpath::C
     }
     let load = jals_classpath::load_classpath(&entries);
     for warning in &load.warnings {
-        eprintln!(
-            "warning: classpath: {}: {}",
-            warning.path.display(),
-            warning.message
-        );
+        eprintln!("warning: classpath: {}: {}", warning.path, warning.message);
     }
     load
 }

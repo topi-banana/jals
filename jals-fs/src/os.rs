@@ -76,7 +76,17 @@ impl FileTree for OsFileTree {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).map_err(|err| map_io(path, &err))?;
         }
-        std::fs::write(p, contents).map_err(|err| map_io(path, &err))
+        // Atomic create-or-replace: write to a `.part` sibling in the same directory, then rename it
+        // into place. `rename` is atomic on a single filesystem, so a reader never observes a
+        // partially-written file, and an interrupted write leaves only the `.part` (whose extension
+        // is `part`, so `walk_ext` never surfaces it) — "the file exists" therefore implies it is
+        // complete, which callers rely on for skip-if-exists caching. `InMemoryFileTree::write` is
+        // already atomic (a single map insert); this brings the OS impl to the same contract.
+        let mut tmp = String::with_capacity(path.len() + 5);
+        tmp.push_str(path);
+        tmp.push_str(".part");
+        std::fs::write(Path::new(&tmp), contents).map_err(|err| map_io(path, &err))?;
+        std::fs::rename(Path::new(&tmp), p).map_err(|err| map_io(path, &err))
     }
 }
 

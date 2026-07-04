@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::Deserialize;
 
@@ -554,8 +555,13 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// The synthetic manifest name used for error reporting when parsing from text (no real path).
+    const IN_MEMORY_NAME: &'static str = "jals.toml";
+
     /// Structurally validate the manifest, independent of any filesystem (pure, so it stays
-    /// `wasm32`-compatible and is called by [`Manifest::from_file`] right after parsing).
+    /// `wasm32`-compatible and is called by [`Manifest::from_file`] right after parsing, and by the
+    /// [`FromStr`](core::str::FromStr) impl — the parse-from-text entry point for hosts with no
+    /// filesystem, e.g. the browser playground).
     ///
     /// Checks the `[[bin]]` table: every bin needs a non-empty `name` and `main-class`, names must
     /// be unique, and `[package] default-run` (when set) must name a declared bin.
@@ -749,6 +755,28 @@ impl Manifest {
             dir = d.parent();
         }
         None
+    }
+}
+
+/// Parse and validate a manifest from its TOML text, with no filesystem access — the
+/// `wasm32`-friendly counterpart of [`Manifest::from_file`] for hosts that already hold the text
+/// (e.g. the browser playground parsing a `jals.toml` editor buffer). Parse / validation errors are
+/// keyed to a synthetic `jals.toml` name (there is no real path).
+impl FromStr for Manifest {
+    type Err = ManifestError;
+
+    fn from_str(text: &str) -> Result<Manifest, ManifestError> {
+        let manifest: Manifest = toml::from_str(text).map_err(|source| ManifestError::Parse {
+            path: PathBuf::from(Manifest::IN_MEMORY_NAME),
+            source,
+        })?;
+        manifest
+            .validate()
+            .map_err(|source| ManifestError::Invalid {
+                path: PathBuf::from(Manifest::IN_MEMORY_NAME),
+                source,
+            })?;
+        Ok(manifest)
     }
 }
 

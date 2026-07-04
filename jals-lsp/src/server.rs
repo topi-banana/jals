@@ -173,11 +173,7 @@ impl ServerState {
         // project still gets analysis from its sources, stubs, and the rest of the classpath.
         let load = jals_classpath::load_classpath(&entries);
         for warning in &load.warnings {
-            eprintln!(
-                "jals-lsp: classpath: {}: {}",
-                warning.path.display(),
-                warning.message
-            );
+            eprintln!("jals-lsp: classpath: {}: {}", warning.path, warning.message);
         }
 
         // Fallback go-to-definition source: synthesize a signature-only `.java` skeleton from every

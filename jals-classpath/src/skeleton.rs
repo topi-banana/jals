@@ -19,7 +19,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::path::PathBuf;
 
 use jals_classfile::{
     Attribute, AttributeBody, ClassAccessFlags, ClassFile, ClassSignature, ConstantPool,
@@ -45,9 +44,11 @@ pub(crate) struct SkeletonGroup<'a> {
 }
 
 impl SkeletonGroup<'_> {
-    /// Where to write the file, relative to the decompiled-sources root — the package as directories
-    /// plus `<TopLevel>.java`, so the on-disk layout mirrors the package (`a/b/Outer.java`).
-    pub(crate) fn rel_path(&self) -> PathBuf {
+    /// Where to write the file, relative to the decompiled-sources root — the package as `/`-separated
+    /// directories plus `<TopLevel>.java`, so the on-disk layout mirrors the package (`a/b/Outer.java`).
+    /// A virtual `/`-path, so the caller joins it onto a [`jals_fs::FileTree`] dir without a
+    /// `PathBuf` round-trip.
+    pub(crate) fn rel_path(&self) -> String {
         source_rel_path(&self.package, &self.top)
     }
 
@@ -131,15 +132,16 @@ fn class_entry(cf: &ClassFile) -> Option<ClassEntry> {
     })
 }
 
-/// The package-relative output path: the package as directories plus `<TopLevel>.java`.
-fn source_rel_path(package: &str, top: &str) -> PathBuf {
-    let mut path = PathBuf::new();
+/// The package-relative output path: the package as `/`-separated directories plus `<TopLevel>.java`.
+fn source_rel_path(package: &str, top: &str) -> String {
+    let mut path = String::new();
     if !package.is_empty() {
-        for segment in package.split('.') {
-            path.push(segment);
-        }
+        // The package is dotted (`a.b`); the on-disk layout is `/`-separated (`a/b/`).
+        path.push_str(&package.replace('.', "/"));
+        path.push('/');
     }
-    path.push(format!("{top}.java"));
+    path.push_str(top);
+    path.push_str(".java");
     path
 }
 
@@ -646,7 +648,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         // `Box` is in the default package, so it is `Box.java` at the root.
-        assert_eq!(group.rel_path(), PathBuf::from("Box.java"));
+        assert_eq!(group.rel_path(), "Box.java");
         let text = group.render();
         // The generic type, its field, and its methods — each with its decompiled body (Box.class
         // carries no debug info, so parameters keep their `argN` fallback names).
