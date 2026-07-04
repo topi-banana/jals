@@ -5,8 +5,9 @@ use std::io::{IsTerminal, Write};
 use std::ops::Range;
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
+use jals_config::Severity;
 use jals_fmt::FormatOutput;
-use jals_lint::{LintOutput, Severity};
+use jals_lint::LintOutput;
 use similar::{ChangeTag, TextDiff};
 
 const RESET: &str = "\x1b[0m";

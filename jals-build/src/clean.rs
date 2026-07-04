@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::manifest::Manifest;
+use jals_config::Manifest;
 
 /// Resolve the build-output paths that `jals clean` should remove for `manifest`, each resolved
 /// against `project_root`.

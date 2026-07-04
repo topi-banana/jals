@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::Path;
 
-use jals_build::{Dependency, JarDependency, Manifest};
 use jals_classpath::{extract_nested_jars, load_classpath, resolve_project_dependencies};
+use jals_config::{Dependency, JarDependency, Manifest};
 
 /// `Box.class` (the same fixture `load.rs` and `jals-hir`'s classpath-bridge tests use).
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");

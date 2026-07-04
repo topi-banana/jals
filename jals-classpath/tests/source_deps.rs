@@ -5,8 +5,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use jals_build::Manifest;
+use jals_build::ManifestExt;
 use jals_classpath::resolve_project_source_deps;
+use jals_config::Manifest;
 
 /// Write `jals.toml` with `body` under `root` and load it (parsing + validating), so the test drives
 /// the real classification path.

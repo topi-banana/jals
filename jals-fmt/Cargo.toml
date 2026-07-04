@@ -4,12 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# The config loaders (`Config::from_file` / `Config::discover`) read through the `jals-fs` `FileTree`
-# abstraction — pure/`no_std` here (the host passes an `OsFileTree`; wasm passes an in-memory tree).
-jals-fs.workspace = true
+# The formatter configuration (`Config` and its option enums) lives in `jals-config`, the shared
+# config-model crate; `jals-fmt` re-exports it internally and formats with it.
+jals-config.workspace = true
 jals-syntax.workspace = true
-serde = { workspace = true, features = ["derive"] }
-toml.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

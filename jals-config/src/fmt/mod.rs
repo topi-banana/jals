@@ -4,9 +4,9 @@
 //! kebab-case (e.g. `indent-style`, `max-blank-lines`).
 //!
 //! The option enums are split out for navigability: the layout / style enums live in
-//! [`options`], the numeric-literal case enums in [`literals`], and the load / parse error
-//! in [`error`]. All are re-exported here, so the whole config surface is reachable as
-//! `config::*`.
+//! [`options`], the numeric-literal case enums in [`literals`]. Both are re-exported here, so the
+//! whole config surface is reachable as `fmt::*`. The load / parse error is the shared
+//! [`ConfigError`](crate::ConfigError).
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -15,14 +15,13 @@ use alloc::vec::Vec;
 use jals_fs::FileTree;
 use serde::Deserialize;
 
-mod error;
 mod literals;
 mod options;
 
 #[cfg(test)]
 mod tests;
 
-pub use error::ConfigError;
+pub use crate::loader::ConfigError;
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase};
 pub use options::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, ControlBraceStyle,
@@ -383,7 +382,9 @@ impl Default for Config {
 
 impl Config {
     /// One indentation level rendered as a string.
-    pub(crate) fn indent_unit(&self) -> String {
+    ///
+    /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
+    pub fn indent_unit(&self) -> String {
         match self.indent_style {
             IndentStyle::Tab => "\t".to_string(),
             IndentStyle::Space => " ".repeat(self.indent_width),
@@ -391,7 +392,9 @@ impl Config {
     }
 
     /// The number of display columns one indentation level occupies.
-    pub(crate) fn indent_cols(&self) -> usize {
+    ///
+    /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
+    pub fn indent_cols(&self) -> usize {
         self.indent_width.max(1)
     }
 
@@ -401,7 +404,9 @@ impl Config {
     /// [`continuation_indent`](Config::continuation_indent) is unset, so default output is
     /// unchanged. In tab style it equals one indentation level (`indent_cols()`), keeping the
     /// emitted indentation a whole number of tabs.
-    pub(crate) fn continuation_cols(&self) -> usize {
+    ///
+    /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
+    pub fn continuation_cols(&self) -> usize {
         match self.indent_style {
             IndentStyle::Tab => self.indent_cols(),
             IndentStyle::Space => self.continuation_indent.unwrap_or(self.indent_width).max(1),
@@ -409,7 +414,9 @@ impl Config {
     }
 
     /// The resolved line terminator for input `src`, honoring `Auto`/`Native`.
-    pub(crate) fn newline(&self, src: &str) -> &'static str {
+    ///
+    /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
+    pub fn newline(&self, src: &str) -> &'static str {
         self.line_ending.resolve(src)
     }
 
@@ -421,14 +428,7 @@ impl Config {
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
     pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
-        let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_string(),
-            source,
-        })?;
-        toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_string(),
-            source,
-        })
+        crate::loader::load(fs, path)
     }
 
     /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalsfmt.toml`, read
@@ -439,14 +439,6 @@ impl Config {
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
     pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
-        let mut dir = Some(start_dir);
-        while let Some(d) = dir {
-            let candidate = jals_fs::path::join(d, "jalsfmt.toml");
-            if fs.is_file(&candidate) {
-                return Config::from_file(fs, &candidate);
-            }
-            dir = jals_fs::path::parent(d);
-        }
-        Ok(Config::default())
+        crate::loader::discover(fs, start_dir, "jalsfmt.toml")
     }
 }

@@ -1,10 +1,11 @@
 //! Property tests for the formatter's correctness invariants.
 
-use jals_fmt::{
+use jals_config::fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, Config, FloatLiteralTrailingZero,
     FnParamsLayout, HexLiteralCase, LiteralSuffixCase, SwitchCaseBody, TrailingComma,
-    TypePunctuationDensity, format_source,
+    TypePunctuationDensity,
 };
+use jals_fmt::format_source;
 use jals_syntax::{SyntaxKind, parse};
 use proptest::prelude::*;
 
@@ -966,7 +967,7 @@ proptest! {
     /// block comments — are preserved verbatim, so they may legitimately keep a bare LF.)
     #[test]
     fn crlf_idempotent(src in javaish()) {
-        let cfg = Config { line_ending: jals_fmt::LineEnding::Crlf, ..Config::default() };
+        let cfg = Config { line_ending: jals_config::fmt::LineEnding::Crlf, ..Config::default() };
         let once = fmt_with(&src, &cfg);
         let twice = fmt_with(&once, &cfg);
         prop_assert_eq!(&once, &twice);
@@ -975,7 +976,7 @@ proptest! {
     /// Auto line-ending detection keeps formatting idempotent.
     #[test]
     fn auto_idempotent(src in javaish()) {
-        let cfg = Config { line_ending: jals_fmt::LineEnding::Auto, ..Config::default() };
+        let cfg = Config { line_ending: jals_config::fmt::LineEnding::Auto, ..Config::default() };
         let once = fmt_with(&src, &cfg);
         let twice = fmt_with(&once, &cfg);
         prop_assert_eq!(&once, &twice);
@@ -984,7 +985,7 @@ proptest! {
     /// Next-line brace style keeps formatting idempotent.
     #[test]
     fn next_line_brace_idempotent(src in javaish()) {
-        let cfg = Config { brace_style: jals_fmt::BraceStyle::NextLine, ..Config::default() };
+        let cfg = Config { brace_style: jals_config::fmt::BraceStyle::NextLine, ..Config::default() };
         let once = fmt_with(&src, &cfg);
         let twice = fmt_with(&once, &cfg);
         prop_assert_eq!(once, twice);
@@ -994,7 +995,7 @@ proptest! {
     /// whitespace around a brace).
     #[test]
     fn next_line_brace_preserves_significant_tokens(src in javaish()) {
-        let cfg = Config { brace_style: jals_fmt::BraceStyle::NextLine, ..Config::default() };
+        let cfg = Config { brace_style: jals_config::fmt::BraceStyle::NextLine, ..Config::default() };
         let out = fmt_with(&src, &cfg);
         prop_assert_eq!(sig_tokens(&src), sig_tokens(&out));
     }
@@ -1004,8 +1005,8 @@ proptest! {
     #[test]
     fn full_allman_idempotent(src in javaish()) {
         let cfg = Config {
-            brace_style: jals_fmt::BraceStyle::NextLine,
-            control_brace_style: jals_fmt::ControlBraceStyle::NextLine,
+            brace_style: jals_config::fmt::BraceStyle::NextLine,
+            control_brace_style: jals_config::fmt::ControlBraceStyle::NextLine,
             ..Config::default()
         };
         let once = fmt_with(&src, &cfg);
@@ -1017,8 +1018,8 @@ proptest! {
     #[test]
     fn full_allman_preserves_significant_tokens(src in javaish()) {
         let cfg = Config {
-            brace_style: jals_fmt::BraceStyle::NextLine,
-            control_brace_style: jals_fmt::ControlBraceStyle::NextLine,
+            brace_style: jals_config::fmt::BraceStyle::NextLine,
+            control_brace_style: jals_config::fmt::ControlBraceStyle::NextLine,
             ..Config::default()
         };
         let out = fmt_with(&src, &cfg);

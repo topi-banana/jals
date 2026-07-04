@@ -8,13 +8,15 @@
 
 use core::ops::Range;
 
-use jals_fmt::{Config as FmtConfig, FormatOutput};
+use jals_config::Severity;
+use jals_config::fmt::Config as FmtConfig;
+use jals_config::lint::Config as LintConfig;
+use jals_fmt::FormatOutput;
 use jals_fs::{FileTree, InMemoryFileTree};
 use jals_hir::{
     DefKind, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved, Ty,
     TypeResolution,
 };
-use jals_lint::{Config as LintConfig, Severity};
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::{TextRange, TextSize};

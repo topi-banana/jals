@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::manifest::Manifest;
+use jals_config::Manifest;
 
 /// A resolved command line: a program plus its argument vector. Pure data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +178,7 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Manifest;
+    use jals_config::Manifest;
 
     const ROOT: &str = "/proj";
 

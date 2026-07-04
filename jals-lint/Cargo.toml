@@ -4,13 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# The config loaders (`Config::from_file` / `Config::discover`) read through the `jals-fs` `FileTree`
-# abstraction — pure/`no_std` here (the host passes an `OsFileTree`; wasm passes an in-memory tree).
-jals-fs.workspace = true
+# The linter configuration (`Config`) and the `Severity` value type live in `jals-config`, the shared
+# config-model crate; `jals-lint` lints with them and re-exports `Severity` through `diagnostic`.
+jals-config.workspace = true
 jals-hir.workspace = true
 jals-syntax.workspace = true
-serde = { workspace = true, features = ["derive"] }
-toml.workspace = true
 
 [dev-dependencies]
 expect-test = "1.5"

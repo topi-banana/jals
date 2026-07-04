@@ -14,14 +14,15 @@
 //!   reorder imports into prefix-defined groups (multiset preserved; it overrides
 //!   `reorder_imports`), [`Config::reorder_modifiers`] may reorder a declaration's modifiers
 //!   into canonical order, hoisting annotations to the front (multiset preserved),
-//!   [`Config::trailing_comma`] (when not [`Preserve`](TrailingComma::Preserve)) may add or
-//!   drop the single trailing comma of an array initializer,
-//!   [`Config::hex_literal_case`] (when not [`Preserve`](HexLiteralCase::Preserve)) may rewrite
-//!   the case of the hex digits of an integer / float literal,
+//!   [`Config::trailing_comma`] (when not [`Preserve`](jals_config::fmt::TrailingComma::Preserve))
+//!   may add or drop the single trailing comma of an array initializer,
+//!   [`Config::hex_literal_case`] (when not [`Preserve`](jals_config::fmt::HexLiteralCase::Preserve))
+//!   may rewrite the case of the hex digits of an integer / float literal,
 //!   [`Config::float_literal_trailing_zero`] (when not
-//!   [`Preserve`](FloatLiteralTrailingZero::Preserve)) may add or strip the trailing zero of a
-//!   decimal float literal, and [`Config::literal_suffix_case`] (when not
-//!   [`Preserve`](LiteralSuffixCase::Preserve)) may rewrite the case of an integer / float
+//!   [`Preserve`](jals_config::fmt::FloatLiteralTrailingZero::Preserve)) may add or strip the
+//!   trailing zero of a decimal float literal, and [`Config::literal_suffix_case`] (when not
+//!   [`Preserve`](jals_config::fmt::LiteralSuffixCase::Preserve)) may rewrite the case of an
+//!   integer / float
 //!   literal's trailing `l` / `f` / `d` type suffix (the token *kind* sequence is preserved
 //!   exactly; only a literal's text may change).
 //! - **Comments are never dropped.** Each stays glued to its anchoring token, so a comment
@@ -40,12 +41,8 @@ mod render;
 mod rules;
 mod wrap;
 
-pub use config::ConfigError;
-pub use config::{
-    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
-    ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
-    LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
-};
+use config::Config;
+
 pub use output::{FormatOutput, Warning};
 
 /// Format `src` according to `config`.

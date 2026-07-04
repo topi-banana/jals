@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use jals_fmt::Config;
+use jals_config::fmt::Config;
 use jals_fs::InMemoryFileTree;
 use jals_hir::{LoweredClasspath, ProjectIndex};
 use wasm_bindgen::JsValue;
@@ -76,7 +76,7 @@ impl App {
         let diags = self
             .workspace
             .borrow()
-            .analyze_active(&jals_lint::Config::default());
+            .analyze_active(&jals_config::lint::Config::default());
         monaco::set_diagnostics(diags.iter().map(|d| monaco::Marker {
             start_line: d.range.start_line,
             start_col: d.range.start_col,
@@ -300,7 +300,7 @@ async fn resolve_classpath(
     cache: Rc<RefCell<InMemoryFileTree>>,
 ) -> Result<(LoweredClasspath, String), String> {
     let manifest = toml
-        .parse::<jals_build::Manifest>()
+        .parse::<jals_config::Manifest>()
         .map_err(|e| e.to_string())?;
     let fetcher = BrowserFetcher::new(proxy);
     let mut snapshot = cache.borrow().clone();

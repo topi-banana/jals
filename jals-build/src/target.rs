@@ -13,7 +13,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::manifest::Manifest;
+use jals_config::Manifest;
 
 /// Resolve the fully-qualified main class `jals run` should execute, given an optional `--bin
 /// <name>` selector.
@@ -120,7 +120,7 @@ impl Error for ResolveTargetError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{Bin, Manifest};
+    use jals_config::{Bin, Manifest};
 
     fn bin(name: &str, main_class: &str) -> Bin {
         Bin {

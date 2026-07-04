@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use jals_fmt::{
+use jals_config::fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
     ControlBraceStyle, IndentStyle, LineEnding,
 };
@@ -306,7 +306,7 @@ mod tests {
         assert!(c.space_around_operator_colon);
         // google-java-format breaks and indents a legacy (colon-form) switch's case bodies; this
         // is jals's default, so `google_config` inherits it.
-        assert_eq!(c.switch_case_body, jals_fmt::SwitchCaseBody::Always);
+        assert_eq!(c.switch_case_body, jals_config::fmt::SwitchCaseBody::Always);
     }
 
     #[test]

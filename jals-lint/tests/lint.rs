@@ -1,5 +1,7 @@
 use expect_test::{Expect, expect};
-use jals_lint::{Config, LintOutput, Severity, lint_source};
+use jals_config::Severity;
+use jals_config::lint::Config;
+use jals_lint::{LintOutput, lint_source};
 
 /// Render the diagnostics (then parser errors) of a default-config lint run as one line each:
 /// `rule:start..end: message`.

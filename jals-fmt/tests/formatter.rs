@@ -1,12 +1,12 @@
 //! Snapshot tests for the formatter.
 
 use expect_test::{Expect, expect};
-use jals_fmt::{
+use jals_config::fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
     ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
     LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
-    format_source,
 };
+use jals_fmt::format_source;
 
 fn fmt(src: &str) -> String {
     format_source(src, &Config::default()).formatted

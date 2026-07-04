@@ -1,7 +1,7 @@
 //! Whole-document formatting via `jals-fmt`.
 
 use async_lsp::lsp_types::{Position, Range, TextEdit};
-use jals_fmt::Config;
+use jals_config::fmt::Config;
 use text_size::TextSize;
 
 use crate::line_index::LineIndex;

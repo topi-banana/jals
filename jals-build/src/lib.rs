@@ -1,6 +1,6 @@
 //! Cargo-style build orchestration for Java projects.
 //!
-//! A [`Manifest`] is a `jals.toml` project manifest, the Java analogue of `Cargo.toml`: it says
+//! A [`Manifest`](jals_config::Manifest) is a `jals.toml` project manifest, the Java analogue of `Cargo.toml`: it says
 //! where the sources live, where compiled classes go, which Java release to target, and what is on
 //! the classpath. [`build_invocation`] and [`run_invocation`] turn a manifest plus already-resolved
 //! inputs into an [`Invocation`] — a program name and an argument vector for `javac`/`java`.
@@ -18,15 +18,13 @@
 mod clean;
 mod init;
 mod invocation;
-mod manifest;
+mod manifest_ext;
 mod target;
 
 pub use clean::clean_paths;
 pub use init::{InitOptions, ScaffoldFile, scaffold};
 pub use invocation::{Invocation, build_invocation, run_invocation};
-pub use manifest::{
-    Bin, Build, Dependency, DependencyError, DependencySource, Edition, GitDependency, GitRef,
-    GitSource, JarDependency, Manifest, ManifestError, Package, PathDependency, PathSource, Run,
-    SourceDependency, ValidationError,
+pub use manifest_ext::{
+    DependencySource, GitSource, ManifestError, ManifestExt, PathSource, SourceDependency,
 };
 pub use target::{ResolveTargetError, resolve_run_target};

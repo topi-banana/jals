@@ -1,6 +1,6 @@
 //! The formatter settings bar under the header.
 
-use jals_fmt::{Config, IndentStyle, LineEnding};
+use jals_config::fmt::{Config, IndentStyle, LineEnding};
 use web_sys::{HtmlInputElement, HtmlSelectElement};
 use yew::prelude::*;
 

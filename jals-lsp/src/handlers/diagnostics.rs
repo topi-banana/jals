@@ -40,7 +40,7 @@ pub(crate) fn compute_lint_diagnostics(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
-    config: &jals_lint::Config,
+    config: &jals_config::lint::Config,
 ) -> Vec<Diagnostic> {
     jals_lint::lint_node(&parse.syntax(), config)
         .into_iter()
@@ -107,10 +107,10 @@ pub(crate) fn compute_type_mismatch_diagnostics(
     resolved: &Resolved,
     text: &str,
     line_index: &LineIndex,
-    config: &jals_lint::Config,
+    config: &jals_config::lint::Config,
 ) -> Vec<Diagnostic> {
-    let severity = config.severity(jals_lint::TYPE_MISMATCH_RULE, jals_lint::Severity::Warn);
-    if severity == jals_lint::Severity::Allow || !parse.errors().is_empty() {
+    let severity = config.severity(jals_lint::TYPE_MISMATCH_RULE, jals_config::Severity::Warn);
+    if severity == jals_config::Severity::Allow || !parse.errors().is_empty() {
         return Vec::new();
     }
     jals_hir::type_mismatches(&parse.syntax(), resolved, Some((index, file)))
@@ -130,10 +130,10 @@ pub(crate) fn compute_type_mismatch_diagnostics(
 
 /// Map a `jals-lint` severity to an LSP diagnostic severity. `Allow` rules are skipped inside
 /// [`jals_lint::lint_node`], so they never reach here; map them alongside `Warn` defensively.
-fn lint_severity(severity: jals_lint::Severity) -> DiagnosticSeverity {
+fn lint_severity(severity: jals_config::Severity) -> DiagnosticSeverity {
     match severity {
-        jals_lint::Severity::Error => DiagnosticSeverity::ERROR,
-        jals_lint::Severity::Warn | jals_lint::Severity::Allow => DiagnosticSeverity::WARNING,
+        jals_config::Severity::Error => DiagnosticSeverity::ERROR,
+        jals_config::Severity::Warn | jals_config::Severity::Allow => DiagnosticSeverity::WARNING,
     }
 }
 
@@ -168,7 +168,7 @@ mod tests {
             &parse,
             text,
             &LineIndex::new(text),
-            &jals_lint::Config::default(),
+            &jals_config::lint::Config::default(),
         );
         let wildcard = diags
             .iter()
@@ -184,7 +184,7 @@ mod tests {
         // edition as `target_java_version`, and the rule reports an ERROR for Java 24.
         let text = "void main() {}\n";
         let parse = jals_syntax::parse(text);
-        let mut config = jals_lint::Config {
+        let mut config = jals_config::lint::Config {
             target_java_version: Some(24),
             ..Default::default()
         };
@@ -213,7 +213,7 @@ mod tests {
             &parse,
             text,
             &LineIndex::new(text),
-            &jals_lint::Config::default(),
+            &jals_config::lint::Config::default(),
         );
         assert!(diags.is_empty());
     }
@@ -288,7 +288,7 @@ mod tests {
             &resolved,
             SUBTYPING_SRC,
             &LineIndex::new(SUBTYPING_SRC),
-            &jals_lint::Config::default(),
+            &jals_config::lint::Config::default(),
         );
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
@@ -313,7 +313,7 @@ mod tests {
             &resolved,
             text,
             &LineIndex::new(text),
-            &jals_lint::Config::default(),
+            &jals_config::lint::Config::default(),
         );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("double") && diags[0].message.contains("int"));
@@ -323,10 +323,10 @@ mod tests {
     fn type_mismatch_diagnostics_respect_allow_config() {
         let parse = jals_syntax::parse(SUBTYPING_SRC);
         let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
-        let mut config = jals_lint::Config::default();
+        let mut config = jals_config::lint::Config::default();
         config
             .rules
-            .insert("type-mismatch".to_string(), jals_lint::Severity::Allow);
+            .insert("type-mismatch".to_string(), jals_config::Severity::Allow);
         let resolved = jals_hir::resolve_node(&parse.syntax());
         let diags = compute_type_mismatch_diagnostics(
             &index,

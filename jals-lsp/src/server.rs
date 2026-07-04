@@ -34,7 +34,8 @@ use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
 use async_lsp::{ClientSocket, ErrorCode, LanguageServer, MainLoop, ResponseError};
 use futures::future::BoxFuture;
-use jals_build::Manifest;
+use jals_build::ManifestExt;
+use jals_config::Manifest;
 use tower::ServiceBuilder;
 
 use crate::handlers;
@@ -66,8 +67,8 @@ pub(crate) async fn run_server() -> anyhow::Result<()> {
 struct ServerState {
     client: ClientSocket,
     store: DocumentStore,
-    discovery: Discovery<jals_fmt::Config>,
-    lint_discovery: Discovery<jals_lint::Config>,
+    discovery: Discovery<jals_config::fmt::Config>,
+    lint_discovery: Discovery<jals_config::lint::Config>,
     /// One [`Workspace`] per `jals.toml` project a client has a file open in. Populated lazily on
     /// `did_open` by walking up from the file to its manifest (see [`ServerState::ensure_workspace_for`]),
     /// so the server only ever indexes a real project's source roots, never a whole git checkout.
@@ -240,7 +241,7 @@ impl ServerState {
         if let Some((workspace, _)) = workspace_file {
             rule_config.rules.insert(
                 jals_lint::TYPE_MISMATCH_RULE.to_string(),
-                jals_lint::Severity::Allow,
+                jals_config::Severity::Allow,
             );
             rule_config.target_java_version = workspace.target_java_version();
         }

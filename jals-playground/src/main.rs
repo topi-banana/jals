@@ -18,7 +18,7 @@
 //! - [`providers`] — wires each Monaco language-feature provider to the workspace analysis.
 //! - [`line_index`] — byte-offset → Monaco (UTF-16) position mapping for diagnostics.
 //!
-//! [`Config`]: jals_fmt::Config
+//! [`Config`]: jals_config::fmt::Config
 
 mod app;
 mod components;
