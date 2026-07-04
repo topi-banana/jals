@@ -3,13 +3,24 @@ name = "jals-classpath"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# `native` unlocks the host I/O: a blocking `reqwest` downloader, a subprocess `git`, and the
+# `OsFileTree` + `PathBuf`-based facades (the crate's historic public API). On by default so
+# `jals-cli`/`jals-lsp` build unchanged; the wasm playground turns it off (`default-features = false`)
+# and supplies its own `Fetcher` + `InMemoryFileTree`. Off, the crate is std-but-`wasm32`-compatible.
+default = ["native"]
+native = ["dep:reqwest", "dep:futures", "jals-fs/std"]
+
 [dependencies]
 jals-build.workspace = true
 jals-classfile.workspace = true
 jals-decompile.workspace = true
-reqwest.workspace = true
-walkdir.workspace = true
+jals-fs.workspace = true
 zip.workspace = true
+# Host-only, behind `native`: the blocking downloader and its `block_on` driver. Kept out of the
+# `wasm32` (no-`native`) build, which uses an injected `Fetcher` instead.
+reqwest = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 jals-syntax.workspace = true

@@ -11,7 +11,8 @@ use core::ops::Range;
 use jals_fmt::{Config as FmtConfig, FormatOutput};
 use jals_fs::{FileTree, InMemoryFileTree};
 use jals_hir::{
-    DefKind, FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved, Ty, TypeResolution,
+    DefKind, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved, Ty,
+    TypeResolution,
 };
 use jals_lint::{Config as LintConfig, Severity};
 use jals_syntax::ast::{self, AstNode};
@@ -144,6 +145,11 @@ pub struct Workspace {
     fs: InMemoryFileTree,
     /// Path of the active file — a key into `fs`, and the editor's backing store.
     active: String,
+    /// The external classpath folded into every analysis, when a `[dependencies]` spec has been
+    /// resolved (`None` until then). Lowered once from the downloaded `.class` files
+    /// ([`ProjectIndex::lower_classpath`]) and reused across rebuilds, mirroring `jals-lsp`. Owned, so
+    /// [`active_context`](Self::active_context) borrows it into the builder each time.
+    classpath: Option<LoweredClasspath>,
 }
 
 impl Workspace {
@@ -157,7 +163,18 @@ impl Workspace {
             .into_iter()
             .next()
             .unwrap_or_default();
-        Workspace { fs, active }
+        Workspace {
+            fs,
+            active,
+            classpath: None,
+        }
+    }
+
+    /// Replace the external classpath folded into analysis (from a resolved `[dependencies]` spec),
+    /// or clear it with `None`. The next analysis picks it up — `Main`'s use of a library type then
+    /// resolves through the downloaded `.class` files.
+    pub fn set_classpath(&mut self, classpath: Option<LoweredClasspath>) {
+        self.classpath = classpath;
     }
 
     /// Every Java file path, sorted. A path's index into this vec is its [`FileId`].
@@ -292,7 +309,14 @@ impl Workspace {
             .iter()
             .map(|(id, parse)| (*id, parse.syntax()))
             .collect();
-        let index = ProjectIndex::builder(&files).with_stdlib().build();
+        // Fold in the resolved external classpath (when a `[dependencies]` spec has been resolved),
+        // so a library type resolves for hover / completion / type-checking, exactly as `jals-lsp`
+        // folds its downloaded jars in.
+        let mut builder = ProjectIndex::builder(&files).with_stdlib();
+        if let Some(classpath) = &self.classpath {
+            builder = builder.with_classpath(classpath);
+        }
+        let index = builder.build();
         // The built index owns its trees, so release the borrowed `files` before moving the active
         // parse out of `parses`.
         drop(files);
@@ -1150,5 +1174,44 @@ mod tests {
         assert_eq!(highlights.len(), 2, "got {highlights:?}");
         assert!(highlights.iter().any(|h| h.write)); // the declaration
         assert!(highlights.iter().any(|h| !h.write)); // the use
+    }
+
+    #[test]
+    fn folded_classpath_resolves_an_external_library_type() {
+        // A compiled `Box<T>` fed to the same wasm-compatible core the browser uses — loaded off an
+        // in-memory tree, then lowered for the index. This is the payoff of external dependencies in
+        // the playground: a library type resolves without any of its `.java` in the workspace.
+        let cache = InMemoryFileTree::new().with_file(
+            "deps/Box.class",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../jals-classpath/tests/fixtures/Box.class"
+            )),
+        );
+        let load = jals_classpath::load_classpath_in(&cache, &["deps/Box.class".to_string()]);
+        assert!(load.warnings.is_empty(), "{:?}", load.warnings);
+        let lowered = jals_hir::ProjectIndex::lower_classpath(&load.classes);
+
+        let mut ws = Workspace::new();
+        ws.set_active("com/example/Main.java");
+        // A default-package class using the external `Box` type (the package `Box.class` declares).
+        ws.edit_active("class Uses { void f() { Box<String> b = null; } }\n");
+
+        // Unresolved before folding the classpath: no `Box` declaration exists in the workspace.
+        let before = ws.analyze_active(&LintConfig::default());
+        assert!(
+            before.iter().any(|d| d.message.contains("Box")),
+            "expected `Box` unresolved before folding the classpath, got: {:?}",
+            before.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+
+        // Resolved after folding `Box.class` in.
+        ws.set_classpath(Some(lowered));
+        let after = ws.analyze_active(&LintConfig::default());
+        assert!(
+            !after.iter().any(|d| d.message.contains("Box")),
+            "expected `Box` to resolve once the classpath is folded, got: {:?}",
+            after.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 }

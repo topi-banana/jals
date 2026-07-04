@@ -67,8 +67,12 @@ pub trait FileTree {
     /// `root` yields an empty vec rather than an error, mirroring the LSP's tolerant walk.
     fn walk_ext(&self, root: &str, ext: &str) -> Result<Vec<String>>;
 
-    /// Write `contents` to `path`, creating or overwriting the file (and, for the OS impl, any
-    /// missing parent directories). Takes `&mut self` so [`InMemoryFileTree`] needs no interior
-    /// mutability.
+    /// Write `contents` to `path`, creating or **atomically** replacing the file (and, for the OS
+    /// impl, any missing parent directories). Atomic means a concurrent or later reader observes
+    /// either the old file or the fully-written new one, never a truncated intermediate — so "the
+    /// file exists" implies it is complete, which callers rely on for skip-if-exists caching.
+    /// [`InMemoryFileTree`] is atomic by construction (a single map insert); [`OsFileTree`] writes a
+    /// temp sibling and renames it into place. Takes `&mut self` so [`InMemoryFileTree`] needs no
+    /// interior mutability.
     fn write(&mut self, path: &str, contents: &[u8]) -> Result<()>;
 }

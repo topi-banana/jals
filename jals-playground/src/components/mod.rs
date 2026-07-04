@@ -2,16 +2,19 @@
 //!
 //! Every component here is a `struct` plus an `impl yew::Component` block (never a
 //! `#[function_component]`): [`Header`] (the top action bar), [`SettingsBar`] (the `jals-fmt`
-//! config controls), [`FileTree`] (the workspace files sidebar), [`EditorPane`] (the Monaco
-//! editor mount + lifecycle), and [`SyntaxPane`] (the CST dump). The root [`crate::app::App`]
-//! owns all state and wires them together with props and callbacks.
+//! config controls), [`DepsBar`] (the external `[dependencies]` resolver), [`FileTree`] (the
+//! workspace files sidebar), [`EditorPane`] (the Monaco editor mount + lifecycle), and
+//! [`SyntaxPane`] (the CST dump). The root [`crate::app::App`] owns all state and wires them
+//! together with props and callbacks.
 
+mod deps_bar;
 mod editor_pane;
 mod file_tree;
 mod header;
 mod settings_bar;
 mod syntax_pane;
 
+pub use deps_bar::DepsBar;
 pub use editor_pane::EditorPane;
 pub use file_tree::{FileTree, TreeEntry};
 pub use header::Header;

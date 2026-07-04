@@ -22,6 +22,7 @@
 
 mod app;
 mod components;
+mod fetcher;
 mod line_index;
 mod monaco;
 mod providers;

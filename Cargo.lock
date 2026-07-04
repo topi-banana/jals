@@ -1031,13 +1031,14 @@ dependencies = [
 name = "jals-classpath"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "jals-build",
  "jals-classfile",
  "jals-decompile",
+ "jals-fs",
  "jals-syntax",
  "reqwest",
  "tempfile",
- "walkdir",
  "zip",
 ]
 
@@ -1137,6 +1138,9 @@ dependencies = [
 name = "jals-playground"
 version = "0.1.0"
 dependencies = [
+ "gloo-net",
+ "jals-build",
+ "jals-classpath",
  "jals-fmt",
  "jals-fs",
  "jals-hir",
