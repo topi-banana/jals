@@ -26,16 +26,21 @@ pub struct TreeEntry {
 /// Props for [`FileTree`].
 #[derive(Properties, PartialEq)]
 pub struct FileTreeProps {
+    /// The project configuration files (`jals.toml` / `jalsfmt.toml`), shown in their own section
+    /// above the workspace files. Each is a top-level, selectable [`TreeEntry`].
+    pub config_entries: Vec<TreeEntry>,
     /// The workspace files, flattened pre-order (see [`TreeEntry`]).
     pub entries: Vec<TreeEntry>,
-    /// Path of the active file — its row carries the app-shell left-edge indicator.
+    /// Path of the active file — its row carries the app-shell left-edge indicator. May be a config
+    /// file's path (see [`config_entries`](FileTreeProps::config_entries)) or a workspace file's.
     pub active: String,
     /// Emitted with a file's path when its row is clicked.
     pub on_select: Callback<String>,
 }
 
-/// The file-tree sidebar: the workspace's files rendered as a fully-expanded tree, each file row
-/// selecting the active file. The active row carries the app-shell left-edge indicator.
+/// The file-tree sidebar: a `Config` section (the editable `jals.toml` / `jalsfmt.toml`) over the
+/// workspace's files rendered as a fully-expanded tree, each file row selecting the active file. The
+/// active row carries the app-shell left-edge indicator.
 pub struct FileTree;
 
 impl Component for FileTree {
@@ -50,6 +55,10 @@ impl Component for FileTree {
         let props = ctx.props();
         html! {
             <aside class="flex w-60 shrink-0 flex-col overflow-auto border-r border-hairline bg-canvas">
+                <div class={PANE_LABEL}>{ "Config" }</div>
+                <div class="py-1">
+                    { for props.config_entries.iter().map(|entry| self.view_entry(ctx, entry)) }
+                </div>
                 <div class={PANE_LABEL}>{ "Files" }</div>
                 <div class="py-1">
                     { for props.entries.iter().map(|entry| self.view_entry(ctx, entry)) }

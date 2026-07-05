@@ -19,10 +19,12 @@ jals-syntax = { workspace = true }
 gloo-net = { version = "0.7", default-features = false, features = ["http"] }
 js-sys = "0.3"
 text-size = { workspace = true }
+# Parses the `jalsfmt.toml` editor buffer into `jals_config::fmt::Config` (the `jals.toml` buffer
+# goes through `Manifest::from_str`, which already pulls in `toml`).
+toml = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
   "Element",
   "HtmlInputElement",
-  "HtmlSelectElement",
 ] }
