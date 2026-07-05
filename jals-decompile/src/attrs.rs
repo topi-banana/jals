@@ -9,12 +9,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_classfile::{
-    AttributeBody, BaseType, ConstantPool, ConstantPoolEntry, FieldInfo, FieldType, MethodInfo,
-    parse_field_descriptor, parse_method_descriptor,
+    AttributeBody, BaseType, CodeAttribute, ConstantPool, ConstantPoolEntry, FieldInfo, FieldType,
+    LocalVariableEntry, MethodInfo, parse_field_descriptor, parse_method_descriptor,
 };
 
 use crate::literal::{double_literal, float_literal, string_literal};
-use crate::types::internal_to_java;
+use crate::types::{internal_to_java, render_field_type};
 
 /// A field's `ConstantValue` rendered as a Java initializer expression (the text after `=`), or
 /// `None` if the field has no constant value or it cannot be rendered. A boolean field's `0`/`1`
@@ -128,10 +128,7 @@ fn params_from_local_variable_table(
         AttributeBody::Code(code) => Some(code),
         _ => None,
     })?;
-    let table = code.attributes.iter().find_map(|a| match &a.body {
-        AttributeBody::LocalVariableTable(table) => Some(table),
-        _ => None,
-    })?;
+    let table = local_variable_table(code)?;
     let mut names = Vec::with_capacity(arity);
     for (slot, _param) in parameter_slots(&params, is_static) {
         let name = table
@@ -167,8 +164,50 @@ pub(crate) fn parameter_slots(
     })
 }
 
+/// The method `Code`'s `LocalVariableTable` (present when compiled with `-g`), or `None` — the
+/// source of names/types for both parameter-name and hoisted-local recovery.
+pub(crate) fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariableEntry]> {
+    code.attributes.iter().find_map(|a| match &a.body {
+        AttributeBody::LocalVariableTable(table) => Some(table.as_slice()),
+        _ => None,
+    })
+}
+
+/// Resolve a non-parameter local `slot` to its `(name, rendered-Java-type)` from a method's
+/// `LocalVariableTable`, used to hoist a typed declaration for every local a method stores into.
+/// Returns `None` — bailing the whole method — when the slot cannot be resolved unambiguously:
+/// - it has no entry (a synthetic temporary, or the class was compiled without `-g`),
+/// - a name is not a valid Java identifier,
+/// - a descriptor does not parse, or
+/// - the slot is reused for two variables with a differing name/type across disjoint live ranges
+///   (M3 does not split a reused slot — a later milestone keys locals by `(slot, pc)`).
+///
+/// `javac` emits several entries for one source variable (one per live sub-range across branches);
+/// they agree on name + type, so collecting the *distinct* `(name, type)` yields exactly one.
+pub(crate) fn local_variable(
+    table: &[LocalVariableEntry],
+    pool: &ConstantPool,
+    slot: u16,
+) -> Option<(String, String)> {
+    let mut resolved: Option<(String, String)> = None;
+    for entry in table.iter().filter(|e| e.index == slot) {
+        let name = pool.utf8(entry.name_index)?.into_owned();
+        if !is_java_identifier(&name) {
+            return None;
+        }
+        let descriptor = pool.utf8(entry.descriptor_index)?;
+        let ty = render_field_type(&parse_field_descriptor(&descriptor).ok()?);
+        let pair = (name, ty);
+        match &resolved {
+            Some(prev) if *prev != pair => return None,
+            _ => resolved = Some(pair),
+        }
+    }
+    resolved
+}
+
 /// A conservative Java-identifier check, so a recovered name can never break the parse.
-fn is_java_identifier(s: &str) -> bool {
+pub(crate) fn is_java_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c == '_' || c == '$' || c.is_alphabetic() => {}

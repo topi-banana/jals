@@ -20,6 +20,20 @@ fn branchy() -> ClassFile {
     .expect("parse Branchy.class")
 }
 
+fn locals() -> ClassFile {
+    jals_classfile::read(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Locals.class"
+    ))
+    .expect("parse Locals.class")
+}
+
+fn loops() -> ClassFile {
+    jals_classfile::read(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Loops.class"
+    ))
+    .expect("parse Loops.class")
+}
+
 /// The first method named `name`.
 fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
     cf.methods
@@ -90,6 +104,99 @@ fn structures_an_if_else_with_a_join() {
             "    this.value = 1;",
             "}",
             "this.value = this.value + 1;",
+        ]
+    );
+}
+
+#[test]
+fn decompiles_straight_line_locals() {
+    // Two temporaries, each hoisted to a typed declaration; the stores become plain assignments.
+    let cf = locals();
+    let names = ["n".to_string()];
+    let body =
+        decompile_method_body(method(&cf, "compute"), &cf, &names).expect("compute decompiles");
+    assert_eq!(
+        body,
+        [
+            "int doubled;",
+            "int result;",
+            "doubled = n * 2;",
+            "result = doubled + 1;",
+            "return result;",
+        ]
+    );
+}
+
+#[test]
+fn hoists_a_local_across_an_if_else() {
+    // `x` is written in both branches and read after the join — hoisting keeps it in scope.
+    let cf = locals();
+    let body = decompile_method_body(method(&cf, "pick"), &cf, &["c".to_string()])
+        .expect("pick decompiles");
+    assert_eq!(
+        body,
+        [
+            "int x;",
+            "if (c) {",
+            "    x = 1;",
+            "} else {",
+            "    x = 2;",
+            "}",
+            "return x;",
+        ]
+    );
+}
+
+#[test]
+fn decompiles_a_reference_typed_local() {
+    let cf = locals();
+    let body = decompile_method_body(method(&cf, "nameLength"), &cf, &["s".to_string()])
+        .expect("nameLength decompiles");
+    assert_eq!(
+        body,
+        ["java.lang.String t;", "t = s;", "return t.length();"]
+    );
+}
+
+#[test]
+fn structures_a_bottom_test_while() {
+    // javac's default loop layout: a top-of-body condition test with a `goto` back-edge, recovered
+    // as `while (i < n)`. The loop counter `i` and accumulator `total` are hoisted locals.
+    let cf = loops();
+    let body =
+        decompile_method_body(method(&cf, "sum"), &cf, &["n".to_string()]).expect("sum decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "int i;",
+            "total = 0;",
+            "i = 0;",
+            "while (i < n) {",
+            "    total = total + i;",
+            "    i = i + 1;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn structures_a_do_while() {
+    // The condition is tested at the bottom (a conditional back-branch), recovered as
+    // `do { ... } while (c < n);`.
+    let cf = loops();
+    let body = decompile_method_body(method(&cf, "count"), &cf, &["n".to_string()])
+        .expect("count decompiles");
+    assert_eq!(
+        body,
+        [
+            "int c;",
+            "c = 0;",
+            "do {",
+            "    c = c + 1;",
+            "} while (c < n);",
+            "return c;",
         ]
     );
 }

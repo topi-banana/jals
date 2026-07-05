@@ -25,6 +25,18 @@ fn branchy_class() -> ClassFile {
     jals_classfile::read(include_bytes!("fixtures/Branchy.class")).expect("parse Branchy.class")
 }
 
+/// `Locals` (package `demo`), compiled with `-parameters -g` — the fixture for M3 local-variable
+/// reconstruction: hoisted typed declarations, stores as assignments, a local across an `if`-`else`.
+fn locals_class() -> ClassFile {
+    jals_classfile::read(include_bytes!("fixtures/Locals.class")).expect("parse Locals.class")
+}
+
+/// `Loops` (package `demo`), compiled with `-parameters -g` — the fixture for M4 loop structuring:
+/// a bottom-test `while` with an `iinc` counter and a `do`-`while`.
+fn loops_class() -> ClassFile {
+    jals_classfile::read(include_bytes!("fixtures/Loops.class")).expect("parse Loops.class")
+}
+
 /// Every committed fixture class, including `jals-classfile`'s round-trip fixtures, so the skeleton
 /// renderer is exercised across generics, enums, records, switches, and annotations.
 fn all_fixture_classes() -> Vec<ClassFile> {
@@ -32,6 +44,8 @@ fn all_fixture_classes() -> Vec<ClassFile> {
         include_bytes!("fixtures/Box.class"),
         include_bytes!("fixtures/Consts.class"),
         include_bytes!("fixtures/Branchy.class"),
+        include_bytes!("fixtures/Locals.class"),
+        include_bytes!("fixtures/Loops.class"),
         include_bytes!("fixtures/Outer.class"),
         include_bytes!("fixtures/Outer$Inner.class"),
         include_bytes!("fixtures/Outer$Color.class"),
@@ -194,6 +208,55 @@ fn renders_recovered_control_flow() {
     // A real `if`-`else` with a join afterwards.
     assert!(text.contains("} else {"), "{text}");
     assert!(text.contains("this.value = this.value + 1;"), "{text}");
+
+    // The recovered bodies must parse cleanly.
+    assert!(
+        jals_syntax::parse(&text).errors().is_empty(),
+        "{text}\n{:#?}",
+        jals_syntax::parse(&text).errors()
+    );
+}
+
+#[test]
+fn renders_local_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut warnings = Vec::new();
+    let files = synthesize_classpath_sources(&[locals_class()], dir.path(), |m| warnings.push(m));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+
+    // Hoisted typed declarations plus stores lowered to assignments.
+    assert!(text.contains("int doubled;"), "{text}");
+    assert!(text.contains("result = doubled + 1;"), "{text}");
+    // A local hoisted across an `if`-`else`, in scope after the join.
+    assert!(text.contains("int x;"), "{text}");
+    assert!(text.contains("x = 1;"), "{text}");
+    // A reference-typed local.
+    assert!(text.contains("java.lang.String t;"), "{text}");
+    assert!(text.contains("return t.length();"), "{text}");
+
+    // The recovered bodies must parse cleanly.
+    assert!(
+        jals_syntax::parse(&text).errors().is_empty(),
+        "{text}\n{:#?}",
+        jals_syntax::parse(&text).errors()
+    );
+}
+
+#[test]
+fn renders_loops() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut warnings = Vec::new();
+    let files = synthesize_classpath_sources(&[loops_class()], dir.path(), |m| warnings.push(m));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+
+    // A bottom-test `while` (javac's default loop layout) with the loop body.
+    assert!(text.contains("while (i < n) {"), "{text}");
+    assert!(text.contains("i = i + 1;"), "{text}");
+    // A `do`-`while`.
+    assert!(text.contains("do {"), "{text}");
+    assert!(text.contains("} while (c < n);"), "{text}");
 
     // The recovered bodies must parse cleanly.
     assert!(
