@@ -11,11 +11,16 @@ valid-Java property test.
 Compiled with the JDK pinned for this repo (`javac 25`, class-file major version 69):
 
 ```sh
-# Consts (M0 enrichments) / Branchy (M2 control flow) — need -parameters + -g:
+# Consts (M0 enrichments) / Branchy (M2 control flow) / Locals (M3 local variables) /
+# Loops (M4 loops) — need -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Consts.java
 cp out/demo/Consts.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Branchy.java
 cp out/demo/Branchy.class jals-classpath/tests/fixtures/
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/Locals.java
+cp out/demo/Locals.class jals-classpath/tests/fixtures/
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/Loops.java
+cp out/demo/Loops.class jals-classpath/tests/fixtures/
 
 # Outer + its nested types (grouping), compiled without debug info (so parameters stay `argN`):
 javac -d out jals-classpath/tests/fixtures/Outer.java
@@ -32,6 +37,8 @@ package, no debug info) and its source is not committed.
 | `Box.class` | (source not committed) | a generic class `Box<T>`, a field, `get`/`set` — no debug info, so `argN` parameter names |
 | `Consts.class` | `src/Consts.java` | `ConstantValue` initializers (every constant kind), real parameter names (`-parameters -g`), a declared checked exception (`Exceptions`), and the value / `void` / constructor body shapes |
 | `Branchy.class` | `src/Branchy.java` | M2 `if` / `if-else` structuring: a guard-clause return, an `if-else` with a join, a null-guarded field store, and a chained `if` |
+| `Locals.class` | `src/Locals.java` | M3 local variables: straight-line temporaries, a local written in both `if`/`else` branches and read after the join (hoisting), and a reference-typed local |
+| `Loops.class` | `src/Loops.java` | M4 loop structuring: a bottom-test `while` with an `iinc` counter and a `do`-`while` |
 | `Outer.class` | `Outer.java` | a top-level class with a nested static class and a nested enum (nested-type grouping) |
 | `Outer$Inner.class` | `Outer.java` | a nested static class |
 | `Outer$Color.class` | `Outer.java` | a nested enum with constants |

@@ -10,18 +10,18 @@
 //! safe body — so the output is always valid Java, never a half-built or mis-structured body.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
 use jals_classfile::{
-    AttributeBody, ClassFile, ConstantPool, ConstantPoolEntry, Instruction, MethodInfo, ReturnType,
-    parse_method_descriptor,
+    AttributeBody, ClassFile, CodeAttribute, ConstantPool, ConstantPoolEntry, Instruction,
+    MethodInfo, ReturnType, WideInstruction, parse_method_descriptor,
 };
 
-use crate::attrs::parameter_slots;
+use crate::attrs::{self, parameter_slots};
 use crate::cfg::{self, Cfg, Term};
 use crate::expr::{Expr, Stmt, render_block};
 use crate::literal::{class_literal, double_literal, float_literal, string_literal};
@@ -51,7 +51,11 @@ pub fn decompile_method_body(
     }
     let owner = pool.class_name(cf.this_class)?.into_owned();
     let is_static = method.access_flags.is_static();
-    let locals = local_slots(method, pool, is_static, param_names)?;
+    let mut locals = local_slots(method, pool, is_static, param_names)?;
+    // Hoist a typed declaration for every non-parameter local the method stores into, registering
+    // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
+    // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
+    let decls = local_declarations(code, pool, is_static, &mut locals)?;
     let cfg = cfg::build(&code.code)?;
     let structurer = Structurer {
         code: &code.code,
@@ -61,7 +65,8 @@ pub fn decompile_method_body(
         is_static,
         locals,
     };
-    let stmts = structurer.structure()?;
+    let mut stmts = decls;
+    stmts.extend(structurer.structure()?);
     Some(render_body(&stmts))
 }
 
@@ -84,6 +89,77 @@ fn local_slots(
         .map(|((slot, _param), name)| (slot, name.clone()))
         .collect();
     Some(map)
+}
+
+/// Plan the hoisted local declarations for a method: scan its bytecode for stored slots, drop `this`
+/// and the parameters (already named), and resolve each remaining slot to a typed declaration from
+/// the `LocalVariableTable`, registering its name in `locals` for the body to reference. Returns the
+/// declarations in slot order, or `None` — bailing the whole method — when a stored local has no
+/// usable LVT entry (no `-g` build, a synthetic temporary, or a reused slot) or its name collides
+/// with a parameter or another local.
+fn local_declarations(
+    code: &CodeAttribute,
+    pool: &ConstantPool,
+    is_static: bool,
+    locals: &mut BTreeMap<u16, String>,
+) -> Option<Vec<Stmt>> {
+    // Slots written by a store / `iinc`, minus `this` (slot 0, instance) and the parameters —
+    // `locals` holds exactly those slots here, before any hoisted local is registered.
+    let mut stored: BTreeSet<u16> = code.code.iter().filter_map(stored_slot).collect();
+    if !is_static {
+        stored.remove(&0);
+    }
+    stored.retain(|slot| !locals.contains_key(slot));
+    if stored.is_empty() {
+        return Some(Vec::new());
+    }
+    // Locals need types (a bare `var x;` is illegal), so the `LocalVariableTable` is required here.
+    let table = attrs::local_variable_table(code)?;
+    let mut decls = Vec::with_capacity(stored.len());
+    for slot in stored {
+        let (name, ty) = attrs::local_variable(table, pool, slot)?;
+        // A hoisted declaration must never shadow a parameter or an already-hoisted local.
+        if locals.values().any(|n| *n == name) {
+            return None;
+        }
+        locals.insert(slot, name.clone());
+        decls.push(Stmt::Declare { ty, name });
+    }
+    Some(decls)
+}
+
+/// The local slot a *store* instruction writes (a store form, its numbered shorthand, or the `wide`
+/// form), or `None` for a non-store. The single source of truth for the store opcode set, shared by
+/// declaration discovery ([`stored_slot`]) and the simulator ([`Sim::step`]) so the two never drift.
+/// `iinc` is deliberately excluded — it read-modify-writes and carries a delta, handled separately.
+fn store_slot(ins: &Instruction) -> Option<u16> {
+    use Instruction as I;
+    Some(match ins {
+        I::Istore(s) | I::Lstore(s) | I::Fstore(s) | I::Dstore(s) | I::Astore(s) => u16::from(*s),
+        I::Istore0 | I::Lstore0 | I::Fstore0 | I::Dstore0 | I::Astore0 => 0,
+        I::Istore1 | I::Lstore1 | I::Fstore1 | I::Dstore1 | I::Astore1 => 1,
+        I::Istore2 | I::Lstore2 | I::Fstore2 | I::Dstore2 | I::Astore2 => 2,
+        I::Istore3 | I::Lstore3 | I::Fstore3 | I::Dstore3 | I::Astore3 => 3,
+        I::Wide(
+            WideInstruction::Istore(s)
+            | WideInstruction::Lstore(s)
+            | WideInstruction::Fstore(s)
+            | WideInstruction::Dstore(s)
+            | WideInstruction::Astore(s),
+        ) => *s,
+        _ => return None,
+    })
+}
+
+/// The local slot an instruction writes — a store (via [`store_slot`]) or an `iinc` (and its `wide`
+/// form) — or `None` if it writes no local. Drives declaration discovery.
+fn stored_slot(ins: &Instruction) -> Option<u16> {
+    use Instruction as I;
+    store_slot(ins).or_else(|| match ins {
+        I::Iinc { index, .. } => Some(u16::from(*index)),
+        I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
+        _ => None,
+    })
 }
 
 /// Trim a trailing implicit `return;` (a `void` method's fall-off return) and render the rest.
@@ -130,6 +206,35 @@ impl Sim<'_> {
             let name = self.locals.get(&slot)?;
             self.stack.push(Expr::Local(name.clone()));
         }
+        Some(())
+    }
+
+    /// Store the top of stack into a local: `name = value;`. The slot's name comes from the map
+    /// built by [`local_declarations`] (parameters plus hoisted locals), so an unmapped slot bails.
+    fn store(&mut self, slot: u16) -> Option<()> {
+        let name = self.locals.get(&slot)?.clone();
+        let value = self.pop()?;
+        self.stmts.push(Stmt::Assign {
+            target: Expr::Local(name),
+            value,
+        });
+        Some(())
+    }
+
+    /// `iinc`: `name = name + by;` (or `name - |by|;` when negative). Reads and writes the local in
+    /// place — the operand stack is untouched.
+    fn iinc(&mut self, slot: u16, by: i32) -> Option<()> {
+        let name = self.locals.get(&slot)?.clone();
+        let op = if by < 0 { "-" } else { "+" };
+        let mag = by.unsigned_abs();
+        self.stmts.push(Stmt::Assign {
+            target: Expr::Local(name.clone()),
+            value: Expr::Binary {
+                op,
+                lhs: Box::new(Expr::Local(name)),
+                rhs: Box::new(lit(mag.to_string())),
+            },
+        });
         Some(())
     }
 
@@ -269,6 +374,12 @@ impl Sim<'_> {
 
     fn step(&mut self, ins: &Instruction) -> Option<()> {
         use Instruction as I;
+        // Local stores (all forms) — the opcode set lives in `store_slot`, shared with declaration
+        // discovery so the simulator and the pre-pass can never drift. Handled before the `match`
+        // (a guard can't bind the slot there) so `store_slot` is computed once.
+        if let Some(slot) = store_slot(ins) {
+            return self.store(slot);
+        }
         match ins {
             I::Nop => {}
 
@@ -307,6 +418,12 @@ impl Sim<'_> {
             I::Iload1 | I::Lload1 | I::Fload1 | I::Dload1 | I::Aload1 => self.load(1)?,
             I::Iload2 | I::Lload2 | I::Fload2 | I::Dload2 | I::Aload2 => self.load(2)?,
             I::Iload3 | I::Lload3 | I::Fload3 | I::Dload3 | I::Aload3 => self.load(3)?,
+
+            // `iinc` (and its wide form): a read-modify-write of a local, stack untouched.
+            I::Iinc { index, value } => self.iinc(u16::from(*index), i32::from(*value))?,
+            I::Wide(WideInstruction::Iinc { index, value }) => {
+                self.iinc(*index, i32::from(*value))?
+            }
 
             // Arithmetic and bitwise.
             I::Iadd | I::Ladd | I::Fadd | I::Dadd => self.binary("+")?,
@@ -391,9 +508,9 @@ impl Sim<'_> {
                 }
             },
 
-            // Everything else — branches, switches, `jsr`/`ret`, local stores, array ops, `iinc`,
-            // comparisons, monitors, `invokedynamic`, `wide`, exotic stack shuffles — is out of M1's
-            // straight-line scope. Bail so the caller keeps its safe body.
+            // Everything else — branches, switches, `jsr`/`ret`, array ops, comparisons, monitors,
+            // `invokedynamic`, `wide` loads, exotic stack shuffles — is not yet modelled. Bail so the
+            // caller keeps its safe body.
             _ => return None,
         }
         Some(())
@@ -514,6 +631,15 @@ impl Structurer<'_> {
             if visited[b] {
                 return None;
             }
+            // A block that is the target of a back-edge is a loop header — structure the loop and
+            // resume past its exit. (Checked before marking `b` visited; the loop's blocks are
+            // visited inside `structure_loop`.)
+            if let Some(latch) = self.loop_latch(b) {
+                let (loop_stmt, cont) = self.structure_loop(b, latch, hi, visited)?;
+                out.push(loop_stmt);
+                b = cont;
+                continue;
+            }
             visited[b] = true;
             let (mut stmts, cond_stack) = self.run_block(b)?;
             out.append(&mut stmts);
@@ -548,7 +674,7 @@ impl Structurer<'_> {
                     fallthrough,
                 } => {
                     let (instr, taken, fallthrough) = (*instr, *taken, *fallthrough);
-                    let cond = branch_condition(&self.code[instr], cond_stack)?;
+                    let cond = branch_condition(&self.code[instr], true, cond_stack)?;
                     // Acyclic only: the fall-through is the next block and the taken edge is forward
                     // and within this region. A back-edge (loop) or a jump out is not yet structured.
                     if fallthrough != b + 1 || taken <= b || taken > hi {
@@ -591,33 +717,137 @@ impl Structurer<'_> {
         }
         Some((sim.stmts, sim.stack))
     }
+
+    /// If block `header` is the target of exactly one back-edge — a `goto` / conditional branch from a
+    /// block at or after it — return that latch block; `None` if `header` is not a single-back-edge
+    /// loop header. More than one back-edge (a multi-latch / irreducible loop) yields `None`, and the
+    /// unstructured back-edge then bails through the normal terminator handling.
+    fn loop_latch(&self, header: usize) -> Option<usize> {
+        let mut latch = None;
+        for (b, block) in self.cfg.blocks.iter().enumerate().skip(header) {
+            let targets_header = match block.term {
+                Term::Goto(t) => t == header,
+                Term::Branch { taken, .. } => taken == header,
+                _ => false,
+            };
+            if targets_header {
+                if latch.is_some() {
+                    return None;
+                }
+                latch = Some(b);
+            }
+        }
+        latch
+    }
+
+    /// Structure the natural loop with this `header` and `latch` into a `while` / `do`-`while`,
+    /// returning the statement and the block to resume at (the loop exit). Handles the two shapes
+    /// `javac` emits — a top-test `while` (the header's branch exits the loop, the latch's `goto`
+    /// jumps back) and a `do`-`while` (the latch's conditional branch is itself the back-edge) — and
+    /// bails on anything else (a `break`/`continue` edge, an irregular exit, a side-effecting header).
+    fn structure_loop(
+        &self,
+        header: usize,
+        latch: usize,
+        hi: usize,
+        visited: &mut [bool],
+    ) -> Option<(Stmt, usize)> {
+        match &self.cfg.blocks[latch].term {
+            // do-while: the latch's conditional branch jumps back to the header to repeat the loop.
+            Term::Branch {
+                instr,
+                taken,
+                fallthrough,
+            } if *taken == header => {
+                let (instr, exit) = (*instr, *fallthrough);
+                // The loop exit is the fall-through — right after the latch, within the region.
+                if exit != latch + 1 || exit > hi {
+                    return None;
+                }
+                // Body: the forward region `[header, latch)` that flows into the latch, then the
+                // latch's own statements finish the body (its leftover operands are the condition).
+                let mut body = self.emit_region(header, latch, latch, visited)?;
+                claim(visited, latch)?;
+                let (mut tail, cond_stack) = self.run_block(latch)?;
+                body.append(&mut tail);
+                let cond = branch_condition(&self.code[instr], false, cond_stack)?;
+                Some((Stmt::DoWhile { body, cond }, exit))
+            }
+            // while (top-test): the latch's `goto` is the back-edge; the header's branch exits.
+            Term::Goto(t) if *t == header => {
+                let (instr, exit, body_start) = match &self.cfg.blocks[header].term {
+                    Term::Branch {
+                        instr,
+                        taken,
+                        fallthrough,
+                    } => (*instr, *taken, *fallthrough),
+                    _ => return None,
+                };
+                // The body immediately follows the header, and the exit is forward past the latch.
+                if body_start != header + 1 || exit <= latch || exit > hi {
+                    return None;
+                }
+                claim(visited, header)?;
+                // The header carries only the loop condition — a side effect there would repeat.
+                let (head_stmts, cond_stack) = self.run_block(header)?;
+                if !head_stmts.is_empty() {
+                    return None;
+                }
+                let cond = branch_condition(&self.code[instr], true, cond_stack)?;
+                // The body `[body_start, latch]` exits back to the header (the latch's goto-back).
+                let body = self.emit_region(body_start, latch + 1, header, visited)?;
+                Some((Stmt::While { cond, body }, exit))
+            }
+            _ => None,
+        }
+    }
 }
 
-/// Recover the source `if` condition from a conditional branch and the operand(s) it tested. The
-/// condition is the one under which the branch is *not* taken (control falls into the `then` body),
-/// so it is the negation of the branch's jump condition.
-fn branch_condition(branch: &Instruction, mut stack: Vec<Expr>) -> Option<Expr> {
+/// Claim block `b` as emitted exactly once — the "emitted exactly once" invariant `structure`
+/// asserts — bailing if it was already visited.
+fn claim(visited: &mut [bool], b: usize) -> Option<()> {
+    if visited[b] {
+        return None;
+    }
+    visited[b] = true;
+    Some(())
+}
+
+/// Recover the source condition from a conditional branch and the operand(s) it tested. With
+/// `negate` the *fall-through* condition is returned — the branch is taken to skip a body, so control
+/// falls through under the negation of its jump test (a forward `if`, or a top-test `while` whose
+/// branch exits the loop). Without it the branch's own (positive) jump test is returned — the branch
+/// is taken to *continue* the loop (the `while (cond)` of a `do`-`while`).
+fn branch_condition(branch: &Instruction, negate: bool, mut stack: Vec<Expr>) -> Option<Expr> {
     use Instruction as I;
+    // Pick the branch-taken operator, or its negation for the fall-through condition.
+    let op = |taken, negated| if negate { negated } else { taken };
     let cond = match branch {
-        I::IfIcmpeq(_) | I::IfAcmpeq(_) => compare("!=", &mut stack)?,
-        I::IfIcmpne(_) | I::IfAcmpne(_) => compare("==", &mut stack)?,
-        I::IfIcmplt(_) => compare(">=", &mut stack)?,
-        I::IfIcmpge(_) => compare("<", &mut stack)?,
-        I::IfIcmpgt(_) => compare("<=", &mut stack)?,
-        I::IfIcmple(_) => compare(">", &mut stack)?,
-        I::Iflt(_) => compare_lit(">=", "0", &mut stack)?,
-        I::Ifge(_) => compare_lit("<", "0", &mut stack)?,
-        I::Ifgt(_) => compare_lit("<=", "0", &mut stack)?,
-        I::Ifle(_) => compare_lit(">", "0", &mut stack)?,
-        I::IfNull(_) => compare_lit("!=", "null", &mut stack)?,
-        I::IfNonNull(_) => compare_lit("==", "null", &mut stack)?,
-        // A bare `ifeq` / `ifne` tests a boolean value: `ifeq` skips when false, so the `then` runs
-        // when it is truthy; `ifne` skips when true, so the `then` runs when it is negated.
-        I::Ifeq(_) => stack.pop()?,
-        I::Ifne(_) => Expr::Unary {
-            op: "!",
-            expr: Box::new(stack.pop()?),
-        },
+        I::IfIcmpeq(_) | I::IfAcmpeq(_) => compare(op("==", "!="), &mut stack)?,
+        I::IfIcmpne(_) | I::IfAcmpne(_) => compare(op("!=", "=="), &mut stack)?,
+        I::IfIcmplt(_) => compare(op("<", ">="), &mut stack)?,
+        I::IfIcmpge(_) => compare(op(">=", "<"), &mut stack)?,
+        I::IfIcmpgt(_) => compare(op(">", "<="), &mut stack)?,
+        I::IfIcmple(_) => compare(op("<=", ">"), &mut stack)?,
+        I::Iflt(_) => compare_lit(op("<", ">="), "0", &mut stack)?,
+        I::Ifge(_) => compare_lit(op(">=", "<"), "0", &mut stack)?,
+        I::Ifgt(_) => compare_lit(op(">", "<="), "0", &mut stack)?,
+        I::Ifle(_) => compare_lit(op("<=", ">"), "0", &mut stack)?,
+        I::IfNull(_) => compare_lit(op("==", "!="), "null", &mut stack)?,
+        I::IfNonNull(_) => compare_lit(op("!=", "=="), "null", &mut stack)?,
+        // A bare `ifne` is taken when the value is truthy, `ifeq` when it is falsy; negating the
+        // taken test gives the fall-through condition.
+        I::Ifne(_) | I::Ifeq(_) => {
+            let value = stack.pop()?;
+            if matches!(branch, I::Ifne(_)) == negate {
+                Expr::Unary {
+                    op: "!",
+                    expr: Box::new(value),
+                }
+            } else {
+                value
+            }
+        }
         _ => return None,
     };
     // The condition must consume exactly the operands the block left; a leftover means we mis-read it.

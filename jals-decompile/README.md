@@ -69,7 +69,7 @@ pub fn is_object_sig(ts: &TypeSignature) -> bool;
 | `attrs.rs` | Read the attributes a signature skeleton needs: `ConstantValue` (→ field initializer, a boolean's `1`→`true`), `Exceptions` (→ non-generic `throws`), `MethodParameters` / `LocalVariableTable` (→ real, slot-aware parameter names). |
 | `expr.rs` | The expression / statement IR (`Expr`, `Stmt`) and its rendering to indented Java, with conservative parenthesization so the grouping the bytecode evaluated is preserved. |
 | `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators. Bails on `switch` / `jsr` / a branch to a non-instruction offset. |
-| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`) from the CFG. `decompile_method_body` is the entry point. |
+| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`) from the CFG. `decompile_method_body` is the entry point. |
 
 ## How a method body is reconstructed
 
@@ -81,18 +81,26 @@ pub fn is_object_sig(ts: &TypeSignature) -> bool;
    at the entry / every branch target / after every branch or exit, then basic blocks with `Fall` /
    `Goto` / `Branch` / `Ret` / `Throw` terminators.
 4. **Structure the CFG** (`Structurer`): walk the blocks as a single-entry region, running each block
-   through the stack machine and folding forward conditional branches into `if` / `if`-`else`. The
-   `if` condition is recovered as the *negation* of the branch's jump test (the branch jumps to skip
-   the `then` body). A block reached more than once, a back-edge (loop), or any other non-tree shape
-   bails. A final check requires **every block to be emitted exactly once** — a strong guard that the
-   recovered tree matches the real control flow.
+   through the stack machine and folding forward conditional branches into `if` / `if`-`else` and
+   natural loops (a block targeted by a back-edge) into `while` / `do`-`while`. A forward `if`
+   condition is the *negation* of the branch's jump test (the branch skips the `then` body); a
+   top-test `while` condition is likewise the negation of its exit branch, while a `do`-`while`
+   condition is the branch's own (positive) test (it jumps back to repeat). A block reached more than
+   once, a `break`/`continue` edge, or any other non-tree/irreducible shape bails. A final check
+   requires **every block to be emitted exactly once** — a strong guard that the recovered tree
+   matches the real control flow.
 5. **Render** the statement tree to indented Java lines, dropping a trailing implicit `return;`.
 
-The stack machine (`Sim`) models: `this` / local (parameter) loads, constants, field get/put,
-`invokevirtual` / `invokeinterface` / `invokestatic` / `invokespecial` (including `new`+`dup`+`<init>`
-object creation and `super(...)` / `this(...)` constructor chaining), integer/long/float/double
-arithmetic and bitwise ops, numeric conversions (as casts), `checkcast`, `arraylength`, `return` /
-`athrow`, and a discarded call result (`pop` → statement).
+The stack machine (`Sim`) models: `this` / local (parameter and declared-local) loads and stores,
+`iinc`, constants, field get/put, `invokevirtual` / `invokeinterface` / `invokestatic` /
+`invokespecial` (including `new`+`dup`+`<init>` object creation and `super(...)` / `this(...)`
+constructor chaining), integer/long/float/double arithmetic and bitwise ops, numeric conversions (as
+casts), `checkcast`, `arraylength`, `return` / `athrow`, and a discarded call result (`pop` →
+statement). Local variables are recovered by hoisting: every non-parameter slot a method stores into
+gets one typed declaration (name + type from the `LocalVariableTable`) at the method-body top, and
+each store becomes a plain assignment — so a local written inside a branch and read after the join
+stays in scope. A method with a stored local the `LocalVariableTable` cannot name/type (a `-g`-less
+build, a synthetic temporary, or a reused slot) falls back to the safe body.
 
 ## Implementation progress
 
@@ -126,10 +134,10 @@ public void risky(java.lang.String path) throws java.io.IOException {
 }
 ```
 
-### M2 — control-flow structuring &nbsp;🚧 in progress
+### M2 — control-flow structuring &nbsp;✅ done
 
 Adds `Instruction::encoded_len` (in `jals-classfile`), CFG construction (`cfg.rs`), and the
-`Structurer`. Done so far: **forward conditional branches → `if` / `if`-`else`.**
+`Structurer`. Delivers **forward conditional branches → `if` / `if`-`else`.**
 
 ```java
 public int max(int a, int b) {
@@ -148,15 +156,73 @@ public void classify(int n) {
 }
 ```
 
-Still falling back to the M0 placeholder (see roadmap): loops, `switch`, `try`/`catch`, and local
-variable declarations.
+### M3 — local variables &nbsp;✅ done
+
+Recovers local variables via **hoisting**: every non-parameter slot a method stores into gets one
+typed declaration (name + type read from the `LocalVariableTable`) at the method-body top, and each
+`istore` / `astore` / … becomes a plain assignment; `iinc` becomes `i = i + n;`. Hoisting keeps a
+local written inside a branch and read after the join in scope, so the output is always valid Java.
+A method with a stored local the `LocalVariableTable` cannot name/type unambiguously — a `-g`-less
+build, a synthetic temporary, or a reused slot — falls back to the M0 safe body.
+
+```java
+public int compute(int n) {
+    int doubled;
+    int result;
+    doubled = n * 2;
+    result = doubled + 1;
+    return result;
+}
+public int pick(boolean c) {
+    int x;
+    if (c) {
+        x = 1;
+    } else {
+        x = 2;
+    }
+    return x;
+}
+```
+
+### M4 — loops &nbsp;✅ done
+
+Recovers natural loops from back-edges (via `Instruction::encoded_len` offsets) into the two shapes
+`javac` emits: a **top-test `while`** (a condition test with a `goto` back-edge — javac's default
+loop layout) and a **`do`-`while`** (a conditional back-branch at the bottom). The loop body reuses
+the M3 local machinery, so a counter (`istore` + `iinc` + `iload`) reconstructs cleanly. A
+`break`/`continue`, a nested/irreducible shape, or a side-effecting loop header falls back to the M0
+placeholder. `for` is rendered as `while` for now.
+
+```java
+public int sum(int n) {
+    int total;
+    int i;
+    total = 0;
+    i = 0;
+    while (i < n) {
+        total = total + i;
+        i = i + 1;
+    }
+    return total;
+}
+public int count(int n) {
+    int c;
+    c = 0;
+    do {
+        c = c + 1;
+    } while (c < n);
+    return c;
+}
+```
+
+Still falling back to the M0 placeholder (see roadmap): `switch`, `try`/`catch`.
 
 ## Supported vs. not (yet)
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
-| Values / expressions | `this` & parameter loads, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast`, `arraylength`, `super(...)` / `this(...)` | local stores (`istore` …), array load/store & `newarray`, `invokedynamic` (string concat, lambdas, method refs), `monitor*` (`synchronized`), `lcmp`/`fcmp`/`dcmp`, `instanceof`, `iinc`, `dup` (except in `new`), `swap`, `wide` |
-| Control flow | straight-line, forward `if` / `if`-`else` (int/ref comparisons, null checks, `< 0` vs zero, boolean) | loops (back-edges), `switch`, `try`/`catch`/`finally`, any non-tree / irreducible shape |
+| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast`, `arraylength`, `super(...)` / `this(...)` | array load/store & `newarray`, `invokedynamic` (string concat, lambdas, method refs), `monitor*` (`synchronized`), `lcmp`/`fcmp`/`dcmp`, `instanceof`, `dup` (except in `new`), `swap`, `wide` loads, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
+| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, null checks, `< 0` vs zero, boolean) | `break` / `continue`, nested / irreducible loops, a side-effecting loop header, `switch`, `try`/`catch`/`finally`, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
 Java, just not (yet) a real body.
@@ -164,25 +230,23 @@ Java, just not (yet) a real body.
 ## Roadmap
 
 Remaining milestones, roughly in priority order. Each is an independent increment gated by the same
-safe-fallback invariant.
+safe-fallback invariant. (Local variables — the old first roadmap entry — shipped as M3, and loops as
+M4 on top of it, since a loop's induction variable is itself a local.)
 
-- **Loops** — detect natural loops (back-edges via `Instruction::encoded_len` offsets) and recover
-  `while` / `for` / `do`-`while`.
-- **Local variables** — model local stores (`istore` …) as declarations / assignments, typed and named
-  from `LocalVariableTable` where available. This unblocks a large class of real method bodies (both
-  straight-line and inside branches).
 - **`switch`** — structure `tableswitch` / `lookupswitch` into a `switch` statement.
 - **`try` / `catch` / `finally`** — structure the exception table.
+- **Richer loops** — `break` / `continue` (labeled), nested loops, and `for`-loop recovery (folding
+  the init / update back into a `for` header instead of rendering as `while`).
 - **Expression polish** — string concatenation (`invokedynamic` `makeConcat*` / `StringBuilder`),
   ternary (`?:`) and short-circuit (`&&` / `||`) from small diamonds, enhanced-`for`, `instanceof`,
-  array operations, and long/float/double comparisons in conditions.
+  array operations, `i++` / `i += n` sugar, and long/float/double comparisons in conditions.
 
 ## Testing
 
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
-  `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`) and assert the
-  recovered statements.
+  `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
+  `Loops.class`) and assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
   `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton (across this crate's
   fixtures plus `jals-classfile`'s round-trip corpus) and asserts zero syntax errors.

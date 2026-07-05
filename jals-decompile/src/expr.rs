@@ -51,6 +51,10 @@ pub(crate) enum Expr {
 pub(crate) enum Stmt {
     /// A bare expression statement `expr;` (a discarded call).
     Expr(Expr),
+    /// A hoisted, uninitialized local declaration `ty name;`. Every local a method stores into is
+    /// declared once at the method-body top (so a local written inside a branch and read after the
+    /// join stays in scope), and each store becomes a plain [`Stmt::Assign`].
+    Declare { ty: String, name: String },
     /// `return;` or `return expr;`.
     Return(Option<Expr>),
     /// `target = value;` (an assignment to a field or local).
@@ -67,6 +71,10 @@ pub(crate) enum Stmt {
         then: Vec<Stmt>,
         els: Vec<Stmt>,
     },
+    /// A `while (cond) { body }` (a top-test loop).
+    While { cond: Expr, body: Vec<Stmt> },
+    /// A `do { body } while (cond);` (a bottom-test loop).
+    DoWhile { body: Vec<Stmt>, cond: Expr },
 }
 
 /// Render a statement tree to indented Java lines. Top-level statements are at indent 0 (the caller
@@ -97,6 +105,20 @@ fn render_into(stmt: &Stmt, indent: usize, out: &mut Vec<String>) {
                 out.push(format!("{pad}}}"));
             }
         }
+        Stmt::While { cond, body } => {
+            out.push(format!("{pad}while ({}) {{", render_expr(cond)));
+            for s in body {
+                render_into(s, indent + 4, out);
+            }
+            out.push(format!("{pad}}}"));
+        }
+        Stmt::DoWhile { body, cond } => {
+            out.push(format!("{pad}do {{"));
+            for s in body {
+                render_into(s, indent + 4, out);
+            }
+            out.push(format!("{pad}}} while ({});", render_expr(cond)));
+        }
         simple => out.push(format!("{pad}{}", render_simple(simple))),
     }
 }
@@ -105,6 +127,7 @@ fn render_into(stmt: &Stmt, indent: usize, out: &mut Vec<String>) {
 fn render_simple(stmt: &Stmt) -> String {
     match stmt {
         Stmt::Expr(e) => format!("{};", render_expr(e)),
+        Stmt::Declare { ty, name } => format!("{ty} {name};"),
         Stmt::Return(None) => "return;".to_string(),
         Stmt::Return(Some(e)) => format!("return {};", render_expr(e)),
         Stmt::Assign { target, value } => {
@@ -113,7 +136,9 @@ fn render_simple(stmt: &Stmt) -> String {
         Stmt::Throw(e) => format!("throw {};", render_expr(e)),
         Stmt::SuperCall(args) => format!("super({});", render_args(args)),
         Stmt::ThisCall(args) => format!("this({});", render_args(args)),
-        Stmt::If { .. } => unreachable!("If is rendered by render_into"),
+        Stmt::If { .. } | Stmt::While { .. } | Stmt::DoWhile { .. } => {
+            unreachable!("block statements are rendered by render_into")
+        }
     }
 }
 
