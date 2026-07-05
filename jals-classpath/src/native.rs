@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use futures::executor::block_on;
-use jals_build::DependencySource;
+use jals_build::{DependencySource, ManifestExt};
 use jals_classfile::ClassFile;
 use jals_config::{GitRef, Manifest};
 use jals_fs::OsFileTree;
@@ -23,6 +23,7 @@ use crate::load::{
     ClasspathLoad, extract_nested_jars_in, extract_sources_in, load_classpath_in,
     synthesize_classpath_sources_in,
 };
+use crate::project::{ProjectInputOptions, assemble_project_inputs_in};
 use crate::resolve::{
     cached_jar_path_str, resolve_dependencies_in, resolve_project_dependencies_in,
     resolve_project_source_deps_in, resolve_project_sources_in, vpath,
@@ -151,6 +152,28 @@ pub struct NestedJarsExtraction {
     pub jars: Vec<PathBuf>,
     /// One per jar or member that could not be read/extracted.
     pub warnings: Vec<Warning>,
+}
+
+/// A project's assembled analysis / build inputs, on the real filesystem — the host `PathBuf`-based
+/// form of [`ProjectInputsIn`](crate::ProjectInputsIn), with the manifest's source roots added.
+/// Produced by [`assemble_project_inputs`]. Which fields are populated depends on the
+/// [`ProjectInputOptions`] passed.
+#[derive(Debug, Default)]
+pub struct ProjectInputs {
+    /// The project's `[build] source-dirs`, resolved against the manifest dir (from
+    /// [`ManifestExt::source_roots`]). The `.java` roots the host walks.
+    pub source_roots: Vec<PathBuf>,
+    /// The resolved `[dependencies]` jar paths — `jals build`/`run`'s `javac -classpath` additions.
+    pub dependency_jars: Vec<PathBuf>,
+    /// The loaded classpath `.class` files, ready for `ProjectIndex::lower_classpath`. Empty unless
+    /// classpath loading was requested.
+    pub classpath_classes: Vec<ClassFile>,
+    /// Navigation `.java`: extracted `-sources.jar` source then synthesized skeletons, in that order.
+    pub library_sources: Vec<PathBuf>,
+    /// The `git`/`path` source dependencies' `.java` — an index input and a `javac` source.
+    pub source_dep_sources: Vec<PathBuf>,
+    /// The project's target Java feature version from `[package] edition` (edition-rule gate).
+    pub target_java_version: Option<u32>,
 }
 
 // ---- Path helpers ---------------------------------------------------------------------------
@@ -283,4 +306,41 @@ pub fn synthesize_classpath_sources(
     let mut fs = OsFileTree;
     let files = synthesize_classpath_sources_in(&mut fs, classes, &vpath(root), warn);
     to_pathbufs(files)
+}
+
+/// Assemble a project's analysis / build inputs off the real filesystem: resolve `[dependencies]`
+/// (downloading remotes with a blocking `reqwest` [`Fetcher`], cloning `git` deps with a subprocess
+/// [`Git`]), load / synthesize per `options`, and add the manifest's source roots + edition. The
+/// single seam `jals-cli` and `jals-lsp` build their `ProjectIndex` / compile inputs from. See
+/// [`assemble_project_inputs_in`](crate::assemble_project_inputs_in) for the pure core.
+///
+/// Uses the blocking `reqwest` client via [`block_on`], which panics inside a Tokio runtime — so
+/// `jals-lsp` calls this from a dedicated `std::thread` (the `git` subprocess and tree I/O are safe
+/// under `block_on` regardless).
+pub fn assemble_project_inputs(
+    manifest: &Manifest,
+    root: &Path,
+    options: ProjectInputOptions,
+    warn: impl FnMut(String),
+) -> ProjectInputs {
+    let mut fs = OsFileTree;
+    let fetcher = ReqwestFetcher::new();
+    let git = SubprocessGit;
+    let inputs = block_on(assemble_project_inputs_in(
+        &fetcher,
+        Some(&git),
+        &mut fs,
+        manifest,
+        &vpath(root),
+        options,
+        warn,
+    ));
+    ProjectInputs {
+        source_roots: manifest.source_roots(root),
+        dependency_jars: to_pathbufs(inputs.dependency_jars),
+        classpath_classes: inputs.classpath_classes,
+        library_sources: to_pathbufs(inputs.library_sources),
+        source_dep_sources: to_pathbufs(inputs.source_dep_sources),
+        target_java_version: inputs.target_java_version,
+    }
 }

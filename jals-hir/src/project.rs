@@ -333,6 +333,7 @@ pub struct ProjectIndex {
 /// into a [`ProjectIndex`]. Produced once by [`ProjectIndex::lower_classpath`] and reused across
 /// rebuilds via [`ProjectIndexBuilder::with_classpath`], so a host that re-indexes on every
 /// edit decodes the (unchanging) classpath only once.
+#[derive(Default)]
 pub struct LoweredClasspath {
     classes: Vec<crate::classpath::ClassfileClass>,
 }

@@ -134,70 +134,37 @@ impl ServerState {
                 return;
             }
         };
-        // The classpath the index reads from: the manifest's `[build] classpath` entries, plus the
-        // jars resolved from `[dependencies]` (downloaded remotes / local `file://` jars).
-        let mut entries = manifest.classpath_entries(&root);
-        let source_roots = manifest.source_roots(&root);
-        // The project's Java edition, read out before `manifest` moves into the resolver thread, fed
-        // to the edition-gated lint rules (e.g. `compact-source-file`).
-        let target_java_version = manifest.target_java_version();
-        // `reqwest`'s blocking downloader panics if run inside the Tokio runtime this server uses, so
-        // resolve `[dependencies]` on a dedicated thread (`manifest` moves in; everything needed after
-        // is already read out above). The same thread also resolves each dependency's optional `sources`
-        // jar (the `.java` for go-to-definition into a classpath type's library source) and clones /
-        // reads each `git`/`path` source dependency (the `.java` folded into the index for analysis +
-        // navigation). This blocks workspace load once per project, like the synchronous classpath read
-        // below.
+        // Assemble the project's full analysis + navigation inputs in one call: the manifest's
+        // `[build] classpath` folded with the resolved `[dependencies]` jars and loaded, each
+        // dependency's `-sources.jar` `.java` plus a synthesized skeleton per classpath `.class` (the
+        // go-to-definition library source, real winning over skeleton), the `git`/`path` source deps'
+        // `.java` (folded into the index for analysis + navigation), the manifest's source roots, and
+        // the `[package] edition` (feeding the edition-gated lint rules).
+        //
+        // `assemble_project_inputs` uses `reqwest`'s blocking downloader, which panics inside the
+        // Tokio runtime this server uses, so it runs on a dedicated thread (`manifest` moves in),
+        // joined immediately — blocking workspace load once per project. stderr is safe to log on:
+        // the LSP protocol owns stdout, not stderr.
         let deps_root = root.clone();
-        let (jars, library_sources, source_dep_sources) = std::thread::spawn(move || {
-            // stderr is safe to log on: the LSP protocol owns stdout, not stderr.
-            let jars =
-                jals_classpath::resolve_project_dependencies(&manifest, &deps_root, |message| {
-                    eprintln!("jals-lsp: dependency: {message}");
-                });
-            let sources =
-                jals_classpath::resolve_project_sources(&manifest, &deps_root, |message| {
-                    eprintln!("jals-lsp: sources: {message}");
-                });
-            let source_deps =
-                jals_classpath::resolve_project_source_deps(&manifest, &deps_root, |message| {
-                    eprintln!("jals-lsp: source dependency: {message}");
-                });
-            (jars, sources, source_deps)
+        let inputs = std::thread::spawn(move || {
+            jals_classpath::assemble_project_inputs(
+                &manifest,
+                &deps_root,
+                jals_classpath::ProjectInputOptions::Editor,
+                |message| eprintln!("jals-lsp: {message}"),
+            )
         })
         .join()
-        .expect("dependency resolution thread panicked");
-        entries.extend(jars);
-
-        // Read and parse the project's classpath jars/dirs once, so external library types resolve
-        // in this workspace's index. Unreadable entries are skipped (logged), never fatal — the
-        // project still gets analysis from its sources, stubs, and the rest of the classpath.
-        let load = jals_classpath::load_classpath(&entries);
-        for warning in &load.warnings {
-            eprintln!("jals-lsp: classpath: {}: {}", warning.path, warning.message);
-        }
-
-        // Fallback go-to-definition source: synthesize a signature-only `.java` skeleton from every
-        // classpath `.class`. Appended **after** the real library sources, so the source-location
-        // overlay (first-declaration-wins) keeps real source authoritative — a skeleton is only ever
-        // navigated to for a class that ships no real source (no `-sources.jar`, no `git`/`path`
-        // source dep), filling the gaps so jump-to-definition lands somewhere for any library type.
-        // Pure rendering + local writes (no network), so this stays on the main thread.
-        let mut library_sources = library_sources;
-        library_sources.extend(jals_classpath::synthesize_classpath_sources(
-            &load.classes,
-            &root,
-            |message| eprintln!("jals-lsp: decompile: {message}"),
-        ));
+        .expect("project input assembly thread panicked");
 
         self.workspaces
             .push(Workspace::load_with_classpath_and_sources(
                 root,
-                source_roots,
-                load.classes,
-                library_sources,
-                source_dep_sources,
-                target_java_version,
+                inputs.source_roots,
+                inputs.classpath_classes,
+                inputs.library_sources,
+                inputs.source_dep_sources,
+                inputs.target_java_version,
             ));
     }
 

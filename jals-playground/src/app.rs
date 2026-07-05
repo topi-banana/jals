@@ -105,8 +105,9 @@ pub enum Msg {
     ModelOpened(String),
     /// The CORS proxy changed (typed in the header); stored for the next dependency resolve.
     SetProxy(String),
-    /// The async dependency resolution finished: the lowered classpath + a status line, or an error.
-    ClasspathResolved(Result<(LoweredClasspath, String), String>),
+    /// The async dependency resolution finished: the lowered classpath + the target Java version
+    /// (from `[package] edition`) + a status line, or an error.
+    ClasspathResolved(Result<(LoweredClasspath, Option<u32>, String), String>),
 }
 
 /// The playground's root component. Owns every piece of state; the children are presentational.
@@ -128,6 +129,11 @@ pub struct App {
     deps_cache: Rc<RefCell<InMemoryFileTree>>,
     /// The last dependency-resolution status line shown in the [`Header`], if any.
     deps_status: Option<String>,
+    /// The project's target Java feature version from the last resolved `jals.toml`'s
+    /// `[package] edition`, threaded into the lint [`Config`] so the edition-gated rules
+    /// (`compact-source-file`, `module-import`) fire in the browser. `None` until a manifest with an
+    /// `edition` resolves.
+    target_java_version: Option<u32>,
     /// The `jals.toml` editor buffer. Held here (not in the workspace's Java file tree) so it is
     /// never analysed/indexed; its `[dependencies]` are re-resolved on edit.
     manifest_src: String,
@@ -149,10 +155,13 @@ impl App {
     /// workspace already maps each range to Monaco's UTF-16 coordinates, so this only marshals
     /// through [`monaco::set_diagnostics`].
     fn refresh_markers(&self) {
-        let diags = self
-            .workspace
-            .borrow()
-            .analyze_active(&jals_config::lint::Config::default());
+        // Fold the resolved `[package] edition` into the lint config so the edition-gated rules
+        // (`compact-source-file`, `module-import`) fire; every other key stays at its default.
+        let config = jals_config::lint::Config {
+            target_java_version: self.target_java_version,
+            ..Default::default()
+        };
+        let diags = self.workspace.borrow().analyze_active(&config);
         monaco::set_diagnostics(diags.iter().map(|d| monaco::Marker {
             start_line: d.range.start_line,
             start_col: d.range.start_col,
@@ -337,6 +346,7 @@ impl Component for App {
             syntax_dump: None,
             deps_cache: Rc::new(RefCell::new(InMemoryFileTree::new())),
             deps_status: None,
+            target_java_version: None,
             manifest_src: ConfigKind::Manifest.seed().to_string(),
             fmt_src: ConfigKind::Fmt.seed().to_string(),
             active_config: None,
@@ -446,8 +456,9 @@ impl Component for App {
             }
             Msg::ClasspathResolved(result) => {
                 match result {
-                    Ok((classpath, status)) => {
+                    Ok((classpath, target_java_version, status)) => {
                         self.workspace.borrow_mut().set_classpath(Some(classpath));
+                        self.target_java_version = target_java_version;
                         self.deps_status = Some(status);
                         // Re-analyse the active file with the external types now in the index — but
                         // only when a Java file is showing, so we never paint Java markers on a
@@ -509,10 +520,11 @@ impl Component for App {
     }
 }
 
-/// Resolve a parsed `manifest`'s `[dependencies]` into a lowered classpath, in the browser: download
-/// each remote jar with a [`BrowserFetcher`] into the in-memory `cache`, load the `.class` files, and
-/// lower them for the project index. Returns the classpath and a human-readable status line (class/jar
-/// counts plus any warnings), or an error message.
+/// Assemble a parsed `manifest`'s analysis inputs into a lowered classpath, in the browser: download
+/// each remote `[dependencies]` jar with a [`BrowserFetcher`] into the in-memory `cache`, load the
+/// `.class` files, and lower them for the project index. Returns the classpath, the target Java
+/// version from `[package] edition` (for the edition-gated lint rules), and a human-readable status
+/// line (class/jar counts plus any warnings), or an error message.
 ///
 /// The whole resolution runs against a *snapshot clone* of `cache` so no `RefCell` borrow is held
 /// across an `.await`; the populated snapshot is written back afterwards, so a re-resolve reuses the
@@ -521,30 +533,29 @@ async fn resolve_classpath(
     manifest: jals_config::Manifest,
     proxy: String,
     cache: Rc<RefCell<InMemoryFileTree>>,
-) -> Result<(LoweredClasspath, String), String> {
+) -> Result<(LoweredClasspath, Option<u32>, String), String> {
     let fetcher = BrowserFetcher::new(proxy);
     let mut snapshot = cache.borrow().clone();
     let mut warnings = Vec::new();
-    // A synthetic root: remote (`https://`) jars ignore it; local `file://`/`path` jars are not
-    // reachable in the browser anyway.
-    let jars = jals_classpath::resolve_project_dependencies_in(
+    // A synthetic `/` root: remote (`https://`) jars ignore it; local `file://`/`path` jars are not
+    // reachable in the browser anyway. No `Git` capability (browser), and analysis-only options —
+    // jars → classpath; sources jars, `git`/`path` source deps, and skeletons are host-only features.
+    let inputs = jals_classpath::assemble_project_inputs_in(
         &fetcher,
+        None,
         &mut snapshot,
         &manifest,
         "/",
+        jals_classpath::ProjectInputOptions::Analysis,
         |message| warnings.push(message),
     )
     .await;
-    let load = jals_classpath::load_classpath_in(&snapshot, &jars);
     *cache.borrow_mut() = snapshot;
-    for warning in &load.warnings {
-        warnings.push(format!("{}: {}", warning.path, warning.message));
-    }
-    let classpath = ProjectIndex::lower_classpath(&load.classes);
+    let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes);
     let mut status = format!(
         "resolved {} class(es) from {} jar(s)",
-        load.classes.len(),
-        jars.len()
+        inputs.classpath_classes.len(),
+        inputs.dependency_jars.len()
     );
     if !warnings.is_empty() {
         status.push_str(&format!(
@@ -553,7 +564,7 @@ async fn resolve_classpath(
             warnings.join("; ")
         ));
     }
-    Ok((classpath, status))
+    Ok((classpath, inputs.target_java_version, status))
 }
 
 /// Parse config file `kind` from `text`, returning the first error — or `None` when it parses
