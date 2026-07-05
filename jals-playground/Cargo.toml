@@ -24,7 +24,4 @@ text-size = { workspace = true }
 toml = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = [
-  "Element",
-  "HtmlInputElement",
-] }
+web-sys = { version = "0.3", features = ["Element", "HtmlInputElement"] }
