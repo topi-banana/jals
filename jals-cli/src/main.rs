@@ -13,7 +13,7 @@ use jals_build::ManifestExt;
 use jals_config::Manifest;
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
-use jals_hir::{FileId, ProjectIndex};
+use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 
 #[derive(Parser)]
 #[command(name = "jals", version, about = "JALS/Java tooling")]
@@ -338,17 +338,22 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
         jals_build::resolve_run_target(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
     }
     let sources = discover_sources(&manifest, &root)?;
-    // Resolve `[dependencies]` (downloading remotes) and put the resulting jars on javac's classpath.
-    let extra_classpath = resolve_project_dependencies(&manifest, &root);
-    // Resolve `git`/`path` source dependencies (cloning/reading their `.java`) and compile them
-    // alongside the project's own sources, so a project that depends on a source dependency builds.
-    let source_deps = resolve_project_source_deps(&manifest, &root);
+    // Assemble the compile inputs: the resolved `[dependencies]` jars for javac's classpath, and the
+    // `git`/`path` source dependencies' `.java` compiled alongside the project's own sources so a
+    // project that depends on a source dependency builds. Best-effort — a failed download/clone is
+    // warned and skipped, never aborting the build.
+    let inputs = jals_classpath::assemble_project_inputs(
+        &manifest,
+        &root,
+        jals_classpath::ProjectInputOptions::Compile,
+        |message| eprintln!("warning: {message}"),
+    );
     let invocation = jals_build::build_invocation(
         &manifest,
         &root,
         &sources,
-        &source_deps,
-        &extra_classpath,
+        &inputs.source_dep_sources,
+        &inputs.dependency_jars,
         path_sep(),
     );
 
@@ -377,18 +382,23 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
             .to_string(),
     };
     let sources = discover_sources(&manifest, &root)?;
-    // Resolve `[dependencies]` once and put the resulting jars on both the compile and run classpaths.
-    let extra_classpath = resolve_project_dependencies(&manifest, &root);
-    // Resolve `git`/`path` source dependencies and compile them alongside the project's own sources;
-    // their `.class` land in the run classpath's `classes-dir`, so no change to the run invocation.
-    let source_deps = resolve_project_source_deps(&manifest, &root);
+    // Assemble the compile inputs once: the resolved `[dependencies]` jars go on both the compile and
+    // run classpaths, and the `git`/`path` source dependencies' `.java` compile alongside the
+    // project's own sources (their `.class` land in the run classpath's `classes-dir`, so the run
+    // invocation is unchanged). Best-effort — a failed download/clone is warned and skipped.
+    let inputs = jals_classpath::assemble_project_inputs(
+        &manifest,
+        &root,
+        jals_classpath::ProjectInputOptions::Compile,
+        |message| eprintln!("warning: {message}"),
+    );
     let sep = path_sep();
     let build_inv = jals_build::build_invocation(
         &manifest,
         &root,
         &sources,
-        &source_deps,
-        &extra_classpath,
+        &inputs.source_dep_sources,
+        &inputs.dependency_jars,
         sep,
     );
     let run_inv = jals_build::run_invocation(
@@ -396,7 +406,7 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
         &root,
         &main_class,
         &args.args,
-        &extra_classpath,
+        &inputs.dependency_jars,
         sep,
     );
 
@@ -515,34 +525,28 @@ fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
     Ok((manifest, root))
 }
 
-/// Discover the project manifest upward from `start_dir` and load the `.class` files on its
-/// `[build] classpath` (out of jars and class directories), for the cross-file `type-mismatch`
-/// check. Unlike `jals build`, a missing manifest or an unreadable classpath entry is **not** an
-/// error here — linting still runs with the project sources and stdlib stubs, just without external
-/// library types. Any unreadable entry is reported as a warning on stderr and skipped.
 /// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and the
-/// project's classpath `.class` files so the index-aware `type-mismatch` rule resolves stdlib and
-/// external library types. Shared by the stdin and multi-file lint paths.
+/// project's lowered classpath so the index-aware `type-mismatch` rule resolves stdlib and external
+/// library types. Shared by the stdin and multi-file lint paths.
 fn build_lint_index(
     files: &[(FileId, jals_syntax::SyntaxNode)],
-    classpath: &jals_classpath::ClasspathLoad,
+    classpath: &LoweredClasspath,
 ) -> ProjectIndex {
-    let lowered = ProjectIndex::lower_classpath(&classpath.classes);
     ProjectIndex::builder(files)
         .with_stdlib()
-        .with_classpath(&lowered)
+        .with_classpath(classpath)
         .build()
 }
 
 /// The project context the linter folds in for the `jals.toml` discovered upward from `start_dir`:
-/// the classpath `.class` files (so the cross-file `type-mismatch` rule resolves external library
-/// types) and the target Java feature version from `[package] edition` (so edition-gated rules like
-/// `compact-source-file` run). Both come from a **single** best-effort parse of the manifest; a
-/// missing or malformed manifest yields an empty classpath and no edition — a malformed manifest is
-/// `jals build`'s business, not lint's.
+/// its lowered classpath (so the cross-file `type-mismatch` rule resolves external library types) and
+/// the target Java feature version from `[package] edition` (so edition-gated rules like
+/// `compact-source-file` run). Both come from a **single** best-effort assembly of the project's
+/// analysis inputs; a missing or malformed manifest yields an empty classpath and no edition — a
+/// malformed manifest is `jals build`'s business, not lint's.
 #[derive(Default)]
 struct ProjectLintContext {
-    classpath: jals_classpath::ClasspathLoad,
+    classpath: LoweredClasspath,
     target_java_version: Option<u32>,
 }
 
@@ -555,51 +559,20 @@ fn load_project_lint_context(start_dir: &Path) -> ProjectLintContext {
         return ProjectLintContext::default();
     };
     let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
+    // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
+    // `type-mismatch` index) and the `[package] edition`. An unreadable entry / failed download is
+    // reported on stderr and skipped, never an error.
+    let inputs = jals_classpath::assemble_project_inputs(
+        &manifest,
+        root,
+        jals_classpath::ProjectInputOptions::Analysis,
+        |message| eprintln!("warning: {message}"),
+    );
     ProjectLintContext {
-        classpath: load_project_classpath(&manifest, root),
-        target_java_version: manifest.target_java_version(),
+        classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
+        target_java_version: inputs.target_java_version,
     }
-}
-
-/// Load the `.class` files on `manifest`'s `[build] classpath` (out of jars and class directories)
-/// plus its resolved `[dependencies]` jars, for the cross-file `type-mismatch` check. Best-effort:
-/// an unreadable classpath entry is reported as a warning on stderr and skipped, never an error —
-/// linting still runs with project sources and stdlib stubs, just without those external types.
-fn load_project_classpath(manifest: &Manifest, root: &Path) -> jals_classpath::ClasspathLoad {
-    let mut entries = manifest.classpath_entries(root);
-    // Fold the resolved `[dependencies]` jars (downloaded remotes / local `file://` jars) into the
-    // classpath, so external library types from named dependencies — not just `[build] classpath`
-    // entries — resolve during linting.
-    entries.extend(resolve_project_dependencies(manifest, root));
-    if entries.is_empty() {
-        return jals_classpath::ClasspathLoad::default();
-    }
-    let load = jals_classpath::load_classpath(&entries);
-    for warning in &load.warnings {
-        eprintln!("warning: classpath: {}: {}", warning.path, warning.message);
-    }
-    load
-}
-
-/// Resolve the project's `[dependencies]` to local jar paths, downloading remote ones into
-/// `<root>/target/jals/deps` (a cache; `target/` is already build output). Best-effort like the rest
-/// of the classpath load: a classification problem or a download failure is reported on stderr and
-/// skipped, never aborting. `jals-cli` is synchronous, so the blocking downloader is called directly.
-fn resolve_project_dependencies(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
-    jals_classpath::resolve_project_dependencies(manifest, root, |message| {
-        eprintln!("warning: dependency: {message}");
-    })
-}
-
-/// Resolve the project's `git`/`path` source `[dependencies]` to the `.java` files under each one's
-/// source root, cloning `git` repos into `<root>/target/jals/deps/git` (a cache) and reading `path`
-/// trees in place. These are compiled alongside the project's own sources by `jals build`/`run`.
-/// Best-effort like the rest of dependency resolution: a missing path, a failed clone, or a missing
-/// source directory is reported on stderr and skipped, never aborting.
-fn resolve_project_source_deps(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
-    jals_classpath::resolve_project_source_deps(manifest, root, |message| {
-        eprintln!("warning: source dependency: {message}");
-    })
 }
 
 /// Collects the `.java` files under the manifest's source directories (resolved against `root`).

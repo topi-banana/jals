@@ -25,6 +25,7 @@
 
 mod io;
 mod load;
+mod project;
 mod resolve;
 mod skeleton;
 
@@ -39,6 +40,7 @@ pub use load::{
     ClasspathLoad, extract_nested_jars_in, extract_sources_in, load_classpath_in,
     synthesize_classpath_sources_in,
 };
+pub use project::{ProjectInputOptions, ProjectInputsIn, assemble_project_inputs_in};
 pub use resolve::{
     resolve_dependencies_in, resolve_project_dependencies_in, resolve_project_source_deps_in,
     resolve_project_sources_in,
@@ -46,10 +48,10 @@ pub use resolve::{
 
 #[cfg(feature = "native")]
 pub use native::{
-    NestedJarsExtraction, ReqwestFetcher, ResolvedDependencies, SourcesExtraction, SubprocessGit,
-    cached_jar_path, extract_nested_jars, extract_sources, load_classpath, resolve_dependencies,
-    resolve_project_dependencies, resolve_project_source_deps, resolve_project_sources,
-    synthesize_classpath_sources,
+    NestedJarsExtraction, ProjectInputs, ReqwestFetcher, ResolvedDependencies, SourcesExtraction,
+    SubprocessGit, assemble_project_inputs, cached_jar_path, extract_nested_jars, extract_sources,
+    load_classpath, resolve_dependencies, resolve_project_dependencies,
+    resolve_project_source_deps, resolve_project_sources, synthesize_classpath_sources,
 };
 
 /// A single classpath entry or member file that could not be loaded, or a dependency that could not be
