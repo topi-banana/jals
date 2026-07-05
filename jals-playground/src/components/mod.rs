@@ -1,24 +1,21 @@
 //! The playground's UI, split by responsibility into struct-based Yew components.
 //!
 //! Every component here is a `struct` plus an `impl yew::Component` block (never a
-//! `#[function_component]`): [`Header`] (the top action bar), [`SettingsBar`] (the `jals-fmt`
-//! config controls), [`DepsBar`] (the external `[dependencies]` resolver), [`FileTree`] (the
-//! workspace files sidebar), [`EditorPane`] (the Monaco editor mount + lifecycle), and
-//! [`SyntaxPane`] (the CST dump). The root [`crate::app::App`] owns all state and wires them
-//! together with props and callbacks.
+//! `#[function_component]`): [`Header`] (the top action bar, with the CORS-proxy input and the
+//! dependency-resolution status), [`FileTree`] (the config-files + workspace-files sidebar),
+//! [`EditorPane`] (the Monaco editor mount + lifecycle), and [`SyntaxPane`] (the CST dump). The
+//! `jals.toml` / `jalsfmt.toml` configuration is edited as TOML files in the editor itself (see
+//! [`crate::app::App`]), so there are no dedicated config/dependency bars. The root
+//! [`crate::app::App`] owns all state and wires the components together with props and callbacks.
 
-mod deps_bar;
 mod editor_pane;
 mod file_tree;
 mod header;
-mod settings_bar;
 mod syntax_pane;
 
-pub use deps_bar::DepsBar;
 pub use editor_pane::EditorPane;
 pub use file_tree::{FileTree, TreeEntry};
 pub use header::Header;
-pub use settings_bar::SettingsBar;
 pub use syntax_pane::SyntaxPane;
 
 /// Shared class list for a pane's small uppercase-mono header label (Files / active file /

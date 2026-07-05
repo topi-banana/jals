@@ -33,12 +33,20 @@ export function initMonaco() {
     return monacoReady;
 }
 
-// Get-or-create the URI-backed `java` model for `path`, seeded with `value` on
-// first use.
+// The Monaco language for `path`, by extension: the config files (`jals.toml` /
+// `jalsfmt.toml`) are plaintext (Monaco ships no TOML mode), everything else is
+// Java. Keeping config models off the `java` language also keeps the Java-only
+// providers/formatter from firing on them.
+function langFor(path) {
+    return path.endsWith(".toml") ? "plaintext" : "java";
+}
+
+// Get-or-create the URI-backed model for `path`, seeded with `value` on first
+// use (its language is chosen by `langFor`).
 function modelFor(path, value) {
     let model = models.get(path);
     if (!model) {
-        model = monaco.editor.createModel(value, "java", pathToUri(path));
+        model = monaco.editor.createModel(value, langFor(path), pathToUri(path));
         models.set(path, model);
     }
     return model;

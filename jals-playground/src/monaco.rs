@@ -5,8 +5,8 @@
 //! wires the editor, while the root [`crate::app::App`] orchestrates content operations —
 //! switching files, applying a format, repainting diagnostics — through these functions.
 
+use jals_config::Severity;
 use jals_hir::DefKind;
-use jals_lint::Severity;
 use wasm_bindgen::prelude::*;
 
 // The Monaco glue (see `js/monaco_glue.js`), pulled in as a wasm-bindgen snippet.

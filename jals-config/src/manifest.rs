@@ -4,12 +4,18 @@
 //! optional; omitted keys fall back to [`Manifest::default`], which encodes the Maven-style
 //! `src/main/java` -> `target/classes` layout. Keys are kebab-case and grouped into `[package]`,
 //! `[build]`, and `[run]` sections.
+//!
+//! This module owns the pure, `no_std` half: the serde model, structural [`validate`](Manifest::validate),
+//! the [`FromStr`] parse-from-text entry point, and the pure classified type [`GitRef`]. The host-only,
+//! `std::path`-based resolution (classpath / source-root / dependency-source / invocation / scaffold) lives
+//! in `jals-build`'s `ManifestExt`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
+use core::str::FromStr;
 
 use serde::Deserialize;
 
@@ -24,16 +30,16 @@ pub struct Manifest {
     /// Run settings (`[run]`).
     pub run: Run,
     /// Named entry points (`[[bin]]`). An empty list means the single entry point comes from
-    /// `[run] main-class`; otherwise the run target is selected from these. See
-    /// [`crate::resolve_run_target`].
+    /// `[run] main-class`; otherwise the run target is selected from these (see `jals-build`'s
+    /// `resolve_run_target`).
     pub bin: Vec<Bin>,
     /// External dependencies (`[dependencies]`), keyed by name (the Java analogue of Cargo's
     /// `[dependencies]`). A `BTreeMap` so iteration order is deterministic — the resolved classpath
     /// and any diagnostics come out in a stable order. Each value is a [`Dependency`] — one of the
     /// `jar` / `git` / `path` forms, chosen by serde at parse time. The host (`jals-cli`/`jals-lsp`)
     /// resolves each entry — downloading `jar`s onto the classpath, cloning/reading `git`/`path`
-    /// source into the editor index; this crate only classifies the specs (see
-    /// [`Manifest::dependency_sources`] / [`Manifest::dependency_source_dirs`]), staying pure.
+    /// source into the editor index; this crate only models and validates the specs, staying pure
+    /// (`jals-build`'s `ManifestExt` classifies them into host-facing path sources).
     pub dependencies: BTreeMap<String, Dependency>,
 }
 
@@ -55,11 +61,10 @@ pub struct Manifest {
 ///
 /// The host resolves each form differently: a [`Jar`](Dependency::Jar) is downloaded/read and put on
 /// the classpath, a [`Git`](Dependency::Git) is cloned, a [`Path`](Dependency::Path) is read in place;
-/// the latter two contribute `.java` source for analysis + navigation only. The resolution accessors
-/// ([`jar_source`](Dependency::jar_source) / [`sources_source`](Dependency::sources_source) /
-/// [`source_dependency`](Dependency::source_dependency)) classify the raw values into the host-facing
-/// [`DependencySource`] / [`SourceDependency`], applying the few checks serde cannot (empty values,
-/// URL scheme, at-most-one git ref).
+/// the latter two contribute `.java` source for analysis + navigation only. The value-level checks
+/// serde cannot express (empty values, URL scheme, at-most-one git ref) are applied by
+/// [`Dependency::validate`]; `jals-build`'s `ManifestExt` classifies the raw values into host-facing
+/// path sources.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum Dependency {
@@ -78,12 +83,12 @@ pub enum Dependency {
 pub struct JarDependency {
     /// A `.jar` location: an `https://`/`http://` URL (the host downloads it), a `file://` URL, or a
     /// bare path (relative to the manifest directory). Resolved to a local `.jar` by the host, never
-    /// here — see [`Dependency::jar_source`].
+    /// here (see `jals-build`'s `ManifestExt`).
     pub jar: String,
     /// An optional companion **sources** `.jar` (the `-sources.jar` of Maven convention), located the
     /// same way as [`jar`](JarDependency::jar) (URL / `file://` / bare path). It carries the library's
     /// `.java` sources, used only for editor navigation (go-to-definition into the real source); it is
-    /// never a compile or analysis input. Resolved by the host — see [`Dependency::sources_source`].
+    /// never a compile or analysis input. Resolved by the host.
     pub sources: Option<String>,
     /// Whether to recursively unpack the jar's **bundled jars** (`*.jar` members nested inside it, as in
     /// a Spring-Boot-style fat jar's `BOOT-INF/lib/*.jar`) onto the classpath. With `recursive = true`
@@ -126,20 +131,9 @@ pub struct PathDependency {
     pub dir: Option<String>,
 }
 
-/// A `git` dependency's classified spec: the clone URL, which commit to check out, and an optional
-/// source-root subdirectory. The host clones the URL, checks out the [`reference`](GitSource::reference),
-/// then reads the `.java` under [`dir`](GitSource::dir) (or the auto-detected source root).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitSource {
-    /// The repository URL to clone.
-    pub url: String,
-    /// Which commit to check out.
-    pub reference: GitRef,
-    /// The source root within the repo (`dir = "..."`); `None` to auto-detect.
-    pub dir: Option<String>,
-}
-
-/// Which commit of a [`GitSource`] to check out: the default branch, or a named branch / tag / commit.
+/// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
+/// The pure classification of a [`GitDependency`]'s `branch` / `tag` / `rev` (see
+/// [`GitDependency::git_ref`]); `jals-build`'s `GitSource` pairs it with the resolved clone URL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GitRef {
     /// No `branch`/`tag`/`rev` given: check out the repository's default branch.
@@ -163,42 +157,9 @@ impl GitRef {
     }
 }
 
-/// A `path` dependency's classified spec: the local directory (resolved against the manifest dir) and
-/// an optional source-root subdirectory within it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathSource {
-    /// The dependency's root directory (the `path` value resolved against the manifest dir).
-    pub root: PathBuf,
-    /// The source root within `root` (`dir = "..."`); `None` to auto-detect.
-    pub dir: Option<String>,
-}
-
-/// A `git` / `path` dependency whose `.java` source the host indexes for analysis and navigation —
-/// the resolved source-form of a [`Dependency`], collected by [`Manifest::dependency_source_dirs`]. (A
-/// `jar` dependency is never one of these; its classes come from the classpath.)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceDependency {
-    /// A git repository to clone and read `.java` from.
-    Git(GitSource),
-    /// A local directory to read `.java` from.
-    Path(PathSource),
-}
-
-/// Where a dependency's jar is obtained, classified purely from its spec (no I/O), so the host knows
-/// whether to download it or read it off disk. Produced by [`Dependency::jar_source`] and
-/// [`Dependency::sources_source`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DependencySource {
-    /// An `https://`/`http://` URL the host must download.
-    Url(String),
-    /// A local `.jar` path — from a `file://` URL or a bare path, the latter resolved against the
-    /// manifest directory when relative.
-    Path(PathBuf),
-}
-
-/// A `[dependencies]` entry whose value could not be classified, found by the resolution accessors
-/// ([`Dependency::jar_source`] / [`Dependency::sources_source`] / [`Dependency::source_dependency`]).
-/// Carries the dependency name for an actionable message.
+/// A `[dependencies]` entry whose value could not be classified, found by [`Dependency::validate`]
+/// (and by `jals-build`'s `ManifestExt` classifiers). Carries the dependency name for an actionable
+/// message.
 ///
 /// These are the checks serde cannot express at parse time. The *structural* errors — a missing form,
 /// co-occurring forms (`{ jar, git }`), or a field misplaced onto the wrong form (`branch` without
@@ -332,7 +293,7 @@ pub struct Run {
     /// Fully-qualified main class used as the entry point for `jals run`.
     ///
     /// Used only when no `[[bin]]` is declared; once any `[[bin]]` exists the run target is
-    /// selected from the bins instead. See [`crate::resolve_run_target`].
+    /// selected from the bins instead (see `jals-build`'s `resolve_run_target`).
     pub main_class: Option<String>,
 }
 
@@ -354,7 +315,7 @@ pub struct Bin {
 impl Default for Build {
     fn default() -> Self {
         Build {
-            source_dirs: vec!["src/main/java".to_string()],
+            source_dirs: alloc::vec!["src/main/java".to_string()],
             classes_dir: "target/classes".to_string(),
             release: None,
             source: None,
@@ -365,92 +326,89 @@ impl Default for Build {
     }
 }
 
+/// Validate a jar-location string (a `jar` or `sources` value) — non-empty and, if it carries a URL
+/// scheme, a known one (`file` / `https` / `http`) — without building any path. The value-level check
+/// serde cannot express, shared by [`Dependency::validate`] and `jals-build`'s classpath classifier
+/// (which reuses it before resolving the value to a `PathBuf` / URL). `field` names the source field
+/// for error messages.
+///
+/// # Errors
+/// [`DependencyError::Empty`] for an empty value, [`DependencyError::UnknownScheme`] for a URL with an
+/// unrecognised scheme.
+pub fn validate_jar_location(
+    value: &str,
+    name: &str,
+    field: &'static str,
+) -> Result<(), DependencyError> {
+    if value.is_empty() {
+        return Err(DependencyError::Empty {
+            name: name.to_string(),
+            field,
+        });
+    }
+    if value.starts_with("file://") || value.starts_with("https://") || value.starts_with("http://")
+    {
+        return Ok(());
+    }
+    if value.contains("://") {
+        return Err(DependencyError::UnknownScheme {
+            name: name.to_string(),
+            field,
+            value: value.to_string(),
+        });
+    }
+    // No scheme: a bare (manifest-relative) path — always valid at this layer.
+    Ok(())
+}
+
 impl Dependency {
-    /// The compiled-jar classpath source of a `jar` dependency, or `None` for a `git`/`path` source
-    /// dependency (which contributes no classpath jar). `name` labels errors; `manifest_dir` is joined
-    /// onto a bare relative path, exactly like [`Manifest::classpath_entries`].
+    /// Apply the value-level checks serde cannot express, without any I/O or path building: a `jar`'s
+    /// `jar` (and optional `sources`) is a non-empty known-scheme location, a `git`'s URL is non-empty
+    /// with at most one `branch` / `tag` / `rev`, and a `path`'s directory is non-empty. `name` labels
+    /// errors.
     ///
     /// # Errors
-    /// Returns [`DependencyError`] when the `jar` value is empty or uses an unsupported URL scheme.
-    pub fn jar_source(
-        &self,
-        name: &str,
-        manifest_dir: &Path,
-    ) -> Option<Result<DependencySource, DependencyError>> {
+    /// Returns the first [`DependencyError`] found (empty value, unsupported URL scheme, or conflicting
+    /// git refs).
+    pub fn validate(&self, name: &str) -> Result<(), DependencyError> {
         match self {
-            Dependency::Jar(jar) => Some(classify(&jar.jar, name, "jar", manifest_dir)),
-            Dependency::Git(_) | Dependency::Path(_) => None,
-        }
-    }
-
-    /// The optional companion **sources** jar of a `jar` dependency, classified the same way as the
-    /// `jar` value (a URL to download or a path to read). `None` when this is not a `jar` dependency or
-    /// it declares no `sources`. `name` labels errors; `manifest_dir` is joined onto a bare relative
-    /// path.
-    ///
-    /// # Errors
-    /// Returns [`DependencyError`] when the `sources` value is empty or uses an unsupported URL scheme.
-    pub fn sources_source(
-        &self,
-        name: &str,
-        manifest_dir: &Path,
-    ) -> Option<Result<DependencySource, DependencyError>> {
-        match self {
-            Dependency::Jar(jar) => jar
-                .sources
-                .as_deref()
-                .map(|sources| classify(sources, name, "sources", manifest_dir)),
-            Dependency::Git(_) | Dependency::Path(_) => None,
-        }
-    }
-
-    /// The resolved `.java` source tree of a `git`/`path` dependency, or `None` for a `jar` dependency
-    /// (whose classes come from the classpath). `name` labels errors; `manifest_dir` is joined onto a
-    /// bare relative `path`.
-    ///
-    /// # Errors
-    /// Returns [`DependencyError`] when the `git`/`path` value is empty or (for `git`) more than one of
-    /// `branch` / `tag` / `rev` is set.
-    pub fn source_dependency(
-        &self,
-        name: &str,
-        manifest_dir: &Path,
-    ) -> Option<Result<SourceDependency, DependencyError>> {
-        match self {
-            Dependency::Jar(_) => None,
-            Dependency::Git(git) => Some(git.source(name)),
-            Dependency::Path(path) => Some(path.source(name, manifest_dir)),
+            Dependency::Jar(jar) => {
+                validate_jar_location(&jar.jar, name, "jar")?;
+                if let Some(sources) = &jar.sources {
+                    validate_jar_location(sources, name, "sources")?;
+                }
+                Ok(())
+            }
+            Dependency::Git(git) => {
+                if git.git.is_empty() {
+                    return Err(DependencyError::Empty {
+                        name: name.to_string(),
+                        field: "git",
+                    });
+                }
+                git.git_ref(name).map(|_| ())
+            }
+            Dependency::Path(path) => {
+                if path.path.is_empty() {
+                    return Err(DependencyError::Empty {
+                        name: name.to_string(),
+                        field: "path",
+                    });
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl GitDependency {
-    /// Resolve this `git` dependency into a [`SourceDependency::Git`]: a non-empty clone URL and a
-    /// single pinned [`GitRef`] from at most one of `branch` / `tag` / `rev`.
-    ///
-    /// # Errors
-    /// [`DependencyError::Empty`] for an empty `git` URL or git ref, [`DependencyError::ConflictingGitRef`]
-    /// when more than one of `branch` / `tag` / `rev` is set.
-    fn source(&self, name: &str) -> Result<SourceDependency, DependencyError> {
-        if self.git.is_empty() {
-            return Err(DependencyError::Empty {
-                name: name.into(),
-                field: "git",
-            });
-        }
-        Ok(SourceDependency::Git(GitSource {
-            url: self.git.clone(),
-            reference: self.git_ref(name)?,
-            dir: self.dir.clone(),
-        }))
-    }
-
-    /// Classify the pinned commit from at most one of `branch` / `tag` / `rev`.
+    /// Classify the pinned commit from at most one of `branch` / `tag` / `rev`. Pure — [`GitRef`]
+    /// holds only strings; `jals-build`'s `GitSource` pairs the result with the clone URL.
     ///
     /// # Errors
     /// [`DependencyError::ConflictingGitRef`] when more than one is set, [`DependencyError::Empty`]
     /// when the one set is empty.
-    fn git_ref(&self, name: &str) -> Result<GitRef, DependencyError> {
+    pub fn git_ref(&self, name: &str) -> Result<GitRef, DependencyError> {
         // Validate the one ref that is set, rejecting an empty value. Matching the tuple of options
         // directly picks the variant in one step — no separate "how many are set?" count and no second
         // match on a field name to re-derive which kind it is.
@@ -458,7 +416,7 @@ impl GitDependency {
             (!value.is_empty())
                 .then(|| value.to_string())
                 .ok_or(DependencyError::Empty {
-                    name: name.into(),
+                    name: name.to_string(),
                     field,
                 })
         };
@@ -471,100 +429,24 @@ impl GitDependency {
             (Some(branch), None, None) => Ok(GitRef::Branch(non_empty(branch, "branch")?)),
             (None, Some(tag), None) => Ok(GitRef::Tag(non_empty(tag, "tag")?)),
             (None, None, Some(rev)) => Ok(GitRef::Rev(non_empty(rev, "rev")?)),
-            _ => Err(DependencyError::ConflictingGitRef { name: name.into() }),
+            _ => Err(DependencyError::ConflictingGitRef {
+                name: name.to_string(),
+            }),
         }
     }
-}
-
-impl PathDependency {
-    /// Resolve this `path` dependency into a [`SourceDependency::Path`]: a non-empty directory resolved
-    /// against `manifest_dir`, plus the optional source-root `dir`.
-    ///
-    /// # Errors
-    /// [`DependencyError::Empty`] when the `path` value is empty.
-    fn source(&self, name: &str, manifest_dir: &Path) -> Result<SourceDependency, DependencyError> {
-        if self.path.is_empty() {
-            return Err(DependencyError::Empty {
-                name: name.into(),
-                field: "path",
-            });
-        }
-        Ok(SourceDependency::Path(PathSource {
-            root: manifest_dir.join(&self.path),
-            dir: self.dir.clone(),
-        }))
-    }
-}
-
-/// Classify a jar-location string (a `jar` or `sources` value) into a [`DependencySource`] without any
-/// I/O, shared by [`Dependency::jar_source`] and [`Dependency::sources_source`]. `field` names the
-/// source field for error messages; `manifest_dir` is joined onto a bare relative path (mirrors
-/// [`Manifest::classpath_entries`]).
-fn classify(
-    value: &str,
-    name: &str,
-    field: &'static str,
-    manifest_dir: &Path,
-) -> Result<DependencySource, DependencyError> {
-    if value.is_empty() {
-        return Err(DependencyError::Empty {
-            name: name.into(),
-            field,
-        });
-    }
-    if let Some(rest) = value.strip_prefix("file://") {
-        // `file:///abs/path` -> `/abs/path`. A full file-URL decode (percent-encoding, Windows
-        // drive letters) can come later; this is enough for the common Unix absolute-path form.
-        return Ok(DependencySource::Path(PathBuf::from(rest)));
-    }
-    if value.starts_with("https://") || value.starts_with("http://") {
-        return Ok(DependencySource::Url(value.to_string()));
-    }
-    if value.contains("://") {
-        return Err(DependencyError::UnknownScheme {
-            name: name.into(),
-            field,
-            value: value.to_string(),
-        });
-    }
-    // No scheme: a path relative to the manifest directory (mirrors `classpath_entries`).
-    Ok(DependencySource::Path(manifest_dir.join(value)))
 }
 
 impl Manifest {
-    /// Load, parse, and validate a specific `jals.toml` file.
-    ///
-    /// # Errors
-    /// Returns [`ManifestError`] when the file cannot be read, contains invalid TOML, or fails
-    /// [`Manifest::validate`] (e.g. duplicate `[[bin]]` names).
-    pub fn from_file(path: &Path) -> Result<Manifest, ManifestError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ManifestError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let manifest: Manifest = toml::from_str(&text).map_err(|source| ManifestError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        manifest
-            .validate()
-            .map_err(|source| ManifestError::Invalid {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        Ok(manifest)
-    }
-
     /// The synthetic manifest name used for error reporting when parsing from text (no real path).
-    const IN_MEMORY_NAME: &'static str = "jals.toml";
+    pub(crate) const IN_MEMORY_NAME: &'static str = "jals.toml";
 
     /// Structurally validate the manifest, independent of any filesystem (pure, so it stays
-    /// `wasm32`-compatible and is called by [`Manifest::from_file`] right after parsing, and by the
-    /// [`FromStr`](core::str::FromStr) impl — the parse-from-text entry point for hosts with no
-    /// filesystem, e.g. the browser playground).
+    /// `wasm32`-compatible and is called by the [`FromStr`] impl right after parsing, and by
+    /// `jals-build`'s `ManifestExt::from_file`).
     ///
     /// Checks the `[[bin]]` table: every bin needs a non-empty `name` and `main-class`, names must
-    /// be unique, and `[package] default-run` (when set) must name a declared bin.
+    /// be unique, and `[package] default-run` (when set) must name a declared bin. Also applies each
+    /// `[dependencies]` entry's value-level checks (see [`Dependency::validate`]).
     ///
     /// # Errors
     /// Returns [`ValidationError`] describing the first problem found.
@@ -602,46 +484,12 @@ impl Manifest {
         // entry never reaches here. What remains are the value-level checks serde cannot express: an
         // empty value, an unsupported URL scheme, conflicting git refs. These are hard errors, like
         // Cargo; runtime I/O failures (a download that fails, a missing local jar / repo) are soft
-        // warnings handled later by the host's resolver. The `manifest_dir` is irrelevant to the error
-        // cases, so a placeholder is fine.
+        // warnings handled later by the host's resolver.
         for (name, dep) in &self.dependencies {
-            if let Some(result) = dep.jar_source(name, Path::new(".")) {
-                result.map_err(ValidationError::Dependency)?;
-            }
-            if let Some(result) = dep.sources_source(name, Path::new(".")) {
-                result.map_err(ValidationError::Dependency)?;
-            }
-            if let Some(result) = dep.source_dependency(name, Path::new(".")) {
-                result.map_err(ValidationError::Dependency)?;
-            }
+            dep.validate(name).map_err(ValidationError::Dependency)?;
         }
 
         Ok(())
-    }
-
-    /// The absolute `.java` source roots: each `[build] source-dirs` entry resolved against
-    /// `manifest_dir` (the manifest's own directory). These feed `javac -sourcepath` and are the
-    /// roots scanned for `.java` files.
-    pub fn source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf> {
-        self.build
-            .source_dirs
-            .iter()
-            .map(|d| manifest_dir.join(d))
-            .collect()
-    }
-
-    /// The absolute classpath entries: each `[build] classpath` entry (a jar or a directory of
-    /// `.class` files) resolved against `manifest_dir`. Symmetric with [`source_roots`]; the host
-    /// reads the `.class` files from these (directly or out of a jar) to feed `jals-hir`'s classpath
-    /// bridge, keeping this crate pure and `wasm32`-compatible.
-    ///
-    /// [`source_roots`]: Manifest::source_roots
-    pub fn classpath_entries(&self, manifest_dir: &Path) -> Vec<PathBuf> {
-        self.build
-            .classpath
-            .iter()
-            .map(|c| manifest_dir.join(c))
-            .collect()
     }
 
     /// The project's target Java feature version (from `[package] edition`), if declared. The single
@@ -652,32 +500,10 @@ impl Manifest {
         self.package.edition.map(Edition::feature_version)
     }
 
-    /// Classify every **`jar`** `[dependencies]` entry into a host-resolvable [`DependencySource`],
-    /// paired with its name (used for cache filenames and diagnostics), separating the ones that
-    /// classified from any [`DependencyError`]s. The binary-classpath half of dependency resolution.
-    /// Pure — no I/O; the host downloads `Url`s and reads `Path`s.
-    ///
-    /// Source-form (`git` / `path`) dependencies are **skipped** here — they carry no jar for the
-    /// classpath; their `.java` source is collected separately by
-    /// [`dependency_source_dirs`](Manifest::dependency_source_dirs). A classification error (a
-    /// malformed entry) is still surfaced.
-    ///
-    /// In practice [`Manifest::validate`] (run by [`Manifest::from_file`]) already rejects the error
-    /// cases, so a manifest loaded through `from_file` yields an empty error list; the errors are
-    /// surfaced here too for callers that classify a `Manifest` they built or parsed directly.
-    pub fn dependency_sources(
-        &self,
-        manifest_dir: &Path,
-    ) -> (Vec<(String, DependencySource)>, Vec<DependencyError>) {
-        // `jar_source` is `None` for `git`/`path` source deps (no classpath jar).
-        self.collect_dependencies(manifest_dir, Dependency::jar_source)
-    }
-
     /// The names of every `jar` `[dependencies]` entry that opted into recursive **bundled-jar**
-    /// unpacking (`recursive = true`). The host pairs these names with the resolved jars from
-    /// [`dependency_sources`](Manifest::dependency_sources) to decide which jars to scan for nested
-    /// `*.jar` members. Pure — no I/O; only the `jar` form carries `recursive`, so `git`/`path` entries
-    /// are never present.
+    /// unpacking (`recursive = true`). The host pairs these names with the resolved jars to decide
+    /// which jars to scan for nested `*.jar` members. Pure — no I/O; only the `jar` form carries
+    /// `recursive`, so `git`/`path` entries are never present.
     pub fn recursive_jar_dependencies(&self) -> BTreeSet<&str> {
         self.dependencies
             .iter()
@@ -687,153 +513,77 @@ impl Manifest {
             })
             .collect()
     }
-
-    /// Classify every `[dependencies]` entry through `classify`, collecting the `Some(Ok)` values
-    /// (each paired with its dependency name) and the `Some(Err)`s into separate vectors; a `None`
-    /// (a form this `classify` does not apply to) is skipped. The shared spine of
-    /// [`dependency_sources`](Manifest::dependency_sources),
-    /// [`dependency_source_dirs`](Manifest::dependency_source_dirs), and
-    /// [`dependency_source_jars`](Manifest::dependency_source_jars).
-    fn collect_dependencies<T>(
-        &self,
-        manifest_dir: &Path,
-        classify: impl Fn(&Dependency, &str, &Path) -> Option<Result<T, DependencyError>>,
-    ) -> (Vec<(String, T)>, Vec<DependencyError>) {
-        let mut oks = Vec::new();
-        let mut errors = Vec::new();
-        for (name, dep) in &self.dependencies {
-            match classify(dep, name, manifest_dir) {
-                Some(Ok(value)) => oks.push((name.clone(), value)),
-                Some(Err(err)) => errors.push(err),
-                None => {}
-            }
-        }
-        (oks, errors)
-    }
-
-    /// Classify every **source-form** (`git` / `path`) `[dependencies]` entry into a host-resolvable
-    /// [`SourceDependency`], paired with its name, separating the ones that classified from any
-    /// [`DependencyError`]s — the source-tree counterpart of
-    /// [`dependency_sources`](Manifest::dependency_sources). `jar` dependencies are skipped (their
-    /// classes come from the classpath). Pure (no I/O): the host clones each `git` repo / reads each
-    /// `path` directory, locates the `.java` source root, and feeds those sources to the editor for
-    /// analysis and go-to-definition — they are never a compile input.
-    pub fn dependency_source_dirs(
-        &self,
-        manifest_dir: &Path,
-    ) -> (Vec<(String, SourceDependency)>, Vec<DependencyError>) {
-        // `source_dependency` is `None` for a `jar` dependency (its classes come from the classpath).
-        self.collect_dependencies(manifest_dir, Dependency::source_dependency)
-    }
-
-    /// Classify the **sources** jar of every `[dependencies]` entry that declares one, paired with its
-    /// name, separating the ones that classified from any [`DependencyError`]s — the sources-jar
-    /// counterpart of [`dependency_sources`](Manifest::dependency_sources). Entries without a `sources`
-    /// field are simply absent. Pure (no I/O): the host resolves each [`DependencySource`] to a local
-    /// sources jar (downloading remote ones), extracts its `.java`, and feeds those to the editor's
-    /// go-to-definition — they are never a compile or analysis input.
-    pub fn dependency_source_jars(
-        &self,
-        manifest_dir: &Path,
-    ) -> (Vec<(String, DependencySource)>, Vec<DependencyError>) {
-        self.collect_dependencies(manifest_dir, Dependency::sources_source)
-    }
-
-    /// Search upward from `start_dir` for a `jals.toml`, returning its path.
-    ///
-    /// The project root is the returned path's parent directory; all manifest paths are resolved
-    /// relative to it. Returns `None` when no manifest is found in `start_dir` or any ancestor.
-    /// Unlike the formatter/linter configs (where a missing file means "use defaults"), a missing
-    /// manifest is left for the caller to treat as an error — there is nothing to build without one.
-    pub fn discover_path(start_dir: &Path) -> Option<PathBuf> {
-        let mut dir = Some(start_dir);
-        while let Some(d) = dir {
-            let candidate = d.join("jals.toml");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            dir = d.parent();
-        }
-        None
-    }
 }
 
 /// Parse and validate a manifest from its TOML text, with no filesystem access — the
-/// `wasm32`-friendly counterpart of [`Manifest::from_file`] for hosts that already hold the text
-/// (e.g. the browser playground parsing a `jals.toml` editor buffer). Parse / validation errors are
-/// keyed to a synthetic `jals.toml` name (there is no real path).
+/// `wasm32`-friendly entry point for hosts that already hold the text (e.g. the browser playground
+/// parsing a `jals.toml` editor buffer, or `jals-build`'s `ManifestExt::from_file` after reading the
+/// file). Parse / validation errors are keyed to a synthetic `jals.toml` name (there is no real path).
 impl FromStr for Manifest {
-    type Err = ManifestError;
+    type Err = ManifestParseError;
 
-    fn from_str(text: &str) -> Result<Manifest, ManifestError> {
-        let manifest: Manifest = toml::from_str(text).map_err(|source| ManifestError::Parse {
-            path: PathBuf::from(Manifest::IN_MEMORY_NAME),
-            source,
-        })?;
+    fn from_str(text: &str) -> Result<Manifest, ManifestParseError> {
+        let manifest: Manifest =
+            toml::from_str(text).map_err(|source| ManifestParseError::Parse {
+                path: Manifest::IN_MEMORY_NAME.to_string(),
+                source,
+            })?;
         manifest
             .validate()
-            .map_err(|source| ManifestError::Invalid {
-                path: PathBuf::from(Manifest::IN_MEMORY_NAME),
+            .map_err(|source| ManifestParseError::Invalid {
+                path: Manifest::IN_MEMORY_NAME.to_string(),
                 source,
             })?;
         Ok(manifest)
     }
 }
 
-/// An error loading, parsing, or validating a manifest file.
-#[derive(Debug)]
-pub enum ManifestError {
-    /// The file could not be read.
-    Io {
-        /// The path that failed to read.
-        path: PathBuf,
-        /// The underlying IO error.
-        source: std::io::Error,
-    },
-    /// The file contained invalid TOML.
+/// An error parsing or validating a manifest from text. `no_std`: it holds a rendered path `String`
+/// and wraps [`toml::de::Error`] (the parse failure) or [`ValidationError`] (the structural failure).
+/// `jals-build`'s host-side `ManifestError` re-stamps these with the real `PathBuf` and adds the
+/// `std::io` read failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestParseError {
+    /// The text contained invalid TOML.
     Parse {
-        /// The path that failed to parse.
-        path: PathBuf,
+        /// The path (or synthetic name) that failed to parse.
+        path: String,
         /// The underlying parse error.
         source: toml::de::Error,
     },
-    /// The file parsed but is structurally invalid (see [`ValidationError`]).
+    /// The text parsed but is structurally invalid (see [`ValidationError`]).
     Invalid {
-        /// The path that failed validation.
-        path: PathBuf,
+        /// The path (or synthetic name) that failed validation.
+        path: String,
         /// The validation failure.
         source: ValidationError,
     },
 }
 
-impl fmt::Display for ManifestError {
+impl fmt::Display for ManifestParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ManifestError::Io { path, source } => {
-                write!(f, "failed to read manifest {}: {source}", path.display())
+            ManifestParseError::Parse { path, source } => {
+                write!(f, "failed to parse manifest {path}: {source}")
             }
-            ManifestError::Parse { path, source } => {
-                write!(f, "failed to parse manifest {}: {source}", path.display())
-            }
-            ManifestError::Invalid { path, source } => {
-                write!(f, "invalid manifest {}: {source}", path.display())
+            ManifestParseError::Invalid { path, source } => {
+                write!(f, "invalid manifest {path}: {source}")
             }
         }
     }
 }
 
-impl Error for ManifestError {
+impl Error for ManifestParseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            ManifestError::Io { source, .. } => Some(source),
-            ManifestError::Parse { source, .. } => Some(source),
-            ManifestError::Invalid { source, .. } => Some(source),
+            ManifestParseError::Parse { source, .. } => Some(source),
+            ManifestParseError::Invalid { source, .. } => Some(source),
         }
     }
 }
 
 /// A structural problem in a manifest, found by [`Manifest::validate`] (independent of the file it
-/// came from — [`ManifestError::Invalid`] adds the path).
+/// came from — the host [`ManifestParseError`] / `jals-build`'s `ManifestError` add the path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     /// Two `[[bin]]` entries share a `name`.
@@ -854,7 +604,7 @@ pub enum ValidationError {
         field: &'static str,
     },
     /// A `[dependencies]` entry could not be classified — an empty `jar`, an unsupported URL scheme,
-    /// or no recognised form. Wraps the classification [`DependencyError`] so the two layers share a
+    /// or conflicting git refs. Wraps the classification [`DependencyError`] so the two layers share a
     /// single message and the variant set never drifts apart.
     Dependency(DependencyError),
 }
@@ -894,7 +644,10 @@ mod tests {
     #[test]
     fn defaults_to_maven_layout() {
         let m = Manifest::default();
-        assert_eq!(m.build.source_dirs, vec!["src/main/java".to_string()]);
+        assert_eq!(
+            m.build.source_dirs,
+            alloc::vec!["src/main/java".to_string()]
+        );
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.build.release, None);
         assert!(m.build.classpath.is_empty());
@@ -930,12 +683,12 @@ mod tests {
         assert_eq!(m.package.version.as_deref(), Some("0.1.0"));
         assert_eq!(
             m.build.source_dirs,
-            vec!["src/main/java".to_string(), "generated".to_string()]
+            alloc::vec!["src/main/java".to_string(), "generated".to_string()]
         );
         assert_eq!(m.build.classes_dir, "out");
         assert_eq!(m.build.release, Some(21));
-        assert_eq!(m.build.classpath, vec!["libs/guava.jar".to_string()]);
-        assert_eq!(m.build.javac_flags, vec!["-Xlint:all".to_string()]);
+        assert_eq!(m.build.classpath, alloc::vec!["libs/guava.jar".to_string()]);
+        assert_eq!(m.build.javac_flags, alloc::vec!["-Xlint:all".to_string()]);
         assert_eq!(m.run.main_class.as_deref(), Some("com.example.Main"));
         // No `[[bin]]`: the bin list is empty and selection falls back to `[run] main-class`.
         assert!(m.bin.is_empty());
@@ -969,29 +722,13 @@ mod tests {
         // `default`).
         let m: Manifest = toml::from_str("[package]\nname = \"x\"\n").unwrap();
         assert_eq!(m.package.name.as_deref(), Some("x"));
-        assert_eq!(m.build.source_dirs, vec!["src/main/java".to_string()]);
+        assert_eq!(
+            m.build.source_dirs,
+            alloc::vec!["src/main/java".to_string()]
+        );
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.run.main_class, None);
         assert!(m.bin.is_empty());
-    }
-
-    #[test]
-    fn classpath_entries_resolve_against_manifest_dir() {
-        let m: Manifest =
-            toml::from_str("[build]\nclasspath = [\"libs/guava.jar\", \"out/classes\"]\n").unwrap();
-        assert_eq!(
-            m.classpath_entries(Path::new("/proj")),
-            vec![
-                PathBuf::from("/proj/libs/guava.jar"),
-                PathBuf::from("/proj/out/classes"),
-            ]
-        );
-        // The default (empty) classpath resolves to no entries.
-        assert!(
-            Manifest::default()
-                .classpath_entries(Path::new("/proj"))
-                .is_empty()
-        );
     }
 
     #[test]
@@ -1001,13 +738,10 @@ mod tests {
         assert_eq!(m.build.source, Some(17));
         assert_eq!(m.build.target, Some(17));
         // The omitted keys still come from the Maven default.
-        assert_eq!(m.build.source_dirs, vec!["src/main/java".to_string()]);
-    }
-
-    #[test]
-    fn discover_path_returns_none_when_absent() {
-        // A path with no `jals.toml` anywhere above it yields None. Use the root, which has none.
-        assert_eq!(Manifest::discover_path(Path::new("/")), None);
+        assert_eq!(
+            m.build.source_dirs,
+            alloc::vec!["src/main/java".to_string()]
+        );
     }
 
     #[test]
@@ -1061,14 +795,14 @@ mod tests {
 
     #[test]
     fn validate_accepts_unique_bins_and_valid_default_run() {
-        let mut m = manifest_with_bins(vec![bin("a", "A"), bin("b", "B")]);
+        let mut m = manifest_with_bins(alloc::vec![bin("a", "A"), bin("b", "B")]);
         m.package.default_run = Some("b".to_string());
         assert_eq!(m.validate(), Ok(()));
     }
 
     #[test]
     fn validate_rejects_duplicate_bin_names() {
-        let m = manifest_with_bins(vec![bin("dup", "A"), bin("dup", "B")]);
+        let m = manifest_with_bins(alloc::vec![bin("dup", "A"), bin("dup", "B")]);
         assert_eq!(
             m.validate(),
             Err(ValidationError::DuplicateBin {
@@ -1079,26 +813,26 @@ mod tests {
 
     #[test]
     fn validate_rejects_unknown_default_run() {
-        let mut m = manifest_with_bins(vec![bin("a", "A")]);
+        let mut m = manifest_with_bins(alloc::vec![bin("a", "A")]);
         m.package.default_run = Some("ghost".to_string());
         assert_eq!(
             m.validate(),
             Err(ValidationError::UnknownDefaultRun {
                 name: "ghost".to_string(),
-                available: vec!["a".to_string()],
+                available: alloc::vec!["a".to_string()],
             })
         );
     }
 
     #[test]
     fn validate_rejects_empty_bin_fields() {
-        let m = manifest_with_bins(vec![bin("", "A")]);
+        let m = manifest_with_bins(alloc::vec![bin("", "A")]);
         assert_eq!(
             m.validate(),
             Err(ValidationError::EmptyBinField { field: "name" })
         );
 
-        let m = manifest_with_bins(vec![bin("a", "")]);
+        let m = manifest_with_bins(alloc::vec![bin("a", "")]);
         assert_eq!(
             m.validate(),
             Err(ValidationError::EmptyBinField {
@@ -1147,39 +881,6 @@ mod tests {
     }
 
     #[test]
-    fn dependency_jar_classifies_https_as_url() {
-        let dep = jar_dep("https://example.com/lib.jar");
-        assert_eq!(
-            dep.jar_source("testlib", Path::new("/proj")),
-            Some(Ok(DependencySource::Url(
-                "https://example.com/lib.jar".to_string()
-            )))
-        );
-    }
-
-    #[test]
-    fn dependency_jar_classifies_file_url_as_path() {
-        let dep = jar_dep("file:///abs/path/lib.jar");
-        assert_eq!(
-            dep.jar_source("otherlib", Path::new("/proj")),
-            Some(Ok(DependencySource::Path(PathBuf::from(
-                "/abs/path/lib.jar"
-            ))))
-        );
-    }
-
-    #[test]
-    fn dependency_jar_classifies_bare_path_relative_to_manifest_dir() {
-        let dep = jar_dep("libs/lib.jar");
-        assert_eq!(
-            dep.jar_source("locallib", Path::new("/proj")),
-            Some(Ok(DependencySource::Path(PathBuf::from(
-                "/proj/libs/lib.jar"
-            ))))
-        );
-    }
-
-    #[test]
     fn validate_rejects_empty_jar() {
         let m = manifest_with_dep("bad", jar_dep(""));
         assert_eq!(
@@ -1207,32 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn dependency_sources_separates_ok_and_errors() {
-        let m = Manifest {
-            dependencies: BTreeMap::from([
-                ("good".to_string(), jar_dep("file:///abs/good.jar")),
-                ("empty".to_string(), jar_dep("")),
-            ]),
-            ..Default::default()
-        };
-        let (sources, errors) = m.dependency_sources(Path::new("/proj"));
-        assert_eq!(
-            sources,
-            vec![(
-                "good".to_string(),
-                DependencySource::Path(PathBuf::from("/abs/good.jar"))
-            )]
-        );
-        assert_eq!(
-            errors,
-            vec![DependencyError::Empty {
-                name: "empty".to_string(),
-                field: "jar",
-            }]
-        );
-    }
-
-    #[test]
     fn parses_dependency_sources_field() {
         let m: Manifest = toml::from_str(
             r#"
@@ -1248,39 +923,6 @@ mod tests {
                 sources: Some("libs/lib-sources.jar".to_string()),
                 recursive: None,
             }))
-        );
-    }
-
-    #[test]
-    fn sources_source_is_none_without_a_sources_field() {
-        let dep = jar_dep("libs/lib.jar");
-        assert_eq!(dep.sources_source("lib", Path::new("/proj")), None);
-    }
-
-    #[test]
-    fn sources_source_classifies_like_jar() {
-        let dep = Dependency::Jar(JarDependency {
-            jar: "libs/lib.jar".to_string(),
-            sources: Some("https://example.com/lib-sources.jar".to_string()),
-            recursive: None,
-        });
-        assert_eq!(
-            dep.sources_source("lib", Path::new("/proj")),
-            Some(Ok(DependencySource::Url(
-                "https://example.com/lib-sources.jar".to_string()
-            )))
-        );
-
-        let local = Dependency::Jar(JarDependency {
-            jar: "libs/lib.jar".to_string(),
-            sources: Some("libs/lib-sources.jar".to_string()),
-            recursive: None,
-        });
-        assert_eq!(
-            local.sources_source("lib", Path::new("/proj")),
-            Some(Ok(DependencySource::Path(PathBuf::from(
-                "/proj/libs/lib-sources.jar"
-            ))))
         );
     }
 
@@ -1304,33 +946,6 @@ mod tests {
                 }
             ))
         );
-    }
-
-    #[test]
-    fn dependency_source_jars_collects_only_declared_sources() {
-        let m = Manifest {
-            dependencies: BTreeMap::from([
-                (
-                    "withsrc".to_string(),
-                    Dependency::Jar(JarDependency {
-                        jar: "file:///abs/a.jar".to_string(),
-                        sources: Some("file:///abs/a-sources.jar".to_string()),
-                        recursive: None,
-                    }),
-                ),
-                ("nosrc".to_string(), jar_dep("file:///abs/b.jar")),
-            ]),
-            ..Default::default()
-        };
-        let (sources, errors) = m.dependency_source_jars(Path::new("/proj"));
-        assert_eq!(
-            sources,
-            vec![(
-                "withsrc".to_string(),
-                DependencySource::Path(PathBuf::from("/abs/a-sources.jar"))
-            )]
-        );
-        assert!(errors.is_empty());
     }
 
     #[test]
@@ -1363,65 +978,40 @@ mod tests {
     }
 
     #[test]
-    fn jar_and_path_forms_resolve() {
-        let jar = jar_dep("libs/lib.jar");
-        assert_eq!(
-            jar.jar_source("lib", Path::new("/proj")),
-            Some(Ok(DependencySource::Path(PathBuf::from(
-                "/proj/libs/lib.jar"
-            ))))
-        );
-        assert_eq!(jar.source_dependency("lib", Path::new("/proj")), None);
-
-        let path = Dependency::Path(PathDependency {
-            path: "../sibling".to_string(),
-            dir: Some("src".to_string()),
-        });
-        assert_eq!(
-            path.source_dependency("lib", Path::new("/proj")),
-            Some(Ok(SourceDependency::Path(PathSource {
-                root: PathBuf::from("/proj/../sibling"),
-                dir: Some("src".to_string()),
-            })))
-        );
-        assert_eq!(path.jar_source("lib", Path::new("/proj")), None);
-    }
-
-    #[test]
     fn git_refs_classify() {
-        let make = |branch, tag, rev| {
-            Dependency::Git(GitDependency {
-                git: "https://example.com/r.git".to_string(),
-                branch,
-                tag,
-                rev,
-                dir: None,
+        let make = |branch, tag, rev| GitDependency {
+            git: "https://example.com/r.git".to_string(),
+            branch,
+            tag,
+            rev,
+            dir: None,
+        };
+        assert_eq!(make(None, None, None).git_ref("r"), Ok(GitRef::Default));
+        assert_eq!(
+            make(Some("main".to_string()), None, None).git_ref("r"),
+            Ok(GitRef::Branch("main".to_string()))
+        );
+        assert_eq!(
+            make(None, Some("v1".to_string()), None).git_ref("r"),
+            Ok(GitRef::Tag("v1".to_string()))
+        );
+        assert_eq!(
+            make(None, None, Some("abc123".to_string())).git_ref("r"),
+            Ok(GitRef::Rev("abc123".to_string()))
+        );
+        // More than one ref set is a conflict.
+        assert_eq!(
+            make(Some("m".to_string()), Some("v".to_string()), None).git_ref("r"),
+            Err(DependencyError::ConflictingGitRef {
+                name: "r".to_string()
             })
-        };
-        let git_ref = |d: &Dependency| match d.source_dependency("r", Path::new("/proj")) {
-            Some(Ok(SourceDependency::Git(g))) => g.reference,
-            other => panic!("expected git source, got {other:?}"),
-        };
-        assert_eq!(git_ref(&make(None, None, None)), GitRef::Default);
-        assert_eq!(
-            git_ref(&make(Some("main".to_string()), None, None)),
-            GitRef::Branch("main".to_string())
-        );
-        assert_eq!(
-            git_ref(&make(None, Some("v1".to_string()), None)),
-            GitRef::Tag("v1".to_string())
-        );
-        assert_eq!(
-            git_ref(&make(None, None, Some("abc123".to_string()))),
-            GitRef::Rev("abc123".to_string())
         );
     }
 
     #[test]
     fn parse_rejects_multiple_forms() {
         // Co-occurring primary forms match no untagged variant (each `deny_unknown_fields`), so the
-        // manifest fails to *parse* — the unification's structural guarantee, in place of the old
-        // `validate`-time `MultipleForms`.
+        // manifest fails to *parse* — the unification's structural guarantee.
         let parsed: Result<Manifest, _> = toml::from_str(
             r#"
             [dependencies]
@@ -1538,7 +1128,7 @@ mod tests {
     #[test]
     fn validate_rejects_conflicting_git_refs() {
         // branch + tag both parse as valid `GitDependency` fields; the at-most-one-ref rule is a
-        // value-level check, surfaced by `validate` (and `source_dependency`).
+        // value-level check, surfaced by `validate`.
         let m = manifest_with_dep(
             "r",
             Dependency::Git(GitDependency {
@@ -1573,61 +1163,16 @@ mod tests {
     }
 
     #[test]
-    fn dependency_source_dirs_collects_git_and_path_only() {
-        let m = Manifest {
-            dependencies: BTreeMap::from([
-                ("fromjar".to_string(), jar_dep("libs/lib.jar")),
-                (
-                    "fromgit".to_string(),
-                    Dependency::Git(GitDependency {
-                        git: "https://example.com/r.git".to_string(),
-                        branch: None,
-                        tag: Some("v1".to_string()),
-                        rev: None,
-                        dir: None,
-                    }),
-                ),
-                (
-                    "frompath".to_string(),
-                    Dependency::Path(PathDependency {
-                        path: "../sibling".to_string(),
-                        dir: None,
-                    }),
-                ),
-            ]),
-            ..Default::default()
-        };
-        let (dirs, errors) = m.dependency_source_dirs(Path::new("/proj"));
-        assert!(errors.is_empty());
-        assert_eq!(
-            dirs,
-            vec![
-                (
-                    "fromgit".to_string(),
-                    SourceDependency::Git(GitSource {
-                        url: "https://example.com/r.git".to_string(),
-                        reference: GitRef::Tag("v1".to_string()),
-                        dir: None,
-                    })
-                ),
-                (
-                    "frompath".to_string(),
-                    SourceDependency::Path(PathSource {
-                        root: PathBuf::from("/proj/../sibling"),
-                        dir: None,
-                    })
-                ),
-            ]
-        );
-        // The classpath classifier sees only the jar, never the source forms.
-        let (jars, errors) = m.dependency_sources(Path::new("/proj"));
-        assert!(errors.is_empty());
-        assert_eq!(
-            jars,
-            vec![(
-                "fromjar".to_string(),
-                DependencySource::Path(PathBuf::from("/proj/libs/lib.jar"))
-            )]
-        );
+    fn from_str_parses_and_validates() {
+        // The `FromStr` entry point (used by the playground and `ManifestExt::from_file`) parses then
+        // validates, keying errors to the synthetic name.
+        let ok: Manifest = "[package]\nname = \"x\"\n".parse().unwrap();
+        assert_eq!(ok.package.name.as_deref(), Some("x"));
+
+        let invalid = "[[bin]]\nname = \"\"\nmain-class = \"X\"\n".parse::<Manifest>();
+        assert!(matches!(invalid, Err(ManifestParseError::Invalid { .. })));
+
+        let bad_toml = "not = = toml".parse::<Manifest>();
+        assert!(matches!(bad_toml, Err(ManifestParseError::Parse { .. })));
     }
 }

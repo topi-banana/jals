@@ -5,6 +5,7 @@ members = [
   "jals-classfile",
   "jals-classpath",
   "jals-cli",
+  "jals-config",
   "jals-decompile",
   "jals-fmt",
   "jals-fs",
@@ -34,6 +35,7 @@ hashbrown = { version = "0.17" }
 jals-build = { path = "jals-build" }
 jals-classfile = { path = "jals-classfile" }
 jals-classpath = { path = "jals-classpath" }
+jals-config = { path = "jals-config" }
 jals-decompile = { path = "jals-decompile" }
 jals-fmt = { path = "jals-fmt" }
 jals-fs = { path = "jals-fs" }

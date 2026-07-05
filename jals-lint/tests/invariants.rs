@@ -1,4 +1,5 @@
-use jals_lint::{Config, lint_source};
+use jals_config::lint::Config;
+use jals_lint::lint_source;
 use proptest::prelude::*;
 
 /// A generator of Java-ish source built from fragments that exercise every rule.

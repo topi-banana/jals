@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use futures::executor::block_on;
-use jals_build::{DependencySource, GitRef, Manifest};
+use jals_build::DependencySource;
 use jals_classfile::ClassFile;
+use jals_config::{GitRef, Manifest};
 use jals_fs::OsFileTree;
 
 use crate::Warning;

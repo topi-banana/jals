@@ -12,21 +12,20 @@
 
 extern crate alloc;
 
-mod config;
 mod diagnostic;
 mod rules;
 
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
+use jals_config::Severity;
+use jals_config::lint::Config;
 use jals_hir::{FileId, ProjectIndex};
 use jals_syntax::{Parse, SyntaxNode};
 
 use rules::Checker;
 
-pub use config::Config;
-pub use config::ConfigError;
-pub use diagnostic::{Diagnostic, LintOutput, Severity};
+pub use diagnostic::{Diagnostic, LintOutput};
 
 /// The project context the index-aware rules resolve reference types against: a project-wide symbol
 /// index plus the id of the file being linted within it. `None` selects the file-local behavior.

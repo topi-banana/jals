@@ -8,7 +8,7 @@
 //! [`native`](crate::native) implementations, behind the default `native` feature) and against an
 //! [`InMemoryFileTree`](jals_fs::InMemoryFileTree) + the browser's `fetch` in wasm (the playground).
 
-use jals_build::GitRef;
+use jals_config::GitRef;
 
 /// Fetch the bytes at a URL — the one capability the resolver cannot express purely.
 ///

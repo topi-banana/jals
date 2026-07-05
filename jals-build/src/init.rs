@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::manifest::Build;
+use jals_config::Build;
 
 /// The simple name of the starter class, and the `[run] main-class` that runs it. The starter lives
 /// in the default (unnamed) package, so the simple name is also the fully-qualified name.
@@ -124,7 +124,7 @@ fn toml_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Manifest;
+    use jals_config::Manifest;
 
     fn find<'a>(files: &'a [ScaffoldFile], path: &str) -> &'a ScaffoldFile {
         files

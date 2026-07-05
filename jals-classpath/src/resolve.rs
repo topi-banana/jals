@@ -21,7 +21,8 @@
 
 use std::path::Path;
 
-use jals_build::{DependencySource, GitRef, GitSource, Manifest, PathSource, SourceDependency};
+use jals_build::{DependencySource, GitSource, ManifestExt, PathSource, SourceDependency};
+use jals_config::{GitRef, Manifest};
 use jals_fs::{FileTree, path};
 
 use crate::io::{Fetcher, Git};

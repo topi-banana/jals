@@ -1,6 +1,6 @@
-//! Case / trailing-zero option enums for numeric literals — the opt-in rewrites whose resolved
-//! policy [`rules::literals`](crate::rules::literals) carries out. Each defaults to `Preserve`,
-//! keeping the source exactly so the strict significant-token invariant holds unless opted into.
+//! Case / trailing-zero option enums for numeric literals — the opt-in rewrites the formatter's
+//! literal rules carry out. Each defaults to `Preserve`, keeping the source exactly so the strict
+//! significant-token invariant holds unless opted into.
 
 use serde::Deserialize;
 

@@ -1,7 +1,7 @@
 //! The style / layout option enums of [`Config`](super::Config).
 //!
 //! Each enum is `Deserialize` with kebab-case (or lowercase) variants and is re-exported from the
-//! `config` module root. The numeric-literal case options live in [`literals`](super::literals).
+//! `fmt` module root. The numeric-literal case options live in [`literals`](super::literals).
 
 use serde::Deserialize;
 

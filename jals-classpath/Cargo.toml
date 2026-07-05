@@ -14,6 +14,7 @@ native = ["dep:reqwest", "dep:futures", "jals-fs/std"]
 [dependencies]
 jals-build.workspace = true
 jals-classfile.workspace = true
+jals-config.workspace = true
 jals-decompile.workspace = true
 jals-fs.workspace = true
 zip.workspace = true

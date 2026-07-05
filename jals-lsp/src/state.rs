@@ -9,7 +9,7 @@ use async_lsp::lsp_types::{
     DocumentHighlight, Hover, Location, Position, SemanticTokens, SignatureHelp,
     TextDocumentContentChangeEvent, TextEdit, Url, WorkspaceEdit,
 };
-use jals_fmt::Config;
+use jals_config::fmt::Config;
 use jals_fs::{FileTree, OsFileTree};
 use jals_hir::{
     FileFacts, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
@@ -843,7 +843,7 @@ fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceE
 }
 
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
-/// file. Implemented for both `jals_fmt::Config` and `jals_lint::Config` so one [`Discovery`]
+/// file. Implemented for both `jals_config::fmt::Config` and `jals_config::lint::Config` so one [`Discovery`]
 /// cache serves the formatter and the linter alike.
 pub(crate) trait DiscoverableConfig: Clone + Default {
     /// The config file name searched for (e.g. `jalsfmt.toml`).
@@ -866,10 +866,10 @@ impl DiscoverableConfig for Config {
     }
 }
 
-impl DiscoverableConfig for jals_lint::Config {
+impl DiscoverableConfig for jals_config::lint::Config {
     const FILE_NAME: &'static str = "jalslint.toml";
     fn discover_str(dir: &str) -> Option<Self> {
-        jals_lint::Config::discover(&OsFileTree, dir).ok()
+        jals_config::lint::Config::discover(&OsFileTree, dir).ok()
     }
 }
 
@@ -920,7 +920,7 @@ pub(crate) fn is_config_file(uri: &Url) -> bool {
 
 /// Whether a watched-file URI refers to a `jalslint.toml` config file.
 pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
-    is_config_file_for::<jals_lint::Config>(uri)
+    is_config_file_for::<jals_config::lint::Config>(uri)
 }
 
 #[cfg(test)]
@@ -1113,9 +1113,12 @@ mod tests {
 
     #[test]
     fn lint_discovery_non_file_uri_uses_default() {
-        let mut discovery = Discovery::<jals_lint::Config>::default();
+        let mut discovery = Discovery::<jals_config::lint::Config>::default();
         let uri = Url::parse("untitled:Untitled-1").unwrap();
-        assert_eq!(discovery.for_uri(&uri), jals_lint::Config::default());
+        assert_eq!(
+            discovery.for_uri(&uri),
+            jals_config::lint::Config::default()
+        );
     }
 
     #[test]
@@ -1124,21 +1127,21 @@ mod tests {
         let config_path = dir.path().join("jalslint.toml");
         let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
 
-        let mut discovery = Discovery::<jals_lint::Config>::default();
+        let mut discovery = Discovery::<jals_config::lint::Config>::default();
         // The resolved severity of `wildcard-import` under the on-disk config.
-        let wildcard = |d: &mut Discovery<jals_lint::Config>| {
+        let wildcard = |d: &mut Discovery<jals_config::lint::Config>| {
             d.for_uri(&uri).rules.get("wildcard-import").copied()
         };
 
         std::fs::write(&config_path, "[rules]\nwildcard-import = \"allow\"\n").unwrap();
-        assert_eq!(wildcard(&mut discovery), Some(jals_lint::Severity::Allow));
+        assert_eq!(wildcard(&mut discovery), Some(jals_config::Severity::Allow));
 
         // The cached config survives an edit on disk until the cache is cleared.
         std::fs::write(&config_path, "[rules]\nwildcard-import = \"error\"\n").unwrap();
-        assert_eq!(wildcard(&mut discovery), Some(jals_lint::Severity::Allow));
+        assert_eq!(wildcard(&mut discovery), Some(jals_config::Severity::Allow));
 
         discovery.clear();
-        assert_eq!(wildcard(&mut discovery), Some(jals_lint::Severity::Error));
+        assert_eq!(wildcard(&mut discovery), Some(jals_config::Severity::Error));
     }
 
     #[test]

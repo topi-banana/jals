@@ -9,10 +9,11 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-use jals_build::Manifest;
-use jals_fmt::Config;
+use jals_build::ManifestExt;
+use jals_config::Manifest;
+use jals_config::fmt::Config;
+use jals_config::lint::Config as LintConfig;
 use jals_hir::{FileId, ProjectIndex};
-use jals_lint::Config as LintConfig;
 
 #[derive(Parser)]
 #[command(name = "jals", version, about = "JALS/Java tooling")]

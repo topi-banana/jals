@@ -10,6 +10,7 @@ futures.workspace = true
 jals-build.workspace = true
 jals-classfile.workspace = true
 jals-classpath.workspace = true
+jals-config.workspace = true
 jals-fmt.workspace = true
 jals-fs = { workspace = true, features = ["std"] }
 jals-hir.workspace = true

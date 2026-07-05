@@ -2,43 +2,16 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt;
 use core::ops::Range;
 
 use jals_syntax::SyntaxError;
-use serde::Deserialize;
 
 use crate::rules::Finding;
 
-/// How serious a lint finding is. Doubles as the per-rule configuration value: a rule set
-/// to [`Allow`](Severity::Allow) is disabled and never runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    /// The rule is disabled; it produces no diagnostics.
-    Allow,
-    /// The finding is a warning.
-    Warn,
-    /// The finding is an error.
-    Error,
-}
-
-impl Severity {
-    /// The lowercase name (`"allow"` / `"warn"` / `"error"`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Severity::Allow => "allow",
-            Severity::Warn => "warn",
-            Severity::Error => "error",
-        }
-    }
-}
-
-impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+/// How serious a lint finding is, re-exported from the shared config crate. Doubles as the per-rule
+/// configuration value ([`jalslint.toml`](jals_config::lint::Config)): a rule set to
+/// [`Allow`](Severity::Allow) is disabled and never runs.
+pub use jals_config::Severity;
 
 /// A single lint diagnostic: a rule firing at a byte range in the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
