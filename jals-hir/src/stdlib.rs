@@ -135,6 +135,45 @@ public class RuntimeException extends Exception {
 
 public class Error extends Throwable {
 }
+
+public class IllegalArgumentException extends RuntimeException {
+}
+
+public class NumberFormatException extends IllegalArgumentException {
+}
+
+public class IllegalStateException extends RuntimeException {
+}
+
+public class NullPointerException extends RuntimeException {
+}
+
+public class IndexOutOfBoundsException extends RuntimeException {
+}
+
+public class ArrayIndexOutOfBoundsException extends IndexOutOfBoundsException {
+}
+
+public class StringIndexOutOfBoundsException extends IndexOutOfBoundsException {
+}
+
+public class UnsupportedOperationException extends RuntimeException {
+}
+
+public class ClassCastException extends RuntimeException {
+}
+
+public class ArithmeticException extends RuntimeException {
+}
+
+public class NegativeArraySizeException extends RuntimeException {
+}
+
+public class InterruptedException extends Exception {
+}
+
+public class CloneNotSupportedException extends Exception {
+}
 "#;
 
 /// The `java.util` containers, as one compilation unit. Top-level types here become `java.util.<Name>`.
@@ -213,10 +252,28 @@ public class Optional<T> {
 }
 "#;
 
-/// The embedded stub sources, each a self-contained compilation unit (`java.lang`, then
-/// `java.util`). `java.util` comes second so its references to `java.lang` types resolve against the
-/// already-collectible first unit; build order does not actually matter (members and supertypes are
-/// resolved in a second pass over all units), but it keeps the list in package-dependency order.
+/// The `java.io` exceptions, as one compilation unit. Only the exception hierarchy is modelled (no
+/// streams/readers yet) — enough that a thrown / propagated `IOException` classifies as *checked* and
+/// an `UncheckedIOException` as *unchecked* through the [`ProjectIndex::is_subtype`](crate::ProjectIndex)
+/// walk. References to `java.lang` supertypes (`Exception`, `RuntimeException`) resolve via the
+/// implicit `java.lang` import.
+const JAVA_IO: &str = r#"
+package java.io;
+
+public class IOException extends Exception {
+}
+
+public class FileNotFoundException extends IOException {
+}
+
+public class UncheckedIOException extends RuntimeException {
+}
+"#;
+
+/// The embedded stub sources, each a self-contained compilation unit (`java.lang`, `java.util`, then
+/// `java.io`). Later units may reference earlier ones, but build order does not actually matter
+/// (members and supertypes are resolved in a second pass over all units); the list is kept in
+/// package-dependency order.
 pub(crate) fn stub_sources() -> &'static [&'static str] {
-    &[JAVA_LANG, JAVA_UTIL]
+    &[JAVA_LANG, JAVA_UTIL, JAVA_IO]
 }

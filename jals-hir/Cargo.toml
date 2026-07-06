@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 hashbrown.workspace = true
 jals-classfile.workspace = true
+jals-decompile.workspace = true
 jals-syntax.workspace = true
 
 [dev-dependencies]

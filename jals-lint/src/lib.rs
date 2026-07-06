@@ -186,4 +186,34 @@ mod tests {
             out.diagnostics
         );
     }
+
+    #[test]
+    fn unreported_exception_needs_the_index() {
+        // A checked exception thrown but not declared. Classifying it as checked and finding it
+        // undeclared needs the project index (with stdlib), so `lint_source` cannot see it.
+        let src = "class MyEx extends Exception {} class C { void f() { throw new MyEx(); } }";
+        let cfg = Config::default();
+        let parse = jals_syntax::parse(src);
+
+        // File-local: nothing to report without the hierarchy.
+        assert!(
+            lint_source(src, &cfg)
+                .diagnostics
+                .iter()
+                .all(|d| d.rule != "unreported-exception")
+        );
+
+        // Index-aware (with stdlib): the undeclared checked exception is flagged.
+        let index = jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())])
+            .with_stdlib()
+            .build();
+        let out = lint_parse_with_index(&parse, &cfg, Some((&index, jals_hir::FileId(0))));
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.rule == "unreported-exception" && d.message.contains("MyEx")),
+            "expected an unreported-exception finding: {:?}",
+            out.diagnostics
+        );
+    }
 }

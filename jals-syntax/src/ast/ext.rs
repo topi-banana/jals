@@ -253,6 +253,13 @@ impl CatchClause {
     pub fn binding(&self) -> Option<SyntaxToken> {
         ident_tokens(&self.syntax).next()
     }
+
+    /// Every caught exception type, including each arm of a multi-catch (`catch (A | B e)`). The
+    /// generated [`ty`](Self::ty) accessor returns only the first arm, so the `Type` children are
+    /// walked directly.
+    pub fn types(&self) -> impl Iterator<Item = Type> {
+        self.syntax.children().filter_map(Type::cast)
+    }
 }
 
 impl Resource {

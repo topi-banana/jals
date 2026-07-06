@@ -51,6 +51,9 @@ pub(crate) struct ClassfileMember {
     pub params: Vec<Param>,
     /// Whether the method is varargs.
     pub varargs: bool,
+    /// The checked exceptions the method declares (`throws`), captured like a supertype so they
+    /// resolve by fully-qualified name. Empty for a field / constructor / method that declares none.
+    pub throws: Vec<MemberType>,
 }
 
 /// Lower a class file to its [`ClassfileClass`], or `None` for `module-info` (a module, not a type).
@@ -177,6 +180,7 @@ fn lower_members(cf: &ClassFile, pool: &ConstantPool, owner_simple: &str) -> Vec
             ty: field_member_type(&field.attributes, field.descriptor_index, pool),
             params: Vec::new(),
             varargs: false,
+            throws: Vec::new(),
         });
     }
     for method in &cf.methods {
@@ -187,6 +191,12 @@ fn lower_members(cf: &ClassFile, pool: &ConstantPool, owner_simple: &str) -> Vec
             continue;
         }
         let (ret, params, varargs) = method_shape(method, pool);
+        // The declared checked exceptions (`throws`), from the `Exceptions` attribute, as
+        // fully-qualified named types so they resolve without an import context.
+        let throws = jals_decompile::declared_throws(method, pool)
+            .iter()
+            .map(|fqn| named(fqn, 0, Vec::new()))
+            .collect();
         let (name, kind, ty) = if raw_name == "<init>" {
             // A constructor's source name is the class's simple name (matches `members_of_decl`).
             (
@@ -203,6 +213,7 @@ fn lower_members(cf: &ClassFile, pool: &ConstantPool, owner_simple: &str) -> Vec
             ty,
             params,
             varargs,
+            throws,
         });
     }
     out
