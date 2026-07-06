@@ -49,6 +49,7 @@ mod reference;
 mod resolve;
 mod scope;
 mod stdlib;
+mod throws;
 mod ty;
 
 use jals_syntax::SyntaxNode;
@@ -66,6 +67,7 @@ pub use project::{
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;
 pub use scope::{Scope, ScopeId, ScopeKind};
+pub use throws::{UnreportedException, unreported_exceptions};
 pub use ty::{ClassTy, Primitive, Ty};
 
 /// Parses `src` and resolves names within it.

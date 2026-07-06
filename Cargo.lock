@@ -1104,6 +1104,7 @@ dependencies = [
  "expect-test",
  "hashbrown 0.17.1",
  "jals-classfile",
+ "jals-decompile",
  "jals-syntax",
  "proptest",
 ]

@@ -23,6 +23,7 @@ mod missing_braces;
 mod module_import;
 mod naming;
 mod type_mismatch;
+mod unreported_exception;
 mod unused_local;
 mod wildcard_import;
 
@@ -110,4 +111,5 @@ pub(crate) const RULES: &[RuleMeta] = &[
     module_import::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
+    unreported_exception::RULE,
 ];

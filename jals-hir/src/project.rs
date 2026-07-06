@@ -199,6 +199,12 @@ pub struct Member {
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
     pub varargs: bool,
+    /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
+    /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
+    /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
+    /// ([`crate::unreported_exceptions`]) to tell whether a called method propagates a checked
+    /// exception the caller must in turn declare or catch.
+    pub throws: Vec<MemberType>,
     /// A real-source go-to-definition override for a classpath member whose library *sources* jar is
     /// available — the `(file, name range)` of the matching `.java` declaration. `None` for a project
     /// member and for a classpath member with no source. Kept separate from [`file`](Member::file),
@@ -847,6 +853,7 @@ impl ProjectIndex {
                     ty: member.ty.clone(),
                     params: member.params.clone(),
                     varargs: member.varargs,
+                    throws: member.throws.clone(),
                     // A real-source go-to-definition target, when the library source is indexed.
                     source_location: sources.member_location(
                         &class.fqn,
@@ -1020,6 +1027,13 @@ impl ProjectIndex {
     /// name. Maps a file-local type definition back to its cross-file [`ItemId`].
     pub fn item_by_decl(&self, file: FileId, name_start: usize) -> Option<ItemId> {
         self.decl_to_item.get(&(file, name_start)).copied()
+    }
+
+    /// The members declared *directly* on `owner` (no inheritance walk), in declaration order. Empty
+    /// for a type with no members or an unknown `owner`. Used where inheritance is irrelevant — e.g.
+    /// enumerating a type's own constructors, which are never inherited.
+    pub(crate) fn own_members(&self, owner: ItemId) -> &[MemberId] {
+        self.members_by_owner.get(&owner).map_or(&[], Vec::as_slice)
     }
 
     /// The member named `name` in name-space `namespace` declared *directly* on `owner` (no
@@ -1277,28 +1291,28 @@ fn members_of_decl(
     else {
         return members;
     };
-    let mut push =
-        |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType, params: Vec<Param>, varargs| {
-            members.push(Member {
-                owner,
-                name: name_tok.text().to_string(),
-                kind,
-                file,
-                name_range: byte_range(name_tok),
-                ty,
-                params,
-                varargs,
-                // A project / stub member's own `file` already points at real (or no) source.
-                source_location: None,
-            });
-        };
+    // A member of `owner`/`file` with no params/varargs/throws; each call site overrides (via
+    // struct-update) only the fields that apply to its member kind.
+    let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
+        owner,
+        name: name_tok.text().to_string(),
+        kind,
+        file,
+        name_range: byte_range(name_tok),
+        ty,
+        params: Vec::new(),
+        varargs: false,
+        throws: Vec::new(),
+        // A project / stub member's own `file` already points at real (or no) source.
+        source_location: None,
+    };
     for member in body.children() {
         match member.kind() {
             FIELD_DECL => {
                 if let Some(field) = ast::FieldDecl::cast(member.clone()) {
                     let ty = member_type_of(field.ty());
                     for name in field.names() {
-                        push(&name, DefKind::Field, ty.clone(), Vec::new(), false);
+                        members.push(new_member(&name, DefKind::Field, ty.clone()));
                     }
                 }
             }
@@ -1308,18 +1322,22 @@ fn members_of_decl(
                         ast::MethodDecl::cast(member.clone()).and_then(|m| m.return_type()),
                     );
                     let (params, varargs) = params_of(&member);
-                    push(&name, DefKind::Method, ty, params, varargs);
+                    let throws = throws_of(&member);
+                    members.push(Member {
+                        params,
+                        varargs,
+                        throws,
+                        ..new_member(&name, DefKind::Method, ty)
+                    });
                 }
             }
             CONSTRUCTOR_DECL => {
                 if let Some(name) = first_ident_token(&member) {
-                    push(
-                        &name,
-                        DefKind::Constructor,
-                        MemberType::Unknown,
-                        Vec::new(),
-                        false,
-                    );
+                    let throws = throws_of(&member);
+                    members.push(Member {
+                        throws,
+                        ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
+                    });
                 }
             }
             ENUM_CONSTANT => {
@@ -1330,7 +1348,7 @@ fn members_of_decl(
                         dims: 0,
                         args: Vec::new(),
                     };
-                    push(&name, DefKind::EnumConstant, ty, Vec::new(), false);
+                    members.push(new_member(&name, DefKind::EnumConstant, ty));
                 }
             }
             _ => {}
@@ -1362,6 +1380,26 @@ fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
         }
     }
     (params, varargs)
+}
+
+/// The `ast::Type`s named in a method / constructor declaration's `throws` clause, in order. Empty
+/// when there is no `throws` clause. Works for both `METHOD_DECL` and `CONSTRUCTOR_DECL` by reading
+/// the shared `THROWS_CLAUSE` child. Shared with the checked-exception analysis
+/// ([`crate::throws`]), which resolves the same types to items rather than capturing them. Pure.
+pub(crate) fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
+    node.children()
+        .find_map(ast::ThrowsClause::cast)
+        .into_iter()
+        .flat_map(|clause| clause.types())
+}
+
+/// A method / constructor declaration's declared checked exceptions — the `throws` clause types —
+/// each captured as a [`MemberType`] like a parameter's type. Empty when there is no `throws` clause.
+/// Pure.
+fn throws_of(member: &SyntaxNode) -> Vec<MemberType> {
+    throws_clause_types(member)
+        .map(|ty| member_type_of(Some(ty)))
+        .collect()
 }
 
 /// The supertypes of a type declaration `node`: the `extends` and `implements` clause types, each
@@ -1524,12 +1562,18 @@ fn is_java_lang(name: &str) -> bool {
         "Exception",
         "RuntimeException",
         "IllegalArgumentException",
+        "NumberFormatException",
         "IllegalStateException",
         "NullPointerException",
         "IndexOutOfBoundsException",
+        "ArrayIndexOutOfBoundsException",
+        "StringIndexOutOfBoundsException",
         "UnsupportedOperationException",
         "ClassCastException",
         "ArithmeticException",
+        "NegativeArraySizeException",
+        "InterruptedException",
+        "CloneNotSupportedException",
         "Override",
         "Deprecated",
         "SuppressWarnings",
