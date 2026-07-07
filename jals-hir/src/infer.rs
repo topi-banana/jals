@@ -209,22 +209,10 @@ fn check_initializer(
     {
         return;
     }
-    // The declarator name is a *definition*, recovered with `symbol_at` (not `definition_at`, which
-    // looks up a reference). The declared `TYPE` / `MODIFIERS` children are not expressions, so they
-    // are skipped by the `Expr::cast` below and never mistaken for an initializer.
-    let mut current: Option<SyntaxToken> = None;
-    for elem in node.children_with_tokens() {
-        if let Some(token) = elem.as_token() {
-            if token.kind() == IDENT {
-                current = Some(token.clone());
-            }
-            continue;
-        }
-        if let Some(value) = elem.into_node().and_then(ast::Expr::cast)
-            && let Some(def_id) = current
-                .take()
-                .and_then(|n| resolved.symbol_at(token_start(&n)))
-        {
+    // The declarator name is a *definition*, recovered with `symbol_at` (not `definition_at`,
+    // which looks up a reference).
+    for (name, value) in declarator_initializers(node) {
+        if let Some(def_id) = resolved.symbol_at(token_start(&name)) {
             record_if_mismatch(value.syntax(), ti.type_of_def(def_id), ti, index, out);
         }
     }
@@ -1046,7 +1034,7 @@ fn is_boolean(t: &Ty) -> bool {
 
 /// The non-trivia operator token kinds directly under `node` (operands are child nodes, so for a
 /// binary/unary expression these are exactly the operator tokens).
-fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
+pub(crate) fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
     direct_tokens(node)
         .filter(|t| !t.kind().is_trivia())
         .map(|t| t.kind())
@@ -1067,7 +1055,28 @@ fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
     node.children_with_tokens().filter_map(|it| it.into_token())
 }
 
-fn token_start(tok: &SyntaxToken) -> usize {
+/// The declarator-name → initializer pairs of a (possibly multi-declarator) variable or field
+/// declaration. The CST is flat (`final int a = 1, b = 2;` has no per-declarator node), so each
+/// direct `IDENT` token takes the next direct expression child as its initializer; a declarator
+/// without one yields no pair. The declared `TYPE` / `MODIFIERS` children are not expressions, so
+/// the `Expr::cast` skips them and they are never mistaken for an initializer.
+pub(crate) fn declarator_initializers(
+    node: &SyntaxNode,
+) -> impl Iterator<Item = (SyntaxToken, ast::Expr)> {
+    let mut current: Option<SyntaxToken> = None;
+    node.children_with_tokens().filter_map(move |elem| {
+        if let Some(token) = elem.as_token() {
+            if token.kind() == IDENT {
+                current = Some(token.clone());
+            }
+            return None;
+        }
+        let value = elem.into_node().and_then(ast::Expr::cast)?;
+        Some((current.take()?, value))
+    })
+}
+
+pub(crate) fn token_start(tok: &SyntaxToken) -> usize {
     usize::from(tok.text_range().start())
 }
 

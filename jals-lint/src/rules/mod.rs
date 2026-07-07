@@ -18,6 +18,7 @@ use crate::IndexCtx;
 use crate::diagnostic::Severity;
 
 mod compact_source_file;
+mod constant_condition;
 mod empty_catch;
 mod missing_braces;
 mod module_import;
@@ -28,11 +29,19 @@ mod unused_local;
 mod wildcard_import;
 
 /// A potential problem reported by a rule, before it is tagged with a rule name / severity.
+#[derive(Default)]
 pub(crate) struct Finding {
     /// Byte range in the original source.
     pub range: Range<usize>,
     /// Human-readable message.
     pub message: String,
+    /// Whether the finding's own range is unnecessary code (e.g. an unused local) — a consumer may
+    /// render it faded in place. `false` for nearly every rule.
+    pub unnecessary: bool,
+    /// A secondary unnecessary-code range with its own message — e.g. the dead branch of a
+    /// constant `if` (the LSP renders it as a faded hint diagnostic). `None` for nearly every
+    /// rule.
+    pub unnecessary_range: Option<(Range<usize>, String)>,
 }
 
 impl Finding {
@@ -42,6 +51,7 @@ impl Finding {
         Finding {
             range: usize::from(range.start())..usize::from(range.end()),
             message: message.into(),
+            ..Finding::default()
         }
     }
 
@@ -51,6 +61,7 @@ impl Finding {
         Finding {
             range: usize::from(range.start())..usize::from(range.end()),
             message: message.into(),
+            ..Finding::default()
         }
     }
 }
@@ -109,6 +120,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     missing_braces::RULE,
     compact_source_file::RULE,
     module_import::RULE,
+    constant_condition::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
     unreported_exception::RULE,
