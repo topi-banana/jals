@@ -24,6 +24,14 @@ pub struct Diagnostic {
     pub message: String,
     /// Byte range in the original source.
     pub range: Range<usize>,
+    /// Whether the diagnostic's own range is unnecessary code (e.g. an unused local) — a consumer
+    /// may render it faded in place. The LSP tags it `Unnecessary`; the CLI ignores it. `false`
+    /// for nearly every rule.
+    pub unnecessary: bool,
+    /// A secondary unnecessary-code range with its own message — e.g. the dead branch of a
+    /// constant `if`. The LSP renders it as a hint diagnostic tagged `Unnecessary`; the CLI
+    /// ignores it. `None` for nearly every rule.
+    pub unnecessary_range: Option<(Range<usize>, String)>,
 }
 
 impl Diagnostic {
@@ -35,6 +43,8 @@ impl Diagnostic {
             severity,
             message: finding.message,
             range: finding.range,
+            unnecessary: finding.unnecessary,
+            unnecessary_range: finding.unnecessary_range,
         }
     }
 
@@ -46,6 +56,8 @@ impl Diagnostic {
             severity: Severity::Error,
             message: err.message().to_string(),
             range: usize::from(range.start())..usize::from(range.end()),
+            unnecessary: false,
+            unnecessary_range: None,
         }
     }
 }

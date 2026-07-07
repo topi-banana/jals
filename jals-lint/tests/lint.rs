@@ -105,6 +105,50 @@ fn missing_braces_loops_flagged() {
     );
 }
 
+// ===== constant-condition =====
+
+#[test]
+fn constant_condition_flagged() {
+    check(
+        "class Foo { void m() { if (true) { a(); } else { b(); } } }",
+        expect![[r#"
+            constant-condition:27..31: `if` condition is always true
+        "#]],
+    );
+    check(
+        "class Foo { void m() { if (1 > 2) { a(); } } }",
+        expect![[r#"
+            constant-condition:27..32: `if` condition is always false
+        "#]],
+    );
+}
+
+#[test]
+fn constant_condition_folds_final_locals() {
+    check(
+        "class Foo { void m() { final boolean debug = false; if (debug) { log(); } } }",
+        expect![[r#"
+            constant-condition:56..61: `if` condition is always false
+        "#]],
+    );
+}
+
+#[test]
+fn variable_condition_ok() {
+    check(
+        "class Foo { void m(boolean a) { if (a) { b(); } } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn idiomatic_infinite_loops_ok() {
+    check(
+        "class Foo { void m() { while (true) { work(); } } }",
+        expect![""],
+    );
+}
+
 // ===== naming-convention =====
 
 #[test]

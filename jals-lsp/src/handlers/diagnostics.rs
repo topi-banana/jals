@@ -1,7 +1,7 @@
 //! Builds LSP diagnostics from parser syntax errors, `jals-lint` rule findings, and unresolved
 //! cross-file type references.
 
-use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
+use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use jals_hir::{FileId, ProjectIndex, Resolved};
 use jals_syntax::Parse;
 
@@ -36,23 +36,50 @@ pub(crate) fn compute_diagnostics(
 /// tree internally. Parser errors are intentionally excluded — they are emitted by
 /// [`compute_diagnostics`], the single source of syntax-error diagnostics, so the two never
 /// duplicate each other.
+///
+/// Two finding shapes render as faded code (the [`DiagnosticTag::UNNECESSARY`] tag): a finding
+/// marked [`unnecessary`](jals_lint::Diagnostic::unnecessary) (e.g. `unused-local`) carries the
+/// tag on its own diagnostic, and a finding with an
+/// [`unnecessary_range`](jals_lint::Diagnostic::unnecessary_range) (the dead branch of a constant
+/// `if`) additionally emits a hint diagnostic covering that range, with the message the rule
+/// supplied for it.
 pub(crate) fn compute_lint_diagnostics(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
     config: &jals_config::lint::Config,
 ) -> Vec<Diagnostic> {
-    jals_lint::lint_node(&parse.syntax(), config)
-        .into_iter()
-        .map(|finding| Diagnostic {
+    let mut out = Vec::new();
+    for finding in jals_lint::lint_node(&parse.syntax(), config) {
+        let code = NumberOrString::String(finding.rule.to_string());
+        // A secondary unnecessary range renders as a hint (kept out of the problems list) tagged
+        // `Unnecessary` so the editor fades it.
+        let hint = finding
+            .unnecessary_range
+            .map(|(range, message)| Diagnostic {
+                range: line_index.byte_range(text, &range),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(code.clone()),
+                source: Some("jals".to_string()),
+                message,
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                ..Default::default()
+            });
+        out.push(Diagnostic {
             range: line_index.byte_range(text, &finding.range),
             severity: Some(lint_severity(finding.severity)),
-            code: Some(NumberOrString::String(finding.rule.to_string())),
+            code: Some(code),
             source: Some("jals".to_string()),
             message: finding.message,
+            // The finding names code that is itself unnecessary, so the editor fades it in place.
+            tags: finding
+                .unnecessary
+                .then(|| vec![DiagnosticTag::UNNECESSARY]),
             ..Default::default()
-        })
-        .collect()
+        });
+        out.extend(hint);
+    }
+    out
 }
 
 /// Build "cannot resolve symbol" diagnostics for `file`'s type-name references that resolve to
@@ -203,6 +230,68 @@ mod tests {
                 .iter()
                 .all(|d| d.code != Some(NumberOrString::String("compact-source-file".to_string())))
         );
+    }
+
+    /// Lint diagnostics for `text` under the default config, filtered to `rule`.
+    fn lint_diags_for_rule(text: &str, rule: &str) -> Vec<Diagnostic> {
+        let parse = jals_syntax::parse(text);
+        let diags = compute_lint_diagnostics(
+            &parse,
+            text,
+            &LineIndex::new(text),
+            &jals_config::lint::Config::default(),
+        );
+        let code = Some(NumberOrString::String(rule.to_string()));
+        diags.into_iter().filter(|d| d.code == code).collect()
+    }
+
+    #[test]
+    fn constant_condition_fades_the_dead_branch() {
+        let text = "class C { void m() { if (true) { a(); } else { b(); } } }\n";
+        let line_index = LineIndex::new(text);
+        let constant = lint_diags_for_rule(text, "constant-condition");
+        assert_eq!(
+            constant.len(),
+            2,
+            "warning + dead-branch hint: {constant:?}"
+        );
+
+        let warning = &constant[0];
+        assert_eq!(warning.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(warning.source.as_deref(), Some("jals"));
+        assert_eq!(warning.tags, None);
+        let cond = text.find("true").unwrap();
+        assert_eq!(
+            warning.range,
+            line_index.byte_range(text, &(cond..cond + "true".len()))
+        );
+
+        let hint = &constant[1];
+        assert_eq!(hint.severity, Some(DiagnosticSeverity::HINT));
+        assert_eq!(hint.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+        assert_eq!(hint.message, "this code is never executed");
+        let dead = text.find("{ b(); }").unwrap();
+        assert_eq!(
+            hint.range,
+            line_index.byte_range(text, &(dead..dead + "{ b(); }".len()))
+        );
+    }
+
+    #[test]
+    fn always_true_without_else_emits_no_hint() {
+        let text = "class C { void m() { if (true) { a(); } } }\n";
+        let constant = lint_diags_for_rule(text, "constant-condition");
+        assert_eq!(constant.len(), 1, "the warning only: {constant:?}");
+        assert_eq!(constant[0].severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn unused_local_is_tagged_unnecessary_in_place() {
+        let text = "class C { void m() { int unused = 1; } }\n";
+        let unused = lint_diags_for_rule(text, "unused-local");
+        assert_eq!(unused.len(), 1, "one tagged warning, no extra diagnostic");
+        assert_eq!(unused[0].severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(unused[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
     }
 
     #[test]

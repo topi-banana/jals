@@ -30,6 +30,7 @@ fn check(root: &SyntaxNode, resolved: &Resolved, index: Option<IndexCtx>) -> Vec
         .map(|e| Finding {
             message: e.message(),
             range: e.range,
+            ..Finding::default()
         })
         .collect()
 }

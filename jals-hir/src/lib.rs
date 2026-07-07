@@ -42,6 +42,7 @@
 extern crate alloc;
 
 mod classpath;
+mod dead_if;
 mod def;
 mod infer;
 mod project;
@@ -54,6 +55,7 @@ mod ty;
 
 use jals_syntax::SyntaxNode;
 
+pub use dead_if::{DeadIf, dead_ifs};
 pub use def::{Def, DefId, DefKind, Namespace};
 pub use infer::{
     Completion, Signature, SignatureHelp, TypeInference, TypeMismatch, at_member_access, infer,

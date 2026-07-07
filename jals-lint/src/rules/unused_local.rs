@@ -34,6 +34,9 @@ fn check(_root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
         out.push(Finding {
             range: def.name_range.clone(),
             message: format!("unused {what} `{}`", def.name),
+            // The binding itself is the unnecessary code — consumers fade it in place.
+            unnecessary: true,
+            ..Finding::default()
         });
     }
     out

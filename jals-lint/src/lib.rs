@@ -188,6 +188,33 @@ mod tests {
     }
 
     #[test]
+    fn constant_condition_carries_the_dead_branch_range() {
+        let src = "class C { void m() { if (true) { a(); } else { b(); } } }";
+        let root = jals_syntax::parse(src).syntax();
+        let diagnostics = lint_node(&root, &Config::default());
+        let constant = diagnostics
+            .iter()
+            .find(|d| d.rule == "constant-condition")
+            .expect("a constant-condition diagnostic");
+        let else_start = src.find("{ b(); }").unwrap();
+        assert_eq!(
+            constant.unnecessary_range,
+            Some((
+                else_start..else_start + "{ b(); }".len(),
+                "this code is never executed".to_string()
+            ))
+        );
+        // Every other rule leaves the secondary range empty.
+        let wildcard_root = jals_syntax::parse("import java.util.*;\nclass C {}\n").syntax();
+        let diagnostics = lint_node(&wildcard_root, &Config::default());
+        let wildcard = diagnostics
+            .iter()
+            .find(|d| d.rule == "wildcard-import")
+            .expect("a wildcard-import diagnostic");
+        assert_eq!(wildcard.unnecessary_range, None);
+    }
+
+    #[test]
     fn unreported_exception_needs_the_index() {
         // A checked exception thrown but not declared. Classifying it as checked and finding it
         // undeclared needs the project index (with stdlib), so `lint_source` cannot see it.
