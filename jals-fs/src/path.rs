@@ -32,10 +32,11 @@ pub fn file_name(path: &str) -> Option<&str> {
     if trimmed.is_empty() {
         return None;
     }
-    match trimmed.rfind('/') {
-        Some(idx) => Some(&trimmed[idx + 1..]),
-        None => Some(trimmed),
-    }
+    Some(
+        trimmed
+            .rfind('/')
+            .map_or(trimmed, |idx| &trimmed[idx + 1..]),
+    )
 }
 
 /// The extension of `path`'s file name — the part after its last `.`, not counting a leading dot.
