@@ -1,0 +1,6 @@
+pass-by-value-size-limit = 64
+enum-variant-size-threshold = 256
+array-size-threshold = 4096
+future-size-threshold = 16384
+large-error-threshold = 256
+type-complexity-threshold = 300

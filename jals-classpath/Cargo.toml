@@ -26,3 +26,6 @@ futures = { workspace = true, optional = true }
 [dev-dependencies]
 jals-syntax.workspace = true
 tempfile = "3"
+
+[lints]
+workspace = true
