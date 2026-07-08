@@ -17,9 +17,11 @@ use jals_config::{
     PathDependency, ValidationError, validate_jar_location,
 };
 
-/// A `git` dependency's classified spec: the clone URL, which commit to check out, and an optional
-/// source-root subdirectory. The host clones the URL, checks out the [`reference`](GitSource::reference),
-/// then reads the `.java` under [`dir`](GitSource::dir) (or the auto-detected source root).
+/// A `git` dependency's classified spec.
+///
+/// Contains the clone URL, which commit to check out, and an optional source-root subdirectory. The
+/// host clones the URL, checks out the [`reference`](GitSource::reference), then reads the `.java`
+/// under [`dir`](GitSource::dir) (or the auto-detected source root).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSource {
     /// The repository URL to clone.
@@ -40,9 +42,11 @@ pub struct PathSource {
     pub dir: Option<String>,
 }
 
-/// A `git` / `path` dependency whose `.java` source the host indexes for analysis and navigation —
-/// the resolved source-form of a [`Dependency`], collected by [`ManifestExt::dependency_source_dirs`]. (A
-/// `jar` dependency is never one of these; its classes come from the classpath.)
+/// A `git` / `path` dependency whose `.java` source the host indexes for analysis and navigation.
+///
+/// This is the resolved source-form of a [`Dependency`], collected by
+/// [`ManifestExt::dependency_source_dirs`]. A `jar` dependency is never one of these; its classes
+/// come from the classpath.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceDependency {
     /// A git repository to clone and read `.java` from.
@@ -51,8 +55,10 @@ pub enum SourceDependency {
     Path(PathSource),
 }
 
-/// Where a dependency's jar is obtained, classified purely from its spec (no I/O), so the host knows
-/// whether to download it or read it off disk. Produced by [`ManifestExt::dependency_sources`] /
+/// Where a dependency's jar is obtained.
+///
+/// Classified purely from its spec (no I/O), so the host knows whether to download it or read it off
+/// disk. Produced by [`ManifestExt::dependency_sources`] /
 /// [`ManifestExt::dependency_source_jars`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySource {
@@ -63,9 +69,10 @@ pub enum DependencySource {
     Path(PathBuf),
 }
 
-/// An error loading, parsing, or validating a manifest file from disk. The host-side counterpart of
-/// [`ManifestParseError`], adding the `std::io` read failure and re-stamping parse / validation errors
-/// with the real [`PathBuf`].
+/// An error loading, parsing, or validating a manifest file from disk.
+///
+/// The host-side counterpart of [`ManifestParseError`], adding the `std::io` read failure and
+/// re-stamping parse / validation errors with the real [`PathBuf`].
 #[derive(Debug)]
 pub enum ManifestError {
     /// The file could not be read.
@@ -94,13 +101,13 @@ pub enum ManifestError {
 impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ManifestError::Io { path, source } => {
+            Self::Io { path, source } => {
                 write!(f, "failed to read manifest {}: {source}", path.display())
             }
-            ManifestError::Parse { path, source } => {
+            Self::Parse { path, source } => {
                 write!(f, "failed to parse manifest {}: {source}", path.display())
             }
-            ManifestError::Invalid { path, source } => {
+            Self::Invalid { path, source } => {
                 write!(f, "invalid manifest {}: {source}", path.display())
             }
         }
@@ -110,9 +117,9 @@ impl fmt::Display for ManifestError {
 impl Error for ManifestError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            ManifestError::Io { source, .. } => Some(source),
-            ManifestError::Parse { source, .. } => Some(source),
-            ManifestError::Invalid { source, .. } => Some(source),
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::Invalid { source, .. } => Some(source),
         }
     }
 }
@@ -239,9 +246,11 @@ fn collect_dependencies<T>(
     (oks, errors)
 }
 
-/// The host-side, `std::path`-based resolution over a [`Manifest`] — the counterpart of the pure
-/// model in [`jals_config`]. Brought into scope alongside `jals_config::Manifest`, its methods are
-/// callable with the historic `manifest.method(dir)` / `Manifest::from_file(path)` syntax.
+/// The host-side, `std::path`-based resolution over a [`Manifest`].
+///
+/// This is the counterpart of the pure model in [`jals_config`]. Brought into scope alongside
+/// `jals_config::Manifest`, its methods are callable with the historic `manifest.method(dir)` /
+/// `Manifest::from_file(path)` syntax.
 pub trait ManifestExt {
     /// Load, parse, and validate a specific `jals.toml` file. Delegates parse+validation to
     /// `jals_config`'s [`FromStr`](core::str::FromStr), re-stamping errors with the real path.
@@ -303,7 +312,7 @@ impl ManifestExt for Manifest {
             path: path.to_path_buf(),
             source,
         })?;
-        text.parse::<Manifest>().map_err(|err| match err {
+        text.parse::<Self>().map_err(|err| match err {
             ManifestParseError::Parse { source, .. } => ManifestError::Parse {
                 path: path.to_path_buf(),
                 source,

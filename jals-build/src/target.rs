@@ -54,19 +54,22 @@ pub fn resolve_run_target<'m>(
             .as_deref()
             .ok_or(ResolveTargetError::NoTarget),
         [only] => Ok(only.main_class.as_str()),
-        many => match manifest.package.default_run.as_deref() {
-            Some(default) => many
-                .iter()
-                .find(|b| b.name == default)
-                .map(|b| b.main_class.as_str())
-                .ok_or_else(|| ResolveTargetError::UnknownBin {
-                    name: default.to_string(),
+        many => manifest.package.default_run.as_deref().map_or_else(
+            || {
+                Err(ResolveTargetError::Ambiguous {
                     available: bin_names(manifest),
-                }),
-            None => Err(ResolveTargetError::Ambiguous {
-                available: bin_names(manifest),
-            }),
-        },
+                })
+            },
+            |default| {
+                many.iter()
+                    .find(|b| b.name == default)
+                    .map(|b| b.main_class.as_str())
+                    .ok_or_else(|| ResolveTargetError::UnknownBin {
+                        name: default.to_string(),
+                        available: bin_names(manifest),
+                    })
+            },
+        ),
     }
 }
 
@@ -97,17 +100,17 @@ pub enum ResolveTargetError {
 impl fmt::Display for ResolveTargetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolveTargetError::UnknownBin { name, available } => write!(
+            Self::UnknownBin { name, available } => write!(
                 f,
                 "no bin named `{name}` (available: {})",
                 available.join(", ")
             ),
-            ResolveTargetError::Ambiguous { available } => write!(
+            Self::Ambiguous { available } => write!(
                 f,
                 "multiple bins ({}); pass --bin <name> or set `[package] default-run`",
                 available.join(", ")
             ),
-            ResolveTargetError::NoTarget => write!(
+            Self::NoTarget => write!(
                 f,
                 "no main class: set `[run] main-class`, add a `[[bin]]`, or pass --main-class"
             ),
