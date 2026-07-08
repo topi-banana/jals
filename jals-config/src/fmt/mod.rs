@@ -31,6 +31,7 @@ pub use options::{
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Spaces vs. tab for indentation.
     pub indent_style: IndentStyle,
@@ -327,7 +328,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             indent_style: IndentStyle::Space,
             indent_width: 4,
             continuation_indent: None,
@@ -427,7 +428,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
+    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
         crate::loader::load(fs, path)
     }
 
@@ -438,7 +439,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
+    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
         crate::loader::discover(fs, start_dir, "jalsfmt.toml")
     }
 }

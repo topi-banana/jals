@@ -36,16 +36,16 @@ impl LineEnding {
     /// Resolve to a concrete terminator string, consulting `src` for [`Auto`](Self::Auto).
     pub(crate) fn resolve(self, src: &str) -> &'static str {
         match self {
-            LineEnding::Lf => "\n",
-            LineEnding::Crlf => "\r\n",
-            LineEnding::Native => Self::native(),
-            LineEnding::Auto => Self::detect(src),
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+            Self::Native => Self::native(),
+            Self::Auto => Self::detect(src),
         }
     }
 
     /// The host platform's native terminator. Compile-time `cfg`, so `wasm32` (which is not
     /// Windows) resolves to `\n` without any platform IO.
-    fn native() -> &'static str {
+    const fn native() -> &'static str {
         if cfg!(windows) { "\r\n" } else { "\n" }
     }
 
@@ -71,11 +71,13 @@ pub enum BraceStyle {
     NextLine,
 }
 
-/// How control-flow brace styling is laid out — the complement of [`BraceStyle`], covering
-/// everything `brace-style` deliberately leaves alone. It governs two coupled junctions:
-/// the opening brace of a control-flow block (`if`/`for`/`while`/`do`/`try`/`catch`/`finally`/
-/// `synchronized`), a `switch` block, a lambda body, or a bare block; and the continuation
-/// keyword that follows a closing brace (`} else`, `} catch`, `} finally`, `} while`).
+/// How control-flow brace styling is laid out.
+///
+/// This is the complement of [`BraceStyle`], covering everything `brace-style` deliberately leaves
+/// alone. It governs two coupled junctions: the opening brace of a control-flow block
+/// (`if`/`for`/`while`/`do`/`try`/`catch`/`finally`/`synchronized`), a `switch` block, a lambda body,
+/// or a bare block; and the continuation keyword that follows a closing brace (`} else`,
+/// `} catch`, `} finally`, `} while`).
 /// Mirrors rustfmt's `control_brace_style`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -97,6 +99,7 @@ pub enum ControlBraceStyle {
 }
 
 /// How the formatter treats the optional trailing comma of an array initializer (`{1, 2, 3,}`).
+///
 /// Mirrors rustfmt's `trailing_comma`, plus a [`Preserve`](Self::Preserve) default (rustfmt has
 /// no such mode) that keeps the source comma exactly, so the strict significant-token invariant
 /// holds unless this is opted into. Only array initializers are affected — the sole Java
@@ -130,10 +133,11 @@ pub enum BinopSeparator {
     Back,
 }
 
-/// How a same-precedence binary-operator run (`a + b + c …`) is laid out when it wraps across
-/// lines, independent of [`BinopSeparator`] (which decides *where* the operator sits). A
-/// Java-specific option with no rustfmt equivalent. Layout-only — the significant-token sequence
-/// is preserved exactly.
+/// How a same-precedence binary-operator run (`a + b + c …`) is laid out when it wraps.
+///
+/// This is independent of [`BinopSeparator`] (which decides *where* the operator sits). A
+/// Java-specific option with no rustfmt equivalent. Layout-only — the significant-token sequence is
+/// preserved exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BinopLayout {
@@ -148,10 +152,11 @@ pub enum BinopLayout {
     Compressed,
 }
 
-/// Layout of a method / constructor parameter list (`PARAM_LIST`). Mirrors rustfmt's
-/// `fn_params_layout` (formerly `fn_args_layout`, which jals accepts as a deprecated alias);
-/// it applies only to declaration parameter lists, never to call argument lists. Layout-only —
-/// the significant-token sequence is preserved exactly.
+/// Layout of a method / constructor parameter list (`PARAM_LIST`).
+///
+/// Mirrors rustfmt's `fn_params_layout` (formerly `fn_args_layout`, which jals accepts as a
+/// deprecated alias); it applies only to declaration parameter lists, never to call argument lists.
+/// Layout-only — the significant-token sequence is preserved exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FnParamsLayout {
@@ -167,9 +172,11 @@ pub enum FnParamsLayout {
     Vertical,
 }
 
-/// Density of spacing around the `&` of a Java intersection type — a type-parameter bound
-/// (`<T extends A & B>`) or a cast intersection (`(A & B) x`). Mirrors rustfmt's
-/// `type_punctuation_density`. The bitwise-AND operator `&` (an expression) is never affected.
+/// Density of spacing around the `&` of a Java intersection type.
+///
+/// This covers a type-parameter bound (`<T extends A & B>`) or a cast intersection (`(A & B) x`).
+/// Mirrors rustfmt's `type_punctuation_density`. The bitwise-AND operator `&` (an expression) is
+/// never affected.
 /// Layout-only — the significant-token sequence is preserved exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -180,10 +187,11 @@ pub enum TypePunctuationDensity {
     Compressed,
 }
 
-/// Placement of a declaration's leading annotations (the annotations in the `MODIFIERS` node of
-/// a type / method / constructor / field / initializer / local-variable declaration). A
-/// Java-specific option with no rustfmt equivalent. Layout-only — the significant-token
-/// sequence is preserved exactly.
+/// Placement of a declaration's leading annotations.
+///
+/// This covers the annotations in the `MODIFIERS` node of a type / method / constructor / field /
+/// initializer / local-variable declaration. A Java-specific option with no rustfmt equivalent.
+/// Layout-only — the significant-token sequence is preserved exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AnnotationPlacement {
@@ -196,11 +204,12 @@ pub enum AnnotationPlacement {
     Expanded,
 }
 
-/// How the body of a *legacy* (colon-form) `switch` group — one or more `case X:` / `default:`
-/// labels followed by statements — is laid out relative to the label's colon. The arrow form
+/// How the body of a *legacy* (colon-form) `switch` group is laid out relative to the label's colon.
+///
+/// This covers one or more `case X:` / `default:` labels followed by statements. The arrow form
 /// (`case X -> …`) is a different construct and is never affected. Layout-only — the
-/// significant-token sequence is preserved exactly (only the whitespace after the colon
-/// changes); idempotent. A Java-specific option with no rustfmt equivalent.
+/// significant-token sequence is preserved exactly (only the whitespace after the colon changes);
+/// idempotent. A Java-specific option with no rustfmt equivalent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SwitchCaseBody {
@@ -217,12 +226,13 @@ pub enum SwitchCaseBody {
     SameLine,
 }
 
-/// Where the closing parenthesis of a wrapped *paren-delimited* list — a call / annotation
-/// argument list, a method / constructor parameter list, or a record header — is placed when
-/// the list breaks across lines. The brace-delimited array initializer (`{ … }`) is never
-/// affected and always keeps its `}` on its own line. Layout-only — the significant-token
-/// sequence is preserved exactly (only the whitespace before the `)` changes); idempotent. A
-/// Java-specific option with no rustfmt equivalent (Rust always dangles).
+/// Where the closing parenthesis of a wrapped *paren-delimited* list is placed.
+///
+/// This covers a call / annotation argument list, a method / constructor parameter list, or a
+/// record header when the list breaks across lines. The brace-delimited array initializer
+/// (`{ … }`) is never affected and always keeps its `}` on its own line. Layout-only — the
+/// significant-token sequence is preserved exactly (only the whitespace before the `)` changes);
+/// idempotent. A Java-specific option with no rustfmt equivalent (Rust always dangles).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClosingParen {

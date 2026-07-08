@@ -34,10 +34,10 @@ pub enum ConfigError {
 impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ConfigError::Io { path, source } => {
+            Self::Io { path, source } => {
                 write!(f, "failed to read config {path}: {source}")
             }
-            ConfigError::Parse { path, source } => {
+            Self::Parse { path, source } => {
                 write!(f, "failed to parse config {path}: {source}")
             }
         }
@@ -47,8 +47,8 @@ impl core::fmt::Display for ConfigError {
 impl core::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            ConfigError::Io { source, .. } => Some(source),
-            ConfigError::Parse { source, .. } => Some(source),
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
         }
     }
 }

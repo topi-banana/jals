@@ -27,11 +27,11 @@ pub enum Severity {
 
 impl Severity {
     /// The lowercase name (`"allow"` / `"warn"` / `"error"`).
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Severity::Allow => "allow",
-            Severity::Warn => "warn",
-            Severity::Error => "error",
+            Self::Allow => "allow",
+            Self::Warn => "warn",
+            Self::Error => "error",
         }
     }
 }
@@ -71,7 +71,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
+    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
         crate::loader::load(fs, path)
     }
 
@@ -82,7 +82,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
+    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
         crate::loader::discover(fs, start_dir, "jalslint.toml")
     }
 }

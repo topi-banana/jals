@@ -132,6 +132,7 @@ pub struct PathDependency {
 }
 
 /// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
+///
 /// The pure classification of a [`GitDependency`]'s `branch` / `tag` / `rev` (see
 /// [`GitDependency::git_ref`]); `jals-build`'s `GitSource` pairs it with the resolved clone URL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -151,15 +152,16 @@ impl GitRef {
     /// `None` for [`Default`](GitRef::Default) (leave the clone on the repository's default branch).
     pub fn checkout_arg(&self) -> Option<&str> {
         match self {
-            GitRef::Default => None,
-            GitRef::Branch(b) | GitRef::Tag(b) | GitRef::Rev(b) => Some(b),
+            Self::Default => None,
+            Self::Branch(b) | Self::Tag(b) | Self::Rev(b) => Some(b),
         }
     }
 }
 
-/// A `[dependencies]` entry whose value could not be classified, found by [`Dependency::validate`]
-/// (and by `jals-build`'s `ManifestExt` classifiers). Carries the dependency name for an actionable
-/// message.
+/// A `[dependencies]` entry whose value could not be classified.
+///
+/// Found by [`Dependency::validate`] (and by `jals-build`'s `ManifestExt` classifiers). Carries the
+/// dependency name for an actionable message.
 ///
 /// These are the checks serde cannot express at parse time. The *structural* errors — a missing form,
 /// co-occurring forms (`{ jar, git }`), or a field misplaced onto the wrong form (`branch` without
@@ -196,15 +198,15 @@ pub enum DependencyError {
 impl fmt::Display for DependencyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DependencyError::Empty { name, field } => {
+            Self::Empty { name, field } => {
                 write!(f, "dependency `{name}` has an empty `{field}`")
             }
-            DependencyError::UnknownScheme { name, field, value } => write!(
+            Self::UnknownScheme { name, field, value } => write!(
                 f,
                 "dependency `{name}` has an unsupported `{field}` URL scheme `{value}` \
                  (expected `https://`, `http://`, `file://`, or a path)"
             ),
-            DependencyError::ConflictingGitRef { name } => write!(
+            Self::ConflictingGitRef { name } => write!(
                 f,
                 "git dependency `{name}` specifies more than one of `branch`, `tag`, `rev` \
                  (use at most one)"
@@ -254,10 +256,10 @@ pub enum Edition {
 
 impl Edition {
     /// The Java feature-release version this edition targets (e.g. `24` for [`Edition::Java24`]).
-    pub fn feature_version(self) -> u32 {
+    pub const fn feature_version(self) -> u32 {
         match self {
-            Edition::Java24 => 24,
-            Edition::Java25 => 25,
+            Self::Java24 => 24,
+            Self::Java25 => 25,
         }
     }
 }
@@ -314,7 +316,7 @@ pub struct Bin {
 
 impl Default for Build {
     fn default() -> Self {
-        Build {
+        Self {
             source_dirs: alloc::vec!["src/main/java".to_string()],
             classes_dir: "target/classes".to_string(),
             release: None,
@@ -326,11 +328,12 @@ impl Default for Build {
     }
 }
 
-/// Validate a jar-location string (a `jar` or `sources` value) — non-empty and, if it carries a URL
-/// scheme, a known one (`file` / `https` / `http`) — without building any path. The value-level check
-/// serde cannot express, shared by [`Dependency::validate`] and `jals-build`'s classpath classifier
-/// (which reuses it before resolving the value to a `PathBuf` / URL). `field` names the source field
-/// for error messages.
+/// Validate a jar-location string without building any path.
+///
+/// The string is a `jar` or `sources` value: non-empty and, if it carries a URL scheme, a known one
+/// (`file` / `https` / `http`). This is the value-level check serde cannot express, shared by
+/// [`Dependency::validate`] and `jals-build`'s classpath classifier (which reuses it before
+/// resolving the value to a `PathBuf` / URL). `field` names the source field for error messages.
 ///
 /// # Errors
 /// [`DependencyError::Empty`] for an empty value, [`DependencyError::UnknownScheme`] for a URL with an
@@ -372,14 +375,14 @@ impl Dependency {
     /// git refs).
     pub fn validate(&self, name: &str) -> Result<(), DependencyError> {
         match self {
-            Dependency::Jar(jar) => {
+            Self::Jar(jar) => {
                 validate_jar_location(&jar.jar, name, "jar")?;
                 if let Some(sources) = &jar.sources {
                     validate_jar_location(sources, name, "sources")?;
                 }
                 Ok(())
             }
-            Dependency::Git(git) => {
+            Self::Git(git) => {
                 if git.git.is_empty() {
                     return Err(DependencyError::Empty {
                         name: name.to_string(),
@@ -388,7 +391,7 @@ impl Dependency {
                 }
                 git.git_ref(name).map(|_| ())
             }
-            Dependency::Path(path) => {
+            Self::Path(path) => {
                 if path.path.is_empty() {
                     return Err(DependencyError::Empty {
                         name: name.to_string(),
@@ -415,7 +418,7 @@ impl GitDependency {
         let non_empty = |value: &str, field| {
             (!value.is_empty())
                 .then(|| value.to_string())
-                .ok_or(DependencyError::Empty {
+                .ok_or_else(|| DependencyError::Empty {
                     name: name.to_string(),
                     field,
                 })
@@ -522,26 +525,26 @@ impl Manifest {
 impl FromStr for Manifest {
     type Err = ManifestParseError;
 
-    fn from_str(text: &str) -> Result<Manifest, ManifestParseError> {
-        let manifest: Manifest =
-            toml::from_str(text).map_err(|source| ManifestParseError::Parse {
-                path: Manifest::IN_MEMORY_NAME.to_string(),
-                source,
-            })?;
+    fn from_str(text: &str) -> Result<Self, ManifestParseError> {
+        let manifest: Self = toml::from_str(text).map_err(|source| ManifestParseError::Parse {
+            path: Self::IN_MEMORY_NAME.to_string(),
+            source,
+        })?;
         manifest
             .validate()
             .map_err(|source| ManifestParseError::Invalid {
-                path: Manifest::IN_MEMORY_NAME.to_string(),
+                path: Self::IN_MEMORY_NAME.to_string(),
                 source,
             })?;
         Ok(manifest)
     }
 }
 
-/// An error parsing or validating a manifest from text. `no_std`: it holds a rendered path `String`
-/// and wraps [`toml::de::Error`] (the parse failure) or [`ValidationError`] (the structural failure).
-/// `jals-build`'s host-side `ManifestError` re-stamps these with the real `PathBuf` and adds the
-/// `std::io` read failure.
+/// An error parsing or validating a manifest from text.
+///
+/// `no_std`: it holds a rendered path `String` and wraps [`toml::de::Error`] (the parse failure) or
+/// [`ValidationError`] (the structural failure). `jals-build`'s host-side `ManifestError` re-stamps
+/// these with the real `PathBuf` and adds the `std::io` read failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestParseError {
     /// The text contained invalid TOML.
@@ -563,10 +566,10 @@ pub enum ManifestParseError {
 impl fmt::Display for ManifestParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ManifestParseError::Parse { path, source } => {
+            Self::Parse { path, source } => {
                 write!(f, "failed to parse manifest {path}: {source}")
             }
-            ManifestParseError::Invalid { path, source } => {
+            Self::Invalid { path, source } => {
                 write!(f, "invalid manifest {path}: {source}")
             }
         }
@@ -576,8 +579,8 @@ impl fmt::Display for ManifestParseError {
 impl Error for ManifestParseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            ManifestParseError::Parse { source, .. } => Some(source),
-            ManifestParseError::Invalid { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::Invalid { source, .. } => Some(source),
         }
     }
 }
@@ -612,18 +615,18 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValidationError::DuplicateBin { name } => {
+            Self::DuplicateBin { name } => {
                 write!(f, "duplicate `[[bin]]` name `{name}`")
             }
-            ValidationError::UnknownDefaultRun { name, available } => write!(
+            Self::UnknownDefaultRun { name, available } => write!(
                 f,
                 "`[package] default-run` is `{name}`, which is not a declared bin (available: {})",
                 available.join(", ")
             ),
-            ValidationError::EmptyBinField { field } => {
+            Self::EmptyBinField { field } => {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
-            ValidationError::Dependency(err) => write!(f, "{err}"),
+            Self::Dependency(err) => write!(f, "{err}"),
         }
     }
 }
@@ -631,7 +634,7 @@ impl fmt::Display for ValidationError {
 impl Error for ValidationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            ValidationError::Dependency(err) => Some(err),
+            Self::Dependency(err) => Some(err),
             _ => None,
         }
     }
