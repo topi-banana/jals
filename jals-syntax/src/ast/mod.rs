@@ -30,21 +30,21 @@ pub use rowan::ast::{AstChildren, AstNode, AstPtr, SyntaxNodePtr};
 pub use generated::*;
 
 use crate::language::{SyntaxNode, SyntaxToken};
-use crate::syntax_kind::SyntaxKind::*;
+use crate::syntax_kind::SyntaxKind::IDENT;
 
 // ===== Shared accessor helpers =====
 
 /// Returns the first significant token (non-trivia) of `node`, if any.
 fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.children_with_tokens()
-        .filter_map(|it| it.into_token())
+        .filter_map(rowan::NodeOrToken::into_token)
         .find(|t| !t.kind().is_trivia())
 }
 
 /// Concatenates the text of all non-trivia tokens beneath `node` (drops whitespace/comments).
 fn non_trivia_text(node: &SyntaxNode) -> String {
     node.descendants_with_tokens()
-        .filter_map(|it| it.into_token())
+        .filter_map(rowan::NodeOrToken::into_token)
         .filter(|t| !t.kind().is_trivia())
         .map(|t| t.text().to_string())
         .collect()
@@ -53,7 +53,7 @@ fn non_trivia_text(node: &SyntaxNode) -> String {
 /// Returns the name (`IDENT`) declared directly under `node` (e.g. the type/method name).
 fn name_text(node: &SyntaxNode) -> Option<String> {
     node.children_with_tokens()
-        .filter_map(|it| it.into_token())
+        .filter_map(rowan::NodeOrToken::into_token)
         .find(|t| t.kind() == IDENT)
         .map(|t| t.text().to_string())
 }

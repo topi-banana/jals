@@ -7,14 +7,14 @@ use crate::syntax_kind::SyntaxKind;
 /// 開いたノードのマーカ。必ず [`complete`](Marker::complete) か [`abandon`](Marker::abandon)
 /// で消費する(消費し忘れると `Drop` で panic)。
 #[must_use]
-pub(crate) struct Marker {
+pub struct Marker {
     pos: usize,
     completed: bool,
 }
 
 impl Marker {
-    pub(super) fn new(pos: usize) -> Self {
-        Marker {
+    pub(super) const fn new(pos: usize) -> Self {
+        Self {
             pos,
             completed: false,
         }
@@ -49,9 +49,10 @@ impl Marker {
 
 impl Drop for Marker {
     fn drop(&mut self) {
-        if !self.completed && !currently_panicking() {
-            panic!("Marker は complete か abandon で消費しなければならない");
-        }
+        assert!(
+            !(!self.completed && !currently_panicking()),
+            "Marker は complete か abandon で消費しなければならない"
+        );
     }
 }
 
@@ -66,12 +67,12 @@ fn currently_panicking() -> bool {
 }
 
 #[cfg(not(test))]
-fn currently_panicking() -> bool {
+const fn currently_panicking() -> bool {
     false
 }
 
 /// 完了したノードのマーカ。[`precede`](CompletedMarker::precede) で後から親で包める。
-pub(crate) struct CompletedMarker {
+pub struct CompletedMarker {
     pos: usize,
 }
 
@@ -91,7 +92,7 @@ impl CompletedMarker {
 
 impl Marker {
     /// イベント列内の開始位置。
-    pub(super) fn index(&self) -> usize {
+    pub(super) const fn index(&self) -> usize {
         self.pos
     }
 }

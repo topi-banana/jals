@@ -16,14 +16,14 @@ use super::{
     QualifiedName, Resource, Type, first_sig_token, non_trivia_text,
 };
 use crate::language::{SyntaxNode, SyntaxToken};
-use crate::syntax_kind::SyntaxKind::{self, *};
+use crate::syntax_kind::SyntaxKind::{self, DOT, IDENT, NON_SEALED_KW};
 
 /// The directly-declared name tokens (`IDENT` children) of `node`, in source order. The type of a
 /// declaration is a nested `TYPE` node, so its identifiers are not direct children; an unnamed `_`
 /// binding is an `UNDERSCORE` token and is likewise excluded.
 fn ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
     node.children_with_tokens()
-        .filter_map(|it| it.into_token())
+        .filter_map(rowan::NodeOrToken::into_token)
         .filter(|t| t.kind() == IDENT)
 }
 
@@ -113,7 +113,7 @@ impl Modifiers {
 impl Type {
     /// The type text with surrounding/interleaved trivia removed (e.g. `List<T>`).
     ///
-    /// Use [`AstNode::syntax`]`().text()` if you need the verbatim slice including trivia.
+    /// Use [`AstNode::syntax`]<code>().text()</code> if you need the verbatim slice including trivia.
     pub fn text(&self) -> String {
         non_trivia_text(&self.syntax)
     }
@@ -137,7 +137,7 @@ impl Type {
     pub fn is_qualified(&self) -> bool {
         self.syntax
             .children_with_tokens()
-            .filter_map(|it| it.into_token())
+            .filter_map(rowan::NodeOrToken::into_token)
             .any(|t| t.kind() == DOT)
     }
 
@@ -147,7 +147,7 @@ impl Type {
         let text: String = self
             .syntax
             .children_with_tokens()
-            .filter_map(|it| it.into_token())
+            .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| matches!(t.kind(), IDENT | DOT))
             .map(|t| t.text().to_string())
             .collect();
@@ -163,7 +163,7 @@ impl Type {
     /// The type-argument `Type` nodes written on this type, in order (`List<String>` → one `String`,
     /// `Map<K, V>` → `K`, `V`); empty for a raw or argument-free type. A bare wildcard (`?`) appears
     /// as a node with no reference name (see [`is_primitive_or_var`](Type::is_primitive_or_var)).
-    pub fn type_arg_types(&self) -> impl Iterator<Item = Type> {
+    pub fn type_arg_types(&self) -> impl Iterator<Item = Self> {
         self.type_args().into_iter().flat_map(|ta| ta.args())
     }
 }
@@ -204,7 +204,7 @@ impl FieldAccess {
     pub fn field(&self) -> Option<String> {
         self.syntax
             .children_with_tokens()
-            .filter_map(|it| it.into_token())
+            .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| t.kind() == IDENT)
             .last()
             .map(|t| t.text().to_string())

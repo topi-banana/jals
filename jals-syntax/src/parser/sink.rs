@@ -59,10 +59,10 @@ impl Sink<'_> {
 
     /// 次に積むトークンの開始オフセット(エラー位置に使う)。
     fn current_offset(&self) -> TextSize {
-        match self.all.get(self.all_idx) {
-            Some(t) => t.range.start(),
-            None => self.all.last().map_or(TextSize::new(0), |t| t.range.end()),
-        }
+        self.all.get(self.all_idx).map_or_else(
+            || self.all.last().map_or(TextSize::new(0), |t| t.range.end()),
+            |t| t.range.start(),
+        )
     }
 
     fn error(&mut self, msg: String) {
@@ -111,10 +111,11 @@ pub(super) fn build(input: &Input, mut events: Vec<Event>) -> (GreenNode, Vec<Sy
                         _ => unreachable!("forward_parent は Start を指す"),
                     };
                 }
-                for kind in forward_parents.drain(..).rev().flatten() {
+                for kind in forward_parents.into_iter().rev().flatten() {
                     sink.start_node(kind);
                     depth += 1;
                 }
+                forward_parents = Vec::new();
             }
             Event::Finish => {
                 depth -= 1;

@@ -8,7 +8,23 @@ use rowan::ast::{AstChildren, AstNode, support};
 
 use super::name_text;
 use crate::language::{JavaLanguage, SyntaxNode};
-use crate::syntax_kind::SyntaxKind::{self, *};
+use crate::syntax_kind::SyntaxKind::{
+    self, ANNOTATION, ANNOTATION_ARG_LIST, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, ARG_LIST,
+    ARRAY_INIT, ASSERT_STMT, ASSIGNMENT_EXPR, BINARY_EXPR, BLOCK, BREAK_STMT, CALL_EXPR, CAST_EXPR,
+    CATCH_CLAUSE, CLASS_BODY, CLASS_DECL, CLASS_LITERAL, CONSTRUCTOR_DECL, CONTINUE_STMT,
+    DEFAULT_KW, DO_WHILE_STMT, EMPTY_STMT, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, EXPORTS_DIRECTIVE,
+    EXPR_STMT, EXTENDS_CLAUSE, FIELD_ACCESS, FIELD_DECL, FINALLY_CLAUSE, FOR_EACH_STMT, FOR_STMT,
+    GUARD, IF_STMT, IMPLEMENTS_CLAUSE, IMPORT_DECL, INDEX_EXPR, INITIALIZER, INTERFACE_DECL,
+    LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LITERAL, LOCAL_VAR_DECL, METHOD_DECL,
+    METHOD_REF_EXPR, MODIFIERS, MODULE_BODY, MODULE_DECL, MODULE_KW, NAME_REF, NEW_EXPR, OPEN_KW,
+    OPENS_DIRECTIVE, PACKAGE_DECL, PARAM, PARAM_LIST, PAREN_EXPR, PERMITS_CLAUSE, POSTFIX_EXPR,
+    PROVIDES_DIRECTIVE, QUALIFIED_NAME, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER,
+    RECORD_PATTERN, REQUIRES_DIRECTIVE, RESOURCE, RESOURCE_LIST, RETURN_STMT, SEALED_KW,
+    SOURCE_FILE, STAR, STATIC_KW, SWITCH_BLOCK, SWITCH_EXPR, SWITCH_GROUP, SWITCH_LABEL,
+    SWITCH_RULE, SWITCH_STMT, SYNCHRONIZED_STMT, TERNARY_EXPR, THROW_STMT, THROWS_CLAUSE,
+    TRANSITIVE_KW, TRY_STMT, TYPE, TYPE_ARGS, TYPE_PARAM, TYPE_PARAMS, TYPE_PATTERN, UNARY_EXPR,
+    UNNAMED_PATTERN, USES_DIRECTIVE, WHILE_STMT, YIELD_STMT,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -177,26 +193,26 @@ impl AstNode for Decl {
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
-            CLASS_DECL => Decl::Class(ClassDecl { syntax }),
-            INTERFACE_DECL => Decl::Interface(InterfaceDecl { syntax }),
-            ENUM_DECL => Decl::Enum(EnumDecl { syntax }),
-            RECORD_DECL => Decl::Record(RecordDecl { syntax }),
-            ANNOTATION_TYPE_DECL => Decl::AnnotationType(AnnotationTypeDecl { syntax }),
-            METHOD_DECL => Decl::Method(MethodDecl { syntax }),
-            FIELD_DECL => Decl::Field(FieldDecl { syntax }),
+            CLASS_DECL => Self::Class(ClassDecl { syntax }),
+            INTERFACE_DECL => Self::Interface(InterfaceDecl { syntax }),
+            ENUM_DECL => Self::Enum(EnumDecl { syntax }),
+            RECORD_DECL => Self::Record(RecordDecl { syntax }),
+            ANNOTATION_TYPE_DECL => Self::AnnotationType(AnnotationTypeDecl { syntax }),
+            METHOD_DECL => Self::Method(MethodDecl { syntax }),
+            FIELD_DECL => Self::Field(FieldDecl { syntax }),
             _ => return None,
         };
         Some(res)
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
-            Decl::Class(it) => it.syntax(),
-            Decl::Interface(it) => it.syntax(),
-            Decl::Enum(it) => it.syntax(),
-            Decl::Record(it) => it.syntax(),
-            Decl::AnnotationType(it) => it.syntax(),
-            Decl::Method(it) => it.syntax(),
-            Decl::Field(it) => it.syntax(),
+            Self::Class(it) => it.syntax(),
+            Self::Interface(it) => it.syntax(),
+            Self::Enum(it) => it.syntax(),
+            Self::Record(it) => it.syntax(),
+            Self::AnnotationType(it) => it.syntax(),
+            Self::Method(it) => it.syntax(),
+            Self::Field(it) => it.syntax(),
         }
     }
 }
@@ -314,22 +330,22 @@ impl AstNode for Directive {
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
-            REQUIRES_DIRECTIVE => Directive::Requires(RequiresDirective { syntax }),
-            EXPORTS_DIRECTIVE => Directive::Exports(ExportsDirective { syntax }),
-            OPENS_DIRECTIVE => Directive::Opens(OpensDirective { syntax }),
-            USES_DIRECTIVE => Directive::Uses(UsesDirective { syntax }),
-            PROVIDES_DIRECTIVE => Directive::Provides(ProvidesDirective { syntax }),
+            REQUIRES_DIRECTIVE => Self::Requires(RequiresDirective { syntax }),
+            EXPORTS_DIRECTIVE => Self::Exports(ExportsDirective { syntax }),
+            OPENS_DIRECTIVE => Self::Opens(OpensDirective { syntax }),
+            USES_DIRECTIVE => Self::Uses(UsesDirective { syntax }),
+            PROVIDES_DIRECTIVE => Self::Provides(ProvidesDirective { syntax }),
             _ => return None,
         };
         Some(res)
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
-            Directive::Requires(it) => it.syntax(),
-            Directive::Exports(it) => it.syntax(),
-            Directive::Opens(it) => it.syntax(),
-            Directive::Uses(it) => it.syntax(),
-            Directive::Provides(it) => it.syntax(),
+            Self::Requires(it) => it.syntax(),
+            Self::Exports(it) => it.syntax(),
+            Self::Opens(it) => it.syntax(),
+            Self::Uses(it) => it.syntax(),
+            Self::Provides(it) => it.syntax(),
         }
     }
 }
@@ -1126,48 +1142,48 @@ impl AstNode for Expr {
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
-            LITERAL => Expr::Literal(Literal { syntax }),
-            NAME_REF => Expr::NameRef(NameRef { syntax }),
-            BINARY_EXPR => Expr::Binary(BinaryExpr { syntax }),
-            UNARY_EXPR => Expr::Unary(UnaryExpr { syntax }),
-            POSTFIX_EXPR => Expr::Postfix(PostfixExpr { syntax }),
-            PAREN_EXPR => Expr::Paren(ParenExpr { syntax }),
-            CALL_EXPR => Expr::Call(CallExpr { syntax }),
-            FIELD_ACCESS => Expr::FieldAccess(FieldAccess { syntax }),
-            INDEX_EXPR => Expr::Index(IndexExpr { syntax }),
-            NEW_EXPR => Expr::New(NewExpr { syntax }),
-            ASSIGNMENT_EXPR => Expr::Assignment(AssignmentExpr { syntax }),
-            TERNARY_EXPR => Expr::Ternary(TernaryExpr { syntax }),
-            LAMBDA_EXPR => Expr::Lambda(LambdaExpr { syntax }),
-            METHOD_REF_EXPR => Expr::MethodRef(MethodRefExpr { syntax }),
-            CAST_EXPR => Expr::Cast(CastExpr { syntax }),
-            SWITCH_EXPR => Expr::Switch(SwitchExpr { syntax }),
-            CLASS_LITERAL => Expr::ClassLiteral(ClassLiteral { syntax }),
-            ARRAY_INIT => Expr::ArrayInit(ArrayInit { syntax }),
+            LITERAL => Self::Literal(Literal { syntax }),
+            NAME_REF => Self::NameRef(NameRef { syntax }),
+            BINARY_EXPR => Self::Binary(BinaryExpr { syntax }),
+            UNARY_EXPR => Self::Unary(UnaryExpr { syntax }),
+            POSTFIX_EXPR => Self::Postfix(PostfixExpr { syntax }),
+            PAREN_EXPR => Self::Paren(ParenExpr { syntax }),
+            CALL_EXPR => Self::Call(CallExpr { syntax }),
+            FIELD_ACCESS => Self::FieldAccess(FieldAccess { syntax }),
+            INDEX_EXPR => Self::Index(IndexExpr { syntax }),
+            NEW_EXPR => Self::New(NewExpr { syntax }),
+            ASSIGNMENT_EXPR => Self::Assignment(AssignmentExpr { syntax }),
+            TERNARY_EXPR => Self::Ternary(TernaryExpr { syntax }),
+            LAMBDA_EXPR => Self::Lambda(LambdaExpr { syntax }),
+            METHOD_REF_EXPR => Self::MethodRef(MethodRefExpr { syntax }),
+            CAST_EXPR => Self::Cast(CastExpr { syntax }),
+            SWITCH_EXPR => Self::Switch(SwitchExpr { syntax }),
+            CLASS_LITERAL => Self::ClassLiteral(ClassLiteral { syntax }),
+            ARRAY_INIT => Self::ArrayInit(ArrayInit { syntax }),
             _ => return None,
         };
         Some(res)
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
-            Expr::Literal(it) => it.syntax(),
-            Expr::NameRef(it) => it.syntax(),
-            Expr::Binary(it) => it.syntax(),
-            Expr::Unary(it) => it.syntax(),
-            Expr::Postfix(it) => it.syntax(),
-            Expr::Paren(it) => it.syntax(),
-            Expr::Call(it) => it.syntax(),
-            Expr::FieldAccess(it) => it.syntax(),
-            Expr::Index(it) => it.syntax(),
-            Expr::New(it) => it.syntax(),
-            Expr::Assignment(it) => it.syntax(),
-            Expr::Ternary(it) => it.syntax(),
-            Expr::Lambda(it) => it.syntax(),
-            Expr::MethodRef(it) => it.syntax(),
-            Expr::Cast(it) => it.syntax(),
-            Expr::Switch(it) => it.syntax(),
-            Expr::ClassLiteral(it) => it.syntax(),
-            Expr::ArrayInit(it) => it.syntax(),
+            Self::Literal(it) => it.syntax(),
+            Self::NameRef(it) => it.syntax(),
+            Self::Binary(it) => it.syntax(),
+            Self::Unary(it) => it.syntax(),
+            Self::Postfix(it) => it.syntax(),
+            Self::Paren(it) => it.syntax(),
+            Self::Call(it) => it.syntax(),
+            Self::FieldAccess(it) => it.syntax(),
+            Self::Index(it) => it.syntax(),
+            Self::New(it) => it.syntax(),
+            Self::Assignment(it) => it.syntax(),
+            Self::Ternary(it) => it.syntax(),
+            Self::Lambda(it) => it.syntax(),
+            Self::MethodRef(it) => it.syntax(),
+            Self::Cast(it) => it.syntax(),
+            Self::Switch(it) => it.syntax(),
+            Self::ClassLiteral(it) => it.syntax(),
+            Self::ArrayInit(it) => it.syntax(),
         }
     }
 }
@@ -1325,30 +1341,30 @@ impl AstNode for Member {
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
-            FIELD_DECL => Member::Field(FieldDecl { syntax }),
-            METHOD_DECL => Member::Method(MethodDecl { syntax }),
-            CONSTRUCTOR_DECL => Member::Constructor(ConstructorDecl { syntax }),
-            INITIALIZER => Member::Initializer(Initializer { syntax }),
-            CLASS_DECL => Member::Class(ClassDecl { syntax }),
-            INTERFACE_DECL => Member::Interface(InterfaceDecl { syntax }),
-            ENUM_DECL => Member::Enum(EnumDecl { syntax }),
-            RECORD_DECL => Member::Record(RecordDecl { syntax }),
-            ANNOTATION_TYPE_DECL => Member::AnnotationType(AnnotationTypeDecl { syntax }),
+            FIELD_DECL => Self::Field(FieldDecl { syntax }),
+            METHOD_DECL => Self::Method(MethodDecl { syntax }),
+            CONSTRUCTOR_DECL => Self::Constructor(ConstructorDecl { syntax }),
+            INITIALIZER => Self::Initializer(Initializer { syntax }),
+            CLASS_DECL => Self::Class(ClassDecl { syntax }),
+            INTERFACE_DECL => Self::Interface(InterfaceDecl { syntax }),
+            ENUM_DECL => Self::Enum(EnumDecl { syntax }),
+            RECORD_DECL => Self::Record(RecordDecl { syntax }),
+            ANNOTATION_TYPE_DECL => Self::AnnotationType(AnnotationTypeDecl { syntax }),
             _ => return None,
         };
         Some(res)
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
-            Member::Field(it) => it.syntax(),
-            Member::Method(it) => it.syntax(),
-            Member::Constructor(it) => it.syntax(),
-            Member::Initializer(it) => it.syntax(),
-            Member::Class(it) => it.syntax(),
-            Member::Interface(it) => it.syntax(),
-            Member::Enum(it) => it.syntax(),
-            Member::Record(it) => it.syntax(),
-            Member::AnnotationType(it) => it.syntax(),
+            Self::Field(it) => it.syntax(),
+            Self::Method(it) => it.syntax(),
+            Self::Constructor(it) => it.syntax(),
+            Self::Initializer(it) => it.syntax(),
+            Self::Class(it) => it.syntax(),
+            Self::Interface(it) => it.syntax(),
+            Self::Enum(it) => it.syntax(),
+            Self::Record(it) => it.syntax(),
+            Self::AnnotationType(it) => it.syntax(),
         }
     }
 }
@@ -1663,50 +1679,50 @@ impl AstNode for Stmt {
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
-            LOCAL_VAR_DECL => Stmt::LocalVar(LocalVarDecl { syntax }),
-            BLOCK => Stmt::Block(Block { syntax }),
-            EXPR_STMT => Stmt::Expr(ExprStmt { syntax }),
-            RETURN_STMT => Stmt::Return(ReturnStmt { syntax }),
-            IF_STMT => Stmt::If(IfStmt { syntax }),
-            WHILE_STMT => Stmt::While(WhileStmt { syntax }),
-            DO_WHILE_STMT => Stmt::DoWhile(DoWhileStmt { syntax }),
-            FOR_STMT => Stmt::For(ForStmt { syntax }),
-            FOR_EACH_STMT => Stmt::ForEach(ForEachStmt { syntax }),
-            BREAK_STMT => Stmt::Break(BreakStmt { syntax }),
-            CONTINUE_STMT => Stmt::Continue(ContinueStmt { syntax }),
-            THROW_STMT => Stmt::Throw(ThrowStmt { syntax }),
-            YIELD_STMT => Stmt::Yield(YieldStmt { syntax }),
-            ASSERT_STMT => Stmt::Assert(AssertStmt { syntax }),
-            SYNCHRONIZED_STMT => Stmt::Synchronized(SynchronizedStmt { syntax }),
-            TRY_STMT => Stmt::Try(TryStmt { syntax }),
-            SWITCH_STMT => Stmt::Switch(SwitchStmt { syntax }),
-            LABELED_STMT => Stmt::Labeled(LabeledStmt { syntax }),
-            EMPTY_STMT => Stmt::Empty(EmptyStmt { syntax }),
+            LOCAL_VAR_DECL => Self::LocalVar(LocalVarDecl { syntax }),
+            BLOCK => Self::Block(Block { syntax }),
+            EXPR_STMT => Self::Expr(ExprStmt { syntax }),
+            RETURN_STMT => Self::Return(ReturnStmt { syntax }),
+            IF_STMT => Self::If(IfStmt { syntax }),
+            WHILE_STMT => Self::While(WhileStmt { syntax }),
+            DO_WHILE_STMT => Self::DoWhile(DoWhileStmt { syntax }),
+            FOR_STMT => Self::For(ForStmt { syntax }),
+            FOR_EACH_STMT => Self::ForEach(ForEachStmt { syntax }),
+            BREAK_STMT => Self::Break(BreakStmt { syntax }),
+            CONTINUE_STMT => Self::Continue(ContinueStmt { syntax }),
+            THROW_STMT => Self::Throw(ThrowStmt { syntax }),
+            YIELD_STMT => Self::Yield(YieldStmt { syntax }),
+            ASSERT_STMT => Self::Assert(AssertStmt { syntax }),
+            SYNCHRONIZED_STMT => Self::Synchronized(SynchronizedStmt { syntax }),
+            TRY_STMT => Self::Try(TryStmt { syntax }),
+            SWITCH_STMT => Self::Switch(SwitchStmt { syntax }),
+            LABELED_STMT => Self::Labeled(LabeledStmt { syntax }),
+            EMPTY_STMT => Self::Empty(EmptyStmt { syntax }),
             _ => return None,
         };
         Some(res)
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
-            Stmt::LocalVar(it) => it.syntax(),
-            Stmt::Block(it) => it.syntax(),
-            Stmt::Expr(it) => it.syntax(),
-            Stmt::Return(it) => it.syntax(),
-            Stmt::If(it) => it.syntax(),
-            Stmt::While(it) => it.syntax(),
-            Stmt::DoWhile(it) => it.syntax(),
-            Stmt::For(it) => it.syntax(),
-            Stmt::ForEach(it) => it.syntax(),
-            Stmt::Break(it) => it.syntax(),
-            Stmt::Continue(it) => it.syntax(),
-            Stmt::Throw(it) => it.syntax(),
-            Stmt::Yield(it) => it.syntax(),
-            Stmt::Assert(it) => it.syntax(),
-            Stmt::Synchronized(it) => it.syntax(),
-            Stmt::Try(it) => it.syntax(),
-            Stmt::Switch(it) => it.syntax(),
-            Stmt::Labeled(it) => it.syntax(),
-            Stmt::Empty(it) => it.syntax(),
+            Self::LocalVar(it) => it.syntax(),
+            Self::Block(it) => it.syntax(),
+            Self::Expr(it) => it.syntax(),
+            Self::Return(it) => it.syntax(),
+            Self::If(it) => it.syntax(),
+            Self::While(it) => it.syntax(),
+            Self::DoWhile(it) => it.syntax(),
+            Self::For(it) => it.syntax(),
+            Self::ForEach(it) => it.syntax(),
+            Self::Break(it) => it.syntax(),
+            Self::Continue(it) => it.syntax(),
+            Self::Throw(it) => it.syntax(),
+            Self::Yield(it) => it.syntax(),
+            Self::Assert(it) => it.syntax(),
+            Self::Synchronized(it) => it.syntax(),
+            Self::Try(it) => it.syntax(),
+            Self::Switch(it) => it.syntax(),
+            Self::Labeled(it) => it.syntax(),
+            Self::Empty(it) => it.syntax(),
         }
     }
 }
@@ -2497,18 +2513,18 @@ impl AstNode for Pattern {
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         let res = match syntax.kind() {
-            TYPE_PATTERN => Pattern::Type(TypePattern { syntax }),
-            RECORD_PATTERN => Pattern::Record(RecordPattern { syntax }),
-            UNNAMED_PATTERN => Pattern::Unnamed(UnnamedPattern { syntax }),
+            TYPE_PATTERN => Self::Type(TypePattern { syntax }),
+            RECORD_PATTERN => Self::Record(RecordPattern { syntax }),
+            UNNAMED_PATTERN => Self::Unnamed(UnnamedPattern { syntax }),
             _ => return None,
         };
         Some(res)
     }
     fn syntax(&self) -> &SyntaxNode {
         match self {
-            Pattern::Type(it) => it.syntax(),
-            Pattern::Record(it) => it.syntax(),
-            Pattern::Unnamed(it) => it.syntax(),
+            Self::Type(it) => it.syntax(),
+            Self::Record(it) => it.syntax(),
+            Self::Unnamed(it) => it.syntax(),
         }
     }
 }

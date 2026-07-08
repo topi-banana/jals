@@ -1,8 +1,8 @@
 //! A hand-written, lossless lexer.
 //!
-//! [`tokenize`] / [`Lexer`] map every byte of the input to exactly one token (concatenating
-//! each token's `text` reproduces the input) and never panic on any input. Unmatched bytes
-//! become [`SyntaxKind::ERROR`].
+//! [`tokenize`] / [`Lexer`] map every byte of inputs that fit in [`TextSize`] to exactly one token
+//! (concatenating each token's `text` reproduces the input) and never panic on such inputs.
+//! Unmatched bytes become [`SyntaxKind::ERROR`].
 
 use alloc::vec::Vec;
 
@@ -35,7 +35,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     /// Creates a lexer over the given input.
-    pub fn new(src: &'a str) -> Self {
+    pub const fn new(src: &'a str) -> Self {
         Lexer { src, pos: 0 }
     }
 }
@@ -56,9 +56,13 @@ impl<'a> Iterator for Lexer<'a> {
             Ok(token) => SyntaxKind::from_token(token, text),
             Err(()) => SyntaxKind::ERROR,
         };
-        let range = TextRange::new(TextSize::from(start as u32), TextSize::from(end as u32));
+        let range = TextRange::new(text_size(start), text_size(end));
         Some(LexedToken { kind, text, range })
     }
+}
+
+fn text_size(offset: usize) -> TextSize {
+    TextSize::try_from(offset).expect("source byte offset exceeds TextSize range")
 }
 
 // === Scanner ===
@@ -107,7 +111,13 @@ impl Cursor<'_> {
 /// boundary). Returns the token kind (`Err(())` for unmatched input) and the end offset;
 /// the end is always `> start` and on a char boundary.
 fn scan_token(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
-    use TokenKind::*;
+    use TokenKind::{
+        AMP, AMP_AMP, AMP_EQ, ARROW, AT, BANG, BANG_EQ, BLOCK_COMMENT, CARET, CARET_EQ, COLON,
+        COLON_COLON, COMMA, DOT, ELLIPSIS, EQ, EQ_EQ, FLOAT_LITERAL, GT, IDENT, LBRACE, LBRACK,
+        LINE_COMMENT, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, MINUS, MINUS_EQ, MINUS_MINUS, NEWLINE,
+        PERCENT, PERCENT_EQ, PIPE, PIPE_EQ, PIPE_PIPE, PLUS, PLUS_EQ, PLUS_PLUS, QUESTION, RBRACE,
+        RBRACK, RPAREN, SEMICOLON, SLASH, SLASH_EQ, STAR, STAR_EQ, TILDE, UNDERSCORE, WHITESPACE,
+    };
 
     let mut cursor = Cursor { src, pos: start };
     let Some(c) = cursor.bump() else {
@@ -319,11 +329,10 @@ fn scan_string_or_text_block(src: &str, start: usize) -> (Result<TokenKind, ()>,
             Some('"') => return (Ok(TokenKind::STRING_LITERAL), cursor.pos),
             Some('\\') => match cursor.first() {
                 // An escape covers any char except `\n` (which stays its own token).
-                Some('\n') => return (Err(()), cursor.pos),
+                Some('\n') | None => return (Err(()), cursor.pos),
                 Some(_) => {
                     cursor.bump();
                 }
-                None => return (Err(()), cursor.pos),
             },
             // A bare line break never belongs to a string literal (1 byte; not consumed).
             Some('\r' | '\n') => return (Err(()), cursor.pos - 1),
@@ -462,6 +471,7 @@ fn scan_decimal_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
     // Float candidates all build on the full decimal digit run (so `089.5` lexes as one
     // float even though `089` alone falls back to `0` + `89`).
     let digits = digit_run(bytes, start, |b| b.is_ascii_digit());
+    #[allow(clippy::useless_let_if_seq)]
     let mut float_end = None;
     // `digits . [digits] [exponent] [suffix]`
     if bytes.get(digits) == Some(&b'.') {
@@ -606,10 +616,11 @@ fn float_suffix(bytes: &[u8], end: usize) -> usize {
 
 /// Whether `c` can start an identifier.
 fn is_ident_start(c: char) -> bool {
+    use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
+
     if c.is_ascii() {
         return c.is_ascii_alphabetic() || c == '_' || c == '$';
     }
-    use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
     matches!(
         c.general_category(),
         GC::UppercaseLetter
@@ -625,10 +636,11 @@ fn is_ident_start(c: char) -> bool {
 
 /// Whether `c` can continue an identifier.
 fn is_ident_continue(c: char) -> bool {
+    use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
+
     if c.is_ascii() {
         return c.is_ascii_alphanumeric() || c == '_' || c == '$';
     }
-    use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
     is_ident_start(c)
         || matches!(
             c.general_category(),

@@ -11,7 +11,7 @@ use text_size::TextRange;
 use crate::lexer::{LexedToken, tokenize};
 use crate::syntax_kind::SyntaxKind;
 
-pub(crate) struct Input<'a> {
+pub struct Input<'a> {
     /// 全トークン(トリビア含む)。lossless 復元に使う。
     all: Vec<LexedToken<'a>>,
     /// significant トークンの種別。

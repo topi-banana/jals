@@ -33,7 +33,7 @@ use token_set::TokenSet;
 const PARSER_FUEL: u32 = 256;
 
 /// The parser core. Scans the sequence of significant tokens at position `pos` and assembles a stream of events.
-pub(crate) struct Parser<'a> {
+pub struct Parser<'a> {
     input: &'a Input<'a>,
     pos: usize,
     pub(crate) events: Vec<Event>,
@@ -41,7 +41,7 @@ pub(crate) struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a Input<'a>) -> Self {
+    const fn new(input: &'a Input<'a>) -> Self {
         Parser {
             input,
             pos: 0,
@@ -63,7 +63,7 @@ impl<'a> Parser<'a> {
 
     /// Current significant token position. Used for the loop's progress guarantee (if the value
     /// does not change, the token was not consumed).
-    pub(crate) fn pos(&self) -> usize {
+    pub(crate) const fn pos(&self) -> usize {
         self.pos
     }
 
@@ -231,7 +231,7 @@ impl Parse {
     }
 
     /// A reference to the green tree.
-    pub fn green(&self) -> &GreenNode {
+    pub const fn green(&self) -> &GreenNode {
         &self.green
     }
 }

@@ -27,7 +27,7 @@ impl SyntaxError {
     }
 
     /// ソース内の範囲(バイト)。
-    pub fn range(&self) -> TextRange {
+    pub const fn range(&self) -> TextRange {
         self.range
     }
 }

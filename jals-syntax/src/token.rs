@@ -160,7 +160,15 @@ pub enum TokenKind {
 /// keywords) to their token kinds. Contextual keywords (`var`, `record`, `sealed`, ...)
 /// are not included: they lex as [`IDENT`](TokenKind::IDENT) and the parser promotes them.
 pub(crate) fn keyword_kind(text: &str) -> Option<TokenKind> {
-    use TokenKind::*;
+    use TokenKind::{
+        ABSTRACT_KW, ASSERT_KW, BOOLEAN_KW, BREAK_KW, BYTE_KW, CASE_KW, CATCH_KW, CHAR_KW,
+        CLASS_KW, CONST_KW, CONTINUE_KW, DEFAULT_KW, DO_KW, DOUBLE_KW, ELSE_KW, ENUM_KW,
+        EXTENDS_KW, FALSE_KW, FINAL_KW, FINALLY_KW, FLOAT_KW, FOR_KW, GOTO_KW, IF_KW,
+        IMPLEMENTS_KW, IMPORT_KW, INSTANCEOF_KW, INT_KW, INTERFACE_KW, LONG_KW, NATIVE_KW, NEW_KW,
+        NULL_KW, PACKAGE_KW, PRIVATE_KW, PROTECTED_KW, PUBLIC_KW, RETURN_KW, SHORT_KW, STATIC_KW,
+        STRICTFP_KW, SUPER_KW, SWITCH_KW, SYNCHRONIZED_KW, THIS_KW, THROW_KW, THROWS_KW,
+        TRANSIENT_KW, TRUE_KW, TRY_KW, VOID_KW, VOLATILE_KW, WHILE_KW,
+    };
     let kind = match text {
         "abstract" => ABSTRACT_KW,
         "assert" => ASSERT_KW,
