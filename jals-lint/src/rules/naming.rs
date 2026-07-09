@@ -11,13 +11,16 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use jals_syntax::SyntaxKind::{self, *};
-use jals_syntax::{SyntaxNode, SyntaxToken};
+use jals_syntax::SyntaxKind::{
+    self, ANNOTATION_TYPE_DECL, CLASS_DECL, ENUM_DECL, FIELD_DECL, FINAL_KW, IDENT, INTERFACE_DECL,
+    LOCAL_VAR_DECL, METHOD_DECL, MODIFIERS, PARAM, RECORD_DECL, STATIC_KW,
+};
+use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
-pub(crate) const RULE: RuleMeta = RuleMeta {
+pub const RULE: RuleMeta = RuleMeta {
     name: "naming-convention",
     default: Severity::Warn,
     check: Checker::Syntactic(check),
@@ -83,13 +86,13 @@ enum Case {
 impl Case {
     fn accepts(self, name: &str) -> bool {
         match self {
-            Case::Pascal => {
+            Self::Pascal => {
                 name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !name.contains('_')
             }
-            Case::Camel => {
+            Self::Camel => {
                 name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) && !name.contains('_')
             }
-            Case::Screaming => {
+            Self::Screaming => {
                 name.chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
                     && name.chars().any(|c| c.is_ascii_uppercase())
@@ -97,11 +100,11 @@ impl Case {
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
-            Case::Pascal => "UpperCamelCase",
-            Case::Camel => "lowerCamelCase",
-            Case::Screaming => "UPPER_SNAKE_CASE",
+            Self::Pascal => "UpperCamelCase",
+            Self::Camel => "lowerCamelCase",
+            Self::Screaming => "UPPER_SNAKE_CASE",
         }
     }
 }
@@ -124,21 +127,21 @@ fn is_constant_field(field: &SyntaxNode) -> bool {
 
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
     node.children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .any(|t| t.kind() == kind)
 }
 
 /// The first directly-declared name (`IDENT`) of `node`, e.g. a type or method name.
 fn first_name_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .find(|t| t.kind() == IDENT)
 }
 
 /// Every directly-declared name (`IDENT`) of `node`, e.g. each variable of `int a, b;`.
 fn name_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| t.kind() == IDENT)
         .collect()
 }

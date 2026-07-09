@@ -20,7 +20,7 @@ use crate::rules::{Checker, Finding, RuleMeta, gated_source_file};
 /// feature. At or above this version the syntax is allowed.
 const STABLE_VERSION: u32 = 25;
 
-pub(crate) const RULE: RuleMeta = RuleMeta {
+pub const RULE: RuleMeta = RuleMeta {
     name: "module-import",
     default: Severity::Error,
     check: Checker::Versioned(check),
@@ -37,7 +37,7 @@ fn check(root: &SyntaxNode, target_java_version: Option<u32>) -> Vec<Finding> {
     // `is_module()` matches `import module M;` (JEP 511), distinct from an ordinary type import of a
     // package/type named `module` (which keeps `module` as an identifier, so `is_module()` is false).
     file.imports()
-        .filter(|import| import.is_module())
+        .filter(jals_syntax::ast::ImportDecl::is_module)
         .map(|import| {
             Finding::at_node(
                 import.syntax(),

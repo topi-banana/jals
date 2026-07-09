@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use expect_test::{Expect, expect};
 use jals_config::Severity;
 use jals_config::lint::Config;
@@ -8,10 +10,12 @@ use jals_lint::{LintOutput, lint_source};
 fn render(out: &LintOutput) -> String {
     let mut s = String::new();
     for d in out.diagnostics.iter().chain(&out.parse_errors) {
-        s.push_str(&format!(
-            "{}:{}..{}: {}\n",
+        writeln!(
+            s,
+            "{}:{}..{}: {}",
             d.rule, d.range.start, d.range.end, d.message
-        ));
+        )
+        .unwrap();
     }
     s
 }
@@ -20,6 +24,7 @@ fn lint(src: &str) -> String {
     render(&lint_source(src, &Config::default()))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check(src: &str, expected: Expect) {
     expected.assert_eq(&lint(src));
 }
@@ -30,9 +35,9 @@ fn check(src: &str, expected: Expect) {
 fn wildcard_import_flagged() {
     check(
         "import java.util.*;",
-        expect![[r#"
+        expect![[r"
             wildcard-import:0..19: avoid wildcard imports; import the specific types you use
-        "#]],
+        "]],
     );
 }
 
@@ -47,9 +52,9 @@ fn specific_import_ok() {
 fn empty_catch_flagged() {
     check(
         "class Foo { void m() { try { x(); } catch (Exception e) {} } }",
-        expect![[r#"
+        expect![[r"
             empty-catch:35..58: empty catch block swallows the exception; handle it or add a comment explaining why
-        "#]],
+        "]],
     );
 }
 
@@ -75,9 +80,9 @@ fn non_empty_catch_ok() {
 fn missing_braces_if_flagged() {
     check(
         "class Foo { void m() { if (a) b(); } }",
-        expect![[r#"
+        expect![[r"
             missing-braces:29..34: `if` body should be wrapped in braces
-        "#]],
+        "]],
     );
 }
 
@@ -98,10 +103,10 @@ fn else_if_chain_ok() {
 fn missing_braces_loops_flagged() {
     check(
         "class Foo { void m() { while (a) b(); for (int i = 0; a; i++) c(); } }",
-        expect![[r#"
+        expect![[r"
             missing-braces:32..37: `while` body should be wrapped in braces
             missing-braces:61..66: `for` body should be wrapped in braces
-        "#]],
+        "]],
     );
 }
 
@@ -111,15 +116,15 @@ fn missing_braces_loops_flagged() {
 fn constant_condition_flagged() {
     check(
         "class Foo { void m() { if (true) { a(); } else { b(); } } }",
-        expect![[r#"
+        expect![[r"
             constant-condition:27..31: `if` condition is always true
-        "#]],
+        "]],
     );
     check(
         "class Foo { void m() { if (1 > 2) { a(); } } }",
-        expect![[r#"
+        expect![[r"
             constant-condition:27..32: `if` condition is always false
-        "#]],
+        "]],
     );
 }
 
@@ -127,9 +132,9 @@ fn constant_condition_flagged() {
 fn constant_condition_folds_final_locals() {
     check(
         "class Foo { void m() { final boolean debug = false; if (debug) { log(); } } }",
-        expect![[r#"
+        expect![[r"
             constant-condition:56..61: `if` condition is always false
-        "#]],
+        "]],
     );
 }
 
@@ -155,10 +160,10 @@ fn idiomatic_infinite_loops_ok() {
 fn naming_type_and_method_flagged() {
     check(
         "class foo { void Bar() {} }",
-        expect![[r#"
+        expect![[r"
             naming-convention:6..9: type name `foo` should be UpperCamelCase
             naming-convention:17..20: method name `Bar` should be lowerCamelCase
-        "#]],
+        "]],
     );
 }
 
@@ -166,9 +171,9 @@ fn naming_type_and_method_flagged() {
 fn naming_constant_flagged() {
     check(
         "class Foo { static final int maxValue = 1; }",
-        expect![[r#"
+        expect![[r"
             naming-convention:29..37: constant name `maxValue` should be UPPER_SNAKE_CASE
-        "#]],
+        "]],
     );
 }
 
@@ -176,9 +181,9 @@ fn naming_constant_flagged() {
 fn naming_field_flagged() {
     check(
         "class Foo { int my_field; }",
-        expect![[r#"
+        expect![[r"
             naming-convention:16..24: field name `my_field` should be lowerCamelCase
-        "#]],
+        "]],
     );
 }
 
@@ -196,9 +201,9 @@ fn naming_clean_ok() {
 fn unused_local_flagged() {
     check(
         "class Foo { void m() { int x = 1; } }",
-        expect![[r#"
+        expect![[r"
         unused-local:27..28: unused local variable `x`
-    "#]],
+    "]],
     );
 }
 
@@ -220,9 +225,9 @@ fn unnamed_local_ok() {
 fn multi_declarator_only_unused_flagged() {
     check(
         "class Foo { int m() { int a = 1, b = 2; return a; } }",
-        expect![[r#"
+        expect![[r"
             unused-local:33..34: unused local variable `b`
-        "#]],
+        "]],
     );
 }
 
@@ -230,9 +235,9 @@ fn multi_declarator_only_unused_flagged() {
 fn unused_parameter_of_bodied_method_flagged() {
     check(
         "class Foo { void m(int p) {} }",
-        expect![[r#"
+        expect![[r"
         unused-local:23..24: unused parameter `p`
-    "#]],
+    "]],
     );
 }
 
@@ -281,9 +286,9 @@ fn type_mismatch_narrowing_flagged() {
     // A field initializer (fields are not subject to `unused-local`, isolating this rule).
     check(
         "class C { int x = 1.0; }",
-        expect![[r#"
+        expect![[r"
             type-mismatch:17..21: incompatible types: `double` cannot be assigned to `int`
-        "#]],
+        "]],
     );
 }
 
@@ -298,9 +303,9 @@ fn type_mismatch_return_flagged() {
     // The method has no locals, so only `type-mismatch` fires.
     check(
         "class C { int m() { return 1.0; } }",
-        expect![[r#"
+        expect![[r"
             type-mismatch:26..30: incompatible types: `double` cannot be assigned to `int`
-        "#]],
+        "]],
     );
 }
 

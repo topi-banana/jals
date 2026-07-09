@@ -7,13 +7,17 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use jals_syntax::SyntaxKind::{self, *};
+use jals_syntax::SyntaxKind::{
+    self, ASSERT_STMT, BLOCK, BREAK_STMT, CONTINUE_STMT, DO_WHILE_STMT, EMPTY_STMT, EXPR_STMT,
+    FOR_EACH_STMT, FOR_STMT, IF_STMT, LABELED_STMT, LOCAL_VAR_DECL, RETURN_STMT, SWITCH_STMT,
+    SYNCHRONIZED_STMT, THROW_STMT, TRY_STMT, WHILE_STMT, YIELD_STMT,
+};
 use jals_syntax::SyntaxNode;
 
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
-pub(crate) const RULE: RuleMeta = RuleMeta {
+pub const RULE: RuleMeta = RuleMeta {
     name: "missing-braces",
     default: Severity::Warn,
     check: Checker::Syntactic(check),
@@ -66,7 +70,7 @@ fn check_if(node: &SyntaxNode, out: &mut Vec<Finding>) {
 }
 
 /// The keyword to name in the message for a loop statement.
-fn keyword(kind: SyntaxKind) -> &'static str {
+const fn keyword(kind: SyntaxKind) -> &'static str {
     match kind {
         WHILE_STMT => "while",
         FOR_STMT | FOR_EACH_STMT => "for",
@@ -76,7 +80,7 @@ fn keyword(kind: SyntaxKind) -> &'static str {
 }
 
 /// Whether `kind` is a statement node kind (the shapes that can appear as a control-flow body).
-fn is_stmt(kind: SyntaxKind) -> bool {
+const fn is_stmt(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         LOCAL_VAR_DECL

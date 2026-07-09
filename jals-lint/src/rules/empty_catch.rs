@@ -6,12 +6,12 @@
 use alloc::vec::Vec;
 
 use jals_syntax::ast::{AstNode, CatchClause};
-use jals_syntax::{SyntaxKind, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
-pub(crate) const RULE: RuleMeta = RuleMeta {
+pub const RULE: RuleMeta = RuleMeta {
     name: "empty-catch",
     default: Severity::Warn,
     check: Checker::Syntactic(check),
@@ -33,7 +33,7 @@ fn check(root: &SyntaxNode) -> Vec<Finding> {
         let has_stmt = block.children().next().is_some();
         let has_comment = block
             .children_with_tokens()
-            .filter_map(|el| el.into_token())
+            .filter_map(SyntaxElement::into_token)
             .any(|t| {
                 matches!(
                     t.kind(),

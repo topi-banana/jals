@@ -27,14 +27,16 @@ use rules::Checker;
 
 pub use diagnostic::{Diagnostic, LintOutput};
 
-/// The project context the index-aware rules resolve reference types against: a project-wide symbol
-/// index plus the id of the file being linted within it. `None` selects the file-local behavior.
-/// See [`lint_parse_with_index`].
+/// The project context the index-aware rules resolve reference types against.
+///
+/// A project-wide symbol index plus the id of the file being linted within it. `None` selects the
+/// file-local behavior. See [`lint_parse_with_index`].
 pub type IndexCtx<'a> = (&'a ProjectIndex, FileId);
 
-/// The kebab-case name of the `type-mismatch` rule, exposed so a consumer holding a project index
-/// (the language server) can suppress this file-local rule and run its index-aware variant under
-/// the same config key instead of double-reporting.
+/// The kebab-case name of the `type-mismatch` rule.
+///
+/// Exposed so a consumer holding a project index (the language server) can suppress this file-local
+/// rule and run its index-aware variant under the same config key instead of double-reporting.
 pub const TYPE_MISMATCH_RULE: &str = "type-mismatch";
 
 /// Lint `src` according to `config`.
