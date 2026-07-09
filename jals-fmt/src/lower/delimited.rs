@@ -88,7 +88,7 @@ fn overflows_last_item(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
 fn starts_new_row(node: &SyntaxNode) -> bool {
     for t in node
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(SyntaxElement::into_token)
     {
         if !t.kind().is_trivia() {
             return false;
@@ -105,7 +105,7 @@ fn starts_new_row(node: &SyntaxNode) -> bool {
 /// commented initializer is never treated as tabular and falls back to width-based wrapping.
 fn has_interior_comment(node: &SyntaxNode) -> bool {
     node.descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(SyntaxElement::into_token)
         .any(|t| crate::comments::is_comment(t.kind()))
 }
 
@@ -157,11 +157,11 @@ fn tabular_doc(open: Doc, close: Doc, items: Vec<Doc>, row_sizes: &[usize]) -> D
     let mut it = items.into_iter();
     let row_docs: Vec<Doc> = row_sizes
         .iter()
-        .map(|&n| join(text(" "), it.by_ref().take(n).collect()))
+        .map(|&n| join(&text(" "), it.by_ref().take(n).collect()))
         .collect();
     concat(vec![
         open,
-        indent(concat(vec![hardline(), join(hardline(), row_docs)])),
+        indent(concat(vec![hardline(), join(&hardline(), row_docs)])),
         hardline(),
         close,
     ])
@@ -170,7 +170,7 @@ fn tabular_doc(open: Doc, close: Doc, items: Vec<Doc>, row_sizes: &[usize]) -> D
 /// Whether `kind` is a *paren-delimited* list whose closing `)` is governed by `closing-paren`:
 /// a call / annotation argument list, a parameter list, or a record header. The brace-delimited
 /// array initializer (`ARRAY_INIT`) is excluded — its `}` always stays on its own line.
-fn is_paren_delimited(kind: S) -> bool {
+const fn is_paren_delimited(kind: S) -> bool {
     matches!(
         kind,
         S::ARG_LIST | S::PARAM_LIST | S::ANNOTATION_ARG_LIST | S::RECORD_HEADER
@@ -198,7 +198,7 @@ fn close_sep(hug: bool) -> Doc {
 /// Inter-item commas are emitted verbatim. The final item's trailing comma is preserved by
 /// default; for an array initializer it instead follows the `trailing-comma` policy (see
 /// [`crate::rules::trailing_comma::doc`]) — the only Java list where adding or dropping it is legal.
-pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Never synthesize a delimiter that the source lacks (error recovery): start empty
     // and fill from the real tokens so the significant-token sequence is preserved.
     let mut open_doc = nil();
@@ -301,7 +301,7 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     {
         let mut head_inner = vec![softline()];
         if !items.is_empty() {
-            head_inner.push(crate::doc::join(line(), items));
+            head_inner.push(crate::doc::join(&line(), items));
             head_inner.push(line());
         }
         let head = concat(vec![open_doc, continuation_indent(concat(head_inner))]);
@@ -319,7 +319,7 @@ pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let inner = if compressed_params {
         fill(items)
     } else {
-        crate::doc::join(line(), items)
+        crate::doc::join(&line(), items)
     };
     let doc = concat(vec![
         open_doc,

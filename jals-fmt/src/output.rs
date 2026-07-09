@@ -19,9 +19,9 @@ pub struct Warning {
 }
 
 impl Warning {
-    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Warning {
+    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Self {
         let range = err.range();
-        Warning {
+        Self {
             message: err.message().to_string(),
             range: usize::from(range.start())..usize::from(range.end()),
         }
@@ -39,7 +39,7 @@ pub struct FormatOutput {
 
 impl FormatOutput {
     /// Whether any warnings were produced.
-    pub fn has_warnings(&self) -> bool {
+    pub const fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
     }
 }

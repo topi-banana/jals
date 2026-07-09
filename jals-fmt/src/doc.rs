@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 /// The flavour of a comment, controlling how it reflows under `wrap-comments`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommentKind {
+pub enum CommentKind {
     /// `// ...` line comment.
     Line,
     /// `/* ... */` block comment.
@@ -23,7 +23,7 @@ pub(crate) enum CommentKind {
 
 /// A formatting document.
 #[derive(Debug)]
-pub(crate) enum Doc {
+pub enum Doc {
     /// Verbatim text with no interior newline. Width is its unicode display width.
     Text(Box<str>),
     /// Verbatim text that may contain newlines (string literals, text blocks,
@@ -38,7 +38,7 @@ pub(crate) enum Doc {
         text: Box<str>,
     },
     /// A sequence of documents.
-    Concat(Vec<Doc>),
+    Concat(Vec<Self>),
     /// A space when flat; a newline + indent when broken.
     Line,
     /// Nothing when flat; a newline + indent when broken.
@@ -50,61 +50,61 @@ pub(crate) enum Doc {
     BlankLine(usize),
     /// Increase the indentation of the child by one block level (`indent-width`). Used for block
     /// bodies (`{ … }`).
-    Indent(Box<Doc>),
+    Indent(Box<Self>),
     /// Increase the indentation of the child by one *continuation* width (`continuation-indent`,
     /// falling back to `indent-width`). Used where an expression or statement wraps — method
     /// chains, wrapped binary / ternary operators, and delimited lists — as opposed to a block
     /// body.
-    ContinuationIndent(Box<Doc>),
+    ContinuationIndent(Box<Self>),
     /// Increase the indentation of the child by one *continuation* width only when the governing
     /// group renders broken; leave it at the current level when flat. Lets
     /// `overflow-delimited-expr` place the hanging last argument inside the list (continuation)
     /// indent in the vertical layout but at the call's own level in the overflow layout
     /// (prettier's `indentIfBreak`).
-    IndentIfBreak(Box<Doc>),
+    IndentIfBreak(Box<Self>),
     /// A break point: render flat if it fits, otherwise broken.
     Group {
         /// The grouped content.
-        doc: Box<Doc>,
+        doc: Box<Self>,
         /// Precomputed: the content contains a forced break, so it must render broken.
         should_break: bool,
     },
     /// Content appended at the end of the current line, after any following break.
     /// Used for trailing comments so they stay on their line even when a group breaks.
-    LineSuffix(Box<Doc>),
+    LineSuffix(Box<Self>),
     /// Render `broken` when the enclosing group breaks, `flat` when it is laid out flat. Lets a
     /// trailing comma appear only in the vertical (broken) layout (`trailing-comma = vertical`).
     IfBreak {
         /// Emitted when the enclosing group renders broken.
-        broken: Box<Doc>,
+        broken: Box<Self>,
         /// Emitted when the enclosing group renders flat.
-        flat: Box<Doc>,
+        flat: Box<Self>,
     },
     /// A fill: an alternating, odd-length sequence `[content, sep, content, sep, …, content]`.
     /// The renderer greedily keeps each item on the current line, breaking the *preceding*
     /// separator (a [`Line`](Doc::Line)) only when the next item would overflow `max-width`.
     /// Unlike a [`Group`](Doc::Group) — which is all-or-nothing — a fill packs as many items
     /// per line as fit. Used for the `Compressed` parameter layout (`fn-params-layout`).
-    Fill(Vec<Doc>),
+    Fill(Vec<Self>),
 }
 
 /// Empty document.
-pub(crate) fn nil() -> Doc {
+pub fn nil() -> Doc {
     Doc::Text("".into())
 }
 
 /// Verbatim text (must not contain a newline).
-pub(crate) fn text<S: Into<Box<str>>>(s: S) -> Doc {
+pub fn text<S: Into<Box<str>>>(s: S) -> Doc {
     Doc::Text(s.into())
 }
 
 /// Verbatim text that may contain newlines, never reflowed or reindented.
-pub(crate) fn raw<S: Into<Box<str>>>(s: S) -> Doc {
+pub fn raw<S: Into<Box<str>>>(s: S) -> Doc {
     Doc::RawText(s.into())
 }
 
 /// A comment that the renderer reflows to `comment-width` when `wrap-comments` is on.
-pub(crate) fn comment<S: Into<Box<str>>>(kind: CommentKind, s: S) -> Doc {
+pub fn comment<S: Into<Box<str>>>(kind: CommentKind, s: S) -> Doc {
     Doc::Comment {
         kind,
         text: s.into(),
@@ -112,38 +112,38 @@ pub(crate) fn comment<S: Into<Box<str>>>(kind: CommentKind, s: S) -> Doc {
 }
 
 /// Concatenate documents.
-pub(crate) fn concat(docs: Vec<Doc>) -> Doc {
+pub const fn concat(docs: Vec<Doc>) -> Doc {
     Doc::Concat(docs)
 }
 
 /// A space-or-break.
-pub(crate) fn line() -> Doc {
+pub const fn line() -> Doc {
     Doc::Line
 }
 
 /// A nothing-or-break.
-pub(crate) fn softline() -> Doc {
+pub const fn softline() -> Doc {
     Doc::SoftLine
 }
 
 /// A forced line break.
-pub(crate) fn hardline() -> Doc {
+pub const fn hardline() -> Doc {
     Doc::HardLine
 }
 
 /// A forced run of `count` blank lines (clamped to `max_blank_lines` when rendered).
-pub(crate) fn blank_line(count: usize) -> Doc {
+pub const fn blank_line(count: usize) -> Doc {
     Doc::BlankLine(count)
 }
 
 /// Indent a document by one block level.
-pub(crate) fn indent(doc: Doc) -> Doc {
+pub fn indent(doc: Doc) -> Doc {
     Doc::Indent(Box::new(doc))
 }
 
 /// Indent a document by one continuation width — used for the wrapped lines of an expression or
 /// statement (method chains, wrapped binary / ternary operators, delimited lists).
-pub(crate) fn continuation_indent(doc: Doc) -> Doc {
+pub fn continuation_indent(doc: Doc) -> Doc {
     Doc::ContinuationIndent(Box::new(doc))
 }
 
@@ -153,7 +153,7 @@ fn indent_if_break(doc: Doc) -> Doc {
 }
 
 /// Group a document so it renders flat when it fits, otherwise broken.
-pub(crate) fn group(doc: Doc) -> Doc {
+pub fn group(doc: Doc) -> Doc {
     let should_break = contains_forced_break(&doc);
     Doc::Group {
         doc: Box::new(doc),
@@ -164,7 +164,7 @@ pub(crate) fn group(doc: Doc) -> Doc {
 /// Group a document forced to render broken regardless of width — every [`Line`](Doc::Line) /
 /// [`SoftLine`](Doc::SoftLine) inside breaks. Used for the `Vertical` parameter layout, which
 /// lays out one parameter per line even when the list would fit on one line.
-pub(crate) fn group_always_break(doc: Doc) -> Doc {
+pub fn group_always_break(doc: Doc) -> Doc {
     Doc::Group {
         doc: Box::new(doc),
         should_break: true,
@@ -174,7 +174,7 @@ pub(crate) fn group_always_break(doc: Doc) -> Doc {
 /// Build a [`Doc::Fill`] from already-rendered items, interleaving a [`line()`] separator
 /// between consecutive items. The renderer packs as many items per line as fit `max-width`.
 /// An empty or single-item list needs no separators and is returned as-is inside the fill.
-pub(crate) fn fill(items: Vec<Doc>) -> Doc {
+pub fn fill(items: Vec<Doc>) -> Doc {
     let mut parts = Vec::with_capacity(items.len().saturating_mul(2).saturating_sub(1));
     let mut first = true;
     for item in items {
@@ -191,11 +191,8 @@ pub(crate) fn fill(items: Vec<Doc>) -> Doc {
 /// when its flat width would exceed `max_flat` (or it cannot be laid out flat at all). Within
 /// the budget it still renders flat only if it also fits `max-width` at its position, exactly
 /// like [`group`]. Used for `chain-width`.
-pub(crate) fn group_within(doc: Doc, max_flat: usize) -> Doc {
-    let should_break = match flat_width(&doc) {
-        Some(w) => w > max_flat,
-        None => true,
-    };
+pub fn group_within(doc: Doc, max_flat: usize) -> Doc {
+    let should_break = flat_width(&doc).is_none_or(|w| w > max_flat);
     Doc::Group {
         doc: Box::new(doc),
         should_break,
@@ -210,7 +207,7 @@ pub(crate) fn group_within(doc: Doc, max_flat: usize) -> Doc {
 /// `max_flat` (`fn-call-width` for a call; `None` for an annotation list, which breaks
 /// against `max-width` alone like a plain [`group`]). Within budget it still renders flat
 /// only if its first line also fits `max-width` at its position, exactly like [`group`].
-pub(crate) fn group_overflow(head: Doc, last: Doc, tail: Doc, max_flat: Option<usize>) -> Doc {
+pub fn group_overflow(head: Doc, last: Doc, tail: Doc, max_flat: Option<usize>) -> Doc {
     let should_break = match flat_width(&head) {
         None => true,
         Some(_) => max_flat.is_some_and(|b| first_line_width(&[&head, &last, &tail]) > b),
@@ -240,16 +237,14 @@ fn first_line_width(docs: &[&Doc]) -> usize {
             },
             Doc::Concat(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
             Doc::Indent(d) | Doc::ContinuationIndent(d) | Doc::IndentIfBreak(d) => {
-                work.push((broken, d))
+                work.push((broken, d));
             }
             Doc::Group { doc, should_break } => work.push((*should_break, doc)),
             Doc::Fill(v) => work.extend(v.iter().rev().map(|d| (broken, d))),
-            Doc::Line if broken => return width,
+            Doc::Line | Doc::SoftLine if broken => return width,
             Doc::Line => width += 1,
-            Doc::SoftLine if broken => return width,
-            Doc::SoftLine => {}
+            Doc::SoftLine | Doc::LineSuffix(_) => {}
             Doc::HardLine | Doc::BlankLine(_) => return width,
-            Doc::LineSuffix(_) => {}
             Doc::IfBreak { broken: b, flat } => work.push((broken, if broken { b } else { flat })),
         }
     }
@@ -260,7 +255,7 @@ fn first_line_width(docs: &[&Doc]) -> usize {
 /// contains a forced break (hard/blank line or an already-breaking group) or a multi-line
 /// raw token. `Line` counts as one space, `SoftLine` as nothing, mirroring the renderer's
 /// flat mode.
-pub(crate) fn flat_width(doc: &Doc) -> Option<usize> {
+pub fn flat_width(doc: &Doc) -> Option<usize> {
     let w = match doc {
         Doc::Text(s) => UnicodeWidthStr::width(&**s),
         Doc::RawText(s) => {
@@ -283,7 +278,9 @@ pub(crate) fn flat_width(doc: &Doc) -> Option<usize> {
             total
         }
         Doc::Line => 1,
-        Doc::SoftLine => 0,
+        // Line suffixes (trailing comments) are deferred past the next break; they never
+        // contribute to the flat width of the line they ride on.
+        Doc::SoftLine | Doc::LineSuffix(_) => 0,
         Doc::HardLine | Doc::BlankLine(_) => return None,
         Doc::Indent(d) | Doc::ContinuationIndent(d) | Doc::IndentIfBreak(d) => flat_width(d)?,
         Doc::Group { doc, should_break } => {
@@ -292,9 +289,6 @@ pub(crate) fn flat_width(doc: &Doc) -> Option<usize> {
             }
             flat_width(doc)?
         }
-        // Line suffixes (trailing comments) are deferred past the next break; they never
-        // contribute to the flat width of the line they ride on.
-        Doc::LineSuffix(_) => 0,
         // Laid out flat, an `IfBreak` renders its flat branch.
         Doc::IfBreak { flat, .. } => flat_width(flat)?,
     };
@@ -302,13 +296,13 @@ pub(crate) fn flat_width(doc: &Doc) -> Option<usize> {
 }
 
 /// Defer content to the end of the current line.
-pub(crate) fn line_suffix(doc: Doc) -> Doc {
+pub fn line_suffix(doc: Doc) -> Doc {
     Doc::LineSuffix(Box::new(doc))
 }
 
 /// Content that renders as `broken` when its enclosing group breaks and as `flat` when the
 /// group is laid out flat.
-pub(crate) fn if_break(broken: Doc, flat: Doc) -> Doc {
+pub fn if_break(broken: Doc, flat: Doc) -> Doc {
     Doc::IfBreak {
         broken: Box::new(broken),
         flat: Box::new(flat),
@@ -316,12 +310,12 @@ pub(crate) fn if_break(broken: Doc, flat: Doc) -> Doc {
 }
 
 /// Interleave `sep` between `items`.
-pub(crate) fn join(sep: Doc, items: Vec<Doc>) -> Doc {
+pub fn join(sep: &Doc, items: Vec<Doc>) -> Doc {
     let mut out = Vec::with_capacity(items.len().saturating_mul(2));
     let mut first = true;
     for item in items {
         if !first {
-            out.push(clone_doc(&sep));
+            out.push(clone_doc(sep));
         }
         out.push(item);
         first = false;

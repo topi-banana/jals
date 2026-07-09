@@ -27,7 +27,7 @@ use unicode_width::UnicodeWidthStr;
 /// `indent_str` is emitted before each continuation line and `indent_cols` is its display
 /// width (a tab counts as one indentation level wide). A comment that already fits is
 /// returned verbatim, so well-formed comments are never re-spaced.
-pub(crate) fn reflow_line(
+pub fn reflow_line(
     text: &str,
     indent_str: &str,
     indent_cols: usize,
@@ -69,7 +69,7 @@ pub(crate) fn reflow_line(
 /// which case it expands to the same canonical multi-line form. Anything that is not a
 /// cleanly delimited `/* ... */` (e.g. an unterminated comment from error recovery) is
 /// returned verbatim.
-pub(crate) fn reflow_block(
+pub fn reflow_block(
     text: &str,
     is_doc: bool,
     indent_str: &str,
@@ -168,10 +168,9 @@ fn emit_block(opener: &str, content: &[String], indent_str: &str, newline: &str)
 /// [`emit_block`] adds is the identity, which is what makes reflow idempotent.
 fn strip_star_margin(line: &str) -> &str {
     let trimmed = line.trim_start();
-    match trimmed.strip_prefix('*') {
-        Some(rest) => rest.strip_prefix(' ').unwrap_or(rest),
-        None => trimmed,
-    }
+    trimmed
+        .strip_prefix('*')
+        .map_or(trimmed, |rest| rest.strip_prefix(' ').unwrap_or(rest))
 }
 
 /// Greedily pack words into lines no wider than `avail`. A word longer than `avail` lands

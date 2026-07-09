@@ -23,30 +23,30 @@ use crate::config::Config;
 use crate::doc::Doc;
 use crate::lower::Ctx;
 
-pub(crate) mod imports;
-pub(crate) mod literals;
-pub(crate) mod modifiers;
-pub(crate) mod parameter_comment;
-pub(crate) mod trailing_comma;
+pub mod imports;
+pub mod literals;
+pub mod modifiers;
+pub mod parameter_comment;
+pub mod trailing_comma;
 
-pub(crate) use literals::LiteralRegistry;
+pub use literals::LiteralRegistry;
 
 /// A pure rewrite of a numeric-literal token's text. An implementor is built from `&Config`
 /// (reading its own option) and carries the resolved, non-`Preserve` policy, so `rewrite` needs no
 /// `Config`. Returns the rewritten text, or `None` to leave the token unchanged.
-pub(crate) trait LiteralRule {
+pub trait LiteralRule {
     fn rewrite(&self, text: &str, kind: S) -> Option<String>;
 }
 
 /// A node-level lowering a rule owns wholesale. Implementors are zero-sized handles held by the
 /// [`Registry`]; their `lower` reads `ctx.cfg` for the gating options exactly as the prior free
 /// functions did.
-pub(crate) trait StructuralRule {
+pub trait StructuralRule {
     fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc;
 }
 
 /// The per-format rule set, built once from `&Config` and carried on [`Ctx`].
-pub(crate) struct Registry {
+pub struct Registry {
     literals: LiteralRegistry,
     imports: imports::ImportRule,
     modifiers: modifiers::ModifierRule,
@@ -64,7 +64,7 @@ impl Registry {
     }
 
     /// The literal-rewrite chain applied in [`crate::lower`]'s token emission.
-    pub(crate) fn literals(&self) -> &LiteralRegistry {
+    pub(crate) const fn literals(&self) -> &LiteralRegistry {
         &self.literals
     }
 

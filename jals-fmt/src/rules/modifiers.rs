@@ -32,7 +32,7 @@ use crate::lower::{
 use crate::rules::StructuralRule;
 
 /// The `reorder-modifiers` / `annotation-placement` rule: owns lowering of a `MODIFIERS` node.
-pub(crate) struct ModifierRule;
+pub struct ModifierRule;
 
 impl StructuralRule for ModifierRule {
     fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
@@ -45,7 +45,7 @@ impl StructuralRule for ModifierRule {
 /// modifier order (§8.1.1 / §8.3.1 / §8.4.3) as codified by Checkstyle's `ModifierOrder` and
 /// the Google Java Style Guide. `SEALED_KW` is a token (promoted from `IDENT` only inside the
 /// `modifiers()` rule) and `NON_SEALED_KW` is a node; both rank uniformly via `SyntaxKind`.
-fn rank_of(kind: S) -> Option<usize> {
+const fn rank_of(kind: S) -> Option<usize> {
     Some(match kind {
         S::PUBLIC_KW => 0,
         S::PROTECTED_KW => 1,
@@ -111,7 +111,7 @@ fn trailing_type_use_start(els: &[SyntaxElement], type_follows: bool) -> usize {
 /// **stable**, so equal-rank duplicates keep their order and an already-canonical list is
 /// returned unchanged — which keeps formatting idempotent (the trailing run is at a fixed point
 /// because it sits after every keyword and so is never re-classified as leading).
-pub(crate) fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
+pub fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
     let split = trailing_type_use_start(&els, type_follows);
     let mut head = els;
     let trailing = head.split_off(split);
@@ -127,19 +127,15 @@ pub(crate) fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxEle
 /// The first significant token of an element: the first non-trivia token of a node, or the
 /// token itself.
 fn element_first_token(el: &SyntaxElement) -> Option<SyntaxToken> {
-    match el.as_node() {
-        Some(n) => first_sig_token(n),
-        None => el.as_token().cloned(),
-    }
+    el.as_node()
+        .map_or_else(|| el.as_token().cloned(), first_sig_token)
 }
 
 /// The last significant token of an element: the last non-trivia token of a node, or the token
 /// itself.
 fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
-    match el.as_node() {
-        Some(n) => last_sig_token(n),
-        None => el.as_token().cloned(),
-    }
+    el.as_node()
+        .map_or_else(|| el.as_token().cloned(), last_sig_token)
 }
 
 /// Whether reordering this `MODIFIERS` node is safe — i.e. it sits in a genuine declaration
@@ -219,7 +215,7 @@ fn preceded_by_dangling_lt(node: &SyntaxNode) -> bool {
 /// keyword (not the structural-last `@`) so the spacing is the same on every pass. Reordering is
 /// confined to genuine declaration contexts ([`is_reorderable_context`]), so this only ever runs
 /// where the boundary token is followed by ordinary, space-separated declaration syntax.
-pub(crate) fn emitted_boundary_tokens(
+pub fn emitted_boundary_tokens(
     node: &SyntaxNode,
     cfg: &Config,
 ) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
@@ -275,7 +271,7 @@ fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
 /// [`emitted_boundary_tokens`] (the emitted-order first / last token), not the structural ones,
 /// which keeps idempotency. When the last emitted part is a forced break, that trailing parent
 /// space is trimmed by the renderer.
-pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
     // The hot path: nothing to reorder and no annotation to break out.
     if !ctx.cfg.reorder_modifiers && !expanded {
@@ -334,10 +330,10 @@ fn lower_modifiers_with_breaks(els: &[SyntaxElement], ctx: &Ctx<'_>, type_follow
         let is_leading_annotation = is_annotation && still_leading && !in_trailing_run;
 
         let first = element_first_token(el);
-        let el_doc = match el.as_node() {
-            Some(n) => lower(n, ctx),
-            None => tok(el.as_token().expect("element is a node or a token"), ctx),
-        };
+        let el_doc = el.as_node().map_or_else(
+            || tok(el.as_token().expect("element is a node or a token"), ctx),
+            |n| lower(n, ctx),
+        );
         let last = element_last_token(el);
 
         if let Some(first) = first.as_ref() {
@@ -395,13 +391,13 @@ mod tests {
         if e.kind() == S::ANNOTATION {
             "@".to_string()
         } else {
-            e.as_token()
-                .map(|t| t.text().to_string())
-                .unwrap_or_else(|| {
+            e.as_token().map_or_else(
+                || {
                     e.as_node()
-                        .map(|n| n.text().to_string().trim().to_string())
-                        .unwrap_or_default()
-                })
+                        .map_or_else(String::new, |n| n.text().to_string().trim().to_string())
+                },
+                |t| t.text().to_string(),
+            )
         }
     }
 

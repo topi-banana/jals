@@ -70,7 +70,7 @@ impl Out<'_> {
         // them; when we are already at line start one '\n' is implicitly present. At the
         // very start of the output there is no preceding line at all, so leading blank
         // lines (e.g. from a blank-before comment on the first item) are suppressed.
-        let already = if self.line_has_content { 0 } else { 1 };
+        let already = usize::from(!self.line_has_content);
         let newlines = if self.buf.is_empty() {
             0
         } else {
@@ -87,7 +87,7 @@ impl Out<'_> {
 
     /// Whether the next content would land at the start of a line (a pending break, or a
     /// line that has only indentation so far). A separator space there is meaningless.
-    fn at_line_start(&self) -> bool {
+    const fn at_line_start(&self) -> bool {
         self.pending_newlines > 0 || !self.line_has_content
     }
 
@@ -130,7 +130,7 @@ impl Out<'_> {
 
 /// Render `root` into a formatted string. `src` is the original input, consulted once to
 /// resolve an `Auto`/`Native` line ending.
-pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
+pub fn print(root: &Doc, cfg: &Config, src: &str) -> String {
     let newline = cfg.newline(src);
     let mut out = Out {
         cfg,
@@ -231,7 +231,7 @@ pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
     }
 
     // Render any line suffixes left at the very end.
-    for s in suffixes.drain(..).rev() {
+    for s in suffixes.into_iter().rev() {
         stack.push(s);
     }
     while let Some(cmd) = stack.pop() {
@@ -372,10 +372,7 @@ fn render_fill<'a>(out: &Out<'_>, indent: usize, parts: &'a [Doc], stack: &mut V
             Mode::Break
         };
         seq.push((content_mode, content));
-        col = match content_w {
-            Some(w) => col + w,
-            None => base_col,
-        };
+        col = content_w.map_or(base_col, |w| col + w);
         if let Some(sep) = parts.get(i + 1) {
             let next_w = parts.get(i + 2).and_then(flat_width);
             // Keep the next item on this line only when this item is flat and the next one
@@ -409,7 +406,7 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
     } else {
         out.col
     };
-    let mut remaining = out.cfg.max_width as isize - start_col as isize;
+    let mut remaining = out.cfg.max_width.cast_signed() - start_col.cast_signed();
     if remaining < 0 {
         return false;
     }
@@ -422,17 +419,17 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
     while let Some((ind, mode, doc)) = work.pop() {
         match doc {
             Doc::Text(s) => {
-                remaining -= UnicodeWidthStr::width(&**s) as isize;
+                remaining -= UnicodeWidthStr::width(&**s).cast_signed();
                 if remaining < 0 {
                     return false;
                 }
             }
             Doc::RawText(s) => {
                 if let Some(pos) = s.find('\n') {
-                    remaining -= UnicodeWidthStr::width(&s[..pos]) as isize;
+                    remaining -= UnicodeWidthStr::width(&s[..pos]).cast_signed();
                     return remaining >= 0;
                 }
-                remaining -= UnicodeWidthStr::width(&**s) as isize;
+                remaining -= UnicodeWidthStr::width(&**s).cast_signed();
                 if remaining < 0 {
                     return false;
                 }
@@ -441,15 +438,18 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
             // when on, comments are surrounded by forced breaks so this never drives layout.
             Doc::Comment { text, .. } => {
                 if let Some(pos) = text.find('\n') {
-                    remaining -= UnicodeWidthStr::width(&text[..pos]) as isize;
+                    remaining -= UnicodeWidthStr::width(&text[..pos]).cast_signed();
                     return remaining >= 0;
                 }
-                remaining -= UnicodeWidthStr::width(&**text) as isize;
+                remaining -= UnicodeWidthStr::width(&**text).cast_signed();
                 if remaining < 0 {
                     return false;
                 }
             }
-            Doc::Concat(v) => {
+            // A fill is measured one-line, exactly like a `Concat`: every separator counts as a
+            // flat space and the items count flat. (`fits` only ever asks whether the enclosing
+            // group's flat layout stays within `max-width`.)
+            Doc::Concat(v) | Doc::Fill(v) => {
                 for d in v.iter().rev() {
                     work.push((ind, mode, d));
                 }
@@ -471,14 +471,6 @@ fn fits(out: &Out<'_>, indent: usize, group_doc: &Doc, rest: &[Cmd<'_>]) -> bool
                     Mode::Flat
                 };
                 work.push((ind, m, doc));
-            }
-            // A fill is measured one-line, exactly like a `Concat`: every separator counts as a
-            // flat space and the items count flat. (`fits` only ever asks whether the enclosing
-            // group's flat layout stays within `max-width`.)
-            Doc::Fill(v) => {
-                for d in v.iter().rev() {
-                    work.push((ind, mode, d));
-                }
             }
             Doc::Line => match mode {
                 Mode::Flat => {

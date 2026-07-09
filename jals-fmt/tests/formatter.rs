@@ -16,6 +16,7 @@ fn fmt_with(src: &str, config: &Config) -> String {
     format_source(src, config).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check(src: &str, expected: Expect) {
     expected.assert_eq(&fmt(src));
 }
@@ -30,6 +31,7 @@ fn fmt_wrapped(src: &str, comment_width: usize) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_wrapped(src: &str, comment_width: usize, expected: Expect) {
     expected.assert_eq(&fmt_wrapped(src, comment_width));
 }
@@ -43,6 +45,7 @@ fn fmt_param_comments(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_param_comments(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_param_comments(src));
 }
@@ -56,6 +59,7 @@ fn fmt_reorder(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_reorder(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_reorder(src));
 }
@@ -69,6 +73,7 @@ fn fmt_group(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_group(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_group(src));
 }
@@ -77,7 +82,10 @@ fn check_group(src: &str, expected: Expect) {
 fn fmt_group_with(src: &str, import_groups: &[&str]) -> String {
     let cfg = Config {
         group_imports: true,
-        import_groups: import_groups.iter().map(|s| s.to_string()).collect(),
+        import_groups: import_groups
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         ..Config::default()
     };
     format_source(src, &cfg).formatted
@@ -96,7 +104,7 @@ fn fmt_expanded(src: &str) -> String {
 fn simple_class() {
     check(
         "package a.b;import java.util.List;public class Foo{private int x=1;void m(int a){return;}}",
-        expect![[r#"
+        expect![[r"
             package a.b;
             import java.util.List;
             public class Foo {
@@ -105,7 +113,7 @@ fn simple_class() {
                     return;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -113,7 +121,7 @@ fn simple_class() {
 fn method_with_statements() {
     check(
         "class C{void m(){int x=1;foo(x);if(x>0){bar();}}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     int x = 1;
@@ -123,7 +131,7 @@ fn method_with_statements() {
                     }
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -131,7 +139,7 @@ fn method_with_statements() {
 fn class_literals() {
     check(
         "class A{void m(){f(int.class);f(void.class);f(int[].class);f(String[].class);f(java.lang.String[][].class);}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     f(int.class);
@@ -141,7 +149,7 @@ fn class_literals() {
                     f(java.lang.String[][].class);
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -149,7 +157,7 @@ fn class_literals() {
 fn array_method_refs() {
     check(
         "class A{void m(){f(String[]::new);f(int[]::new);f(int[][]::new);f(java.lang.String[][]::new);f(Map.Entry[]::new);}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     f(String[]::new);
@@ -159,7 +167,7 @@ fn array_method_refs() {
                     f(Map.Entry[]::new);
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -167,13 +175,13 @@ fn array_method_refs() {
 fn nested_generics() {
     check(
         "class C{Map<K,List<Map<K2,V2>>> f(){return null;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 Map<K, List<Map<K2, V2>>> f() {
                     return null;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -181,7 +189,7 @@ fn nested_generics() {
 fn explicit_type_witness_hugs_method_name() {
     check(
         "class C{void m(){var a=List.<String>of();var b=Collections.<File>emptyList();var c=Foo::<String>bar;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     var a = List.<String>of();
@@ -189,7 +197,7 @@ fn explicit_type_witness_hugs_method_name() {
                     var c = Foo::<String>bar;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -220,7 +228,7 @@ fn constructor_call_type_witness() {
 fn long_param_list_wraps() {
     check(
         "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void method(
                     int aaaaaaaaaaaaaaaa,
@@ -230,7 +238,7 @@ fn long_param_list_wraps() {
                     int eeeeeeeeeeeeeeee
                 ) {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -245,6 +253,7 @@ fn fmt_hug(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_hug(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_hug(src));
 }
@@ -254,7 +263,7 @@ fn closing_paren_hug_arg_list() {
     // The wrapped call keeps its `)` on the last argument's line instead of dedenting it.
     check_hug(
         "class C{void m(){foooo(aaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbb,cccccccccccccccc,dddddddddddddddd);}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     foooo(
@@ -264,7 +273,7 @@ fn closing_paren_hug_arg_list() {
                         dddddddddddddddd);
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -273,7 +282,7 @@ fn closing_paren_hug_param_list() {
     // A wrapped parameter list also hugs `) {`.
     check_hug(
         "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void method(
                     int aaaaaaaaaaaaaaaa,
@@ -282,7 +291,7 @@ fn closing_paren_hug_param_list() {
                     int dddddddddddddddd,
                     int eeeeeeeeeeeeeeee) {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -291,13 +300,13 @@ fn closing_paren_hug_record_header() {
     // A wrapped record header hugs `) {}`.
     check_hug(
         "record Rrrrrrr(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int ddddddddddddd){}",
-        expect![[r#"
+        expect![[r"
             record Rrrrrrr(
                 int aaaaaaaaaaaaaaaa,
                 int bbbbbbbbbbbbbbbb,
                 int cccccccccccccccc,
                 int ddddddddddddd) {}
-        "#]],
+        "]],
     );
 }
 
@@ -306,7 +315,7 @@ fn closing_paren_hug_array_init_unaffected() {
     // The brace-delimited array initializer is never hugged — its `}` stays on its own line.
     check_hug(
         "class C{int[] a={aaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbb,cccccccccccccccc,dddddddddddddddd,eeeeeeeeeeeeeeee};}",
-        expect![[r#"
+        expect![[r"
             class C {
                 int[] a = {
                     aaaaaaaaaaaaaaaa,
@@ -316,7 +325,7 @@ fn closing_paren_hug_array_init_unaffected() {
                     eeeeeeeeeeeeeeee
                 };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -330,7 +339,7 @@ fn closing_paren_hug_overflow_flat_head() {
         ..Config::default()
     };
     let src = "class C{void m(){foooooooooooo(aaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbb,()->{doSomething();});}}";
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 foooooooooooo(aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbb, () -> {
@@ -338,7 +347,7 @@ fn closing_paren_hug_overflow_flat_head() {
                 });
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(src, &cfg));
 }
 
@@ -353,7 +362,7 @@ fn closing_paren_hug_overflow_broken_head() {
         ..Config::default()
     };
     let src = "class C{void m(){foooooooooooo(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,()->{doSomething();});}}";
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 foooooooooooo(
@@ -364,7 +373,7 @@ fn closing_paren_hug_overflow_broken_head() {
                     });
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(src, &cfg));
 }
 
@@ -401,7 +410,7 @@ fn text_block_preserved() {
 fn comments_kept() {
     check(
         "class C{\n// leading\nvoid m(){foo();// trailing\nbar();}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 // leading
                 void m() {
@@ -409,7 +418,7 @@ fn comments_kept() {
                     bar();
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -419,11 +428,11 @@ fn comments_after_final_brace_kept() {
     // is a closing brace (emitted by `lower_braced`, not the generic token path).
     check(
         "class A{} // same\n// below\n/* block */\n",
-        expect![[r#"
+        expect![[r"
             class A {} // same
             // below
             /* block */
-        "#]],
+        "]],
     );
 }
 
@@ -435,10 +444,10 @@ fn trailing_line_comment_on_brace_forces_break() {
     // swallowed by the first on re-lex (dropping a comment and breaking idempotency).
     check(
         "class{{}// alpha\nclass// beta\n",
-        expect![[r#"
+        expect![[r"
             class { {} // alpha
             class // beta
-        "#]],
+        "]],
     );
 }
 
@@ -446,11 +455,11 @@ fn trailing_line_comment_on_brace_forces_break() {
 fn binary_operators_spaced() {
     check(
         "class C{boolean b=a>>2==c&&d>=e;}",
-        expect![[r#"
+        expect![[r"
         class C {
             boolean b = a >> 2 == c && d >= e;
         }
-    "#]],
+    "]],
     );
 }
 
@@ -467,12 +476,12 @@ fn compact_source_file_top_level_members() {
     // format like ordinary class members and round-trip idempotently.
     check(
         "int count=0;void main(){System.out.println(count);}",
-        expect![[r#"
+        expect![[r"
             int count = 0;
             void main() {
                 System.out.println(count);
             }
-        "#]],
+        "]],
     );
     let once = fmt("int count=0;void main(){System.out.println(count);}");
     assert_eq!(fmt(&once), once, "format must be idempotent");
@@ -486,13 +495,13 @@ fn blank_lines_default_clamps_to_one() {
     // and no blank line is kept before the first member.
     check(
         "class C{\n\n\nint a=1;\n\n\n\nint b=2;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 int a = 1;
 
                 int b = 2;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -503,14 +512,14 @@ fn blank_lines_upper_bound_two() {
         ..Config::default()
     };
     // The source has three blank lines between the members; the bound keeps two.
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 1;
 
 
             int b = 2;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with("class C{int a=1;\n\n\n\nint b=2;}", &cfg));
 }
 
@@ -520,12 +529,12 @@ fn blank_lines_upper_bound_zero_removes_all() {
         max_blank_lines: 0,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 1;
             int b = 2;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with("class C{int a=1;\n\n\nint b=2;}", &cfg));
 }
 
@@ -536,13 +545,13 @@ fn blank_lines_bound_is_an_upper_bound_only() {
         max_blank_lines: 3,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 1;
 
             int b = 2;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with("class C{int a=1;\n\nint b=2;}", &cfg));
 }
 
@@ -553,7 +562,7 @@ fn blank_lines_before_leading_comment_clamped() {
         ..Config::default()
     };
     // The blank-line run sits before a leading comment; it is clamped just the same.
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 1;
 
@@ -561,7 +570,7 @@ fn blank_lines_before_leading_comment_clamped() {
             // note
             int b = 2;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(
         "class C{int a=1;\n\n\n\n// note\nint b=2;}",
         &cfg,
@@ -589,12 +598,12 @@ fn comments_not_reflowed_by_default() {
     // Without `wrap-comments`, an over-long comment is left exactly as written.
     check(
         "class C{\n// aaaa bbbb cccc dddd eeee ffff gggg hhhh\nvoid m(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 // aaaa bbbb cccc dddd eeee ffff gggg hhhh
                 void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -604,14 +613,14 @@ fn long_line_comment_wraps() {
     check_wrapped(
         "class C{\n// aaaa bbbb cccc dddd eeee ffff\nvoid m(){}}",
         20,
-        expect![[r#"
+        expect![[r"
             class C {
                 // aaaa bbbb
                 // cccc dddd
                 // eeee ffff
                 void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -620,12 +629,12 @@ fn short_comment_unchanged_when_wrapping() {
     check_wrapped(
         "class C{\n// short note\nvoid m(){}}",
         40,
-        expect![[r#"
+        expect![[r"
             class C {
                 // short note
                 void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -634,7 +643,7 @@ fn single_line_javadoc_expands_when_too_long() {
     check_wrapped(
         "class C{\n/** Summary that is quite long indeed today. */\nvoid m(){}}",
         30,
-        expect![[r#"
+        expect![[r"
             class C {
                 /**
                  * Summary that is quite
@@ -642,7 +651,7 @@ fn single_line_javadoc_expands_when_too_long() {
                  */
                 void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -651,7 +660,7 @@ fn multiline_javadoc_reflows_and_keeps_tags() {
     check_wrapped(
         "class C{\n/**\n * A description long enough to need wrapping here.\n * @param x the x value\n */\nvoid m(int x){}}",
         30,
-        expect![[r#"
+        expect![[r"
             class C {
                 /**
                  * A description long
@@ -661,7 +670,7 @@ fn multiline_javadoc_reflows_and_keeps_tags() {
                  */
                 void m(int x) {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -671,11 +680,11 @@ fn trailing_comment_is_never_wrapped() {
     check_wrapped(
         "class C{int x=1;// aaaa bbbb cccc dddd eeee ffff gggg\n}",
         20,
-        expect![[r#"
+        expect![[r"
             class C {
                 int x = 1; // aaaa bbbb cccc dddd eeee ffff gggg
             }
-        "#]],
+        "]],
     );
 }
 
@@ -701,7 +710,7 @@ fn fmt_next_line(src: &str) -> String {
 fn brace_style_next_line_moves_declaration_braces() {
     // Type and method bodies open on the next line; the control-flow `if`/`else` braces stay
     // on the header's line (those are governed by the future `control-brace-style`).
-    expect![[r#"
+    expect![[r"
         class Foo
         {
             void m(int a)
@@ -713,7 +722,7 @@ fn brace_style_next_line_moves_declaration_braces() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_next_line(
         "class Foo{void m(int a){if(a>0){foo();}else{bar();}}}",
     ));
@@ -722,18 +731,18 @@ fn brace_style_next_line_moves_declaration_braces() {
 #[test]
 fn brace_style_next_line_keeps_empty_body_inline() {
     // An empty body stays `{}` on the header's line; only the (non-empty) class body breaks.
-    expect![[r#"
+    expect![[r"
         class Foo
         {
             void m() {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_next_line("class Foo{void m(){}}"));
 }
 
 #[test]
 fn brace_style_next_line_covers_constructor_and_initializer() {
-    expect![[r#"
+    expect![[r"
         class C
         {
             static
@@ -745,14 +754,14 @@ fn brace_style_next_line_covers_constructor_and_initializer() {
                 this.x = 1;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_next_line("class C{static{init();}C(){this.x=1;}}"));
 }
 
 #[test]
 fn brace_style_next_line_wraps_param_list_then_breaks_brace() {
     // When the signature wraps, the brace still lands on its own line under the header.
-    expect![[r#"
+    expect![[r"
         class C
         {
             void method(
@@ -766,7 +775,7 @@ fn brace_style_next_line_wraps_param_list_then_breaks_brace() {
                 foo();
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_next_line(
         "class C{void method(int aaaaaaaaaaaaaaaa,int bbbbbbbbbbbbbbbb,int cccccccccccccccc,int dddddddddddddddd,int eeeeeeeeeeeeeeee){foo();}}",
     ));
@@ -803,18 +812,18 @@ fn fmt_no_empty_single_line_next_line(src: &str) -> String {
 #[test]
 fn empty_item_single_line_default_collapses_bodies() {
     // By default an empty declaration body collapses to `{}` on the header's line.
-    expect![[r#"
+    expect![[r"
         class Foo {}
-    "#]]
+    "]]
     .assert_eq(&fmt("class Foo{}"));
 }
 
 #[test]
 fn empty_item_single_line_off_expands_class_body() {
-    expect![[r#"
+    expect![[r"
         class Foo {
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line("class Foo{}"));
 }
 
@@ -822,7 +831,7 @@ fn empty_item_single_line_off_expands_class_body() {
 fn empty_item_single_line_off_expands_member_bodies() {
     // The (non-empty) class body lays out normally; each empty member body expands, its `}`
     // landing at the member's own indent.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
             }
@@ -831,7 +840,7 @@ fn empty_item_single_line_off_expands_member_bodies() {
             static {
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line(
         "class C{void m(){}C(){}static{}}",
     ));
@@ -842,20 +851,20 @@ fn empty_item_single_line_off_expands_every_type_kind() {
     // Every body that lowers to `CLASS_BODY` expands. (Enum bodies are `ENUM_BODY` with their own
     // dedicated lowering; an empty one always collapses to `{}` regardless of this option — see the
     // dedicated test.)
-    expect![[r#"
+    expect![[r"
         interface I {
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line("interface I{}"));
-    expect![[r#"
+    expect![[r"
         @interface A {
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line("@interface A{}"));
-    expect![[r#"
+    expect![[r"
         record R(int x) {
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line("record R(int x){}"));
 }
 
@@ -873,14 +882,14 @@ fn enum_constants_break_one_per_line() {
     // A non-empty enum body always breaks — one constant per line — even when it would fit.
     check(
         "enum Suit { DIAMONDS, HEARTS, CLUBS, SPADES }",
-        expect![[r#"
+        expect![[r"
             enum Suit {
                 DIAMONDS,
                 HEARTS,
                 CLUBS,
                 SPADES
             }
-        "#]],
+        "]],
     );
 }
 
@@ -889,12 +898,12 @@ fn enum_terminator_glues_to_last_constant() {
     // No trailing comma: the terminator `;` glues onto the last constant.
     check(
         "enum E { ONE, TWO; }",
-        expect![[r#"
+        expect![[r"
             enum E {
                 ONE,
                 TWO;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -903,13 +912,13 @@ fn enum_trailing_comma_keeps_terminator_on_own_line() {
     // A trailing comma keeps the terminator `;` on its own line.
     check(
         "enum E { ONE, TWO,; }",
-        expect![[r#"
+        expect![[r"
             enum E {
                 ONE,
                 TWO,
                 ;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -934,13 +943,13 @@ fn enum_multiple_empty_declarations() {
     // per line.
     check(
         "public enum Empty {;;;}",
-        expect![[r#"
+        expect![[r"
             public enum Empty {
                 ;
                 ;
                 ;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -950,14 +959,14 @@ fn enum_preserves_blank_lines_between_constants() {
     // before the first constant is dropped, like a class body.
     check(
         "enum E {\n\n  A,\n  B,\n\n  C;\n}",
-        expect![[r#"
+        expect![[r"
             enum E {
                 A,
                 B,
 
                 C;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -967,14 +976,14 @@ fn enum_members_after_terminator() {
     // blank lines preserved — here there were none, so none are inserted).
     check(
         "enum E { A, B; int x; E() {} }",
-        expect![[r#"
+        expect![[r"
             enum E {
                 A,
                 B;
                 int x;
                 E() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -983,14 +992,14 @@ fn enum_constant_with_class_body() {
     // A constant's class body recurses through the block formatter.
     check(
         "enum E { A { void m() {} }, B; }",
-        expect![[r#"
+        expect![[r"
             enum E {
                 A {
                     void m() {}
                 },
                 B;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -998,7 +1007,7 @@ fn enum_constant_with_class_body() {
 fn enum_constant_annotations_expanded_vs_compact() {
     // Under `annotation-placement = expanded` each leading annotation breaks onto its own line;
     // under the default `compact` the constant stays inline.
-    expect![[r#"
+    expect![[r"
         enum E {
             @A
             ONE,
@@ -1007,15 +1016,15 @@ fn enum_constant_annotations_expanded_vs_compact() {
             @C
             THREE;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_expanded("enum E { @A ONE, TWO, @B @C THREE; }"));
-    expect![[r#"
+    expect![[r"
         enum E {
             @A ONE,
             TWO,
             @B @C THREE;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt("enum E { @A ONE, TWO, @B @C THREE; }"));
 }
 
@@ -1025,14 +1034,14 @@ fn enum_comment_before_terminator_keeps_it_on_own_line() {
     // above the constant), so the `;` stays on its own line and the comment is preserved.
     check(
         "enum E { ONE, TWO\n // keep\n ; }",
-        expect![[r#"
+        expect![[r"
             enum E {
                 ONE,
                 TWO
                 // keep
                 ;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -1042,19 +1051,19 @@ fn enum_dangling_comment_before_brace() {
     // still emitted.
     check(
         "enum E { ONE;\n /* dangling */\n }",
-        expect![[r#"
+        expect![[r"
             enum E {
                 ONE;
                 /* dangling */
             }
-        "#]],
+        "]],
     );
 }
 
 #[test]
 fn empty_item_single_line_off_keeps_control_flow_collapsed() {
     // Control-flow / switch / bare blocks are never governed: they always stay `{}`.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 if (a) {}
@@ -1063,7 +1072,7 @@ fn empty_item_single_line_off_keeps_control_flow_collapsed() {
                 {}
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line(
         "class C{void m(){if(a){}while(b){}switch(x){}{}}}",
     ));
@@ -1072,11 +1081,11 @@ fn empty_item_single_line_off_keeps_control_flow_collapsed() {
 #[test]
 fn empty_item_single_line_off_keeps_lambda_collapsed() {
     // A lambda body is not a declaration body, so an empty one stays `{}`.
-    expect![[r#"
+    expect![[r"
         class C {
             Runnable r = () -> {};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line("class C{Runnable r=()->{};}"));
 }
 
@@ -1084,30 +1093,30 @@ fn empty_item_single_line_off_keeps_lambda_collapsed() {
 fn empty_item_single_line_off_preserves_dangling_comment_body() {
     // A body whose only content is a comment dangling on `}` already takes the multi-line
     // path (it is not "empty"), so the option does not govern it and the comment is kept.
-    expect![[r#"
+    expect![[r"
         class Foo {
             // x
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line("class Foo{\n// x\n}"));
 }
 
 #[test]
 fn empty_item_single_line_off_next_line_opens_brace_on_own_line() {
-    expect![[r#"
+    expect![[r"
         class Foo
         {
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line_next_line("class Foo{}"));
-    expect![[r#"
+    expect![[r"
         class C
         {
             void m()
             {
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_no_empty_single_line_next_line("class C{void m(){}}"));
 }
 
@@ -1134,23 +1143,23 @@ fn fmt_fn_single_line(src: &str) -> String {
 
 #[test]
 fn fn_single_line_collapses_single_statement_method() {
-    expect![[r#"
+    expect![[r"
         class C {
             int foo() { return 1; }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line("class C{int foo(){return 1;}}"));
 }
 
 #[test]
 fn fn_single_line_collapses_constructor_and_initializer() {
     // The option governs every declaration body: methods, constructors, and initializers.
-    expect![[r#"
+    expect![[r"
         class C {
             C() { this.x = 1; }
             static { init(); }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line(
         "class C{C(){this.x=1;}static{init();}}",
     ));
@@ -1159,14 +1168,14 @@ fn fn_single_line_collapses_constructor_and_initializer() {
 #[test]
 fn fn_single_line_keeps_multi_statement_body_multiline() {
     // Two statements never collapse, even when they would fit on one line.
-    expect![[r#"
+    expect![[r"
         class C {
             void bar() {
                 a();
                 b();
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line("class C{void bar(){a();b();}}"));
 }
 
@@ -1178,13 +1187,13 @@ fn fn_single_line_keeps_overflowing_body_multiline() {
         max_width: 40,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             int wide() {
                 return aVeryLongMethodCallThatOverflows();
             }
         }
-    "#]]
+    "]]
     .assert_eq(
         &format_source(
             "class C{int wide(){return aVeryLongMethodCallThatOverflows();}}",
@@ -1197,7 +1206,7 @@ fn fn_single_line_keeps_overflowing_body_multiline() {
 #[test]
 fn fn_single_line_keeps_nested_block_body_multiline() {
     // A nested block forces a break inside the body, so it is never collapsed.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 if (x) {
@@ -1205,21 +1214,21 @@ fn fn_single_line_keeps_nested_block_body_multiline() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line("class C{void m(){if(x){y();}}}"));
 }
 
 #[test]
 fn fn_single_line_keeps_commented_body_multiline() {
     // A body carrying a comment is never collapsed (comments must stay on their anchor).
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 // keep
                 return;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line("class C{void m(){\n// keep\nreturn;}}"));
 }
 
@@ -1229,13 +1238,13 @@ fn fn_single_line_keeps_body_multiline_when_header_has_trailing_comment() {
     // flushes at the body's first newline. Collapsing the body to one line would relocate it past
     // the closing brace, re-anchoring it on the next parse and breaking idempotency — so the body
     // stays multi-line and the comment keeps its place.
-    expect![[r#"
+    expect![[r"
         class C {
             int foo() { /*c*/
                 return 1;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line("class C{int/*c*/foo(){return 1;}}"));
 }
 
@@ -1262,7 +1271,7 @@ fn fn_single_line_next_line_collapses_when_fits_else_opens_brace() {
         max_width: 40,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C
         {
             int foo() { return 1; }
@@ -1271,7 +1280,7 @@ fn fn_single_line_next_line_collapses_when_fits_else_opens_brace() {
                 return aVeryLongMethodCallThatOverflows();
             }
         }
-    "#]]
+    "]]
     .assert_eq(
         &format_source(
             "class C{int foo(){return 1;}int wide(){return aVeryLongMethodCallThatOverflows();}}",
@@ -1284,13 +1293,13 @@ fn fn_single_line_next_line_collapses_when_fits_else_opens_brace() {
 #[test]
 fn fn_single_line_off_by_default_keeps_body_multiline() {
     // With the option off (the default) a single-statement body stays multi-line.
-    expect![[r#"
+    expect![[r"
         class C {
             int foo() {
                 return 1;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt("class C{int foo(){return 1;}}"));
 }
 
@@ -1299,11 +1308,11 @@ fn fn_single_line_collapses_braceless_control_statement() {
     // The rule is "one statement with no forced break", not "one expression statement": a
     // braceless control statement is a single statement and collapses when it fits. A bare or
     // braced control block forces a break (see the nested-block test) and never collapses.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() { if (a) only(); }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_single_line("class C{void m(){if(a)only();}}"));
 }
 
@@ -1330,17 +1339,17 @@ fn fmt_force_multiline_blocks(src: &str) -> String {
 fn force_multiline_blocks_expands_empty_type_body() {
     // An empty type body expands to a two-line `{` … `}` instead of collapsing to `{}`,
     // overriding the default `empty-item-single-line`.
-    expect![[r#"
+    expect![[r"
         class C {
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_force_multiline_blocks("class C{}"));
 }
 
 #[test]
 fn force_multiline_blocks_expands_empty_method_body() {
     // An empty method / constructor / initializer body expands too.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
             }
@@ -1349,7 +1358,7 @@ fn force_multiline_blocks_expands_empty_method_body() {
             static {
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_force_multiline_blocks(
         "class C{void m(){}C(){}static{}}",
     ));
@@ -1359,7 +1368,7 @@ fn force_multiline_blocks_expands_empty_method_body() {
 fn force_multiline_blocks_expands_empty_control_flow_block() {
     // Goes beyond `empty-item-single-line` (declaration-only): an empty control-flow block,
     // which would otherwise always keep `{}`, also expands.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 if (true) {
@@ -1368,7 +1377,7 @@ fn force_multiline_blocks_expands_empty_control_flow_block() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_force_multiline_blocks(
         "class C{void m(){if(true){}while(x){}}}",
     ));
@@ -1377,12 +1386,12 @@ fn force_multiline_blocks_expands_empty_control_flow_block() {
 #[test]
 fn force_multiline_blocks_expands_empty_lambda_block() {
     // An empty lambda block expands as well.
-    expect![[r#"
+    expect![[r"
         class C {
             Runnable r = () -> {
             };
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_force_multiline_blocks(
         "class C{Runnable r = () -> {};}",
     ));
@@ -1396,13 +1405,13 @@ fn force_multiline_blocks_overrides_fn_single_line() {
         fn_single_line: true,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             int foo() {
                 return 1;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&format_source("class C{int foo(){return 1;}}", &cfg).formatted);
 }
 
@@ -1415,14 +1424,14 @@ fn force_multiline_blocks_next_line_empty_body_opens_brace() {
         brace_style: BraceStyle::NextLine,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C
         {
             void m()
             {
             }
         }
-    "#]]
+    "]]
     .assert_eq(&format_source("class C{void m(){}}", &cfg).formatted);
 }
 
@@ -1435,7 +1444,7 @@ fn force_multiline_blocks_control_next_line_empty_block_opens_brace() {
         control_brace_style: ControlBraceStyle::NextLine,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 if (true)
@@ -1443,18 +1452,18 @@ fn force_multiline_blocks_control_next_line_empty_block_opens_brace() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&format_source("class C{void m(){if(true){}}}", &cfg).formatted);
 }
 
 #[test]
 fn force_multiline_blocks_off_by_default_collapses_empties() {
     // With the option off (the default) empty bodies still collapse to `{}`.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt("class C{void m(){}}"));
 }
 
@@ -1496,7 +1505,7 @@ fn control_brace_style_next_line_moves_control_braces_only() {
     // The mirror image of `brace_style_next_line_moves_declaration_braces`: the type and
     // method braces stay K&R, while the `if`/`else` control-flow braces and the `else`
     // continuation break onto their own lines.
-    expect![[r#"
+    expect![[r"
         class Foo {
             void m(int a) {
                 if (a > 0)
@@ -1509,7 +1518,7 @@ fn control_brace_style_next_line_moves_control_braces_only() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ctrl_next_line(
         "class Foo{void m(int a){if(a>0){foo();}else{bar();}}}",
     ));
@@ -1517,7 +1526,7 @@ fn control_brace_style_next_line_moves_control_braces_only() {
 
 #[test]
 fn control_brace_style_next_line_try_catch_finally() {
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 try
@@ -1534,7 +1543,7 @@ fn control_brace_style_next_line_try_catch_finally() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ctrl_next_line(
         "class C{void m(){try{a();}catch(E e){b();}finally{c();}}}",
     ));
@@ -1544,7 +1553,7 @@ fn control_brace_style_next_line_try_catch_finally() {
 fn control_brace_style_next_line_loops() {
     // A `while` loop's opening brace breaks (via the block), and a `do`-`while`'s trailing
     // `while` breaks (via the continuation).
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 while (x)
@@ -1558,7 +1567,7 @@ fn control_brace_style_next_line_loops() {
                 while (y);
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ctrl_next_line(
         "class C{void m(){while(x){a();}do{b();}while(y);}}",
     ));
@@ -1568,17 +1577,17 @@ fn control_brace_style_next_line_loops() {
 fn control_brace_style_does_not_touch_declaration_braces() {
     // With only `control-brace-style` set, declaration bodies stay K&R; an empty method body
     // still collapses to `{}`.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ctrl_next_line("class C{void m(){}}"));
 }
 
 #[test]
 fn full_allman_breaks_every_brace() {
-    expect![[r#"
+    expect![[r"
         class Foo
         {
             void m(int a)
@@ -1593,7 +1602,7 @@ fn full_allman_breaks_every_brace() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_full_allman(
         "class Foo{void m(int a){if(a>0){foo();}else{bar();}}}",
     ));
@@ -1709,13 +1718,13 @@ fn fmt_chain(src: &str, chain_width: usize) -> String {
 fn short_chain_stays_inline() {
     check(
         "class A{void m(){foo.bar().baz();}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     foo.bar().baz();
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -1723,7 +1732,7 @@ fn short_chain_stays_inline() {
 fn long_chain_breaks_one_call_per_line() {
     check(
         "class A{void m(){result=source.stream().filter(x->x.isActive()).map(Item::getName).sorted().collect(Collectors.toList());}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     result = source.stream()
@@ -1733,7 +1742,7 @@ fn long_chain_breaks_one_call_per_line() {
                         .collect(Collectors.toList());
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -1758,13 +1767,13 @@ fn field_only_path_stays_inline() {
     // No calls: a pure field path is never broken, even past max-width.
     check(
         "class A{void m(){x=a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.aa.bb.cc.dd.ee.ff.gg.hh;}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     x = a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.aa.bb.cc.dd.ee.ff.gg.hh;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -1772,7 +1781,7 @@ fn field_only_path_stays_inline() {
 fn type_witness_preserved_in_broken_chain() {
     check(
         "class A{void m(){result=obj.<String>alpha().<Integer>beta().gamma().delta().epsilon();}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     result = obj.<String>alpha()
@@ -1782,14 +1791,14 @@ fn type_witness_preserved_in_broken_chain() {
                         .epsilon();
                 }
             }
-        "#]],
+        "]],
     );
 }
 
 #[test]
 fn chain_width_forces_break_below_max_width() {
     // Fits max-width(100) but exceeds the narrow chain-width, so it still breaks.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 v = alpha.beta()
@@ -1797,7 +1806,7 @@ fn chain_width_forces_break_below_max_width() {
                     .delta();
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_chain(
         "class A{void m(){v=alpha.beta().gamma().delta();}}",
         20,
@@ -1807,13 +1816,13 @@ fn chain_width_forces_break_below_max_width() {
 #[test]
 fn chain_width_generous_keeps_inline() {
     // A generous chain-width keeps the same chain on one line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 v = alpha.beta().gamma().delta();
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_chain(
         "class A{void m(){v=alpha.beta().gamma().delta();}}",
         200,
@@ -1835,7 +1844,7 @@ fn fmt_fn_call(src: &str, fn_call_width: usize) -> String {
 #[test]
 fn fn_call_width_forces_break_below_max_width() {
     // Fits max-width(100) but exceeds the narrow fn-call-width, so the args break.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 foo(
@@ -1845,7 +1854,7 @@ fn fn_call_width_forces_break_below_max_width() {
                 );
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_call(
         "class A{void m(){foo(alpha,beta,gamma);}}",
         10,
@@ -1855,13 +1864,13 @@ fn fn_call_width_forces_break_below_max_width() {
 #[test]
 fn fn_call_width_generous_keeps_inline() {
     // A generous fn-call-width keeps the call on one line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 foo(alpha, beta, gamma);
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_call(
         "class A{void m(){foo(alpha,beta,gamma);}}",
         200,
@@ -1872,11 +1881,11 @@ fn fn_call_width_generous_keeps_inline() {
 fn fn_call_width_leaves_param_list_inline() {
     // fn-call-width targets call argument lists (ARG_LIST), not method-definition
     // parameter lists (PARAM_LIST), which stay inline under a narrow fn-call-width.
-    expect![[r#"
+    expect![[r"
         class A {
             void method(int alpha, int beta, int gamma) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_fn_call(
         "class A{void method(int alpha,int beta,int gamma){}}",
         5,
@@ -1898,7 +1907,7 @@ fn fmt_array_init(src: &str, array_width: usize) -> String {
 #[test]
 fn array_width_forces_break_below_max_width() {
     // Fits max-width(100) but exceeds the narrow array-width, so the elements break.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {
                 alpha,
@@ -1906,25 +1915,25 @@ fn array_width_forces_break_below_max_width() {
                 gamma
             };
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_array_init("class A{int[] x={alpha,beta,gamma};}", 10));
 }
 
 #[test]
 fn array_width_generous_keeps_inline() {
     // A generous array-width keeps the initializer on one line.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {alpha, beta, gamma};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_array_init("class A{int[] x={alpha,beta,gamma};}", 200));
 }
 
 #[test]
 fn array_width_breaks_new_array_creation() {
     // `new T[]{…}` carries the same ARRAY_INIT node, so it honors array-width too.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = new int[] {
                 alpha,
@@ -1932,7 +1941,7 @@ fn array_width_breaks_new_array_creation() {
                 gamma
             };
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_array_init(
         "class A{int[] x=new int[]{alpha,beta,gamma};}",
         10,
@@ -1965,11 +1974,11 @@ fn fmt_trailing_narrow(src: &str, trailing_comma: TrailingComma) -> String {
 #[test]
 fn trailing_comma_preserve_keeps_source_absent() {
     // Preserve (the default): an absent trailing comma stays absent.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {a, b, c};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{int[] x={a,b,c};}",
         TrailingComma::Preserve,
@@ -1979,11 +1988,11 @@ fn trailing_comma_preserve_keeps_source_absent() {
 #[test]
 fn trailing_comma_preserve_keeps_source_present() {
     // Preserve: a present trailing comma stays present.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {a, b, c,};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{int[] x={a,b,c,};}",
         TrailingComma::Preserve,
@@ -1992,11 +2001,11 @@ fn trailing_comma_preserve_keeps_source_present() {
 
 #[test]
 fn trailing_comma_always_adds_when_absent() {
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {a, b, c,};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{int[] x={a,b,c};}",
         TrailingComma::Always,
@@ -2005,11 +2014,11 @@ fn trailing_comma_always_adds_when_absent() {
 
 #[test]
 fn trailing_comma_never_drops_when_present() {
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {a, b, c};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{int[] x={a,b,c,};}",
         TrailingComma::Never,
@@ -2019,11 +2028,11 @@ fn trailing_comma_never_drops_when_present() {
 #[test]
 fn trailing_comma_vertical_omits_when_flat() {
     // Fits on one line, so the comma is omitted — even though the source had one.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {a, b, c};
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{int[] x={a,b,c,};}",
         TrailingComma::Vertical,
@@ -2033,7 +2042,7 @@ fn trailing_comma_vertical_omits_when_flat() {
 #[test]
 fn trailing_comma_vertical_adds_when_broken() {
     // Broken one element per line, so the comma is added.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {
                 alpha,
@@ -2041,7 +2050,7 @@ fn trailing_comma_vertical_adds_when_broken() {
                 gamma,
             };
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing_narrow(
         "class A{int[] x={alpha,beta,gamma};}",
         TrailingComma::Vertical,
@@ -2051,7 +2060,7 @@ fn trailing_comma_vertical_adds_when_broken() {
 #[test]
 fn trailing_comma_never_omits_even_when_broken() {
     // `never` keeps no trailing comma regardless of layout.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {
                 alpha,
@@ -2059,7 +2068,7 @@ fn trailing_comma_never_omits_even_when_broken() {
                 gamma
             };
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing_narrow(
         "class A{int[] x={alpha,beta,gamma,};}",
         TrailingComma::Never,
@@ -2068,7 +2077,7 @@ fn trailing_comma_never_omits_even_when_broken() {
 
 #[test]
 fn trailing_comma_always_when_broken() {
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {
                 alpha,
@@ -2076,7 +2085,7 @@ fn trailing_comma_always_when_broken() {
                 gamma,
             };
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing_narrow(
         "class A{int[] x={alpha,beta,gamma};}",
         TrailingComma::Always,
@@ -2087,13 +2096,13 @@ fn trailing_comma_always_when_broken() {
 fn trailing_comma_only_touches_array_initializers() {
     // `trailing-comma` governs array initializers only; a call's argument list is never given a
     // trailing comma (it would be invalid Java).
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 foo(a, b, c);
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{void m(){foo(a,b,c);}}",
         TrailingComma::Always,
@@ -2104,11 +2113,11 @@ fn trailing_comma_only_touches_array_initializers() {
 fn trailing_comma_never_keeps_commented_comma() {
     // A comment glued to the trailing comma is never dropped: `never` keeps the comma so the
     // comment survives.
-    expect![[r#"
+    expect![[r"
         class A {
             int[] x = {a, b, c,}; /* keep */
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing(
         "class A{int[] x={a,b,c, /* keep */};}",
         TrailingComma::Never,
@@ -2135,11 +2144,11 @@ fn trailing_comma_unclosed_array_is_not_synthesized() {
     // synthesized trailing comma. With no closing brace the comma would not be trailing — on a
     // re-parse it reads as an item separator that pulls the following token into the list,
     // breaking idempotency. The source is preserved exactly here (no comma added after `beta`).
-    expect![[r#"
+    expect![[r"
         class A { int[] x = {
             alpha,
             beta
-    "#]]
+    "]]
     .assert_eq(&fmt_trailing_narrow(
         "class A{int[] x={alpha,beta",
         TrailingComma::Vertical,
@@ -2167,12 +2176,12 @@ fn trailing_comma_unclosed_array_is_idempotent() {
 fn reorder_imports_sorts_basic() {
     check_reorder(
         "package a.b;import java.util.Map;import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
             package a.b;
             import java.util.List;
             import java.util.Map;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2181,13 +2190,13 @@ fn reorder_imports_static_to_end() {
     // Non-static imports first (alphabetical), then static imports (alphabetical).
     check_reorder(
         "import static a.Z.z;import b.A;import static a.A.a;import b.B;class C{}",
-        expect![[r#"
+        expect![[r"
             import b.A;
             import b.B;
             import static a.A.a;
             import static a.Z.z;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2196,7 +2205,7 @@ fn reorder_imports_normalizes_blank_lines() {
     // Blank lines between imports are dropped; the package->block and block->class gaps stay.
     check_reorder(
         "package p;\n\nimport c.C;\n\nimport a.A;\nimport b.B;\n\nclass C {}\n",
-        expect![[r#"
+        expect![[r"
             package p;
 
             import a.A;
@@ -2204,7 +2213,7 @@ fn reorder_imports_normalizes_blank_lines() {
             import c.C;
 
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2213,12 +2222,12 @@ fn reorder_imports_comments_follow() {
     // A leading and a trailing comment glued to an import move with it when it is reordered.
     check_reorder(
         "import b.B;\n// lead for a\nimport a.A; // trail for a\nclass C {}\n",
-        expect![[r#"
+        expect![[r"
             // lead for a
             import a.A; // trail for a
             import b.B;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2227,10 +2236,10 @@ fn module_import_formats_inline() {
     // `import module M;` (JEP 511) lays out with normal spacing under the default config.
     check(
         "import module java.base;class C{}",
-        expect![[r#"
+        expect![[r"
             import module java.base;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2240,15 +2249,15 @@ fn module_decl_empty_body_collapses() {
     // collapses to `{}` (not `{ }`) under the default `empty-item-single-line`.
     check(
         "open module com.google.m { }",
-        expect![[r#"
+        expect![[r"
             open module com.google.m {}
-        "#]],
+        "]],
     );
     check(
         "module com.google.m {}",
-        expect![[r#"
+        expect![[r"
             module com.google.m {}
-        "#]],
+        "]],
     );
 }
 
@@ -2257,12 +2266,12 @@ fn module_decl_directives_break_and_indent() {
     // A non-empty module body lays its directives out one per indented line, like class members.
     check(
         "module com.google.m { requires java.base; exports com.foo; }",
-        expect![[r#"
+        expect![[r"
             module com.google.m {
                 requires java.base;
                 exports com.foo;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -2274,9 +2283,9 @@ fn module_decl_empty_body_next_line_brace() {
         brace_style: BraceStyle::NextLine,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         module com.google.m {}
-    "#]]
+    "]]
     .assert_eq(&fmt_with("module com.google.m { }", &cfg));
 }
 
@@ -2285,13 +2294,13 @@ fn reorder_imports_module_to_front() {
     // Module imports lead their own tier: module, then ordinary (alphabetical), then static.
     check_reorder(
         "import b.B;import module java.base;import static a.A.a;import a.A;class C{}",
-        expect![[r#"
+        expect![[r"
             import module java.base;
             import a.A;
             import b.B;
             import static a.A.a;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2300,12 +2309,12 @@ fn reorder_imports_module_comment_follows() {
     // A leading comment glued to a module import moves with it when it is reordered to the front.
     check_reorder(
         "import b.B;\n// lead for mod\nimport module java.base;\nclass C {}\n",
-        expect![[r#"
+        expect![[r"
             // lead for mod
             import module java.base;
             import b.B;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2314,11 +2323,11 @@ fn reorder_imports_wildcard() {
     // `*` (0x2A) sorts before `.` (0x2E), so `a.b.*` precedes `a.b.C`. Locks the chosen order.
     check_reorder(
         "import a.b.C;import a.b.*;class X{}",
-        expect![[r#"
+        expect![[r"
             import a.b.*;
             import a.b.C;
             class X {}
-        "#]],
+        "]],
     );
 }
 
@@ -2327,11 +2336,11 @@ fn reorder_imports_no_package_imports_first() {
     // No package decl: the file starts with imports; no leading blank line is introduced.
     check_reorder(
         "import c.C;import a.A;class X{}",
-        expect![[r#"
+        expect![[r"
         import a.A;
         import c.C;
         class X {}
-    "#]],
+    "]],
     );
 }
 
@@ -2340,11 +2349,11 @@ fn reorder_imports_off_by_default_preserves_order() {
     // With the default config the import order is preserved exactly (strict-sequence invariant).
     check(
         "import java.util.Map;import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
             import java.util.Map;
             import java.util.List;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2353,10 +2362,10 @@ fn reorder_imports_single_import_unchanged() {
     // A single import has nothing to sort (the `< 2` guard); output is unchanged.
     check_reorder(
         "import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
         import java.util.List;
         class C {}
-    "#]],
+    "]],
     );
 }
 
@@ -2383,7 +2392,7 @@ fn group_imports_basic() {
     // Default groups: java. / javax. / others (`*`) / static — each block sorted, blank-separated.
     check_group(
         "import com.foo.Bar;import java.util.List;import static org.junit.Assert.assertEquals;import javax.annotation.Nullable;class C{}",
-        expect![[r#"
+        expect![[r"
             import java.util.List;
 
             import javax.annotation.Nullable;
@@ -2392,7 +2401,7 @@ fn group_imports_basic() {
 
             import static org.junit.Assert.assertEquals;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2401,13 +2410,13 @@ fn group_imports_catch_all_block() {
     // Imports matching no prefix cluster in the `*` block, sorted, after the java./javax. blocks.
     check_group(
         "import org.b.B;import com.a.A;import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
             import java.util.List;
 
             import com.a.A;
             import org.b.B;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2416,13 +2425,13 @@ fn group_imports_static_block_last() {
     // Every static import clusters in the trailing `static` block, sorted by qualified name.
     check_group(
         "import static b.B.b;import static a.A.a;import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
             import java.util.List;
 
             import static a.A.a;
             import static b.B.b;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2431,7 +2440,7 @@ fn group_imports_module_block_first() {
     // Module imports cluster in a leading block, before every prefix group and the static block.
     check_group(
         "import static a.A.a;import com.foo.Bar;import module java.base;import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
             import module java.base;
 
             import java.util.List;
@@ -2440,7 +2449,7 @@ fn group_imports_module_block_first() {
 
             import static a.A.a;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2449,12 +2458,12 @@ fn group_imports_empty_group_no_blank() {
     // No javax. import: a single blank separates java. from the catch-all (no stray blank line).
     check_group(
         "import com.x.X;import java.util.List;class C{}",
-        expect![[r#"
+        expect![[r"
             import java.util.List;
 
             import com.x.X;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2463,13 +2472,13 @@ fn group_imports_comment_follows() {
     // A leading and trailing comment glued to an import move with it into its group.
     check_group(
         "import com.b.B;\n// lead\nimport java.a.A; // trail\nclass C {}\n",
-        expect![[r#"
+        expect![[r"
             // lead
             import java.a.A; // trail
 
             import com.b.B;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2482,11 +2491,11 @@ fn group_imports_independent_of_reorder() {
         ..Config::default()
     };
     let out = format_source("import b.B;import a.A;class C{}", &cfg).formatted;
-    expect![[r#"
+    expect![[r"
         import a.A;
         import b.B;
         class C {}
-    "#]]
+    "]]
     .assert_eq(&out);
 }
 
@@ -2495,11 +2504,11 @@ fn group_imports_off_by_default_preserves_order() {
     // The default config leaves import order untouched (strict-sequence invariant).
     check(
         "import com.b.B;import java.a.A;class C{}",
-        expect![[r#"
+        expect![[r"
             import com.b.B;
             import java.a.A;
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -2520,14 +2529,14 @@ fn group_imports_custom_longest_prefix_wins() {
         "import java.io.File;import java.util.List;import com.x.X;class C{}",
         &["java.", "java.util.", "*"],
     );
-    expect![[r#"
+    expect![[r"
         import java.io.File;
 
         import java.util.List;
 
         import com.x.X;
         class C {}
-    "#]]
+    "]]
     .assert_eq(&out);
 }
 
@@ -2568,11 +2577,11 @@ fn short_binary_stays_flat_in_both_modes() {
     let front = fmt_binop(src, 100, BinopSeparator::Front);
     let back = fmt_binop(src, 100, BinopSeparator::Back);
     assert_eq!(front, back);
-    expect![[r#"
+    expect![[r"
         class A {
             int x = a + b * c;
         }
-    "#]]
+    "]]
     .assert_eq(&front);
 }
 
@@ -2581,7 +2590,7 @@ fn long_binary_wraps_operator_front_by_default() {
     // Past max-width(100) the additive run breaks at every operator, each leading its line.
     check(
         "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     result = alphaOperandName
@@ -2591,14 +2600,14 @@ fn long_binary_wraps_operator_front_by_default() {
                         + epsilonOperandName;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
 #[test]
 fn long_binary_wraps_operator_back() {
     // The same source with `binop-separator = back`: each operator ends the broken line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 result = alphaOperandName +
@@ -2608,7 +2617,7 @@ fn long_binary_wraps_operator_back() {
                     epsilonOperandName;
             }
         }
-    "#]].assert_eq(&fmt_binop(
+    "]].assert_eq(&fmt_binop(
         "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
         100,
         BinopSeparator::Back,
@@ -2618,14 +2627,14 @@ fn long_binary_wraps_operator_back() {
 #[test]
 fn mixed_precedence_breaks_at_lowest_first() {
     // Only the `||` level needs to break; the `&&`/`==` operands stay intact on their lines.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 flag = aLongName == bLongName && cLongName == dLongName
                     || eLongName == fLongName;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}",
         65,
@@ -2636,7 +2645,7 @@ fn mixed_precedence_breaks_at_lowest_first() {
 #[test]
 fn mixed_precedence_breaks_inner_level_when_narrower() {
     // Narrower still: the `&&` group also breaks, while each `==` unit stays on one line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 flag = aLongName == bLongName
@@ -2644,7 +2653,7 @@ fn mixed_precedence_breaks_inner_level_when_narrower() {
                     || eLongName == fLongName;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}",
         40,
@@ -2655,7 +2664,7 @@ fn mixed_precedence_breaks_inner_level_when_narrower() {
 #[test]
 fn multiplicative_stays_a_unit_when_additive_breaks() {
     // Breaks at `+` only; the higher-precedence `*` run rides along as one unit.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 total = alphaValue
@@ -2663,7 +2672,7 @@ fn multiplicative_stays_a_unit_when_additive_breaks() {
                     + epsilonValue;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){total=alphaValue+betaValue*gammaValue*deltaValue+epsilonValue;}}",
         55,
@@ -2674,7 +2683,7 @@ fn multiplicative_stays_a_unit_when_additive_breaks() {
 #[test]
 fn shift_operators_stay_fused_when_wrapped_front() {
     // `>>` / `>>>` are runs of `>` tokens; they stay fused at the front of their lines.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 mask = firstLongValue
@@ -2682,7 +2691,7 @@ fn shift_operators_stay_fused_when_wrapped_front() {
                     >>> thirdShiftAmount;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){mask=firstLongValue>>secondShiftAmount>>>thirdShiftAmount;}}",
         40,
@@ -2692,7 +2701,7 @@ fn shift_operators_stay_fused_when_wrapped_front() {
 
 #[test]
 fn shift_operators_stay_fused_when_wrapped_back() {
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 mask = firstLongValue >>
@@ -2700,7 +2709,7 @@ fn shift_operators_stay_fused_when_wrapped_back() {
                     thirdShiftAmount;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){mask=firstLongValue>>secondShiftAmount>>>thirdShiftAmount;}}",
         40,
@@ -2710,14 +2719,14 @@ fn shift_operators_stay_fused_when_wrapped_back() {
 
 #[test]
 fn instanceof_wraps_like_any_operator() {
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 flag = someObjectReference
                     instanceof SomeVeryLongGenericTypeName;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){flag=someObjectReference instanceof SomeVeryLongGenericTypeName;}}",
         40,
@@ -2728,14 +2737,14 @@ fn instanceof_wraps_like_any_operator() {
 #[test]
 fn paren_operand_stays_a_unit() {
     // Parenthesized operands are opaque units; the break lands on the `*` between them.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 area = (widthValue + paddingValue)
                     * (heightValue + marginValue);
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop(
         "class A{void m(){area=(widthValue+paddingValue)*(heightValue+marginValue);}}",
         45,
@@ -2749,7 +2758,7 @@ fn comment_on_operator_forces_break_front() {
     // glued to its `+`.
     let src = "class A{void m(){x = a + // why\nb;}}";
     let once = fmt_binop(src, 100, BinopSeparator::Front);
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 x = a
@@ -2757,7 +2766,7 @@ fn comment_on_operator_forces_break_front() {
                     b;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&once);
     assert_eq!(once, fmt_binop(&once, 100, BinopSeparator::Front));
 }
@@ -2766,14 +2775,14 @@ fn comment_on_operator_forces_break_front() {
 fn comment_on_operator_forces_break_back() {
     let src = "class A{void m(){x = a + // why\nb;}}";
     let once = fmt_binop(src, 100, BinopSeparator::Back);
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 x = a + // why
                     b;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&once);
     assert_eq!(once, fmt_binop(&once, 100, BinopSeparator::Back));
 }
@@ -2786,7 +2795,7 @@ fn binary_inside_broken_arg_list_refits_at_its_column() {
         fn_call_width: 10,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 process(
@@ -2795,7 +2804,7 @@ fn binary_inside_broken_arg_list_refits_at_its_column() {
                 );
             }
         }
-    "#]]
+    "]]
     .assert_eq(
         &format_source(
             "class A{void m(){process(alphaValue+betaValue,gammaValue);}}",
@@ -2837,14 +2846,14 @@ fn compressed_layout_packs_operands_per_line() {
     // compressed`: instead of one operand per line, operands pack up to max-width(100) and only
     // the overflowing operand starts a new line, the operator leading it (google-java-format's
     // layout).
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 result = alphaOperandName + betaOperandName + gammaOperandName + deltaOperandName
                     + epsilonOperandName;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop_layout(
         "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
         100,
@@ -2857,14 +2866,14 @@ fn compressed_layout_packs_operands_per_line() {
 fn compressed_layout_packs_each_precedence_level() {
     // Mixed precedence: the outer `||` and the inner `&&` each fill independently; an `==` unit
     // that fits stays whole on its line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 flag = aLongName == bLongName && cLongName == dLongName
                     || eLongName == fLongName;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_binop_layout(
         "class A{void m(){flag=aLongName==bLongName&&cLongName==dLongName||eLongName==fLongName;}}",
         65,
@@ -2900,6 +2909,7 @@ fn fmt_overflow(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_overflow(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_overflow(src));
 }
@@ -2909,7 +2919,7 @@ fn overflow_off_by_default_keeps_vertical_layout() {
     // Without the option a multi-line trailing lambda still breaks the list all-or-nothing.
     check(
         "class A{void m(){executor.submit(task,()->{run();});}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     executor.submit(
@@ -2920,7 +2930,7 @@ fn overflow_off_by_default_keeps_vertical_layout() {
                     );
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -2928,7 +2938,7 @@ fn overflow_off_by_default_keeps_vertical_layout() {
 fn overflow_hangs_trailing_block_lambda() {
     check_overflow(
         "class A{void m(){executor.submit(task,()->{run();});}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     executor.submit(task, () -> {
@@ -2936,7 +2946,7 @@ fn overflow_hangs_trailing_block_lambda() {
                     });
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -2944,7 +2954,7 @@ fn overflow_hangs_trailing_block_lambda() {
 fn overflow_hangs_sole_lambda_argument() {
     check_overflow(
         "class A{void m(){run(()->{go();});}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     run(() -> {
@@ -2952,7 +2962,7 @@ fn overflow_hangs_sole_lambda_argument() {
                     });
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -2960,7 +2970,7 @@ fn overflow_hangs_sole_lambda_argument() {
 fn overflow_hangs_trailing_anonymous_class() {
     check_overflow(
         "class A{void m(){register(name,new Listener(){public void on(){go();}});}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     register(name, new Listener() {
@@ -2970,7 +2980,7 @@ fn overflow_hangs_trailing_anonymous_class() {
                     });
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -2982,7 +2992,7 @@ fn overflow_hangs_trailing_array_creation() {
         array_width: 10,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 fill(buf, new int[] {
@@ -2992,7 +3002,7 @@ fn overflow_hangs_trailing_array_creation() {
                 });
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(
         "class A{void m(){fill(buf,new int[]{alpha,beta,gamma});}}",
         &cfg,
@@ -3009,7 +3019,7 @@ fn overflow_array_honors_vertical_trailing_comma() {
         trailing_comma: TrailingComma::Vertical,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 fill(buf, new int[] {
@@ -3019,7 +3029,7 @@ fn overflow_array_honors_vertical_trailing_comma() {
                 });
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(
         "class A{void m(){fill(buf,new int[]{alpha,beta,gamma});}}",
         &cfg,
@@ -3033,13 +3043,13 @@ fn overflow_hangs_annotation_array() {
         array_width: 10,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         @Foo({
             alpha,
             beta,
             gamma
         }) class A {}
-    "#]]
+    "]]
     .assert_eq(&fmt_with("@Foo({alpha,beta,gamma}) class A{}", &cfg));
 }
 
@@ -3050,13 +3060,13 @@ fn overflow_hangs_annotation_pair_value() {
         array_width: 10,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         @Foo(key = {
             alpha,
             beta,
             gamma
         }) class A {}
-    "#]]
+    "]]
     .assert_eq(&fmt_with("@Foo(key={alpha,beta,gamma}) class A{}", &cfg));
 }
 
@@ -3067,7 +3077,7 @@ fn overflow_falls_back_when_earlier_argument_is_multiline() {
     let src = "class A{void m(){foo(()->{a();},()->{b();});}}";
     let overflowed = fmt_overflow(src);
     assert_eq!(overflowed, fmt(src));
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 foo(
@@ -3080,7 +3090,7 @@ fn overflow_falls_back_when_earlier_argument_is_multiline() {
                 );
             }
         }
-    "#]]
+    "]]
     .assert_eq(&overflowed);
 }
 
@@ -3093,7 +3103,7 @@ fn overflow_falls_back_past_fn_call_width() {
         fn_call_width: 16,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 submit(
@@ -3104,7 +3114,7 @@ fn overflow_falls_back_past_fn_call_width() {
                 );
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(
         "class A{void m(){submit(taskNameLong,()->{run();});}}",
         &cfg,
@@ -3117,7 +3127,7 @@ fn overflow_falls_back_on_comment_between_arguments() {
     // the comment is preserved.
     check_overflow(
         "class A{void m(){foo(a, // note\n()->{run();});}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     foo(
@@ -3128,7 +3138,7 @@ fn overflow_falls_back_on_comment_between_arguments() {
                     );
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3140,13 +3150,13 @@ fn overflow_leaves_expression_bodied_lambda_alone() {
     assert_eq!(fmt_overflow(short), fmt(short));
     check_overflow(
         short,
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     foo(a, x -> x + 1);
                 }
             }
-        "#]],
+        "]],
     );
     let long = "class A{void m(){perform(aVeryLongArgumentName,anotherLongArgumentName,x->aVeryLongCallTarget(x));}}";
     assert_eq!(fmt_overflow(long), fmt(long));
@@ -3159,7 +3169,7 @@ fn overflow_ignores_non_trailing_lambda() {
     assert_eq!(fmt_overflow(src), fmt(src));
     check_overflow(
         src,
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     foo(
@@ -3170,7 +3180,7 @@ fn overflow_ignores_non_trailing_lambda() {
                     );
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3179,7 +3189,7 @@ fn overflow_nests() {
     // A hanging lambda body may itself contain an overflowing call.
     check_overflow(
         "class A{void m(){outer(a,()->{inner(b,()->{run();});});}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     outer(a, () -> {
@@ -3189,7 +3199,7 @@ fn overflow_nests() {
                     });
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3199,7 +3209,7 @@ fn overflow_applies_within_broken_chain_links() {
     // applies within each link, hugging the lambda to its call.
     check_overflow(
         "class A{void m(){r=list.stream().map(x->{return x;}).collect(c);}}",
-        expect![[r#"
+        expect![[r"
             class A {
                 void m() {
                     r = list.stream()
@@ -3209,7 +3219,7 @@ fn overflow_applies_within_broken_chain_links() {
                         .collect(c);
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3246,20 +3256,20 @@ fn fmt_ternary_back(src: &str, width: usize) -> String {
 fn ternary_within_width_stays_flat() {
     // A ternary whose flat width fits the budget keeps the inline form, with the `:` spacing
     // following the colon options (default: no space before, one after).
-    expect![[r#"
+    expect![[r"
         class C {
             int m() {
                 return x > 0 ? 1: 2;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ternary("class C{int m(){return x>0?1:2;}}", 50));
 }
 
 #[test]
 fn ternary_exceeding_width_wraps_front() {
     // Past the budget the ternary wraps, `?` and `:` leading the continuation lines (front).
-    expect![[r#"
+    expect![[r"
         class C {
             int m() {
                 return someCondition
@@ -3267,7 +3277,7 @@ fn ternary_exceeding_width_wraps_front() {
                     : theElseBranchValue;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ternary(
         "class C{int m(){return someCondition?thisIsARatherLongThenExpression:theElseBranchValue;}}",
         50,
@@ -3277,7 +3287,7 @@ fn ternary_exceeding_width_wraps_front() {
 #[test]
 fn ternary_exceeding_width_wraps_back() {
     // The same source under `binop-separator = back`: `?` and `:` trail the broken lines.
-    expect![[r#"
+    expect![[r"
         class C {
             int m() {
                 return someCondition ?
@@ -3285,7 +3295,7 @@ fn ternary_exceeding_width_wraps_back() {
                     theElseBranchValue;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ternary_back(
         "class C{int m(){return someCondition?thisIsARatherLongThenExpression:theElseBranchValue;}}",
         50,
@@ -3295,7 +3305,7 @@ fn ternary_exceeding_width_wraps_back() {
 #[test]
 fn ternary_zero_width_always_wraps() {
     // A width of `0` forces even a tiny ternary to wrap.
-    expect![[r#"
+    expect![[r"
         class C {
             int m() {
                 return x > 0
@@ -3303,7 +3313,7 @@ fn ternary_zero_width_always_wraps() {
                     : 2;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ternary("class C{int m(){return x>0?1:2;}}", 0));
 }
 
@@ -3315,7 +3325,7 @@ fn ternary_wrap_respects_colon_spacing() {
         space_before_colon: true,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             int m() {
                 return x > 0
@@ -3323,7 +3333,7 @@ fn ternary_wrap_respects_colon_spacing() {
                     : 2;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with("class C{int m(){return x>0?1:2;}}", &cfg));
 }
 
@@ -3331,7 +3341,7 @@ fn ternary_wrap_respects_colon_spacing() {
 fn ternary_nested_wraps_independently() {
     // A nested ternary (the else branch is itself a ternary) is its own group; each wraps when
     // it exceeds the budget.
-    expect![[r#"
+    expect![[r"
         class C {
             int m() {
                 return firstCondition
@@ -3341,7 +3351,7 @@ fn ternary_nested_wraps_independently() {
                         : thirdFallbackValue;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_ternary(
         "class C{int m(){return firstCondition?firstValueExpression:secondConditionHere?secondValueExpression:thirdFallbackValue;}}",
         50,
@@ -3458,13 +3468,13 @@ fn colon_method_reference_is_never_affected() {
     // fusion-safety net keeps a ternary colon from joining a following `::` into `:::`.
     check(
         "class C{void m(){var r=cond?Foo::bar:Baz::qux;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     var r = cond ? Foo::bar: Baz::qux;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3526,14 +3536,14 @@ fn operator_colon_hugs_an_unnamed_for_each_variable() {
     // google-java-format spaces a named for-each colon (`for (Order a : ys)`) but hugs the colon
     // of an unnamed `_` loop variable (`for (Order _: xs)`); the `UNDERSCORE` token before the
     // colon suppresses the space even with `space-around-operator-colon` on.
-    expect![[r#"
+    expect![[r"
         class C {
             void m() {
                 for (Order _: xs) {}
                 for (Order a : ys) {}
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_operator_colon(
         "class C{void m(){for(Order _:xs){}for(Order a:ys){}}}",
     ));
@@ -3566,7 +3576,7 @@ const TYPE_PUNCT_SRC: &str = "class C<T extends A & B>{<U extends X & Y & Z> voi
 #[test]
 fn type_punctuation_density_wide_keeps_spaces() {
     // `wide` (the default) keeps a space around every intersection `&`, matching prior behavior.
-    expect![[r#"
+    expect![[r"
         class C<T extends A & B> {
             <U extends X & Y & Z> void m() {
                 Object o = (A & B) x;
@@ -3574,7 +3584,7 @@ fn type_punctuation_density_wide_keeps_spaces() {
                 boolean f = (p && q) & r;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_type_punct(
         TYPE_PUNCT_SRC,
         TypePunctuationDensity::Wide,
@@ -3585,7 +3595,7 @@ fn type_punctuation_density_wide_keeps_spaces() {
 fn type_punctuation_density_compressed_tightens_only_type_amp() {
     // `compressed` removes the space around `&` in type-parameter bounds and cast
     // intersections, but never touches the bitwise-AND operator (`a & b`, `(p && q) & r`).
-    expect![[r#"
+    expect![[r"
         class C<T extends A&B> {
             <U extends X&Y&Z> void m() {
                 Object o = (A&B) x;
@@ -3593,7 +3603,7 @@ fn type_punctuation_density_compressed_tightens_only_type_amp() {
                 boolean f = (p && q) & r;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_type_punct(
         TYPE_PUNCT_SRC,
         TypePunctuationDensity::Compressed,
@@ -3642,18 +3652,18 @@ const PARAMS_SRC: &str = "class A{void m(int alpha,String beta,long gamma,double
 #[test]
 fn fn_params_tall_keeps_one_line_when_it_fits() {
     // Tall (the default): a parameter list that fits stays on one line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(int alpha, String beta, long gamma, double delta) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params(PARAMS_SRC, FnParamsLayout::Tall));
 }
 
 #[test]
 fn fn_params_tall_breaks_all_or_nothing() {
     // Tall under a narrow width: all-or-nothing, one parameter per line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(
                 int alpha,
@@ -3662,14 +3672,14 @@ fn fn_params_tall_breaks_all_or_nothing() {
                 double delta
             ) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params_narrow(PARAMS_SRC, FnParamsLayout::Tall, 40));
 }
 
 #[test]
 fn fn_params_vertical_breaks_even_when_it_fits() {
     // Vertical: one parameter per line even though the list would fit on one line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(
                 int alpha,
@@ -3678,20 +3688,20 @@ fn fn_params_vertical_breaks_even_when_it_fits() {
                 double delta
             ) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params(PARAMS_SRC, FnParamsLayout::Vertical));
 }
 
 #[test]
 fn fn_params_vertical_single_param_still_breaks() {
     // A single parameter still goes on its own line under Vertical.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(
                 int only
             ) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params(
         "class A{void m(int only){}}",
         FnParamsLayout::Vertical,
@@ -3701,25 +3711,25 @@ fn fn_params_vertical_single_param_still_breaks() {
 #[test]
 fn fn_params_vertical_empty_list_stays_inline() {
     // An empty parameter list has nothing to break: it stays `()`.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params("class A{void m(){}}", FnParamsLayout::Vertical));
 }
 
 #[test]
 fn fn_params_compressed_packs_as_many_as_fit() {
     // Compressed under a narrow width: pack parameters per line, wrapping at the width.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(
                 int alpha, String beta,
                 long gamma, double delta
             ) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params_narrow(
         PARAMS_SRC,
         FnParamsLayout::Compressed,
@@ -3730,18 +3740,18 @@ fn fn_params_compressed_packs_as_many_as_fit() {
 #[test]
 fn fn_params_compressed_keeps_one_line_when_it_fits() {
     // Compressed that fits stays on one line, just like Tall.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(int alpha, String beta, long gamma, double delta) {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params(PARAMS_SRC, FnParamsLayout::Compressed));
 }
 
 #[test]
 fn fn_params_layout_only_affects_params_not_call_args() {
     // Vertical breaks the *parameter* list but leaves a call's *argument* list inline.
-    expect![[r#"
+    expect![[r"
         class A {
             void m(
                 int a,
@@ -3750,7 +3760,7 @@ fn fn_params_layout_only_affects_params_not_call_args() {
                 f(x, y, z);
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_params(
         "class A{void m(int a,int b){f(x,y,z);}}",
         FnParamsLayout::Vertical,
@@ -3778,13 +3788,13 @@ fn type_use_annotation_inner_type() {
     // JSR 308 inner-type annotation: the `.` hugs the following annotation (`Outer.@A Inner`).
     check(
         "class C{Outer. @A Inner f(){return null;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 Outer.@A Inner f() {
                     return null;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3793,13 +3803,13 @@ fn type_use_annotation_wildcard() {
     // JSR 308 annotation before a wildcard `?`.
     check(
         "class C{MyList<@A ?> f(){return null;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 MyList<@A ?> f() {
                     return null;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3808,11 +3818,11 @@ fn type_use_annotation_varargs() {
     // JSR 308 annotation on a varargs element type (`Object @A...`).
     check(
         "class C{void m(Object @A ... xs){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m(Object @A... xs) {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3821,13 +3831,13 @@ fn type_use_annotation_cast() {
     // JSR 308 annotated type in a cast (`(@A Long) y`).
     check(
         "class C{Object m(){return (@A Long) y;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 Object m() {
                     return (@A Long) y;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3836,12 +3846,12 @@ fn non_sealed_modifier_renders_tight() {
     // `non-sealed` is one keyword: its `non` `-` `sealed` tokens stay tight (not `non - sealed`).
     check(
         "class C{public sealed class S permits N{}non-sealed class N extends S{}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 public sealed class S permits N {}
                 non-sealed class N extends S {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3856,6 +3866,7 @@ fn fmt_reorder_mods(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_reorder_mods(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_reorder_mods(src));
 }
@@ -3864,12 +3875,12 @@ fn check_reorder_mods(src: &str, expected: Expect) {
 fn reorder_modifiers_sorts_type_method_and_field() {
     check_reorder_mods(
         "final public class C{static private final int x=0;synchronized public void m(){}}",
-        expect![[r#"
+        expect![[r"
             public final class C {
                 private static final int x = 0;
                 public synchronized void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3877,11 +3888,11 @@ fn reorder_modifiers_sorts_type_method_and_field() {
 fn reorder_modifiers_hoists_annotations_to_front() {
     check_reorder_mods(
         "class C{public @Override static void m(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Override public static void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3892,11 +3903,11 @@ fn reorder_modifiers_keeps_relative_annotation_order() {
     // place after the sorted keywords instead of being hoisted.
     check_reorder_mods(
         "class C{static @A public @B int x=0;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @A public static @B int x = 0;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3904,12 +3915,12 @@ fn reorder_modifiers_keeps_relative_annotation_order() {
 fn reorder_modifiers_orders_sealed_and_non_sealed() {
     check_reorder_mods(
         "class C{final sealed class S{}final non-sealed class N{}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 sealed final class S {}
                 non-sealed final class N {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3919,13 +3930,13 @@ fn reorder_modifiers_keeps_attached_comment_glued() {
     // `// keep` comment anchored to `static` follows `static` past `public`.
     check_reorder_mods(
         "class C{\n// keep\nstatic public int x=0;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 public
                 // keep
                 static int x = 0;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3934,11 +3945,11 @@ fn reorder_modifiers_off_by_default_preserves_order() {
     // With the option off (the default), the source modifier order is preserved exactly.
     check(
         "class C{final public static int x=0;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 final public static int x = 0;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -3989,6 +4000,7 @@ fn fmt_annotation_placement(src: &str, placement: AnnotationPlacement) -> String
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_expanded(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_annotation_placement(
         src,
@@ -4000,11 +4012,11 @@ fn check_expanded(src: &str, expected: Expect) {
 fn annotation_placement_compact_keeps_annotations_inline() {
     // `compact` (the default) reproduces the prior behavior: annotations are pulled inline onto
     // the declaration's line, collapsing the source's line break.
-    expect![[r#"
+    expect![[r"
         @Foo @Bar class D {
             @Inject private int x;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_annotation_placement(
         "@Foo\n@Bar class D{@Inject private int x;}",
         AnnotationPlacement::Compact,
@@ -4015,11 +4027,11 @@ fn annotation_placement_compact_keeps_annotations_inline() {
 fn annotation_placement_expanded_breaks_type_annotations() {
     check_expanded(
         "@Foo @Bar class C{}",
-        expect![[r#"
+        expect![[r"
             @Foo
             @Bar
             class C {}
-        "#]],
+        "]],
     );
 }
 
@@ -4027,12 +4039,12 @@ fn annotation_placement_expanded_breaks_type_annotations() {
 fn annotation_placement_expanded_breaks_method_annotation() {
     check_expanded(
         "class C{@Override public void m(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Override
                 public void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4040,12 +4052,12 @@ fn annotation_placement_expanded_breaks_method_annotation() {
 fn annotation_placement_expanded_breaks_field_annotation() {
     check_expanded(
         "class C{@Inject private int x;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Inject
                 private int x;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4057,12 +4069,12 @@ fn annotation_placement_expanded_breaks_lone_marker() {
     // resolve — so only annotations *after* a keyword are recognized as type-use here.)
     check_expanded(
         "class C{@Override void m(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Override
                 void m() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4088,12 +4100,12 @@ fn annotation_placement_expanded_keeps_parameter_annotation_inline() {
     // the method's own leading declaration annotation (`@Override`, before `public`) breaks.
     check_expanded(
         "class C{@Override public void m(@NonNull String s){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Override
                 public void m(@NonNull String s) {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4102,13 +4114,13 @@ fn annotation_placement_expanded_keeps_type_use_annotation_inline() {
     // A type-use annotation lives in the type, not in the leading MODIFIERS, so it is unaffected.
     check_expanded(
         "class C{Outer. @A Inner f(){return null;}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 Outer.@A Inner f() {
                     return null;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4118,11 +4130,11 @@ fn annotation_placement_expanded_keeps_interleaved_annotation_inline() {
     // contiguous run breaks. Here the run is empty, so nothing breaks.
     check_expanded(
         "class C{public @A static int x;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 public @A static int x;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4152,12 +4164,12 @@ fn annotation_placement_expanded_composes_with_reorder_modifiers() {
         annotation_placement: AnnotationPlacement::Expanded,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             @Foo
             public static @Bar int x;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with("class C{static @Foo public @Bar int x;}", &cfg));
 }
 
@@ -4170,12 +4182,12 @@ fn annotation_placement_expanded_keeps_single_line_body() {
         annotation_placement: AnnotationPlacement::Expanded,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class C {
             @Override
             public int m() { return 1; }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_with(
         "class C{@Override public int m(){return 1;}}",
         &cfg,
@@ -4214,11 +4226,11 @@ fn type_use_annotation_after_keyword_stays_inline() {
     // and stays inline (google-java-format keeps `public @Nullable Object foo()`).
     check_expanded(
         "class C{public @Nullable Object foo(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 public @Nullable Object foo() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4228,12 +4240,12 @@ fn declaration_annotation_breaks_while_type_use_stays_inline() {
     // follows it, directly before the type (type-use → inline).
     check_expanded(
         "class C{@Deprecated public @Nullable Object foo(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Deprecated
                 public @Nullable Object foo() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4243,13 +4255,13 @@ fn constructor_annotations_break_having_no_type() {
     // breaks onto its own line (no trailing type-use run).
     check_expanded(
         "class C{@Deprecated @Nullable C(){}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 @Deprecated
                 @Nullable
                 C() {}
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4257,12 +4269,12 @@ fn constructor_annotations_break_having_no_type() {
 fn reorder_and_expanded_keep_type_use_annotation_in_place() {
     // The google-java-format preset (reorder + expanded): `@Deprecated` breaks, the keyword stays
     // canonical, and the type-use `@Nullable` is neither hoisted nor broken.
-    expect![[r#"
+    expect![[r"
         class C {
             @Deprecated
             public @Nullable Object foo() {}
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_reorder_expanded(
         "class C{@Deprecated public @Nullable Object foo(){}}",
     ));
@@ -4274,11 +4286,11 @@ fn reorder_keeps_type_use_annotation_inline_compact() {
     // kept in place rather than hoisted ahead of the keyword (cf. google-java-format's B20577626).
     check_reorder_mods(
         "class C{private @Mock GsaConfigFlags mGsaConfig;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 private @Mock GsaConfigFlags mGsaConfig;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4300,7 +4312,7 @@ const HEX_SRC: &str = "class C{int a=0xCafe;int b=0XdeadL;long c=0xDEAD_beefl;do
 #[test]
 fn hex_literal_case_preserve_keeps_source_case() {
     // The default leaves every literal exactly as written.
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 0xCafe;
             int b = 0XdeadL;
@@ -4312,7 +4324,7 @@ fn hex_literal_case_preserve_keeps_source_case() {
             int h = 0b1010;
             double i = 3.14F;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Preserve));
 }
 
@@ -4320,7 +4332,7 @@ fn hex_literal_case_preserve_keeps_source_case() {
 fn hex_literal_case_upper_uppercases_only_hex_digits() {
     // Hex mantissa digits become upper case; the `0x`/`0X` prefix, the `p` exponent, and the
     // `l`/`f`/`d` suffix keep their case. Non-hex literals are untouched.
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 0xCAFE;
             int b = 0XDEADL;
@@ -4332,14 +4344,14 @@ fn hex_literal_case_upper_uppercases_only_hex_digits() {
             int h = 0b1010;
             double i = 3.14F;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Upper));
 }
 
 #[test]
 fn hex_literal_case_lower_lowercases_only_hex_digits() {
     // Mirror image of the upper-case test: only the hex mantissa digits change.
-    expect![[r#"
+    expect![[r"
         class C {
             int a = 0xcafe;
             int b = 0XdeadL;
@@ -4351,7 +4363,7 @@ fn hex_literal_case_lower_lowercases_only_hex_digits() {
             int h = 0b1010;
             double i = 3.14F;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_hex(HEX_SRC, HexLiteralCase::Lower));
 }
 
@@ -4390,7 +4402,7 @@ const FLOAT_SRC: &str = "class C{double a=1.0;double b=1.;double c=1.00;double d
 #[test]
 fn float_literal_trailing_zero_preserve_keeps_source() {
     // The default leaves every literal exactly as written.
-    expect![[r#"
+    expect![[r"
         class C {
             double a = 1.0;
             double b = 1.;
@@ -4405,7 +4417,7 @@ fn float_literal_trailing_zero_preserve_keeps_source() {
             double k = 0x1.0p3;
             int l = 123;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Preserve));
 }
 
@@ -4414,7 +4426,7 @@ fn float_literal_trailing_zero_always_adds_the_zero() {
     // Every empty-fraction decimal float gains a single trailing zero (`1.` → `1.0`,
     // `1.f` → `1.0f`); fractions that already have a digit, dotless / leading-dot / hex floats,
     // and integers are untouched.
-    expect![[r#"
+    expect![[r"
         class C {
             double a = 1.0;
             double b = 1.0;
@@ -4429,7 +4441,7 @@ fn float_literal_trailing_zero_always_adds_the_zero() {
             double k = 0x1.0p3;
             int l = 123;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Always));
 }
 
@@ -4438,7 +4450,7 @@ fn float_literal_trailing_zero_never_strips_the_zero() {
     // Every all-zero fraction is stripped to a bare dot (`1.0` / `1.00` → `1.`, `1.0f` → `1.f`,
     // `1.0e10` → `1.e10`); non-zero fractions, the leading-dot `.5`, dotless / hex floats, and
     // integers are untouched.
-    expect![[r#"
+    expect![[r"
         class C {
             double a = 1.;
             double b = 1.;
@@ -4453,7 +4465,7 @@ fn float_literal_trailing_zero_never_strips_the_zero() {
             double k = 0x1.0p3;
             int l = 123;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_float(FLOAT_SRC, FloatLiteralTrailingZero::Never));
 }
 
@@ -4492,7 +4504,7 @@ const SUFFIX_SRC: &str = "class C{long a=123l;long b=123L;long c=0xCAFEl;float d
 #[test]
 fn literal_suffix_case_preserve_keeps_source() {
     // The default leaves every literal exactly as written.
-    expect![[r#"
+    expect![[r"
         class C {
             long a = 123l;
             long b = 123L;
@@ -4506,7 +4518,7 @@ fn literal_suffix_case_preserve_keeps_source() {
             int j = 0xabcdef;
             double k = 1.5;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Preserve));
 }
 
@@ -4515,7 +4527,7 @@ fn literal_suffix_case_upper_uppercases_only_the_suffix() {
     // Every trailing type-suffix letter becomes upper case (`123l` → `123L`, `1.5f` → `1.5F`).
     // The hex digits keep their case (`hex-literal-case` is off), the unsuffixed literals are
     // untouched, and a hex integer's trailing `f` digit (`0xabcdef`) is *not* a suffix.
-    expect![[r#"
+    expect![[r"
         class C {
             long a = 123L;
             long b = 123L;
@@ -4529,7 +4541,7 @@ fn literal_suffix_case_upper_uppercases_only_the_suffix() {
             int j = 0xabcdef;
             double k = 1.5;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Upper));
 }
 
@@ -4537,7 +4549,7 @@ fn literal_suffix_case_upper_uppercases_only_the_suffix() {
 fn literal_suffix_case_lower_lowercases_only_the_suffix() {
     // Mirror image of the upper-case test: only the trailing suffix letter changes, and the
     // `0xabcdef` digit `f` stays put.
-    expect![[r#"
+    expect![[r"
         class C {
             long a = 123l;
             long b = 123l;
@@ -4551,7 +4563,7 @@ fn literal_suffix_case_lower_lowercases_only_the_suffix() {
             int j = 0xabcdef;
             double k = 1.5;
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_suffix(SUFFIX_SRC, LiteralSuffixCase::Lower));
 }
 
@@ -4600,7 +4612,7 @@ fn fmt_cont_narrow(src: &str, n: usize, max_width: usize) -> String {
 fn continuation_indent_wraps_binary_at_configured_width() {
     // The statement sits at column 8 (two block levels); wrapped operands hang 8 columns past it
     // (column 16) instead of the 4-column block indent.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 result = alphaOperandName
@@ -4610,7 +4622,7 @@ fn continuation_indent_wraps_binary_at_configured_width() {
                         + epsilonOperandName;
             }
         }
-    "#]].assert_eq(&fmt_cont(
+    "]].assert_eq(&fmt_cont(
         "class A{void m(){result=alphaOperandName+betaOperandName+gammaOperandName+deltaOperandName+epsilonOperandName;}}",
         8,
     ));
@@ -4619,7 +4631,7 @@ fn continuation_indent_wraps_binary_at_configured_width() {
 #[test]
 fn continuation_indent_wraps_method_chain() {
     // Each wrapped `.call()` hangs `continuation-indent` (8) past the receiver line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 source.stream()
@@ -4628,7 +4640,7 @@ fn continuation_indent_wraps_method_chain() {
                         .collect(collector);
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_cont_narrow(
         "class A{void m(){source.stream().filter(predicate).map(mapper).collect(collector);}}",
         8,
@@ -4639,7 +4651,7 @@ fn continuation_indent_wraps_method_chain() {
 #[test]
 fn continuation_indent_wraps_call_arguments() {
     // Wrapped arguments hang `continuation-indent` (8) past the call line.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 compute(
@@ -4651,7 +4663,7 @@ fn continuation_indent_wraps_call_arguments() {
                 );
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_cont_narrow(
         "class A{void m(){compute(alphaArg,betaArg,gammaArg,deltaArg,epsilonArg);}}",
         8,
@@ -4664,7 +4676,7 @@ fn continuation_indent_wraps_parameters_but_not_body() {
     // The wrapped parameters hang 8 past the method header (column 4 + 8 = 12), while the body
     // statement keeps the 4-column block indent (column 8). This is the block-vs-continuation
     // split.
-    expect![[r#"
+    expect![[r"
         class A {
             void method(
                     int alpha,
@@ -4675,7 +4687,7 @@ fn continuation_indent_wraps_parameters_but_not_body() {
                 int x = 1;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_cont_narrow(
         "class A{void method(int alpha,String beta,long gamma,double delta){int x=1;}}",
         8,
@@ -4686,7 +4698,7 @@ fn continuation_indent_wraps_parameters_but_not_body() {
 #[test]
 fn continuation_indent_wraps_ternary() {
     // The `?` / `:` continuation lines hang `continuation-indent` (8) past the condition.
-    expect![[r#"
+    expect![[r"
         class A {
             void m() {
                 int v = conditionExpr
@@ -4694,7 +4706,7 @@ fn continuation_indent_wraps_ternary() {
                         : elseValueExpression;
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_cont_narrow(
         "class A{void m(){int v=conditionExpr?thenValueExpression:elseValueExpression;}}",
         8,
@@ -4707,7 +4719,7 @@ fn continuation_indent_composes_block_and_continuation() {
     // Three distinct indents in one snapshot: wrapped params hang 8 past the header (col 12),
     // body statements use the 4-column block indent (col 8), and the body's wrapped binary hangs
     // a further 8 (col 16).
-    expect![[r#"
+    expect![[r"
         class A {
             int method(
                     int alphaParam,
@@ -4721,7 +4733,7 @@ fn continuation_indent_composes_block_and_continuation() {
                         + betaParam;
             }
         }
-    "#]].assert_eq(&fmt_cont_narrow(
+    "]].assert_eq(&fmt_cont_narrow(
         "class A{int method(int alphaParam,int betaParam,int gammaParam){return alphaParam+betaParam+gammaParam+alphaParam+betaParam;}}",
         8,
         40,
@@ -4764,7 +4776,7 @@ fn continuation_indent_ignored_in_tab_style() {
             .any(|l| l.starts_with('\t') && l.trim_start_matches('\t').starts_with(' ')),
         "tab-style indentation must not mix tabs then spaces:\n{out}"
     );
-    expect![[r#"
+    expect![[r"
         class A {
         	void m() {
         		result = alphaOperandName
@@ -4772,7 +4784,7 @@ fn continuation_indent_ignored_in_tab_style() {
         			+ gammaName;
         	}
         }
-    "#]]
+    "]]
     .assert_eq(&out);
 }
 
@@ -4784,13 +4796,13 @@ fn parameter_comments_are_normalized_and_hugged() {
     // varargs `...` kept) and hugs the following argument on the same line.
     check_param_comments(
         "class C{void m(){f(/*a=*/1,/*xs...=*/2,/*  b  =  */3);}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     f(/* a= */ 1, /* xs...= */ 2, /* b= */ 3);
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4799,7 +4811,7 @@ fn parameter_comments_break_one_per_line_each_hugged() {
     // When the argument list wraps, each `/* name= */ value` group stays together on its line.
     check_param_comments(
         "class C{void m(){foo(/*alpha=*/111,/*beta=*/222,/*gamma=*/333,/*delta=*/444,/*epsilon=*/555);}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     foo(
@@ -4811,7 +4823,7 @@ fn parameter_comments_break_one_per_line_each_hugged() {
                     );
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4821,13 +4833,13 @@ fn parameter_comments_off_by_default_keeps_them_verbatim() {
     // line-suffix of the preceding token, exactly as before.
     check(
         "class C{void m(){f(/*a=*/1);}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     f(1); /*a=*/
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4838,14 +4850,14 @@ fn parameter_comments_leave_non_matching_comments_untouched() {
     // ordinary trailing placement.
     check_param_comments(
         "class C{void m(){f(/* hello */1,/* = */2,/*1=*/3);g(/** doc */4);}}",
-        expect![[r#"
+        expect![[r"
             class C {
                 void m() {
                     f(1, 2, 3); /* hello */ /* = */ /*1=*/
                     g(4); /** doc */
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4869,6 +4881,7 @@ fn fmt_inline_block(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_inline_block(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_inline_block(src));
 }
@@ -4877,13 +4890,13 @@ fn check_inline_block(src: &str, expected: Expect) {
 fn inline_block_comments_keeps_embedded_marker_in_place() {
     check_inline_block(
         "class N{void f(){java.lang./* @MarkerAnnotation */ String s=null;}}",
-        expect![[r#"
+        expect![[r"
             class N {
                 void f() {
                     java.lang./* @MarkerAnnotation */ String s = null;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4891,13 +4904,13 @@ fn inline_block_comments_keeps_embedded_marker_in_place() {
 fn inline_block_comments_hugs_consecutive_embedded_comments() {
     check_inline_block(
         "class N{void f(){java.lang./* a */ /* b */ String s=null;}}",
-        expect![[r#"
+        expect![[r"
             class N {
                 void f() {
                     java.lang./* a */ /* b */ String s = null;
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4908,11 +4921,11 @@ fn inline_block_comments_leaves_trailing_comment_relocated() {
     // the option on.
     check_inline_block(
         "class N{int x=1 /* x */ /* y */\n+2;}",
-        expect![[r#"
+        expect![[r"
             class N {
                 int x = 1 + 2; /* x */ /* y */
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4921,13 +4934,13 @@ fn inline_block_comments_off_relocates_embedded_marker() {
     // Default config (option off): the embedded comment is relocated to end of line.
     check(
         "class N{void f(){java.lang./* @MarkerAnnotation */ String s=null;}}",
-        expect![[r#"
+        expect![[r"
             class N {
                 void f() {
                     java.lang.String s = null; /* @MarkerAnnotation */
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4938,12 +4951,12 @@ fn inline_block_comments_keeps_comment_before_closing_brace() {
     // It must dangle on its own line inside the body rather than be dropped.
     check_inline_block(
         "class C{ int x; /* b */ }",
-        expect![[r#"
+        expect![[r"
             class C {
                 int x;
                 /* b */
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4953,11 +4966,11 @@ fn inline_block_comments_keeps_comment_in_empty_body() {
     // dropped when the empty body would otherwise collapse to `{}`.
     check_inline_block(
         "class C{/* b */}",
-        expect![[r#"
+        expect![[r"
             class C {
                 /* b */
             }
-        "#]],
+        "]],
     );
 }
 
@@ -4982,6 +4995,7 @@ fn fmt_tabular(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_tabular(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_tabular(src));
 }
@@ -4993,14 +5007,14 @@ fn tabular_array_initializer_preserves_grid() {
     // `TabularMixedSignInitializer` behavior.
     check_tabular(
         "public class T {\n  private static final double[] f = {\n    95.0, 75.0, -95.0, 75.0,\n    -95.0, 75.0, +95.0, 75.0\n  };\n}\n",
-        expect![[r#"
+        expect![[r"
             public class T {
               private static final double[] f = {
                 95.0, 75.0, -95.0, 75.0,
                 -95.0, 75.0, +95.0, 75.0
               };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5009,7 +5023,7 @@ fn tabular_array_initializer_with_short_final_row() {
     // The final row may hold fewer elements than the others.
     check_tabular(
         "class T {\n  int[] g = {\n    1, 2, 3,\n    4, 5, 6,\n    7, 8\n  };\n}\n",
-        expect![[r#"
+        expect![[r"
             class T {
               int[] g = {
                 1, 2, 3,
@@ -5017,7 +5031,7 @@ fn tabular_array_initializer_with_short_final_row() {
                 7, 8
               };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5026,11 +5040,11 @@ fn tabular_array_initializer_off_by_default_collapses() {
     // With the option off (the default), a grid initializer that fits collapses to one line.
     check(
         "class T {\n  int[] g = {\n    1, 2,\n    3, 4\n  };\n}\n",
-        expect![[r#"
+        expect![[r"
             class T {
                 int[] g = {1, 2, 3, 4};
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5040,11 +5054,11 @@ fn tabular_falls_back_for_irregular_rows() {
     // initializer wraps by width and collapses when it fits.
     check_tabular(
         "class T {\n  int[] g = {\n    1, 2,\n    3, 4, 5\n  };\n}\n",
-        expect![[r#"
+        expect![[r"
             class T {
               int[] g = {1, 2, 3, 4, 5};
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5053,11 +5067,11 @@ fn tabular_falls_back_for_single_row() {
     // A single source row is not a table; it collapses by width.
     check_tabular(
         "class T {\n  int[] g = {\n    1, 2, 3\n  };\n}\n",
-        expect![[r#"
+        expect![[r"
             class T {
               int[] g = {1, 2, 3};
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5067,14 +5081,14 @@ fn tabular_nested_outer_grid_inner_collapses() {
     // single-line arrays are not tables and stay on their row.
     check_tabular(
         "class T {\n  int[][] m = {\n    {1, 2},\n    {3, 4}\n  };\n}\n",
-        expect![[r#"
+        expect![[r"
             class T {
               int[][] m = {
                 {1, 2},
                 {3, 4}
               };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5099,6 +5113,7 @@ fn fmt_switch_nl(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_switch_nl(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_switch_nl(src));
 }
@@ -5128,7 +5143,7 @@ fn switch_on_new_line_breaks_field_initializer() {
     // A field initializer behaves the same as a local one.
     check_switch_nl(
         "class T { int x = switch (v) { case 1 -> 1; default -> 0; }; }",
-        expect![[r#"
+        expect![[r"
             class T {
               int x =
                   switch (v) {
@@ -5136,7 +5151,7 @@ fn switch_on_new_line_breaks_field_initializer() {
                     default -> 0;
                   };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5145,7 +5160,7 @@ fn switch_on_new_line_breaks_assignment() {
     // A plain assignment (`x = switch …`) breaks after `=` too, not just declarations.
     check_switch_nl(
         "class T { void f() { x = switch (v) { case 1 -> 1; default -> 0; }; } }",
-        expect![[r#"
+        expect![[r"
             class T {
               void f() {
                 x =
@@ -5155,7 +5170,7 @@ fn switch_on_new_line_breaks_assignment() {
                     };
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5182,14 +5197,14 @@ fn switch_on_new_line_off_by_default_keeps_inline() {
     // With the option off (the default), the switch rides on the `=` line.
     check(
         "class T { int x = switch (v) { case 1 -> 1; default -> 0; }; }",
-        expect![[r#"
+        expect![[r"
             class T {
                 int x = switch (v) {
                     case 1 -> 1;
                     default -> 0;
                 };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5218,6 +5233,7 @@ fn fmt_wrap_case(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_wrap_case(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_wrap_case(src));
 }
@@ -5232,7 +5248,7 @@ fn wrap_case_labels_breaks_long_arrow_list() {
     // short arm (the second one) stays on one line.
     check_wrap_case(
         WRAP_CASE_SRC,
-        expect![[r#"
+        expect![[r"
             class T {
               String m(MyEnum e) {
                 return switch (e) {
@@ -5247,7 +5263,7 @@ fn wrap_case_labels_breaks_long_arrow_list() {
                 };
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5256,7 +5272,7 @@ fn wrap_case_labels_keeps_short_arrow_list_flat() {
     // A short constant list that fits stays on one line (all-or-nothing group).
     check_wrap_case(
         "class T { String m(MyEnum e) { return switch (e) { case CASE_A, CASE_B -> {} }; } }",
-        expect![[r#"
+        expect![[r"
             class T {
               String m(MyEnum e) {
                 return switch (e) {
@@ -5264,7 +5280,7 @@ fn wrap_case_labels_keeps_short_arrow_list_flat() {
                 };
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5295,7 +5311,7 @@ fn wrap_case_labels_breaks_long_colon_group() {
     // body breaks below (the default `switch-case-body = always`).
     check_wrap_case(
         "class T { void m(MyEnum e) { switch (e) { case SOME_RATHER_LONG_NAME_1, SOME_RATHER_LONG_NAME_2, SOME_RATHER_LONG_NAME_3, SOME_RATHER_LONG_NAME_4, SOME_RATHER_LONG_NAME_5, SOME_RATHER_LONG_NAME_6: doStuff(); break; } } }",
-        expect![[r#"
+        expect![[r"
             class T {
               void m(MyEnum e) {
                 switch (e) {
@@ -5310,7 +5326,7 @@ fn wrap_case_labels_breaks_long_colon_group() {
                 }
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5320,7 +5336,7 @@ fn wrap_case_labels_keeps_guard_glued_to_constant() {
     // constant chunk, not a separate break point.
     check_wrap_case(
         "class T { int m(Object o) { return switch (o) { case Integer i when LOOOOOOOOOOONG_CONDITION_AAAA, Long l when LOOOOOOOOOOONG_CONDITION_BBBB -> 1; default -> 0; }; } }",
-        expect![[r#"
+        expect![[r"
             class T {
               int m(Object o) {
                 return switch (o) {
@@ -5331,7 +5347,7 @@ fn wrap_case_labels_keeps_guard_glued_to_constant() {
                 };
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5340,7 +5356,7 @@ fn wrap_case_labels_leaves_default_and_single_constant_untouched() {
     // A bare `default` and a single-constant `case` never wrap, even when long.
     check_wrap_case(
         "class T { int m(int x) { return switch (x) { case SOME_SINGLE_BUT_RATHER_LONG_CONSTANT_NAME_THAT_IS_VERY_LONG_INDEED_X -> 1; default -> 0; }; } }",
-        expect![[r#"
+        expect![[r"
             class T {
               int m(int x) {
                 return switch (x) {
@@ -5349,7 +5365,7 @@ fn wrap_case_labels_leaves_default_and_single_constant_untouched() {
                 };
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5363,7 +5379,7 @@ fn wrap_case_labels_off_by_default_keeps_flat() {
         wrap_case_labels: false,
         ..Config::default()
     };
-    expect![[r#"
+    expect![[r"
         class T {
           String m(MyEnum e) {
             return switch (e) {
@@ -5372,7 +5388,7 @@ fn wrap_case_labels_off_by_default_keeps_flat() {
             };
           }
         }
-    "#]]
+    "]]
         .assert_eq(&fmt_with(WRAP_CASE_SRC, &cfg));
 }
 
@@ -5452,7 +5468,7 @@ fn switch_arrow_block_body_with_arrow_comment_keeps_block_at_label() {
     // its `{` stays at the label level and it aligns its own `}` with the label.
     check_switch_nl(
         "class T { void main() {switch (e) {case A -> //c\n{ f(); } default -> { g(); }}}}",
-        expect![[r#"
+        expect![[r"
             class T {
               void main() {
                 switch (e) {
@@ -5466,7 +5482,7 @@ fn switch_arrow_block_body_with_arrow_comment_keeps_block_at_label() {
                 }
               }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5476,7 +5492,7 @@ fn switch_arrow_comment_free_body_unchanged() {
     // byte unchanged (the body rides on the arrow line).
     check_switch_nl(
         "class T { int x = switch (v) { case 1 -> 1; default -> 0; }; }",
-        expect![[r#"
+        expect![[r"
             class T {
               int x =
                   switch (v) {
@@ -5484,7 +5500,7 @@ fn switch_arrow_comment_free_body_unchanged() {
                     default -> 0;
                   };
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5518,7 +5534,7 @@ const LEGACY_SWITCH_SRC: &str = "class C{void m(int x){switch(x){case 0:return 0
 fn switch_case_body_always_breaks_and_indents() {
     // The default: every label on its own line, every body statement broken out and indented
     // one level (google-java-format's legacy-switch layout).
-    expect![[r#"
+    expect![[r"
         class C {
             void m(int x) {
                 switch (x) {
@@ -5536,7 +5552,7 @@ fn switch_case_body_always_breaks_and_indents() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_case_body(LEGACY_SWITCH_SRC, SwitchCaseBody::Always));
 }
 
@@ -5544,7 +5560,7 @@ fn switch_case_body_always_breaks_and_indents() {
 fn switch_case_body_single_line_keeps_single_statement_inline() {
     // A lone label with a single statement stays on the colon line; a multi-statement body and
     // a fall-through still break and indent.
-    expect![[r#"
+    expect![[r"
         class C {
             void m(int x) {
                 switch (x) {
@@ -5560,7 +5576,7 @@ fn switch_case_body_single_line_keeps_single_statement_inline() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_case_body(
         LEGACY_SWITCH_SRC,
         SwitchCaseBody::SingleLine,
@@ -5570,7 +5586,7 @@ fn switch_case_body_single_line_keeps_single_statement_inline() {
 #[test]
 fn switch_case_body_same_line_keeps_all_inline() {
     // The prior behavior: the whole group stays inline on the label line.
-    expect![[r#"
+    expect![[r"
         class C {
             void m(int x) {
                 switch (x) {
@@ -5581,7 +5597,7 @@ fn switch_case_body_same_line_keeps_all_inline() {
                 }
             }
         }
-    "#]]
+    "]]
     .assert_eq(&fmt_case_body(LEGACY_SWITCH_SRC, SwitchCaseBody::SameLine));
 }
 
@@ -5637,6 +5653,7 @@ fn fmt_blank_line_at_block_start(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check_blank_line_at_block_start(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_blank_line_at_block_start(src));
 }
@@ -5645,13 +5662,13 @@ fn check_blank_line_at_block_start(src: &str, expected: Expect) {
 fn blank_line_at_block_start_keeps_class_body_leading_blank() {
     check_blank_line_at_block_start(
         "class Fields {\n\n  int a = 1;\n  int b = 1;\n}\n",
-        expect![[r#"
+        expect![[r"
             class Fields {
 
                 int a = 1;
                 int b = 1;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5660,7 +5677,7 @@ fn blank_line_at_block_start_keeps_method_and_control_block_leading_blank() {
     // The leading blank is preserved in every braced body: a method block and a nested `if` block.
     check_blank_line_at_block_start(
         "class C {\n\n  void m() {\n\n    if (a) {\n\n      x();\n    }\n  }\n}\n",
-        expect![[r#"
+        expect![[r"
             class C {
 
                 void m() {
@@ -5671,7 +5688,7 @@ fn blank_line_at_block_start_keeps_method_and_control_block_leading_blank() {
                     }
                 }
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5681,13 +5698,13 @@ fn blank_line_at_block_start_keeps_blank_before_leading_comment() {
     // `break_before`'s leading-comment path) and is preserved with the comment.
     check_blank_line_at_block_start(
         "class C {\n\n  // hi\n  int x = 1;\n}\n",
-        expect![[r#"
+        expect![[r"
             class C {
 
                 // hi
                 int x = 1;
             }
-        "#]],
+        "]],
     );
 }
 
@@ -5696,12 +5713,12 @@ fn blank_line_at_block_start_off_drops_leading_blank() {
     // Default config (option off): the leading blank after `{` is dropped, the prior behavior.
     check(
         "class Fields {\n\n  int a = 1;\n  int b = 1;\n}\n",
-        expect![[r#"
+        expect![[r"
             class Fields {
                 int a = 1;
                 int b = 1;
             }
-        "#]],
+        "]],
     );
 }
 

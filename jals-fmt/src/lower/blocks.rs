@@ -21,10 +21,10 @@ use crate::lower::{
 };
 
 /// Lower a `{ ... }` node (block, class body, switch body) with one indentation level.
-pub(crate) fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let tokens: Vec<SyntaxToken> = node
         .children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .collect();
     let lbrace = tokens.iter().find(|t| t.kind() == S::LBRACE);
     let rbrace = tokens.iter().rfind(|t| t.kind() == S::RBRACE);
@@ -176,7 +176,7 @@ fn header_has_trailing_comment(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
     let body_start = node.text_range().start();
     parent
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia() && t.text_range().end() <= body_start)
         .any(|t| ctx.comments.has_trailing(&t))
 }
@@ -184,7 +184,7 @@ fn header_has_trailing_comment(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
 /// Build the inner document for a sequence of item nodes. Returns the content and whether
 /// any item was emitted. Braces are skipped (a brace wrapper adds them); blank lines from
 /// the source are preserved (clamped by the renderer).
-pub(crate) fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
+pub fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
     let mut parts: Vec<Doc> = Vec::new();
     let mut saw = false;
 
@@ -243,18 +243,15 @@ fn first_item_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 
 /// The line break before an item node: the source's blank-line run (clamped to
 /// `max_blank_lines` by the renderer) when it had one, else a plain line break.
-pub(crate) fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-    match first_sig_token(node) {
-        Some(t) => break_before(&t, ctx),
-        None => hardline(),
-    }
+pub fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    first_sig_token(node).map_or_else(hardline, |t| break_before(&t, ctx))
 }
 
 /// The line break before a row anchored at significant token `t`: the source's blank-line run
 /// (clamped to `max_blank_lines` by the renderer) when one preceded it, else a plain line break.
 /// The token-anchored core of [`item_separator`], shared with the enum-body lowering (which also
 /// anchors on bare `;` tokens that have no containing item node).
-pub(crate) fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
+pub fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
     let blanks = if ctx.comments.has_leading(t) {
         ctx.comments.blank_lines_before_first(t)
     } else {
@@ -270,7 +267,7 @@ pub(crate) fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
 /// The number of blank lines preceding `tok` in the source (0 when it is on the next line,
 /// or on the same line as the previous token). A run of `n` consecutive newlines is `n - 1`
 /// blank lines. A comment between stops the run, so a lone comment line is not a blank line.
-pub(crate) fn blank_lines_before(tok: &SyntaxToken) -> usize {
+pub fn blank_lines_before(tok: &SyntaxToken) -> usize {
     let mut newlines = 0usize;
     let mut cur = tok.prev_token();
     while let Some(t) = cur {
@@ -293,7 +290,7 @@ pub(crate) fn blank_lines_before(tok: &SyntaxToken) -> usize {
 /// layout. `SingleLine` keeps a lone label with a single, comment-free statement inline. A
 /// malformed group (error recovery — a label without a colon, a stray significant token) falls
 /// back to the inline path, so every significant token is still emitted exactly once.
-pub(crate) fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     if ctx.cfg.switch_case_body == SwitchCaseBody::SameLine {
         return lower_generic(node, ctx);
     }
@@ -348,13 +345,13 @@ pub(crate) fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// anonymous-class / lambda body (its `}` stays aligned with the hung body). A `{ … }` body is
 /// excluded (blocks never take a continuation indent), and a malformed rule with no `->` falls
 /// back to the inline path, so every significant token is still emitted exactly once.
-pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Children (grammar): `SwitchLabel '->' (Block | ThrowStmt | Expr ';')`. The label is the only
     // significant content before the `->`, so the rule splits cleanly into the label and a tail.
     let label = node.children().find(|n| n.kind() == S::SWITCH_LABEL);
     let arrow = node
         .children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .find(|t| t.kind() == S::ARROW);
     let (Some(label), Some(arrow)) = (label, arrow) else {
         return lower_generic(node, ctx); // malformed: missing the label or the `->`
@@ -363,7 +360,7 @@ pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // A `{ … }` block body keeps the generic layout — its `{` rides on the arrow line and it aligns
     // its own `}` with the label, so it is never hung at a continuation indent.
     let body = node.children().find(|n| n.kind() != S::SWITCH_LABEL);
-    if body.as_ref().map(|n| n.kind()) == Some(S::BLOCK) {
+    if body.as_ref().map(SyntaxNode::kind) == Some(S::BLOCK) {
         return lower_generic(node, ctx);
     }
 
@@ -385,7 +382,7 @@ pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         let arrow_sep = sep(last_sig_token(&label).as_ref(), &arrow, ctx.cfg);
         let after_arrow = node
             .children_with_tokens()
-            .skip_while(|e| e.as_token().map(|t| t.kind()) != Some(S::ARROW))
+            .skip_while(|e| e.as_token().map(SyntaxToken::kind) != Some(S::ARROW))
             .skip(1);
         return group(concat(vec![
             lower(&label, ctx),
@@ -408,7 +405,7 @@ pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let arrow_sep = sep(last_sig_token(&label).as_ref(), &arrow, ctx.cfg);
     let tail = node
         .children_with_tokens()
-        .skip_while(|e| e.as_token().map(|t| t.kind()) != Some(S::ARROW));
+        .skip_while(|e| e.as_token().map(SyntaxToken::kind) != Some(S::ARROW));
     concat(vec![
         lower(&label, ctx),
         arrow_sep,
@@ -428,7 +425,7 @@ pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// With the option off, or for any label that is not a multi-constant `case`, this is byte-for-byte
 /// [`lower_generic`]; a malformed label (no `case`, an empty constant) also falls back, so every
 /// significant token is still emitted exactly once.
-pub(crate) fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     if !ctx.cfg.wrap_case_labels {
         return lower_generic(node, ctx);
     }
@@ -436,7 +433,7 @@ pub(crate) fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // common single-constant label and a bare `default`, neither of which has a top-level comma.
     if !node
         .children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .any(|t| t.kind() == S::COMMA)
     {
         return lower_generic(node, ctx);
@@ -473,7 +470,7 @@ pub(crate) fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         tok(&case_kw, ctx),
         continuation_indent(concat(vec![
             sep(Some(&case_kw), &first, ctx.cfg),
-            join(line(), rows),
+            join(&line(), rows),
         ])),
     ]))
 }
@@ -487,7 +484,7 @@ fn case_label_wraps(label: &SyntaxNode, cfg: &Config) -> bool {
     cfg.wrap_case_labels
         && label
             .children_with_tokens()
-            .filter_map(|e| e.into_token())
+            .filter_map(SyntaxElement::into_token)
             .any(|t| t.kind() == S::COMMA)
         && split_case_label(label).is_some_and(|(_, chunks)| chunks.len() >= 2)
 }
@@ -506,7 +503,7 @@ fn split_case_label(node: &SyntaxNode) -> Option<(SyntaxToken, Vec<CaseChunk>)> 
     let mut current: Vec<SyntaxElement> = Vec::new();
     for el in node.children_with_tokens() {
         match &el {
-            SyntaxElement::Token(t) if t.kind().is_trivia() => continue,
+            SyntaxElement::Token(t) if t.kind().is_trivia() => {}
             SyntaxElement::Token(t)
                 if t.kind() == S::CASE_KW
                     && case_kw.is_none()
@@ -535,7 +532,7 @@ fn first_sig_token_of_elements(els: &[SyntaxElement]) -> Option<SyntaxToken> {
     els.iter().find_map(|e| match e {
         SyntaxElement::Node(n) => first_sig_token(n),
         SyntaxElement::Token(t) if !t.kind().is_trivia() => Some(t.clone()),
-        _ => None,
+        SyntaxElement::Token(_) => None,
     })
 }
 
@@ -586,7 +583,7 @@ fn split_switch_group(node: &SyntaxNode) -> Option<(Vec<SwitchLabelPair>, Vec<Sy
 /// holds a comment (which must never be dropped or moved off its anchor) out of a one-line layout.
 fn has_comments_in_subtree(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
     node.descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
         .any(|t| ctx.comments.has_comments(&t))
 }

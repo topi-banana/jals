@@ -16,7 +16,7 @@ use crate::lower::{Ctx, tok};
 /// A source comma that carries a comment is always kept verbatim — even when the policy would drop
 /// it — so no comment is lost. Under [`Vertical`](TrailingComma::Vertical) the comma is an
 /// [`if_break`]: it materializes only when the enclosing list breaks across lines.
-pub(crate) fn doc(policy: TrailingComma, comma: Option<&SyntaxToken>, ctx: &Ctx<'_>) -> Doc {
+pub fn doc(policy: TrailingComma, comma: Option<&SyntaxToken>, ctx: &Ctx<'_>) -> Doc {
     // A commented comma can't be conditionally dropped without losing the comment; preserve it.
     if let Some(t) = comma
         && ctx.comments.has_comments(t)

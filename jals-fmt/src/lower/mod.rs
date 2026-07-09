@@ -26,7 +26,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jals_syntax::{SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
 
 use crate::comments::{self, CommentMap};
 use crate::config::Config;
@@ -41,19 +41,19 @@ mod expr;
 mod inline;
 mod tokens;
 
-pub(crate) use blocks::{
+pub use blocks::{
     blank_lines_before, break_before, item_separator, lower_braced, lower_items,
     lower_switch_group, lower_switch_label, lower_switch_rule,
 };
-pub(crate) use chains::lower_chain;
-pub(crate) use delimited::lower_delimited;
-pub(crate) use enums::lower_enum_body;
-pub(crate) use expr::{lower_binary, lower_ternary, lower_unary};
-pub(crate) use inline::{lower_control_flow, lower_elements, lower_generic, lower_inline};
-pub(crate) use tokens::{first_sig_token, last_sig_token, sep, tight_sep, tok};
+pub use chains::lower_chain;
+pub use delimited::lower_delimited;
+pub use enums::lower_enum_body;
+pub use expr::{lower_binary, lower_ternary, lower_unary};
+pub use inline::{lower_control_flow, lower_elements, lower_generic, lower_inline};
+pub use tokens::{first_sig_token, last_sig_token, sep, tight_sep, tok};
 
 /// Lowering context shared (immutably) across the walk.
-pub(crate) struct Ctx<'a> {
+pub struct Ctx<'a> {
     pub(crate) comments: CommentMap,
     pub(crate) cfg: &'a Config,
     /// The opt-in rules (literal rewrites, structural reordering) resolved from `cfg`.
@@ -61,7 +61,7 @@ pub(crate) struct Ctx<'a> {
 }
 
 /// Lower the whole tree.
-pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
+pub fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
     let ctx = Ctx {
         comments: comments::build(
             root,
@@ -78,7 +78,7 @@ pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
 }
 
 /// Lower a node, dispatching on its kind.
-pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // A structural rule (import / modifier reordering) owns its node's layout wholesale; the
     // lookup is a static O(1) match returning `None` for every other kind.
     if let Some(rule) = ctx.rules.structural(node.kind()) {
@@ -109,7 +109,7 @@ pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 fn lower_non_sealed(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let parts: Vec<Doc> = node
         .children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
         .map(|t| tok(&t, ctx))
         .collect();

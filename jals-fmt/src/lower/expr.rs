@@ -22,7 +22,10 @@ use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, lower_generic, t
 /// (`>=` is `GT EQ`, `>>` is `GT GT`, `>>>` is `GT GT GT`; `<=` and `<<` are single
 /// tokens). `None` for a token run that is not a known binary operator (error recovery).
 fn binop_bp(ops: &[SyntaxToken]) -> Option<u8> {
-    use S::*;
+    use S::{
+        AMP, AMP_AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
+        PERCENT, PIPE, PIPE_PIPE, PLUS, SLASH, STAR,
+    };
     let kinds: Vec<S> = ops.iter().map(SyntaxToken::kind).collect();
     Some(match kinds.as_slice() {
         [PIPE_PIPE] => 1,
@@ -30,11 +33,11 @@ fn binop_bp(ops: &[SyntaxToken]) -> Option<u8> {
         [PIPE] => 3,
         [CARET] => 4,
         [AMP] => 5,
-        [EQ_EQ] | [BANG_EQ] => 6,
-        [LT] | [LT_EQ] | [GT] | [GT, EQ] | [INSTANCEOF_KW] => 7,
+        [EQ_EQ | BANG_EQ] => 6,
+        [LT | LT_EQ | GT | INSTANCEOF_KW] | [GT, EQ] => 7,
         [LSHIFT] | [GT, GT] | [GT, GT, GT] => 8,
-        [PLUS] | [MINUS] => 9,
-        [STAR] | [SLASH] | [PERCENT] => 10,
+        [PLUS | MINUS] => 9,
+        [STAR | SLASH | PERCENT] => 10,
         _ => return None,
     })
 }
@@ -97,7 +100,7 @@ fn flatten_binary(node: &SyntaxNode) -> Option<(SyntaxNode, Vec<BinopStep>)> {
 /// [`Tall`](BinopLayout::Tall) is one group — flat `a op b op c`, else *every* step on its own
 /// line; [`Compressed`](BinopLayout::Compressed) is a fill that packs as many operands per line
 /// as fit `max-width` (google-java-format's layout).
-pub(crate) fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((first, steps)) = flatten_binary(node) else {
         // Error recovery produced something other than `lhs op rhs`; emit inline with
         // canonical spacing so every token is preserved verbatim.
@@ -219,7 +222,7 @@ fn ternary_parts(
 /// (`binop-separator = front`, the default) or trailing the broken lines (`back`). A value of
 /// `0` for the width wraps every ternary. A malformed ternary (error recovery) falls back to
 /// inline emission, byte-for-byte unchanged.
-pub(crate) fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((cond, q, then, colon, els)) = ternary_parts(node) else {
         return lower_generic(node, ctx);
     };
@@ -261,7 +264,7 @@ pub(crate) fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
 /// Lower a unary expression tight (`-x`), inserting a space only when the operator and
 /// operand would otherwise fuse (`- -x`, `+ +x`).
-pub(crate) fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
     for el in node.children_with_tokens() {

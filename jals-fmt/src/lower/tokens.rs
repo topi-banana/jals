@@ -8,7 +8,7 @@
 use alloc::format;
 use alloc::string::ToString;
 
-use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{Config, TypePunctuationDensity};
 use crate::doc::{Doc, nil, raw, text};
@@ -26,31 +26,33 @@ fn token_text(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
         S::STRING_LITERAL | S::TEXT_BLOCK => raw(tok.text().to_string()),
         S::INT_LITERAL | S::FLOAT_LITERAL => {
             let original = tok.text();
-            match ctx.rules.literals().apply(original, tok.kind()) {
-                Some(rewritten) => text(rewritten),
-                None => text(original.to_string()),
-            }
+            text(
+                ctx.rules
+                    .literals()
+                    .apply(original, tok.kind())
+                    .unwrap_or_else(|| original.into()),
+            )
         }
         _ => text(tok.text().to_string()),
     }
 }
 
 /// A significant token with its attached comments.
-pub(crate) fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
+pub fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
     ctx.comments.token(tok, token_text(tok, ctx))
 }
 
 /// The first non-trivia token contained in `node`, if any.
-pub(crate) fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .find(|t| !t.kind().is_trivia())
 }
 
 /// The last non-trivia token contained in `node`, if any.
-pub(crate) fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
         .last()
 }
@@ -60,7 +62,10 @@ pub(crate) fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 /// only to disambiguate colon contexts (see [`space_before_colon`]); callers pass it solely when
 /// `next` is a `COLON`.
 fn want_space(prev: S, next: S, next_parent: Option<S>, cfg: &Config) -> bool {
-    use S::*;
+    use S::{
+        AMP, AT, BANG, COLON, COLON_COLON, COMMA, DOT, ELLIPSIS, GT, IDENT, LBRACK, LPAREN, LT,
+        MINUS_MINUS, NEW_KW, PLUS_PLUS, RBRACK, RPAREN, SEMICOLON, SUPER_KW, THIS_KW, TILDE,
+    };
     // A constructor-call type witness `new <Integer>Foo()` keeps a space after `new`; the
     // generic no-space-before-`<` rule below (for `Foo<T>`) must not glue `new` to its `<`.
     if prev == NEW_KW && next == LT {
@@ -150,7 +155,7 @@ fn would_fuse(a: &str, b: &str) -> bool {
 
 /// The separator document between `prev` (if any) and the token `next`. Applies the
 /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
-pub(crate) fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
+pub fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
     let Some(p) = prev else {
         return nil();
     };
@@ -172,7 +177,7 @@ pub(crate) fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) 
 
 /// A separator that keeps two tokens tight unless they would fuse (used for unary
 /// operators, e.g. `-x` but `- -x`).
-pub(crate) fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
+pub fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
     match prev {
         Some(p) if would_fuse(p.text(), next.text()) => text(" "),
         _ => nil(),

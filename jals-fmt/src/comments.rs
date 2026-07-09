@@ -22,11 +22,11 @@
 //! and `NEWLINE` is a standalone token (CRLF is one token).
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::doc::{
     CommentKind, Doc, blank_line, comment, concat, hardline, line_suffix, nil, raw, text,
@@ -44,7 +44,7 @@ struct Comment {
 }
 
 /// Comments anchored to significant tokens by source byte offset.
-pub(crate) struct CommentMap {
+pub struct CommentMap {
     leading: BTreeMap<usize, Vec<Comment>>,
     /// Leading comments that hug their anchor token on the same line (parameter comments under
     /// `normalize-parameter-comments`): emitted immediately before the token text, so they wrap
@@ -64,7 +64,7 @@ pub(crate) struct CommentMap {
 /// is the resolved `inline-block-comments` policy: when set, a block / doc comment written
 /// immediately before a significant token on the same line hugs that token as a leading-inline
 /// comment instead of trailing the previous one to end of line.
-pub(crate) fn build(
+pub fn build(
     root: &SyntaxNode,
     normalize_param_comments: bool,
     inline_block_comments: bool,
@@ -80,7 +80,7 @@ pub(crate) fn build(
 
     for tok in root
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
     {
         let kind = tok.kind();
         if is_comment(kind) {
@@ -354,7 +354,7 @@ fn followed_by_same_line_sig(tok: &SyntaxToken) -> bool {
 }
 
 /// Is this token kind a comment?
-pub(crate) fn is_comment(kind: SyntaxKind) -> bool {
+pub const fn is_comment(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
@@ -371,14 +371,14 @@ pub(crate) fn is_comment(kind: SyntaxKind) -> bool {
 /// following token instead of trailing the previous one or sitting on its own line.
 fn classify(tok: &SyntaxToken, normalize_param_comments: bool) -> (String, bool) {
     match tok.kind() {
-        SyntaxKind::LINE_COMMENT => (tok.text().trim_end().to_string(), false),
+        SyntaxKind::LINE_COMMENT => (tok.text().trim_end().into(), false),
         SyntaxKind::BLOCK_COMMENT if normalize_param_comments => {
-            match crate::rules::parameter_comment::normalize(tok.text()) {
-                Some(normalized) => (normalized, true),
-                None => (tok.text().to_string(), false),
-            }
+            crate::rules::parameter_comment::normalize(tok.text()).map_or_else(
+                || (tok.text().into(), false),
+                |normalized| (normalized, true),
+            )
         }
-        _ => (tok.text().to_string(), false),
+        _ => (tok.text().into(), false),
     }
 }
 

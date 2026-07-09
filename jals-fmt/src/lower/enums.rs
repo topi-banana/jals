@@ -35,7 +35,7 @@ struct EnumParts {
 }
 
 impl EnumParts {
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.constants.is_empty() && self.terminator.is_none() && self.members.is_empty()
     }
 
@@ -102,10 +102,10 @@ fn partition(node: &SyntaxNode) -> Option<EnumParts> {
 }
 
 /// Lower an `ENUM_BODY`. See the module docs for the GJF layout rules.
-pub(crate) fn lower_enum_body(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_enum_body(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let tokens: Vec<SyntaxToken> = node
         .children_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .collect();
     let lbrace = tokens.iter().find(|t| t.kind() == S::LBRACE);
     let rbrace = tokens.iter().rfind(|t| t.kind() == S::RBRACE);
@@ -171,13 +171,16 @@ fn build_inner(parts: &EnumParts, ctx: &Ctx<'_>) -> Doc {
         if !rows.is_empty() {
             rows.push(row_sep(first_sig_token(constant).as_ref(), ctx));
         }
-        let tail = if let Some(c) = comma {
-            tok(c, ctx)
-        } else if i == last {
-            glued_terminator.map_or_else(nil, |s| tok(s, ctx))
-        } else {
-            nil()
-        };
+        let tail = comma.as_ref().map_or_else(
+            || {
+                if i == last {
+                    glued_terminator.map_or_else(nil, |s| tok(s, ctx))
+                } else {
+                    nil()
+                }
+            },
+            |c| tok(c, ctx),
+        );
         rows.push(concat(vec![lower_enum_constant(constant, ctx), tail]));
     }
 
@@ -214,10 +217,7 @@ fn build_inner(parts: &EnumParts, ctx: &Ctx<'_>) -> Doc {
 /// a missing anchor — an empty node (already filtered) or any token-less row — by falling back to a
 /// plain `hardline`. Anchoring on a token (not an item node) lets it serve the bare `;` rows too.
 fn row_sep(anchor: Option<&SyntaxToken>, ctx: &Ctx<'_>) -> Doc {
-    match anchor {
-        Some(t) => break_before(t, ctx),
-        None => hardline(),
-    }
+    anchor.map_or_else(hardline, |t| break_before(t, ctx))
 }
 
 /// Lower one `ENUM_CONSTANT`. Under `annotation-placement = expanded` each annotation in the

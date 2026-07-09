@@ -21,12 +21,12 @@ mod float_zero;
 mod hex_case;
 mod suffix_case;
 
-pub(crate) use float_zero::FloatTrailingZero;
-pub(crate) use hex_case::HexCase;
-pub(crate) use suffix_case::LiteralSuffix;
+pub use float_zero::FloatTrailingZero;
+pub use hex_case::HexCase;
+pub use suffix_case::LiteralSuffix;
 
 /// The active literal-rewrite chain, built once per format from `&Config`.
-pub(crate) struct LiteralRegistry {
+pub struct LiteralRegistry {
     rules: Vec<Box<dyn LiteralRule>>,
 }
 

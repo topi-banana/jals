@@ -22,7 +22,7 @@ use crate::lower::{
 use crate::rules::StructuralRule;
 
 /// The `reorder-imports` / `group-imports` rule: owns lowering of the `SOURCE_FILE` node.
-pub(crate) struct ImportRule;
+pub struct ImportRule;
 
 impl StructuralRule for ImportRule {
     fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
@@ -68,7 +68,7 @@ impl<'a> ImportOrdering<'a> {
 ///
 /// Sorting reuses the original import nodes, so every token keeps its byte offset and its
 /// attached comments follow it automatically; the significant-token *multiset* is preserved.
-pub(crate) fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some(ordering) = ImportOrdering::from_config(ctx.cfg) else {
         return lower_items(node, ctx).0;
     };
@@ -165,7 +165,7 @@ struct ImportPlan {
 /// Order `run` under `ordering` — the pure planning step, separate from `Doc` emission so
 /// it is unit-testable without rendering. With [`ImportOrdering::Group`], sort by
 /// (group rank, name) and break at every rank change. With [`ImportOrdering::Sort`], sort
-/// by (is_static, name) as a single group with no boundaries, so the emitted Doc — and thus
+/// by (`is_static`, name) as a single group with no boundaries, so the emitted Doc — and thus
 /// the output — is byte-identical to the reorder-only behavior.
 fn plan_run(mut run: Vec<SyntaxNode>, ordering: ImportOrdering<'_>) -> ImportPlan {
     match ordering {
@@ -370,13 +370,12 @@ mod tests {
         let run = run_of("import b.B;import a.A;import b.B;class C{}");
         let mut input_names = names(&run);
         let plan = plan_run(run, ImportOrdering::Sort);
-        let output_names = names(&plan.imports);
+        let mut output_names = names(&plan.imports);
         assert_eq!(output_names, ["a.A", "b.B", "b.B"]);
         // Permutation proof: same names as the input, duplicates included.
         input_names.sort();
-        let mut sorted_output = output_names.clone();
-        sorted_output.sort();
-        assert_eq!(sorted_output, input_names);
+        output_names.sort();
+        assert_eq!(output_names, input_names);
     }
 
     #[test]

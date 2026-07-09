@@ -18,7 +18,7 @@ use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, sep, tight_sep, 
 /// Lay a node out inline: child nodes are recursed, tokens are separated by single
 /// spaces per [`crate::lower::want_space`]. Whitespace, newlines, and comment trivia are skipped
 /// here (comments are injected via [`tok`]).
-pub(crate) fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     lower_inline(node, ctx, false)
 }
 
@@ -27,14 +27,14 @@ pub(crate) fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// brace (`} else`, `} catch`, `} finally`, `} while`) moves onto its own line. (The opening
 /// brace of each block is handled separately, by `lower_braced` via `opens_on_next_line`.)
 /// With the default `same-line` it is byte-for-byte identical to [`lower_generic`].
-pub(crate) fn lower_control_flow(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_control_flow(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     lower_inline(node, ctx, true)
 }
 
 /// Shared core of [`lower_generic`] and [`lower_control_flow`]. When `control_flow` is set,
 /// the separator before a `}`-anchored continuation becomes a forced break under
 /// `control-brace-style = next-line` (see [`flow_sep`]).
-pub(crate) fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
+pub fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
     lower_elements(node.children_with_tokens(), ctx, control_flow)
 }
 
@@ -42,7 +42,7 @@ pub(crate) fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool)
 /// [`lower_inline`] (a whole node's children) and chain-selector emission, which feeds it a
 /// `FIELD_ACCESS`'s children minus the receiver (see `lower_after_first_node`); routing both
 /// through here keeps the type-witness hug below in one place.
-pub(crate) fn lower_elements(
+pub fn lower_elements(
     els: impl Iterator<Item = SyntaxElement>,
     ctx: &Ctx<'_>,
     control_flow: bool,
@@ -63,7 +63,7 @@ pub(crate) fn lower_elements(
             // has no `=` and stays inline. Layout-only — only the inter-token whitespace changes.
             if ctx.cfg.switch_expression_on_new_line
                 && child.kind() == S::SWITCH_EXPR
-                && prev.as_ref().map(|t| t.kind()) == Some(S::EQ)
+                && prev.as_ref().map(SyntaxToken::kind) == Some(S::EQ)
             {
                 parts.push(continuation_indent(concat(vec![
                     hardline(),
@@ -94,7 +94,7 @@ pub(crate) fn lower_elements(
             }
             hug_witness = child.kind() == S::TYPE_ARGS
                 && matches!(
-                    prev.as_ref().map(|t| t.kind()),
+                    prev.as_ref().map(SyntaxToken::kind),
                     Some(S::DOT | S::COLON_COLON)
                 );
             parts.push(lower(child, ctx));
@@ -122,7 +122,7 @@ pub(crate) fn lower_elements(
 /// Whether `kind` identifies a control-flow continuation that `control-brace-style` may push
 /// to the next line: the `else` / `while` token of an `if` / `do-while`, or a `catch` /
 /// `finally` clause node of a `try`.
-fn is_continuation(kind: S) -> bool {
+const fn is_continuation(kind: S) -> bool {
     matches!(
         kind,
         S::ELSE_KW | S::WHILE_KW | S::CATCH_CLAUSE | S::FINALLY_CLAUSE
@@ -142,7 +142,7 @@ fn flow_sep(
     if control_flow
         && ctx.cfg.control_brace_style == ControlBraceStyle::NextLine
         && is_continuation(next_kind)
-        && prev.map(|p| p.kind()) == Some(S::RBRACE)
+        && prev.map(SyntaxToken::kind) == Some(S::RBRACE)
     {
         return hardline();
     }

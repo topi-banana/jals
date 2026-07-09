@@ -9,7 +9,7 @@ use crate::config::HexLiteralCase;
 use crate::rules::LiteralRule;
 
 /// The `hex-literal-case` rule, holding its resolved (non-`Preserve`) case.
-pub(crate) struct HexCase {
+pub struct HexCase {
     case: HexLiteralCase,
 }
 

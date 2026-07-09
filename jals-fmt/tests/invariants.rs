@@ -6,7 +6,7 @@ use jals_config::fmt::{
     TypePunctuationDensity,
 };
 use jals_fmt::format_source;
-use jals_syntax::{SyntaxKind, parse};
+use jals_syntax::{SyntaxElement, SyntaxKind, parse};
 use proptest::prelude::*;
 
 fn fmt(src: &str) -> String {
@@ -49,7 +49,7 @@ fn comment_skeleton(src: &str) -> String {
     parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| {
             matches!(
                 t.kind(),
@@ -66,7 +66,7 @@ fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
     parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
         .map(|t| (t.kind(), t.text().to_string()))
         .collect()
@@ -77,7 +77,7 @@ fn comment_contents(src: &str) -> Vec<String> {
     parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| {
             matches!(
                 t.kind(),
@@ -107,7 +107,7 @@ fn comment_multiset_no_ws(src: &str) -> Vec<String> {
     let mut comments: Vec<String> = parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| {
             matches!(
                 t.kind(),
@@ -240,7 +240,7 @@ fn reorder_mods_config() -> Config {
 /// The canonical rank of a keyword modifier, or `None` for an annotation (or any non-modifier
 /// element). Mirrors the formatter's internal `modifiers::rank_of` so a canonical layout can be
 /// asserted on formatted output.
-fn modifier_rank(kind: SyntaxKind) -> Option<usize> {
+const fn modifier_rank(kind: SyntaxKind) -> Option<usize> {
     Some(match kind {
         SyntaxKind::PUBLIC_KW => 0,
         SyntaxKind::PROTECTED_KW => 1,
@@ -674,7 +674,7 @@ fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
     // Strip an all-zero fraction (with a non-empty integer part) to the bare dot: `1.0` / `1.00`
     // canonicalize to `1.`, exactly the form the empty fraction already has.
     if dot > 0 && frac_end > dot + 1 && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') {
-        format!("{}{}", &text[..dot + 1], &text[frac_end..])
+        format!("{}{}", &text[..=dot], &text[frac_end..])
     } else {
         text.to_string()
     }

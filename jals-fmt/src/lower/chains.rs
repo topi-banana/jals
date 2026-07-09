@@ -23,7 +23,7 @@ struct ChainLink {
 }
 
 impl ChainLink {
-    fn is_call(&self) -> bool {
+    const fn is_call(&self) -> bool {
         self.call.is_some()
     }
 }
@@ -34,7 +34,7 @@ impl ChainLink {
 /// the chain does not fit `max-width` or its flat width exceeds `chain-width`. Anything else
 /// (a lone call, a pure field path `a.b.c`, a malformed node) falls back to inline emission,
 /// byte-for-byte unchanged.
-pub(crate) fn lower_chain(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub fn lower_chain(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((head, links)) = flatten_chain(node) else {
         return lower_inline(node, ctx, false);
     };

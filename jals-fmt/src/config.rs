@@ -7,7 +7,7 @@
 //! `crate::config::*` unchanged. The rendering helpers the formatter needs (`indent_unit`,
 //! `continuation_cols`, `newline`, …) are `pub` methods on `jals_config::fmt::Config`.
 
-pub(crate) use jals_config::fmt::{
+pub use jals_config::fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
     ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
     LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,

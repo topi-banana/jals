@@ -9,7 +9,7 @@ use crate::config::FloatLiteralTrailingZero;
 use crate::rules::LiteralRule;
 
 /// The `float-literal-trailing-zero` rule, holding its resolved (non-`Preserve`) policy.
-pub(crate) struct FloatTrailingZero {
+pub struct FloatTrailingZero {
     policy: FloatLiteralTrailingZero,
 }
 
@@ -60,7 +60,7 @@ fn map_float_trailing_zero(lit: &str, policy: FloatLiteralTrailingZero) -> Optio
     match policy {
         FloatLiteralTrailingZero::Always if frac_end == dot + 1 => {
             // Empty fraction: insert a single `0` right after the `.` (`1.` → `1.0`).
-            Some(format!("{}0{}", &lit[..dot + 1], &lit[dot + 1..]))
+            Some(format!("{}0{}", &lit[..=dot], &lit[dot + 1..]))
         }
         FloatLiteralTrailingZero::Never
             // Non-empty integer part (so the bare `.` is never produced) and an all-zero fraction.
@@ -69,7 +69,7 @@ fn map_float_trailing_zero(lit: &str, policy: FloatLiteralTrailingZero) -> Optio
                 && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') =>
         {
             // Strip the whole zero run at once (`1.0` / `1.00` → `1.`) — required for idempotency.
-            Some(format!("{}{}", &lit[..dot + 1], &lit[frac_end..]))
+            Some(format!("{}{}", &lit[..=dot], &lit[frac_end..]))
         }
         _ => None,
     }

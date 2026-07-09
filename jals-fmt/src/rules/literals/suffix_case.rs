@@ -9,7 +9,7 @@ use crate::config::LiteralSuffixCase;
 use crate::rules::LiteralRule;
 
 /// The `literal-suffix-case` rule, holding its resolved (non-`Preserve`) case.
-pub(crate) struct LiteralSuffix {
+pub struct LiteralSuffix {
     case: LiteralSuffixCase,
 }
 
