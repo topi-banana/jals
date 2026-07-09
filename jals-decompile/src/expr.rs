@@ -141,16 +141,17 @@ fn render_simple(stmt: &Stmt) -> String {
 }
 
 /// Render an expression to Java source.
+#[allow(clippy::option_if_let_else)]
 pub(crate) fn render_expr(e: &Expr) -> String {
     match e {
         Expr::This => "this".to_string(),
         Expr::Local(name) | Expr::Type(name) => name.clone(),
         Expr::Literal(text) => text.clone(),
         Expr::Field { recv, name } => format!("{}.{name}", receiver(recv)),
-        Expr::Call { recv, name, args } => recv.as_ref().map_or_else(
-            || format!("{name}({})", render_args(args)),
-            |r| format!("{}.{name}({})", receiver(r), render_args(args)),
-        ),
+        Expr::Call { recv, name, args } => match recv {
+            Some(r) => format!("{}.{name}({})", receiver(r), render_args(args)),
+            None => format!("{name}({})", render_args(args)),
+        },
         Expr::New { ty, args } => format!("new {ty}({})", render_args(args)),
         Expr::Binary { op, lhs, rhs } => format!("{} {op} {}", operand(lhs), operand(rhs)),
         Expr::Unary { op, expr } => format!("{op}{}", operand(expr)),

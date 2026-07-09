@@ -310,6 +310,7 @@ pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// [`trailing_type_use_start`], the position-based half of google-java-format's split. With
 /// `reorder-modifiers` on, [`plan`] has already grouped the leading declaration annotations into one
 /// front run, so every one of those breaks.
+#[allow(clippy::option_if_let_else)]
 fn lower_modifiers_with_breaks(els: &[SyntaxElement], ctx: &Ctx<'_>, type_follows: bool) -> Doc {
     let trailing_start = trailing_type_use_start(els, type_follows);
     let mut parts: Vec<Doc> = Vec::new();
@@ -330,10 +331,10 @@ fn lower_modifiers_with_breaks(els: &[SyntaxElement], ctx: &Ctx<'_>, type_follow
         let is_leading_annotation = is_annotation && still_leading && !in_trailing_run;
 
         let first = element_first_token(el);
-        let el_doc = el.as_node().map_or_else(
-            || tok(el.as_token().expect("element is a node or a token"), ctx),
-            |n| lower(n, ctx),
-        );
+        let el_doc = match el.as_node() {
+            Some(n) => lower(n, ctx),
+            None => tok(el.as_token().expect("element is a node or a token"), ctx),
+        };
         let last = element_last_token(el);
 
         if let Some(first) = first.as_ref() {

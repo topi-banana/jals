@@ -9,8 +9,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_classfile::{
-    AttributeBody, BaseType, CodeAttribute, ConstantPool, ConstantPoolEntry, FieldInfo, FieldType,
-    LocalVariableEntry, MethodInfo, parse_field_descriptor, parse_method_descriptor,
+    Attribute, AttributeBody, BaseType, CodeAttribute, ConstantPool, ConstantPoolEntry, FieldInfo,
+    FieldType, LocalVariableEntry, MethodInfo, parse_field_descriptor, parse_method_descriptor,
 };
 
 use crate::literal::{double_literal, float_literal, string_literal};
@@ -45,6 +45,17 @@ pub fn constant_value_initializer(field: &FieldInfo, pool: &ConstantPool) -> Opt
         ConstantPoolEntry::Double(v) => double_literal(*v),
         ConstantPoolEntry::String { string_index } => string_literal(&pool.utf8(*string_index)?),
         _ => return None,
+    })
+}
+
+/// The `Signature` attribute's generic-signature string, if present — the raw JVMS §4.7.9 text a
+/// caller parses into a class/field/method signature.
+pub fn signature_string(attrs: &[Attribute], pool: &ConstantPool) -> Option<String> {
+    attrs.iter().find_map(|a| match &a.body {
+        AttributeBody::Signature { signature_index } => pool
+            .utf8(*signature_index)
+            .map(alloc::borrow::Cow::into_owned),
+        _ => None,
     })
 }
 

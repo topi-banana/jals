@@ -50,7 +50,7 @@ impl Marker {
 impl Drop for Marker {
     fn drop(&mut self) {
         assert!(
-            !(!self.completed && !currently_panicking()),
+            self.completed || currently_panicking(),
             "Marker は complete か abandon で消費しなければならない"
         );
     }

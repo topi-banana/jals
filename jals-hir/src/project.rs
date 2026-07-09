@@ -944,10 +944,7 @@ impl ProjectIndex {
 
     /// Resolves the type-name `reference` (simple or qualified) from `file` against the project.
     pub fn resolve_reference(&self, file: FileId, reference: &Reference) -> TypeResolution {
-        reference.qualified.as_ref().map_or_else(
-            || self.resolve_type(file, &reference.name),
-            |qualified| self.resolve_qualified(qualified),
-        )
+        self.resolve_type_name(file, &reference.name, reference.qualified.as_deref())
     }
 
     /// Resolves a type *name* from `file`: the full dotted text when `qualified`, otherwise the
@@ -955,16 +952,17 @@ impl ProjectIndex {
     /// [`resolve_reference`](ProjectIndex::resolve_reference) for a caller holding only a captured
     /// spelling rather than a CST [`Reference`] — namely a member's declared [`MemberType`], which
     /// inference turns into a concrete type.
+    #[allow(clippy::option_if_let_else)]
     pub fn resolve_type_name(
         &self,
         file: FileId,
         name: &str,
         qualified: Option<&str>,
     ) -> TypeResolution {
-        qualified.map_or_else(
-            || self.resolve_type(file, name),
-            |qualified| self.resolve_qualified(qualified),
-        )
+        match qualified {
+            Some(qualified) => self.resolve_qualified(qualified),
+            None => self.resolve_type(file, name),
+        }
     }
 
     /// The cross-file go-to-definition target for the reference covering byte `offset` in `file`,

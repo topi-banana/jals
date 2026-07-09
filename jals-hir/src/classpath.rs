@@ -110,17 +110,7 @@ fn class_kind(cf: &ClassFile) -> DefKind {
 }
 
 fn class_signature(cf: &ClassFile, pool: &ConstantPool) -> Option<ClassSignature> {
-    parse_class_signature(&signature_string(&cf.attributes, pool)?).ok()
-}
-
-/// The `Signature` attribute's string, if present.
-fn signature_string(attrs: &[Attribute], pool: &ConstantPool) -> Option<String> {
-    attrs.iter().find_map(|a| match &a.body {
-        AttributeBody::Signature { signature_index } => {
-            pool.utf8(*signature_index).map(Cow::into_owned)
-        }
-        _ => None,
-    })
+    parse_class_signature(&jals_decompile::signature_string(&cf.attributes, pool)?).ok()
 }
 
 fn lower_type_params(params: &[TypeParameter]) -> Vec<TypeParamDecl> {
@@ -225,7 +215,7 @@ fn field_member_type(
     descriptor_index: u16,
     pool: &ConstantPool,
 ) -> MemberType {
-    if let Some(sig) = signature_string(attrs, pool)
+    if let Some(sig) = jals_decompile::signature_string(attrs, pool)
         && let Ok(ts) = parse_field_signature(&sig)
     {
         return type_sig_to_member_type(&ts);
@@ -245,7 +235,7 @@ fn method_shape(
     pool: &ConstantPool,
 ) -> (MemberType, Vec<Param>, bool) {
     let varargs = method.access_flags.is_varargs();
-    if let Some(sig) = signature_string(&method.attributes, pool)
+    if let Some(sig) = jals_decompile::signature_string(&method.attributes, pool)
         && let Ok(ms) = parse_method_signature(&sig)
     {
         let params = ms

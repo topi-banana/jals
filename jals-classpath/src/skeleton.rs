@@ -21,13 +21,14 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use jals_classfile::{
-    Attribute, AttributeBody, ClassAccessFlags, ClassFile, ClassSignature, ConstantPool,
-    FieldAccessFlags, MethodAccessFlags, MethodInfo, ResultSignature, ReturnType, TypeParameter,
+    Attribute, ClassAccessFlags, ClassFile, ClassSignature, ConstantPool, FieldAccessFlags,
+    MethodAccessFlags, MethodInfo, ResultSignature, ReturnType, TypeParameter,
     parse_class_signature, parse_field_descriptor, parse_field_signature, parse_method_descriptor,
     parse_method_signature,
 };
 use jals_decompile::{
     internal_to_java, render_class_type_sig, render_field_type, render_throws, render_type_sig,
+    signature_string,
 };
 
 /// One top-level type's worth of class files, ready to render into a single `.java`: its output path
@@ -618,16 +619,6 @@ fn render_type_params(params: &[TypeParameter]) -> String {
         })
         .collect();
     format!("<{}>", rendered.join(", "))
-}
-
-/// The `Signature` attribute's string, if present.
-fn signature_string(attrs: &[Attribute], pool: &ConstantPool) -> Option<String> {
-    attrs.iter().find_map(|a| match &a.body {
-        AttributeBody::Signature { signature_index } => pool
-            .utf8(*signature_index)
-            .map(std::borrow::Cow::into_owned),
-        _ => None,
-    })
 }
 
 /// The class's generic signature, if it has a parseable `Signature` attribute.
