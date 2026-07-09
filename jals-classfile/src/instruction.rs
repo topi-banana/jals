@@ -335,7 +335,7 @@ pub enum WideInstruction {
 }
 
 /// Decode a `Code` attribute's `code` array into instructions.
-pub fn decode_code(bytes: &[u8]) -> Result<Vec<Instruction>> {
+pub(crate) fn decode_code(bytes: &[u8]) -> Result<Vec<Instruction>> {
     let mut r = Reader::new(bytes);
     let mut out = Vec::new();
     while r.remaining() > 0 {
@@ -345,7 +345,7 @@ pub fn decode_code(bytes: &[u8]) -> Result<Vec<Instruction>> {
 }
 
 /// Encode instructions back into a `code` array, reproducing switch alignment padding exactly.
-pub fn encode_code(instructions: &[Instruction]) -> Vec<u8> {
+pub(crate) fn encode_code(instructions: &[Instruction]) -> Vec<u8> {
     let mut w = Writer::new();
     for ins in instructions {
         ins.write(&mut w);

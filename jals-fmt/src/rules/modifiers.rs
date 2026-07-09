@@ -32,7 +32,7 @@ use crate::lower::{
 use crate::rules::StructuralRule;
 
 /// The `reorder-modifiers` / `annotation-placement` rule: owns lowering of a `MODIFIERS` node.
-pub struct ModifierRule;
+pub(crate) struct ModifierRule;
 
 impl StructuralRule for ModifierRule {
     fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
@@ -111,7 +111,7 @@ fn trailing_type_use_start(els: &[SyntaxElement], type_follows: bool) -> usize {
 /// **stable**, so equal-rank duplicates keep their order and an already-canonical list is
 /// returned unchanged — which keeps formatting idempotent (the trailing run is at a fixed point
 /// because it sits after every keyword and so is never re-classified as leading).
-pub fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
+pub(crate) fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
     let split = trailing_type_use_start(&els, type_follows);
     let mut head = els;
     let trailing = head.split_off(split);
@@ -215,7 +215,7 @@ fn preceded_by_dangling_lt(node: &SyntaxNode) -> bool {
 /// keyword (not the structural-last `@`) so the spacing is the same on every pass. Reordering is
 /// confined to genuine declaration contexts ([`is_reorderable_context`]), so this only ever runs
 /// where the boundary token is followed by ordinary, space-separated declaration syntax.
-pub fn emitted_boundary_tokens(
+pub(crate) fn emitted_boundary_tokens(
     node: &SyntaxNode,
     cfg: &Config,
 ) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
@@ -271,7 +271,7 @@ fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
 /// [`emitted_boundary_tokens`] (the emitted-order first / last token), not the structural ones,
 /// which keeps idempotency. When the last emitted part is a forced break, that trailing parent
 /// space is trimmed by the renderer.
-pub fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
     // The hot path: nothing to reorder and no annotation to break out.
     if !ctx.cfg.reorder_modifiers && !expanded {

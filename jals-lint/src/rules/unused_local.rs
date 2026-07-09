@@ -17,7 +17,7 @@ use jals_syntax::SyntaxNode;
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
-pub const RULE: RuleMeta = RuleMeta {
+pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-local",
     default: Severity::Warn,
     check: Checker::Resolved(check),

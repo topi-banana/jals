@@ -21,7 +21,7 @@ use crate::lower::{
 };
 
 /// Lower a `{ ... }` node (block, class body, switch body) with one indentation level.
-pub fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_braced(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let tokens: Vec<SyntaxToken> = node
         .children_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -184,7 +184,7 @@ fn header_has_trailing_comment(node: &SyntaxNode, ctx: &Ctx<'_>) -> bool {
 /// Build the inner document for a sequence of item nodes. Returns the content and whether
 /// any item was emitted. Braces are skipped (a brace wrapper adds them); blank lines from
 /// the source are preserved (clamped by the renderer).
-pub fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
+pub(crate) fn lower_items(node: &SyntaxNode, ctx: &Ctx<'_>) -> (Doc, bool) {
     let mut parts: Vec<Doc> = Vec::new();
     let mut saw = false;
 
@@ -243,7 +243,7 @@ fn first_item_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 
 /// The line break before an item node: the source's blank-line run (clamped to
 /// `max_blank_lines` by the renderer) when it had one, else a plain line break.
-pub fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     first_sig_token(node).map_or_else(hardline, |t| break_before(&t, ctx))
 }
 
@@ -251,7 +251,7 @@ pub fn item_separator(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// (clamped to `max_blank_lines` by the renderer) when one preceded it, else a plain line break.
 /// The token-anchored core of [`item_separator`], shared with the enum-body lowering (which also
 /// anchors on bare `;` tokens that have no containing item node).
-pub fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
     let blanks = if ctx.comments.has_leading(t) {
         ctx.comments.blank_lines_before_first(t)
     } else {
@@ -267,7 +267,7 @@ pub fn break_before(t: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
 /// The number of blank lines preceding `tok` in the source (0 when it is on the next line,
 /// or on the same line as the previous token). A run of `n` consecutive newlines is `n - 1`
 /// blank lines. A comment between stops the run, so a lone comment line is not a blank line.
-pub fn blank_lines_before(tok: &SyntaxToken) -> usize {
+pub(crate) fn blank_lines_before(tok: &SyntaxToken) -> usize {
     let mut newlines = 0usize;
     let mut cur = tok.prev_token();
     while let Some(t) = cur {
@@ -290,7 +290,7 @@ pub fn blank_lines_before(tok: &SyntaxToken) -> usize {
 /// layout. `SingleLine` keeps a lone label with a single, comment-free statement inline. A
 /// malformed group (error recovery — a label without a colon, a stray significant token) falls
 /// back to the inline path, so every significant token is still emitted exactly once.
-pub fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     if ctx.cfg.switch_case_body == SwitchCaseBody::SameLine {
         return lower_generic(node, ctx);
     }
@@ -345,7 +345,7 @@ pub fn lower_switch_group(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// anonymous-class / lambda body (its `}` stays aligned with the hung body). A `{ … }` body is
 /// excluded (blocks never take a continuation indent), and a malformed rule with no `->` falls
 /// back to the inline path, so every significant token is still emitted exactly once.
-pub fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Children (grammar): `SwitchLabel '->' (Block | ThrowStmt | Expr ';')`. The label is the only
     // significant content before the `->`, so the rule splits cleanly into the label and a tail.
     let label = node.children().find(|n| n.kind() == S::SWITCH_LABEL);
@@ -425,7 +425,7 @@ pub fn lower_switch_rule(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// With the option off, or for any label that is not a multi-constant `case`, this is byte-for-byte
 /// [`lower_generic`]; a malformed label (no `case`, an empty constant) also falls back, so every
 /// significant token is still emitted exactly once.
-pub fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_switch_label(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     if !ctx.cfg.wrap_case_labels {
         return lower_generic(node, ctx);
     }

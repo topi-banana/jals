@@ -34,7 +34,7 @@ impl ChainLink {
 /// the chain does not fit `max-width` or its flat width exceeds `chain-width`. Anything else
 /// (a lone call, a pure field path `a.b.c`, a malformed node) falls back to inline emission,
 /// byte-for-byte unchanged.
-pub fn lower_chain(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_chain(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((head, links)) = flatten_chain(node) else {
         return lower_inline(node, ctx, false);
     };

@@ -52,7 +52,7 @@ pub fn render_class_type_sig(c: &ClassTypeSignature) -> String {
 }
 
 /// Render a `<...>` type-argument list, or `""` for none.
-pub fn render_type_args(args: &[TypeArgument]) -> String {
+pub(crate) fn render_type_args(args: &[TypeArgument]) -> String {
     if args.is_empty() {
         return String::new();
     }
@@ -61,7 +61,7 @@ pub fn render_type_args(args: &[TypeArgument]) -> String {
 }
 
 /// Render one type argument (`?`, `T`, `? extends T`, `? super T`).
-pub fn render_type_arg(arg: &TypeArgument) -> String {
+pub(crate) fn render_type_arg(arg: &TypeArgument) -> String {
     match arg {
         TypeArgument::Any => "?".to_string(),
         TypeArgument::Exact(t) => render_type_sig(t),

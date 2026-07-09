@@ -33,7 +33,7 @@ use token_set::TokenSet;
 const PARSER_FUEL: u32 = 256;
 
 /// The parser core. Scans the sequence of significant tokens at position `pos` and assembles a stream of events.
-pub struct Parser<'a> {
+pub(crate) struct Parser<'a> {
     input: &'a Input<'a>,
     pos: usize,
     pub(crate) events: Vec<Event>,

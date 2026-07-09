@@ -9,7 +9,7 @@ use alloc::string::String;
 use crate::syntax_kind::SyntaxKind;
 
 /// 木構築のための1イベント。
-pub enum Event {
+pub(crate) enum Event {
     /// ノード開始。`kind` が `None` の間は墓石(tombstone)で、木には現れない。
     /// `forward_parent` は、このノードを包む親 `Start` への(イベント列内の)相対距離。
     Start {

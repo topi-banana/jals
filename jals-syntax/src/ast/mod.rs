@@ -62,6 +62,7 @@ fn name_text(node: &SyntaxNode) -> Option<String> {
 mod tests {
     use super::*;
     use crate::parser::parse;
+    use crate::syntax_kind::SyntaxKind::{FINAL_KW, PUBLIC_KW};
 
     /// Casts the parsed root to a [`SourceFile`].
     fn source_file(src: &str) -> SourceFile {

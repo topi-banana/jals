@@ -13,7 +13,7 @@ use crate::line_index::LineIndex;
 /// The LSP range of the definition the reference under `position` binds to within this one file, if
 /// any. Resolution is the file-local pass ([`jals_hir::resolve_node`]); the cursor may sit on a
 /// local, parameter, field, method call, or a file-local type name.
-pub fn goto_definition_local(
+pub(crate) fn goto_definition_local(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -27,8 +27,6 @@ pub fn goto_definition_local(
 
 #[cfg(test)]
 mod tests {
-    // Test offsets live in `TextSize`'s `u32` space, so these `usize`/`u32` casts cannot truncate.
-    #![allow(clippy::cast_possible_truncation)]
     use text_size::TextSize;
 
     use super::*;

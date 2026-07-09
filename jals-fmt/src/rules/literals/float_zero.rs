@@ -9,7 +9,7 @@ use crate::config::FloatLiteralTrailingZero;
 use crate::rules::LiteralRule;
 
 /// The `float-literal-trailing-zero` rule, holding its resolved (non-`Preserve`) policy.
-pub struct FloatTrailingZero {
+pub(crate) struct FloatTrailingZero {
     policy: FloatLiteralTrailingZero,
 }
 

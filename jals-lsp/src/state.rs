@@ -1,9 +1,5 @@
 //! In-memory server state: open documents and memoized config discovery.
 
-// File indices and counts here are `jals-hir` `FileId`s (`u32`) — a project never approaches 2³²
-// files — so the `usize`/`u32` conversions cannot truncate in practice.
-#![allow(clippy::cast_possible_truncation)]
-
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -32,7 +28,7 @@ use crate::line_index::LineIndex;
 /// out of the store and moved into an async request handler. The CST is parsed once here,
 /// when the document is built, so each request handler reuses it instead of reparsing.
 #[derive(Clone)]
-pub struct Document {
+pub(crate) struct Document {
     pub(crate) text: Arc<str>,
     pub(crate) version: i32,
     pub(crate) line_index: Arc<LineIndex>,
@@ -56,7 +52,7 @@ impl Document {
 /// `apply_changes` splices `didChange` events into the stored text and rebuilds the
 /// line index, while `upsert` (didOpen) replaces the document wholesale.
 #[derive(Default)]
-pub struct DocumentStore {
+pub(crate) struct DocumentStore {
     docs: HashMap<Url, Document>,
 }
 
@@ -102,7 +98,10 @@ impl DocumentStore {
 /// event, so a fresh `LineIndex` is built per ranged event. An event without a range
 /// replaces the whole document. Reversed ranges are normalized and out-of-range
 /// positions are clamped by `LineIndex::offset`, so this never panics.
-pub fn apply_content_changes(text: &str, changes: &[TextDocumentContentChangeEvent]) -> String {
+pub(crate) fn apply_content_changes(
+    text: &str,
+    changes: &[TextDocumentContentChangeEvent],
+) -> String {
     let mut text = text.to_owned();
     for change in changes {
         let Some(range) = change.range else {
@@ -187,7 +186,7 @@ impl WorkspaceFile {
 /// cached text for the editor's and rebuilds the (in-memory, no-I/O) index. The rebuild walks the
 /// cached trees of every file, so it is cheap per edit but linear in project size — adequate until
 /// an incremental index is needed.
-pub struct Workspace<F: FileTree = OsFileTree> {
+pub(crate) struct Workspace<F: FileTree = OsFileTree> {
     /// The file tree every load reads through. `OsFileTree` (the default) on the host; an in-memory
     /// tree in tests. Only used during construction — queries answer from the cached parsed trees.
     fs: F,
@@ -848,7 +847,7 @@ fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceE
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
 /// file. Implemented for both `jals_config::fmt::Config` and `jals_config::lint::Config` so one [`Discovery`]
 /// cache serves the formatter and the linter alike.
-pub trait DiscoverableConfig: Clone + Default {
+pub(crate) trait DiscoverableConfig: Clone + Default {
     /// The config file name searched for (e.g. `jalsfmt.toml`).
     const FILE_NAME: &'static str;
     /// Discover the config from `dir` (a UTF-8 virtual path) upward, `None` on any read/parse error.
@@ -880,7 +879,7 @@ impl DiscoverableConfig for jals_config::lint::Config {
 /// [`FILE_NAME`](DiscoverableConfig::FILE_NAME) from the file's directory upward, memoized per
 /// directory. Mirrors the `jals` CLI behavior.
 #[derive(Default)]
-pub struct Discovery<C> {
+pub(crate) struct Discovery<C> {
     cache: HashMap<PathBuf, C>,
 }
 
@@ -917,12 +916,12 @@ fn is_config_file_for<C: DiscoverableConfig>(uri: &Url) -> bool {
 }
 
 /// Whether a watched-file URI refers to a `jalsfmt.toml` config file.
-pub fn is_config_file(uri: &Url) -> bool {
+pub(crate) fn is_config_file(uri: &Url) -> bool {
     is_config_file_for::<Config>(uri)
 }
 
 /// Whether a watched-file URI refers to a `jalslint.toml` config file.
-pub fn is_lint_config_file(uri: &Url) -> bool {
+pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
     is_config_file_for::<jals_config::lint::Config>(uri)
 }
 

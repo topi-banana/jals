@@ -20,7 +20,7 @@ use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
-pub const RULE: RuleMeta = RuleMeta {
+pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "naming-convention",
     default: Severity::Warn,
     check: Checker::Syntactic(check),

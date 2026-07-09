@@ -198,7 +198,7 @@ fn close_sep(hug: bool) -> Doc {
 /// Inter-item commas are emitted verbatim. The final item's trailing comma is preserved by
 /// default; for an array initializer it instead follows the `trailing-comma` policy (see
 /// [`crate::rules::trailing_comma::doc`]) — the only Java list where adding or dropping it is legal.
-pub fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_delimited(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // Never synthesize a delimiter that the source lacks (error recovery): start empty
     // and fill from the real tokens so the significant-token sequence is preserved.
     let mut open_doc = nil();

@@ -37,7 +37,7 @@ use crate::{Warning, hash_hex};
 /// The project's dependency cache root, `<root>/target/jals/deps` — downloads, git clones, extracted
 /// sources, and unpacked nested jars all live under it (`target/` is already build output). The single
 /// definition of the cache layout.
-pub fn deps_cache_dir(root: &str) -> String {
+pub(crate) fn deps_cache_dir(root: &str) -> String {
     path::join(root, "target/jals/deps")
 }
 
@@ -46,14 +46,14 @@ pub fn deps_cache_dir(root: &str) -> String {
 /// Combining the human-readable dependency name with a hash of the URL keeps filenames legible while
 /// disambiguating two URLs that share a name (and avoiding a stale cache silently serving the wrong
 /// jar).
-pub fn cached_jar_path_str(name: &str, url: &str, cache_dir: &str) -> String {
+pub(crate) fn cached_jar_path_str(name: &str, url: &str, cache_dir: &str) -> String {
     path::join(cache_dir, &format!("{name}-{}.jar", hash_hex(url)))
 }
 
 /// A `PathBuf` rendered as a virtual `&str` path. On a host a virtual path *is* the OS path string,
 /// so this is lossless there. Shared with the [`native`](crate::native) facade, which converts the
 /// crate's historic `PathBuf` API to and from the core's virtual `&str` paths.
-pub fn vpath(p: &Path) -> String {
+pub(crate) fn vpath(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 

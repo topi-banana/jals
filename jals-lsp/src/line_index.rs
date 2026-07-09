@@ -4,15 +4,11 @@
 //! LSP `Position`s are zero-based line + UTF-16 code-unit column. This index precomputes
 //! line starts so each conversion is a binary search plus a short per-line scan.
 
-// Every offset here lives in `jals-syntax`'s `u32` (`TextSize`) address space — a source document
-// never approaches 4 GiB — so the `usize`/`u32` conversions cannot truncate in practice.
-#![allow(clippy::cast_possible_truncation)]
-
 use async_lsp::lsp_types::{Position, Range};
 use text_size::{TextRange, TextSize};
 
 /// Precomputed line-start offsets for one document.
-pub struct LineIndex {
+pub(crate) struct LineIndex {
     /// Byte offset of the start of each line; always begins with `0`.
     line_starts: Vec<u32>,
     /// Total byte length, used to clamp offsets past the end of the document.

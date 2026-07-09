@@ -11,7 +11,11 @@ use crate::line_index::LineIndex;
 ///
 /// `parse` is the document's cached CST (so this never reparses); `text` is the source it was
 /// built from, needed to convert byte ranges to UTF-16 positions.
-pub fn compute_diagnostics(parse: &Parse, text: &str, line_index: &LineIndex) -> Vec<Diagnostic> {
+pub(crate) fn compute_diagnostics(
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+) -> Vec<Diagnostic> {
     parse
         .errors()
         .iter()
@@ -39,7 +43,7 @@ pub fn compute_diagnostics(parse: &Parse, text: &str, line_index: &LineIndex) ->
 /// [`unnecessary_range`](jals_lint::Diagnostic::unnecessary_range) (the dead branch of a constant
 /// `if`) additionally emits a hint diagnostic covering that range, with the message the rule
 /// supplied for it.
-pub fn compute_lint_diagnostics(
+pub(crate) fn compute_lint_diagnostics(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -87,7 +91,7 @@ pub fn compute_lint_diagnostics(
 /// id within it. Diagnostics are suppressed entirely when the document has parse errors: a broken
 /// tree yields spurious unresolved names, and the syntax errors themselves are already reported by
 /// [`compute_diagnostics`].
-pub fn compute_type_diagnostics(
+pub(crate) fn compute_type_diagnostics(
     index: &ProjectIndex,
     file: FileId,
     parse: &Parse,
@@ -123,7 +127,7 @@ pub fn compute_type_diagnostics(
 /// `error` to escalate) governs both. `resolved` is the document's file-local name resolution,
 /// shared with [`compute_type_diagnostics`]. Suppressed on parse errors, like
 /// [`compute_type_diagnostics`].
-pub fn compute_type_mismatch_diagnostics(
+pub(crate) fn compute_type_mismatch_diagnostics(
     index: &ProjectIndex,
     file: FileId,
     parse: &Parse,

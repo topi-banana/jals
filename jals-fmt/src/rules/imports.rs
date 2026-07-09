@@ -22,7 +22,7 @@ use crate::lower::{
 use crate::rules::StructuralRule;
 
 /// The `reorder-imports` / `group-imports` rule: owns lowering of the `SOURCE_FILE` node.
-pub struct ImportRule;
+pub(crate) struct ImportRule;
 
 impl StructuralRule for ImportRule {
     fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
@@ -68,7 +68,7 @@ impl<'a> ImportOrdering<'a> {
 ///
 /// Sorting reuses the original import nodes, so every token keeps its byte offset and its
 /// attached comments follow it automatically; the significant-token *multiset* is preserved.
-pub fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some(ordering) = ImportOrdering::from_config(ctx.cfg) else {
         return lower_items(node, ctx).0;
     };

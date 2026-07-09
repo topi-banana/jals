@@ -47,7 +47,7 @@ use crate::state::{Discovery, DocumentStore, Workspace, is_config_file, is_lint_
 // holds the non-`Send` stdio locks across `.await`. Those guards are moved into `run_buffered` and
 // live for the whole loop by design, so neither can be dropped earlier.
 #[allow(clippy::future_not_send, clippy::significant_drop_tightening)]
-pub async fn run_server() -> anyhow::Result<()> {
+pub(crate) async fn run_server() -> anyhow::Result<()> {
     let (server, _client) = MainLoop::new_server(|client| {
         ServiceBuilder::new()
             .layer(TracingLayer::default())

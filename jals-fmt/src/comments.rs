@@ -44,7 +44,7 @@ struct Comment {
 }
 
 /// Comments anchored to significant tokens by source byte offset.
-pub struct CommentMap {
+pub(crate) struct CommentMap {
     leading: BTreeMap<usize, Vec<Comment>>,
     /// Leading comments that hug their anchor token on the same line (parameter comments under
     /// `normalize-parameter-comments`): emitted immediately before the token text, so they wrap
@@ -64,7 +64,7 @@ pub struct CommentMap {
 /// is the resolved `inline-block-comments` policy: when set, a block / doc comment written
 /// immediately before a significant token on the same line hugs that token as a leading-inline
 /// comment instead of trailing the previous one to end of line.
-pub fn build(
+pub(crate) fn build(
     root: &SyntaxNode,
     normalize_param_comments: bool,
     inline_block_comments: bool,
@@ -354,7 +354,7 @@ fn followed_by_same_line_sig(tok: &SyntaxToken) -> bool {
 }
 
 /// Is this token kind a comment?
-pub const fn is_comment(kind: SyntaxKind) -> bool {
+pub(crate) const fn is_comment(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT

@@ -30,7 +30,7 @@ mod wildcard_import;
 
 /// A potential problem reported by a rule, before it is tagged with a rule name / severity.
 #[derive(Default)]
-pub struct Finding {
+pub(crate) struct Finding {
     /// Byte range in the original source.
     pub range: Range<usize>,
     /// Human-readable message.
@@ -72,7 +72,7 @@ impl Finding {
 /// that stabilized in `stable_in` is still a *preview* at the target (`target_java_version` is
 /// declared and *below* `stable_in`). Returns `None` (so the rule reports nothing) when no edition
 /// is declared, the target is already at/above `stable_in`, or the root is not a source file.
-pub fn gated_source_file(
+pub(crate) fn gated_source_file(
     target_java_version: Option<u32>,
     stable_in: u32,
     root: &SyntaxNode,
@@ -86,7 +86,7 @@ pub fn gated_source_file(
 /// the file-local name resolution, which the library computes at most once per lint (see
 /// [`crate::lint_node`]) and shares across every [`Checker::Resolved`] / [`Checker::Indexed`] rule.
 #[derive(Clone, Copy)]
-pub enum Checker {
+pub(crate) enum Checker {
     /// A pure syntactic rule: given the CST root, return every finding.
     Syntactic(fn(&SyntaxNode) -> Vec<Finding>),
     /// A rule that also consumes `jals-hir` file-local name resolution.
@@ -103,7 +103,7 @@ pub enum Checker {
 }
 
 /// A rule: its identity and its checker.
-pub struct RuleMeta {
+pub(crate) struct RuleMeta {
     /// Stable kebab-case name, used as the config key and shown in diagnostics.
     pub name: &'static str,
     /// Severity used when the rule is not configured.
@@ -113,7 +113,7 @@ pub struct RuleMeta {
 }
 
 /// Every rule, in a stable order.
-pub const RULES: &[RuleMeta] = &[
+pub(crate) const RULES: &[RuleMeta] = &[
     naming::RULE,
     wildcard_import::RULE,
     empty_catch::RULE,

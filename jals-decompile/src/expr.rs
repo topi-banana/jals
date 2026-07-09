@@ -10,7 +10,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// A reconstructed Java expression.
-pub enum Expr {
+pub(crate) enum Expr {
     /// The receiver `this`.
     This,
     /// A local variable / parameter, by source name.
@@ -48,7 +48,7 @@ pub enum Expr {
 }
 
 /// A reconstructed Java statement.
-pub enum Stmt {
+pub(crate) enum Stmt {
     /// A bare expression statement `expr;` (a discarded call).
     Expr(Expr),
     /// A hoisted, uninitialized local declaration `ty name;`. Every local a method stores into is
@@ -79,7 +79,7 @@ pub enum Stmt {
 
 /// Render a statement tree to indented Java lines. Top-level statements are at indent 0 (the caller
 /// adds the method-body indentation); a nested block indents its contents four spaces further.
-pub fn render_block(stmts: &[Stmt]) -> Vec<String> {
+pub(crate) fn render_block(stmts: &[Stmt]) -> Vec<String> {
     let mut out = Vec::new();
     for stmt in stmts {
         render_into(stmt, 0, &mut out);
@@ -141,7 +141,7 @@ fn render_simple(stmt: &Stmt) -> String {
 }
 
 /// Render an expression to Java source.
-pub fn render_expr(e: &Expr) -> String {
+pub(crate) fn render_expr(e: &Expr) -> String {
     match e {
         Expr::This => "this".to_string(),
         Expr::Local(name) | Expr::Type(name) => name.clone(),

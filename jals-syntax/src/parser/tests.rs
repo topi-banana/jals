@@ -35,6 +35,7 @@ fn debug_tree(parse: &Parse) -> String {
 }
 
 /// Confirm that the tree dump matches the snapshot and is lossless.
+#[allow(clippy::needless_pass_by_value)]
 fn check(src: &str, expected: Expect) {
     let parse = parse(src);
     expected.assert_eq(&debug_tree(&parse));

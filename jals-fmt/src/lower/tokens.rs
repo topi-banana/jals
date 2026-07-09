@@ -38,19 +38,19 @@ fn token_text(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
 }
 
 /// A significant token with its attached comments.
-pub fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn tok(tok: &SyntaxToken, ctx: &Ctx<'_>) -> Doc {
     ctx.comments.token(tok, token_text(tok, ctx))
 }
 
 /// The first non-trivia token contained in `node`, if any.
-pub fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub(crate) fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .find(|t| !t.kind().is_trivia())
 }
 
 /// The last non-trivia token contained in `node`, if any.
-pub fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub(crate) fn last_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
@@ -155,7 +155,7 @@ fn would_fuse(a: &str, b: &str) -> bool {
 
 /// The separator document between `prev` (if any) and the token `next`. Applies the
 /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
-pub fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
+pub(crate) fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc {
     let Some(p) = prev else {
         return nil();
     };
@@ -177,7 +177,7 @@ pub fn sep(prev: Option<&SyntaxToken>, next: &SyntaxToken, cfg: &Config) -> Doc 
 
 /// A separator that keeps two tokens tight unless they would fuse (used for unary
 /// operators, e.g. `-x` but `- -x`).
-pub fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
+pub(crate) fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
     match prev {
         Some(p) if would_fuse(p.text(), next.text()) => text(" "),
         _ => nil(),

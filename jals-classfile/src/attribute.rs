@@ -739,7 +739,7 @@ impl ModuleProvide {
 }
 
 /// Read an `attributes_count`-prefixed run of attributes, dispatching each by name.
-pub fn read_attributes(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<Attribute>> {
+pub(crate) fn read_attributes(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<Attribute>> {
     let count = r.u16()?;
     let mut v = Vec::with_capacity(count as usize);
     for _ in 0..count {
@@ -749,7 +749,7 @@ pub fn read_attributes(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<At
 }
 
 /// Write an `attributes_count`-prefixed run of attributes; the count is derived from the slice.
-pub fn write_attributes(attrs: &[Attribute], w: &mut Writer) {
+pub(crate) fn write_attributes(attrs: &[Attribute], w: &mut Writer) {
     w.u16(attrs.len() as u16);
     for a in attrs {
         a.write(w);

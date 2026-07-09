@@ -7,7 +7,7 @@ use crate::syntax_kind::SyntaxKind;
 /// 開いたノードのマーカ。必ず [`complete`](Marker::complete) か [`abandon`](Marker::abandon)
 /// で消費する(消費し忘れると `Drop` で panic)。
 #[must_use]
-pub struct Marker {
+pub(crate) struct Marker {
     pos: usize,
     completed: bool,
 }
@@ -72,7 +72,7 @@ const fn currently_panicking() -> bool {
 }
 
 /// 完了したノードのマーカ。[`precede`](CompletedMarker::precede) で後から親で包める。
-pub struct CompletedMarker {
+pub(crate) struct CompletedMarker {
     pos: usize,
 }
 

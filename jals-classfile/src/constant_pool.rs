@@ -24,7 +24,7 @@ pub struct ConstantPool {
 /// One slot of the pool. `Long`/`Double` entries are followed by a [`Gap`](ConstantSlot::Gap) so
 /// indices stay aligned with the file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ConstantSlot {
+pub(crate) enum ConstantSlot {
     /// Index 0, which the JVM never uses.
     Sentinel,
     /// A real entry.

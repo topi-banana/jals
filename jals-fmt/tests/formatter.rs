@@ -1,5 +1,9 @@
 //! Snapshot tests for the formatter.
 
+// The `check*` helpers take `expected: Expect` by value — the idiomatic expect-test signature that
+// `assert_eq` consumes — so `needless_pass_by_value` is allowed for the whole test module.
+#![allow(clippy::needless_pass_by_value)]
+
 use expect_test::{Expect, expect};
 use jals_config::fmt::{
     AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
@@ -16,7 +20,6 @@ fn fmt_with(src: &str, config: &Config) -> String {
     format_source(src, config).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check(src: &str, expected: Expect) {
     expected.assert_eq(&fmt(src));
 }
@@ -31,7 +34,6 @@ fn fmt_wrapped(src: &str, comment_width: usize) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_wrapped(src: &str, comment_width: usize, expected: Expect) {
     expected.assert_eq(&fmt_wrapped(src, comment_width));
 }
@@ -45,7 +47,6 @@ fn fmt_param_comments(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_param_comments(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_param_comments(src));
 }
@@ -59,7 +60,6 @@ fn fmt_reorder(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_reorder(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_reorder(src));
 }
@@ -73,7 +73,6 @@ fn fmt_group(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_group(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_group(src));
 }
@@ -253,7 +252,6 @@ fn fmt_hug(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_hug(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_hug(src));
 }
@@ -2909,7 +2907,6 @@ fn fmt_overflow(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_overflow(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_overflow(src));
 }
@@ -3866,7 +3863,6 @@ fn fmt_reorder_mods(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_reorder_mods(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_reorder_mods(src));
 }
@@ -4000,7 +3996,6 @@ fn fmt_annotation_placement(src: &str, placement: AnnotationPlacement) -> String
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_expanded(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_annotation_placement(
         src,
@@ -4881,7 +4876,6 @@ fn fmt_inline_block(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_inline_block(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_inline_block(src));
 }
@@ -4995,7 +4989,6 @@ fn fmt_tabular(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_tabular(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_tabular(src));
 }
@@ -5113,7 +5106,6 @@ fn fmt_switch_nl(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_switch_nl(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_switch_nl(src));
 }
@@ -5233,7 +5225,6 @@ fn fmt_wrap_case(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_wrap_case(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_wrap_case(src));
 }
@@ -5653,7 +5644,6 @@ fn fmt_blank_line_at_block_start(src: &str) -> String {
     format_source(src, &cfg).formatted
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn check_blank_line_at_block_start(src: &str, expected: Expect) {
     expected.assert_eq(&fmt_blank_line_at_block_start(src));
 }

@@ -18,29 +18,31 @@ mod semantic_tokens;
 mod signature_help;
 mod symbols;
 
-pub use completion::{completions, completions_local};
-pub use definition::goto_definition_local;
-pub use diagnostics::{
+pub(crate) use completion::{completions, completions_local};
+pub(crate) use definition::goto_definition_local;
+pub(crate) use diagnostics::{
     compute_diagnostics, compute_lint_diagnostics, compute_type_diagnostics,
     compute_type_mismatch_diagnostics,
 };
-pub use document_highlight::document_highlight;
-pub use folding_range::folding_range;
-pub use formatting::formatting_edits;
-pub use hover::{hover_local, type_hover};
-pub use references::references;
-pub use rename::{is_renamable_kind, is_valid_identifier, prepare_rename_local, rename_local};
-pub use selection_range::selection_ranges;
-pub use semantic_tokens::{
+pub(crate) use document_highlight::document_highlight;
+pub(crate) use folding_range::folding_range;
+pub(crate) use formatting::formatting_edits;
+pub(crate) use hover::{hover_local, type_hover};
+pub(crate) use references::references;
+pub(crate) use rename::{
+    is_renamable_kind, is_valid_identifier, prepare_rename_local, rename_local,
+};
+pub(crate) use selection_range::selection_ranges;
+pub(crate) use semantic_tokens::{
     legend as semantic_tokens_legend, semantic_tokens, tokens_delta as semantic_tokens_delta,
 };
-pub use signature_help::{signature_help_local, signature_help_to_lsp};
-pub use symbols::document_symbols;
+pub(crate) use signature_help::{signature_help_local, signature_help_to_lsp};
+pub(crate) use symbols::document_symbols;
 
 /// The `IDENT` token at `offset`, preferring it when a token boundary yields two tokens — so a
 /// cursor at the end of a word still anchors to it (standard editor UX). Shared by the
 /// resolution-aware handlers (document-highlight, references) and the project workspace.
-pub fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+pub(crate) fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
     root.token_at_offset(offset)
         .find(|token| token.kind() == SyntaxKind::IDENT)
 }

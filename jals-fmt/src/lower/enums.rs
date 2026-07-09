@@ -102,7 +102,7 @@ fn partition(node: &SyntaxNode) -> Option<EnumParts> {
 }
 
 /// Lower an `ENUM_BODY`. See the module docs for the GJF layout rules.
-pub fn lower_enum_body(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_enum_body(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let tokens: Vec<SyntaxToken> = node
         .children_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -171,16 +171,15 @@ fn build_inner(parts: &EnumParts, ctx: &Ctx<'_>) -> Doc {
         if !rows.is_empty() {
             rows.push(row_sep(first_sig_token(constant).as_ref(), ctx));
         }
-        let tail = comma.as_ref().map_or_else(
-            || {
-                if i == last {
-                    glued_terminator.map_or_else(nil, |s| tok(s, ctx))
-                } else {
-                    nil()
-                }
-            },
-            |c| tok(c, ctx),
-        );
+        // This comma/last/else ladder reads far more clearly than nested `map_or_else` closures.
+        #[allow(clippy::option_if_let_else)]
+        let tail = if let Some(c) = comma {
+            tok(c, ctx)
+        } else if i == last {
+            glued_terminator.map_or_else(nil, |s| tok(s, ctx))
+        } else {
+            nil()
+        };
         rows.push(concat(vec![lower_enum_constant(constant, ctx), tail]));
     }
 

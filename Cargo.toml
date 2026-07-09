@@ -95,6 +95,9 @@ todo = "deny"
 unimplemented = "deny"
 
 module_name_repetitions = "allow"
+# `pub(crate)` in a private module is a deliberate crate-internal intent marker; the nursery lint
+# that flags it as redundant would erase that signal, so keep it off.
+redundant_pub_crate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 missing_safety_doc = "allow"

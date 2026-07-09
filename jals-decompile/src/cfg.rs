@@ -12,20 +12,20 @@ use alloc::vec::Vec;
 use jals_classfile::{Instruction, WideInstruction};
 
 /// A method's basic blocks, in instruction order (block 0 is the entry).
-pub struct Cfg {
+pub(crate) struct Cfg {
     pub blocks: Vec<Block>,
 }
 
 /// A basic block: a maximal run of instructions `code[start..end]` with a single entry, ending in a
 /// [`Term`] that names its successors (as block indices).
-pub struct Block {
+pub(crate) struct Block {
     pub start: usize,
     pub end: usize,
     pub term: Term,
 }
 
 /// A block's terminator and its successor block indices.
-pub enum Term {
+pub(crate) enum Term {
     /// Falls straight through to the next block (its last instruction is not a jump).
     Fall(usize),
     /// An unconditional `goto` to a block.
@@ -104,7 +104,7 @@ fn flow(ins: &Instruction) -> Flow {
 }
 
 /// Build the CFG for a method's instructions, or `None` if it uses a construct M2 does not model.
-pub fn build(code: &[Instruction]) -> Option<Cfg> {
+pub(crate) fn build(code: &[Instruction]) -> Option<Cfg> {
     if code.is_empty() {
         return None;
     }

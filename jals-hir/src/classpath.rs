@@ -25,7 +25,7 @@ use crate::def::DefKind;
 use crate::project::{MemberType, Param, TypeParamDecl};
 
 /// A `.class` file reduced to the type-level facts the index needs.
-pub struct ClassfileClass {
+pub(crate) struct ClassfileClass {
     /// The class's fully-qualified, dotted name (`java.util.Map.Entry`).
     pub fqn: String,
     /// Which kind of type it is.
@@ -40,7 +40,7 @@ pub struct ClassfileClass {
 }
 
 /// One member (field / method / constructor) of a [`ClassfileClass`].
-pub struct ClassfileMember {
+pub(crate) struct ClassfileMember {
     /// The member's simple name (a constructor uses the class's simple name, matching the source path).
     pub name: String,
     /// What kind of member it is.
@@ -57,7 +57,7 @@ pub struct ClassfileMember {
 }
 
 /// Lower a class file to its [`ClassfileClass`], or `None` for `module-info` (a module, not a type).
-pub fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
+pub(crate) fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
     if cf.access_flags.is_module() {
         return None;
     }

@@ -17,7 +17,7 @@ use alloc::string::String;
 ///
 /// Already-canonical input (`/* a= */`) maps to a byte-identical string, so the rewrite is a
 /// fixed point and formatting stays idempotent.
-pub fn normalize(text: &str) -> Option<String> {
+pub(crate) fn normalize(text: &str) -> Option<String> {
     // Strip the `/*` … `*/` fence. (A `DOC_COMMENT` `/** … */` is a different token kind and is
     // not passed in; a `/**/`-style comment has no `=` and fails below.)
     let inner = text.strip_prefix("/*")?.strip_suffix("*/")?;

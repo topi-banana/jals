@@ -15,7 +15,11 @@ use text_size::{TextRange, TextSize};
 use crate::line_index::LineIndex;
 
 /// Compute folding ranges from the cached parse of `text`.
-pub fn folding_range(parse: &Parse, text: &str, line_index: &LineIndex) -> Vec<FoldingRange> {
+pub(crate) fn folding_range(
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+) -> Vec<FoldingRange> {
     let root = parse.syntax();
     let mut ranges = Vec::new();
 

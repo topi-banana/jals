@@ -100,7 +100,7 @@ fn flatten_binary(node: &SyntaxNode) -> Option<(SyntaxNode, Vec<BinopStep>)> {
 /// [`Tall`](BinopLayout::Tall) is one group — flat `a op b op c`, else *every* step on its own
 /// line; [`Compressed`](BinopLayout::Compressed) is a fill that packs as many operands per line
 /// as fit `max-width` (google-java-format's layout).
-pub fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_binary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((first, steps)) = flatten_binary(node) else {
         // Error recovery produced something other than `lhs op rhs`; emit inline with
         // canonical spacing so every token is preserved verbatim.
@@ -222,7 +222,7 @@ fn ternary_parts(
 /// (`binop-separator = front`, the default) or trailing the broken lines (`back`). A value of
 /// `0` for the width wraps every ternary. A malformed ternary (error recovery) falls back to
 /// inline emission, byte-for-byte unchanged.
-pub fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let Some((cond, q, then, colon, els)) = ternary_parts(node) else {
         return lower_generic(node, ctx);
     };
@@ -264,7 +264,7 @@ pub fn lower_ternary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 
 /// Lower a unary expression tight (`-x`), inserting a space only when the operator and
 /// operand would otherwise fuse (`- -x`, `+ +x`).
-pub fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_unary(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     let mut parts: Vec<Doc> = Vec::new();
     let mut prev: Option<SyntaxToken> = None;
     for el in node.children_with_tokens() {

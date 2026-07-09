@@ -34,7 +34,7 @@ use jals_decompile::{
 /// plus the members (the top-level type and its inlined nested types). Splitting the cheap grouping
 /// ([`skeleton_groups`]) from the body rendering ([`render`](SkeletonGroup::render)) lets the host skip
 /// rendering a skeleton that is already cached on disk.
-pub struct SkeletonGroup<'a> {
+pub(crate) struct SkeletonGroup<'a> {
     /// The package, dotted (`a.b`); empty for the default package.
     package: String,
     /// The top-level type's simple name.
@@ -69,7 +69,7 @@ impl SkeletonGroup<'_> {
 /// Classes are grouped by `(package, top-level simple name)`; each group's nested types render inline
 /// so their dotted FQNs are well-formed. A class with no present top-level enclosing type, or a
 /// module / anonymous / local / synthetic class, contributes nothing.
-pub fn skeleton_groups(classes: &[ClassFile]) -> Vec<SkeletonGroup<'_>> {
+pub(crate) fn skeleton_groups(classes: &[ClassFile]) -> Vec<SkeletonGroup<'_>> {
     // group key (package, top-level name) -> nested-path -> class file.
     let mut groups: BTreeMap<(String, String), BTreeMap<Vec<String>, &ClassFile>> = BTreeMap::new();
     for cf in classes {

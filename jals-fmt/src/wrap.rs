@@ -27,7 +27,7 @@ use unicode_width::UnicodeWidthStr;
 /// `indent_str` is emitted before each continuation line and `indent_cols` is its display
 /// width (a tab counts as one indentation level wide). A comment that already fits is
 /// returned verbatim, so well-formed comments are never re-spaced.
-pub fn reflow_line(
+pub(crate) fn reflow_line(
     text: &str,
     indent_str: &str,
     indent_cols: usize,
@@ -69,7 +69,7 @@ pub fn reflow_line(
 /// which case it expands to the same canonical multi-line form. Anything that is not a
 /// cleanly delimited `/* ... */` (e.g. an unterminated comment from error recovery) is
 /// returned verbatim.
-pub fn reflow_block(
+pub(crate) fn reflow_block(
     text: &str,
     is_doc: bool,
     indent_str: &str,

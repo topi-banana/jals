@@ -18,7 +18,7 @@ use crate::lower::{Ctx, first_sig_token, last_sig_token, lower, sep, tight_sep, 
 /// Lay a node out inline: child nodes are recursed, tokens are separated by single
 /// spaces per [`crate::lower::want_space`]. Whitespace, newlines, and comment trivia are skipped
 /// here (comments are injected via [`tok`]).
-pub fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     lower_inline(node, ctx, false)
 }
 
@@ -27,14 +27,14 @@ pub fn lower_generic(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
 /// brace (`} else`, `} catch`, `} finally`, `} while`) moves onto its own line. (The opening
 /// brace of each block is handled separately, by `lower_braced` via `opens_on_next_line`.)
 /// With the default `same-line` it is byte-for-byte identical to [`lower_generic`].
-pub fn lower_control_flow(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower_control_flow(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     lower_inline(node, ctx, true)
 }
 
 /// Shared core of [`lower_generic`] and [`lower_control_flow`]. When `control_flow` is set,
 /// the separator before a `}`-anchored continuation becomes a forced break under
 /// `control-brace-style = next-line` (see [`flow_sep`]).
-pub fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
+pub(crate) fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc {
     lower_elements(node.children_with_tokens(), ctx, control_flow)
 }
 
@@ -42,7 +42,7 @@ pub fn lower_inline(node: &SyntaxNode, ctx: &Ctx<'_>, control_flow: bool) -> Doc
 /// [`lower_inline`] (a whole node's children) and chain-selector emission, which feeds it a
 /// `FIELD_ACCESS`'s children minus the receiver (see `lower_after_first_node`); routing both
 /// through here keeps the type-witness hug below in one place.
-pub fn lower_elements(
+pub(crate) fn lower_elements(
     els: impl Iterator<Item = SyntaxElement>,
     ctx: &Ctx<'_>,
     control_flow: bool,

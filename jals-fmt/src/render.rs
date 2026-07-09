@@ -130,7 +130,7 @@ impl Out<'_> {
 
 /// Render `root` into a formatted string. `src` is the original input, consulted once to
 /// resolve an `Auto`/`Native` line ending.
-pub fn print(root: &Doc, cfg: &Config, src: &str) -> String {
+pub(crate) fn print(root: &Doc, cfg: &Config, src: &str) -> String {
     let newline = cfg.newline(src);
     let mut out = Out {
         cfg,

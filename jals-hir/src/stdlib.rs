@@ -274,6 +274,6 @@ public class UncheckedIOException extends RuntimeException {
 /// `java.io`). Later units may reference earlier ones, but build order does not actually matter
 /// (members and supertypes are resolved in a second pass over all units); the list is kept in
 /// package-dependency order.
-pub const fn stub_sources() -> &'static [&'static str] {
+pub(crate) const fn stub_sources() -> &'static [&'static str] {
     &[JAVA_LANG, JAVA_UTIL, JAVA_IO]
 }

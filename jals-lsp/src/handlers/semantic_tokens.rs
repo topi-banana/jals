@@ -12,10 +12,6 @@
 //! *every* identifier before resolution was wired in, so it never regresses; resolution only sharpens
 //! what it can place.
 
-// Column lengths and token-array indices here are bounded by a single source document (well under
-// 4 GiB / 2³² tokens), so the `usize`/`u32` conversions cannot truncate in practice.
-#![allow(clippy::cast_possible_truncation)]
-
 use std::collections::HashMap;
 
 use async_lsp::lsp_types::{
@@ -53,7 +49,7 @@ const MOD_DECLARATION: u32 = 1 << 0;
 
 /// The legend advertised on `initialize`. The order of `token_types` defines the indices in
 /// [`ty`]; the order of `token_modifiers` defines the [`MOD_DECLARATION`] bit.
-pub fn legend() -> SemanticTokensLegend {
+pub(crate) fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
             SemanticTokenType::NAMESPACE,
@@ -79,7 +75,7 @@ pub fn legend() -> SemanticTokensLegend {
 
 /// Classify every significant token in `text` and emit LSP semantic tokens (delta-encoded,
 /// one per line — multi-line tokens are split, as the protocol requires).
-pub fn semantic_tokens(
+pub(crate) fn semantic_tokens(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -141,7 +137,10 @@ pub fn semantic_tokens(
 /// A `SemanticTokensEdit`'s `start` / `delete_count` count entries of the *flattened* integer array
 /// the tokens encode to — 5 ints per token — so the token indices are multiplied by 5. Returns an
 /// empty vector when the arrays are identical (no edits to apply).
-pub fn tokens_delta(prev: &[SemanticToken], next: &[SemanticToken]) -> Vec<SemanticTokensEdit> {
+pub(crate) fn tokens_delta(
+    prev: &[SemanticToken],
+    next: &[SemanticToken],
+) -> Vec<SemanticTokensEdit> {
     let max = prev.len().min(next.len());
     // The longest common prefix, then the longest common suffix that does not overlap it.
     let mut prefix = 0;

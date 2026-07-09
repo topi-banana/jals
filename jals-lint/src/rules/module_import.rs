@@ -20,7 +20,7 @@ use crate::rules::{Checker, Finding, RuleMeta, gated_source_file};
 /// feature. At or above this version the syntax is allowed.
 const STABLE_VERSION: u32 = 25;
 
-pub const RULE: RuleMeta = RuleMeta {
+pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "module-import",
     default: Severity::Error,
     check: Checker::Versioned(check),

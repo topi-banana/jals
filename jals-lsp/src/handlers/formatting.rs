@@ -1,9 +1,5 @@
 //! Whole-document formatting via `jals-fmt`.
 
-// The document length lives in `jals-syntax`'s `u32` (`TextSize`) address space — a source document
-// never approaches 4 GiB — so the `usize`/`u32` conversion cannot truncate in practice.
-#![allow(clippy::cast_possible_truncation)]
-
 use async_lsp::lsp_types::{Position, Range, TextEdit};
 use jals_config::fmt::Config;
 use text_size::TextSize;
@@ -12,7 +8,11 @@ use crate::line_index::LineIndex;
 
 /// Format the whole document. Returns a single full-range text edit, or no edits when the
 /// document is already formatted.
-pub fn formatting_edits(text: &str, config: &Config, line_index: &LineIndex) -> Vec<TextEdit> {
+pub(crate) fn formatting_edits(
+    text: &str,
+    config: &Config,
+    line_index: &LineIndex,
+) -> Vec<TextEdit> {
     let formatted = jals_fmt::format_source(text, config).formatted;
     if formatted == text {
         return Vec::new();

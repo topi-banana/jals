@@ -7,7 +7,7 @@
 //! field or method used before its declaration) resolve without a separate pre-scan.
 
 mod build;
-pub mod collect;
+pub(crate) mod collect;
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -176,7 +176,7 @@ struct RawRef {
 }
 
 /// Builds the scope tree and resolves references for one file.
-pub struct Resolver {
+pub(crate) struct Resolver {
     root: SyntaxNode,
     defs: Vec<Def>,
     scopes: Vec<Scope>,

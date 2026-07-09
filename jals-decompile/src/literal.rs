@@ -10,7 +10,7 @@ use crate::types::internal_to_java;
 
 /// Render a `float` constant as a valid Java literal (finite values get an `f` suffix; NaN / infinity
 /// map to the `Float` constants).
-pub fn float_literal(v: f32) -> String {
+pub(crate) fn float_literal(v: f32) -> String {
     if v.is_nan() {
         "Float.NaN".to_string()
     } else if v.is_infinite() {
@@ -26,7 +26,7 @@ pub fn float_literal(v: f32) -> String {
 
 /// Render a `double` constant as a valid Java literal (finite values get a `d` suffix; NaN / infinity
 /// map to the `Double` constants).
-pub fn double_literal(v: f64) -> String {
+pub(crate) fn double_literal(v: f64) -> String {
     if v.is_nan() {
         "Double.NaN".to_string()
     } else if v.is_infinite() {
@@ -41,7 +41,7 @@ pub fn double_literal(v: f64) -> String {
 }
 
 /// Render a `String` constant as an escaped Java string literal (quotes included).
-pub fn string_literal(s: &str) -> String {
+pub(crate) fn string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -65,7 +65,7 @@ pub fn string_literal(s: &str) -> String {
 
 /// Render a `Class` constant (internal name) as a Java class literal (`java/lang/String` →
 /// `java.lang.String.class`).
-pub fn class_literal(internal: &str) -> String {
+pub(crate) fn class_literal(internal: &str) -> String {
     format!("{}.class", internal_to_java(internal))
 }
 

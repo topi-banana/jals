@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::error::{ClassfileError, Result};
 
 /// A big-endian cursor over an input buffer.
-pub struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
@@ -75,11 +75,11 @@ impl<'a> Reader<'a> {
 /// was written after it. See [`Writer::reserve_u32_len`] / [`Writer::patch_u32_len`].
 #[derive(Clone, Copy)]
 #[must_use]
-pub struct LenPatch(usize);
+pub(crate) struct LenPatch(usize);
 
 /// A big-endian byte sink.
 #[derive(Default)]
-pub struct Writer {
+pub(crate) struct Writer {
     buf: Vec<u8>,
 }
 

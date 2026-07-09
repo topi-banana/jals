@@ -7,7 +7,11 @@ use jals_syntax::{Parse, SyntaxNode};
 use crate::line_index::LineIndex;
 
 /// Build the document-symbol tree from the cached parse of `text`.
-pub fn document_symbols(parse: &Parse, text: &str, line_index: &LineIndex) -> Vec<DocumentSymbol> {
+pub(crate) fn document_symbols(
+    parse: &Parse,
+    text: &str,
+    line_index: &LineIndex,
+) -> Vec<DocumentSymbol> {
     let Some(file) = SourceFile::cast(parse.syntax()) else {
         return Vec::new();
     };

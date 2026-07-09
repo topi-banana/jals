@@ -25,10 +25,6 @@
 //! contextual ones like `var`, remapped at parse time), literals, trivia, and `_` yield no
 //! highlights.
 
-// Byte offsets here live in `jals-syntax`'s `u32` (`TextSize`) address space — a source document
-// never approaches 4 GiB — so the `usize`/`u32` conversions cannot truncate in practice.
-#![allow(clippy::cast_possible_truncation)]
-
 use std::ops::Range;
 
 use async_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
@@ -42,7 +38,7 @@ use crate::line_index::LineIndex;
 /// on an identifier. With `project = Some((index, file))`, a type name with no file-local binding is
 /// resolved cross-file so its references in this file highlight precisely; `None` keeps the
 /// file-local behavior (a lexical fallback for such a name).
-pub fn document_highlight(
+pub(crate) fn document_highlight(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,

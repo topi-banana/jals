@@ -409,13 +409,13 @@ fn args_definitely_differ(a: &Ty, b: &Ty) -> bool {
 }
 
 /// The `java.lang.String` type as the MVP models it.
-pub fn string_ty() -> Ty {
+pub(crate) fn string_ty() -> Ty {
     Ty::Class(ClassTy::external("String"))
 }
 
 /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
 /// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
-pub const fn unary_promote(t: &Ty) -> Ty {
+pub(crate) const fn unary_promote(t: &Ty) -> Ty {
     match t.as_numeric() {
         Some(Primitive::Byte | Primitive::Short | Primitive::Char) => Ty::Primitive(Primitive::Int),
         Some(p) => Ty::Primitive(p),
@@ -426,7 +426,7 @@ pub const fn unary_promote(t: &Ty) -> Ty {
 /// Binary numeric promotion (JLS §5.6.2): the result widens to the larger of the two operands
 /// along `double > float > long > int`, with everything narrower than `int` promoted to `int`. A
 /// non-numeric operand yields [`Ty::Unknown`].
-pub fn binary_numeric(l: &Ty, r: &Ty) -> Ty {
+pub(crate) fn binary_numeric(l: &Ty, r: &Ty) -> Ty {
     let (Some(a), Some(b)) = (l.as_numeric(), r.as_numeric()) else {
         return Ty::Unknown;
     };

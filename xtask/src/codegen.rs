@@ -349,7 +349,14 @@ fn generate(grammar: &Grammar) -> Result<String> {
     buf.push_str("use rowan::ast::{AstChildren, AstNode, support};\n\n");
     buf.push_str("use super::name_text;\n");
     buf.push_str("use crate::language::{JavaLanguage, SyntaxNode};\n");
-    buf.push_str("use crate::syntax_kind::SyntaxKind::{self, *};\n");
+    // An explicit import list rather than a glob: a `use …::*` would trip
+    // `clippy::enum_glob_use`. rustfmt sorts and wraps the names, so the exact
+    // order emitted here does not matter.
+    let _ = writeln!(
+        buf,
+        "use crate::syntax_kind::SyntaxKind::{{self, {}}};",
+        referenced_kinds(&items).join(", ")
+    );
     for item in &items {
         match item {
             Item::Node(node) => render_node(&mut buf, node),
@@ -357,6 +364,30 @@ fn generate(grammar: &Grammar) -> Result<String> {
         }
     }
     reformat(&buf)
+}
+
+/// Every `SyntaxKind` variant the generated code names, deduplicated. Feeds the
+/// explicit `use crate::syntax_kind::SyntaxKind::{…}` import (see `generate`).
+fn referenced_kinds(items: &[Item]) -> Vec<String> {
+    let mut kinds = std::collections::BTreeSet::new();
+    for item in items {
+        match item {
+            Item::Node(node) => {
+                kinds.insert(node.kind.clone());
+                for accessor in &node.accessors {
+                    if let AccessorKind::TokenFlag(kind) = &accessor.kind {
+                        kinds.insert((*kind).to_owned());
+                    }
+                }
+            }
+            Item::Enum(enm) => {
+                for (_, _, kind) in &enm.variants {
+                    kinds.insert(kind.clone());
+                }
+            }
+        }
+    }
+    kinds.into_iter().collect()
 }
 
 fn render_node(buf: &mut String, node: &NodeSrc) {
@@ -436,12 +467,12 @@ fn render_enum(buf: &mut String, enm: &EnumSrc) {
          let res = match syntax.kind() {{"
     );
     for (variant, node, kind) in &enm.variants {
-        let _ = writeln!(buf, "{kind} => {name}::{variant}({node} {{ syntax }}),");
+        let _ = writeln!(buf, "{kind} => Self::{variant}({node} {{ syntax }}),");
     }
     buf.push_str("_ => return None,\n};\nSome(res)\n}\n");
     buf.push_str("fn syntax(&self) -> &SyntaxNode {\nmatch self {\n");
     for (variant, _, _) in &enm.variants {
-        let _ = writeln!(buf, "{name}::{variant}(it) => it.syntax(),");
+        let _ = writeln!(buf, "Self::{variant}(it) => it.syntax(),");
     }
     buf.push_str("}\n}\n}\n");
 }

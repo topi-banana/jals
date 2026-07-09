@@ -1398,7 +1398,7 @@ fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
 /// when there is no `throws` clause. Works for both `METHOD_DECL` and `CONSTRUCTOR_DECL` by reading
 /// the shared `THROWS_CLAUSE` child. Shared with the checked-exception analysis
 /// ([`crate::throws`]), which resolves the same types to items rather than capturing them. Pure.
-pub fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
+pub(crate) fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
     node.children()
         .find_map(ast::ThrowsClause::cast)
         .into_iter()
@@ -1491,7 +1491,7 @@ fn member_type_of(ty: Option<ast::Type>) -> MemberType {
 }
 
 /// The [`DefKind`] for a type-declaration node kind, or `None` if it is not a type declaration.
-pub const fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
+pub(crate) const fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
     match kind {
         CLASS_DECL => Some(DefKind::Class),
         INTERFACE_DECL => Some(DefKind::Interface),

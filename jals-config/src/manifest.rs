@@ -1028,10 +1028,10 @@ mod tests {
     fn parse_rejects_no_form() {
         // An empty entry matches no variant (each requires its primary field).
         let parsed: Result<Manifest, _> = toml::from_str(
-            r#"
+            r"
             [dependencies]
             bad = {}
-            "#,
+            ",
         );
         assert!(parsed.is_err(), "an entry with no form must not parse");
     }

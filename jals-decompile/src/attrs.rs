@@ -153,7 +153,7 @@ fn params_from_local_variable_table(
 /// instance method (so the first parameter starts at slot 1); a `long`/`double` parameter takes two
 /// slots, everything else one. The single source of truth for the parameter → slot mapping, shared by
 /// parameter-name recovery here and the body decompiler's local map ([`crate::body`]).
-pub fn parameter_slots(
+pub(crate) fn parameter_slots(
     params: &[FieldType],
     is_static: bool,
 ) -> impl Iterator<Item = (u16, &FieldType)> {
@@ -171,7 +171,7 @@ pub fn parameter_slots(
 
 /// The method `Code`'s `LocalVariableTable` (present when compiled with `-g`), or `None` — the
 /// source of names/types for both parameter-name and hoisted-local recovery.
-pub fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariableEntry]> {
+pub(crate) fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariableEntry]> {
     code.attributes.iter().find_map(|a| match &a.body {
         AttributeBody::LocalVariableTable(table) => Some(table.as_slice()),
         _ => None,
@@ -189,7 +189,7 @@ pub fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariableEntry
 ///
 /// `javac` emits several entries for one source variable (one per live sub-range across branches);
 /// they agree on name + type, so collecting the *distinct* `(name, type)` yields exactly one.
-pub fn local_variable(
+pub(crate) fn local_variable(
     table: &[LocalVariableEntry],
     pool: &ConstantPool,
     slot: u16,
@@ -212,7 +212,7 @@ pub fn local_variable(
 }
 
 /// A conservative Java-identifier check, so a recovered name can never break the parse.
-pub fn is_java_identifier(s: &str) -> bool {
+pub(crate) fn is_java_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c == '_' || c == '$' || c.is_alphabetic() => {}

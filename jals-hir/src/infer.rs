@@ -375,7 +375,7 @@ fn check_call(
 /// receiver's project type, or a bare call `m(..)` on the enclosing type (an implicit `this`).
 /// `None` when the receiver is not an indexed project type or the callee is neither a name nor a
 /// field access.
-pub fn call_target(
+pub(crate) fn call_target(
     call: &ast::CallExpr,
     ti: &TypeInference,
     index: &ProjectIndex,
@@ -811,7 +811,12 @@ impl<'a> Inferer<'a> {
 /// type whose declaration the `MemberType` lives in: a bare name matching one of its type parameters
 /// becomes a [`Ty::TypeVar`] (to be substituted by the caller) rather than an external by-name type.
 /// A free function so a caller holding only a [`TypeInference`] (e.g. argument checking) can use it.
-pub fn member_type_to_ty(index: &ProjectIndex, file: FileId, owner: ItemId, mt: &MemberType) -> Ty {
+pub(crate) fn member_type_to_ty(
+    index: &ProjectIndex,
+    file: FileId,
+    owner: ItemId,
+    mt: &MemberType,
+) -> Ty {
     match mt {
         MemberType::Primitive { keyword, dims } => {
             let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
@@ -1036,7 +1041,7 @@ const fn is_boolean(t: &Ty) -> bool {
 
 /// The non-trivia operator token kinds directly under `node` (operands are child nodes, so for a
 /// binary/unary expression these are exactly the operator tokens).
-pub fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
+pub(crate) fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
     direct_tokens(node)
         .filter(|t| !t.kind().is_trivia())
         .map(|t| t.kind())
@@ -1063,7 +1068,7 @@ fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
 /// direct `IDENT` token takes the next direct expression child as its initializer; a declarator
 /// without one yields no pair. The declared `TYPE` / `MODIFIERS` children are not expressions, so
 /// the `Expr::cast` skips them and they are never mistaken for an initializer.
-pub fn declarator_initializers(
+pub(crate) fn declarator_initializers(
     node: &SyntaxNode,
 ) -> impl Iterator<Item = (SyntaxToken, ast::Expr)> {
     let mut current: Option<SyntaxToken> = None;
@@ -1079,13 +1084,13 @@ pub fn declarator_initializers(
     })
 }
 
-pub fn token_start(tok: &SyntaxToken) -> usize {
+pub(crate) fn token_start(tok: &SyntaxToken) -> usize {
     usize::from(tok.text_range().start())
 }
 
 /// The byte span of `node` in the source — the key shape used to look an expression's type up in a
 /// [`TypeInference`] and to anchor a [`TypeMismatch`].
-pub fn node_span(node: &SyntaxNode) -> Range<usize> {
+pub(crate) fn node_span(node: &SyntaxNode) -> Range<usize> {
     let r = node.text_range();
     usize::from(r.start())..usize::from(r.end())
 }

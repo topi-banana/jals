@@ -24,7 +24,7 @@ const SOURCE_DEP_FILE_BASE: u32 = (1 << 31) + (1 << 30);
 /// space. The partition of the raw `u32` lives entirely in [`from_raw`](Self::from_raw) /
 /// [`to_raw`](Self::to_raw); every other site allocates and routes through this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceFileId {
+pub(crate) enum WorkspaceFileId {
     /// A project's own `.java`, indexed and linted. Id `index` (base 0).
     Project(u32),
     /// A `-sources.jar` overlay: navigation-only library source. Id <code>[LIBRARY_FILE_BASE] + index</code>.

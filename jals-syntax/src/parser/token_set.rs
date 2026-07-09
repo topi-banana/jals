@@ -4,7 +4,7 @@ use crate::syntax_kind::SyntaxKind;
 
 /// `SyntaxKind` の小さな集合。`u128` 2 本で最大 256 種別まで表せる。
 #[derive(Clone, Copy)]
-pub struct TokenSet([u128; 2]);
+pub(crate) struct TokenSet([u128; 2]);
 
 impl TokenSet {
     /// 種別の列から集合を作る。

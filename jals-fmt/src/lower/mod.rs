@@ -41,19 +41,19 @@ mod expr;
 mod inline;
 mod tokens;
 
-pub use blocks::{
+pub(crate) use blocks::{
     blank_lines_before, break_before, item_separator, lower_braced, lower_items,
     lower_switch_group, lower_switch_label, lower_switch_rule,
 };
-pub use chains::lower_chain;
-pub use delimited::lower_delimited;
-pub use enums::lower_enum_body;
-pub use expr::{lower_binary, lower_ternary, lower_unary};
-pub use inline::{lower_control_flow, lower_elements, lower_generic, lower_inline};
-pub use tokens::{first_sig_token, last_sig_token, sep, tight_sep, tok};
+pub(crate) use chains::lower_chain;
+pub(crate) use delimited::lower_delimited;
+pub(crate) use enums::lower_enum_body;
+pub(crate) use expr::{lower_binary, lower_ternary, lower_unary};
+pub(crate) use inline::{lower_control_flow, lower_elements, lower_generic, lower_inline};
+pub(crate) use tokens::{first_sig_token, last_sig_token, sep, tight_sep, tok};
 
 /// Lowering context shared (immutably) across the walk.
-pub struct Ctx<'a> {
+pub(crate) struct Ctx<'a> {
     pub(crate) comments: CommentMap,
     pub(crate) cfg: &'a Config,
     /// The opt-in rules (literal rewrites, structural reordering) resolved from `cfg`.
@@ -61,7 +61,7 @@ pub struct Ctx<'a> {
 }
 
 /// Lower the whole tree.
-pub fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
+pub(crate) fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
     let ctx = Ctx {
         comments: comments::build(
             root,
@@ -78,7 +78,7 @@ pub fn lower_root(root: &SyntaxNode, cfg: &Config) -> Doc {
 }
 
 /// Lower a node, dispatching on its kind.
-pub fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+pub(crate) fn lower(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
     // A structural rule (import / modifier reordering) owns its node's layout wholesale; the
     // lookup is a static O(1) match returning `None` for every other kind.
     if let Some(rule) = ctx.rules.structural(node.kind()) {

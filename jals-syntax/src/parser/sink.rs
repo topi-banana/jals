@@ -111,11 +111,13 @@ pub(super) fn build(input: &Input, mut events: Vec<Event>) -> (GreenNode, Vec<Sy
                         _ => unreachable!("forward_parent は Start を指す"),
                     };
                 }
-                for kind in forward_parents.into_iter().rev().flatten() {
+                // `drain(..)` empties the buffer while keeping its allocation for the next
+                // `Event::Start`; `into_iter()` would drop it and reallocate on every node.
+                #[allow(clippy::iter_with_drain)]
+                for kind in forward_parents.drain(..).rev().flatten() {
                     sink.start_node(kind);
                     depth += 1;
                 }
-                forward_parents = Vec::new();
             }
             Event::Finish => {
                 depth -= 1;

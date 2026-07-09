@@ -188,6 +188,7 @@ fn render(src: &str) -> String {
 }
 
 /// Compares the rendered token stream for `src` with an inline snapshot.
+#[allow(clippy::needless_pass_by_value)]
 fn check(src: &str, expect: Expect) {
     expect.assert_eq(&render(src));
 }
