@@ -12,6 +12,10 @@
 //! *every* identifier before resolution was wired in, so it never regresses; resolution only sharpens
 //! what it can place.
 
+// Column lengths and token-array indices here are bounded by a single source document (well under
+// 4 GiB / 2³² tokens), so the `usize`/`u32` conversions cannot truncate in practice.
+#![allow(clippy::cast_possible_truncation)]
+
 use std::collections::HashMap;
 
 use async_lsp::lsp_types::{
@@ -19,7 +23,7 @@ use async_lsp::lsp_types::{
     SemanticTokensLegend,
 };
 use jals_hir::{DefKind, FileId, Namespace, ProjectIndex, TypeResolution};
-use jals_syntax::{Parse, SyntaxKind, SyntaxToken};
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind, SyntaxToken};
 
 use crate::line_index::LineIndex;
 
@@ -49,7 +53,7 @@ const MOD_DECLARATION: u32 = 1 << 0;
 
 /// The legend advertised on `initialize`. The order of `token_types` defines the indices in
 /// [`ty`]; the order of `token_modifiers` defines the [`MOD_DECLARATION`] bit.
-pub(crate) fn legend() -> SemanticTokensLegend {
+pub fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
             SemanticTokenType::NAMESPACE,
@@ -75,7 +79,7 @@ pub(crate) fn legend() -> SemanticTokensLegend {
 
 /// Classify every significant token in `text` and emit LSP semantic tokens (delta-encoded,
 /// one per line — multi-line tokens are split, as the protocol requires).
-pub(crate) fn semantic_tokens(
+pub fn semantic_tokens(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -89,7 +93,7 @@ pub(crate) fn semantic_tokens(
 
     for token in root
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(SyntaxElement::into_token)
     {
         let Some((token_type, token_modifiers_bitset)) = classify(&token, &by_start) else {
             continue;
@@ -137,10 +141,7 @@ pub(crate) fn semantic_tokens(
 /// A `SemanticTokensEdit`'s `start` / `delete_count` count entries of the *flattened* integer array
 /// the tokens encode to — 5 ints per token — so the token indices are multiplied by 5. Returns an
 /// empty vector when the arrays are identical (no edits to apply).
-pub(crate) fn tokens_delta(
-    prev: &[SemanticToken],
-    next: &[SemanticToken],
-) -> Vec<SemanticTokensEdit> {
+pub fn tokens_delta(prev: &[SemanticToken], next: &[SemanticToken]) -> Vec<SemanticTokensEdit> {
     let max = prev.len().min(next.len());
     // The longest common prefix, then the longest common suffix that does not overlap it.
     let mut prefix = 0;
@@ -201,7 +202,7 @@ fn resolution_classes(
     for def in &resolved.defs {
         by_start
             .entry(def.name_range.start)
-            .or_insert((token_type_for(def.kind), MOD_DECLARATION));
+            .or_insert_with(|| (token_type_for(def.kind), MOD_DECLARATION));
     }
     by_start
 }
@@ -209,7 +210,7 @@ fn resolution_classes(
 /// The legend token-type index for a resolved binding's [`DefKind`]. Mirrors the declaration-site
 /// mapping in [`classify_ident_syntactic`], so a declaration classifies the same whether it is
 /// placed by resolution or syntax.
-fn token_type_for(kind: DefKind) -> u32 {
+const fn token_type_for(kind: DefKind) -> u32 {
     match kind {
         DefKind::Class | DefKind::Record => ty::CLASS,
         DefKind::Interface | DefKind::AnnotationType => ty::INTERFACE,
@@ -231,7 +232,10 @@ fn token_type_for(kind: DefKind) -> u32 {
 /// An identifier is taken from `by_start` (name resolution) when present, otherwise classified
 /// syntactically.
 fn classify(token: &SyntaxToken, by_start: &HashMap<usize, (u32, u32)>) -> Option<(u32, u32)> {
-    use SyntaxKind::*;
+    use SyntaxKind::{
+        BLOCK_COMMENT, CHAR_LITERAL, DOC_COMMENT, FLOAT_LITERAL, IDENT, INT_LITERAL, LINE_COMMENT,
+        NEWLINE, STRING_LITERAL, TEXT_BLOCK, UNDERSCORE, WHITESPACE,
+    };
     match token.kind() {
         WHITESPACE | NEWLINE => None,
         LINE_COMMENT | BLOCK_COMMENT | DOC_COMMENT => Some((ty::COMMENT, 0)),
@@ -253,9 +257,17 @@ fn classify(token: &SyntaxToken, by_start: &HashMap<usize, (u32, u32)>) -> Optio
 /// context to distinguish a method call from a plain name/field access. The syntactic fallback for
 /// identifiers name resolution cannot place.
 fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(u32, u32)> {
-    use SyntaxKind::*;
+    use SyntaxKind::{
+        ANNOTATION, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, CALL_EXPR, CATCH_CLAUSE, CLASS_DECL,
+        CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, INTERFACE_DECL,
+        LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, NAME_REF, NON_SEALED_KW, PARAM,
+        QUALIFIED_NAME, RECORD_COMPONENT, RECORD_DECL, RESOURCE, TYPE, TYPE_PARAM, TYPE_PATTERN,
+    };
     let parent = token.parent()?;
     let grandparent = || parent.parent().map(|n| n.kind());
+    // Each arm names a distinct syntactic context; keeping the equal-bodied arms separate (rather
+    // than merging them) is what documents which context maps to which token type.
+    #[allow(clippy::match_same_arms)]
     let classified = match parent.kind() {
         // Declaration sites: the identifier names the entity being declared.
         CLASS_DECL | RECORD_DECL => (ty::CLASS, MOD_DECLARATION),
@@ -290,8 +302,18 @@ fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(u32, u32)> {
 
 /// Whether `kind` is a keyword token — the reserved 50, the literal keywords
 /// (`true`/`false`/`null`), and the contextual keywords the parser promotes from `IDENT`.
-fn is_keyword(kind: SyntaxKind) -> bool {
-    use SyntaxKind::*;
+const fn is_keyword(kind: SyntaxKind) -> bool {
+    use SyntaxKind::{
+        ABSTRACT_KW, ASSERT_KW, BOOLEAN_KW, BREAK_KW, BYTE_KW, CASE_KW, CATCH_KW, CHAR_KW,
+        CLASS_KW, CONST_KW, CONTINUE_KW, DEFAULT_KW, DO_KW, DOUBLE_KW, ELSE_KW, ENUM_KW,
+        EXPORTS_KW, EXTENDS_KW, FALSE_KW, FINAL_KW, FINALLY_KW, FLOAT_KW, FOR_KW, GOTO_KW, IF_KW,
+        IMPLEMENTS_KW, IMPORT_KW, INSTANCEOF_KW, INT_KW, INTERFACE_KW, LONG_KW, MODULE_KW,
+        NATIVE_KW, NEW_KW, NULL_KW, OPEN_KW, OPENS_KW, PACKAGE_KW, PERMITS_KW, PRIVATE_KW,
+        PROTECTED_KW, PROVIDES_KW, PUBLIC_KW, RECORD_KW, REQUIRES_KW, RETURN_KW, SEALED_KW,
+        SHORT_KW, STATIC_KW, STRICTFP_KW, SUPER_KW, SWITCH_KW, SYNCHRONIZED_KW, THIS_KW, THROW_KW,
+        THROWS_KW, TO_KW, TRANSIENT_KW, TRANSITIVE_KW, TRUE_KW, TRY_KW, USES_KW, VAR_KW, VOID_KW,
+        VOLATILE_KW, WHEN_KW, WHILE_KW, WITH_KW, YIELD_KW,
+    };
     matches!(
         kind,
         ABSTRACT_KW

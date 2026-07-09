@@ -13,7 +13,7 @@ use jals_syntax::Parse;
 use crate::line_index::LineIndex;
 
 /// Renders an inferred type as a hover, or `None` for [`Ty::Unknown`] (nothing useful to show).
-pub(crate) fn type_hover(ty: &Ty) -> Option<Hover> {
+pub fn type_hover(ty: &Ty) -> Option<Hover> {
     if matches!(ty, Ty::Unknown) {
         return None;
     }
@@ -29,7 +29,7 @@ pub(crate) fn type_hover(ty: &Ty) -> Option<Hover> {
 /// The hover for the expression under `position`, inferred over this one file. Reference type names
 /// can only resolve externally (by spelling) here — [`jals_hir::infer_node`] has no project index —
 /// but structural inference (primitives, arrays, `var`, numeric promotion) is unaffected.
-pub(crate) fn hover_local(
+pub fn hover_local(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -44,6 +44,8 @@ pub(crate) fn hover_local(
 
 #[cfg(test)]
 mod tests {
+    // Test offsets live in `TextSize`'s `u32` space, so these `usize`/`u32` casts cannot truncate.
+    #![allow(clippy::cast_possible_truncation)]
     use text_size::TextSize;
 
     use super::*;

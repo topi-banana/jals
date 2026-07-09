@@ -9,17 +9,13 @@
 
 use async_lsp::lsp_types::{FoldingRange, FoldingRangeKind};
 use jals_syntax::ast::{AstNode, SourceFile};
-use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind, SyntaxNode};
 use text_size::{TextRange, TextSize};
 
 use crate::line_index::LineIndex;
 
 /// Compute folding ranges from the cached parse of `text`.
-pub(crate) fn folding_range(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-) -> Vec<FoldingRange> {
+pub fn folding_range(parse: &Parse, text: &str, line_index: &LineIndex) -> Vec<FoldingRange> {
     let root = parse.syntax();
     let mut ranges = Vec::new();
 
@@ -38,7 +34,7 @@ pub(crate) fn folding_range(
     // each and are not folded.
     for token in root
         .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
+        .filter_map(SyntaxElement::into_token)
     {
         if matches!(
             token.kind(),
@@ -55,7 +51,7 @@ pub(crate) fn folding_range(
 
     // A consecutive group of imports collapses into one region (first import line .. last
     // import line), so a long import block can be tucked away.
-    if let Some(file) = SourceFile::cast(root.clone()) {
+    if let Some(file) = SourceFile::cast(root) {
         let mut imports = file.imports();
         if let Some(first) = imports.next()
             && let Some(last) = imports.last()
@@ -76,8 +72,8 @@ pub(crate) fn folding_range(
 }
 
 /// The brace-delimited body node kinds we fold.
-fn is_foldable_body(kind: SyntaxKind) -> bool {
-    use SyntaxKind::*;
+const fn is_foldable_body(kind: SyntaxKind) -> bool {
+    use SyntaxKind::{ARRAY_INIT, BLOCK, CLASS_BODY, ENUM_BODY, MODULE_BODY, SWITCH_BLOCK};
     matches!(
         kind,
         CLASS_BODY | ENUM_BODY | MODULE_BODY | BLOCK | SWITCH_BLOCK | ARRAY_INIT
@@ -117,7 +113,7 @@ fn last_offset(range: TextRange) -> TextSize {
     range
         .end()
         .checked_sub(TextSize::from(1))
-        .unwrap_or(range.end())
+        .unwrap_or_else(|| range.end())
 }
 
 #[cfg(test)]

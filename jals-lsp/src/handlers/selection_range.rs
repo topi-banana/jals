@@ -12,7 +12,7 @@ use text_size::TextRange;
 use crate::line_index::LineIndex;
 
 /// Build a selection-range chain for each requested position, in request order.
-pub(crate) fn selection_ranges(
+pub fn selection_ranges(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,

@@ -25,11 +25,15 @@
 //! contextual ones like `var`, remapped at parse time), literals, trivia, and `_` yield no
 //! highlights.
 
+// Byte offsets here live in `jals-syntax`'s `u32` (`TextSize`) address space — a source document
+// never approaches 4 GiB — so the `usize`/`u32` conversions cannot truncate in practice.
+#![allow(clippy::cast_possible_truncation)]
+
 use std::ops::Range;
 
 use async_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
 use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved};
-use jals_syntax::{Parse, SyntaxKind, SyntaxNode, SyntaxToken};
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::TextSize;
 
 use crate::line_index::LineIndex;
@@ -38,7 +42,7 @@ use crate::line_index::LineIndex;
 /// on an identifier. With `project = Some((index, file))`, a type name with no file-local binding is
 /// resolved cross-file so its references in this file highlight precisely; `None` keeps the
 /// file-local behavior (a lexical fallback for such a name).
-pub(crate) fn document_highlight(
+pub fn document_highlight(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -83,7 +87,7 @@ pub(crate) fn document_highlight(
     // Fall back to every same-text `IDENT` token. Preorder traversal keeps them in document order,
     // and each token is classified directly — no re-lookup, we already hold it.
     root.descendants_with_tokens()
-        .filter_map(|element| element.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| t.kind() == SyntaxKind::IDENT && t.text() == target.text())
         .map(|t| DocumentHighlight {
             range: line_index.range(text, t.text_range()),
@@ -142,8 +146,7 @@ fn highlight_at(
     range: Range<usize>,
 ) -> DocumentHighlight {
     let kind = super::ident_at(root, TextSize::from(range.start as u32))
-        .map(|token| classify(&token))
-        .unwrap_or(DocumentHighlightKind::READ);
+        .map_or(DocumentHighlightKind::READ, |token| classify(&token));
     DocumentHighlight {
         range: line_index.byte_range(text, &range),
         kind: Some(kind),
@@ -152,7 +155,11 @@ fn highlight_at(
 
 /// Write for declaration/binding names and mutating uses; Read for everything else.
 fn classify(token: &SyntaxToken) -> DocumentHighlightKind {
-    use SyntaxKind::*;
+    use SyntaxKind::{
+        ANNOTATION_TYPE_DECL, CATCH_CLAUSE, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL,
+        FIELD_DECL, FOR_EACH_STMT, INTERFACE_DECL, LOCAL_VAR_DECL, METHOD_DECL, NAME_REF, PARAM,
+        RECORD_COMPONENT, RECORD_DECL, RESOURCE, TYPE_PARAM, TYPE_PATTERN,
+    };
     let Some(parent) = token.parent() else {
         return DocumentHighlightKind::READ;
     };
@@ -173,7 +180,7 @@ fn classify(token: &SyntaxToken) -> DocumentHighlightKind {
 /// A simple name reference is a write when it is the target of an assignment or the operand
 /// of `++`/`--`. Only simple names count: `o.f = 1` keeps `f` (under `FIELD_ACCESS`) a read.
 fn classify_name_ref(name_ref: &SyntaxNode) -> DocumentHighlightKind {
-    use SyntaxKind::*;
+    use SyntaxKind::{ASSIGNMENT_EXPR, MINUS_MINUS, PLUS_PLUS, POSTFIX_EXPR, UNARY_EXPR};
     let is_write = match name_ref.parent() {
         // The target is the first child *node* of `ASSIGNMENT_EXPR` (the operator is a
         // token), matching `AssignmentExpr::target()`.
@@ -183,7 +190,7 @@ fn classify_name_ref(name_ref: &SyntaxNode) -> DocumentHighlightKind {
         // `UNARY_EXPR` also covers `!x`, `-x`, ...; only `++`/`--` mutate.
         Some(p) if p.kind() == UNARY_EXPR => p
             .children_with_tokens()
-            .filter_map(|element| element.into_token())
+            .filter_map(SyntaxElement::into_token)
             .any(|t| matches!(t.kind(), PLUS_PLUS | MINUS_MINUS)),
         _ => false,
     };

@@ -1,5 +1,9 @@
 //! In-memory server state: open documents and memoized config discovery.
 
+// File indices and counts here are `jals-hir` `FileId`s (`u32`) — a project never approaches 2³²
+// files — so the `usize`/`u32` conversions cannot truncate in practice.
+#![allow(clippy::cast_possible_truncation)]
+
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -28,7 +32,7 @@ use crate::line_index::LineIndex;
 /// out of the store and moved into an async request handler. The CST is parsed once here,
 /// when the document is built, so each request handler reuses it instead of reparsing.
 #[derive(Clone)]
-pub(crate) struct Document {
+pub struct Document {
     pub(crate) text: Arc<str>,
     pub(crate) version: i32,
     pub(crate) line_index: Arc<LineIndex>,
@@ -36,10 +40,10 @@ pub(crate) struct Document {
 }
 
 impl Document {
-    fn new(text: String, version: i32) -> Document {
+    fn new(text: String, version: i32) -> Self {
         let line_index = Arc::new(LineIndex::new(&text));
         let parse = Arc::new(jals_syntax::parse(&text));
-        Document {
+        Self {
             text: Arc::from(text),
             version,
             line_index,
@@ -52,7 +56,7 @@ impl Document {
 /// `apply_changes` splices `didChange` events into the stored text and rebuilds the
 /// line index, while `upsert` (didOpen) replaces the document wholesale.
 #[derive(Default)]
-pub(crate) struct DocumentStore {
+pub struct DocumentStore {
     docs: HashMap<Url, Document>,
 }
 
@@ -98,14 +102,11 @@ impl DocumentStore {
 /// event, so a fresh `LineIndex` is built per ranged event. An event without a range
 /// replaces the whole document. Reversed ranges are normalized and out-of-range
 /// positions are clamped by `LineIndex::offset`, so this never panics.
-pub(crate) fn apply_content_changes(
-    text: &str,
-    changes: &[TextDocumentContentChangeEvent],
-) -> String {
+pub fn apply_content_changes(text: &str, changes: &[TextDocumentContentChangeEvent]) -> String {
     let mut text = text.to_owned();
     for change in changes {
         let Some(range) = change.range else {
-            text = change.text.clone();
+            text.clone_from(&change.text);
             continue;
         };
         let index = LineIndex::new(&text);
@@ -138,10 +139,10 @@ struct WorkspaceFile {
 }
 
 impl WorkspaceFile {
-    fn new(uri: Url, text: String) -> WorkspaceFile {
+    fn new(uri: Url, text: String) -> Self {
         let line_index = Arc::new(LineIndex::new(&text));
         let parse = Arc::new(jals_syntax::parse(&text));
-        WorkspaceFile {
+        Self {
             uri,
             text: Arc::from(text),
             line_index,
@@ -186,7 +187,7 @@ impl WorkspaceFile {
 /// cached text for the editor's and rebuilds the (in-memory, no-I/O) index. The rebuild walks the
 /// cached trees of every file, so it is cheap per edit but linear in project size — adequate until
 /// an incremental index is needed.
-pub(crate) struct Workspace<F: FileTree = OsFileTree> {
+pub struct Workspace<F: FileTree = OsFileTree> {
     /// The file tree every load reads through. `OsFileTree` (the default) on the host; an in-memory
     /// tree in tests. Only used during construction — queries answer from the cached parsed trees.
     fs: F,
@@ -281,7 +282,7 @@ impl Workspace<OsFileTree> {
     ///
     /// The workspace has an empty classpath; use [`load_with_classpath`](Workspace::load_with_classpath)
     /// to fold a project's external library types into the index.
-    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace<OsFileTree> {
+    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Self {
         Self::load_with_classpath(project_root, source_roots, Vec::new())
     }
 
@@ -293,7 +294,7 @@ impl Workspace<OsFileTree> {
         project_root: PathBuf,
         source_roots: Vec<PathBuf>,
         classfiles: Vec<jals_classfile::ClassFile>,
-    ) -> Workspace<OsFileTree> {
+    ) -> Self {
         Self::load_with_classpath_and_sources(
             project_root,
             source_roots,
@@ -324,7 +325,7 @@ impl Workspace<OsFileTree> {
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
         target_java_version: Option<u32>,
-    ) -> Workspace<OsFileTree> {
+    ) -> Self {
         Self::load_in(
             OsFileTree,
             project_root,
@@ -348,6 +349,9 @@ impl<F: FileTree> Workspace<F> {
     /// identity stays a `file://` [`Url`] derived from it. See
     /// [`load_with_classpath_and_sources`](Workspace::load_with_classpath_and_sources) for the roles
     /// of `library_sources` / `source_dep_sources` / `target_java_version`.
+    // The load chain moves owned inputs through a uniform signature; `classfiles` is only read (to
+    // lower the classpath) before being dropped, but keeping it owned matches the rest of the chain.
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn load_in(
         fs: F,
         project_root: PathBuf,
@@ -356,7 +360,7 @@ impl<F: FileTree> Workspace<F> {
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
         target_java_version: Option<u32>,
-    ) -> Workspace<F> {
+    ) -> Self {
         let mut paths: Vec<String> = source_roots
             .iter()
             .filter_map(|root| root.to_str())
@@ -376,7 +380,7 @@ impl<F: FileTree> Workspace<F> {
         // every rebuild (their `FileId`s are assigned in `rebuild_index`).
         let source_dep_files = read_library_files(&fs, source_dep_sources);
 
-        let mut ws = Workspace {
+        let mut ws = Self {
             fs,
             project_root,
             source_roots,
@@ -418,7 +422,7 @@ impl<F: FileTree> Workspace<F> {
     /// and resolves supertypes but walks nothing) reassembles the whole index — identical to a
     /// from-scratch build, but without re-walking the project.
     fn rebuild_index(&mut self) {
-        let project = file_inputs(&self.files, WorkspaceFileId::Project, |f| f.facts());
+        let project = file_inputs(&self.files, WorkspaceFileId::Project, WorkspaceFile::facts);
         // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types),
         // under their own `SourceDep` ids so they navigate back to the right files. The
         // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
@@ -454,13 +458,13 @@ impl<F: FileTree> Workspace<F> {
     }
 
     /// The project symbol index.
-    pub(crate) fn index(&self) -> &ProjectIndex {
+    pub(crate) const fn index(&self) -> &ProjectIndex {
         &self.index
     }
 
     /// The project's target Java feature version (from `[package] edition`), if declared. Feeds the
     /// edition-gated lint rules.
-    pub(crate) fn target_java_version(&self) -> Option<u32> {
+    pub(crate) const fn target_java_version(&self) -> Option<u32> {
         self.target_java_version
     }
 
@@ -500,16 +504,15 @@ impl<F: FileTree> Workspace<F> {
             // its cache, so a keystroke re-walks only the edited file.
             facts: OnceLock::new(),
         };
-        match self.by_uri.get(uri).copied() {
-            Some(id) => self.files[id.0 as usize] = file,
-            None => {
-                if !self.under_source_root(uri) {
-                    return false;
-                }
-                let id = WorkspaceFileId::Project(self.files.len() as u32).to_raw();
-                self.by_uri.insert(uri.clone(), id);
-                self.files.push(file);
+        if let Some(id) = self.by_uri.get(uri).copied() {
+            self.files[id.0 as usize] = file;
+        } else {
+            if !self.under_source_root(uri) {
+                return false;
             }
+            let id = WorkspaceFileId::Project(self.files.len() as u32).to_raw();
+            self.by_uri.insert(uri.clone(), id);
+            self.files.push(file);
         }
         self.rebuild_index();
         true
@@ -845,7 +848,7 @@ fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceE
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
 /// file. Implemented for both `jals_config::fmt::Config` and `jals_config::lint::Config` so one [`Discovery`]
 /// cache serves the formatter and the linter alike.
-pub(crate) trait DiscoverableConfig: Clone + Default {
+pub trait DiscoverableConfig: Clone + Default {
     /// The config file name searched for (e.g. `jalsfmt.toml`).
     const FILE_NAME: &'static str;
     /// Discover the config from `dir` (a UTF-8 virtual path) upward, `None` on any read/parse error.
@@ -862,14 +865,14 @@ pub(crate) trait DiscoverableConfig: Clone + Default {
 impl DiscoverableConfig for Config {
     const FILE_NAME: &'static str = "jalsfmt.toml";
     fn discover_str(dir: &str) -> Option<Self> {
-        Config::discover(&OsFileTree, dir).ok()
+        Self::discover(&OsFileTree, dir).ok()
     }
 }
 
 impl DiscoverableConfig for jals_config::lint::Config {
     const FILE_NAME: &'static str = "jalslint.toml";
     fn discover_str(dir: &str) -> Option<Self> {
-        jals_config::lint::Config::discover(&OsFileTree, dir).ok()
+        Self::discover(&OsFileTree, dir).ok()
     }
 }
 
@@ -877,7 +880,7 @@ impl DiscoverableConfig for jals_config::lint::Config {
 /// [`FILE_NAME`](DiscoverableConfig::FILE_NAME) from the file's directory upward, memoized per
 /// directory. Mirrors the `jals` CLI behavior.
 #[derive(Default)]
-pub(crate) struct Discovery<C> {
+pub struct Discovery<C> {
     cache: HashMap<PathBuf, C>,
 }
 
@@ -914,12 +917,12 @@ fn is_config_file_for<C: DiscoverableConfig>(uri: &Url) -> bool {
 }
 
 /// Whether a watched-file URI refers to a `jalsfmt.toml` config file.
-pub(crate) fn is_config_file(uri: &Url) -> bool {
+pub fn is_config_file(uri: &Url) -> bool {
     is_config_file_for::<Config>(uri)
 }
 
 /// Whether a watched-file URI refers to a `jalslint.toml` config file.
-pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
+pub fn is_lint_config_file(uri: &Url) -> bool {
     is_config_file_for::<jals_config::lint::Config>(uri)
 }
 

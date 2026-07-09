@@ -22,7 +22,7 @@ use crate::line_index::LineIndex;
 
 /// Maps `jals-hir`'s pure completions to LSP `CompletionItem`s: the name is the label, its kind
 /// drives the item icon, and its rendered type / signature (when any) is the detail shown beside it.
-pub(crate) fn completions_to_lsp(completions: Vec<Completion>) -> Vec<CompletionItem> {
+pub fn completions_to_lsp(completions: Vec<Completion>) -> Vec<CompletionItem> {
     completions
         .into_iter()
         .map(|completion| CompletionItem {
@@ -35,8 +35,11 @@ pub(crate) fn completions_to_lsp(completions: Vec<Completion>) -> Vec<Completion
 }
 
 /// The LSP completion-item kind for a completion's [`DefKind`] — the icon the editor shows.
-fn item_kind(kind: DefKind) -> CompletionItemKind {
-    use DefKind::*;
+const fn item_kind(kind: DefKind) -> CompletionItemKind {
+    use DefKind::{
+        AnnotationType, CatchParam, Class, Constructor, Enum, EnumConstant, Field, Interface,
+        LambdaParam, Local, Method, Param, PatternVar, Record, Resource, TypeParam,
+    };
     match kind {
         Method | Constructor => CompletionItemKind::METHOD,
         Field => CompletionItemKind::FIELD,
@@ -54,7 +57,7 @@ fn item_kind(kind: DefKind) -> CompletionItemKind {
 /// The completions at byte `offset`, dispatched on context: members after a `.`, otherwise the
 /// in-scope bindings and project types plus the Java keywords. The shared core of the workspace and
 /// file-local entry points.
-pub(crate) fn completions(
+pub fn completions(
     root: &SyntaxNode,
     resolved: &Resolved,
     index: &ProjectIndex,
@@ -150,7 +153,7 @@ fn keyword_items() -> impl Iterator<Item = CompletionItem> {
 /// index with the `java.lang` stubs folded in (so the document's own types and the core JDK types
 /// are visible). The fallback for a file outside any indexed project; the cross-file path is
 /// [`Workspace::completions`](crate::state::Workspace::completions).
-pub(crate) fn completions_local(
+pub fn completions_local(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -167,6 +170,8 @@ pub(crate) fn completions_local(
 
 #[cfg(test)]
 mod tests {
+    // Test offsets live in `TextSize`'s `u32` space, so these `usize`/`u32` casts cannot truncate.
+    #![allow(clippy::cast_possible_truncation)]
     use super::*;
 
     /// Completion labels (with kinds) at the cursor placed just after the first `cursor` substring.

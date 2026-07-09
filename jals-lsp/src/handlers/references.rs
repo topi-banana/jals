@@ -14,7 +14,7 @@ use crate::line_index::LineIndex;
 /// Every reference to the symbol under `position`, within this one file, as `Location`s under
 /// `uri`. The declaration is included when `include_declaration` is set. Empty if the cursor is not
 /// on a resolvable identifier — an unresolved or external name has no file-local binding to gather.
-pub(crate) fn references(
+pub fn references(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -46,6 +46,8 @@ pub(crate) fn references(
 
 #[cfg(test)]
 mod tests {
+    // Test offsets live in `TextSize`'s `u32` space, so these `usize`/`u32` casts cannot truncate.
+    #![allow(clippy::cast_possible_truncation)]
     use text_size::TextSize;
 
     use super::*;

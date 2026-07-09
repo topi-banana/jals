@@ -24,7 +24,8 @@ use async_lsp::lsp_types::{
     SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
     ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WillSaveTextDocumentParams, WorkDoneProgressCancelParams, WorkspaceEdit,
+    WillSaveTextDocumentParams, WorkDoneProgressCancelParams, WorkDoneProgressOptions,
+    WorkspaceEdit,
     notification::{self, Notification},
     request,
 };
@@ -42,7 +43,11 @@ use crate::handlers;
 use crate::state::{Discovery, DocumentStore, Workspace, is_config_file, is_lint_config_file};
 
 /// Build the server and run its stdio event loop until the client disconnects.
-pub(crate) async fn run_server() -> anyhow::Result<()> {
+// Runs on a current-thread runtime (see `crate::run`), so the future is deliberately `!Send` — it
+// holds the non-`Send` stdio locks across `.await`. Those guards are moved into `run_buffered` and
+// live for the whole loop by design, so neither can be dropped earlier.
+#[allow(clippy::future_not_send, clippy::significant_drop_tightening)]
+pub async fn run_server() -> anyhow::Result<()> {
     let (server, _client) = MainLoop::new_server(|client| {
         ServiceBuilder::new()
             .layer(TracingLayer::default())
@@ -87,8 +92,8 @@ struct ServerState {
 }
 
 impl ServerState {
-    fn new(client: ClientSocket) -> ServerState {
-        ServerState {
+    fn new(client: ClientSocket) -> Self {
+        Self {
             client,
             store: DocumentStore::default(),
             discovery: Discovery::default(),
@@ -120,19 +125,16 @@ impl ServerState {
         };
         let root = manifest_path
             .parent()
-            .unwrap_or(Path::new("."))
+            .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         if self.workspaces.iter().any(|ws| ws.project_root() == root) {
             return;
         }
-        let manifest = match Manifest::from_file(&manifest_path) {
-            Ok(manifest) => manifest,
+        let Ok(manifest) = Manifest::from_file(&manifest_path) else {
             // An unparsable manifest: index the project root as a lone source root, no classpath.
-            Err(_) => {
-                self.workspaces
-                    .push(Workspace::load(root.clone(), vec![root]));
-                return;
-            }
+            self.workspaces
+                .push(Workspace::load(root.clone(), vec![root]));
+            return;
         };
         // Assemble the project's full analysis + navigation inputs in one call: the manifest's
         // `[build] classpath` folded with the resolved `[dependencies]` jars and loaded, each
@@ -774,13 +776,13 @@ fn server_capabilities() -> ServerCapabilities {
         }),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
-            work_done_progress_options: Default::default(),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
         })),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: None,
-            work_done_progress_options: Default::default(),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
         document_formatting_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),

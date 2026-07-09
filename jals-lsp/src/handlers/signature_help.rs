@@ -8,6 +8,10 @@
 //! builds a single-file index so the document's own methods are visible) and [`signature_help_to_lsp`]
 //! — the mapping from `jals-hir`'s pure shape to the LSP payload that both paths share.
 
+// The overload/parameter indices and UTF-16 label lengths here are bounded by a single source
+// document, so the `usize`/`u32` conversions cannot truncate in practice.
+#![allow(clippy::cast_possible_truncation)]
+
 use async_lsp::lsp_types::{
     ParameterInformation, ParameterLabel, Position, SignatureHelp, SignatureInformation,
 };
@@ -18,7 +22,7 @@ use crate::line_index::LineIndex;
 
 /// Maps `jals-hir`'s pure signature-help data to the LSP payload. Each parameter range is a byte
 /// range into its signature's label; LSP wants UTF-16 code-unit offsets, so they are converted here.
-pub(crate) fn signature_help_to_lsp(help: &jals_hir::SignatureHelp) -> SignatureHelp {
+pub fn signature_help_to_lsp(help: &jals_hir::SignatureHelp) -> SignatureHelp {
     let signatures = help
         .signatures
         .iter()
@@ -56,7 +60,7 @@ fn utf16_len(s: &str) -> u32 {
 /// single-file project index with the `java.lang` stubs folded in (so the document's own methods
 /// and the core JDK methods are visible). The fallback for a file outside any indexed project; the
 /// cross-file path is [`Workspace::signature_help`](crate::state::Workspace::signature_help).
-pub(crate) fn signature_help_local(
+pub fn signature_help_local(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,

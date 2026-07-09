@@ -30,7 +30,7 @@ use crate::line_index::LineIndex;
 /// anything with whitespace, punctuation, or a leading digit yields a non-`IDENT` token or more
 /// than one token — all rejected. (A context-sensitive keyword such as `var` lexes as `IDENT` and
 /// is accepted; its use is position-restricted, which a rename does not police.)
-pub(crate) fn is_valid_identifier(name: &str) -> bool {
+pub fn is_valid_identifier(name: &str) -> bool {
     let mut tokens = jals_syntax::tokenize(name).into_iter();
     matches!(
         (tokens.next(), tokens.next()),
@@ -41,8 +41,11 @@ pub(crate) fn is_valid_identifier(name: &str) -> bool {
 /// Whether a binding of this kind may be renamed from a single file's resolution alone. Locals and
 /// other file-scoped bindings always qualify; project types do too (the workspace widens their
 /// rewrite project-wide). Members are withheld — their uses can span files we do not rewrite here.
-pub(crate) fn is_renamable_kind(kind: DefKind) -> bool {
-    use jals_hir::DefKind::*;
+pub const fn is_renamable_kind(kind: DefKind) -> bool {
+    use jals_hir::DefKind::{
+        AnnotationType, CatchParam, Class, Enum, Interface, LambdaParam, Local, Param, PatternVar,
+        Record, Resource, TypeParam,
+    };
     matches!(
         kind,
         Local
@@ -79,7 +82,7 @@ fn renamable_binding_at(
 /// The range of the renamable identifier under `position`, or `None` when the cursor is on no
 /// renamable binding (an external name, a keyword/literal, or a withheld member). Drives
 /// `prepareRename`, which the editor uses to validate a rename before prompting for a new name.
-pub(crate) fn prepare_rename_local(
+pub fn prepare_rename_local(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -92,7 +95,7 @@ pub(crate) fn prepare_rename_local(
 /// A [`WorkspaceEdit`] renaming the binding under `position` to `new_name` within this one file, or
 /// `None` if the cursor is on no renamable binding. The caller validates `new_name` first (see
 /// [`is_valid_identifier`]).
-pub(crate) fn rename_local(
+pub fn rename_local(
     parse: &Parse,
     text: &str,
     line_index: &LineIndex,
@@ -122,6 +125,8 @@ pub(crate) fn rename_local(
 
 #[cfg(test)]
 mod tests {
+    // Test offsets live in `TextSize`'s `u32` space, so these `usize`/`u32` casts cannot truncate.
+    #![allow(clippy::cast_possible_truncation)]
     use text_size::TextSize;
 
     use super::*;
