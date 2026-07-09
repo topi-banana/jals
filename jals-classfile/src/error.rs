@@ -34,28 +34,28 @@ pub enum ClassfileError {
 impl fmt::Display for ClassfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ClassfileError::UnexpectedEof { offset, needed } => {
+            Self::UnexpectedEof { offset, needed } => {
                 write!(
                     f,
                     "unexpected end of input at byte {offset}: needed {needed} more byte(s)"
                 )
             }
-            ClassfileError::BadMagic(m) => {
+            Self::BadMagic(m) => {
                 write!(f, "bad magic: expected 0xCAFEBABE, found {m:#010X}")
             }
-            ClassfileError::TrailingBytes { remaining } => {
+            Self::TrailingBytes { remaining } => {
                 write!(
                     f,
                     "{remaining} trailing byte(s) after a complete class file"
                 )
             }
-            ClassfileError::InvalidConstantTag(t) => {
+            Self::InvalidConstantTag(t) => {
                 write!(f, "invalid constant-pool tag: {t}")
             }
-            ClassfileError::InvalidOpcode(op) => {
+            Self::InvalidOpcode(op) => {
                 write!(f, "invalid bytecode opcode: {op:#04X}")
             }
-            ClassfileError::Malformed(s) => write!(f, "malformed class file: {s}"),
+            Self::Malformed(s) => write!(f, "malformed class file: {s}"),
         }
     }
 }

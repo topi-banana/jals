@@ -53,7 +53,7 @@ pub enum ElementValue {
     /// A nested annotation (`@`).
     Annotation(Annotation),
     /// An array of element values (`[`).
-    Array(Vec<ElementValue>),
+    Array(Vec<Self>),
 }
 
 /// A `type_annotation` (JVMS §4.7.20): an annotation plus the location in a type it targets.
@@ -71,7 +71,7 @@ pub struct TypeAnnotation {
 
 /// The `target_type` + `target_info` union of a [`TypeAnnotation`] (JVMS §4.7.20.1). The `target_type`
 /// byte is reconstructed from the variant on write.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TargetInfo {
     /// `type_parameter_target` (0x00 / 0x01).
     TypeParameter {
@@ -140,7 +140,7 @@ pub enum TargetInfo {
 }
 
 /// One live range in a [`TargetInfo::LocalVar`] table.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalVarTargetEntry {
     /// Start of the range (bytecode offset).
     pub start_pc: u16,
@@ -151,7 +151,7 @@ pub struct LocalVarTargetEntry {
 }
 
 /// One step of a [`TypeAnnotation::target_path`] (JVMS §4.7.20.2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypePathEntry {
     /// How to step (array, nested, wildcard bound, or type argument).
     pub type_path_kind: u8,
@@ -160,7 +160,7 @@ pub struct TypePathEntry {
 }
 
 impl Annotation {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Annotation> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let type_index = r.u16()?;
         let count = r.u16()?;
         let mut element_value_pairs = Vec::with_capacity(count as usize);
@@ -170,7 +170,7 @@ impl Annotation {
                 value: ElementValue::read(r)?,
             });
         }
-        Ok(Annotation {
+        Ok(Self {
             type_index,
             element_value_pairs,
         })
@@ -187,28 +187,28 @@ impl Annotation {
 }
 
 impl ElementValue {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<ElementValue> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
-            b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b's' => ElementValue::Const {
+            b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b's' => Self::Const {
                 tag,
                 const_value_index: r.u16()?,
             },
-            b'e' => ElementValue::Enum {
+            b'e' => Self::Enum {
                 type_name_index: r.u16()?,
                 const_name_index: r.u16()?,
             },
-            b'c' => ElementValue::Class {
+            b'c' => Self::Class {
                 class_info_index: r.u16()?,
             },
-            b'@' => ElementValue::Annotation(Annotation::read(r)?),
+            b'@' => Self::Annotation(Annotation::read(r)?),
             b'[' => {
                 let count = r.u16()?;
                 let mut values = Vec::with_capacity(count as usize);
                 for _ in 0..count {
-                    values.push(ElementValue::read(r)?);
+                    values.push(Self::read(r)?);
                 }
-                ElementValue::Array(values)
+                Self::Array(values)
             }
             _ => return Err(ClassfileError::Malformed("element_value tag")),
         })
@@ -216,14 +216,14 @@ impl ElementValue {
 
     pub(crate) fn write(&self, w: &mut Writer) {
         match self {
-            ElementValue::Const {
+            Self::Const {
                 tag,
                 const_value_index,
             } => {
                 w.u8(*tag);
                 w.u16(*const_value_index);
             }
-            ElementValue::Enum {
+            Self::Enum {
                 type_name_index,
                 const_name_index,
             } => {
@@ -231,15 +231,15 @@ impl ElementValue {
                 w.u16(*type_name_index);
                 w.u16(*const_name_index);
             }
-            ElementValue::Class { class_info_index } => {
+            Self::Class { class_info_index } => {
                 w.u8(b'c');
                 w.u16(*class_info_index);
             }
-            ElementValue::Annotation(a) => {
+            Self::Annotation(a) => {
                 w.u8(b'@');
                 a.write(w);
             }
-            ElementValue::Array(values) => {
+            Self::Array(values) => {
                 w.u8(b'[');
                 w.u16(values.len() as u16);
                 for v in values {
@@ -251,7 +251,7 @@ impl ElementValue {
 }
 
 impl TypeAnnotation {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<TypeAnnotation> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let target_info = TargetInfo::read(r)?;
         let path_length = r.u8()?;
         let mut target_path = Vec::with_capacity(path_length as usize);
@@ -270,7 +270,7 @@ impl TypeAnnotation {
                 value: ElementValue::read(r)?,
             });
         }
-        Ok(TypeAnnotation {
+        Ok(Self {
             target_info,
             target_path,
             type_index,
@@ -295,26 +295,26 @@ impl TypeAnnotation {
 }
 
 impl TargetInfo {
-    fn read(r: &mut Reader<'_>) -> Result<TargetInfo> {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
         let target_type = r.u8()?;
         Ok(match target_type {
-            0x00 | 0x01 => TargetInfo::TypeParameter {
+            0x00 | 0x01 => Self::TypeParameter {
                 target_type,
                 type_parameter_index: r.u8()?,
             },
-            0x10 => TargetInfo::Supertype {
+            0x10 => Self::Supertype {
                 supertype_index: r.u16()?,
             },
-            0x11 | 0x12 => TargetInfo::TypeParameterBound {
+            0x11 | 0x12 => Self::TypeParameterBound {
                 target_type,
                 type_parameter_index: r.u8()?,
                 bound_index: r.u8()?,
             },
-            0x13..=0x15 => TargetInfo::Empty { target_type },
-            0x16 => TargetInfo::FormalParameter {
+            0x13..=0x15 => Self::Empty { target_type },
+            0x16 => Self::FormalParameter {
                 formal_parameter_index: r.u8()?,
             },
-            0x17 => TargetInfo::Throws {
+            0x17 => Self::Throws {
                 throws_type_index: r.u16()?,
             },
             0x40 | 0x41 => {
@@ -327,16 +327,16 @@ impl TargetInfo {
                         index: r.u16()?,
                     });
                 }
-                TargetInfo::LocalVar { target_type, table }
+                Self::LocalVar { target_type, table }
             }
-            0x42 => TargetInfo::Catch {
+            0x42 => Self::Catch {
                 exception_table_index: r.u16()?,
             },
-            0x43..=0x46 => TargetInfo::Offset {
+            0x43..=0x46 => Self::Offset {
                 target_type,
                 offset: r.u16()?,
             },
-            0x47..=0x4B => TargetInfo::TypeArgument {
+            0x47..=0x4B => Self::TypeArgument {
                 target_type,
                 offset: r.u16()?,
                 type_argument_index: r.u8()?,
@@ -347,18 +347,18 @@ impl TargetInfo {
 
     fn write(&self, w: &mut Writer) {
         match self {
-            TargetInfo::TypeParameter {
+            Self::TypeParameter {
                 target_type,
                 type_parameter_index,
             } => {
                 w.u8(*target_type);
                 w.u8(*type_parameter_index);
             }
-            TargetInfo::Supertype { supertype_index } => {
+            Self::Supertype { supertype_index } => {
                 w.u8(0x10);
                 w.u16(*supertype_index);
             }
-            TargetInfo::TypeParameterBound {
+            Self::TypeParameterBound {
                 target_type,
                 type_parameter_index,
                 bound_index,
@@ -367,18 +367,18 @@ impl TargetInfo {
                 w.u8(*type_parameter_index);
                 w.u8(*bound_index);
             }
-            TargetInfo::Empty { target_type } => w.u8(*target_type),
-            TargetInfo::FormalParameter {
+            Self::Empty { target_type } => w.u8(*target_type),
+            Self::FormalParameter {
                 formal_parameter_index,
             } => {
                 w.u8(0x16);
                 w.u8(*formal_parameter_index);
             }
-            TargetInfo::Throws { throws_type_index } => {
+            Self::Throws { throws_type_index } => {
                 w.u8(0x17);
                 w.u16(*throws_type_index);
             }
-            TargetInfo::LocalVar { target_type, table } => {
+            Self::LocalVar { target_type, table } => {
                 w.u8(*target_type);
                 w.u16(table.len() as u16);
                 for e in table {
@@ -387,20 +387,20 @@ impl TargetInfo {
                     w.u16(e.index);
                 }
             }
-            TargetInfo::Catch {
+            Self::Catch {
                 exception_table_index,
             } => {
                 w.u8(0x42);
                 w.u16(*exception_table_index);
             }
-            TargetInfo::Offset {
+            Self::Offset {
                 target_type,
                 offset,
             } => {
                 w.u8(*target_type);
                 w.u16(*offset);
             }
-            TargetInfo::TypeArgument {
+            Self::TypeArgument {
                 target_type,
                 offset,
                 type_argument_index,

@@ -1,4 +1,13 @@
 #![cfg_attr(not(test), no_std)]
+// This crate is a byte-exact binary codec: reinterpreting between signed and unsigned integers of
+// the same width (e.g. a `u16` branch offset as an `i16`, two's-complement) and narrowing a
+// derived-on-write count to its `u8`/`u16` field are the codec's intended semantics, so the
+// value-losing cast lints are allowed crate-wide rather than papered over with `as`-site attributes.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 //! `jals-classfile`: a complete, round-trippable model of the JVM `.class` file format (JVMS ch. 4).
 //!
 //! Reads and writes Java class files through a full struct/enum model. The binary codec

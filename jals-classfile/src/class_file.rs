@@ -48,7 +48,7 @@ pub struct ClassFile {
 impl ClassFile {
     /// Parse a class file from its raw bytes. Returns an [`Err`] (never panics) on any structural
     /// problem, including a bad magic or trailing bytes.
-    pub fn read(bytes: &[u8]) -> Result<ClassFile> {
+    pub fn read(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
         let magic = r.u32()?;
         if magic != MAGIC {
@@ -69,7 +69,7 @@ impl ClassFile {
                 remaining: r.remaining(),
             });
         }
-        Ok(ClassFile {
+        Ok(Self {
             minor_version,
             major_version,
             constant_pool,

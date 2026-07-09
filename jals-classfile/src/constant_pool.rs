@@ -24,7 +24,7 @@ pub struct ConstantPool {
 /// One slot of the pool. `Long`/`Double` entries are followed by a [`Gap`](ConstantSlot::Gap) so
 /// indices stay aligned with the file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) enum ConstantSlot {
+pub enum ConstantSlot {
     /// Index 0, which the JVM never uses.
     Sentinel,
     /// A real entry.
@@ -125,7 +125,7 @@ pub enum ConstantPoolEntry {
 }
 
 impl ConstantPool {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<ConstantPool> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let count = r.u16()?;
         let mut entries = Vec::with_capacity(count as usize);
         entries.push(ConstantSlot::Sentinel);
@@ -144,7 +144,7 @@ impl ConstantPool {
                 i += 1;
             }
         }
-        Ok(ConstantPool { entries })
+        Ok(Self { entries })
     }
 
     pub(crate) fn write(&self, w: &mut Writer) {
@@ -182,58 +182,58 @@ impl ConstantPool {
 }
 
 impl ConstantPoolEntry {
-    fn read(r: &mut Reader<'_>) -> Result<ConstantPoolEntry> {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
             1 => {
                 let len = r.u16()? as usize;
-                ConstantPoolEntry::Utf8(r.bytes(len)?.to_vec())
+                Self::Utf8(r.bytes(len)?.to_vec())
             }
-            3 => ConstantPoolEntry::Integer(r.u32()? as i32),
-            4 => ConstantPoolEntry::Float(f32::from_bits(r.u32()?)),
-            5 => ConstantPoolEntry::Long(r.u64()? as i64),
-            6 => ConstantPoolEntry::Double(f64::from_bits(r.u64()?)),
-            7 => ConstantPoolEntry::Class {
+            3 => Self::Integer(r.u32()? as i32),
+            4 => Self::Float(f32::from_bits(r.u32()?)),
+            5 => Self::Long(r.u64()? as i64),
+            6 => Self::Double(f64::from_bits(r.u64()?)),
+            7 => Self::Class {
                 name_index: r.u16()?,
             },
-            8 => ConstantPoolEntry::String {
+            8 => Self::String {
                 string_index: r.u16()?,
             },
-            9 => ConstantPoolEntry::FieldRef {
+            9 => Self::FieldRef {
                 class_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            10 => ConstantPoolEntry::MethodRef {
+            10 => Self::MethodRef {
                 class_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            11 => ConstantPoolEntry::InterfaceMethodRef {
+            11 => Self::InterfaceMethodRef {
                 class_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            12 => ConstantPoolEntry::NameAndType {
+            12 => Self::NameAndType {
                 name_index: r.u16()?,
                 descriptor_index: r.u16()?,
             },
-            15 => ConstantPoolEntry::MethodHandle {
+            15 => Self::MethodHandle {
                 reference_kind: r.u8()?,
                 reference_index: r.u16()?,
             },
-            16 => ConstantPoolEntry::MethodType {
+            16 => Self::MethodType {
                 descriptor_index: r.u16()?,
             },
-            17 => ConstantPoolEntry::Dynamic {
+            17 => Self::Dynamic {
                 bootstrap_method_attr_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            18 => ConstantPoolEntry::InvokeDynamic {
+            18 => Self::InvokeDynamic {
                 bootstrap_method_attr_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            19 => ConstantPoolEntry::Module {
+            19 => Self::Module {
                 name_index: r.u16()?,
             },
-            20 => ConstantPoolEntry::Package {
+            20 => Self::Package {
                 name_index: r.u16()?,
             },
             other => return Err(ClassfileError::InvalidConstantTag(other)),
@@ -242,36 +242,36 @@ impl ConstantPoolEntry {
 
     fn write(&self, w: &mut Writer) {
         match self {
-            ConstantPoolEntry::Utf8(bytes) => {
+            Self::Utf8(bytes) => {
                 w.u8(1);
                 w.u16(bytes.len() as u16);
                 w.bytes(bytes);
             }
-            ConstantPoolEntry::Integer(v) => {
+            Self::Integer(v) => {
                 w.u8(3);
-                w.u32(*v as u32);
+                w.u32(v.cast_unsigned());
             }
-            ConstantPoolEntry::Float(v) => {
+            Self::Float(v) => {
                 w.u8(4);
                 w.u32(v.to_bits());
             }
-            ConstantPoolEntry::Long(v) => {
+            Self::Long(v) => {
                 w.u8(5);
                 w.u64(*v as u64);
             }
-            ConstantPoolEntry::Double(v) => {
+            Self::Double(v) => {
                 w.u8(6);
                 w.u64(v.to_bits());
             }
-            ConstantPoolEntry::Class { name_index } => {
+            Self::Class { name_index } => {
                 w.u8(7);
                 w.u16(*name_index);
             }
-            ConstantPoolEntry::String { string_index } => {
+            Self::String { string_index } => {
                 w.u8(8);
                 w.u16(*string_index);
             }
-            ConstantPoolEntry::FieldRef {
+            Self::FieldRef {
                 class_index,
                 name_and_type_index,
             } => {
@@ -279,7 +279,7 @@ impl ConstantPoolEntry {
                 w.u16(*class_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::MethodRef {
+            Self::MethodRef {
                 class_index,
                 name_and_type_index,
             } => {
@@ -287,7 +287,7 @@ impl ConstantPoolEntry {
                 w.u16(*class_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::InterfaceMethodRef {
+            Self::InterfaceMethodRef {
                 class_index,
                 name_and_type_index,
             } => {
@@ -295,7 +295,7 @@ impl ConstantPoolEntry {
                 w.u16(*class_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::NameAndType {
+            Self::NameAndType {
                 name_index,
                 descriptor_index,
             } => {
@@ -303,7 +303,7 @@ impl ConstantPoolEntry {
                 w.u16(*name_index);
                 w.u16(*descriptor_index);
             }
-            ConstantPoolEntry::MethodHandle {
+            Self::MethodHandle {
                 reference_kind,
                 reference_index,
             } => {
@@ -311,11 +311,11 @@ impl ConstantPoolEntry {
                 w.u8(*reference_kind);
                 w.u16(*reference_index);
             }
-            ConstantPoolEntry::MethodType { descriptor_index } => {
+            Self::MethodType { descriptor_index } => {
                 w.u8(16);
                 w.u16(*descriptor_index);
             }
-            ConstantPoolEntry::Dynamic {
+            Self::Dynamic {
                 bootstrap_method_attr_index,
                 name_and_type_index,
             } => {
@@ -323,7 +323,7 @@ impl ConstantPoolEntry {
                 w.u16(*bootstrap_method_attr_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::InvokeDynamic {
+            Self::InvokeDynamic {
                 bootstrap_method_attr_index,
                 name_and_type_index,
             } => {
@@ -331,11 +331,11 @@ impl ConstantPoolEntry {
                 w.u16(*bootstrap_method_attr_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::Module { name_index } => {
+            Self::Module { name_index } => {
                 w.u8(19);
                 w.u16(*name_index);
             }
-            ConstantPoolEntry::Package { name_index } => {
+            Self::Package { name_index } => {
                 w.u8(20);
                 w.u16(*name_index);
             }

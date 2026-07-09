@@ -25,7 +25,7 @@ fn unknown_names(cf: &ClassFile) -> Vec<String> {
                 AttributeBody::Unknown(_) => {
                     out.push(
                         pool.utf8(a.name_index)
-                            .map(|c| c.into_owned())
+                            .map(std::borrow::Cow::into_owned)
                             .unwrap_or_default(),
                     );
                 }

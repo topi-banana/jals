@@ -8,24 +8,24 @@ use alloc::vec::Vec;
 use crate::error::{ClassfileError, Result};
 
 /// A big-endian cursor over an input buffer.
-pub(crate) struct Reader<'a> {
+pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) fn new(buf: &'a [u8]) -> Self {
+    pub(crate) const fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
     }
 
     /// The current absolute byte offset. Used by `Code` to compute the alignment padding of
     /// `tableswitch` / `lookupswitch`, which is relative to the start of the code array.
-    pub(crate) fn pos(&self) -> usize {
+    pub(crate) const fn pos(&self) -> usize {
         self.pos
     }
 
     /// How many bytes are left unread.
-    pub(crate) fn remaining(&self) -> usize {
+    pub(crate) const fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
 
@@ -73,18 +73,19 @@ impl<'a> Reader<'a> {
 
 /// A reserved 4-byte slot in a [`Writer`], to be filled in later with the byte length of whatever
 /// was written after it. See [`Writer::reserve_u32_len`] / [`Writer::patch_u32_len`].
+#[derive(Clone, Copy)]
 #[must_use]
-pub(crate) struct LenPatch(usize);
+pub struct LenPatch(usize);
 
 /// A big-endian byte sink.
 #[derive(Default)]
-pub(crate) struct Writer {
+pub struct Writer {
     buf: Vec<u8>,
 }
 
 impl Writer {
     pub(crate) fn new() -> Self {
-        Writer::default()
+        Self::default()
     }
 
     pub(crate) fn u8(&mut self, v: u8) {
@@ -109,7 +110,7 @@ impl Writer {
 
     /// The number of bytes written so far. Used as the current code-array offset when emitting
     /// alignment padding for `tableswitch` / `lookupswitch`.
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.buf.len()
     }
 

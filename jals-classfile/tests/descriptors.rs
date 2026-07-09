@@ -32,7 +32,7 @@ fn signature(cf: &ClassFile, attrs: &[Attribute]) -> Option<String> {
         AttributeBody::Signature { signature_index } => cf
             .constant_pool
             .utf8(*signature_index)
-            .map(|c| c.into_owned()),
+            .map(std::borrow::Cow::into_owned),
         _ => None,
     })
 }

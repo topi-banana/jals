@@ -25,14 +25,14 @@ pub enum TypeSignature {
     /// `T Identifier ;` — a reference to a type variable.
     TypeVariable(String),
     /// `[ ...` — an array of the component signature.
-    Array(Box<TypeSignature>),
+    Array(Box<Self>),
 }
 
 impl TypeSignature {
     /// Whether this signature is exactly `java.lang.Object` (a raw, non-restrictive class bound —
     /// the implicit bound that renderers omit).
     pub fn is_java_lang_object(&self) -> bool {
-        matches!(self, TypeSignature::Class(c)
+        matches!(self, Self::Class(c)
             if c.name == "java/lang/Object" && c.suffixes.is_empty() && c.type_arguments.is_empty())
     }
 }
@@ -156,7 +156,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(s: &'a str) -> Self {
+    const fn new(s: &'a str) -> Self {
         Parser { s, pos: 0 }
     }
 
@@ -178,7 +178,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_eof(&self) -> Result<()> {
+    const fn expect_eof(&self) -> Result<()> {
         if self.pos == self.s.len() {
             Ok(())
         } else {
@@ -378,10 +378,10 @@ impl<'a> Parser<'a> {
 impl fmt::Display for TypeSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TypeSignature::Base(b) => f.write_str(&b.as_char().to_string()),
-            TypeSignature::Class(c) => write!(f, "{c}"),
-            TypeSignature::TypeVariable(name) => write!(f, "T{name};"),
-            TypeSignature::Array(inner) => write!(f, "[{inner}"),
+            Self::Base(b) => f.write_str(&b.as_char().to_string()),
+            Self::Class(c) => write!(f, "{c}"),
+            Self::TypeVariable(name) => write!(f, "T{name};"),
+            Self::Array(inner) => write!(f, "[{inner}"),
         }
     }
 }
@@ -412,10 +412,10 @@ impl fmt::Display for ClassTypeSignature {
 impl fmt::Display for TypeArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TypeArgument::Any => f.write_str("*"),
-            TypeArgument::Exact(t) => write!(f, "{t}"),
-            TypeArgument::Extends(t) => write!(f, "+{t}"),
-            TypeArgument::Super(t) => write!(f, "-{t}"),
+            Self::Any => f.write_str("*"),
+            Self::Exact(t) => write!(f, "{t}"),
+            Self::Extends(t) => write!(f, "+{t}"),
+            Self::Super(t) => write!(f, "-{t}"),
         }
     }
 }

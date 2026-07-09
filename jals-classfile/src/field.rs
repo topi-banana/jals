@@ -24,12 +24,12 @@ pub struct FieldInfo {
 }
 
 impl FieldInfo {
-    pub(crate) fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<FieldInfo> {
+    pub(crate) fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
         let access_flags = FieldAccessFlags(r.u16()?);
         let name_index = r.u16()?;
         let descriptor_index = r.u16()?;
         let attributes = attribute::read_attributes(r, pool)?;
-        Ok(FieldInfo {
+        Ok(Self {
             access_flags,
             name_index,
             descriptor_index,

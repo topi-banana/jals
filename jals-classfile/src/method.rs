@@ -25,12 +25,12 @@ pub struct MethodInfo {
 }
 
 impl MethodInfo {
-    pub(crate) fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<MethodInfo> {
+    pub(crate) fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
         let access_flags = MethodAccessFlags(r.u16()?);
         let name_index = r.u16()?;
         let descriptor_index = r.u16()?;
         let attributes = attribute::read_attributes(r, pool)?;
-        Ok(MethodInfo {
+        Ok(Self {
             access_flags,
             name_index,
             descriptor_index,
