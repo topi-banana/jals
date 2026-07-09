@@ -31,9 +31,11 @@ use crate::resolve::{
 
 // ---- Capability implementations -------------------------------------------------------------
 
-/// A [`Fetcher`] backed by `reqwest`'s **blocking** client. Its `fetch` does blocking work and the
-/// returned future resolves in a single poll, so a synchronous host drives it with `block_on` —
-/// provided no Tokio runtime is active on the current thread (`reqwest::blocking` panics inside one).
+/// A [`Fetcher`] backed by `reqwest`'s **blocking** client.
+///
+/// Its `fetch` does blocking work and the returned future resolves in a single poll, so a synchronous
+/// host drives it with `block_on` — provided no Tokio runtime is active on the current thread
+/// (`reqwest::blocking` panics inside one).
 pub struct ReqwestFetcher {
     client: reqwest::blocking::Client,
 }
@@ -41,7 +43,7 @@ pub struct ReqwestFetcher {
 impl ReqwestFetcher {
     /// Build a fetcher with a fresh blocking client (cheap; reused across a resolution batch).
     pub fn new() -> Self {
-        ReqwestFetcher {
+        Self {
             client: reqwest::blocking::Client::new(),
         }
     }
@@ -156,6 +158,7 @@ pub struct NestedJarsExtraction {
 
 /// A project's assembled analysis / build inputs, on the real filesystem — the host `PathBuf`-based
 /// form of [`ProjectInputsIn`](crate::ProjectInputsIn), with the manifest's source roots added.
+///
 /// Produced by [`assemble_project_inputs`]. Which fields are populated depends on the
 /// [`ProjectInputOptions`] passed.
 #[derive(Debug, Default)]
@@ -308,10 +311,12 @@ pub fn synthesize_classpath_sources(
     to_pathbufs(files)
 }
 
-/// Assemble a project's analysis / build inputs off the real filesystem: resolve `[dependencies]`
-/// (downloading remotes with a blocking `reqwest` [`Fetcher`], cloning `git` deps with a subprocess
-/// [`Git`]), load / synthesize per `options`, and add the manifest's source roots + edition. The
-/// single seam `jals-cli` and `jals-lsp` build their `ProjectIndex` / compile inputs from. See
+/// Assemble a project's analysis / build inputs off the real filesystem.
+///
+/// Resolves `[dependencies]` (downloading remotes with a blocking `reqwest` [`Fetcher`], cloning `git`
+/// deps with a subprocess [`Git`]), loads / synthesizes per `options`, and adds the manifest's source
+/// roots + edition. The single seam `jals-cli` and `jals-lsp` build their `ProjectIndex` / compile
+/// inputs from. See
 /// [`assemble_project_inputs_in`](crate::assemble_project_inputs_in) for the pure core.
 ///
 /// Uses the blocking `reqwest` client via [`block_on`], which panics inside a Tokio runtime — so

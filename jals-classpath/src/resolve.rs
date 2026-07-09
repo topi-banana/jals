@@ -19,6 +19,11 @@
 //! [`Fetcher`] + a subprocess [`Git`], preserving the crate's historic `PathBuf` API; the browser
 //! playground drives them with an `InMemoryFileTree` + a `fetch`-backed [`Fetcher`] and no `Git`.
 
+// The download orchestrators borrow a `&mut dyn FileTree` and a non-`Sync` `Fetcher`/`Git` across the
+// fetch await, so their futures are deliberately not `Send`: the wasm core drives them
+// single-threaded and the `native` facade `block_on`s them on a dedicated thread.
+#![allow(clippy::future_not_send)]
+
 use std::path::Path;
 
 use jals_build::{DependencySource, GitSource, ManifestExt, PathSource, SourceDependency};
@@ -32,7 +37,7 @@ use crate::{Warning, hash_hex};
 /// The project's dependency cache root, `<root>/target/jals/deps` — downloads, git clones, extracted
 /// sources, and unpacked nested jars all live under it (`target/` is already build output). The single
 /// definition of the cache layout.
-pub(crate) fn deps_cache_dir(root: &str) -> String {
+pub fn deps_cache_dir(root: &str) -> String {
     path::join(root, "target/jals/deps")
 }
 
@@ -41,14 +46,14 @@ pub(crate) fn deps_cache_dir(root: &str) -> String {
 /// Combining the human-readable dependency name with a hash of the URL keeps filenames legible while
 /// disambiguating two URLs that share a name (and avoiding a stale cache silently serving the wrong
 /// jar).
-pub(crate) fn cached_jar_path_str(name: &str, url: &str, cache_dir: &str) -> String {
+pub fn cached_jar_path_str(name: &str, url: &str, cache_dir: &str) -> String {
     path::join(cache_dir, &format!("{name}-{}.jar", hash_hex(url)))
 }
 
 /// A `PathBuf` rendered as a virtual `&str` path. On a host a virtual path *is* the OS path string,
 /// so this is lossless there. Shared with the [`native`](crate::native) facade, which converts the
 /// crate's historic `PathBuf` API to and from the core's virtual `&str` paths.
-pub(crate) fn vpath(p: &Path) -> String {
+pub fn vpath(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
@@ -199,9 +204,10 @@ pub async fn resolve_project_sources_in<F: Fetcher>(
     java_files
 }
 
-/// Resolve a project's **source-form** `[dependencies]` (`git` / `path`) to the virtual `.java` paths
-/// the host indexes for analysis and go-to-definition (and, for the CLI, compiles alongside the
-/// project's own sources).
+/// Resolve a project's **source-form** `[dependencies]` (`git` / `path`) to the virtual `.java` paths.
+///
+/// The host indexes these for analysis and go-to-definition (and, for the CLI, compiles them alongside
+/// the project's own sources).
 ///
 /// Classifies each ([`Manifest::dependency_source_dirs`]), then for each locates a directory of
 /// `.java`:

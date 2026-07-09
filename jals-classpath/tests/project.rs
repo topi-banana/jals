@@ -47,7 +47,7 @@ fn analysis_loads_the_classpath_and_reads_edition() {
         });
 
     // The jar is resolved and its `.class` loaded for the index.
-    assert_eq!(inputs.dependency_jars, vec![jar.clone()]);
+    assert_eq!(inputs.dependency_jars, vec![jar]);
     assert_eq!(inputs.classpath_classes.len(), 1);
     // Analysis pulls no navigation source and no git/path source deps.
     assert!(inputs.library_sources.is_empty());

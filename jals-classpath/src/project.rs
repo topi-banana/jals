@@ -78,13 +78,19 @@ pub struct ProjectInputsIn {
 
 /// Assemble a project's analysis / build inputs from its parsed `manifest` (rooted at `root`, a
 /// `/`-separated virtual path), driving all I/O through `fs` and the injected `fetcher` / `git`
-/// capabilities. The one place the resolve → load → synthesize pipeline lives; adapters call it and
+/// capabilities.
+///
+/// The one place the resolve → load → synthesize pipeline lives; adapters call it and
 /// consume the fields they need.
 ///
 /// Every non-fatal problem — a failed download, a missing local jar, an unreadable `.class`, a failed
 /// clone — is reported through `warn` with a category prefix (`dependency: …`, `sources: …`,
 /// `source dependency: …`, `classpath: <path>: …`, `decompile: …`) and skipped; the caller's `warn`
 /// sink owns only where the message goes (its own tool prefix, a status line, a marker).
+// The injected capabilities (`&mut dyn FileTree`, non-`Sync` `F`/`Git`, `impl FnMut` sink) are
+// deliberately not `Send` — the wasm core drives this single-threaded and the `native` facade
+// `block_on`s it on a dedicated thread, so `future_not_send` does not apply.
+#[allow(clippy::future_not_send)]
 pub async fn assemble_project_inputs_in<F: Fetcher>(
     fetcher: &F,
     git: Option<&dyn Git>,
@@ -106,7 +112,7 @@ pub async fn assemble_project_inputs_in<F: Fetcher>(
 
     // 1. Resolve the `[dependencies]` jars (download remotes / confirm locals, unpack bundled jars).
     let dependency_jars = resolve_project_dependencies_in(fetcher, &mut *fs, manifest, root, |m| {
-        warn(format!("dependency: {m}"))
+        warn(format!("dependency: {m}"));
     })
     .await;
 
@@ -114,7 +120,7 @@ pub async fn assemble_project_inputs_in<F: Fetcher>(
     //    layer — extended with the skeletons below.
     let mut library_sources = if want_sources {
         resolve_project_sources_in(fetcher, &mut *fs, manifest, root, |m| {
-            warn(format!("sources: {m}"))
+            warn(format!("sources: {m}"));
         })
         .await
     } else {
@@ -125,7 +131,7 @@ pub async fn assemble_project_inputs_in<F: Fetcher>(
     //    only via the injected `git`, not the tree).
     let source_dep_sources = if want_source_deps {
         resolve_project_source_deps_in(&*fs, git, manifest, root, |m| {
-            warn(format!("source dependency: {m}"))
+            warn(format!("source dependency: {m}"));
         })
     } else {
         Vec::new()

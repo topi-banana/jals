@@ -66,7 +66,7 @@ fn load_entry(fs: &dyn FileTree, entry: &str, load: &mut ClasspathLoad) {
         match path::extension(entry) {
             Some(e) if e.eq_ignore_ascii_case("class") => load_class_file(fs, entry, load),
             Some(e) if e.eq_ignore_ascii_case("jar") || e.eq_ignore_ascii_case("zip") => {
-                load_jar(fs, entry, load)
+                load_jar(fs, entry, load);
             }
             _ => load.warn(
                 entry,
@@ -108,12 +108,14 @@ fn load_jar(fs: &dyn FileTree, jar: &str, load: &mut ClasspathLoad) {
                 continue;
             }
         };
-        if member.is_dir() || !member.name().ends_with(".class") {
+        if member.is_dir()
+            || !path::extension(member.name()).is_some_and(|e| e.eq_ignore_ascii_case("class"))
+        {
             continue;
         }
         // `joined` names the failing member within the jar, e.g. `dep.jar/java/util/List.class`.
         let joined = path::join(jar, member.name());
-        let mut buf = Vec::with_capacity(member.size() as usize);
+        let mut buf = Vec::with_capacity(usize::try_from(member.size()).unwrap_or(0));
         if let Err(err) = member.read_to_end(&mut buf) {
             load.warn(&joined, &format!("failed to read class from jar: {err}"));
             continue;
@@ -166,8 +168,9 @@ pub fn extract_sources_in(
     (java_files, warnings)
 }
 
-/// Recursively extract every **bundled jar** (`*.jar` member, at any depth) of `jar` into `dest_dir`,
-/// returning the nested jar paths written to the tree (for the host to add to the classpath), plus any
+/// Recursively extract every **bundled jar** (`*.jar` member, at any depth) of `jar` into `dest_dir`.
+///
+/// Returns the nested jar paths written to the tree (for the host to add to the classpath), plus any
 /// non-fatal [`Warning`]s.
 ///
 /// This is what `recursive = true` on a `[dependencies]` jar opts into. Idempotent (skip-if-exists),
@@ -269,7 +272,7 @@ fn extract_members(
             extracted.push(dest);
             continue;
         }
-        let mut buf = Vec::with_capacity(member.size() as usize);
+        let mut buf = Vec::with_capacity(usize::try_from(member.size()).unwrap_or(0));
         if let Err(err) = member.read_to_end(&mut buf) {
             let joined = path::join(jar, member.name());
             warnings.push(Warning::new(
@@ -289,8 +292,9 @@ fn extract_members(
 }
 
 /// Synthesize signature-only `.java` **skeletons** for `classes` (already-parsed classpath class
-/// files) and write them under `<root>/target/jals/deps/decompiled`, returning the written `.java`
-/// paths for the host to register as go-to-definition targets.
+/// files) and write them under `<root>/target/jals/deps/decompiled`.
+///
+/// Returns the written `.java` paths for the host to register as go-to-definition targets.
 ///
 /// Takes the project `root` and derives the cache subdir itself, mirroring the sibling
 /// `resolve_project_*_in` orchestrators (so the cache layout lives in one place — the core, next to

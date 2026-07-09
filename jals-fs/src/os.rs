@@ -15,8 +15,8 @@ pub struct OsFileTree;
 
 impl OsFileTree {
     /// Create a new handle.
-    pub fn new() -> Self {
-        OsFileTree
+    pub const fn new() -> Self {
+        Self
     }
 }
 

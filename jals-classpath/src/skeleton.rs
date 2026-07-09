@@ -34,7 +34,7 @@ use jals_decompile::{
 /// plus the members (the top-level type and its inlined nested types). Splitting the cheap grouping
 /// ([`skeleton_groups`]) from the body rendering ([`render`](SkeletonGroup::render)) lets the host skip
 /// rendering a skeleton that is already cached on disk.
-pub(crate) struct SkeletonGroup<'a> {
+pub struct SkeletonGroup<'a> {
     /// The package, dotted (`a.b`); empty for the default package.
     package: String,
     /// The top-level type's simple name.
@@ -69,7 +69,7 @@ impl SkeletonGroup<'_> {
 /// Classes are grouped by `(package, top-level simple name)`; each group's nested types render inline
 /// so their dotted FQNs are well-formed. A class with no present top-level enclosing type, or a
 /// module / anonymous / local / synthetic class, contributes nothing.
-pub(crate) fn skeleton_groups(classes: &[ClassFile]) -> Vec<SkeletonGroup<'_>> {
+pub fn skeleton_groups(classes: &[ClassFile]) -> Vec<SkeletonGroup<'_>> {
     // group key (package, top-level name) -> nested-path -> class file.
     let mut groups: BTreeMap<(String, String), BTreeMap<Vec<String>, &ClassFile>> = BTreeMap::new();
     for cf in classes {
@@ -217,7 +217,7 @@ fn type_header(
 
 /// The class-kind keyword. A record is rendered as a plain `class` — the `.class` stays authoritative
 /// for typing, and the skeleton is navigation-only, so the record component syntax is unnecessary.
-fn class_keyword(cf: &ClassFile) -> &'static str {
+const fn class_keyword(cf: &ClassFile) -> &'static str {
     let flags = cf.access_flags;
     if flags.is_annotation() {
         "@interface"
@@ -299,7 +299,7 @@ fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize)
             .fields
             .iter()
             .filter(|f| f.access_flags.is_enum())
-            .filter_map(|f| pool.utf8(f.name_index).map(|c| c.into_owned()))
+            .filter_map(|f| pool.utf8(f.name_index).map(std::borrow::Cow::into_owned))
             .collect();
         if !constants.is_empty() {
             let _ = writeln!(out, "{pad}{};", constants.join(", "));
@@ -311,7 +311,10 @@ fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize)
         if flags.is_enum() || flags.contains(FieldAccessFlags::SYNTHETIC) {
             continue;
         }
-        let Some(name) = pool.utf8(field.name_index).map(|c| c.into_owned()) else {
+        let Some(name) = pool
+            .utf8(field.name_index)
+            .map(std::borrow::Cow::into_owned)
+        else {
             continue;
         };
         let ty = field_type_java(&field.attributes, field.descriptor_index, pool);
@@ -333,7 +336,10 @@ fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize)
         {
             continue;
         }
-        let Some(raw_name) = pool.utf8(method.name_index).map(|c| c.into_owned()) else {
+        let Some(raw_name) = pool
+            .utf8(method.name_index)
+            .map(std::borrow::Cow::into_owned)
+        else {
             continue;
         };
         if raw_name == "<clinit>" {
@@ -409,7 +415,7 @@ fn method_body(
 }
 
 /// The safe placeholder body used when a method's real body cannot be decompiled.
-fn safe_body(is_ctor: bool, returns_value: bool) -> &'static str {
+const fn safe_body(is_ctor: bool, returns_value: bool) -> &'static str {
     if is_ctor || !returns_value {
         " {}"
     } else {
@@ -617,9 +623,9 @@ fn render_type_params(params: &[TypeParameter]) -> String {
 /// The `Signature` attribute's string, if present.
 fn signature_string(attrs: &[Attribute], pool: &ConstantPool) -> Option<String> {
     attrs.iter().find_map(|a| match &a.body {
-        AttributeBody::Signature { signature_index } => {
-            pool.utf8(*signature_index).map(|c| c.into_owned())
-        }
+        AttributeBody::Signature { signature_index } => pool
+            .utf8(*signature_index)
+            .map(std::borrow::Cow::into_owned),
         _ => None,
     })
 }

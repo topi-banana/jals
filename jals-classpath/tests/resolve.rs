@@ -93,7 +93,7 @@ fn downloads_from_localhost() {
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("cache");
     let url = format!("http://{addr}/lib.jar");
-    let sources = vec![("lib".to_string(), DependencySource::Url(url.clone()))];
+    let sources = vec![("lib".to_string(), DependencySource::Url(url))];
 
     let resolved = resolve_dependencies(&sources, &cache);
     handle.join().unwrap();
