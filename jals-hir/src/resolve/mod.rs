@@ -7,7 +7,7 @@
 //! field or method used before its declaration) resolve without a separate pre-scan.
 
 mod build;
-pub(crate) mod collect;
+pub mod collect;
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -176,7 +176,7 @@ struct RawRef {
 }
 
 /// Builds the scope tree and resolves references for one file.
-pub(crate) struct Resolver {
+pub struct Resolver {
     root: SyntaxNode,
     defs: Vec<Def>,
     scopes: Vec<Scope>,
@@ -185,7 +185,7 @@ pub(crate) struct Resolver {
 
 impl Resolver {
     /// Creates a resolver rooted at `root` (the `SOURCE_FILE` node), seeded with the file scope.
-    pub(crate) fn new(root: &SyntaxNode) -> Resolver {
+    pub(crate) fn new(root: &SyntaxNode) -> Self {
         let r = root.text_range();
         let file_scope = Scope {
             id: ScopeId(0),
@@ -194,7 +194,7 @@ impl Resolver {
             range: usize::from(r.start())..usize::from(r.end()),
             defs: Vec::new(),
         };
-        Resolver {
+        Self {
             root: root.clone(),
             defs: Vec::new(),
             scopes: vec![file_scope],
@@ -215,10 +215,8 @@ impl Resolver {
             let resolution = if raw.qualified.is_some() {
                 Resolution::Unresolved
             } else {
-                match self.lookup(raw.scope, &raw.name, raw.namespace, raw.range.start) {
-                    Some(id) => Resolution::Def(id),
-                    None => Resolution::Unresolved,
-                }
+                self.lookup(raw.scope, &raw.name, raw.namespace, raw.range.start)
+                    .map_or(Resolution::Unresolved, Resolution::Def)
             };
             references.push(Reference {
                 range: raw.range,

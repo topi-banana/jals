@@ -9,7 +9,7 @@
 //! left as a bare name for [`is_type_param`](crate::ProjectIndex) to recognise, and every class name
 //! is emitted fully-qualified so it resolves without an import context.
 
-use alloc::borrow::ToOwned;
+use alloc::borrow::{Cow, ToOwned};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -25,7 +25,7 @@ use crate::def::DefKind;
 use crate::project::{MemberType, Param, TypeParamDecl};
 
 /// A `.class` file reduced to the type-level facts the index needs.
-pub(crate) struct ClassfileClass {
+pub struct ClassfileClass {
     /// The class's fully-qualified, dotted name (`java.util.Map.Entry`).
     pub fqn: String,
     /// Which kind of type it is.
@@ -40,7 +40,7 @@ pub(crate) struct ClassfileClass {
 }
 
 /// One member (field / method / constructor) of a [`ClassfileClass`].
-pub(crate) struct ClassfileMember {
+pub struct ClassfileMember {
     /// The member's simple name (a constructor uses the class's simple name, matching the source path).
     pub name: String,
     /// What kind of member it is.
@@ -57,7 +57,7 @@ pub(crate) struct ClassfileMember {
 }
 
 /// Lower a class file to its [`ClassfileClass`], or `None` for `module-info` (a module, not a type).
-pub(crate) fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
+pub fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
     if cf.access_flags.is_module() {
         return None;
     }
@@ -117,7 +117,7 @@ fn class_signature(cf: &ClassFile, pool: &ConstantPool) -> Option<ClassSignature
 fn signature_string(attrs: &[Attribute], pool: &ConstantPool) -> Option<String> {
     attrs.iter().find_map(|a| match &a.body {
         AttributeBody::Signature { signature_index } => {
-            pool.utf8(*signature_index).map(|c| c.into_owned())
+            pool.utf8(*signature_index).map(Cow::into_owned)
         }
         _ => None,
     })
@@ -171,7 +171,7 @@ fn lower_supertypes(
 fn lower_members(cf: &ClassFile, pool: &ConstantPool, owner_simple: &str) -> Vec<ClassfileMember> {
     let mut out = Vec::new();
     for field in &cf.fields {
-        let Some(name) = pool.utf8(field.name_index).map(|c| c.into_owned()) else {
+        let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
             continue;
         };
         out.push(ClassfileMember {
@@ -184,7 +184,7 @@ fn lower_members(cf: &ClassFile, pool: &ConstantPool, owner_simple: &str) -> Vec
         });
     }
     for method in &cf.methods {
-        let Some(raw_name) = pool.utf8(method.name_index).map(|c| c.into_owned()) else {
+        let Some(raw_name) = pool.utf8(method.name_index).map(Cow::into_owned) else {
             continue;
         };
         if raw_name == "<clinit>" {

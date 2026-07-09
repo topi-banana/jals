@@ -4,7 +4,13 @@
 //! anything without a special shape just recurses its children in the current scope, which also
 //! records the `NAME_REF`s it meets (deeper resolution happens in pass 2).
 
-use jals_syntax::SyntaxKind::*;
+use jals_syntax::SyntaxKind::{
+    ANNOTATION_TYPE_DECL, BLOCK, CATCH_CLAUSE, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL,
+    ENUM_CONSTANT, ENUM_DECL, FIELD_DECL, FOR_EACH_STMT, FOR_STMT, INTERFACE_DECL, LAMBDA_EXPR,
+    LOCAL_VAR_DECL, METHOD_DECL, NAME_REF, NEW_EXPR, PARAM, PARAM_LIST, RECORD_COMPONENT,
+    RECORD_DECL, RECORD_HEADER, SWITCH_EXPR, SWITCH_GROUP, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT,
+    TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS,
+};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{
     AstNode, CatchClause, ForEachStmt, LambdaExpr, LocalVarDecl, Resource, SwitchExpr, SwitchStmt,
@@ -189,11 +195,9 @@ impl Resolver {
             return;
         };
         // Resources are visible in the try block; catch/finally do not see them.
-        let body_scope = if let Some(res) = t.resources() {
-            self.build_resources(&res, scope)
-        } else {
-            scope
-        };
+        let body_scope = t
+            .resources()
+            .map_or(scope, |res| self.build_resources(&res, scope));
         if let Some(b) = t.block() {
             self.build(b.syntax(), body_scope);
         }

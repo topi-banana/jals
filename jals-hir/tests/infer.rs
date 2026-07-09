@@ -4,6 +4,8 @@
 //! tests render every value definition and every expression of a fixture, one per line, so the
 //! whole bottom-up result is visible at a glance.
 
+use core::fmt::Write;
+
 use expect_test::{Expect, expect};
 use jals_hir::{
     FileId, Namespace, ProjectIndex, Resolved, Ty, TypeInference, infer, infer_node, resolve_node,
@@ -298,12 +300,7 @@ fn render(src: &str) -> String {
         if d.kind.namespace() != Namespace::Value {
             continue;
         }
-        out.push_str(&format!(
-            "  {:?} {}: {}\n",
-            d.kind,
-            d.name,
-            ti.type_of_def(d.id)
-        ));
+        writeln!(out, "  {:?} {}: {}", d.kind, d.name, ti.type_of_def(d.id)).unwrap();
     }
     out.push_str("exprs:\n");
     for e in node.descendants().filter_map(ast::Expr::cast) {
@@ -313,11 +310,12 @@ fn render(src: &str) -> String {
             .cloned()
             .unwrap_or(Ty::Unknown);
         let text = e.syntax().text().to_string().trim().replace('\n', " ");
-        out.push_str(&format!("  {text}: {ty}\n"));
+        writeln!(out, "  {text}: {ty}").unwrap();
     }
     out
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn check(src: &str, expected: Expect) {
     expected.assert_eq(&render(src));
 }
@@ -326,7 +324,7 @@ fn check(src: &str, expected: Expect) {
 fn snapshot_mixed_expression() {
     check(
         "class C { void m(int a, double b) { var r = a * b + 1; } }",
-        expect![[r#"
+        expect![[r"
             defs:
               Param a: int
               Param b: double
@@ -337,7 +335,7 @@ fn snapshot_mixed_expression() {
               a: int
               b: double
               1: int
-        "#]],
+        "]],
     );
 }
 
@@ -345,7 +343,7 @@ fn snapshot_mixed_expression() {
 fn snapshot_new_and_array() {
     check(
         "class C { void m() { Helper h = new Helper(); var xs = new int[2]; } } class Helper { }",
-        expect![[r#"
+        expect![[r"
             defs:
               Local h: Helper
               Local xs: int[]
@@ -353,6 +351,6 @@ fn snapshot_new_and_array() {
               new Helper(): Helper
               new int[2]: int[]
               2: int
-        "#]],
+        "]],
     );
 }

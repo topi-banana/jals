@@ -16,7 +16,12 @@ fn indexed(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
     let nodes: Vec<(FileId, SyntaxNode)> = sources
         .iter()
         .enumerate()
-        .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+        .map(|(i, s)| {
+            (
+                FileId(u32::try_from(i).unwrap()),
+                jals_syntax::parse(s).syntax(),
+            )
+        })
         .collect();
     let index = ProjectIndex::builder(&nodes).build();
     let (fid, root) = &nodes[file as usize];

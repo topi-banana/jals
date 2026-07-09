@@ -97,12 +97,12 @@ struct Classifier {
 impl Classifier {
     /// Resolve `java.lang.Throwable` / `RuntimeException` / `Error` (via the stdlib stubs). `None` when
     /// they are not indexed — the analysis then cannot classify anything and is a no-op.
-    fn new(index: &ProjectIndex, file: FileId) -> Option<Classifier> {
+    fn new(index: &ProjectIndex, file: FileId) -> Option<Self> {
         let resolve = |simple, fqn| match index.resolve_type_name(file, simple, Some(fqn)) {
             TypeResolution::Project(id) => Some(id),
             _ => None,
         };
-        Some(Classifier {
+        Some(Self {
             throwable: resolve("Throwable", "java.lang.Throwable")?,
             runtime_exception: resolve("RuntimeException", "java.lang.RuntimeException")?,
             error: resolve("Error", "java.lang.Error")?,
@@ -357,7 +357,7 @@ fn arg_count(args: Option<ast::ArgList>) -> usize {
 /// Whether a member's arity can bind a call of `argc` arguments: an exact match, or a varargs method
 /// whose fixed parameters are no more than `argc`. Including varargs candidates keeps the
 /// intersection in [`Cx::call_throws`] sound (the actually-resolved overload is never excluded).
-fn applies_to_arity(member: &crate::Member, argc: usize) -> bool {
+const fn applies_to_arity(member: &crate::Member, argc: usize) -> bool {
     if member.varargs {
         member.params.len().saturating_sub(1) <= argc
     } else {

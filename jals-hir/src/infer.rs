@@ -30,9 +30,17 @@ use core::ops::Range;
 
 use hashbrown::{HashMap, HashSet};
 
-use jals_syntax::SyntaxKind::*;
+use jals_syntax::SyntaxKind::{
+    AMP, AMP_AMP, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
+    CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, EQ, EQ_EQ,
+    FALSE_KW, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW,
+    INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL,
+    MINUS, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT,
+    SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, VAR_KW,
+    VOID_KW,
+};
 use jals_syntax::ast::{self, AstNode};
-use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::def::{Def, DefId, DefKind, Namespace};
 use crate::project::{FileId, ItemId, MemberType, ProjectIndex, TypeResolution};
@@ -87,9 +95,11 @@ pub fn infer(
     Inferer::new(root, resolved, Some((index, file))).run()
 }
 
-/// Infers types for `root` without a project index: reference type names resolve only to
-/// [`ClassTy::External`] (by spelling), but all structural inference — primitives, arrays, literals,
-/// numeric promotion, `var` from initializer — still works. For file-local tooling holding no index.
+/// Infers types for `root` without a project index.
+///
+/// Reference type names resolve only to [`ClassTy::External`] (by spelling), but all structural
+/// inference — primitives, arrays, literals, numeric promotion, `var` from initializer — still
+/// works. For file-local tooling holding no index.
 pub fn infer_node(root: &SyntaxNode, resolved: &Resolved) -> TypeInference {
     Inferer::new(root, resolved, None).run()
 }
@@ -116,16 +126,16 @@ enum MismatchKind {
 impl TypeMismatch {
     /// An assignment-context mismatch (initializer, assignment, return, or a single-overload call
     /// argument): `found` is not assignable to `expected`.
-    fn assignment(range: Range<usize>, expected: Ty, found: Ty) -> TypeMismatch {
-        TypeMismatch {
+    const fn assignment(range: Range<usize>, expected: Ty, found: Ty) -> Self {
+        Self {
             range,
             kind: MismatchKind::Assignment { expected, found },
         }
     }
 
     /// A call to `name` with argument types `args` that no same-arity overload accepts.
-    fn no_overload(range: Range<usize>, name: String, args: Vec<Ty>) -> TypeMismatch {
-        TypeMismatch {
+    const fn no_overload(range: Range<usize>, name: String, args: Vec<Ty>) -> Self {
+        Self {
             range,
             kind: MismatchKind::NoOverload { name, args },
         }
@@ -140,7 +150,7 @@ impl TypeMismatch {
             MismatchKind::NoOverload { name, args } => {
                 let list = args
                     .iter()
-                    .map(|t| t.to_string())
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("no overload of `{name}` accepts the argument types ({list})")
@@ -365,7 +375,7 @@ fn check_call(
 /// receiver's project type, or a bare call `m(..)` on the enclosing type (an implicit `this`).
 /// `None` when the receiver is not an indexed project type or the callee is neither a name nor a
 /// field access.
-pub(crate) fn call_target(
+pub fn call_target(
     call: &ast::CallExpr,
     ti: &TypeInference,
     index: &ProjectIndex,
@@ -413,7 +423,7 @@ fn record_if_mismatch(
 /// numeric value assigned to a `byte` / `short` / `char` slot. Without a constant evaluator we cannot
 /// tell whether the value is a constant in range, so we never report these — under-reporting (missing
 /// `byte b = someInt;`) rather than risk a false positive on the legal, common `byte b = 1;`.
-fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
+const fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
     matches!(
         expected,
         Ty::Primitive(Primitive::Byte | Primitive::Short | Primitive::Char)
@@ -439,7 +449,7 @@ impl<'a> Inferer<'a> {
         root: &SyntaxNode,
         resolved: &'a Resolved,
         project: Option<(&'a ProjectIndex, FileId)>,
-    ) -> Inferer<'a> {
+    ) -> Self {
         let def_by_name_start = resolved
             .defs
             .iter()
@@ -525,8 +535,7 @@ impl<'a> Inferer<'a> {
         let init_ty = node
             .children()
             .find_map(ast::Expr::cast)
-            .map(|e| self.expr_ty(e.syntax()))
-            .unwrap_or(Ty::Unknown);
+            .map_or(Ty::Unknown, |e| self.expr_ty(e.syntax()));
         for tok in direct_ident_tokens(node) {
             self.set_def_type(token_start(&tok), init_ty.clone());
         }
@@ -573,8 +582,7 @@ impl<'a> Inferer<'a> {
     }
 
     fn child_ty(&self, expr: Option<ast::Expr>) -> Ty {
-        expr.map(|e| self.expr_ty(e.syntax()))
-            .unwrap_or(Ty::Unknown)
+        expr.map_or(Ty::Unknown, |e| self.expr_ty(e.syntax()))
     }
 
     fn nameref_ty(&self, node: &SyntaxNode) -> Ty {
@@ -613,9 +621,7 @@ impl<'a> Inferer<'a> {
         let boolean = Ty::Primitive(Primitive::Boolean);
         match ops.as_slice() {
             // Conditional, equality, and relational operators (`>` is `GT`, `>=` is `GT EQ`).
-            [AMP_AMP] | [PIPE_PIPE] | [EQ_EQ] | [BANG_EQ] | [LT] | [LT_EQ] | [GT] | [GT, EQ] => {
-                boolean
-            }
+            [AMP_AMP | PIPE_PIPE | EQ_EQ | BANG_EQ | LT | LT_EQ | GT] | [GT, EQ] => boolean,
             // Shifts (`<<` is `LSHIFT`; `>>` / `>>>` are repeated `GT`): the promoted left operand.
             [LSHIFT] | [GT, GT] | [GT, GT, GT] => unary_promote(&lhs),
             // `+` is string concatenation when either side is a `String`, else arithmetic.
@@ -626,9 +632,9 @@ impl<'a> Inferer<'a> {
                     binary_numeric(&lhs, &rhs)
                 }
             }
-            [MINUS] | [STAR] | [SLASH] | [PERCENT] => binary_numeric(&lhs, &rhs),
+            [MINUS | STAR | SLASH | PERCENT] => binary_numeric(&lhs, &rhs),
             // `&` `|` `^` are logical on booleans, bitwise (numeric) otherwise.
-            [AMP] | [PIPE] | [CARET] => {
+            [AMP | PIPE | CARET] => {
                 if is_boolean(&lhs) && is_boolean(&rhs) {
                     Ty::Primitive(Primitive::Boolean)
                 } else {
@@ -676,7 +682,7 @@ impl<'a> Inferer<'a> {
     // --- Syntactic type -> Ty -----------------------------------------------------------------
 
     fn ty_of_opt_type(&self, ty: Option<&ast::Type>) -> Ty {
-        ty.map(|t| self.ty_of_type(t)).unwrap_or(Ty::Unknown)
+        ty.map_or(Ty::Unknown, |t| self.ty_of_type(t))
     }
 
     fn ty_of_type(&self, ty: &ast::Type) -> Ty {
@@ -752,12 +758,13 @@ impl<'a> Inferer<'a> {
                 let Some(name) = first_ident_token(n.syntax()).map(|t| t.text().to_string()) else {
                     return Ty::Unknown;
                 };
-                match self.enclosing_item(call.syntax()) {
-                    // A bare (`this`) call: the enclosing type is used raw, so its own type variables
-                    // stay un-substituted (they survive by name).
-                    Some(owner) => self.member_ty_in(owner, &[], &name, Namespace::Method),
-                    None => Ty::Unknown,
-                }
+                // A bare (`this`) call resolves against the enclosing type, which is used raw so its
+                // own type variables stay un-substituted (they survive by name); no enclosing type
+                // means the callee is unknown.
+                self.enclosing_item(call.syntax())
+                    .map_or(Ty::Unknown, |owner| {
+                        self.member_ty_in(owner, &[], &name, Namespace::Method)
+                    })
             }
             _ => Ty::Unknown,
         }
@@ -804,12 +811,7 @@ impl<'a> Inferer<'a> {
 /// type whose declaration the `MemberType` lives in: a bare name matching one of its type parameters
 /// becomes a [`Ty::TypeVar`] (to be substituted by the caller) rather than an external by-name type.
 /// A free function so a caller holding only a [`TypeInference`] (e.g. argument checking) can use it.
-pub(crate) fn member_type_to_ty(
-    index: &ProjectIndex,
-    file: FileId,
-    owner: ItemId,
-    mt: &MemberType,
-) -> Ty {
+pub fn member_type_to_ty(index: &ProjectIndex, file: FileId, owner: ItemId, mt: &MemberType) -> Ty {
     match mt {
         MemberType::Primitive { keyword, dims } => {
             let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
@@ -957,7 +959,7 @@ fn array_of(base: Ty, dims: usize) -> Ty {
 /// name(s) as direct `IDENT` tokens. For a `METHOD_DECL` the direct `TYPE` child is the *return*
 /// type and the direct `IDENT` is the method name, so the method's definition is typed with its
 /// return type — used to check `return` statements (its parameters' types are nested and unaffected).
-fn declares_typed_bindings(kind: SyntaxKind) -> bool {
+const fn declares_typed_bindings(kind: SyntaxKind) -> bool {
     matches!(
         kind,
         FIELD_DECL
@@ -977,7 +979,7 @@ fn is_var_type(ty: &ast::Type) -> bool {
 }
 
 /// The [`Ty`] of a primitive (or `void`) type keyword, or `None` for any other token.
-fn primitive_ty(kind: SyntaxKind) -> Option<Ty> {
+const fn primitive_ty(kind: SyntaxKind) -> Option<Ty> {
     let p = match kind {
         BOOLEAN_KW => Primitive::Boolean,
         BYTE_KW => Primitive::Byte,
@@ -1028,13 +1030,13 @@ fn ends_with_ignore_case(text: &str, suffix: char) -> bool {
         .is_some_and(|c| c.eq_ignore_ascii_case(&suffix))
 }
 
-fn is_boolean(t: &Ty) -> bool {
+const fn is_boolean(t: &Ty) -> bool {
     matches!(t, Ty::Primitive(Primitive::Boolean))
 }
 
 /// The non-trivia operator token kinds directly under `node` (operands are child nodes, so for a
 /// binary/unary expression these are exactly the operator tokens).
-pub(crate) fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
+pub fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
     direct_tokens(node)
         .filter(|t| !t.kind().is_trivia())
         .map(|t| t.kind())
@@ -1052,7 +1054,8 @@ fn direct_ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
 }
 
 fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
-    node.children_with_tokens().filter_map(|it| it.into_token())
+    node.children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
 }
 
 /// The declarator-name → initializer pairs of a (possibly multi-declarator) variable or field
@@ -1060,7 +1063,7 @@ fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
 /// direct `IDENT` token takes the next direct expression child as its initializer; a declarator
 /// without one yields no pair. The declared `TYPE` / `MODIFIERS` children are not expressions, so
 /// the `Expr::cast` skips them and they are never mistaken for an initializer.
-pub(crate) fn declarator_initializers(
+pub fn declarator_initializers(
     node: &SyntaxNode,
 ) -> impl Iterator<Item = (SyntaxToken, ast::Expr)> {
     let mut current: Option<SyntaxToken> = None;
@@ -1076,13 +1079,13 @@ pub(crate) fn declarator_initializers(
     })
 }
 
-pub(crate) fn token_start(tok: &SyntaxToken) -> usize {
+pub fn token_start(tok: &SyntaxToken) -> usize {
     usize::from(tok.text_range().start())
 }
 
 /// The byte span of `node` in the source — the key shape used to look an expression's type up in a
 /// [`TypeInference`] and to anchor a [`TypeMismatch`].
-pub(crate) fn node_span(node: &SyntaxNode) -> Range<usize> {
+pub fn node_span(node: &SyntaxNode) -> Range<usize> {
     let r = node.text_range();
     usize::from(r.start())..usize::from(r.end())
 }
@@ -1335,7 +1338,7 @@ fn receiver_node(before: &SyntaxToken, dot_start: usize) -> Option<SyntaxNode> {
 /// boundary, so a cursor right after `.` lands on the `.`). `None` before the first token.
 fn token_left_of(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
     root.descendants_with_tokens()
-        .filter_map(|element| element.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|token| {
             let range = token.text_range();
             usize::from(range.start()) < offset && offset <= usize::from(range.end())
@@ -1368,8 +1371,10 @@ fn member_access_dot(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
 }
 
 /// Whether the cursor at byte `offset` is in a member-access position (just after a `.`, or in a
-/// member name following one). The host dispatches on this: a member access completes members
-/// ([`member_completions`]); any other position completes the scope ([`scope_completions`]).
+/// member name following one).
+///
+/// The host dispatches on this: a member access completes members ([`member_completions`]); any
+/// other position completes the scope ([`scope_completions`]).
 pub fn at_member_access(root: &SyntaxNode, offset: usize) -> bool {
     member_access_dot(root, offset).is_some()
 }
@@ -1377,7 +1382,9 @@ pub fn at_member_access(root: &SyntaxNode, offset: usize) -> bool {
 // ===== Scope completion =====
 
 /// The scope completions at byte `offset`: every binding visible there plus every project type by
-/// simple name — the candidates for a bare identifier position (not after a `.`; the host gates on
+/// simple name.
+///
+/// These are the candidates for a bare identifier position (not after a `.`; the host gates on
 /// [`at_member_access`]).
 ///
 /// Bindings come from the cursor's scope chain, innermost outward: a block / `for` / resources scope

@@ -24,7 +24,7 @@ pub enum Ty {
     /// The type of the `null` literal: assignable to any reference type.
     Null,
     /// An array; the boxed type is the element type (`int[][]` nests).
-    Array(Box<Ty>),
+    Array(Box<Self>),
     /// A nominal reference type (class / interface / enum / record), by name, with its type
     /// arguments (see [`ClassTy`]) — carried for display, member substitution, and same-nominal
     /// invariance.
@@ -54,27 +54,27 @@ pub enum Primitive {
 
 impl Primitive {
     /// The Java keyword spelling.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Primitive::Boolean => "boolean",
-            Primitive::Byte => "byte",
-            Primitive::Short => "short",
-            Primitive::Int => "int",
-            Primitive::Long => "long",
-            Primitive::Char => "char",
-            Primitive::Float => "float",
-            Primitive::Double => "double",
+            Self::Boolean => "boolean",
+            Self::Byte => "byte",
+            Self::Short => "short",
+            Self::Int => "int",
+            Self::Long => "long",
+            Self::Char => "char",
+            Self::Float => "float",
+            Self::Double => "double",
         }
     }
 
     /// Whether this is one of the numeric primitives (everything but `boolean`).
-    pub fn is_numeric(self) -> bool {
-        !matches!(self, Primitive::Boolean)
+    pub const fn is_numeric(self) -> bool {
+        !matches!(self, Self::Boolean)
     }
 
     /// The primitive whose Java keyword spelling is `keyword` (`"int"`), if any. The inverse of
     /// [`as_str`](Primitive::as_str), single-sourced from it so the spelling table lives in one place.
-    pub fn from_keyword(keyword: &str) -> Option<Primitive> {
+    pub fn from_keyword(keyword: &str) -> Option<Self> {
         const ALL: [Primitive; 8] = [
             Primitive::Boolean,
             Primitive::Byte,
@@ -91,13 +91,12 @@ impl Primitive {
     /// Widening primitive conversion (JLS §5.1.2): can a value of `self` widen to `target`
     /// without a cast? `boolean` widens to nothing. Reflexive pairs (`self == target`) are *not*
     /// widenings — the caller handles identity separately.
-    pub fn widens_to(self, target: Primitive) -> bool {
-        use Primitive::*;
+    pub const fn widens_to(self, target: Self) -> bool {
+        use Primitive::{Byte, Char, Double, Float, Int, Long, Short};
         matches!(
             (self, target),
             (Byte, Short | Int | Long | Float | Double)
-                | (Short, Int | Long | Float | Double)
-                | (Char, Int | Long | Float | Double)
+                | (Short | Char, Int | Long | Float | Double)
                 | (Int, Long | Float | Double)
                 | (Long, Float | Double)
                 | (Float, Double)
@@ -129,8 +128,8 @@ pub enum ClassTy {
 
 impl ClassTy {
     /// An external (JDK / unindexed) class type with no type arguments.
-    pub fn external(name: impl Into<String>) -> ClassTy {
-        ClassTy::External {
+    pub fn external(name: impl Into<String>) -> Self {
+        Self::External {
             name: name.into(),
             args: Vec::new(),
         }
@@ -139,14 +138,14 @@ impl ClassTy {
     /// The simple class name, common to both variants.
     pub fn name(&self) -> &str {
         match self {
-            ClassTy::Project { name, .. } | ClassTy::External { name, .. } => name,
+            Self::Project { name, .. } | Self::External { name, .. } => name,
         }
     }
 
     /// The type arguments as written; empty for a raw or argument-free use.
     pub fn args(&self) -> &[Ty] {
         match self {
-            ClassTy::Project { args, .. } | ClassTy::External { args, .. } => args,
+            Self::Project { args, .. } | Self::External { args, .. } => args,
         }
     }
 }
@@ -155,21 +154,21 @@ impl Ty {
     /// Whether this is the `String` class type (the only reference type the MVP recognises by
     /// name, for `+` string-concatenation).
     pub fn is_string(&self) -> bool {
-        matches!(self, Ty::Class(c) if c.name() == "String")
+        matches!(self, Self::Class(c) if c.name() == "String")
     }
 
     /// The numeric primitive this type is, if any (`boolean` excluded).
-    pub(crate) fn as_numeric(&self) -> Option<Primitive> {
+    pub(crate) const fn as_numeric(&self) -> Option<Primitive> {
         match self {
-            Ty::Primitive(p) if p.is_numeric() => Some(*p),
+            Self::Primitive(p) if p.is_numeric() => Some(*p),
             _ => None,
         }
     }
 
     /// The indexed project type's id, if this is one ([`ClassTy::Project`]).
-    pub fn project_id(&self) -> Option<ItemId> {
+    pub const fn project_id(&self) -> Option<ItemId> {
         match self {
-            Ty::Class(ClassTy::Project { id, .. }) => Some(*id),
+            Self::Class(ClassTy::Project { id, .. }) => Some(*id),
             _ => None,
         }
     }
@@ -188,9 +187,12 @@ impl Ty {
     /// `index` supplies the project class hierarchy for reference subtyping; without it (the
     /// [`infer_node`](crate::infer_node) path, which has no [`ProjectIndex`]) subtyping between two
     /// distinct project types is unknowable, so it too stays conservatively `true`.
-    pub fn is_assignable_to(&self, target: &Ty, index: Option<&ProjectIndex>) -> bool {
+    // Each arm names one JLS conversion case; keeping them separate (rather than merging equal
+    // bodies) is what documents which conversions are/aren't modelled.
+    #[allow(clippy::match_same_arms)]
+    pub fn is_assignable_to(&self, target: &Self, index: Option<&ProjectIndex>) -> bool {
         use ClassTy::{External, Project};
-        use Ty::*;
+        use Ty::{Array, Class, Null, Primitive, TypeVar, Unknown, Void};
 
         // Unknown or an un-substituted type variable on either side: defer, never claim a mismatch.
         // A type variable stands for an unknown concrete type (its bound is not yet modelled), so
@@ -243,12 +245,11 @@ impl Ty {
             (Class(External { .. }), Primitive(_)) => true,
             (Class(Project { .. }) | Array(_), Primitive(_)) => false,
 
-            // Reference subtyping between two project types: walk the indexed supertype chain.
-            (Class(Project { id: s, .. }), Class(Project { id: t, .. })) => match index {
-                Some(index) => index.is_subtype(*s, *t),
-                // No hierarchy to consult: stay conservative rather than claim a mismatch.
-                None => true,
-            },
+            // Reference subtyping between two project types: walk the indexed supertype chain. With
+            // no index (no hierarchy to consult) stay conservative rather than claim a mismatch.
+            (Class(Project { id: s, .. }), Class(Project { id: t, .. })) => {
+                index.is_none_or(|index| index.is_subtype(*s, *t))
+            }
             // A project type may widen to an external supertype (`Object`, a JDK interface); an
             // external type might really be an unindexed project type — both conservatively `true`.
             (Class(Project { .. }), Class(External { .. }))
@@ -279,7 +280,7 @@ impl Ty {
     /// same indexed item is considered (a different nominal type is a job for the nominal-subtyping
     /// arm, which stays lenient on arguments); a raw use on either side, a differing arity, and any
     /// argument that is not fully known are all lenient, so this never reports a false positive.
-    fn type_args_conflict(&self, target: &Ty) -> bool {
+    fn type_args_conflict(&self, target: &Self) -> bool {
         // The same nominal project item with provably-different arguments is exactly the top-level
         // same-item case of [`args_definitely_differ`] (raw use / arity / unknown-argument leniency
         // included). A *different* nominal type is the nominal-subtyping arm's job and stays lenient
@@ -287,7 +288,7 @@ impl Ty {
         // different items a difference.
         matches!(
             (self, target),
-            (Ty::Class(ClassTy::Project { id: s, .. }), Ty::Class(ClassTy::Project { id: t, .. }))
+            (Self::Class(ClassTy::Project { id: s, .. }), Self::Class(ClassTy::Project { id: t, .. }))
                 if s == t
         ) && args_definitely_differ(self, target)
     }
@@ -297,30 +298,30 @@ impl Ty {
     /// elements and type arguments. The stubs are intentionally partial, so assignment conversion
     /// treats them leniently; see [`is_assignable_to`](Ty::is_assignable_to). Without an `index` (the
     /// project-free path) there are no stub project types and this clones unchanged.
-    fn demote_stdlib(&self, index: Option<&ProjectIndex>) -> Ty {
+    fn demote_stdlib(&self, index: Option<&ProjectIndex>) -> Self {
         let Some(index) = index else {
             return self.clone();
         };
         match self {
-            Ty::Class(ClassTy::Project { id, name, args })
+            Self::Class(ClassTy::Project { id, name, args })
                 if index.item(*id).origin == ItemOrigin::Stdlib =>
             {
-                Ty::Class(ClassTy::External {
+                Self::Class(ClassTy::External {
                     name: name.clone(),
                     args: args.iter().map(|a| a.demote_stdlib(Some(index))).collect(),
                 })
             }
-            Ty::Class(ClassTy::Project { id, name, args }) => Ty::Class(ClassTy::Project {
+            Self::Class(ClassTy::Project { id, name, args }) => Self::Class(ClassTy::Project {
                 id: *id,
                 name: name.clone(),
                 args: args.iter().map(|a| a.demote_stdlib(Some(index))).collect(),
             }),
-            Ty::Class(ClassTy::External { name, args }) => Ty::Class(ClassTy::External {
+            Self::Class(ClassTy::External { name, args }) => Self::Class(ClassTy::External {
                 name: name.clone(),
                 args: args.iter().map(|a| a.demote_stdlib(Some(index))).collect(),
             }),
-            Ty::Array(elem) => Ty::Array(Box::new(elem.demote_stdlib(Some(index)))),
-            Ty::Primitive(_) | Ty::Void | Ty::Null | Ty::TypeVar { .. } | Ty::Unknown => {
+            Self::Array(elem) => Self::Array(Box::new(elem.demote_stdlib(Some(index)))),
+            Self::Primitive(_) | Self::Void | Self::Null | Self::TypeVar { .. } | Self::Unknown => {
                 self.clone()
             }
         }
@@ -330,20 +331,21 @@ impl Ty {
     /// yields `Some`, recursing through array elements and class type arguments. A type variable `f`
     /// does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged. The
     /// basis for binding a generic type's parameters to the arguments a use supplies.
-    pub fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Ty>) -> Ty {
+    #[must_use]
+    pub fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Self>) -> Self {
         match self {
-            Ty::TypeVar { owner, name } => f(*owner, name).unwrap_or_else(|| self.clone()),
-            Ty::Array(elem) => Ty::Array(Box::new(elem.substitute(f))),
-            Ty::Class(ClassTy::Project { id, name, args }) => Ty::Class(ClassTy::Project {
+            Self::TypeVar { owner, name } => f(*owner, name).unwrap_or_else(|| self.clone()),
+            Self::Array(elem) => Self::Array(Box::new(elem.substitute(f))),
+            Self::Class(ClassTy::Project { id, name, args }) => Self::Class(ClassTy::Project {
                 id: *id,
                 name: name.clone(),
                 args: args.iter().map(|a| a.substitute(f)).collect(),
             }),
-            Ty::Class(ClassTy::External { name, args }) => Ty::Class(ClassTy::External {
+            Self::Class(ClassTy::External { name, args }) => Self::Class(ClassTy::External {
                 name: name.clone(),
                 args: args.iter().map(|a| a.substitute(f)).collect(),
             }),
-            Ty::Primitive(_) | Ty::Void | Ty::Null | Ty::Unknown => self.clone(),
+            Self::Primitive(_) | Self::Void | Self::Null | Self::Unknown => self.clone(),
         }
     }
 }
@@ -351,11 +353,11 @@ impl Ty {
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Ty::Primitive(p) => f.write_str(p.as_str()),
-            Ty::Void => f.write_str("void"),
-            Ty::Null => f.write_str("null"),
-            Ty::Array(elem) => write!(f, "{elem}[]"),
-            Ty::Class(c) => {
+            Self::Primitive(p) => f.write_str(p.as_str()),
+            Self::Void => f.write_str("void"),
+            Self::Null => f.write_str("null"),
+            Self::Array(elem) => write!(f, "{elem}[]"),
+            Self::Class(c) => {
                 f.write_str(c.name())?;
                 if let [first, rest @ ..] = c.args() {
                     write!(f, "<{first}")?;
@@ -366,8 +368,8 @@ impl fmt::Display for Ty {
                 }
                 Ok(())
             }
-            Ty::TypeVar { name, .. } => f.write_str(name),
-            Ty::Unknown => f.write_str("?"),
+            Self::TypeVar { name, .. } => f.write_str(name),
+            Self::Unknown => f.write_str("?"),
         }
     }
 }
@@ -381,10 +383,6 @@ impl fmt::Display for Ty {
 fn args_definitely_differ(a: &Ty, b: &Ty) -> bool {
     use ClassTy::Project;
     match (a, b) {
-        (Ty::Unknown | Ty::TypeVar { .. }, _) | (_, Ty::Unknown | Ty::TypeVar { .. }) => false,
-        (Ty::Class(ClassTy::External { .. }), _) | (_, Ty::Class(ClassTy::External { .. })) => {
-            false
-        }
         (
             Ty::Class(Project {
                 id: i, args: ia, ..
@@ -404,18 +402,20 @@ fn args_definitely_differ(a: &Ty, b: &Ty) -> bool {
         }
         (Ty::Array(x), Ty::Array(y)) => args_definitely_differ(x, y),
         (Ty::Primitive(p), Ty::Primitive(q)) => p != q,
+        // Not fully known on either side (`Unknown`/`TypeVar`), an external by-name type, or any
+        // other mixed-kind pair: not provably different, so lenient.
         _ => false,
     }
 }
 
 /// The `java.lang.String` type as the MVP models it.
-pub(crate) fn string_ty() -> Ty {
+pub fn string_ty() -> Ty {
     Ty::Class(ClassTy::external("String"))
 }
 
 /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
 /// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
-pub(crate) fn unary_promote(t: &Ty) -> Ty {
+pub const fn unary_promote(t: &Ty) -> Ty {
     match t.as_numeric() {
         Some(Primitive::Byte | Primitive::Short | Primitive::Char) => Ty::Primitive(Primitive::Int),
         Some(p) => Ty::Primitive(p),
@@ -426,7 +426,7 @@ pub(crate) fn unary_promote(t: &Ty) -> Ty {
 /// Binary numeric promotion (JLS §5.6.2): the result widens to the larger of the two operands
 /// along `double > float > long > int`, with everything narrower than `int` promoted to `int`. A
 /// non-numeric operand yields [`Ty::Unknown`].
-pub(crate) fn binary_numeric(l: &Ty, r: &Ty) -> Ty {
+pub fn binary_numeric(l: &Ty, r: &Ty) -> Ty {
     let (Some(a), Some(b)) = (l.as_numeric(), r.as_numeric()) else {
         return Ty::Unknown;
     };

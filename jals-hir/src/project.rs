@@ -34,7 +34,7 @@ use jals_syntax::SyntaxKind::{
     LBRACK, METHOD_DECL, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode};
-use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::Namespace;
 use crate::def::DefKind;
@@ -71,9 +71,10 @@ impl fmt::Display for Fqn {
 pub struct ItemId(u32);
 
 /// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
-/// sources, an external `.class` file, or an embedded standard-library stub. All are indexed by the
-/// same machinery but treated differently at the edges — e.g. a stub has no real file the host can
-/// open, so navigation into it is suppressed.
+/// sources, an external `.class` file, or an embedded standard-library stub.
+///
+/// All are indexed by the same machinery but treated differently at the edges — e.g. a stub has no
+/// real file the host can open, so navigation into it is suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemOrigin {
     /// Declared in one of the project source files the host supplied to [`ProjectIndex::builder`].
@@ -103,10 +104,10 @@ impl ItemOrigin {
     /// classpath `.class`, or a `git`/`path` library source) is external: navigable at most, never
     /// edited. An exhaustive match so a new origin must explicitly opt in here rather than silently
     /// becoming renamable.
-    pub fn is_host_editable(self) -> bool {
+    pub const fn is_host_editable(self) -> bool {
         match self {
-            ItemOrigin::Project => true,
-            ItemOrigin::Stdlib | ItemOrigin::Classpath | ItemOrigin::Source => false,
+            Self::Project => true,
+            Self::Stdlib | Self::Classpath | Self::Source => false,
         }
     }
 }
@@ -159,8 +160,9 @@ pub struct TypeParamDecl {
 }
 
 /// A resolved project-internal supertype: the indexed type it names, plus the type arguments the
-/// `extends` / `implements` clause supplied to it (`extends Container<String>` → `[String]`). The
-/// arguments are kept for generic inherited-member substitution; plain subtyping ignores them.
+/// `extends` / `implements` clause supplied to it (`extends Container<String>` → `[String]`).
+///
+/// The arguments are kept for generic inherited-member substitution; plain subtyping ignores them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Supertype {
     /// The indexed supertype.
@@ -173,9 +175,10 @@ pub struct Supertype {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemberId(u32);
 
-/// A member of an indexed type: a field, method, constructor, or enum constant. Methods and
-/// constructors live in the [`Method`](Namespace::Method) name-space; fields and enum constants in
-/// [`Value`](Namespace::Value), mirroring [`DefKind::namespace`].
+/// A member of an indexed type: a field, method, constructor, or enum constant.
+///
+/// Methods and constructors live in the [`Method`](Namespace::Method) name-space; fields and enum
+/// constants in [`Value`](Namespace::Value), mirroring [`DefKind::namespace`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     /// The type that declares this member.
@@ -223,9 +226,10 @@ pub struct Param {
 }
 
 /// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
-/// holds no CST references. A named type keeps the spelling as written (simple, plus the full dotted
-/// text when qualified) to be resolved against the declaring file later; array dimensions are kept
-/// as a count.
+/// holds no CST references.
+///
+/// A named type keeps the spelling as written (simple, plus the full dotted text when qualified) to
+/// be resolved against the declaring file later; array dimensions are kept as a count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberType {
     /// A primitive type, by keyword spelling (`"int"`), with `dims` array levels (`int[]` → 1).
@@ -243,7 +247,7 @@ pub enum MemberType {
         /// each captured recursively like the outer type. Empty for a raw / non-generic use. A bare
         /// wildcard (`<?>`) is not captured. Resolved (and, later, substituted) in the declaring
         /// file's context.
-        args: Vec<MemberType>,
+        args: Vec<Self>,
     },
     /// No resolvable value type — a constructor, a `var` slot, or a type that could not be read.
     Unknown,
@@ -266,10 +270,10 @@ pub enum TypeResolution {
 impl TypeResolution {
     /// The indexed project item this resolved to, or `None` for an [`External`](Self::External) /
     /// [`Unresolved`](Self::Unresolved) name. The counterpart to [`crate::Resolution::def_id`].
-    pub fn project_id(self) -> Option<ItemId> {
+    pub const fn project_id(self) -> Option<ItemId> {
         match self {
-            TypeResolution::Project(id) => Some(id),
-            TypeResolution::External | TypeResolution::Unresolved => None,
+            Self::Project(id) => Some(id),
+            Self::External | Self::Unresolved => None,
         }
     }
 }
@@ -308,12 +312,14 @@ struct RawType {
 }
 
 /// One source file's cacheable contribution to a [`ProjectIndex`]: its resolution context (package +
-/// imports) and its type declarations' [`RawType`] facts. Produced by [`ProjectIndex::extract_file`]
-/// — the CST-walking half of indexing — and folded into an index by [`ProjectIndex::assemble`]
-/// without re-walking. A host that re-indexes on every edit caches these per file and re-extracts
-/// only the file that changed, so a keystroke costs one file's walk plus a (cheap) reassembly rather
-/// than a walk of every file. `meta` is `None` for a root that is not a source file (an unreadable
-/// tree contributes nothing, exactly as a from-scratch build skips it). Pure and `wasm32`-compatible.
+/// imports) and its type declarations' [`RawType`] facts.
+///
+/// Produced by [`ProjectIndex::extract_file`] — the CST-walking half of indexing — and folded into
+/// an index by [`ProjectIndex::assemble`] without re-walking. A host that re-indexes on every edit
+/// caches these per file and re-extracts only the file that changed, so a keystroke costs one file's
+/// walk plus a (cheap) reassembly rather than a walk of every file. `meta` is `None` for a root that
+/// is not a source file (an unreadable tree contributes nothing, exactly as a from-scratch build
+/// skips it). Pure and `wasm32`-compatible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFacts {
     meta: Option<FileMeta>,
@@ -336,21 +342,24 @@ pub struct ProjectIndex {
 }
 
 /// A project's classpath `.class` files lowered to the index facts they contribute, ready to fold
-/// into a [`ProjectIndex`]. Produced once by [`ProjectIndex::lower_classpath`] and reused across
-/// rebuilds via [`ProjectIndexBuilder::with_classpath`], so a host that re-indexes on every
-/// edit decodes the (unchanging) classpath only once.
+/// into a [`ProjectIndex`].
+///
+/// Produced once by [`ProjectIndex::lower_classpath`] and reused across rebuilds via
+/// [`ProjectIndexBuilder::with_classpath`], so a host that re-indexes on every edit decodes the
+/// (unchanging) classpath only once.
 #[derive(Default)]
 pub struct LoweredClasspath {
     classes: Vec<crate::classpath::ClassfileClass>,
 }
 
-/// Where the types and members of a project's **library sources** are declared, keyed so a
-/// `.class`-derived [`Classpath`](ItemOrigin::Classpath) item can be pointed at its real `.java`
-/// declaration for go-to-definition. Built once by
-/// [`index_source_locations`](ProjectIndex::index_source_locations) from the host's extracted library
-/// sources (the `sources` jars of `[dependencies]`) and folded in by
-/// [`ProjectIndexBuilder::with_source_locations`]. Pure data — the host
-/// owns the file I/O and maps each [`FileId`] back to a real URL.
+/// Where the types and members of a project's **library sources** are declared.
+///
+/// Keyed so a `.class`-derived [`Classpath`](ItemOrigin::Classpath) item can be pointed at its real
+/// `.java` declaration for go-to-definition. Built once by
+/// [`index_source_locations`](ProjectIndex::index_source_locations) from the host's
+/// extracted library sources (the `sources` jars of `[dependencies]`) and folded in by
+/// [`ProjectIndexBuilder::with_source_locations`]. Pure data — the host owns the file I/O and maps
+/// each [`FileId`] back to a real URL.
 #[derive(Debug, Default)]
 pub struct SourceLocations {
     /// Each type's fully-qualified name to its declaring `(file, name-token range)`.
@@ -390,11 +399,12 @@ impl SourceLocations {
     }
 }
 
-/// Fluent builder for a [`ProjectIndex`], created by [`ProjectIndex::builder`]. Each `with_*` turns
-/// on one orthogonal input — the embedded `java.lang` stubs, the classpath `.class` facts, a
-/// source-location overlay, and `git`/`path` source dependencies — and [`build`](Self::build) folds
-/// every configured one in. Omit what you don't need; a project type still wins a fully-qualified-name
-/// clash over a library/stub type. Pure and `wasm32`-compatible.
+/// Fluent builder for a [`ProjectIndex`], created by [`ProjectIndex::builder`].
+///
+/// Each `with_*` turns on one orthogonal input — the embedded `java.lang` stubs, the classpath
+/// `.class` facts, a source-location overlay, and `git`/`path` source dependencies — and
+/// [`build`](Self::build) folds every configured one in. Omit what you don't need; a project type
+/// still wins a fully-qualified-name clash over a library/stub type. Pure and `wasm32`-compatible.
 pub struct ProjectIndexBuilder<'a> {
     files: &'a [(FileId, SyntaxNode)],
     source_files: &'a [(FileId, SyntaxNode)],
@@ -410,7 +420,7 @@ impl<'a> ProjectIndexBuilder<'a> {
     /// and hover see through it instead of stopping at an external name. Still pure and
     /// `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
     #[must_use]
-    pub fn with_stdlib(mut self) -> Self {
+    pub const fn with_stdlib(mut self) -> Self {
         self.stdlib = true;
         self
     }
@@ -422,7 +432,7 @@ impl<'a> ProjectIndexBuilder<'a> {
     /// Lower the raw `.class` files once with [`ProjectIndex::lower_classpath`] and reuse the result
     /// across rebuilds. Does **not** imply [`with_stdlib`](Self::with_stdlib) — opt into both.
     #[must_use]
-    pub fn with_classpath(mut self, classpath: &'a LoweredClasspath) -> Self {
+    pub const fn with_classpath(mut self, classpath: &'a LoweredClasspath) -> Self {
         self.classpath = Some(classpath);
         self
     }
@@ -433,7 +443,7 @@ impl<'a> ProjectIndexBuilder<'a> {
     /// the overlay only adds navigation. Build it once with
     /// [`ProjectIndex::index_source_locations`].
     #[must_use]
-    pub fn with_source_locations(mut self, sources: &'a SourceLocations) -> Self {
+    pub const fn with_source_locations(mut self, sources: &'a SourceLocations) -> Self {
         self.sources = Some(sources);
         self
     }
@@ -446,7 +456,7 @@ impl<'a> ProjectIndexBuilder<'a> {
     /// project files, so the host neither lints nor renames them. Pure and `wasm32`-compatible — the
     /// host reads and parses the library `.java` and assigns their [`FileId`]s.
     #[must_use]
-    pub fn with_source_deps(mut self, source_files: &'a [(FileId, SyntaxNode)]) -> Self {
+    pub const fn with_source_deps(mut self, source_files: &'a [(FileId, SyntaxNode)]) -> Self {
         self.source_files = source_files;
         self
     }
@@ -475,7 +485,7 @@ impl ProjectIndex {
     /// [`with_source_deps`](ProjectIndexBuilder::with_source_deps), each turning on one orthogonal
     /// input.
     #[must_use]
-    pub fn builder(files: &[(FileId, SyntaxNode)]) -> ProjectIndexBuilder<'_> {
+    pub const fn builder(files: &[(FileId, SyntaxNode)]) -> ProjectIndexBuilder<'_> {
         ProjectIndexBuilder {
             files,
             source_files: &[],
@@ -524,7 +534,7 @@ impl ProjectIndex {
         stdlib: bool,
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
-    ) -> ProjectIndex {
+    ) -> Self {
         // The CST-walking half: extract each file's cacheable facts. A from-scratch build extracts
         // every file; an incremental host (the LSP) caches these and re-extracts only the file that
         // changed, then calls `assemble` (below) — which folds them in with no CST walking.
@@ -632,7 +642,7 @@ impl ProjectIndex {
         stub: &[(FileId, &FileFacts)],
         classpath: &LoweredClasspath,
         sources: &SourceLocations,
-    ) -> ProjectIndex {
+    ) -> Self {
         Self::assemble_inner(project, source, stub, &classpath.classes, sources)
     }
 
@@ -642,8 +652,8 @@ impl ProjectIndex {
         stub: &[(FileId, &FileFacts)],
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
-    ) -> ProjectIndex {
-        let mut index = ProjectIndex {
+    ) -> Self {
+        let mut index = Self {
             items: Vec::new(),
             by_fqn: HashMap::new(),
             files: HashMap::new(),
@@ -934,10 +944,10 @@ impl ProjectIndex {
 
     /// Resolves the type-name `reference` (simple or qualified) from `file` against the project.
     pub fn resolve_reference(&self, file: FileId, reference: &Reference) -> TypeResolution {
-        match &reference.qualified {
-            Some(qualified) => self.resolve_qualified(qualified),
-            None => self.resolve_type(file, &reference.name),
-        }
+        reference.qualified.as_ref().map_or_else(
+            || self.resolve_type(file, &reference.name),
+            |qualified| self.resolve_qualified(qualified),
+        )
     }
 
     /// Resolves a type *name* from `file`: the full dotted text when `qualified`, otherwise the
@@ -951,10 +961,10 @@ impl ProjectIndex {
         name: &str,
         qualified: Option<&str>,
     ) -> TypeResolution {
-        match qualified {
-            Some(qualified) => self.resolve_qualified(qualified),
-            None => self.resolve_type(file, name),
-        }
+        qualified.map_or_else(
+            || self.resolve_type(file, name),
+            |qualified| self.resolve_qualified(qualified),
+        )
     }
 
     /// The cross-file go-to-definition target for the reference covering byte `offset` in `file`,
@@ -1207,8 +1217,7 @@ fn collect_source_locations(
     enclosing: Option<&str>,
     locs: &mut SourceLocations,
 ) {
-    let mut next_enclosing = enclosing.map(str::to_string);
-    if type_decl_kind(node.kind()).is_some()
+    let next_enclosing = if type_decl_kind(node.kind()).is_some()
         && let Some(name_tok) = first_ident_token(node)
     {
         let fqn = build_fqn(package, enclosing, name_tok.text());
@@ -1224,8 +1233,10 @@ fn collect_source_locations(
                 .entry((fqn.clone(), member.name.clone()))
                 .or_insert(loc);
         }
-        next_enclosing = Some(fqn);
-    }
+        Some(fqn)
+    } else {
+        enclosing.map(str::to_string)
+    };
     for child in node.children() {
         collect_source_locations(file, &child, package, next_enclosing.as_deref(), locs);
     }
@@ -1251,8 +1262,7 @@ fn extract_types(
     enclosing: Option<&str>,
     out: &mut Vec<RawType>,
 ) {
-    let mut next_enclosing = enclosing.map(str::to_string);
-    if let Some(kind) = type_decl_kind(node.kind())
+    let next_enclosing = if let Some(kind) = type_decl_kind(node.kind())
         && let Some(name_tok) = first_ident_token(node)
     {
         let fqn = build_fqn(package, enclosing, name_tok.text());
@@ -1265,8 +1275,10 @@ fn extract_types(
             members: members_of_decl(ItemId(0), FileId(0), node, name_tok.text()),
             raw_supertypes: raw_supertypes_of(node),
         });
-        next_enclosing = Some(fqn);
-    }
+        Some(fqn)
+    } else {
+        enclosing.map(str::to_string)
+    };
     for child in node.children() {
         extract_types(&child, package, next_enclosing.as_deref(), out);
     }
@@ -1368,7 +1380,7 @@ fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
             if param
                 .syntax()
                 .children_with_tokens()
-                .filter_map(|it| it.into_token())
+                .filter_map(SyntaxElement::into_token)
                 .any(|t| t.kind() == ELLIPSIS)
             {
                 varargs = true;
@@ -1386,7 +1398,7 @@ fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
 /// when there is no `throws` clause. Works for both `METHOD_DECL` and `CONSTRUCTOR_DECL` by reading
 /// the shared `THROWS_CLAUSE` child. Shared with the checked-exception analysis
 /// ([`crate::throws`]), which resolves the same types to items rather than capturing them. Pure.
-pub(crate) fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
+pub fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
     node.children()
         .find_map(ast::ThrowsClause::cast)
         .into_iter()
@@ -1446,7 +1458,7 @@ fn member_type_of(ty: Option<ast::Type>) -> MemberType {
     for token in ty
         .syntax()
         .children_with_tokens()
-        .filter_map(|it| it.into_token())
+        .filter_map(SyntaxElement::into_token)
     {
         match token.kind() {
             LBRACK => dims += 1,
@@ -1479,7 +1491,7 @@ fn member_type_of(ty: Option<ast::Type>) -> MemberType {
 }
 
 /// The [`DefKind`] for a type-declaration node kind, or `None` if it is not a type declaration.
-pub(crate) fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
+pub const fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
     match kind {
         CLASS_DECL => Some(DefKind::Class),
         INTERFACE_DECL => Some(DefKind::Interface),
@@ -1493,18 +1505,12 @@ pub(crate) fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
 /// Builds a fully-qualified name. A nested type appends to its enclosing type's FQN (which already
 /// carries the package); a top-level type prepends the package, if any.
 fn build_fqn(package: Option<&str>, enclosing: Option<&str>, simple: &str) -> String {
-    match enclosing {
-        Some(e) => format!("{e}.{simple}"),
-        None => qualify(package, simple),
-    }
+    enclosing.map_or_else(|| qualify(package, simple), |e| format!("{e}.{simple}"))
 }
 
 /// Qualifies `simple` with `package` (`Some("a.b")` → `a.b.Simple`; `None` → `Simple`).
 fn qualify(package: Option<&str>, simple: &str) -> String {
-    match package {
-        Some(p) => format!("{p}.{simple}"),
-        None => simple.to_string(),
-    }
+    package.map_or_else(|| simple.to_string(), |p| format!("{p}.{simple}"))
 }
 
 /// Whether `name` is a method every type inherits from `java.lang.Object`. A call to one of these

@@ -27,8 +27,8 @@ use jals_syntax::SyntaxKind::{
     AMP_AMP, BANG, BANG_EQ, EQ, EQ_EQ, FALSE_KW, FIELD_DECL, FINAL_KW, GT, INT_LITERAL,
     LOCAL_VAR_DECL, LT, LT_EQ, MINUS, PIPE_PIPE, PLUS, TRUE_KW,
 };
-use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
+use jals_syntax::{SyntaxElement, SyntaxNode};
 
 use crate::def::DefId;
 use crate::infer::{declarator_initializers, node_span, op_kinds, token_start};
@@ -96,7 +96,7 @@ fn trimmed_span(node: &SyntaxNode) -> Range<usize> {
     let full = node_span(node);
     let start = node
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .find(|t| !t.kind().is_trivia())
         .map_or(full.start, |t| usize::from(t.text_range().start()));
     start..full.end
@@ -270,7 +270,7 @@ fn literal_value(literal: &ast::Literal) -> Option<ConstValue> {
 
 /// Java `==` on two constants of the same kind; a mixed comparison (`1 == true`) is a type error
 /// and stays unknown.
-fn equal(lhs: ConstValue, rhs: ConstValue) -> Option<bool> {
+const fn equal(lhs: ConstValue, rhs: ConstValue) -> Option<bool> {
     match (lhs, rhs) {
         (ConstValue::Bool(a), ConstValue::Bool(b)) => Some(a == b),
         (ConstValue::Int(a), ConstValue::Int(b)) => Some(a == b),
@@ -289,6 +289,8 @@ fn parse_int_literal(text: &str) -> Option<i64> {
         _ => (text, false),
     };
     let body: String = body.chars().filter(|&c| c != '_').collect();
+    // A radix-prefix chain reads far more clearly as an if/else ladder than nested `map_or_else`.
+    #[allow(clippy::option_if_let_else)]
     let (radix, digits, is_decimal) =
         if let Some(rest) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
             (16, rest, false)
@@ -305,11 +307,13 @@ fn parse_int_literal(text: &str) -> Option<i64> {
     let value = u64::from_str_radix(digits, radix).ok()?;
     match (is_decimal, is_long) {
         // A decimal literal is written as a magnitude — it must fit the positive range.
-        (true, false) => (value <= i32::MAX as u64).then_some(value as i64),
-        (true, true) => (value <= i64::MAX as u64).then_some(value as i64),
+        (true, false) => i32::try_from(value).ok().map(i64::from),
+        (true, true) => i64::try_from(value).ok(),
         // A hex / binary / octal literal is a bit pattern — sign-extend from its width.
-        (false, false) => (value <= u32::MAX as u64).then(|| i64::from(value as u32 as i32)),
-        (false, true) => Some(value as i64),
+        (false, false) => u32::try_from(value)
+            .ok()
+            .map(|bits| i64::from(bits.cast_signed())),
+        (false, true) => Some(value.cast_signed()),
     }
 }
 

@@ -8,14 +8,14 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_syntax::SyntaxKind::{IDENT, TYPE_PATTERN};
-use jals_syntax::{SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
 /// The first directly-declared name (`IDENT` token child) of `node`, e.g. a type, method, or
 /// parameter name. The type of a declaration is a nested `TYPE` node, so its identifiers are not
 /// direct token children and are correctly skipped.
-pub(crate) fn first_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+pub fn first_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     node.children_with_tokens()
-        .filter_map(|it| it.into_token())
+        .filter_map(SyntaxElement::into_token)
         .find(|t| t.kind() == IDENT)
 }
 
@@ -23,7 +23,7 @@ pub(crate) fn first_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 ///
 /// Each `TYPE_PATTERN` contributes its binding name; record-pattern nesting is handled by walking
 /// descendants, and an unnamed `_` pattern contributes nothing (it has no `IDENT`).
-pub(crate) fn pattern_var_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
+pub fn pattern_var_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.descendants()
         .filter(|n| n.kind() == TYPE_PATTERN)
         .filter_map(|n| first_ident_token(&n))
@@ -31,7 +31,7 @@ pub(crate) fn pattern_var_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
 }
 
 /// The byte range of `token` in the source.
-pub(crate) fn byte_range(token: &SyntaxToken) -> Range<usize> {
+pub fn byte_range(token: &SyntaxToken) -> Range<usize> {
     let r = token.text_range();
     usize::from(r.start())..usize::from(r.end())
 }
@@ -41,6 +41,7 @@ mod tests {
     use super::*;
     use jals_syntax::SyntaxKind::{METHOD_DECL, SWITCH_LABEL};
 
+    #[allow(clippy::needless_pass_by_value)]
     fn text(tokens: Vec<SyntaxToken>) -> Vec<String> {
         tokens.iter().map(|t| t.text().to_string()).collect()
     }

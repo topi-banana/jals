@@ -14,13 +14,18 @@ fn at(
     file: usize,
     run: impl Fn(&SyntaxNode, &Resolved, &ProjectIndex, FileId, usize) -> Vec<Completion>,
 ) -> Vec<Completion> {
-    let mut texts: Vec<String> = sources.iter().map(|s| s.to_string()).collect();
+    let mut texts: Vec<String> = sources.iter().map(ToString::to_string).collect();
     let offset = texts[file].find("$0").expect("a $0 cursor marker");
     texts[file].replace_range(offset..offset + 2, "");
     let nodes: Vec<(FileId, SyntaxNode)> = texts
         .iter()
         .enumerate()
-        .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+        .map(|(i, s)| {
+            (
+                FileId(u32::try_from(i).unwrap()),
+                jals_syntax::parse(s).syntax(),
+            )
+        })
         .collect();
     let index = ProjectIndex::builder(&nodes).build();
     let (fid, root) = &nodes[file];

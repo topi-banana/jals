@@ -38,8 +38,7 @@ fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
         .unwrap_or_else(|| panic!("no expression `{text}`"));
     let r = expr.syntax().text_range();
     ti.type_of_expr(usize::from(r.start())..usize::from(r.end()))
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "<none>".to_owned())
+        .map_or_else(|| "<none>".to_owned(), ToString::to_string)
 }
 
 const SRC: &str = "class Test { void m(Box<String> b) { var x = b.get(); } }";
@@ -66,7 +65,7 @@ fn classpath_type_is_not_a_navigation_target() {
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
     let resolved = resolve_node(&node);
-    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+    let index = ProjectIndex::builder(&[(FileId(0), node)])
         .with_stdlib()
         .with_classpath(&ProjectIndex::lower_classpath(std::slice::from_ref(
             &box_classfile(),
@@ -90,7 +89,7 @@ fn classpath_type_navigates_to_library_source() {
     let lib = FileId(100);
     let sources = ProjectIndex::index_source_locations(&[(lib, parse(BOX_SOURCE))]);
     let classpath = ProjectIndex::lower_classpath(std::slice::from_ref(&box_classfile()));
-    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
+    let index = ProjectIndex::builder(&[(FileId(0), node)])
         .with_stdlib()
         .with_classpath(&classpath)
         .with_source_locations(&sources)
@@ -133,7 +132,7 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     let r = expr.syntax().text_range();
     assert_eq!(
         ti.type_of_expr(usize::from(r.start())..usize::from(r.end()))
-            .map(|t| t.to_string())
+            .map(ToString::to_string)
             .as_deref(),
         Some("String")
     );

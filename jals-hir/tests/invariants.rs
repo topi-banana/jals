@@ -104,7 +104,7 @@ proptest! {
         let nodes: Vec<(FileId, SyntaxNode)> = srcs
             .iter()
             .enumerate()
-            .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+            .map(|(i, s)| (FileId(u32::try_from(i).unwrap()), jals_syntax::parse(s).syntax()))
             .collect();
         let index = ProjectIndex::builder(&nodes).build();
         for (file, root) in &nodes {

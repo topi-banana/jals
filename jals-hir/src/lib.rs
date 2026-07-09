@@ -1,4 +1,10 @@
 #![cfg_attr(not(test), no_std)]
+// Every id in the index/resolver (`ItemId`, `MemberId`, `ScopeId`, `DefId`, and the reserved
+// `FileId` blocks) is a `u32` allocated from a monotonic `Vec` length or enumeration index. Narrowing
+// that `usize` count/index to the `u32` id representation is the deliberate id width — the id space is
+// `u32` by design and never approaches its limit — so the truncation lint is allowed crate-wide
+// rather than papered over with `as`-site attributes.
+#![allow(clippy::cast_possible_truncation)]
 //! File-local name resolution for Java/JALS source, over the `jals-syntax` CST.
 //!
 //! [`resolve`] binds each *reference* (an identifier use) to the *definition* (binding) it names,
