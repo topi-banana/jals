@@ -1,5 +1,9 @@
 //! `jals` command-line interface.
 
+// The only `usize`/`u32` casts here build a `FileId` from a linted file's index — bounded by the
+// set of files on the command line, never approaching 2³² — so they cannot truncate in practice.
+#![allow(clippy::cast_possible_truncation)]
+
 mod report;
 
 use std::collections::HashMap;
@@ -159,12 +163,12 @@ struct InitArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Commands::Fmt(args) => run_fmt(args),
+        Commands::Fmt(args) => run_fmt(&args),
         Commands::Lsp(args) => run_lsp(args),
-        Commands::Lint(args) => run_lint(args),
-        Commands::Build(args) => run_build(args),
-        Commands::Run(args) => run_run(args),
-        Commands::Clean(args) => run_clean(args),
+        Commands::Lint(args) => run_lint(&args),
+        Commands::Build(args) => run_build(&args),
+        Commands::Run(args) => run_run(&args),
+        Commands::Clean(args) => run_clean(&args),
         Commands::Init(args) => run_init(args),
     };
     match result {
@@ -176,7 +180,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
+fn run_fmt(args: &FmtArgs) -> Result<ExitCode> {
     let deny_warnings = args.deny.iter().any(|d| d == "warnings");
     let explicit_config = args
         .config
@@ -241,7 +245,7 @@ fn run_fmt(args: FmtArgs) -> Result<ExitCode> {
     })
 }
 
-fn run_lint(args: LintArgs) -> Result<ExitCode> {
+fn run_lint(args: &LintArgs) -> Result<ExitCode> {
     let explicit_config = args
         .config
         .as_deref()
@@ -294,8 +298,7 @@ fn run_lint(args: LintArgs) -> Result<ExitCode> {
         let start_dir = files
             .first()
             .and_then(|(path, _, _)| path.parent())
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         // Discover the project once: its classpath (folded into the cross-file `type-mismatch` index
         // so a method whose argument type comes from a dependency jar resolves) and its edition
         // (`[package] edition`, shared across the project's files), from a single manifest parse.
@@ -327,7 +330,7 @@ fn run_lsp(_args: LspArgs) -> Result<ExitCode> {
 
 /// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
 /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
-fn run_build(args: BuildArgs) -> Result<ExitCode> {
+fn run_build(args: &BuildArgs) -> Result<ExitCode> {
     let (mut manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
     if let Some(out) = &args.out_dir {
         manifest.build.classes_dir = out.to_string_lossy().into_owned();
@@ -371,7 +374,7 @@ fn run_build(args: BuildArgs) -> Result<ExitCode> {
 
 /// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
 /// run; `--dry-run` prints both commands without executing either.
-fn run_run(args: RunArgs) -> Result<ExitCode> {
+fn run_run(args: &RunArgs) -> Result<ExitCode> {
     let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
     // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point from
     // `[[bin]]` / `[package] default-run` / `[run] main-class`.
@@ -432,7 +435,7 @@ fn run_run(args: RunArgs) -> Result<ExitCode> {
 /// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
 /// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
 /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
-fn run_clean(args: CleanArgs) -> Result<ExitCode> {
+fn run_clean(args: &CleanArgs) -> Result<ExitCode> {
     let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
     let paths = jals_build::clean_paths(&manifest, &root);
 
@@ -495,7 +498,7 @@ fn project_name_from_dir(dir: &Path) -> Result<String> {
     absolute
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or_else(|| {
             anyhow!(
                 "could not infer a project name from {}; pass --name",
@@ -508,13 +511,12 @@ fn project_name_from_dir(dir: &Path) -> Result<String> {
 /// returning the parsed manifest and the project root (the manifest's parent directory). A missing
 /// manifest is an error, unlike the formatter/linter configs.
 fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
-    let manifest_path = match explicit {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let cwd = std::env::current_dir().context("getting current dir")?;
-            Manifest::discover_path(&cwd)
-                .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
-        }
+    let manifest_path = if let Some(p) = explicit {
+        p.to_path_buf()
+    } else {
+        let cwd = std::env::current_dir().context("getting current dir")?;
+        Manifest::discover_path(&cwd)
+            .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
     };
     let manifest = Manifest::from_file(&manifest_path)
         .with_context(|| format!("loading {}", manifest_path.display()))?;
@@ -595,7 +597,7 @@ fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// The platform classpath separator.
-fn path_sep() -> char {
+const fn path_sep() -> char {
     if cfg!(windows) { ';' } else { ':' }
 }
 
@@ -632,7 +634,8 @@ fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatu
 fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
     match status.code() {
         Some(0) => ExitCode::SUCCESS,
-        Some(code) => ExitCode::from(code as u8),
+        // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails as 1.
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         None => ExitCode::from(1),
     }
 }
@@ -646,7 +649,7 @@ struct Discovery {
 
 impl Discovery {
     fn new(explicit: Option<Config>) -> Self {
-        Discovery {
+        Self {
             explicit,
             cache: HashMap::new(),
         }
@@ -713,7 +716,7 @@ struct LintDiscovery {
 
 impl LintDiscovery {
     fn new(explicit: Option<LintConfig>) -> Self {
-        LintDiscovery {
+        Self {
             explicit,
             cache: HashMap::new(),
         }

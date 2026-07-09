@@ -30,7 +30,7 @@ fn paint(text: &str, code: &str, color: bool) -> String {
 
 /// Print a rustfmt-style hunked diff of `original` → `formatted` to stdout, labelled
 /// with `label` (a file path or `<stdin>`). Does nothing if the two are identical.
-pub(crate) fn print_diff(label: &str, original: &str, formatted: &str) {
+pub fn print_diff(label: &str, original: &str, formatted: &str) {
     if original == formatted {
         return;
     }
@@ -117,7 +117,7 @@ fn emit<'a>(
 }
 
 /// Render every formatter warning (parser syntax errors) for one source through `ariadne`.
-pub(crate) fn report_format_warnings(label: &str, src: &str, out: &FormatOutput) {
+pub fn report_format_warnings(label: &str, src: &str, out: &FormatOutput) {
     let use_color = color_for(std::io::stderr().is_terminal());
     let mut cache = (label, Source::from(src));
     for w in &out.warnings {
@@ -137,7 +137,7 @@ pub(crate) fn report_format_warnings(label: &str, src: &str, out: &FormatOutput)
 
 /// Render every lint diagnostic (and parser error) for one source through `ariadne`.
 /// Returns whether anything was reported.
-pub(crate) fn report_lint(label: &str, src: &str, out: &LintOutput) -> bool {
+pub fn report_lint(label: &str, src: &str, out: &LintOutput) -> bool {
     let use_color = color_for(std::io::stderr().is_terminal());
     let mut cache = (label, Source::from(src));
     for d in out.diagnostics.iter().chain(&out.parse_errors) {
