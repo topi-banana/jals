@@ -36,9 +36,10 @@ pub fn render_type_sig(ts: &TypeSignature) -> String {
     }
 }
 
-/// Render a class type signature: fold the inner-class suffixes into one dotted name, keeping the
-/// innermost type arguments (matching the HIR bridge; a navigation reference needs only a
-/// well-formed reference).
+/// Render a class type signature to a Java type reference.
+///
+/// Fold the inner-class suffixes into one dotted name, keeping the innermost type arguments
+/// (matching the HIR bridge; a navigation reference needs only a well-formed reference).
 pub fn render_class_type_sig(c: &ClassTypeSignature) -> String {
     let mut name = internal_to_java(&c.name);
     let mut args = &c.type_arguments;
@@ -51,7 +52,7 @@ pub fn render_class_type_sig(c: &ClassTypeSignature) -> String {
 }
 
 /// Render a `<...>` type-argument list, or `""` for none.
-pub(crate) fn render_type_args(args: &[TypeArgument]) -> String {
+pub fn render_type_args(args: &[TypeArgument]) -> String {
     if args.is_empty() {
         return String::new();
     }
@@ -60,7 +61,7 @@ pub(crate) fn render_type_args(args: &[TypeArgument]) -> String {
 }
 
 /// Render one type argument (`?`, `T`, `? extends T`, `? super T`).
-pub(crate) fn render_type_arg(arg: &TypeArgument) -> String {
+pub fn render_type_arg(arg: &TypeArgument) -> String {
     match arg {
         TypeArgument::Any => "?".to_string(),
         TypeArgument::Exact(t) => render_type_sig(t),

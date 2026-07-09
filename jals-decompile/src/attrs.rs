@@ -17,8 +17,10 @@ use crate::literal::{double_literal, float_literal, string_literal};
 use crate::types::{internal_to_java, render_field_type};
 
 /// A field's `ConstantValue` rendered as a Java initializer expression (the text after `=`), or
-/// `None` if the field has no constant value or it cannot be rendered. A boolean field's `0`/`1`
-/// becomes `false`/`true`; `long`/`float`/`double` get their type suffix; a `String` is escaped.
+/// `None` if the field has no constant value or it cannot be rendered.
+///
+/// A boolean field's `0`/`1` becomes `false`/`true`; `long`/`float`/`double` get their type suffix;
+/// a `String` is escaped.
 pub fn constant_value_initializer(field: &FieldInfo, pool: &ConstantPool) -> Option<String> {
     let index = field.attributes.iter().find_map(|a| match &a.body {
         AttributeBody::ConstantValue {
@@ -46,9 +48,10 @@ pub fn constant_value_initializer(field: &FieldInfo, pool: &ConstantPool) -> Opt
     })
 }
 
-/// The checked exceptions a method declares via its `Exceptions` attribute, in Java dotted form. The
-/// non-generic counterpart to the `throws` clause carried by a generic `Signature`; empty when the
-/// method declares none.
+/// The checked exceptions a method declares via its `Exceptions` attribute, in Java dotted form.
+///
+/// The non-generic counterpart to the `throws` clause carried by a generic `Signature`; empty when
+/// the method declares none.
 pub fn declared_throws(method: &MethodInfo, pool: &ConstantPool) -> Vec<String> {
     method
         .attributes
@@ -67,8 +70,10 @@ pub fn declared_throws(method: &MethodInfo, pool: &ConstantPool) -> Vec<String> 
 }
 
 /// A method's real source parameter names, in order, or `None` if they cannot be recovered
-/// confidently (no debug info, a count mismatch, or a name that is not a valid identifier). `arity`
-/// is the number of source parameters the caller renders; the result, when `Some`, has that length.
+/// confidently (no debug info, a count mismatch, or a name that is not a valid identifier).
+///
+/// `arity` is the number of source parameters the caller renders; the result, when `Some`, has that
+/// length.
 pub fn parameter_names(
     method: &MethodInfo,
     pool: &ConstantPool,
@@ -135,7 +140,7 @@ fn params_from_local_variable_table(
             .iter()
             .find(|e| e.index == slot && e.start_pc == 0)
             .and_then(|e| pool.utf8(e.name_index))
-            .map(|c| c.into_owned())?;
+            .map(alloc::borrow::Cow::into_owned)?;
         if !is_java_identifier(&name) {
             return None;
         }
@@ -148,7 +153,7 @@ fn params_from_local_variable_table(
 /// instance method (so the first parameter starts at slot 1); a `long`/`double` parameter takes two
 /// slots, everything else one. The single source of truth for the parameter → slot mapping, shared by
 /// parameter-name recovery here and the body decompiler's local map ([`crate::body`]).
-pub(crate) fn parameter_slots(
+pub fn parameter_slots(
     params: &[FieldType],
     is_static: bool,
 ) -> impl Iterator<Item = (u16, &FieldType)> {
@@ -166,7 +171,7 @@ pub(crate) fn parameter_slots(
 
 /// The method `Code`'s `LocalVariableTable` (present when compiled with `-g`), or `None` — the
 /// source of names/types for both parameter-name and hoisted-local recovery.
-pub(crate) fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariableEntry]> {
+pub fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariableEntry]> {
     code.attributes.iter().find_map(|a| match &a.body {
         AttributeBody::LocalVariableTable(table) => Some(table.as_slice()),
         _ => None,
@@ -184,7 +189,7 @@ pub(crate) fn local_variable_table(code: &CodeAttribute) -> Option<&[LocalVariab
 ///
 /// `javac` emits several entries for one source variable (one per live sub-range across branches);
 /// they agree on name + type, so collecting the *distinct* `(name, type)` yields exactly one.
-pub(crate) fn local_variable(
+pub fn local_variable(
     table: &[LocalVariableEntry],
     pool: &ConstantPool,
     slot: u16,
@@ -207,7 +212,7 @@ pub(crate) fn local_variable(
 }
 
 /// A conservative Java-identifier check, so a recovered name can never break the parse.
-pub(crate) fn is_java_identifier(s: &str) -> bool {
+pub fn is_java_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c == '_' || c == '$' || c.is_alphabetic() => {}

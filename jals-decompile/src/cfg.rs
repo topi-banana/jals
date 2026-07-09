@@ -12,20 +12,20 @@ use alloc::vec::Vec;
 use jals_classfile::{Instruction, WideInstruction};
 
 /// A method's basic blocks, in instruction order (block 0 is the entry).
-pub(crate) struct Cfg {
+pub struct Cfg {
     pub blocks: Vec<Block>,
 }
 
 /// A basic block: a maximal run of instructions `code[start..end]` with a single entry, ending in a
 /// [`Term`] that names its successors (as block indices).
-pub(crate) struct Block {
+pub struct Block {
     pub start: usize,
     pub end: usize,
     pub term: Term,
 }
 
 /// A block's terminator and its successor block indices.
-pub(crate) enum Term {
+pub enum Term {
     /// Falls straight through to the next block (its last instruction is not a jump).
     Fall(usize),
     /// An unconditional `goto` to a block.
@@ -46,7 +46,7 @@ pub(crate) enum Term {
 impl Block {
     /// The instruction range the value-level simulator should replay: the whole block, except an
     /// explicit `goto` / conditional-branch terminator (which the structurer interprets itself).
-    pub fn body(&self) -> core::ops::Range<usize> {
+    pub const fn body(&self) -> core::ops::Range<usize> {
         match self.term {
             Term::Goto(_) | Term::Branch { .. } => self.start..self.end - 1,
             Term::Fall(_) | Term::Ret | Term::Throw => self.start..self.end,
@@ -104,7 +104,7 @@ fn flow(ins: &Instruction) -> Flow {
 }
 
 /// Build the CFG for a method's instructions, or `None` if it uses a construct M2 does not model.
-pub(crate) fn build(code: &[Instruction]) -> Option<Cfg> {
+pub fn build(code: &[Instruction]) -> Option<Cfg> {
     if code.is_empty() {
         return None;
     }

@@ -27,9 +27,12 @@ use crate::expr::{Expr, Stmt, render_block};
 use crate::literal::{class_literal, double_literal, float_literal, string_literal};
 use crate::types::internal_to_java;
 
-/// Reconstruct a method's body as indented Java statement lines, or `None` if it cannot be decompiled
-/// confidently (a control-flow shape not yet modelled, an exception handler, or any unsupported
-/// instruction). The caller wraps the lines in a block and falls back to a safe placeholder on `None`.
+/// Reconstruct a method's body as indented Java statement lines, or `None` if it cannot be
+/// decompiled confidently.
+///
+/// It returns `None` on a control-flow shape not yet modelled, an exception handler, or any
+/// unsupported instruction; the caller wraps the lines in a block and falls back to a safe
+/// placeholder on `None`.
 ///
 /// `param_names` are the exact parameter names the caller renders in the signature, in order; the
 /// body reuses them (never a name the signature doesn't declare), and a mismatch between them and the
@@ -412,7 +415,7 @@ impl Sim<'_> {
 
             // Loads (slot forms and the numbered shorthands).
             I::Iload(s) | I::Lload(s) | I::Fload(s) | I::Dload(s) | I::Aload(s) => {
-                self.load(u16::from(*s))?
+                self.load(u16::from(*s))?;
             }
             I::Iload0 | I::Lload0 | I::Fload0 | I::Dload0 | I::Aload0 => self.load(0)?,
             I::Iload1 | I::Lload1 | I::Fload1 | I::Dload1 | I::Aload1 => self.load(1)?,
@@ -422,7 +425,7 @@ impl Sim<'_> {
             // `iinc` (and its wide form): a read-modify-write of a local, stack untouched.
             I::Iinc { index, value } => self.iinc(u16::from(*index), i32::from(*value))?,
             I::Wide(WideInstruction::Iinc { index, value }) => {
-                self.iinc(*index, i32::from(*value))?
+                self.iinc(*index, i32::from(*value))?;
             }
 
             // Arithmetic and bitwise.
@@ -582,7 +585,9 @@ impl Sim<'_> {
 
     /// The internal name a `Class` entry points to.
     fn class_ref(&self, index: u16) -> Option<String> {
-        self.pool.class_name(index).map(|c| c.into_owned())
+        self.pool
+            .class_name(index)
+            .map(alloc::borrow::Cow::into_owned)
     }
 }
 
