@@ -16,6 +16,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ast-grep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall ast-grep --no-confirm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run ast-grep rule tests
+        run: ast-grep test --skip-snapshot-tests
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest

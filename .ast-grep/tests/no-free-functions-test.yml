@@ -1,0 +1,44 @@
+id: no-free-functions
+
+valid:
+    - |
+        struct User;
+
+        impl User {
+            fn new() -> Self {
+                Self
+            }
+        }
+
+    - |
+        trait Make {
+            fn make() -> Self;
+        }
+
+    - |
+        mod parser {
+            fn parse() {}
+        }
+
+    - |
+        fn main() {}
+
+    - |
+        #[test]
+        fn it_works() {}
+
+    - |
+        #[tokio::test]
+        async fn it_works_async() {}
+
+    - |
+        #[test]
+        #[should_panic]
+        fn it_panics() {}
+
+invalid:
+    - |
+        fn parse_user() {}
+
+    - |
+        pub fn create_user() {}
