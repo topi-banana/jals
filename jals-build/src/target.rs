@@ -31,7 +31,6 @@ use jals_config::Manifest;
 ///
 /// # Errors
 /// Returns [`ResolveTargetError`] when no single target can be chosen.
-#[allow(clippy::option_if_let_else)]
 pub fn resolve_run_target<'m>(
     manifest: &'m Manifest,
     bin: Option<&str>,
@@ -55,19 +54,24 @@ pub fn resolve_run_target<'m>(
             .as_deref()
             .ok_or(ResolveTargetError::NoTarget),
         [only] => Ok(only.main_class.as_str()),
-        many => match manifest.package.default_run.as_deref() {
-            Some(default) => many
-                .iter()
-                .find(|b| b.name == default)
-                .map(|b| b.main_class.as_str())
-                .ok_or_else(|| ResolveTargetError::UnknownBin {
-                    name: default.to_string(),
+        many => manifest.package.default_run.as_deref().map_or_else(
+            || {
+                Err(ResolveTargetError::Ambiguous {
                     available: bin_names(manifest),
-                }),
-            None => Err(ResolveTargetError::Ambiguous {
-                available: bin_names(manifest),
-            }),
-        },
+                })
+            },
+            |name| {
+                many.iter().find(|b| b.name == name).map_or_else(
+                    || {
+                        Err(ResolveTargetError::UnknownBin {
+                            name: name.into(),
+                            available: bin_names(manifest),
+                        })
+                    },
+                    |b| Ok(b.main_class.as_str()),
+                )
+            },
+        ),
     }
 }
 

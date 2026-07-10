@@ -58,12 +58,11 @@ impl Sink<'_> {
     }
 
     /// 次に積むトークンの開始オフセット(エラー位置に使う)。
-    #[allow(clippy::option_if_let_else)]
     fn current_offset(&self) -> TextSize {
-        match self.all.get(self.all_idx) {
-            Some(t) => t.range.start(),
-            None => self.all.last().map_or(TextSize::new(0), |t| t.range.end()),
-        }
+        self.all.get(self.all_idx).map_or_else(
+            || self.all.last().map_or(TextSize::new(0), |t| t.range.end()),
+            |t| t.range.start(),
+        )
     }
 
     fn error(&mut self, msg: String) {

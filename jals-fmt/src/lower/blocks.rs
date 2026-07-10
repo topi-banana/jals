@@ -564,10 +564,7 @@ fn split_switch_group(node: &SyntaxNode) -> Option<(Vec<SwitchLabelPair>, Vec<Sy
         } else if let Some(t) = el.as_token() {
             let kind = t.kind();
             if kind == S::COLON {
-                match pending.take() {
-                    Some(label) => labels.push((label, t.clone())),
-                    None => return None, // a stray colon
-                }
+                labels.push((pending.take()?, t.clone()));
             } else if !kind.is_trivia() {
                 return None; // a stray significant token
             }
