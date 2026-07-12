@@ -145,6 +145,53 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
+  lsp-binary:
+    name: lsp binary (${{ matrix.target }})
+    # Per-platform `jals` binaries for the Zed extension's auto-download: the extension asks
+    # the GitHub API for the newest of these artifacts on `main` and fetches its zip through
+    # nightly.link (GitHub's own artifact-download endpoint requires authentication, even on a
+    # public repository). Push-to-main only — the extension never downloads a PR build, so a
+    # per-PR five-target build would be wasted.
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          # Cross-compiled from the arm64 macOS runner (the Xcode toolchain links both archs).
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lsp-binary-${{ matrix.target }}
+      - name: Build the jals binary
+        run: cargo build --release --target ${{ matrix.target }} --package jals-cli
+      - name: Upload the jals binary
+        uses: actions/upload-artifact@v4
+        with:
+          # The artifact name the extension derives from `zed::current_platform()`; keep the
+          # two in sync (`artifact_name` in editors/zed/src/lib.rs).
+          name: jals-${{ matrix.target }}
+          # Exactly one of the two patterns matches (`jals.exe` on Windows), so the artifact
+          # zip holds the binary at its root — which is where the extension expects it.
+          path: |
+            target/${{ matrix.target }}/release/jals
+            target/${{ matrix.target }}/release/jals.exe
+          if-no-files-found: error
+
   zed-extension:
     name: zed extension
     runs-on: ubuntu-latest
