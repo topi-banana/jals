@@ -1,0 +1,18 @@
+# This crate is a Zed extension compiled to `wasm32-wasip1`, not a member of the outer `jals`
+# workspace: the empty `[workspace]` table below makes it its own workspace root so `cargo`
+# commands run from the repo root never pull it in (and it does not inherit the workspace lints
+# or the `wasm32-unknown-unknown` pure-crate constraints). It is also listed in the root
+# `Cargo.toml`'s `exclude`.
+[workspace]
+
+[package]
+name = "zed-jals"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

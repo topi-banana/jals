@@ -145,6 +145,105 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
+  lsp-binary:
+    name: lsp binary (${{ matrix.target }})
+    # Per-platform `jals` binaries for the Zed extension's auto-download: the extension asks
+    # the GitHub API for the newest of these artifacts on `main` and fetches its zip through
+    # nightly.link (GitHub's own artifact-download endpoint requires authentication, even on a
+    # public repository). Push-to-main only — the extension never downloads a PR build, so a
+    # per-PR five-target build would be wasted.
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          # Cross-compiled from the arm64 macOS runner (the Xcode toolchain links both archs).
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lsp-binary-${{ matrix.target }}
+      - name: Build the jals binary
+        run: cargo build --release --target ${{ matrix.target }} --package jals-cli
+      - name: Upload the jals binary
+        uses: actions/upload-artifact@v4
+        with:
+          # The artifact name the extension derives from `zed::current_platform()`; keep the
+          # two in sync (`artifact_name` in editors/zed/src/lib.rs).
+          name: jals-${{ matrix.target }}
+          # Exactly one of the two patterns matches (`jals.exe` on Windows), so the artifact
+          # zip holds the binary at its root — which is where the extension expects it.
+          path: |
+            target/${{ matrix.target }}/release/jals
+            target/${{ matrix.target }}/release/jals.exe
+          if-no-files-found: error
+
+  zed-extension:
+    name: zed extension
+    runs-on: ubuntu-latest
+    env:
+      # The wasi-preview1 reactor adapter used to component-encode the extension, pinned to the
+      # wasmtime release Zed's extension host tracks (`wasmtime` in zed-industries/zed's
+      # Cargo.toml). Zed loads a wasm *component*, but `cargo build` emits a core module, so the
+      # module is adapted into a component with this exact adapter — matching Zed's own build so
+      # the artifact loads. Bump this when Zed bumps its wasmtime.
+      WASMTIME_VERSION: "36.0.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      # The extension (`editors/zed`) is its own workspace root (excluded from the outer one), so
+      # its target dir is `editors/zed/target`.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: editors/zed
+      - uses: cargo-bins/cargo-binstall@main
+      # `--force`: the `rust-cache` step above restores cargo's install metadata
+      # (`.crates.toml`) marking wasm-tools as "already installed" while *not* restoring the
+      # `~/.cargo/bin/wasm-tools` binary itself, so a plain `binstall` skips the install and the
+      # component-encode step below fails with `wasm-tools: command not found`. Forcing the
+      # (re)install ignores that stale metadata and always places the binary.
+      - run: cargo binstall wasm-tools --no-confirm --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the extension (wasm32-wasip1 core module)
+        run: cargo build --release --locked --target wasm32-wasip1 --manifest-path editors/zed/Cargo.toml
+      - name: Download the wasi-preview1 reactor adapter
+        run: |
+          curl -fL --retry 3 \
+            -o wasi_snapshot_preview1.reactor.wasm \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasi_snapshot_preview1.reactor.wasm"
+      - name: Component-encode the extension
+        run: |
+          mkdir -p dist
+          wasm-tools component new \
+            editors/zed/target/wasm32-wasip1/release/zed_jals.wasm \
+            --adapt "wasi_snapshot_preview1=wasi_snapshot_preview1.reactor.wasm" \
+            -o dist/extension.wasm
+          cp editors/zed/extension.toml dist/extension.toml
+      - name: Upload the compiled extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-jals-extension
+          # The compiled Zed extension: the component `extension.wasm` + its `extension.toml`.
+          path: dist/
+          if-no-files-found: error
+
   corpus-reports:
     name: corpus reports
     runs-on: ubuntu-latest
