@@ -318,15 +318,36 @@ CI (GitHub Actions) runs the following checks; mirror them locally before pushin
 
 ```sh
 cargo fmt --all --check                                       # formatting
+cargo run -p xtask -- codegen --check                         # generated AST is up to date
 cargo clippy --workspace --all-targets --all-features -- -D warnings   # lints
 cargo test --workspace --all-features                         # tests
 taplo fmt --check --diff                                      # TOML formatting
 cargo machete                                                 # unused dependencies
-cargo build --release --target wasm32-unknown-unknown -p jals-syntax   # wasm core
+typos                                                         # spelling
+ast-grep test --skip-snapshot-tests                           # ast-grep rule tests
+ast-grep scan --error                                         # structural lints (no-free-functions, …)
+
+# wasm: the pure `no_std` crate set (built as one package set so their `std` features stay off) …
+cargo build --release --target wasm32-unknown-unknown \
+  -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
+  -p jals-fmt -p jals-lint -p jals-fs -p jals-config
+# … plus jals-classpath's wasm-compatible core (host I/O is behind its default `native` feature)
+cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 ```
 
-The build matrix also compiles the workspace for `x86_64`/`aarch64` Linux. Dependency
-updates are automated with Dependabot.
+Lints are configured workspace-wide in the root `Cargo.toml` under `[workspace.lints]`
+(clippy `all` / `pedantic` / `nursery` at `warn`, denied in CI), and structural rules live in
+`.ast-grep/rules/`. The build matrix also compiles the workspace for `x86_64`/`aarch64` Linux.
+Dependency updates are automated with Dependabot.
+
+The main structural rule, `no-free-functions`, asks helpers to be associated (or nested)
+functions rather than free functions. Abstraction is treated as the top priority here — it
+raises the overall quality of the codebase and can contribute meaningfully to performance — so
+free functions are avoided wherever possible. An associated function's parent type lets a caller
+tell at a glance what the function relates to and does, which matters most for a `pub` function
+reached through an external import; a bare free function offers no such anchor. Collecting
+functions on a specific struct also makes near-duplicate helpers easy to notice and consolidate.
+Move a helper into an `impl`/`trait`, or nest it inside its sole caller when it is purely local.
 
 ### Invariants worth protecting
 

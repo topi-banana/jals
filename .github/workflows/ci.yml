@@ -26,6 +26,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Run ast-grep rule tests
         run: ast-grep test --skip-snapshot-tests
+      # `--error` is required to gate CI: a plain `ast-grep scan` exits 0 even when it
+      # reports error-severity findings, so without it a rule violation would pass silently.
+      - name: Scan the codebase against ast-grep rules
+        run: ast-grep scan --error
 
   fmt:
     name: rustfmt

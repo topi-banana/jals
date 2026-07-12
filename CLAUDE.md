@@ -202,6 +202,14 @@ When touching the lexer, parser, or formatter, prefer adding a snapshot test
 - In `jals-playground`, implement every Yew component as a `struct` definition plus an
   `impl yew::Component` block (struct components) — do not use `#[function_component]` or
   other function-component styles.
+- **Prefer associated functions over free functions** (`ast-grep scan`'s `no-free-functions`
+  rule). Abstraction is the top priority: it lifts the codebase's overall quality and can
+  meaningfully help performance, so free functions should be avoided wherever possible. An
+  associated function's parent type tells a caller — especially across an external `pub` import —
+  what the function relates to and what it does at a glance, whereas a bare free function reveals
+  neither. Grouping functions on a specific struct also makes near-duplicate functions easy to
+  spot (and so to deduplicate); associated functions dodge both problems. Move a helper into an
+  `impl`/`trait`, or nest it inside its only caller when it is purely local.
 
 ## Repository notes
 

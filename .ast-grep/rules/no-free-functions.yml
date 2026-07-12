@@ -43,9 +43,11 @@ rule:
             not:
               kind: attribute_item
 
+# Globs are matched against workspace-relative paths, so crate subdirectories
+# (`jals-fmt/tests/…`) need the leading `**/`.
 ignores:
-  - target/**/*
-  - build.rs
-  - benches/**/*.rs
-  - tests/**/*.rs
-  - examples/**/*.rs
+  - '**/target/**'
+  - '**/build.rs'
+  - '**/benches/**/*.rs'
+  - '**/tests/**/*.rs'
+  - '**/examples/**/*.rs'
