@@ -11,37 +11,42 @@ use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
 
-/// Every reference to the symbol under `position`, within this one file, as `Location`s under
-/// `uri`. The declaration is included when `include_declaration` is set. Empty if the cursor is not
-/// on a resolvable identifier — an unresolved or external name has no file-local binding to gather.
-pub(crate) fn references(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    uri: &Url,
-    position: Position,
-    include_declaration: bool,
-) -> Vec<Location> {
-    let root = parse.syntax();
-    // Anchor on the identifier under the cursor (boundary-aware, so a cursor at the end of a word
-    // still counts), then ask name resolution for the binding it denotes — whether the cursor sits
-    // on a use or on the declaration itself.
-    let Some(ident) = super::ident_at(&root, line_index.offset(text, position)) else {
-        return Vec::new();
-    };
-    let resolved = jals_hir::resolve_node(&root);
-    let Some(id) = resolved.symbol_at(usize::from(ident.text_range().start())) else {
-        return Vec::new();
-    };
+/// Find references (`textDocument/references`): the file-local pass.
+pub(crate) struct References;
 
-    resolved
-        .occurrences(id, include_declaration)
-        .into_iter()
-        .map(|range| Location {
-            uri: uri.clone(),
-            range: line_index.byte_range(text, &range),
-        })
-        .collect()
+impl References {
+    /// Every reference to the symbol under `position`, within this one file, as `Location`s under
+    /// `uri`. The declaration is included when `include_declaration` is set. Empty if the cursor is not
+    /// on a resolvable identifier — an unresolved or external name has no file-local binding to gather.
+    pub(crate) fn references(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let root = parse.syntax();
+        // Anchor on the identifier under the cursor (boundary-aware, so a cursor at the end of a word
+        // still counts), then ask name resolution for the binding it denotes — whether the cursor sits
+        // on a use or on the declaration itself.
+        let Some(ident) = super::Cursor::ident_at(&root, line_index.offset(text, position)) else {
+            return Vec::new();
+        };
+        let resolved = jals_hir::Resolved::resolve_node(&root);
+        let Some(id) = resolved.symbol_at(usize::from(ident.text_range().start())) else {
+            return Vec::new();
+        };
+
+        resolved
+            .occurrences(id, include_declaration)
+            .into_iter()
+            .map(|range| Location {
+                uri: uri.clone(),
+                range: line_index.byte_range(text, &range),
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -57,8 +62,8 @@ mod tests {
         let idx = LineIndex::new(text);
         let offset = text.find(needle).expect("needle not found in text");
         let pos = idx.position(text, TextSize::new(offset as u32));
-        let parse = jals_syntax::parse(text);
-        references(&parse, text, &idx, &uri, pos, include_declaration)
+        let parse = jals_syntax::Parse::parse(text);
+        References::references(&parse, text, &idx, &uri, pos, include_declaration)
             .into_iter()
             .map(|l| {
                 (
@@ -97,9 +102,9 @@ mod tests {
         let text = "class C { void m() { int x = 1; f(x); } }";
         let uri = Url::parse("file:///A.java").unwrap();
         let idx = LineIndex::new(text);
-        let parse = jals_syntax::parse(text);
+        let parse = jals_syntax::Parse::parse(text);
         let pos = idx.position(text, TextSize::new(text.find("x = 1").unwrap() as u32));
-        let locations = references(&parse, text, &idx, &uri, pos, true);
+        let locations = References::references(&parse, text, &idx, &uri, pos, true);
         assert!(!locations.is_empty());
         assert!(locations.iter().all(|l| l.uri == uri));
     }
@@ -117,9 +122,16 @@ mod tests {
         let uri = Url::parse("file:///A.java").unwrap();
         for text in ["", "class", "class C {", "@", "a ="] {
             let idx = LineIndex::new(text);
-            let parse = jals_syntax::parse(text);
+            let parse = jals_syntax::Parse::parse(text);
             for (line, character) in [(0, 0), (999, 999), (0, 999)] {
-                references(&parse, text, &idx, &uri, Position { line, character }, true);
+                References::references(
+                    &parse,
+                    text,
+                    &idx,
+                    &uri,
+                    Position { line, character },
+                    true,
+                );
             }
         }
     }

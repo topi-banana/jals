@@ -12,34 +12,39 @@ use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
 
-/// Renders an inferred type as a hover, or `None` for [`Ty::Unknown`] (nothing useful to show).
-pub(crate) fn type_hover(ty: &Ty) -> Option<Hover> {
-    if matches!(ty, Ty::Unknown) {
-        return None;
-    }
-    Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: format!("```java\n{ty}\n```"),
-        }),
-        range: None,
-    })
-}
+/// Hover (`textDocument/hover`): render the inferred type of the expression under the cursor.
+pub(crate) struct Hovers;
 
-/// The hover for the expression under `position`, inferred over this one file. Reference type names
-/// can only resolve externally (by spelling) here — [`jals_hir::infer_node`] has no project index —
-/// but structural inference (primitives, arrays, `var`, numeric promotion) is unaffected.
-pub(crate) fn hover_local(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    position: Position,
-) -> Option<Hover> {
-    let root = parse.syntax();
-    let resolved = jals_hir::resolve_node(&root);
-    let inference = jals_hir::infer_node(&root, &resolved);
-    let offset = u32::from(line_index.offset(text, position)) as usize;
-    type_hover(inference.type_at(offset)?)
+impl Hovers {
+    /// Renders an inferred type as a hover, or `None` for [`Ty::Unknown`] (nothing useful to show).
+    pub(crate) fn type_hover(ty: &Ty) -> Option<Hover> {
+        if matches!(ty, Ty::Unknown) {
+            return None;
+        }
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```java\n{ty}\n```"),
+            }),
+            range: None,
+        })
+    }
+
+    /// The hover for the expression under `position`, inferred over this one file. Reference type names
+    /// can only resolve externally (by spelling) here — [`jals_hir::TypeInference::infer_node`] has no project index —
+    /// but structural inference (primitives, arrays, `var`, numeric promotion) is unaffected.
+    pub(crate) fn hover_local(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        position: Position,
+    ) -> Option<Hover> {
+        let root = parse.syntax();
+        let resolved = jals_hir::Resolved::resolve_node(&root);
+        let inference = jals_hir::TypeInference::infer_node(&root, &resolved);
+        let offset = u32::from(line_index.offset(text, position)) as usize;
+        Self::type_hover(inference.type_at(offset)?)
+    }
 }
 
 #[cfg(test)]
@@ -53,8 +58,8 @@ mod tests {
         let line_index = LineIndex::new(text);
         let offset = text.find(needle).expect("needle not found");
         let pos = line_index.position(text, TextSize::from(offset as u32));
-        let parse = jals_syntax::parse(text);
-        hover_local(&parse, text, &line_index, pos).map(|h| match h.contents {
+        let parse = jals_syntax::Parse::parse(text);
+        Hovers::hover_local(&parse, text, &line_index, pos).map(|h| match h.contents {
             HoverContents::Markup(m) => m.value,
             _ => panic!("expected markup hover"),
         })
@@ -75,8 +80,8 @@ mod tests {
         let use_s = text.rfind('s').unwrap();
         let line_index = LineIndex::new(text);
         let pos = line_index.position(text, TextSize::from(use_s as u32));
-        let parse = jals_syntax::parse(text);
-        let hover = hover_local(&parse, text, &line_index, pos).expect("has a type");
+        let parse = jals_syntax::Parse::parse(text);
+        let hover = Hovers::hover_local(&parse, text, &line_index, pos).expect("has a type");
         let HoverContents::Markup(m) = hover.contents else {
             panic!("expected markup");
         };
@@ -93,9 +98,9 @@ mod tests {
     fn never_panics_on_broken_or_out_of_range() {
         for text in ["", "class", "class C {", "@", "a ="] {
             let line_index = LineIndex::new(text);
-            let parse = jals_syntax::parse(text);
+            let parse = jals_syntax::Parse::parse(text);
             for (line, character) in [(0, 0), (999, 999), (0, 999)] {
-                hover_local(&parse, text, &line_index, Position { line, character });
+                Hovers::hover_local(&parse, text, &line_index, Position { line, character });
             }
         }
     }

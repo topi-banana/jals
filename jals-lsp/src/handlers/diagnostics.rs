@@ -7,160 +7,167 @@ use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
 
-/// Map each [`jals_syntax::SyntaxError`] in `parse` to an LSP diagnostic.
-///
-/// `parse` is the document's cached CST (so this never reparses); `text` is the source it was
-/// built from, needed to convert byte ranges to UTF-16 positions.
-pub(crate) fn compute_diagnostics(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-) -> Vec<Diagnostic> {
-    parse
-        .errors()
-        .iter()
-        .map(|err| Diagnostic {
-            range: line_index.range(text, err.range()),
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("jals".to_string()),
-            message: err.message().to_string(),
-            ..Default::default()
-        })
-        .collect()
-}
+/// LSP diagnostics from parser errors, lint findings, and cross-file type checks.
+pub(crate) struct Diagnostics;
 
-/// Run the enabled `jals-lint` rules over the cached CST in `parse` and map each finding to an
-/// LSP diagnostic, tagged with its rule name (`code`) and the `jals` source.
-///
-/// Takes `&Parse` like the other handlers (and `compute_diagnostics`), materializing the syntax
-/// tree internally. Parser errors are intentionally excluded — they are emitted by
-/// [`compute_diagnostics`], the single source of syntax-error diagnostics, so the two never
-/// duplicate each other.
-///
-/// Two finding shapes render as faded code (the [`DiagnosticTag::UNNECESSARY`] tag): a finding
-/// marked [`unnecessary`](jals_lint::Diagnostic::unnecessary) (e.g. `unused-local`) carries the
-/// tag on its own diagnostic, and a finding with an
-/// [`unnecessary_range`](jals_lint::Diagnostic::unnecessary_range) (the dead branch of a constant
-/// `if`) additionally emits a hint diagnostic covering that range, with the message the rule
-/// supplied for it.
-pub(crate) fn compute_lint_diagnostics(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    config: &jals_config::lint::Config,
-) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
-    for finding in jals_lint::lint_node(&parse.syntax(), config) {
-        let code = NumberOrString::String(finding.rule.to_string());
-        // A secondary unnecessary range renders as a hint (kept out of the problems list) tagged
-        // `Unnecessary` so the editor fades it.
-        let hint = finding
-            .unnecessary_range
-            .map(|(range, message)| Diagnostic {
-                range: line_index.byte_range(text, &range),
-                severity: Some(DiagnosticSeverity::HINT),
-                code: Some(code.clone()),
+impl Diagnostics {
+    /// Map each [`jals_syntax::SyntaxError`] in `parse` to an LSP diagnostic.
+    ///
+    /// `parse` is the document's cached CST (so this never reparses); `text` is the source it was
+    /// built from, needed to convert byte ranges to UTF-16 positions.
+    pub(crate) fn compute_diagnostics(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+    ) -> Vec<Diagnostic> {
+        parse
+            .errors()
+            .iter()
+            .map(|err| Diagnostic {
+                range: line_index.range(text, err.range()),
+                severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("jals".to_string()),
-                message,
-                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                message: err.message().to_string(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Run the enabled `jals-lint` rules over the cached CST in `parse` and map each finding to an
+    /// LSP diagnostic, tagged with its rule name (`code`) and the `jals` source.
+    ///
+    /// Takes `&Parse` like the other handlers (and `compute_diagnostics`), materializing the syntax
+    /// tree internally. Parser errors are intentionally excluded — they are emitted by
+    /// [`Self::compute_diagnostics`], the single source of syntax-error diagnostics, so the two never
+    /// duplicate each other.
+    ///
+    /// Two finding shapes render as faded code (the [`DiagnosticTag::UNNECESSARY`] tag): a finding
+    /// marked [`unnecessary`](jals_lint::Diagnostic::unnecessary) (e.g. `unused-local`) carries the
+    /// tag on its own diagnostic, and a finding with an
+    /// [`unnecessary_range`](jals_lint::Diagnostic::unnecessary_range) (the dead branch of a constant
+    /// `if`) additionally emits a hint diagnostic covering that range, with the message the rule
+    /// supplied for it.
+    pub(crate) fn compute_lint_diagnostics(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        config: &jals_config::lint::Config,
+    ) -> Vec<Diagnostic> {
+        let mut out = Vec::new();
+        for finding in jals_lint::LintOutput::lint_node(&parse.syntax(), config) {
+            let code = NumberOrString::String(finding.rule.to_string());
+            // A secondary unnecessary range renders as a hint (kept out of the problems list) tagged
+            // `Unnecessary` so the editor fades it.
+            let hint = finding
+                .unnecessary_range
+                .map(|(range, message)| Diagnostic {
+                    range: line_index.byte_range(text, &range),
+                    severity: Some(DiagnosticSeverity::HINT),
+                    code: Some(code.clone()),
+                    source: Some("jals".to_string()),
+                    message,
+                    tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                    ..Default::default()
+                });
+            out.push(Diagnostic {
+                range: line_index.byte_range(text, &finding.range),
+                severity: Some(Self::lint_severity(finding.severity)),
+                code: Some(code),
+                source: Some("jals".to_string()),
+                message: finding.message,
+                // The finding names code that is itself unnecessary, so the editor fades it in place.
+                tags: finding
+                    .unnecessary
+                    .then(|| vec![DiagnosticTag::UNNECESSARY]),
                 ..Default::default()
             });
-        out.push(Diagnostic {
-            range: line_index.byte_range(text, &finding.range),
-            severity: Some(lint_severity(finding.severity)),
-            code: Some(code),
-            source: Some("jals".to_string()),
-            message: finding.message,
-            // The finding names code that is itself unnecessary, so the editor fades it in place.
-            tags: finding
-                .unnecessary
-                .then(|| vec![DiagnosticTag::UNNECESSARY]),
-            ..Default::default()
-        });
-        out.extend(hint);
+            out.extend(hint);
+        }
+        out
     }
-    out
-}
 
-/// Build "cannot resolve symbol" diagnostics for `file`'s type-name references that resolve to
-/// nothing — neither file-locally nor anywhere in the project index.
-///
-/// `parse`/`text`/`line_index` are the document's cached CST and its coordinate map; `resolved` is
-/// its file-local name resolution (shared with [`compute_type_mismatch_diagnostics`] so the tree is
-/// resolved once per publish); `index` is the project-wide symbol index and `file` this document's
-/// id within it. Diagnostics are suppressed entirely when the document has parse errors: a broken
-/// tree yields spurious unresolved names, and the syntax errors themselves are already reported by
-/// [`compute_diagnostics`].
-pub(crate) fn compute_type_diagnostics(
-    index: &ProjectIndex,
-    file: FileId,
-    parse: &Parse,
-    resolved: &Resolved,
-    text: &str,
-    line_index: &LineIndex,
-) -> Vec<Diagnostic> {
-    if !parse.errors().is_empty() {
-        return Vec::new();
+    /// Build "cannot resolve symbol" diagnostics for `file`'s type-name references that resolve to
+    /// nothing — neither file-locally nor anywhere in the project index.
+    ///
+    /// `parse`/`text`/`line_index` are the document's cached CST and its coordinate map; `resolved` is
+    /// its file-local name resolution (shared with [`Self::compute_type_mismatch_diagnostics`] so the tree is
+    /// resolved once per publish); `index` is the project-wide symbol index and `file` this document's
+    /// id within it. Diagnostics are suppressed entirely when the document has parse errors: a broken
+    /// tree yields spurious unresolved names, and the syntax errors themselves are already reported by
+    /// [`Self::compute_diagnostics`].
+    pub(crate) fn compute_type_diagnostics(
+        index: &ProjectIndex,
+        file: FileId,
+        parse: &Parse,
+        resolved: &Resolved,
+        text: &str,
+        line_index: &LineIndex,
+    ) -> Vec<Diagnostic> {
+        if !parse.errors().is_empty() {
+            return Vec::new();
+        }
+        index
+            .unresolved_types(file, resolved)
+            .into_iter()
+            .map(|range| Diagnostic {
+                range: line_index.byte_range(text, &range),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("cannot-resolve".to_string())),
+                source: Some("jals".to_string()),
+                message: format!("cannot resolve symbol `{}`", &text[range]),
+                ..Default::default()
+            })
+            .collect()
     }
-    index
-        .unresolved_types(file, resolved)
-        .into_iter()
-        .map(|range| Diagnostic {
-            range: line_index.byte_range(text, &range),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String("cannot-resolve".to_string())),
-            source: Some("jals".to_string()),
-            message: format!("cannot resolve symbol `{}`", &text[range]),
-            ..Default::default()
-        })
-        .collect()
-}
 
-/// Build index-aware type-mismatch diagnostics for `file`: a variable initializer or simple `=`
-/// assignment whose value type is not assignable to its slot, resolving reference types against the
-/// project `index` (so a `Sub`/`Base` confusion is caught, which the file-local `type-mismatch` lint
-/// rule cannot see).
-///
-/// This is the project-wide counterpart of the `jals-lint` `type-mismatch` rule, sharing the same
-/// `jals_hir::type_mismatches` core and the same config key — so the server suppresses the
-/// file-local rule when it runs this, and the user's `type-mismatch` severity (`allow` to disable,
-/// `error` to escalate) governs both. `resolved` is the document's file-local name resolution,
-/// shared with [`compute_type_diagnostics`]. Suppressed on parse errors, like
-/// [`compute_type_diagnostics`].
-pub(crate) fn compute_type_mismatch_diagnostics(
-    index: &ProjectIndex,
-    file: FileId,
-    parse: &Parse,
-    resolved: &Resolved,
-    text: &str,
-    line_index: &LineIndex,
-    config: &jals_config::lint::Config,
-) -> Vec<Diagnostic> {
-    let severity = config.severity(jals_lint::TYPE_MISMATCH_RULE, jals_config::Severity::Warn);
-    if severity == jals_config::Severity::Allow || !parse.errors().is_empty() {
-        return Vec::new();
+    /// Build index-aware type-mismatch diagnostics for `file`: a variable initializer or simple `=`
+    /// assignment whose value type is not assignable to its slot, resolving reference types against the
+    /// project `index` (so a `Sub`/`Base` confusion is caught, which the file-local `type-mismatch` lint
+    /// rule cannot see).
+    ///
+    /// This is the project-wide counterpart of the `jals-lint` `type-mismatch` rule, sharing the same
+    /// `jals_hir::TypeInference::type_mismatches` core and the same config key — so the server suppresses the
+    /// file-local rule when it runs this, and the user's `type-mismatch` severity (`allow` to disable,
+    /// `error` to escalate) governs both. `resolved` is the document's file-local name resolution,
+    /// shared with [`Self::compute_type_diagnostics`]. Suppressed on parse errors, like
+    /// [`Self::compute_type_diagnostics`].
+    pub(crate) fn compute_type_mismatch_diagnostics(
+        index: &ProjectIndex,
+        file: FileId,
+        parse: &Parse,
+        resolved: &Resolved,
+        text: &str,
+        line_index: &LineIndex,
+        config: &jals_config::lint::Config,
+    ) -> Vec<Diagnostic> {
+        let severity = config.severity(jals_lint::TYPE_MISMATCH_RULE, jals_config::Severity::Warn);
+        if severity == jals_config::Severity::Allow || !parse.errors().is_empty() {
+            return Vec::new();
+        }
+        jals_hir::TypeInference::type_mismatches(&parse.syntax(), resolved, Some((index, file)))
+            .into_iter()
+            .map(|m| Diagnostic {
+                range: line_index.byte_range(text, &m.range),
+                severity: Some(Self::lint_severity(severity)),
+                code: Some(NumberOrString::String(
+                    jals_lint::TYPE_MISMATCH_RULE.to_string(),
+                )),
+                source: Some("jals".to_string()),
+                message: m.message(),
+                ..Default::default()
+            })
+            .collect()
     }
-    jals_hir::type_mismatches(&parse.syntax(), resolved, Some((index, file)))
-        .into_iter()
-        .map(|m| Diagnostic {
-            range: line_index.byte_range(text, &m.range),
-            severity: Some(lint_severity(severity)),
-            code: Some(NumberOrString::String(
-                jals_lint::TYPE_MISMATCH_RULE.to_string(),
-            )),
-            source: Some("jals".to_string()),
-            message: m.message(),
-            ..Default::default()
-        })
-        .collect()
-}
 
-/// Map a `jals-lint` severity to an LSP diagnostic severity. `Allow` rules are skipped inside
-/// [`jals_lint::lint_node`], so they never reach here; map them alongside `Warn` defensively.
-const fn lint_severity(severity: jals_config::Severity) -> DiagnosticSeverity {
-    match severity {
-        jals_config::Severity::Error => DiagnosticSeverity::ERROR,
-        jals_config::Severity::Warn | jals_config::Severity::Allow => DiagnosticSeverity::WARNING,
+    /// Map a `jals-lint` severity to an LSP diagnostic severity. `Allow` rules are skipped inside
+    /// [`jals_lint::LintOutput::lint_node`], so they never reach here; map them alongside `Warn` defensively.
+    const fn lint_severity(severity: jals_config::Severity) -> DiagnosticSeverity {
+        match severity {
+            jals_config::Severity::Error => DiagnosticSeverity::ERROR,
+            jals_config::Severity::Warn | jals_config::Severity::Allow => {
+                DiagnosticSeverity::WARNING
+            }
+        }
     }
 }
 
@@ -171,16 +178,16 @@ mod tests {
     #[test]
     fn clean_source_has_no_diagnostics() {
         let text = "class A {}\n";
-        let parse = jals_syntax::parse(text);
-        let diags = compute_diagnostics(&parse, text, &LineIndex::new(text));
+        let parse = jals_syntax::Parse::parse(text);
+        let diags = Diagnostics::compute_diagnostics(&parse, text, &LineIndex::new(text));
         assert!(diags.is_empty());
     }
 
     #[test]
     fn syntax_error_becomes_diagnostic() {
         let text = "class A { void m( {}";
-        let parse = jals_syntax::parse(text);
-        let diags = compute_diagnostics(&parse, text, &LineIndex::new(text));
+        let parse = jals_syntax::Parse::parse(text);
+        let diags = Diagnostics::compute_diagnostics(&parse, text, &LineIndex::new(text));
         assert!(!diags.is_empty());
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(diags[0].source.as_deref(), Some("jals"));
@@ -190,8 +197,8 @@ mod tests {
     #[test]
     fn wildcard_import_becomes_lint_warning() {
         let text = "import java.util.*;\nclass C {}\n";
-        let parse = jals_syntax::parse(text);
-        let diags = compute_lint_diagnostics(
+        let parse = jals_syntax::Parse::parse(text);
+        let diags = Diagnostics::compute_lint_diagnostics(
             &parse,
             text,
             &LineIndex::new(text),
@@ -210,12 +217,13 @@ mod tests {
         // A top-level `main` is a preview feature before Java 25; the host injects the project's
         // edition as `target_java_version`, and the rule reports an ERROR for Java 24.
         let text = "void main() {}\n";
-        let parse = jals_syntax::parse(text);
+        let parse = jals_syntax::Parse::parse(text);
         let mut config = jals_config::lint::Config {
             target_java_version: Some(24),
             ..Default::default()
         };
-        let diags = compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config);
+        let diags =
+            Diagnostics::compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config);
         let d = diags
             .iter()
             .find(|d| d.code == Some(NumberOrString::String("compact-source-file".to_string())))
@@ -226,7 +234,7 @@ mod tests {
         // Java 25 (or no edition) allows the syntax: nothing is reported.
         config.target_java_version = Some(25);
         assert!(
-            compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config)
+            Diagnostics::compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config)
                 .iter()
                 .all(|d| d.code != Some(NumberOrString::String("compact-source-file".to_string())))
         );
@@ -234,8 +242,8 @@ mod tests {
 
     /// Lint diagnostics for `text` under the default config, filtered to `rule`.
     fn lint_diags_for_rule(text: &str, rule: &str) -> Vec<Diagnostic> {
-        let parse = jals_syntax::parse(text);
-        let diags = compute_lint_diagnostics(
+        let parse = jals_syntax::Parse::parse(text);
+        let diags = Diagnostics::compute_lint_diagnostics(
             &parse,
             text,
             &LineIndex::new(text),
@@ -297,8 +305,8 @@ mod tests {
     #[test]
     fn clean_source_has_no_lint_diagnostics() {
         let text = "class C {}\n";
-        let parse = jals_syntax::parse(text);
-        let diags = compute_lint_diagnostics(
+        let parse = jals_syntax::Parse::parse(text);
+        let diags = Diagnostics::compute_lint_diagnostics(
             &parse,
             text,
             &LineIndex::new(text),
@@ -309,8 +317,8 @@ mod tests {
 
     /// Build a two-file project index: `file0` is `text`, `file1` declares `package a; class Foo`.
     fn index_with_sibling_foo(text: &str) -> (ProjectIndex, Parse) {
-        let parse = jals_syntax::parse(text);
-        let sibling = jals_syntax::parse("package a; class Foo { }");
+        let parse = jals_syntax::Parse::parse(text);
+        let sibling = jals_syntax::Parse::parse("package a; class Foo { }");
         let index =
             ProjectIndex::builder(&[(FileId(0), parse.syntax()), (FileId(1), sibling.syntax())])
                 .build();
@@ -323,8 +331,8 @@ mod tests {
         // type. Only `Nope` is reported.
         let text = "package a; class Bar { Nope n; String s; Foo f; }";
         let (index, parse) = index_with_sibling_foo(text);
-        let resolved = jals_hir::resolve_node(&parse.syntax());
-        let diags = compute_type_diagnostics(
+        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
+        let diags = Diagnostics::compute_type_diagnostics(
             &index,
             FileId(0),
             &parse,
@@ -346,11 +354,11 @@ mod tests {
     fn type_diagnostics_suppressed_on_parse_errors() {
         // A broken tree yields spurious unresolved names, so the whole pass is skipped.
         let text = "package a; class Bar { Nope n; ";
-        let parse = jals_syntax::parse(text);
+        let parse = jals_syntax::Parse::parse(text);
         assert!(!parse.errors().is_empty());
         let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
-        let resolved = jals_hir::resolve_node(&parse.syntax());
-        let diags = compute_type_diagnostics(
+        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
+        let diags = Diagnostics::compute_type_diagnostics(
             &index,
             FileId(0),
             &parse,
@@ -367,10 +375,10 @@ mod tests {
 
     #[test]
     fn type_mismatch_diagnostics_flag_project_subtyping() {
-        let parse = jals_syntax::parse(SUBTYPING_SRC);
+        let parse = jals_syntax::Parse::parse(SUBTYPING_SRC);
         let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
-        let resolved = jals_hir::resolve_node(&parse.syntax());
-        let diags = compute_type_mismatch_diagnostics(
+        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
+        let diags = Diagnostics::compute_type_mismatch_diagnostics(
             &index,
             FileId(0),
             &parse,
@@ -392,10 +400,10 @@ mod tests {
     #[test]
     fn type_mismatch_diagnostics_flag_a_bad_call_argument() {
         let text = "class C { void f(int x) {} void g() { f(1.0); } }";
-        let parse = jals_syntax::parse(text);
+        let parse = jals_syntax::Parse::parse(text);
         let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
-        let resolved = jals_hir::resolve_node(&parse.syntax());
-        let diags = compute_type_mismatch_diagnostics(
+        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
+        let diags = Diagnostics::compute_type_mismatch_diagnostics(
             &index,
             FileId(0),
             &parse,
@@ -410,14 +418,14 @@ mod tests {
 
     #[test]
     fn type_mismatch_diagnostics_respect_allow_config() {
-        let parse = jals_syntax::parse(SUBTYPING_SRC);
+        let parse = jals_syntax::Parse::parse(SUBTYPING_SRC);
         let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())]).build();
         let mut config = jals_config::lint::Config::default();
         config
             .rules
             .insert("type-mismatch".to_string(), jals_config::Severity::Allow);
-        let resolved = jals_hir::resolve_node(&parse.syntax());
-        let diags = compute_type_mismatch_diagnostics(
+        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
+        let diags = Diagnostics::compute_type_mismatch_diagnostics(
             &index,
             FileId(0),
             &parse,

@@ -13,7 +13,7 @@
 //!   references are not indexed yet, so a rename could silently break uses in other files. They
 //!   become renamable once a cross-file member reference index exists.
 //!
-//! The new name is validated against the lexer ([`is_valid_identifier`]): it must tokenize as a
+//! The new name is validated against the lexer ([`Rename::is_valid_identifier`]): it must tokenize as a
 //! single `IDENT`, so a reserved word (`int`, `true`) or a malformed name is rejected before any
 //! edit is produced.
 
@@ -25,102 +25,107 @@ use jals_syntax::{Parse, SyntaxKind, SyntaxToken};
 
 use crate::line_index::LineIndex;
 
-/// Whether `name` is a single legal Java identifier: it tokenizes to exactly one `IDENT` token
-/// spanning the whole string. A reserved word lexes to its keyword kind (`int` → `INT_KW`), and
-/// anything with whitespace, punctuation, or a leading digit yields a non-`IDENT` token or more
-/// than one token — all rejected. (A context-sensitive keyword such as `var` lexes as `IDENT` and
-/// is accepted; its use is position-restricted, which a rename does not police.)
-pub(crate) fn is_valid_identifier(name: &str) -> bool {
-    let mut tokens = jals_syntax::tokenize(name).into_iter();
-    matches!(
-        (tokens.next(), tokens.next()),
-        (Some(token), None) if token.kind == SyntaxKind::IDENT && token.text == name
-    )
-}
+/// Rename (`textDocument/rename` + `textDocument/prepareRename`): the file-local pass.
+pub(crate) struct Rename;
 
-/// Whether a binding of this kind may be renamed from a single file's resolution alone. Locals and
-/// other file-scoped bindings always qualify; project types do too (the workspace widens their
-/// rewrite project-wide). Members are withheld — their uses can span files we do not rewrite here.
-pub(crate) const fn is_renamable_kind(kind: DefKind) -> bool {
-    use jals_hir::DefKind::{
-        AnnotationType, CatchParam, Class, Enum, Interface, LambdaParam, Local, Param, PatternVar,
-        Record, Resource, TypeParam,
-    };
-    matches!(
-        kind,
-        Local
-            | Param
-            | LambdaParam
-            | TypeParam
-            | CatchParam
-            | Resource
-            | PatternVar
-            | Class
-            | Interface
-            | Enum
-            | Record
-            | AnnotationType
-    )
-}
-
-/// The renamable binding under `position`: its def id, the identifier token naming it, and the
-/// file's resolution. `None` when the cursor is on no renamable binding (an external name, a
-/// keyword/literal, or a withheld member). Shared by [`prepare_rename_local`] and [`rename_local`].
-fn renamable_binding_at(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    position: Position,
-) -> Option<(DefId, SyntaxToken, Resolved)> {
-    let root = parse.syntax();
-    let ident = super::ident_at(&root, line_index.offset(text, position))?;
-    let resolved = jals_hir::resolve_node(&root);
-    let id = resolved.symbol_at(usize::from(ident.text_range().start()))?;
-    is_renamable_kind(resolved.def(id).kind).then_some((id, ident, resolved))
-}
-
-/// The range of the renamable identifier under `position`, or `None` when the cursor is on no
-/// renamable binding (an external name, a keyword/literal, or a withheld member). Drives
-/// `prepareRename`, which the editor uses to validate a rename before prompting for a new name.
-pub(crate) fn prepare_rename_local(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    position: Position,
-) -> Option<Range> {
-    let (_, ident, _) = renamable_binding_at(parse, text, line_index, position)?;
-    Some(line_index.range(text, ident.text_range()))
-}
-
-/// A [`WorkspaceEdit`] renaming the binding under `position` to `new_name` within this one file, or
-/// `None` if the cursor is on no renamable binding. The caller validates `new_name` first (see
-/// [`is_valid_identifier`]).
-pub(crate) fn rename_local(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    uri: &Url,
-    position: Position,
-    new_name: &str,
-) -> Option<WorkspaceEdit> {
-    let (id, _, resolved) = renamable_binding_at(parse, text, line_index, position)?;
-    let edits: Vec<TextEdit> = resolved
-        .occurrences(id, true)
-        .into_iter()
-        .map(|range| TextEdit {
-            range: line_index.byte_range(text, &range),
-            new_text: new_name.to_owned(),
-        })
-        .collect();
-    if edits.is_empty() {
-        return None;
+impl Rename {
+    /// Whether `name` is a single legal Java identifier: it tokenizes to exactly one `IDENT` token
+    /// spanning the whole string. A reserved word lexes to its keyword kind (`int` → `INT_KW`), and
+    /// anything with whitespace, punctuation, or a leading digit yields a non-`IDENT` token or more
+    /// than one token — all rejected. (A context-sensitive keyword such as `var` lexes as `IDENT` and
+    /// is accepted; its use is position-restricted, which a rename does not police.)
+    pub(crate) fn is_valid_identifier(name: &str) -> bool {
+        let mut tokens = jals_syntax::Lexer::tokenize(name).into_iter();
+        matches!(
+            (tokens.next(), tokens.next()),
+            (Some(token), None) if token.kind == SyntaxKind::IDENT && token.text == name
+        )
     }
-    let mut changes = HashMap::new();
-    changes.insert(uri.clone(), edits);
-    Some(WorkspaceEdit {
-        changes: Some(changes),
-        ..Default::default()
-    })
+
+    /// Whether a binding of this kind may be renamed from a single file's resolution alone. Locals and
+    /// other file-scoped bindings always qualify; project types do too (the workspace widens their
+    /// rewrite project-wide). Members are withheld — their uses can span files we do not rewrite here.
+    pub(crate) const fn is_renamable_kind(kind: DefKind) -> bool {
+        use jals_hir::DefKind::{
+            AnnotationType, CatchParam, Class, Enum, Interface, LambdaParam, Local, Param,
+            PatternVar, Record, Resource, TypeParam,
+        };
+        matches!(
+            kind,
+            Local
+                | Param
+                | LambdaParam
+                | TypeParam
+                | CatchParam
+                | Resource
+                | PatternVar
+                | Class
+                | Interface
+                | Enum
+                | Record
+                | AnnotationType
+        )
+    }
+
+    /// The renamable binding under `position`: its def id, the identifier token naming it, and the
+    /// file's resolution. `None` when the cursor is on no renamable binding (an external name, a
+    /// keyword/literal, or a withheld member). Shared by [`Self::prepare_rename_local`] and [`Self::rename_local`].
+    fn renamable_binding_at(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        position: Position,
+    ) -> Option<(DefId, SyntaxToken, Resolved)> {
+        let root = parse.syntax();
+        let ident = super::Cursor::ident_at(&root, line_index.offset(text, position))?;
+        let resolved = jals_hir::Resolved::resolve_node(&root);
+        let id = resolved.symbol_at(usize::from(ident.text_range().start()))?;
+        Self::is_renamable_kind(resolved.def(id).kind).then_some((id, ident, resolved))
+    }
+
+    /// The range of the renamable identifier under `position`, or `None` when the cursor is on no
+    /// renamable binding (an external name, a keyword/literal, or a withheld member). Drives
+    /// `prepareRename`, which the editor uses to validate a rename before prompting for a new name.
+    pub(crate) fn prepare_rename_local(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        position: Position,
+    ) -> Option<Range> {
+        let (_, ident, _) = Self::renamable_binding_at(parse, text, line_index, position)?;
+        Some(line_index.range(text, ident.text_range()))
+    }
+
+    /// A [`WorkspaceEdit`] renaming the binding under `position` to `new_name` within this one file, or
+    /// `None` if the cursor is on no renamable binding. The caller validates `new_name` first (see
+    /// [`Self::is_valid_identifier`]).
+    pub(crate) fn rename_local(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        uri: &Url,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let (id, _, resolved) = Self::renamable_binding_at(parse, text, line_index, position)?;
+        let edits: Vec<TextEdit> = resolved
+            .occurrences(id, true)
+            .into_iter()
+            .map(|range| TextEdit {
+                range: line_index.byte_range(text, &range),
+                new_text: new_name.to_owned(),
+            })
+            .collect();
+        if edits.is_empty() {
+            return None;
+        }
+        let mut changes = HashMap::new();
+        changes.insert(uri.clone(), edits);
+        Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -132,12 +137,18 @@ mod tests {
     #[test]
     fn valid_identifier_accepts_names_and_rejects_keywords_and_junk() {
         for ok in ["foo", "x1", "_x", "camelCase", "var"] {
-            assert!(is_valid_identifier(ok), "{ok} should be a valid identifier");
+            assert!(
+                Rename::is_valid_identifier(ok),
+                "{ok} should be a valid identifier"
+            );
         }
         for bad in [
             "int", "class", "true", "false", "null", "1a", "a b", "", "x.y", "a-b", "+",
         ] {
-            assert!(!is_valid_identifier(bad), "{bad} should be rejected");
+            assert!(
+                !Rename::is_valid_identifier(bad),
+                "{bad} should be rejected"
+            );
         }
     }
 
@@ -148,8 +159,8 @@ mod tests {
         let idx = LineIndex::new(text);
         let offset = text.find(needle).expect("needle not found");
         let pos = idx.position(text, TextSize::new(offset as u32));
-        let parse = jals_syntax::parse(text);
-        let edit = rename_local(&parse, text, &idx, &uri, pos, new_name)?;
+        let parse = jals_syntax::Parse::parse(text);
+        let edit = Rename::rename_local(&parse, text, &idx, &uri, pos, new_name)?;
         let mut edits: Vec<TextEdit> = edit.changes.unwrap().remove(&uri).unwrap();
         edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
         Some(
@@ -202,14 +213,14 @@ mod tests {
     fn prepare_reports_the_identifier_range_for_a_renamable_binding() {
         let text = "class C { void m() { int x = 1; f(x); } }";
         let idx = LineIndex::new(text);
-        let parse = jals_syntax::parse(text);
+        let parse = jals_syntax::Parse::parse(text);
         let pos = idx.position(text, TextSize::new(text.find("x = 1").unwrap() as u32));
-        let range = prepare_rename_local(&parse, text, &idx, pos).expect("x is renamable");
+        let range = Rename::prepare_rename_local(&parse, text, &idx, pos).expect("x is renamable");
         assert_eq!((range.start.character, range.end.character), (25, 26));
 
         // A member yields no prepare range.
         let pos = idx.position(text, TextSize::new(text.find("m()").unwrap() as u32));
-        assert!(prepare_rename_local(&parse, text, &idx, pos).is_none());
+        assert!(Rename::prepare_rename_local(&parse, text, &idx, pos).is_none());
     }
 
     #[test]
@@ -217,11 +228,11 @@ mod tests {
         let uri = Url::parse("file:///A.java").unwrap();
         for text in ["", "class", "class C {", "@", "a ="] {
             let idx = LineIndex::new(text);
-            let parse = jals_syntax::parse(text);
+            let parse = jals_syntax::Parse::parse(text);
             for (line, character) in [(0, 0), (999, 999), (0, 999)] {
                 let pos = Position { line, character };
-                prepare_rename_local(&parse, text, &idx, pos);
-                rename_local(&parse, text, &idx, &uri, pos, "x");
+                Rename::prepare_rename_local(&parse, text, &idx, pos);
+                Rename::rename_local(&parse, text, &idx, &uri, pos, "x");
             }
         }
     }

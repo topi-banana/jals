@@ -15,10 +15,4 @@ mod line_index;
 mod server;
 mod state;
 
-/// Run the language server over stdio. Blocks until the client disconnects.
-pub fn run() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
-    runtime.block_on(server::run_server())
-}
+pub use server::Server;

@@ -18,31 +18,29 @@ mod semantic_tokens;
 mod signature_help;
 mod symbols;
 
-pub(crate) use completion::{completions, completions_local};
-pub(crate) use definition::goto_definition_local;
-pub(crate) use diagnostics::{
-    compute_diagnostics, compute_lint_diagnostics, compute_type_diagnostics,
-    compute_type_mismatch_diagnostics,
-};
-pub(crate) use document_highlight::document_highlight;
-pub(crate) use folding_range::folding_range;
-pub(crate) use formatting::formatting_edits;
-pub(crate) use hover::{hover_local, type_hover};
-pub(crate) use references::references;
-pub(crate) use rename::{
-    is_renamable_kind, is_valid_identifier, prepare_rename_local, rename_local,
-};
-pub(crate) use selection_range::selection_ranges;
-pub(crate) use semantic_tokens::{
-    legend as semantic_tokens_legend, semantic_tokens, tokens_delta as semantic_tokens_delta,
-};
-pub(crate) use signature_help::{signature_help_local, signature_help_to_lsp};
-pub(crate) use symbols::document_symbols;
+pub(crate) use completion::Completions;
+pub(crate) use definition::Definition;
+pub(crate) use diagnostics::Diagnostics;
+pub(crate) use document_highlight::DocumentHighlights;
+pub(crate) use folding_range::FoldingRanges;
+pub(crate) use formatting::Formatting;
+pub(crate) use hover::Hovers;
+pub(crate) use references::References;
+pub(crate) use rename::Rename;
+pub(crate) use selection_range::SelectionRanges;
+pub(crate) use semantic_tokens::SemanticTokensBuilder;
+pub(crate) use signature_help::SignatureHelpHandler;
+pub(crate) use symbols::DocumentSymbols;
 
-/// The `IDENT` token at `offset`, preferring it when a token boundary yields two tokens — so a
-/// cursor at the end of a word still anchors to it (standard editor UX). Shared by the
-/// resolution-aware handlers (document-highlight, references) and the project workspace.
-pub(crate) fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
-    root.token_at_offset(offset)
-        .find(|token| token.kind() == SyntaxKind::IDENT)
+/// Cursor-anchoring helpers shared by the resolution-aware handlers (document-highlight,
+/// references, rename) and the project workspace.
+pub(crate) struct Cursor;
+
+impl Cursor {
+    /// The `IDENT` token at `offset`, preferring it when a token boundary yields two tokens — so a
+    /// cursor at the end of a word still anchors to it (standard editor UX).
+    pub(crate) fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+        root.token_at_offset(offset)
+            .find(|token| token.kind() == SyntaxKind::IDENT)
+    }
 }

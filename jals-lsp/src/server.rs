@@ -40,30 +40,44 @@ use jals_config::Manifest;
 use tower::ServiceBuilder;
 
 use crate::handlers;
-use crate::state::{Discovery, DocumentStore, Workspace, is_config_file, is_lint_config_file};
+use crate::state::{DiscoverableConfig, Discovery, DocumentStore, Workspace};
 
-/// Build the server and run its stdio event loop until the client disconnects.
-// Runs on a current-thread runtime (see `crate::run`), so the future is deliberately `!Send` — it
-// holds the non-`Send` stdio locks across `.await`. Those guards are moved into `run_buffered` and
-// live for the whole loop by design, so neither can be dropped earlier.
-#[allow(clippy::future_not_send, clippy::significant_drop_tightening)]
-pub(crate) async fn run_server() -> anyhow::Result<()> {
-    let (server, _client) = MainLoop::new_server(|client| {
-        ServiceBuilder::new()
-            .layer(TracingLayer::default())
-            .layer(LifecycleLayer::default())
-            .layer(CatchUnwindLayer::default())
-            .layer(ConcurrencyLayer::default())
-            .layer(ClientProcessMonitorLayer::new(client.clone()))
-            .service(Router::from_language_server(ServerState::new(client)))
-    });
+/// The jals language server: builds the async-lsp main loop and runs the stdio event loop.
+pub struct Server;
 
-    // Truly asynchronous piped stdin/stdout (unix). stdout is the LSP transport, so all
-    // logging must go to stderr.
-    let stdin = async_lsp::stdio::PipeStdin::lock_tokio()?;
-    let stdout = async_lsp::stdio::PipeStdout::lock_tokio()?;
-    server.run_buffered(stdin, stdout).await?;
-    Ok(())
+impl Server {
+    /// Run the language server over stdio on a fresh current-thread runtime. Blocks until the
+    /// client disconnects. The public entry point (`jals lsp`).
+    pub fn run() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        runtime.block_on(Self::serve())
+    }
+
+    /// Build the server and run its stdio event loop until the client disconnects.
+    // Runs on a current-thread runtime (see [`Server::run`]), so the future is deliberately `!Send`
+    // — it holds the non-`Send` stdio locks across `.await`. Those guards are moved into
+    // `run_buffered` and live for the whole loop by design, so neither can be dropped earlier.
+    #[allow(clippy::future_not_send, clippy::significant_drop_tightening)]
+    async fn serve() -> anyhow::Result<()> {
+        let (server, _client) = MainLoop::new_server(|client| {
+            ServiceBuilder::new()
+                .layer(TracingLayer::default())
+                .layer(LifecycleLayer::default())
+                .layer(CatchUnwindLayer::default())
+                .layer(ConcurrencyLayer::default())
+                .layer(ClientProcessMonitorLayer::new(client.clone()))
+                .service(Router::from_language_server(ServerState::new(client)))
+        });
+
+        // Truly asynchronous piped stdin/stdout (unix). stdout is the LSP transport, so all
+        // logging must go to stderr.
+        let stdin = async_lsp::stdio::PipeStdin::lock_tokio()?;
+        let stdout = async_lsp::stdio::PipeStdout::lock_tokio()?;
+        server.run_buffered(stdin, stdout).await?;
+        Ok(())
+    }
 }
 
 /// Server state: the client handle, open documents, memoized config discovery (one cache each for
@@ -149,7 +163,7 @@ impl ServerState {
         // the LSP protocol owns stdout, not stderr.
         let deps_root = root.clone();
         let inputs = std::thread::spawn(move || {
-            jals_classpath::assemble_project_inputs(
+            jals_classpath::ProjectInputs::assemble_project_inputs(
                 &manifest,
                 &deps_root,
                 jals_classpath::ProjectInputOptions::Editor,
@@ -194,7 +208,8 @@ impl ServerState {
         let Some(doc) = self.store.get(uri) else {
             return;
         };
-        let mut diagnostics = handlers::compute_diagnostics(&doc.parse, &doc.text, &doc.line_index);
+        let mut diagnostics =
+            handlers::Diagnostics::compute_diagnostics(&doc.parse, &doc.text, &doc.line_index);
         let lint_config = self.lint_discovery.for_uri(uri);
 
         // The workspace (if any) that owns this file, paired with its id within that workspace's
@@ -214,7 +229,7 @@ impl ServerState {
             );
             rule_config.target_java_version = workspace.target_java_version();
         }
-        diagnostics.extend(handlers::compute_lint_diagnostics(
+        diagnostics.extend(handlers::Diagnostics::compute_lint_diagnostics(
             &doc.parse,
             &doc.text,
             &doc.line_index,
@@ -224,8 +239,8 @@ impl ServerState {
         // files in an indexed project. Both passes read the same file-local resolution, so resolve
         // the tree once here and share it rather than resolving twice per publish.
         if let Some((workspace, file)) = workspace_file {
-            let resolved = jals_hir::resolve_node(&doc.parse.syntax());
-            diagnostics.extend(handlers::compute_type_diagnostics(
+            let resolved = jals_hir::Resolved::resolve_node(&doc.parse.syntax());
+            diagnostics.extend(handlers::Diagnostics::compute_type_diagnostics(
                 workspace.index(),
                 file,
                 &doc.parse,
@@ -233,7 +248,7 @@ impl ServerState {
                 &doc.text,
                 &doc.line_index,
             ));
-            diagnostics.extend(handlers::compute_type_mismatch_diagnostics(
+            diagnostics.extend(handlers::Diagnostics::compute_type_mismatch_diagnostics(
                 workspace.index(),
                 file,
                 &doc.parse,
@@ -260,7 +275,12 @@ impl ServerState {
             .and_then(|workspace| workspace.semantic_tokens(uri))
             .or_else(|| {
                 self.store.get(uri).map(|doc| {
-                    handlers::semantic_tokens(&doc.parse, &doc.text, &doc.line_index, None)
+                    handlers::SemanticTokensBuilder::semantic_tokens(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        None,
+                    )
                 })
             })
             .map(|tokens| tokens.data)
@@ -302,7 +322,9 @@ impl ServerState {
             .semantic_tokens_cache
             .get(uri)
             .filter(|(cached_id, _)| *cached_id == previous_result_id)
-            .map(|(_, cached_data)| handlers::semantic_tokens_delta(cached_data, &data));
+            .map(|(_, cached_data)| {
+                handlers::SemanticTokensBuilder::tokens_delta(cached_data, &data)
+            });
         self.semantic_tokens_cache
             .insert(uri.clone(), (result_id.clone(), data.clone()));
         Some(match edits {
@@ -336,7 +358,7 @@ impl LanguageServer for ServerState {
             .unwrap_or(false);
         Box::pin(async move {
             Ok(InitializeResult {
-                capabilities: server_capabilities(),
+                capabilities: Self::server_capabilities(),
                 server_info: None,
             })
         })
@@ -350,7 +372,7 @@ impl LanguageServer for ServerState {
             // the response.
             tokio::spawn(async move {
                 let _ = client
-                    .request::<request::RegisterCapability>(config_watch_registration())
+                    .request::<request::RegisterCapability>(Self::config_watch_registration())
                     .await;
             });
         }
@@ -367,10 +389,18 @@ impl LanguageServer for ServerState {
         // A created/changed/deleted config file can affect discovery for any directory at or
         // below it (including shadowing); drop the whole memo for the affected tool and
         // rediscover lazily on the next request that needs it.
-        if params.changes.iter().any(|e| is_config_file(&e.uri)) {
+        if params
+            .changes
+            .iter()
+            .any(|e| jals_config::fmt::Config::is_config_file(&e.uri))
+        {
             self.discovery.clear();
         }
-        if params.changes.iter().any(|e| is_lint_config_file(&e.uri)) {
+        if params
+            .changes
+            .iter()
+            .any(|e| jals_config::lint::Config::is_config_file(&e.uri))
+        {
             self.lint_discovery.clear();
         }
         ControlFlow::Continue(())
@@ -470,7 +500,7 @@ impl LanguageServer for ServerState {
         let doc = self.store.get(&params.text_document.uri);
         Box::pin(async move {
             Ok(doc.map(|doc| {
-                DocumentSymbolResponse::Nested(handlers::document_symbols(
+                DocumentSymbolResponse::Nested(handlers::DocumentSymbols::document_symbols(
                     &doc.parse,
                     &doc.text,
                     &doc.line_index,
@@ -494,7 +524,7 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.document_highlight(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).map(|doc| {
-                    handlers::document_highlight(
+                    handlers::DocumentHighlights::document_highlight(
                         &doc.parse,
                         &doc.text,
                         &doc.line_index,
@@ -521,7 +551,7 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.goto_definition(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
-                    handlers::goto_definition_local(
+                    handlers::Definition::goto_definition_local(
                         &doc.parse,
                         &doc.text,
                         &doc.line_index,
@@ -551,7 +581,7 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.references(&uri, position, include_declaration))
             .or_else(|| {
                 self.store.get(&uri).map(|doc| {
-                    handlers::references(
+                    handlers::References::references(
                         &doc.parse,
                         &doc.text,
                         &doc.line_index,
@@ -577,7 +607,12 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.prepare_rename(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
-                    handlers::prepare_rename_local(&doc.parse, &doc.text, &doc.line_index, position)
+                    handlers::Rename::prepare_rename_local(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        position,
+                    )
                 })
             });
         Box::pin(async move { Ok(range.map(PrepareRenameResponse::Range)) })
@@ -592,7 +627,7 @@ impl LanguageServer for ServerState {
         let new_name = params.new_name;
         // Reject a new name that is not a single legal Java identifier before producing any edit, so
         // the editor surfaces the error instead of writing broken source.
-        if !handlers::is_valid_identifier(&new_name) {
+        if !handlers::Rename::is_valid_identifier(&new_name) {
             return Box::pin(async move {
                 Err(ResponseError::new(
                     ErrorCode::INVALID_PARAMS,
@@ -607,7 +642,7 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.rename(&uri, position, &new_name))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
-                    handlers::rename_local(
+                    handlers::Rename::rename_local(
                         &doc.parse,
                         &doc.text,
                         &doc.line_index,
@@ -634,7 +669,12 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.completions(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).map(|doc| {
-                    handlers::completions_local(&doc.parse, &doc.text, &doc.line_index, position)
+                    handlers::Completions::completions_local(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        position,
+                    )
                 })
             });
         Box::pin(async move { Ok(items.map(CompletionResponse::Array)) })
@@ -654,7 +694,7 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.hover(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
-                    handlers::hover_local(&doc.parse, &doc.text, &doc.line_index, position)
+                    handlers::Hovers::hover_local(&doc.parse, &doc.text, &doc.line_index, position)
                 })
             });
         Box::pin(async move { Ok(hover) })
@@ -674,7 +714,12 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.signature_help(&uri, position))
             .or_else(|| {
                 self.store.get(&uri).and_then(|doc| {
-                    handlers::signature_help_local(&doc.parse, &doc.text, &doc.line_index, position)
+                    handlers::SignatureHelpHandler::signature_help_local(
+                        &doc.parse,
+                        &doc.text,
+                        &doc.line_index,
+                        position,
+                    )
                 })
             });
         Box::pin(async move { Ok(help) })
@@ -687,7 +732,9 @@ impl LanguageServer for ServerState {
         let doc = self.store.get(&params.text_document.uri);
         let config = self.discovery.for_uri(&params.text_document.uri);
         Box::pin(async move {
-            Ok(doc.map(|doc| handlers::formatting_edits(&doc.text, &config, &doc.line_index)))
+            Ok(doc.map(|doc| {
+                handlers::Formatting::formatting_edits(&doc.text, &config, &doc.line_index)
+            }))
         })
     }
 
@@ -716,7 +763,9 @@ impl LanguageServer for ServerState {
     ) -> BoxFuture<'static, Result<Option<Vec<FoldingRange>>, Self::Error>> {
         let doc = self.store.get(&params.text_document.uri);
         Box::pin(async move {
-            Ok(doc.map(|doc| handlers::folding_range(&doc.parse, &doc.text, &doc.line_index)))
+            Ok(doc.map(|doc| {
+                handlers::FoldingRanges::folding_range(&doc.parse, &doc.text, &doc.line_index)
+            }))
         })
     }
 
@@ -727,7 +776,7 @@ impl LanguageServer for ServerState {
         let doc = self.store.get(&params.text_document.uri);
         Box::pin(async move {
             Ok(doc.map(|doc| {
-                handlers::selection_ranges(
+                handlers::SelectionRanges::selection_ranges(
                     &doc.parse,
                     &doc.text,
                     &doc.line_index,
@@ -738,64 +787,66 @@ impl LanguageServer for ServerState {
     }
 }
 
-/// Ask the client to watch `jalsfmt.toml` and `jalslint.toml` files anywhere in the
-/// workspace, so config edits invalidate the discovery caches without a server restart.
-fn config_watch_registration() -> RegistrationParams {
-    // `None` kind means create + change + delete.
-    let watcher = |glob: &str| FileSystemWatcher {
-        glob_pattern: GlobPattern::String(glob.into()),
-        kind: None,
-    };
-    let options = DidChangeWatchedFilesRegistrationOptions {
-        watchers: vec![watcher("**/jalsfmt.toml"), watcher("**/jalslint.toml")],
-    };
-    RegistrationParams {
-        registrations: vec![Registration {
-            id: "jals-lsp-config-watch".into(),
-            method: notification::DidChangeWatchedFiles::METHOD.into(),
-            register_options: Some(
-                serde_json::to_value(options).expect("watcher options serialize to JSON"),
-            ),
-        }],
+impl ServerState {
+    /// Ask the client to watch `jalsfmt.toml` and `jalslint.toml` files anywhere in the
+    /// workspace, so config edits invalidate the discovery caches without a server restart.
+    fn config_watch_registration() -> RegistrationParams {
+        // `None` kind means create + change + delete.
+        let watcher = |glob: &str| FileSystemWatcher {
+            glob_pattern: GlobPattern::String(glob.into()),
+            kind: None,
+        };
+        let options = DidChangeWatchedFilesRegistrationOptions {
+            watchers: vec![watcher("**/jalsfmt.toml"), watcher("**/jalslint.toml")],
+        };
+        RegistrationParams {
+            registrations: vec![Registration {
+                id: "jals-lsp-config-watch".into(),
+                method: notification::DidChangeWatchedFiles::METHOD.into(),
+                register_options: Some(
+                    serde_json::to_value(options).expect("watcher options serialize to JSON"),
+                ),
+            }],
+        }
     }
-}
 
-/// The capabilities advertised to the client during `initialize`.
-fn server_capabilities() -> ServerCapabilities {
-    ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::INCREMENTAL,
-        )),
-        document_symbol_provider: Some(OneOf::Left(true)),
-        document_highlight_provider: Some(OneOf::Left(true)),
-        definition_provider: Some(OneOf::Left(true)),
-        references_provider: Some(OneOf::Left(true)),
-        completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".to_string()]),
-            ..CompletionOptions::default()
-        }),
-        rename_provider: Some(OneOf::Right(RenameOptions {
-            prepare_provider: Some(true),
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        })),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-        signature_help_provider: Some(SignatureHelpOptions {
-            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
-            retrigger_characters: None,
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        }),
-        document_formatting_provider: Some(OneOf::Left(true)),
-        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
-        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
-        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
-            SemanticTokensOptions {
-                legend: handlers::semantic_tokens_legend(),
-                range: Some(false),
-                full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
-                ..SemanticTokensOptions::default()
-            },
-        )),
-        ..ServerCapabilities::default()
+    /// The capabilities advertised to the client during `initialize`.
+    fn server_capabilities() -> ServerCapabilities {
+        ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                TextDocumentSyncKind::INCREMENTAL,
+            )),
+            document_symbol_provider: Some(OneOf::Left(true)),
+            document_highlight_provider: Some(OneOf::Left(true)),
+            definition_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
+            completion_provider: Some(CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                ..CompletionOptions::default()
+            }),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            signature_help_provider: Some(SignatureHelpOptions {
+                trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                retrigger_characters: None,
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            }),
+            document_formatting_provider: Some(OneOf::Left(true)),
+            folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+            selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+            semantic_tokens_provider: Some(
+                SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                    legend: handlers::SemanticTokensBuilder::legend(),
+                    range: Some(false),
+                    full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+                    ..SemanticTokensOptions::default()
+                }),
+            ),
+            ..ServerCapabilities::default()
+        }
     }
 }
 
@@ -891,7 +942,7 @@ mod tests {
 
     #[test]
     fn advertises_rename_with_prepare_support() {
-        let caps = server_capabilities();
+        let caps = ServerState::server_capabilities();
         let Some(OneOf::Right(rename)) = caps.rename_provider else {
             panic!("rename provider advertised with options");
         };
@@ -901,7 +952,7 @@ mod tests {
     #[test]
     fn advertises_semantic_tokens_full_delta() {
         let Some(SemanticTokensServerCapabilities::SemanticTokensOptions(options)) =
-            server_capabilities().semantic_tokens_provider
+            ServerState::server_capabilities().semantic_tokens_provider
         else {
             panic!("semantic tokens options advertised");
         };
@@ -957,7 +1008,7 @@ mod tests {
 
     #[test]
     fn advertises_completion_triggered_on_dot() {
-        let completion = server_capabilities()
+        let completion = ServerState::server_capabilities()
             .completion_provider
             .expect("completion provider advertised");
         assert_eq!(completion.trigger_characters, Some(vec![".".to_string()]));
@@ -965,7 +1016,7 @@ mod tests {
 
     #[test]
     fn config_watch_registration_targets_both_config_files() {
-        let params = config_watch_registration();
+        let params = ServerState::config_watch_registration();
         assert_eq!(params.registrations.len(), 1);
         let registration = &params.registrations[0];
         assert_eq!(registration.method, "workspace/didChangeWatchedFiles");

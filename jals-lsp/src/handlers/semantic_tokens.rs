@@ -1,6 +1,6 @@
 //! Builds LSP semantic tokens from the lossless CST, refined by name resolution.
 //!
-//! Identifiers are classified first from `jals-hir`'s file-local resolution ([`resolve_node`]): a
+//! Identifiers are classified first from `jals-hir`'s file-local resolution ([`jals_hir::Resolved::resolve_node`]): a
 //! resolved reference takes the kind of the binding it names (a field is `property`, a parameter
 //! `parameter`, a sibling type `class`/`enum`/...), and a declaring name takes its own kind plus the
 //! `declaration` modifier. A type name the file-local pass could not place — an imported or
@@ -47,344 +47,355 @@ mod ty {
 /// The `declaration` modifier (bit 0, the only entry in the legend's `token_modifiers`).
 const MOD_DECLARATION: u32 = 1 << 0;
 
-/// The legend advertised on `initialize`. The order of `token_types` defines the indices in
-/// [`ty`]; the order of `token_modifiers` defines the [`MOD_DECLARATION`] bit.
-pub(crate) fn legend() -> SemanticTokensLegend {
-    SemanticTokensLegend {
-        token_types: vec![
-            SemanticTokenType::NAMESPACE,
-            SemanticTokenType::TYPE,
-            SemanticTokenType::CLASS,
-            SemanticTokenType::ENUM,
-            SemanticTokenType::INTERFACE,
-            SemanticTokenType::TYPE_PARAMETER,
-            SemanticTokenType::PARAMETER,
-            SemanticTokenType::VARIABLE,
-            SemanticTokenType::PROPERTY,
-            SemanticTokenType::ENUM_MEMBER,
-            SemanticTokenType::METHOD,
-            SemanticTokenType::KEYWORD,
-            SemanticTokenType::COMMENT,
-            SemanticTokenType::STRING,
-            SemanticTokenType::NUMBER,
-            SemanticTokenType::DECORATOR,
-        ],
-        token_modifiers: vec![SemanticTokenModifier::DECLARATION],
+/// Semantic tokens (`textDocument/semanticTokens`).
+pub(crate) struct SemanticTokensBuilder;
+
+impl SemanticTokensBuilder {
+    /// The legend advertised on `initialize`. The order of `token_types` defines the indices in
+    /// [`ty`]; the order of `token_modifiers` defines the [`MOD_DECLARATION`] bit.
+    pub(crate) fn legend() -> SemanticTokensLegend {
+        SemanticTokensLegend {
+            token_types: vec![
+                SemanticTokenType::NAMESPACE,
+                SemanticTokenType::TYPE,
+                SemanticTokenType::CLASS,
+                SemanticTokenType::ENUM,
+                SemanticTokenType::INTERFACE,
+                SemanticTokenType::TYPE_PARAMETER,
+                SemanticTokenType::PARAMETER,
+                SemanticTokenType::VARIABLE,
+                SemanticTokenType::PROPERTY,
+                SemanticTokenType::ENUM_MEMBER,
+                SemanticTokenType::METHOD,
+                SemanticTokenType::KEYWORD,
+                SemanticTokenType::COMMENT,
+                SemanticTokenType::STRING,
+                SemanticTokenType::NUMBER,
+                SemanticTokenType::DECORATOR,
+            ],
+            token_modifiers: vec![SemanticTokenModifier::DECLARATION],
+        }
     }
-}
 
-/// Classify every significant token in `text` and emit LSP semantic tokens (delta-encoded,
-/// one per line — multi-line tokens are split, as the protocol requires).
-pub(crate) fn semantic_tokens(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    project: Option<(&ProjectIndex, FileId)>,
-) -> SemanticTokens {
-    let root = parse.syntax();
-    let by_start = resolution_classes(&root, project);
-    let mut data: Vec<SemanticToken> = Vec::new();
-    // Anchor for delta encoding: the line/start of the previously emitted token.
-    let (mut prev_line, mut prev_start) = (0u32, 0u32);
+    /// Classify every significant token in `text` and emit LSP semantic tokens (delta-encoded,
+    /// one per line — multi-line tokens are split, as the protocol requires).
+    pub(crate) fn semantic_tokens(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        project: Option<(&ProjectIndex, FileId)>,
+    ) -> SemanticTokens {
+        let root = parse.syntax();
+        let by_start = Self::resolution_classes(&root, project);
+        let mut data: Vec<SemanticToken> = Vec::new();
+        // Anchor for delta encoding: the line/start of the previously emitted token.
+        let (mut prev_line, mut prev_start) = (0u32, 0u32);
 
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-    {
-        let Some((token_type, token_modifiers_bitset)) = classify(&token, &by_start) else {
-            continue;
-        };
-        let start = line_index.position(text, token.text_range().start());
-        // A semantic token may not span lines (LSP spec), so split on '\n'. Trivia tokens
-        // are dropped, but comments are kept and a block comment / text block can be
-        // multi-line; each line becomes its own token starting at column 0 (after line 0).
-        for (line, (i, segment)) in (start.line..).zip(token.text().split('\n').enumerate()) {
-            let segment = segment.strip_suffix('\r').unwrap_or(segment);
-            let length: u32 = segment.chars().map(|c| c.len_utf16() as u32).sum();
-            let char_start = if i == 0 { start.character } else { 0 };
-            if length != 0 {
-                let delta_line = line.saturating_sub(prev_line);
-                let delta_start = if delta_line == 0 {
-                    // Same line as the previous token; never underflows for in-order,
-                    // non-overlapping tokens, but saturate defensively to never panic.
-                    char_start.saturating_sub(prev_start)
-                } else {
-                    char_start
-                };
-                data.push(SemanticToken {
-                    delta_line,
-                    delta_start,
-                    length,
-                    token_type,
-                    token_modifiers_bitset,
-                });
-                (prev_line, prev_start) = (line, char_start);
+        for token in root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+        {
+            let Some((token_type, token_modifiers_bitset)) = Self::classify(&token, &by_start)
+            else {
+                continue;
+            };
+            let start = line_index.position(text, token.text_range().start());
+            // A semantic token may not span lines (LSP spec), so split on '\n'. Trivia tokens
+            // are dropped, but comments are kept and a block comment / text block can be
+            // multi-line; each line becomes its own token starting at column 0 (after line 0).
+            for (line, (i, segment)) in (start.line..).zip(token.text().split('\n').enumerate()) {
+                let segment = segment.strip_suffix('\r').unwrap_or(segment);
+                let length: u32 = segment.chars().map(|c| c.len_utf16() as u32).sum();
+                let char_start = if i == 0 { start.character } else { 0 };
+                if length != 0 {
+                    let delta_line = line.saturating_sub(prev_line);
+                    let delta_start = if delta_line == 0 {
+                        // Same line as the previous token; never underflows for in-order,
+                        // non-overlapping tokens, but saturate defensively to never panic.
+                        char_start.saturating_sub(prev_start)
+                    } else {
+                        char_start
+                    };
+                    data.push(SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length,
+                        token_type,
+                        token_modifiers_bitset,
+                    });
+                    (prev_line, prev_start) = (line, char_start);
+                }
+            }
+        }
+
+        SemanticTokens {
+            result_id: None,
+            data,
+        }
+    }
+
+    /// The LSP semantic-tokens *delta* (edit script) turning `prev` into `next`, as a single splice of
+    /// the one differing middle range. `prev` and `next` are the delta-encoded token arrays of two
+    /// consecutive [`semantic_tokens`] results for the same document (the client's last copy and the
+    /// current one).
+    ///
+    /// A `SemanticTokensEdit`'s `start` / `delete_count` count entries of the *flattened* integer array
+    /// the tokens encode to — 5 ints per token — so the token indices are multiplied by 5. Returns an
+    /// empty vector when the arrays are identical (no edits to apply).
+    pub(crate) fn tokens_delta(
+        prev: &[SemanticToken],
+        next: &[SemanticToken],
+    ) -> Vec<SemanticTokensEdit> {
+        let max = prev.len().min(next.len());
+        // The longest common prefix, then the longest common suffix that does not overlap it.
+        let mut prefix = 0;
+        while prefix < max && prev[prefix] == next[prefix] {
+            prefix += 1;
+        }
+        let mut suffix = 0;
+        while suffix < max - prefix
+            && prev[prev.len() - 1 - suffix] == next[next.len() - 1 - suffix]
+        {
+            suffix += 1;
+        }
+        let deleted = prev.len() - prefix - suffix;
+        let inserted = &next[prefix..next.len() - suffix];
+        if deleted == 0 && inserted.is_empty() {
+            return Vec::new();
+        }
+        vec![SemanticTokensEdit {
+            start: (prefix * 5) as u32,
+            delete_count: (deleted * 5) as u32,
+            data: Some(inserted.to_vec()),
+        }]
+    }
+
+    /// A map from a token's start byte offset to its resolution-derived `(token_type, modifier_bits)`,
+    /// built once per request from `jals-hir`'s file-local name resolution.
+    ///
+    /// Equivalent to calling [`jals_hir::Resolved::symbol_at`] for every identifier, but precomputed in
+    /// one pass (O(references + defs)) so each token is an O(1) lookup instead of a linear scan. A
+    /// resolved reference maps to the kind of the binding it names (no `declaration` modifier); a
+    /// declaring name maps to its own kind plus [`MOD_DECLARATION`]. References are inserted first and
+    /// declarations only fill gaps (`symbol_at` treats a covering reference as authoritative), though in
+    /// practice a reference and a declaring name never share a start offset. A reference the file-local
+    /// pass left unresolved is placed only when `project` binds it to a cross-file type (by its declared
+    /// kind); any other unresolved reference is omitted, leaving its token to the syntactic fallback.
+    fn resolution_classes(
+        root: &jals_syntax::SyntaxNode,
+        project: Option<(&ProjectIndex, FileId)>,
+    ) -> HashMap<usize, (u32, u32)> {
+        let resolved = jals_hir::Resolved::resolve_node(root);
+        let mut by_start: HashMap<usize, (u32, u32)> = HashMap::new();
+        for reference in &resolved.references {
+            if let Some(id) = reference.resolution.def_id() {
+                by_start.insert(
+                    reference.range.start,
+                    (Self::token_type_for(resolved.def(id).kind), 0),
+                );
+            } else if let Some((index, file)) = project
+                && reference.namespace == Namespace::Type
+                && let TypeResolution::Project(item) = index.resolve_reference(file, reference)
+            {
+                // A cross-file type the file-local pass could not place: classify by the indexed
+                // declaration's kind, sharper than the syntactic fallback's generic `type`.
+                by_start.insert(
+                    reference.range.start,
+                    (Self::token_type_for(index.item(item).kind), 0),
+                );
+            }
+        }
+        for def in &resolved.defs {
+            by_start
+                .entry(def.name_range.start)
+                .or_insert_with(|| (Self::token_type_for(def.kind), MOD_DECLARATION));
+        }
+        by_start
+    }
+
+    /// The legend token-type index for a resolved binding's [`DefKind`]. Mirrors the declaration-site
+    /// mapping in [`Self::classify_ident_syntactic`], so a declaration classifies the same whether it is
+    /// placed by resolution or syntax.
+    const fn token_type_for(kind: DefKind) -> u32 {
+        match kind {
+            DefKind::Class | DefKind::Record => ty::CLASS,
+            DefKind::Interface | DefKind::AnnotationType => ty::INTERFACE,
+            DefKind::Enum => ty::ENUM,
+            DefKind::TypeParam => ty::TYPE_PARAMETER,
+            DefKind::Param | DefKind::LambdaParam => ty::PARAMETER,
+            DefKind::Field => ty::PROPERTY,
+            DefKind::EnumConstant => ty::ENUM_MEMBER,
+            DefKind::Method | DefKind::Constructor => ty::METHOD,
+            DefKind::Local | DefKind::CatchParam | DefKind::Resource | DefKind::PatternVar => {
+                ty::VARIABLE
             }
         }
     }
 
-    SemanticTokens {
-        result_id: None,
-        data,
-    }
-}
-
-/// The LSP semantic-tokens *delta* (edit script) turning `prev` into `next`, as a single splice of
-/// the one differing middle range. `prev` and `next` are the delta-encoded token arrays of two
-/// consecutive [`semantic_tokens`] results for the same document (the client's last copy and the
-/// current one).
-///
-/// A `SemanticTokensEdit`'s `start` / `delete_count` count entries of the *flattened* integer array
-/// the tokens encode to — 5 ints per token — so the token indices are multiplied by 5. Returns an
-/// empty vector when the arrays are identical (no edits to apply).
-pub(crate) fn tokens_delta(
-    prev: &[SemanticToken],
-    next: &[SemanticToken],
-) -> Vec<SemanticTokensEdit> {
-    let max = prev.len().min(next.len());
-    // The longest common prefix, then the longest common suffix that does not overlap it.
-    let mut prefix = 0;
-    while prefix < max && prev[prefix] == next[prefix] {
-        prefix += 1;
-    }
-    let mut suffix = 0;
-    while suffix < max - prefix && prev[prev.len() - 1 - suffix] == next[next.len() - 1 - suffix] {
-        suffix += 1;
-    }
-    let deleted = prev.len() - prefix - suffix;
-    let inserted = &next[prefix..next.len() - suffix];
-    if deleted == 0 && inserted.is_empty() {
-        return Vec::new();
-    }
-    vec![SemanticTokensEdit {
-        start: (prefix * 5) as u32,
-        delete_count: (deleted * 5) as u32,
-        data: Some(inserted.to_vec()),
-    }]
-}
-
-/// A map from a token's start byte offset to its resolution-derived `(token_type, modifier_bits)`,
-/// built once per request from `jals-hir`'s file-local name resolution.
-///
-/// Equivalent to calling [`jals_hir::Resolved::symbol_at`] for every identifier, but precomputed in
-/// one pass (O(references + defs)) so each token is an O(1) lookup instead of a linear scan. A
-/// resolved reference maps to the kind of the binding it names (no `declaration` modifier); a
-/// declaring name maps to its own kind plus [`MOD_DECLARATION`]. References are inserted first and
-/// declarations only fill gaps (`symbol_at` treats a covering reference as authoritative), though in
-/// practice a reference and a declaring name never share a start offset. A reference the file-local
-/// pass left unresolved is placed only when `project` binds it to a cross-file type (by its declared
-/// kind); any other unresolved reference is omitted, leaving its token to the syntactic fallback.
-fn resolution_classes(
-    root: &jals_syntax::SyntaxNode,
-    project: Option<(&ProjectIndex, FileId)>,
-) -> HashMap<usize, (u32, u32)> {
-    let resolved = jals_hir::resolve_node(root);
-    let mut by_start: HashMap<usize, (u32, u32)> = HashMap::new();
-    for reference in &resolved.references {
-        if let Some(id) = reference.resolution.def_id() {
-            by_start.insert(
-                reference.range.start,
-                (token_type_for(resolved.def(id).kind), 0),
-            );
-        } else if let Some((index, file)) = project
-            && reference.namespace == Namespace::Type
-            && let TypeResolution::Project(item) = index.resolve_reference(file, reference)
-        {
-            // A cross-file type the file-local pass could not place: classify by the indexed
-            // declaration's kind, sharper than the syntactic fallback's generic `type`.
-            by_start.insert(
-                reference.range.start,
-                (token_type_for(index.item(item).kind), 0),
-            );
+    /// Classify a single token into a `(token_type, modifier_bits)` pair, or `None` to skip it
+    /// (whitespace/newlines, operators, delimiters, and unclassifiable identifiers).
+    ///
+    /// An identifier is taken from `by_start` (name resolution) when present, otherwise classified
+    /// syntactically.
+    fn classify(token: &SyntaxToken, by_start: &HashMap<usize, (u32, u32)>) -> Option<(u32, u32)> {
+        use SyntaxKind::{
+            BLOCK_COMMENT, CHAR_LITERAL, DOC_COMMENT, FLOAT_LITERAL, IDENT, INT_LITERAL,
+            LINE_COMMENT, NEWLINE, STRING_LITERAL, TEXT_BLOCK, UNDERSCORE, WHITESPACE,
+        };
+        match token.kind() {
+            WHITESPACE | NEWLINE => None,
+            LINE_COMMENT | BLOCK_COMMENT | DOC_COMMENT => Some((ty::COMMENT, 0)),
+            STRING_LITERAL | TEXT_BLOCK | CHAR_LITERAL => Some((ty::STRING, 0)),
+            INT_LITERAL | FLOAT_LITERAL => Some((ty::NUMBER, 0)),
+            IDENT | UNDERSCORE => {
+                let start = usize::from(token.text_range().start());
+                by_start
+                    .get(&start)
+                    .copied()
+                    .or_else(|| Self::classify_ident_syntactic(token))
+            }
+            k if Self::is_keyword(k) => Some((ty::KEYWORD, 0)),
+            _ => None,
         }
     }
-    for def in &resolved.defs {
-        by_start
-            .entry(def.name_range.start)
-            .or_insert_with(|| (token_type_for(def.kind), MOD_DECLARATION));
+
+    /// Classify an identifier from the kind of its parent node, falling back to grandparent
+    /// context to distinguish a method call from a plain name/field access. The syntactic fallback for
+    /// identifiers name resolution cannot place.
+    fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(u32, u32)> {
+        use SyntaxKind::{
+            ANNOTATION, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, CALL_EXPR, CATCH_CLAUSE, CLASS_DECL,
+            CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, INTERFACE_DECL,
+            LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, NAME_REF, NON_SEALED_KW, PARAM,
+            QUALIFIED_NAME, RECORD_COMPONENT, RECORD_DECL, RESOURCE, TYPE, TYPE_PARAM,
+            TYPE_PATTERN,
+        };
+        let parent = token.parent()?;
+        let grandparent = || parent.parent().map(|n| n.kind());
+        // Each arm names a distinct syntactic context; keeping the equal-bodied arms separate (rather
+        // than merging them) is what documents which context maps to which token type.
+        #[allow(clippy::match_same_arms)]
+        let classified = match parent.kind() {
+            // Declaration sites: the identifier names the entity being declared.
+            CLASS_DECL | RECORD_DECL => (ty::CLASS, MOD_DECLARATION),
+            INTERFACE_DECL | ANNOTATION_TYPE_DECL => (ty::INTERFACE, MOD_DECLARATION),
+            ENUM_DECL => (ty::ENUM, MOD_DECLARATION),
+            METHOD_DECL | CONSTRUCTOR_DECL => (ty::METHOD, MOD_DECLARATION),
+            TYPE_PARAM => (ty::TYPE_PARAMETER, MOD_DECLARATION),
+            PARAM | RECORD_COMPONENT => (ty::PARAMETER, MOD_DECLARATION),
+            ENUM_CONSTANT => (ty::ENUM_MEMBER, MOD_DECLARATION),
+            FIELD_DECL => (ty::PROPERTY, MOD_DECLARATION),
+            // Binding sites that introduce a local: `T x`, `var x = ..`, `catch (E e)`,
+            // `o instanceof T p`, `case T p ->`.
+            LOCAL_VAR_DECL | RESOURCE | CATCH_CLAUSE | TYPE_PATTERN => {
+                (ty::VARIABLE, MOD_DECLARATION)
+            }
+            // Reference sites.
+            TYPE => (ty::TYPE, 0),
+            METHOD_REF_EXPR => (ty::METHOD, 0),
+            ANNOTATION_PAIR => (ty::PROPERTY, 0),
+            // `non-sealed` is re-joined into a node wrapping `non` `-` `sealed`.
+            NON_SEALED_KW => (ty::KEYWORD, 0),
+            // A name / field is a method when it is the callee of a call expression.
+            NAME_REF if grandparent() == Some(CALL_EXPR) => (ty::METHOD, 0),
+            NAME_REF => (ty::VARIABLE, 0),
+            FIELD_ACCESS if grandparent() == Some(CALL_EXPR) => (ty::METHOD, 0),
+            FIELD_ACCESS => (ty::PROPERTY, 0),
+            // A dotted name: the annotation type after `@`, otherwise a package/module name.
+            QUALIFIED_NAME if grandparent() == Some(ANNOTATION) => (ty::DECORATOR, 0),
+            QUALIFIED_NAME => (ty::NAMESPACE, 0),
+            _ => return None,
+        };
+        Some(classified)
     }
-    by_start
-}
 
-/// The legend token-type index for a resolved binding's [`DefKind`]. Mirrors the declaration-site
-/// mapping in [`classify_ident_syntactic`], so a declaration classifies the same whether it is
-/// placed by resolution or syntax.
-const fn token_type_for(kind: DefKind) -> u32 {
-    match kind {
-        DefKind::Class | DefKind::Record => ty::CLASS,
-        DefKind::Interface | DefKind::AnnotationType => ty::INTERFACE,
-        DefKind::Enum => ty::ENUM,
-        DefKind::TypeParam => ty::TYPE_PARAMETER,
-        DefKind::Param | DefKind::LambdaParam => ty::PARAMETER,
-        DefKind::Field => ty::PROPERTY,
-        DefKind::EnumConstant => ty::ENUM_MEMBER,
-        DefKind::Method | DefKind::Constructor => ty::METHOD,
-        DefKind::Local | DefKind::CatchParam | DefKind::Resource | DefKind::PatternVar => {
-            ty::VARIABLE
-        }
+    /// Whether `kind` is a keyword token — the reserved 50, the literal keywords
+    /// (`true`/`false`/`null`), and the contextual keywords the parser promotes from `IDENT`.
+    const fn is_keyword(kind: SyntaxKind) -> bool {
+        use SyntaxKind::{
+            ABSTRACT_KW, ASSERT_KW, BOOLEAN_KW, BREAK_KW, BYTE_KW, CASE_KW, CATCH_KW, CHAR_KW,
+            CLASS_KW, CONST_KW, CONTINUE_KW, DEFAULT_KW, DO_KW, DOUBLE_KW, ELSE_KW, ENUM_KW,
+            EXPORTS_KW, EXTENDS_KW, FALSE_KW, FINAL_KW, FINALLY_KW, FLOAT_KW, FOR_KW, GOTO_KW,
+            IF_KW, IMPLEMENTS_KW, IMPORT_KW, INSTANCEOF_KW, INT_KW, INTERFACE_KW, LONG_KW,
+            MODULE_KW, NATIVE_KW, NEW_KW, NULL_KW, OPEN_KW, OPENS_KW, PACKAGE_KW, PERMITS_KW,
+            PRIVATE_KW, PROTECTED_KW, PROVIDES_KW, PUBLIC_KW, RECORD_KW, REQUIRES_KW, RETURN_KW,
+            SEALED_KW, SHORT_KW, STATIC_KW, STRICTFP_KW, SUPER_KW, SWITCH_KW, SYNCHRONIZED_KW,
+            THIS_KW, THROW_KW, THROWS_KW, TO_KW, TRANSIENT_KW, TRANSITIVE_KW, TRUE_KW, TRY_KW,
+            USES_KW, VAR_KW, VOID_KW, VOLATILE_KW, WHEN_KW, WHILE_KW, WITH_KW, YIELD_KW,
+        };
+        matches!(
+            kind,
+            ABSTRACT_KW
+                | ASSERT_KW
+                | BOOLEAN_KW
+                | BREAK_KW
+                | BYTE_KW
+                | CASE_KW
+                | CATCH_KW
+                | CHAR_KW
+                | CLASS_KW
+                | CONST_KW
+                | CONTINUE_KW
+                | DEFAULT_KW
+                | DO_KW
+                | DOUBLE_KW
+                | ELSE_KW
+                | ENUM_KW
+                | EXTENDS_KW
+                | FINAL_KW
+                | FINALLY_KW
+                | FLOAT_KW
+                | FOR_KW
+                | GOTO_KW
+                | IF_KW
+                | IMPLEMENTS_KW
+                | IMPORT_KW
+                | INSTANCEOF_KW
+                | INT_KW
+                | INTERFACE_KW
+                | LONG_KW
+                | NATIVE_KW
+                | NEW_KW
+                | PACKAGE_KW
+                | PRIVATE_KW
+                | PROTECTED_KW
+                | PUBLIC_KW
+                | RETURN_KW
+                | SHORT_KW
+                | STATIC_KW
+                | STRICTFP_KW
+                | SUPER_KW
+                | SWITCH_KW
+                | SYNCHRONIZED_KW
+                | THIS_KW
+                | THROW_KW
+                | THROWS_KW
+                | TRANSIENT_KW
+                | TRY_KW
+                | VOID_KW
+                | VOLATILE_KW
+                | WHILE_KW
+                | TRUE_KW
+                | FALSE_KW
+                | NULL_KW
+                | VAR_KW
+                | YIELD_KW
+                | RECORD_KW
+                | SEALED_KW
+                | PERMITS_KW
+                | WHEN_KW
+                | MODULE_KW
+                | OPEN_KW
+                | OPENS_KW
+                | REQUIRES_KW
+                | TRANSITIVE_KW
+                | EXPORTS_KW
+                | TO_KW
+                | PROVIDES_KW
+                | USES_KW
+                | WITH_KW
+        )
     }
-}
-
-/// Classify a single token into a `(token_type, modifier_bits)` pair, or `None` to skip it
-/// (whitespace/newlines, operators, delimiters, and unclassifiable identifiers).
-///
-/// An identifier is taken from `by_start` (name resolution) when present, otherwise classified
-/// syntactically.
-fn classify(token: &SyntaxToken, by_start: &HashMap<usize, (u32, u32)>) -> Option<(u32, u32)> {
-    use SyntaxKind::{
-        BLOCK_COMMENT, CHAR_LITERAL, DOC_COMMENT, FLOAT_LITERAL, IDENT, INT_LITERAL, LINE_COMMENT,
-        NEWLINE, STRING_LITERAL, TEXT_BLOCK, UNDERSCORE, WHITESPACE,
-    };
-    match token.kind() {
-        WHITESPACE | NEWLINE => None,
-        LINE_COMMENT | BLOCK_COMMENT | DOC_COMMENT => Some((ty::COMMENT, 0)),
-        STRING_LITERAL | TEXT_BLOCK | CHAR_LITERAL => Some((ty::STRING, 0)),
-        INT_LITERAL | FLOAT_LITERAL => Some((ty::NUMBER, 0)),
-        IDENT | UNDERSCORE => {
-            let start = usize::from(token.text_range().start());
-            by_start
-                .get(&start)
-                .copied()
-                .or_else(|| classify_ident_syntactic(token))
-        }
-        k if is_keyword(k) => Some((ty::KEYWORD, 0)),
-        _ => None,
-    }
-}
-
-/// Classify an identifier from the kind of its parent node, falling back to grandparent
-/// context to distinguish a method call from a plain name/field access. The syntactic fallback for
-/// identifiers name resolution cannot place.
-fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(u32, u32)> {
-    use SyntaxKind::{
-        ANNOTATION, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, CALL_EXPR, CATCH_CLAUSE, CLASS_DECL,
-        CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, INTERFACE_DECL,
-        LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, NAME_REF, NON_SEALED_KW, PARAM,
-        QUALIFIED_NAME, RECORD_COMPONENT, RECORD_DECL, RESOURCE, TYPE, TYPE_PARAM, TYPE_PATTERN,
-    };
-    let parent = token.parent()?;
-    let grandparent = || parent.parent().map(|n| n.kind());
-    // Each arm names a distinct syntactic context; keeping the equal-bodied arms separate (rather
-    // than merging them) is what documents which context maps to which token type.
-    #[allow(clippy::match_same_arms)]
-    let classified = match parent.kind() {
-        // Declaration sites: the identifier names the entity being declared.
-        CLASS_DECL | RECORD_DECL => (ty::CLASS, MOD_DECLARATION),
-        INTERFACE_DECL | ANNOTATION_TYPE_DECL => (ty::INTERFACE, MOD_DECLARATION),
-        ENUM_DECL => (ty::ENUM, MOD_DECLARATION),
-        METHOD_DECL | CONSTRUCTOR_DECL => (ty::METHOD, MOD_DECLARATION),
-        TYPE_PARAM => (ty::TYPE_PARAMETER, MOD_DECLARATION),
-        PARAM | RECORD_COMPONENT => (ty::PARAMETER, MOD_DECLARATION),
-        ENUM_CONSTANT => (ty::ENUM_MEMBER, MOD_DECLARATION),
-        FIELD_DECL => (ty::PROPERTY, MOD_DECLARATION),
-        // Binding sites that introduce a local: `T x`, `var x = ..`, `catch (E e)`,
-        // `o instanceof T p`, `case T p ->`.
-        LOCAL_VAR_DECL | RESOURCE | CATCH_CLAUSE | TYPE_PATTERN => (ty::VARIABLE, MOD_DECLARATION),
-        // Reference sites.
-        TYPE => (ty::TYPE, 0),
-        METHOD_REF_EXPR => (ty::METHOD, 0),
-        ANNOTATION_PAIR => (ty::PROPERTY, 0),
-        // `non-sealed` is re-joined into a node wrapping `non` `-` `sealed`.
-        NON_SEALED_KW => (ty::KEYWORD, 0),
-        // A name / field is a method when it is the callee of a call expression.
-        NAME_REF if grandparent() == Some(CALL_EXPR) => (ty::METHOD, 0),
-        NAME_REF => (ty::VARIABLE, 0),
-        FIELD_ACCESS if grandparent() == Some(CALL_EXPR) => (ty::METHOD, 0),
-        FIELD_ACCESS => (ty::PROPERTY, 0),
-        // A dotted name: the annotation type after `@`, otherwise a package/module name.
-        QUALIFIED_NAME if grandparent() == Some(ANNOTATION) => (ty::DECORATOR, 0),
-        QUALIFIED_NAME => (ty::NAMESPACE, 0),
-        _ => return None,
-    };
-    Some(classified)
-}
-
-/// Whether `kind` is a keyword token — the reserved 50, the literal keywords
-/// (`true`/`false`/`null`), and the contextual keywords the parser promotes from `IDENT`.
-const fn is_keyword(kind: SyntaxKind) -> bool {
-    use SyntaxKind::{
-        ABSTRACT_KW, ASSERT_KW, BOOLEAN_KW, BREAK_KW, BYTE_KW, CASE_KW, CATCH_KW, CHAR_KW,
-        CLASS_KW, CONST_KW, CONTINUE_KW, DEFAULT_KW, DO_KW, DOUBLE_KW, ELSE_KW, ENUM_KW,
-        EXPORTS_KW, EXTENDS_KW, FALSE_KW, FINAL_KW, FINALLY_KW, FLOAT_KW, FOR_KW, GOTO_KW, IF_KW,
-        IMPLEMENTS_KW, IMPORT_KW, INSTANCEOF_KW, INT_KW, INTERFACE_KW, LONG_KW, MODULE_KW,
-        NATIVE_KW, NEW_KW, NULL_KW, OPEN_KW, OPENS_KW, PACKAGE_KW, PERMITS_KW, PRIVATE_KW,
-        PROTECTED_KW, PROVIDES_KW, PUBLIC_KW, RECORD_KW, REQUIRES_KW, RETURN_KW, SEALED_KW,
-        SHORT_KW, STATIC_KW, STRICTFP_KW, SUPER_KW, SWITCH_KW, SYNCHRONIZED_KW, THIS_KW, THROW_KW,
-        THROWS_KW, TO_KW, TRANSIENT_KW, TRANSITIVE_KW, TRUE_KW, TRY_KW, USES_KW, VAR_KW, VOID_KW,
-        VOLATILE_KW, WHEN_KW, WHILE_KW, WITH_KW, YIELD_KW,
-    };
-    matches!(
-        kind,
-        ABSTRACT_KW
-            | ASSERT_KW
-            | BOOLEAN_KW
-            | BREAK_KW
-            | BYTE_KW
-            | CASE_KW
-            | CATCH_KW
-            | CHAR_KW
-            | CLASS_KW
-            | CONST_KW
-            | CONTINUE_KW
-            | DEFAULT_KW
-            | DO_KW
-            | DOUBLE_KW
-            | ELSE_KW
-            | ENUM_KW
-            | EXTENDS_KW
-            | FINAL_KW
-            | FINALLY_KW
-            | FLOAT_KW
-            | FOR_KW
-            | GOTO_KW
-            | IF_KW
-            | IMPLEMENTS_KW
-            | IMPORT_KW
-            | INSTANCEOF_KW
-            | INT_KW
-            | INTERFACE_KW
-            | LONG_KW
-            | NATIVE_KW
-            | NEW_KW
-            | PACKAGE_KW
-            | PRIVATE_KW
-            | PROTECTED_KW
-            | PUBLIC_KW
-            | RETURN_KW
-            | SHORT_KW
-            | STATIC_KW
-            | STRICTFP_KW
-            | SUPER_KW
-            | SWITCH_KW
-            | SYNCHRONIZED_KW
-            | THIS_KW
-            | THROW_KW
-            | THROWS_KW
-            | TRANSIENT_KW
-            | TRY_KW
-            | VOID_KW
-            | VOLATILE_KW
-            | WHILE_KW
-            | TRUE_KW
-            | FALSE_KW
-            | NULL_KW
-            | VAR_KW
-            | YIELD_KW
-            | RECORD_KW
-            | SEALED_KW
-            | PERMITS_KW
-            | WHEN_KW
-            | MODULE_KW
-            | OPEN_KW
-            | OPENS_KW
-            | REQUIRES_KW
-            | TRANSITIVE_KW
-            | EXPORTS_KW
-            | TO_KW
-            | PROVIDES_KW
-            | USES_KW
-            | WITH_KW
-    )
 }
 
 #[cfg(test)]
@@ -404,7 +415,7 @@ mod tests {
     /// Decode an already-built token stream back to absolute positions and type names, so tests
     /// can assert on what a client would actually render.
     fn decode_tokens(toks: &SemanticTokens) -> Vec<Tok> {
-        let legend = legend();
+        let legend = SemanticTokensBuilder::legend();
         let (mut line, mut start) = (0u32, 0u32);
         let mut out = Vec::new();
         for t in &toks.data {
@@ -429,8 +440,8 @@ mod tests {
 
     /// Decode the tokens produced for `text` (with no project index).
     fn decode(text: &str) -> Vec<Tok> {
-        decode_tokens(&semantic_tokens(
-            &jals_syntax::parse(text),
+        decode_tokens(&SemanticTokensBuilder::semantic_tokens(
+            &jals_syntax::Parse::parse(text),
             text,
             &LineIndex::new(text),
             None,
@@ -458,7 +469,7 @@ mod tests {
 
     #[test]
     fn legend_indices_match() {
-        let legend = legend();
+        let legend = SemanticTokensBuilder::legend();
         assert_eq!(legend.token_types.len(), 16);
         assert_eq!(legend.token_modifiers.len(), 1);
         // Spot-check that the index constants line up with the legend order.
@@ -613,13 +624,18 @@ mod tests {
         let other = "package a; enum Color { RED }";
         let main = "package a; class C { Color c; }";
         let nodes = [
-            (FileId(0), jals_syntax::parse(other).syntax()),
-            (FileId(1), jals_syntax::parse(main).syntax()),
+            (FileId(0), jals_syntax::Parse::parse(other).syntax()),
+            (FileId(1), jals_syntax::Parse::parse(main).syntax()),
         ];
         let index = ProjectIndex::builder(&nodes).build();
 
         // Without the index: the syntactic fallback can only say `type`.
-        let local = semantic_tokens(&jals_syntax::parse(main), main, &LineIndex::new(main), None);
+        let local = SemanticTokensBuilder::semantic_tokens(
+            &jals_syntax::Parse::parse(main),
+            main,
+            &LineIndex::new(main),
+            None,
+        );
         let col = main.find("Color").unwrap() as u32;
         let kind_at = |toks: &SemanticTokens| {
             decode_tokens(toks)
@@ -631,8 +647,8 @@ mod tests {
         assert_eq!(kind_at(&local), "type");
 
         // With the index: the cross-file `enum` is recognized.
-        let indexed = semantic_tokens(
-            &jals_syntax::parse(main),
+        let indexed = SemanticTokensBuilder::semantic_tokens(
+            &jals_syntax::Parse::parse(main),
             main,
             &LineIndex::new(main),
             Some((&index, FileId(1))),
@@ -658,7 +674,7 @@ mod tests {
         // replacement, in flattened-int units (×5).
         let mut b = a.clone();
         b[1] = tok(0, 4, 2, 7);
-        let edits = tokens_delta(&a, &b);
+        let edits = SemanticTokensBuilder::tokens_delta(&a, &b);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].start, 5);
         assert_eq!(edits[0].delete_count, 5);
@@ -668,7 +684,7 @@ mod tests {
     #[test]
     fn tokens_delta_identical_is_empty() {
         let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2)];
-        assert!(tokens_delta(&a, &a).is_empty());
+        assert!(SemanticTokensBuilder::tokens_delta(&a, &a).is_empty());
     }
 
     #[test]
@@ -676,7 +692,7 @@ mod tests {
         let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2)];
         let mut b = a.clone();
         b.push(tok(1, 0, 1, 4));
-        let edits = tokens_delta(&a, &b);
+        let edits = SemanticTokensBuilder::tokens_delta(&a, &b);
         assert_eq!(edits.len(), 1);
         // Prefix of 2 tokens (10 ints), nothing deleted, one token inserted.
         assert_eq!(edits[0].start, 10);
@@ -689,7 +705,7 @@ mod tests {
         let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2), tok(1, 0, 5, 3)];
         let mut b = a.clone();
         b.remove(1); // drop the middle token
-        let edits = tokens_delta(&a, &b);
+        let edits = SemanticTokensBuilder::tokens_delta(&a, &b);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].start, 5);
         assert_eq!(edits[0].delete_count, 5);
@@ -700,7 +716,12 @@ mod tests {
     fn does_not_panic_on_garbage_or_empty() {
         // Invariant: handlers never panic, even on broken / arbitrary input.
         let panics = |text: &str| {
-            semantic_tokens(&jals_syntax::parse(text), text, &LineIndex::new(text), None)
+            SemanticTokensBuilder::semantic_tokens(
+                &jals_syntax::Parse::parse(text),
+                text,
+                &LineIndex::new(text),
+                None,
+            )
         };
         let _ = panics("");
         let _ = panics("class");
