@@ -43,7 +43,7 @@ impl InMemoryFileTree {
     /// Insert (or overwrite) the file at `path`.
     pub fn insert(&mut self, path: &str, contents: impl AsRef<[u8]>) {
         self.files
-            .insert(normalize(path), contents.as_ref().to_vec());
+            .insert(Self::normalize(path), contents.as_ref().to_vec());
     }
 
     /// Build a tree from an iterator of `(path, contents)` pairs.
@@ -59,11 +59,51 @@ impl InMemoryFileTree {
         }
         tree
     }
+
+    /// Whether `key` denotes the root (`""` for a relative tree, `"/"` for an absolute one).
+    fn is_root(key: &str) -> bool {
+        key.is_empty() || key == "/"
+    }
+
+    /// The prefix a key must start with to be *inside* the directory `key`.
+    ///
+    /// Root (`""`/`"/"`) yields itself, so every key of the matching (relative / absolute) form is
+    /// considered under it; any other directory yields `key + "/"`.
+    fn dir_prefix(key: &str) -> String {
+        if Self::is_root(key) {
+            return String::from(key);
+        }
+        let mut prefix = String::from(key);
+        prefix.push('/');
+        prefix
+    }
+
+    /// Canonicalize a path key: collapse runs of `/`, drop a trailing `/` (except the root), keep a
+    /// leading `/`.
+    fn normalize(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut prev_slash = false;
+        for ch in path.chars() {
+            if ch == '/' {
+                if !prev_slash {
+                    out.push('/');
+                }
+                prev_slash = true;
+            } else {
+                out.push(ch);
+                prev_slash = false;
+            }
+        }
+        if out.len() > 1 && out.ends_with('/') {
+            out.pop();
+        }
+        out
+    }
 }
 
 impl FileTree for InMemoryFileTree {
     fn read_to_string(&self, path: &str) -> Result<String> {
-        let key = normalize(path);
+        let key = Self::normalize(path);
         match self.files.get(&key) {
             Some(bytes) => String::from_utf8(bytes.clone()).map_err(|_| FsError::InvalidUtf8(key)),
             None => Err(FsError::NotFound(key)),
@@ -71,26 +111,26 @@ impl FileTree for InMemoryFileTree {
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>> {
-        let key = normalize(path);
+        let key = Self::normalize(path);
         self.files.get(&key).cloned().ok_or(FsError::NotFound(key))
     }
 
     fn is_file(&self, path: &str) -> bool {
-        self.files.contains_key(&normalize(path))
+        self.files.contains_key(&Self::normalize(path))
     }
 
     fn is_dir(&self, path: &str) -> bool {
-        let key = normalize(path);
-        if is_root(&key) {
+        let key = Self::normalize(path);
+        if Self::is_root(&key) {
             return true;
         }
-        let prefix = dir_prefix(&key);
+        let prefix = Self::dir_prefix(&key);
         self.files.keys().any(|k| k.starts_with(&prefix))
     }
 
     fn read_dir(&self, path: &str) -> Result<Vec<String>> {
-        let key = normalize(path);
-        let prefix = dir_prefix(&key);
+        let key = Self::normalize(path);
+        let prefix = Self::dir_prefix(&key);
         let mut children = BTreeSet::new();
         for k in self.files.keys() {
             let Some(rest) = k.strip_prefix(&prefix) else {
@@ -106,17 +146,17 @@ impl FileTree for InMemoryFileTree {
         // A directory is implied by the files under it, so a non-root path with no children under
         // its prefix is not a directory (the same single pass that collects children detects this,
         // with no separate `is_dir` scan). The root always lists, possibly empty.
-        if children.is_empty() && !is_root(&key) {
+        if children.is_empty() && !Self::is_root(&key) {
             return Err(FsError::NotADirectory(key));
         }
         Ok(children.into_iter().collect())
     }
 
     fn walk_ext(&self, root: &str, ext: &str) -> Result<Vec<String>> {
-        let prefix = dir_prefix(&normalize(root));
+        let prefix = Self::dir_prefix(&Self::normalize(root));
         let mut out = Vec::new();
         for k in self.files.keys() {
-            if k.starts_with(&prefix) && path::extension(k) == Some(ext) {
+            if k.starts_with(&prefix) && path::VPath::extension(k) == Some(ext) {
                 out.push(k.clone());
             }
         }
@@ -125,49 +165,9 @@ impl FileTree for InMemoryFileTree {
     }
 
     fn write(&mut self, path: &str, contents: &[u8]) -> Result<()> {
-        self.files.insert(normalize(path), contents.to_vec());
+        self.files.insert(Self::normalize(path), contents.to_vec());
         Ok(())
     }
-}
-
-/// Whether `key` denotes the root (`""` for a relative tree, `"/"` for an absolute one).
-fn is_root(key: &str) -> bool {
-    key.is_empty() || key == "/"
-}
-
-/// The prefix a key must start with to be *inside* the directory `key`.
-///
-/// Root (`""`/`"/"`) yields itself, so every key of the matching (relative / absolute) form is
-/// considered under it; any other directory yields `key + "/"`.
-fn dir_prefix(key: &str) -> String {
-    if is_root(key) {
-        return String::from(key);
-    }
-    let mut prefix = String::from(key);
-    prefix.push('/');
-    prefix
-}
-
-/// Canonicalize a path key: collapse runs of `/`, drop a trailing `/` (except the root), keep a
-/// leading `/`.
-fn normalize(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut prev_slash = false;
-    for ch in path.chars() {
-        if ch == '/' {
-            if !prev_slash {
-                out.push('/');
-            }
-            prev_slash = true;
-        } else {
-            out.push(ch);
-            prev_slash = false;
-        }
-    }
-    if out.len() > 1 && out.ends_with('/') {
-        out.pop();
-    }
-    out
 }
 
 #[cfg(test)]

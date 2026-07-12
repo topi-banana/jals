@@ -18,6 +18,37 @@ impl OsFileTree {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Render a `std::io::Error` into an [`FsError`], preserving the not-found case.
+    fn map_io(path: &str, err: &std::io::Error) -> FsError {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => FsError::NotFound(path.to_string()),
+            _ => FsError::Io(format!("{path}: {err}")),
+        }
+    }
+
+    /// Recursively collect files with extension `ext` under `dir`. Hand-rolled (no `walkdir`)
+    /// recursion mirroring `jals-cli`'s `collect_dir`; symlinked directories are not followed (via
+    /// `file_type`), avoiding cycles. Unreadable directories are silently skipped.
+    fn collect_ext(dir: &Path, ext: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                Self::collect_ext(&path, ext, out);
+            } else if file_type.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some(ext)
+                && let Some(child) = path.to_str()
+            {
+                out.push(child.to_string());
+            }
+        }
+    }
 }
 
 impl FileTree for OsFileTree {
@@ -26,12 +57,12 @@ impl FileTree for OsFileTree {
             Ok(bytes) => {
                 String::from_utf8(bytes).map_err(|_| FsError::InvalidUtf8(path.to_string()))
             }
-            Err(err) => Err(map_io(path, &err)),
+            Err(err) => Err(Self::map_io(path, &err)),
         }
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>> {
-        std::fs::read(Path::new(path)).map_err(|err| map_io(path, &err))
+        std::fs::read(Path::new(path)).map_err(|err| Self::map_io(path, &err))
     }
 
     fn is_file(&self, path: &str) -> bool {
@@ -50,7 +81,7 @@ impl FileTree for OsFileTree {
             if dir.exists() {
                 FsError::NotADirectory(path.to_string())
             } else {
-                map_io(path, &err)
+                Self::map_io(path, &err)
             }
         })?;
         let mut out = Vec::new();
@@ -65,7 +96,7 @@ impl FileTree for OsFileTree {
 
     fn walk_ext(&self, root: &str, ext: &str) -> Result<Vec<String>> {
         let mut out = Vec::new();
-        collect_ext(Path::new(root), ext, &mut out);
+        Self::collect_ext(Path::new(root), ext, &mut out);
         out.sort();
         out.dedup();
         Ok(out)
@@ -74,7 +105,7 @@ impl FileTree for OsFileTree {
     fn write(&mut self, path: &str, contents: &[u8]) -> Result<()> {
         let p = Path::new(path);
         if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| map_io(path, &err))?;
+            std::fs::create_dir_all(parent).map_err(|err| Self::map_io(path, &err))?;
         }
         // Atomic create-or-replace: write to a `.part` sibling in the same directory, then rename it
         // into place. `rename` is atomic on a single filesystem, so a reader never observes a
@@ -85,39 +116,8 @@ impl FileTree for OsFileTree {
         let mut tmp = String::with_capacity(path.len() + 5);
         tmp.push_str(path);
         tmp.push_str(".part");
-        std::fs::write(Path::new(&tmp), contents).map_err(|err| map_io(path, &err))?;
-        std::fs::rename(Path::new(&tmp), p).map_err(|err| map_io(path, &err))
-    }
-}
-
-/// Render a `std::io::Error` into an [`FsError`], preserving the not-found case.
-fn map_io(path: &str, err: &std::io::Error) -> FsError {
-    match err.kind() {
-        std::io::ErrorKind::NotFound => FsError::NotFound(path.to_string()),
-        _ => FsError::Io(format!("{path}: {err}")),
-    }
-}
-
-/// Recursively collect files with extension `ext` under `dir`. Hand-rolled (no `walkdir`) recursion
-/// mirroring `jals-cli`'s `collect_dir`; symlinked directories are not followed (via `file_type`),
-/// avoiding cycles. Unreadable directories are silently skipped.
-fn collect_ext(dir: &Path, ext: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if file_type.is_dir() {
-            collect_ext(&path, ext, out);
-        } else if file_type.is_file()
-            && path.extension().and_then(|e| e.to_str()) == Some(ext)
-            && let Some(child) = path.to_str()
-        {
-            out.push(child.to_string());
-        }
+        std::fs::write(Path::new(&tmp), contents).map_err(|err| Self::map_io(path, &err))?;
+        std::fs::rename(Path::new(&tmp), p).map_err(|err| Self::map_io(path, &err))
     }
 }
 
@@ -146,7 +146,7 @@ mod tests {
     fn materialize_mem(root: &str) -> InMemoryFileTree {
         InMemoryFileTree::from_files(
             TREE.iter()
-                .map(|(rel, contents)| (crate::path::join(root, rel), *contents)),
+                .map(|(rel, contents)| (crate::path::VPath::join(root, rel), *contents)),
         )
     }
 
@@ -179,7 +179,7 @@ mod tests {
 
         // read_to_string parity for every file.
         for (rel, _) in TREE {
-            let abs = crate::path::join(root, rel);
+            let abs = crate::path::VPath::join(root, rel);
             assert_eq!(
                 os.read_to_string(&abs),
                 mem.read_to_string(&abs),
@@ -188,10 +188,10 @@ mod tests {
         }
 
         // predicate parity.
-        let src = crate::path::join(root, "src");
+        let src = crate::path::VPath::join(root, "src");
         assert_eq!(os.is_dir(&src), mem.is_dir(&src));
         assert_eq!(os.is_file(&src), mem.is_file(&src));
-        let a = crate::path::join(root, "src/A.java");
+        let a = crate::path::VPath::join(root, "src/A.java");
         assert_eq!(os.is_file(&a), mem.is_file(&a));
 
         // read_dir + walk_ext parity (both sorted, full virtual paths).
