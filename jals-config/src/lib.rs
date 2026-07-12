@@ -27,9 +27,8 @@ pub mod lint;
 pub mod manifest;
 
 pub use lint::Severity;
-pub use loader::ConfigError;
+pub use loader::{ConfigError, DiscoverableConfig};
 pub use manifest::{
     Bin, Build, Dependency, DependencyError, Edition, GitDependency, GitRef, JarDependency,
     Manifest, ManifestParseError, Package, PathDependency, Run, ValidationError,
-    validate_jar_location,
 };

@@ -328,43 +328,45 @@ impl Default for Build {
     }
 }
 
-/// Validate a jar-location string without building any path.
-///
-/// The string is a `jar` or `sources` value: non-empty and, if it carries a URL scheme, a known one
-/// (`file` / `https` / `http`). This is the value-level check serde cannot express, shared by
-/// [`Dependency::validate`] and `jals-build`'s classpath classifier (which reuses it before
-/// resolving the value to a `PathBuf` / URL). `field` names the source field for error messages.
-///
-/// # Errors
-/// [`DependencyError::Empty`] for an empty value, [`DependencyError::UnknownScheme`] for a URL with an
-/// unrecognised scheme.
-pub fn validate_jar_location(
-    value: &str,
-    name: &str,
-    field: &'static str,
-) -> Result<(), DependencyError> {
-    if value.is_empty() {
-        return Err(DependencyError::Empty {
-            name: name.to_string(),
-            field,
-        });
-    }
-    if value.starts_with("file://") || value.starts_with("https://") || value.starts_with("http://")
-    {
-        return Ok(());
-    }
-    if value.contains("://") {
-        return Err(DependencyError::UnknownScheme {
-            name: name.to_string(),
-            field,
-            value: value.to_string(),
-        });
-    }
-    // No scheme: a bare (manifest-relative) path — always valid at this layer.
-    Ok(())
-}
-
 impl Dependency {
+    /// Validate a jar-location string without building any path.
+    ///
+    /// The string is a `jar` or `sources` value: non-empty and, if it carries a URL scheme, a known
+    /// one (`file` / `https` / `http`). This is the value-level check serde cannot express, shared by
+    /// [`Dependency::validate`] and `jals-build`'s classpath classifier (which reuses it before
+    /// resolving the value to a `PathBuf` / URL). `field` names the source field for error messages.
+    ///
+    /// # Errors
+    /// [`DependencyError::Empty`] for an empty value, [`DependencyError::UnknownScheme`] for a URL
+    /// with an unrecognised scheme.
+    pub fn validate_jar_location(
+        value: &str,
+        name: &str,
+        field: &'static str,
+    ) -> Result<(), DependencyError> {
+        if value.is_empty() {
+            return Err(DependencyError::Empty {
+                name: name.to_string(),
+                field,
+            });
+        }
+        if value.starts_with("file://")
+            || value.starts_with("https://")
+            || value.starts_with("http://")
+        {
+            return Ok(());
+        }
+        if value.contains("://") {
+            return Err(DependencyError::UnknownScheme {
+                name: name.to_string(),
+                field,
+                value: value.to_string(),
+            });
+        }
+        // No scheme: a bare (manifest-relative) path — always valid at this layer.
+        Ok(())
+    }
+
     /// Apply the value-level checks serde cannot express, without any I/O or path building: a `jar`'s
     /// `jar` (and optional `sources`) is a non-empty known-scheme location, a `git`'s URL is non-empty
     /// with at most one `branch` / `tag` / `rev`, and a `path`'s directory is non-empty. `name` labels
@@ -376,9 +378,9 @@ impl Dependency {
     pub fn validate(&self, name: &str) -> Result<(), DependencyError> {
         match self {
             Self::Jar(jar) => {
-                validate_jar_location(&jar.jar, name, "jar")?;
+                Self::validate_jar_location(&jar.jar, name, "jar")?;
                 if let Some(sources) = &jar.sources {
-                    validate_jar_location(sources, name, "sources")?;
+                    Self::validate_jar_location(sources, name, "sources")?;
                 }
                 Ok(())
             }

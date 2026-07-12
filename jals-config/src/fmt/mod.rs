@@ -429,7 +429,7 @@ impl Config {
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
     pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
-        crate::loader::load(fs, path)
+        <Self as crate::DiscoverableConfig>::load(fs, path)
     }
 
     /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalsfmt.toml`, read
@@ -440,6 +440,10 @@ impl Config {
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
     pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
-        crate::loader::discover(fs, start_dir, "jalsfmt.toml")
+        <Self as crate::DiscoverableConfig>::discover(fs, start_dir)
     }
+}
+
+impl crate::DiscoverableConfig for Config {
+    const FILE_NAME: &'static str = "jalsfmt.toml";
 }
