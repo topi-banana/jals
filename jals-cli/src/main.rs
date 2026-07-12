@@ -19,6 +19,8 @@ use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 
+use report::Reporter;
+
 #[derive(Parser)]
 #[command(name = "jals", version, about = "JALS/Java tooling")]
 struct Cli {
@@ -163,13 +165,13 @@ struct InitArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Commands::Fmt(args) => run_fmt(&args),
-        Commands::Lsp(args) => run_lsp(args),
-        Commands::Lint(args) => run_lint(&args),
-        Commands::Build(args) => run_build(&args),
-        Commands::Run(args) => run_run(&args),
-        Commands::Clean(args) => run_clean(&args),
-        Commands::Init(args) => run_init(args),
+        Commands::Fmt(args) => args.run(),
+        Commands::Lsp(_) => LspArgs::run(),
+        Commands::Lint(args) => args.run(),
+        Commands::Build(args) => args.run(),
+        Commands::Run(args) => args.run(),
+        Commands::Clean(args) => args.run(),
+        Commands::Init(args) => args.run(),
     };
     match result {
         Ok(code) => code,
@@ -180,364 +182,361 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_fmt(args: &FmtArgs) -> Result<ExitCode> {
-    let deny_warnings = args.deny.iter().any(|d| d == "warnings");
-    let explicit_config = args
-        .config
-        .as_deref()
-        .map(|p| Config::from_file(&jals_fs::OsFileTree, path_str(p)?).context("loading --config"))
-        .transpose()?;
+impl FmtArgs {
+    fn run(&self) -> Result<ExitCode> {
+        let deny_warnings = self.deny.iter().any(|d| d == "warnings");
+        let explicit_config = self
+            .config
+            .as_deref()
+            .map(|p| {
+                Config::from_file(&jals_fs::OsFileTree, App::path_str(p)?)
+                    .context("loading --config")
+            })
+            .transpose()?;
 
-    // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
-    // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
-    let show_diff = args.check || args.diff;
+        // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
+        // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
+        let show_diff = self.check || self.diff;
 
-    let mut discovery = Discovery::new(explicit_config);
-    let mut any_changed = false;
-    let mut any_warning = false;
+        let mut discovery = Discovery::new(explicit_config);
+        let mut any_changed = false;
+        let mut any_warning = false;
 
-    if args.paths.is_empty() {
-        // stdin -> stdout
-        let mut src = String::new();
-        std::io::stdin()
-            .read_to_string(&mut src)
-            .context("reading stdin")?;
-        let cfg = discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
-        let out = jals_fmt::format_source(&src, &cfg);
-        let changed = out.formatted != src;
-        any_changed |= changed;
-        any_warning |= out.has_warnings();
-        report::report_format_warnings("<stdin>", &src, &out);
-        if show_diff {
-            report::print_diff("<stdin>", &src, &out.formatted);
-        } else {
-            std::io::stdout()
-                .write_all(out.formatted.as_bytes())
-                .context("writing stdout")?;
-        }
-    } else {
-        for path in collect_java_files(&args.paths)? {
-            let src = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            let cfg = discovery.for_dir(parent)?;
-            let out = jals_fmt::format_source(&src, &cfg);
+        if self.paths.is_empty() {
+            // stdin -> stdout
+            let mut src = String::new();
+            std::io::stdin()
+                .read_to_string(&mut src)
+                .context("reading stdin")?;
+            let cfg =
+                discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
+            let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
             let changed = out.formatted != src;
             any_changed |= changed;
             any_warning |= out.has_warnings();
-            let label = path.display().to_string();
-            report::report_format_warnings(&label, &src, &out);
-
+            Reporter::report_format_warnings("<stdin>", &src, &out);
             if show_diff {
-                report::print_diff(&label, &src, &out.formatted);
-            } else if changed {
-                std::fs::write(&path, out.formatted.as_bytes())
-                    .with_context(|| format!("writing {}", path.display()))?;
+                Reporter::print_diff("<stdin>", &src, &out.formatted);
+            } else {
+                std::io::stdout()
+                    .write_all(out.formatted.as_bytes())
+                    .context("writing stdout")?;
+            }
+        } else {
+            for path in App::collect_java_files(&self.paths)? {
+                let src = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let cfg = discovery.for_dir(parent)?;
+                let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
+                let changed = out.formatted != src;
+                any_changed |= changed;
+                any_warning |= out.has_warnings();
+                let label = path.display().to_string();
+                Reporter::report_format_warnings(&label, &src, &out);
+
+                if show_diff {
+                    Reporter::print_diff(&label, &src, &out.formatted);
+                } else if changed {
+                    std::fs::write(&path, out.formatted.as_bytes())
+                        .with_context(|| format!("writing {}", path.display()))?;
+                }
             }
         }
-    }
 
-    let fail = (args.check && any_changed) || (deny_warnings && any_warning);
-    Ok(if fail {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    })
+        let fail = (self.check && any_changed) || (deny_warnings && any_warning);
+        Ok(if fail {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        })
+    }
 }
 
-fn run_lint(args: &LintArgs) -> Result<ExitCode> {
-    let explicit_config = args
-        .config
-        .as_deref()
-        .map(|p| {
-            LintConfig::from_file(&jals_fs::OsFileTree, path_str(p)?).context("loading --config")
-        })
-        .transpose()?;
+impl LintArgs {
+    fn run(&self) -> Result<ExitCode> {
+        let explicit_config = self
+            .config
+            .as_deref()
+            .map(|p| {
+                LintConfig::from_file(&jals_fs::OsFileTree, App::path_str(p)?)
+                    .context("loading --config")
+            })
+            .transpose()?;
 
-    let mut discovery = LintDiscovery::new(explicit_config);
-    let mut any_finding = false;
+        let mut discovery = LintDiscovery::new(explicit_config);
+        let mut any_finding = false;
 
-    if args.paths.is_empty() {
-        // stdin: a one-file "project". Building a single-file index still lets `type-mismatch` see
-        // in-file project subtyping (a `Sub`/`Base` confusion), matching the multi-file path below.
-        let mut src = String::new();
-        std::io::stdin()
-            .read_to_string(&mut src)
-            .context("reading stdin")?;
-        let cwd = std::env::current_dir().context("getting current dir")?;
-        let mut cfg = discovery.for_dir(&cwd)?;
-        let parse = jals_syntax::parse(&src);
-        // Fold in the project discovered from the cwd (in a single manifest parse): its classpath so
-        // `type-mismatch` sees external library types, and its edition (`[package] edition`) so the
-        // edition-gated rules run — exactly as the multi-file path does.
-        let ctx = load_project_lint_context(&cwd);
-        cfg.target_java_version = ctx.target_java_version;
-        let index = build_lint_index(&[(FileId(0), parse.syntax())], &ctx.classpath);
-        let out = jals_lint::lint_parse_with_index(&parse, &cfg, Some((&index, FileId(0))));
-        any_finding |= report::report_lint("<stdin>", &src, &out);
-    } else {
-        // Read and parse every file once, then build a project-wide symbol index from the parsed
-        // trees so the `type-mismatch` rule resolves reference types across files (project
-        // subtyping, cross-file call arguments) — the same checks the language server runs. The
-        // host owns the I/O; `ProjectIndex` itself is pure. Holding every parse at once costs more
-        // memory than the old file-at-a-time pass, but is bounded by the set of files being linted.
-        let mut files = Vec::new();
-        for path in collect_java_files(&args.paths)? {
-            let src = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let parse = jals_syntax::parse(&src);
-            files.push((path, src, parse));
-        }
-        let inputs: Vec<_> = files
-            .iter()
-            .enumerate()
-            .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
-            .collect();
-        // Anchor project discovery at the first linted file's directory (walked upward for the
-        // `jals.toml` in `load_project_lint_context` below).
-        let start_dir = files
-            .first()
-            .and_then(|(path, _, _)| path.parent())
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        // Discover the project once: its classpath (folded into the cross-file `type-mismatch` index
-        // so a method whose argument type comes from a dependency jar resolves) and its edition
-        // (`[package] edition`, shared across the project's files), from a single manifest parse.
-        let ctx = load_project_lint_context(&start_dir);
-        let index = build_lint_index(&inputs, &ctx.classpath);
-
-        for (i, (path, src, parse)) in files.iter().enumerate() {
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            let mut cfg = discovery.for_dir(parent)?;
+        if self.paths.is_empty() {
+            // stdin: a one-file "project". Building a single-file index still lets `type-mismatch`
+            // see in-file project subtyping (a `Sub`/`Base` confusion), matching the multi-file path
+            // below.
+            let mut src = String::new();
+            std::io::stdin()
+                .read_to_string(&mut src)
+                .context("reading stdin")?;
+            let cwd = std::env::current_dir().context("getting current dir")?;
+            let mut cfg = discovery.for_dir(&cwd)?;
+            let parse = jals_syntax::Parse::parse(&src);
+            // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
+            // so `type-mismatch` sees external library types, and its edition (`[package] edition`) so
+            // the edition-gated rules run — exactly as the multi-file path does.
+            let ctx = ProjectLintContext::load(&cwd);
             cfg.target_java_version = ctx.target_java_version;
-            let out =
-                jals_lint::lint_parse_with_index(parse, &cfg, Some((&index, FileId(i as u32))));
-            any_finding |= report::report_lint(&path.display().to_string(), src, &out);
+            let index = ctx.build_index(&[(FileId(0), parse.syntax())]);
+            let out = jals_lint::LintOutput::lint_parse_with_index(
+                &parse,
+                &cfg,
+                Some((&index, FileId(0))),
+            );
+            any_finding |= Reporter::report_lint("<stdin>", &src, &out);
+        } else {
+            // Read and parse every file once, then build a project-wide symbol index from the parsed
+            // trees so the `type-mismatch` rule resolves reference types across files (project
+            // subtyping, cross-file call arguments) — the same checks the language server runs. The
+            // host owns the I/O; `ProjectIndex` itself is pure. Holding every parse at once costs more
+            // memory than the old file-at-a-time pass, but is bounded by the set of files being linted.
+            let mut files = Vec::new();
+            for path in App::collect_java_files(&self.paths)? {
+                let src = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let parse = jals_syntax::Parse::parse(&src);
+                files.push((path, src, parse));
+            }
+            let inputs: Vec<_> = files
+                .iter()
+                .enumerate()
+                .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
+                .collect();
+            // Anchor project discovery at the first linted file's directory (walked upward for the
+            // `jals.toml` in `ProjectLintContext::load` below).
+            let start_dir = files
+                .first()
+                .and_then(|(path, _, _)| path.parent())
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+            // Discover the project once: its classpath (folded into the cross-file `type-mismatch`
+            // index so a method whose argument type comes from a dependency jar resolves) and its
+            // edition (`[package] edition`, shared across the project's files), from a single manifest
+            // parse.
+            let ctx = ProjectLintContext::load(&start_dir);
+            let index = ctx.build_index(&inputs);
+
+            for (i, (path, src, parse)) in files.iter().enumerate() {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let mut cfg = discovery.for_dir(parent)?;
+                cfg.target_java_version = ctx.target_java_version;
+                let out = jals_lint::LintOutput::lint_parse_with_index(
+                    parse,
+                    &cfg,
+                    Some((&index, FileId(i as u32))),
+                );
+                any_finding |= Reporter::report_lint(&path.display().to_string(), src, &out);
+            }
         }
-    }
 
-    Ok(if any_finding {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    })
-}
-
-/// Runs the language server over stdio until the client disconnects.
-fn run_lsp(_args: LspArgs) -> Result<ExitCode> {
-    jals_lsp::run()?;
-    Ok(ExitCode::SUCCESS)
-}
-
-/// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
-/// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
-fn run_build(args: &BuildArgs) -> Result<ExitCode> {
-    let (mut manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
-    if let Some(out) = &args.out_dir {
-        manifest.build.classes_dir = out.to_string_lossy().into_owned();
-    }
-    // `--bin` does not narrow compilation (javac compiles all sources); it only asserts the bin
-    // exists, so a typo fails fast before spawning the compiler.
-    if let Some(name) = &args.bin {
-        jals_build::resolve_run_target(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
-    }
-    let sources = discover_sources(&manifest, &root)?;
-    // Assemble the compile inputs: the resolved `[dependencies]` jars for javac's classpath, and the
-    // `git`/`path` source dependencies' `.java` compiled alongside the project's own sources so a
-    // project that depends on a source dependency builds. Best-effort — a failed download/clone is
-    // warned and skipped, never aborting the build.
-    let inputs = jals_classpath::assemble_project_inputs(
-        &manifest,
-        &root,
-        jals_classpath::ProjectInputOptions::Compile,
-        |message| eprintln!("warning: {message}"),
-    );
-    let invocation = jals_build::build_invocation(
-        &manifest,
-        &root,
-        &sources,
-        &inputs.source_dep_sources,
-        &inputs.dependency_jars,
-        path_sep(),
-    );
-
-    if args.dry_run || args.verbose {
-        println!("{}", invocation.display_command());
-    }
-    if args.dry_run {
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    let javac = jdk_tool("JAVAC", "javac");
-    let status = spawn_tool(&javac, &invocation.args)?;
-    Ok(to_exit_code(status))
-}
-
-/// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
-/// run; `--dry-run` prints both commands without executing either.
-fn run_run(args: &RunArgs) -> Result<ExitCode> {
-    let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
-    // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point from
-    // `[[bin]]` / `[package] default-run` / `[run] main-class`.
-    let main_class: String = match &args.main_class {
-        Some(explicit) => explicit.clone(),
-        None => jals_build::resolve_run_target(&manifest, args.bin.as_deref())
-            .map_err(|e| anyhow!("{e}"))?
-            .to_string(),
-    };
-    let sources = discover_sources(&manifest, &root)?;
-    // Assemble the compile inputs once: the resolved `[dependencies]` jars go on both the compile and
-    // run classpaths, and the `git`/`path` source dependencies' `.java` compile alongside the
-    // project's own sources (their `.class` land in the run classpath's `classes-dir`, so the run
-    // invocation is unchanged). Best-effort — a failed download/clone is warned and skipped.
-    let inputs = jals_classpath::assemble_project_inputs(
-        &manifest,
-        &root,
-        jals_classpath::ProjectInputOptions::Compile,
-        |message| eprintln!("warning: {message}"),
-    );
-    let sep = path_sep();
-    let build_inv = jals_build::build_invocation(
-        &manifest,
-        &root,
-        &sources,
-        &inputs.source_dep_sources,
-        &inputs.dependency_jars,
-        sep,
-    );
-    let run_inv = jals_build::run_invocation(
-        &manifest,
-        &root,
-        &main_class,
-        &args.args,
-        &inputs.dependency_jars,
-        sep,
-    );
-
-    if args.dry_run || args.verbose {
-        println!("{}", build_inv.display_command());
-        println!("{}", run_inv.display_command());
-    }
-    if args.dry_run {
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    // Compile first; only run when compilation succeeds.
-    let javac = jdk_tool("JAVAC", "javac");
-    let build_status = spawn_tool(&javac, &build_inv.args)?;
-    if !build_status.success() {
-        return Ok(to_exit_code(build_status));
-    }
-    let java = jdk_tool("JAVA", "java");
-    let run_status = spawn_tool(&java, &run_inv.args)?;
-    Ok(to_exit_code(run_status))
-}
-
-/// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
-/// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
-/// project succeeds quietly). `--dry-run` prints the paths without deleting them.
-fn run_clean(args: &CleanArgs) -> Result<ExitCode> {
-    let (manifest, root) = resolve_manifest(args.manifest_path.as_deref())?;
-    let paths = jals_build::clean_paths(&manifest, &root);
-
-    for path in &paths {
-        if args.dry_run {
-            println!("would remove {}", path.display());
-            continue;
-        }
-        if !path.exists() {
-            continue;
-        }
-        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
-        println!("removed {}", path.display());
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
-/// Scaffolds a new project: resolves the target directory and name, then writes the files from
-/// [`jals_build::scaffold`]. Refuses to overwrite an existing `jals.toml`; any other pre-existing
-/// scaffold file (e.g. a hand-written `Main.java`) is left untouched.
-fn run_init(args: InitArgs) -> Result<ExitCode> {
-    let dir = match args.path {
-        Some(p) => p,
-        None => std::env::current_dir().context("getting current dir")?,
-    };
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-
-    if dir.join("jals.toml").exists() {
-        return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
-    }
-
-    let name = match args.name {
-        Some(n) => n,
-        None => project_name_from_dir(&dir)?,
-    };
-
-    let files = jals_build::scaffold(&jals_build::InitOptions { name: name.clone() });
-    for file in &files {
-        let dest = dir.join(&file.path);
-        if dest.exists() {
-            println!("skipping {} (already exists)", dest.display());
-            continue;
-        }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        std::fs::write(&dest, file.contents.as_bytes())
-            .with_context(|| format!("writing {}", dest.display()))?;
-    }
-
-    println!("created JALS project `{name}` in {}", dir.display());
-    Ok(ExitCode::SUCCESS)
-}
-
-/// Infers a project name from a target directory's final component, canonicalizing first so a
-/// relative path or `.` resolves to the directory's real name rather than the literal `.`.
-fn project_name_from_dir(dir: &Path) -> Result<String> {
-    let absolute = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    absolute
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(std::string::ToString::to_string)
-        .ok_or_else(|| {
-            anyhow!(
-                "could not infer a project name from {}; pass --name",
-                dir.display()
-            )
+        Ok(if any_finding {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
         })
+    }
 }
 
-/// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
-/// returning the parsed manifest and the project root (the manifest's parent directory). A missing
-/// manifest is an error, unlike the formatter/linter configs.
-fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
-    let manifest_path = if let Some(p) = explicit {
-        p.to_path_buf()
-    } else {
-        let cwd = std::env::current_dir().context("getting current dir")?;
-        Manifest::discover_path(&cwd)
-            .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
-    };
-    let manifest = Manifest::from_file(&manifest_path)
-        .with_context(|| format!("loading {}", manifest_path.display()))?;
-    let root = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    Ok((manifest, root))
+impl LspArgs {
+    /// Runs the language server over stdio until the client disconnects. The parsed `--stdio` flag is
+    /// accepted for editor compatibility and ignored (the stdio transport is always used).
+    fn run() -> Result<ExitCode> {
+        jals_lsp::Server::run()?;
+        Ok(ExitCode::SUCCESS)
+    }
 }
 
-/// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and the
-/// project's lowered classpath so the index-aware `type-mismatch` rule resolves stdlib and external
-/// library types. Shared by the stdin and multi-file lint paths.
-fn build_lint_index(
-    files: &[(FileId, jals_syntax::SyntaxNode)],
-    classpath: &LoweredClasspath,
-) -> ProjectIndex {
-    ProjectIndex::builder(files)
-        .with_stdlib()
-        .with_classpath(classpath)
-        .build()
+impl BuildArgs {
+    /// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
+    /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
+    fn run(&self) -> Result<ExitCode> {
+        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
+        if let Some(out) = &self.out_dir {
+            manifest.build.classes_dir = out.to_string_lossy().into_owned();
+        }
+        // `--bin` does not narrow compilation (javac compiles all sources); it only asserts the bin
+        // exists, so a typo fails fast before spawning the compiler.
+        if let Some(name) = &self.bin {
+            jals_build::RunTarget::resolve(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
+        }
+        let sources = App::discover_sources(&manifest, &root)?;
+        // Assemble the compile inputs: the resolved `[dependencies]` jars for javac's classpath, and
+        // the `git`/`path` source dependencies' `.java` compiled alongside the project's own sources so
+        // a project that depends on a source dependency builds. Best-effort — a failed download/clone
+        // is warned and skipped, never aborting the build.
+        let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
+            &manifest,
+            &root,
+            jals_classpath::ProjectInputOptions::Compile,
+            |message| eprintln!("warning: {message}"),
+        );
+        let invocation = jals_build::Invocation::build(
+            &manifest,
+            &root,
+            &sources,
+            &inputs.source_dep_sources,
+            &inputs.dependency_jars,
+            App::path_sep(),
+        );
+
+        if self.dry_run || self.verbose {
+            println!("{}", invocation.display_command());
+        }
+        if self.dry_run {
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        let javac = App::jdk_tool("JAVAC", "javac");
+        let status = App::spawn_tool(&javac, &invocation.args)?;
+        Ok(App::to_exit_code(status))
+    }
+}
+
+impl RunArgs {
+    /// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
+    /// run; `--dry-run` prints both commands without executing either.
+    fn run(&self) -> Result<ExitCode> {
+        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
+        // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
+        // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
+        let main_class: String = match &self.main_class {
+            Some(explicit) => explicit.clone(),
+            None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
+                .map_err(|e| anyhow!("{e}"))?
+                .to_string(),
+        };
+        let sources = App::discover_sources(&manifest, &root)?;
+        // Assemble the compile inputs once: the resolved `[dependencies]` jars go on both the compile
+        // and run classpaths, and the `git`/`path` source dependencies' `.java` compile alongside the
+        // project's own sources (their `.class` land in the run classpath's `classes-dir`, so the run
+        // invocation is unchanged). Best-effort — a failed download/clone is warned and skipped.
+        let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
+            &manifest,
+            &root,
+            jals_classpath::ProjectInputOptions::Compile,
+            |message| eprintln!("warning: {message}"),
+        );
+        let sep = App::path_sep();
+        let build_inv = jals_build::Invocation::build(
+            &manifest,
+            &root,
+            &sources,
+            &inputs.source_dep_sources,
+            &inputs.dependency_jars,
+            sep,
+        );
+        let run_inv = jals_build::Invocation::run(
+            &manifest,
+            &root,
+            &main_class,
+            &self.args,
+            &inputs.dependency_jars,
+            sep,
+        );
+
+        if self.dry_run || self.verbose {
+            println!("{}", build_inv.display_command());
+            println!("{}", run_inv.display_command());
+        }
+        if self.dry_run {
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        // Compile first; only run when compilation succeeds.
+        let javac = App::jdk_tool("JAVAC", "javac");
+        let build_status = App::spawn_tool(&javac, &build_inv.args)?;
+        if !build_status.success() {
+            return Ok(App::to_exit_code(build_status));
+        }
+        let java = App::jdk_tool("JAVA", "java");
+        let run_status = App::spawn_tool(&java, &run_inv.args)?;
+        Ok(App::to_exit_code(run_status))
+    }
+}
+
+impl CleanArgs {
+    /// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
+    /// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
+    /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
+    fn run(&self) -> Result<ExitCode> {
+        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
+        let paths = jals_build::CleanTargets::paths(&manifest, &root);
+
+        for path in &paths {
+            if self.dry_run {
+                println!("would remove {}", path.display());
+                continue;
+            }
+            if !path.exists() {
+                continue;
+            }
+            std::fs::remove_dir_all(path)
+                .with_context(|| format!("removing {}", path.display()))?;
+            println!("removed {}", path.display());
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+impl InitArgs {
+    /// Scaffolds a new project: resolves the target directory and name, then writes the files from
+    /// [`jals_build::InitOptions::scaffold`]. Refuses to overwrite an existing `jals.toml`; any other
+    /// pre-existing scaffold file (e.g. a hand-written `Main.java`) is left untouched.
+    fn run(self) -> Result<ExitCode> {
+        /// Infers a project name from a target directory's final component, canonicalizing first so a
+        /// relative path or `.` resolves to the directory's real name rather than the literal `.`.
+        fn project_name_from_dir(dir: &Path) -> Result<String> {
+            let absolute = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            absolute
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(std::string::ToString::to_string)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "could not infer a project name from {}; pass --name",
+                        dir.display()
+                    )
+                })
+        }
+
+        let dir = match self.path {
+            Some(p) => p,
+            None => std::env::current_dir().context("getting current dir")?,
+        };
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+        if dir.join("jals.toml").exists() {
+            return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
+        }
+
+        let name = match self.name {
+            Some(n) => n,
+            None => project_name_from_dir(&dir)?,
+        };
+
+        let files = jals_build::InitOptions { name: name.clone() }.scaffold();
+        for file in &files {
+            let dest = dir.join(&file.path);
+            if dest.exists() {
+                println!("skipping {} (already exists)", dest.display());
+                continue;
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(&dest, file.contents.as_bytes())
+                .with_context(|| format!("writing {}", dest.display()))?;
+        }
+
+        println!("created JALS project `{name}` in {}", dir.display());
+        Ok(ExitCode::SUCCESS)
+    }
 }
 
 /// The project context the linter folds in for the `jals.toml` discovered upward from `start_dir`:
@@ -552,91 +551,168 @@ struct ProjectLintContext {
     target_java_version: Option<u32>,
 }
 
-fn load_project_lint_context(start_dir: &Path) -> ProjectLintContext {
-    let Some(manifest_path) = Manifest::discover_path(start_dir) else {
-        return ProjectLintContext::default();
-    };
-    let Ok(manifest) = Manifest::from_file(&manifest_path) else {
-        // A malformed manifest is the business of `jals build`; lint stays best-effort.
-        return ProjectLintContext::default();
-    };
-    let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
-    // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
-    // `type-mismatch` index) and the `[package] edition`. An unreadable entry / failed download is
-    // reported on stderr and skipped, never an error.
-    let inputs = jals_classpath::assemble_project_inputs(
-        &manifest,
-        root,
-        jals_classpath::ProjectInputOptions::Analysis,
-        |message| eprintln!("warning: {message}"),
-    );
-    ProjectLintContext {
-        classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
-        target_java_version: inputs.target_java_version,
-    }
-}
-
-/// Collects the `.java` files under the manifest's source directories (resolved against `root`).
-/// Each source directory must exist, and at least one source file must be found.
-fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
-    let source_roots = manifest.source_roots(root);
-    for dir in &source_roots {
-        if !dir.is_dir() {
-            return Err(anyhow!("source directory {} does not exist", dir.display()));
+impl ProjectLintContext {
+    fn load(start_dir: &Path) -> Self {
+        let Some(manifest_path) = Manifest::discover_path(start_dir) else {
+            return Self::default();
+        };
+        let Ok(manifest) = Manifest::from_file(&manifest_path) else {
+            // A malformed manifest is the business of `jals build`; lint stays best-effort.
+            return Self::default();
+        };
+        let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
+        // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
+        // `type-mismatch` index) and the `[package] edition`. An unreadable entry / failed download is
+        // reported on stderr and skipped, never an error.
+        let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
+            &manifest,
+            root,
+            jals_classpath::ProjectInputOptions::Analysis,
+            |message| eprintln!("warning: {message}"),
+        );
+        Self {
+            classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
+            target_java_version: inputs.target_java_version,
         }
     }
-    let sources = collect_java_files(&source_roots)?;
-    if sources.is_empty() {
-        return Err(anyhow!(
-            "no .java files found under {:?}",
-            manifest.build.source_dirs
-        ));
+
+    /// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and this
+    /// context's lowered classpath so the index-aware `type-mismatch` rule resolves stdlib and
+    /// external library types. Shared by the stdin and multi-file lint paths.
+    fn build_index(&self, files: &[(FileId, jals_syntax::SyntaxNode)]) -> ProjectIndex {
+        ProjectIndex::builder(files)
+            .with_stdlib()
+            .with_classpath(&self.classpath)
+            .build()
     }
-    Ok(sources)
 }
 
-/// The platform classpath separator.
-const fn path_sep() -> char {
-    if cfg!(windows) { ';' } else { ':' }
-}
+/// Host-side helper operations for the CLI commands with no more natural home: manifest/source
+/// resolution, JDK tool discovery and spawning, exit-code mapping, and `.java` file collection. A
+/// stateless namespace grouping these cross-command utilities.
+struct App;
 
-/// Resolves a JDK tool (`javac`/`java`): honor `$<env>` first, then `$JAVA_HOME/bin/<tool>`, and
-/// finally fall back to the bare tool name on `PATH`.
-fn jdk_tool(env: &str, tool: &str) -> PathBuf {
-    if let Some(explicit) = std::env::var_os(env) {
-        return PathBuf::from(explicit);
+impl App {
+    /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
+    /// returning the parsed manifest and the project root (the manifest's parent directory). A missing
+    /// manifest is an error, unlike the formatter/linter configs.
+    fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
+        let manifest_path = if let Some(p) = explicit {
+            p.to_path_buf()
+        } else {
+            let cwd = std::env::current_dir().context("getting current dir")?;
+            Manifest::discover_path(&cwd)
+                .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
+        };
+        let manifest = Manifest::from_file(&manifest_path)
+            .with_context(|| format!("loading {}", manifest_path.display()))?;
+        let root = manifest_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Ok((manifest, root))
     }
-    if let Some(home) = std::env::var_os("JAVA_HOME") {
-        let candidate = Path::new(&home).join("bin").join(tool);
-        if candidate.is_file() {
-            return candidate;
+
+    /// Collects the `.java` files under the manifest's source directories (resolved against `root`).
+    /// Each source directory must exist, and at least one source file must be found.
+    fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
+        let source_roots = manifest.source_roots(root);
+        for dir in &source_roots {
+            if !dir.is_dir() {
+                return Err(anyhow!("source directory {} does not exist", dir.display()));
+            }
+        }
+        let sources = Self::collect_java_files(&source_roots)?;
+        if sources.is_empty() {
+            return Err(anyhow!(
+                "no .java files found under {:?}",
+                manifest.build.source_dirs
+            ));
+        }
+        Ok(sources)
+    }
+
+    /// The platform classpath separator.
+    const fn path_sep() -> char {
+        if cfg!(windows) { ';' } else { ':' }
+    }
+
+    /// Resolves a JDK tool (`javac`/`java`): honor `$<env>` first, then `$JAVA_HOME/bin/<tool>`, and
+    /// finally fall back to the bare tool name on `PATH`.
+    fn jdk_tool(env: &str, tool: &str) -> PathBuf {
+        if let Some(explicit) = std::env::var_os(env) {
+            return PathBuf::from(explicit);
+        }
+        if let Some(home) = std::env::var_os("JAVA_HOME") {
+            let candidate = Path::new(&home).join("bin").join(tool);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        PathBuf::from(tool)
+    }
+
+    /// Spawns `program` with `args`, inheriting stdio so the tool's diagnostics pass straight through.
+    fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatus> {
+        std::process::Command::new(program)
+            .args(args)
+            .status()
+            .with_context(|| {
+                format!(
+                    "failed to spawn `{}` (is a JDK installed and on PATH?)",
+                    program.display()
+                )
+            })
+    }
+
+    /// Maps a process exit status to a CLI [`ExitCode`]: 0 succeeds, any other code propagates, and a
+    /// signal-terminated process fails with code 1.
+    fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
+        match status.code() {
+            Some(0) => ExitCode::SUCCESS,
+            // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails
+            // as 1.
+            Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            None => ExitCode::from(1),
         }
     }
-    PathBuf::from(tool)
-}
 
-/// Spawns `program` with `args`, inheriting stdio so the tool's diagnostics pass straight through.
-fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatus> {
-    std::process::Command::new(program)
-        .args(args)
-        .status()
-        .with_context(|| {
-            format!(
-                "failed to spawn `{}` (is a JDK installed and on PATH?)",
-                program.display()
-            )
-        })
-}
+    /// Collect the files to format: explicit files as-is, directories searched recursively
+    /// for `.java` files.
+    fn collect_java_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+                .map(|e| e.map(|e| e.path()))
+                .collect::<Result<_, _>>()?;
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    collect_dir(&path, out)?;
+                } else if path.extension().is_some_and(|ext| ext == "java") {
+                    out.push(path);
+                }
+            }
+            Ok(())
+        }
 
-/// Maps a process exit status to a CLI [`ExitCode`]: 0 succeeds, any other code propagates, and a
-/// signal-terminated process fails with code 1.
-fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
-    match status.code() {
-        Some(0) => ExitCode::SUCCESS,
-        // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails as 1.
-        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-        None => ExitCode::from(1),
+        let mut out = Vec::new();
+        for p in paths {
+            if p.is_dir() {
+                collect_dir(p, &mut out)
+                    .with_context(|| format!("scanning directory {}", p.display()))?;
+            } else {
+                out.push(p.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// The UTF-8 form of `path`, as required by the `jals_fs::FileTree` config-loader API. Errors on
+    /// the rare non-UTF-8 host path rather than lossily converting.
+    fn path_str(path: &Path) -> Result<&str> {
+        path.to_str()
+            .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", path.display()))
     }
 }
 
@@ -662,48 +738,11 @@ impl Discovery {
         if let Some(cfg) = self.cache.get(dir) {
             return Ok(cfg.clone());
         }
-        let cfg = Config::discover(&jals_fs::OsFileTree, path_str(dir)?)
+        let cfg = Config::discover(&jals_fs::OsFileTree, App::path_str(dir)?)
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.cache.insert(dir.to_path_buf(), cfg.clone());
         Ok(cfg)
     }
-}
-
-/// Collect the files to format: explicit files as-is, directories searched recursively
-/// for `.java` files.
-fn collect_java_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for p in paths {
-        if p.is_dir() {
-            collect_dir(p, &mut out)
-                .with_context(|| format!("scanning directory {}", p.display()))?;
-        } else {
-            out.push(p.clone());
-        }
-    }
-    Ok(out)
-}
-
-fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<Result<_, _>>()?;
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            collect_dir(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "java") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// The UTF-8 form of `path`, as required by the `jals_fs::FileTree` config-loader API. Errors on the
-/// rare non-UTF-8 host path rather than lossily converting.
-fn path_str(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", path.display()))
 }
 
 /// Resolves the lint config for a directory, mirroring [`Discovery`] for [`jals_lint::Config`]:
@@ -729,7 +768,7 @@ impl LintDiscovery {
         if let Some(cfg) = self.cache.get(dir) {
             return Ok(cfg.clone());
         }
-        let cfg = LintConfig::discover(&jals_fs::OsFileTree, path_str(dir)?)
+        let cfg = LintConfig::discover(&jals_fs::OsFileTree, App::path_str(dir)?)
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.cache.insert(dir.to_path_buf(), cfg.clone());
         Ok(cfg)
