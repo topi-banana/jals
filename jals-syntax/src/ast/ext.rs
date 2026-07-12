@@ -11,32 +11,23 @@ use alloc::vec::Vec;
 use rowan::ast::support;
 
 use super::{
-    AssignmentExpr, AstNode, BinaryExpr, CatchClause, ExportsDirective, Expr, FieldAccess,
-    FieldDecl, Literal, LocalVarDecl, Modifiers, NameRef, OpensDirective, ProvidesDirective,
-    QualifiedName, Resource, Type, first_sig_token, non_trivia_text,
+    AssignmentExpr, AstNode, AstSupport, BinaryExpr, CatchClause, ExportsDirective, Expr,
+    FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, NameRef, OpensDirective,
+    ProvidesDirective, QualifiedName, Resource, Type,
 };
-use crate::language::{SyntaxNode, SyntaxToken};
+use crate::language::SyntaxToken;
 use crate::syntax_kind::SyntaxKind::{self, DOT, IDENT, NON_SEALED_KW};
-
-/// The directly-declared name tokens (`IDENT` children) of `node`, in source order. The type of a
-/// declaration is a nested `TYPE` node, so its identifiers are not direct children; an unnamed `_`
-/// binding is an `UNDERSCORE` token and is likewise excluded.
-fn ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
-    node.children_with_tokens()
-        .filter_map(rowan::NodeOrToken::into_token)
-        .filter(|t| t.kind() == IDENT)
-}
 
 impl QualifiedName {
     /// The full dotted text as written (without surrounding trivia), e.g. `a.b.c` or `a.b.*`.
     pub fn text(&self) -> String {
-        non_trivia_text(&self.syntax)
+        AstSupport::non_trivia_text(&self.syntax)
     }
 
     /// The dotted segments in source order (`a.b.C` → `["a", "b", "C"]`). The trailing wildcard
     /// `*` of an on-demand import is not a segment.
     pub fn segments(&self) -> Vec<String> {
-        ident_tokens(&self.syntax)
+        AstSupport::ident_tokens(&self.syntax)
             .map(|t| t.text().to_string())
             .collect()
     }
@@ -47,7 +38,7 @@ impl QualifiedName {
         if self.is_wildcard() {
             return None;
         }
-        ident_tokens(&self.syntax)
+        AstSupport::ident_tokens(&self.syntax)
             .last()
             .map(|t| t.text().to_string())
     }
@@ -115,7 +106,7 @@ impl Type {
     ///
     /// Use [`AstNode::syntax`]<code>().text()</code> if you need the verbatim slice including trivia.
     pub fn text(&self) -> String {
-        non_trivia_text(&self.syntax)
+        AstSupport::non_trivia_text(&self.syntax)
     }
 
     /// The simple-name identifier token of a reference type (the last top-level `IDENT`): `a.b.C`
@@ -125,7 +116,7 @@ impl Type {
     /// Type arguments are nested `TYPE_ARGS` nodes, so the names inside `List<Foo>` are not direct
     /// `IDENT` tokens — only the outer `List` is considered here.
     pub fn simple_name_token(&self) -> Option<SyntaxToken> {
-        ident_tokens(&self.syntax).last()
+        AstSupport::ident_tokens(&self.syntax).last()
     }
 
     /// The text of [`simple_name_token`](Type::simple_name_token): `a.b.C` → `C`.
@@ -157,7 +148,7 @@ impl Type {
     /// Whether this is a primitive, `var`, or `void` type — one with no reference name to resolve.
     /// Equivalently, a type with no top-level `IDENT` token (a reference type always has one).
     pub fn is_primitive_or_var(&self) -> bool {
-        ident_tokens(&self.syntax).next().is_none()
+        AstSupport::ident_tokens(&self.syntax).next().is_none()
     }
 
     /// The type-argument `Type` nodes written on this type, in order (`List<String>` → one `String`,
@@ -171,7 +162,7 @@ impl Type {
 impl Literal {
     /// The literal token.
     pub fn token(&self) -> Option<SyntaxToken> {
-        first_sig_token(&self.syntax)
+        AstSupport::first_sig_token(&self.syntax)
     }
 
     /// The literal text as written.
@@ -183,7 +174,7 @@ impl Literal {
 impl NameRef {
     /// The referenced name text.
     pub fn text(&self) -> Option<String> {
-        first_sig_token(&self.syntax).map(|t| t.text().to_string())
+        AstSupport::first_sig_token(&self.syntax).map(|t| t.text().to_string())
     }
 }
 
@@ -231,7 +222,7 @@ impl LocalVarDecl {
     /// token child (the type is a nested `TYPE` node, so its identifiers are not included).
     /// An unnamed `_` binding is an `UNDERSCORE` token and is intentionally not reported here.
     pub fn names(&self) -> impl Iterator<Item = SyntaxToken> {
-        ident_tokens(&self.syntax)
+        AstSupport::ident_tokens(&self.syntax)
     }
 }
 
@@ -241,7 +232,7 @@ impl FieldDecl {
     /// Like [`LocalVarDecl::names`]: each name is a direct `IDENT` token child, and an unnamed
     /// `_` binding is not reported.
     pub fn names(&self) -> impl Iterator<Item = SyntaxToken> {
-        ident_tokens(&self.syntax)
+        AstSupport::ident_tokens(&self.syntax)
     }
 }
 
@@ -251,7 +242,7 @@ impl CatchClause {
     /// The catch types are nested `TYPE` nodes, so the only direct `IDENT` token is the binding.
     /// Returns `None` for an unnamed `_` binding (an `UNDERSCORE` token).
     pub fn binding(&self) -> Option<SyntaxToken> {
-        ident_tokens(&self.syntax).next()
+        AstSupport::ident_tokens(&self.syntax).next()
     }
 
     /// Every caught exception type, including each arm of a multi-catch (`catch (A | B e)`). The
@@ -269,7 +260,7 @@ impl Resource {
     /// Returns `None` when the resource is an existing variable used directly (`try (existing)`,
     /// where the resource is a reference node, not a declaration) or an unnamed `_` binding.
     pub fn binding(&self) -> Option<SyntaxToken> {
-        ident_tokens(&self.syntax).next()
+        AstSupport::ident_tokens(&self.syntax).next()
     }
 }
 
@@ -277,11 +268,11 @@ impl Resource {
 mod tests {
     use super::AstNode;
     use crate::ast::{CatchClause, FieldDecl, LocalVarDecl, QualifiedName, Resource, Type};
-    use crate::parser::parse;
+    use crate::parser::Parse;
 
     /// Returns the first descendant of `src` that casts to `T`.
     fn first<T: AstNode<Language = crate::language::JavaLanguage>>(src: &str) -> T {
-        parse(src)
+        Parse::parse(src)
             .syntax()
             .descendants()
             .find_map(T::cast)

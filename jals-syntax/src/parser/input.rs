@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use text_size::TextRange;
 
-use crate::lexer::{LexedToken, tokenize};
+use crate::lexer::{LexedToken, Lexer};
 use crate::syntax_kind::SyntaxKind;
 
 pub(crate) struct Input<'a> {
@@ -24,7 +24,7 @@ pub(crate) struct Input<'a> {
 
 impl<'a> Input<'a> {
     pub(crate) fn new(src: &'a str) -> Self {
-        let all = tokenize(src);
+        let all = Lexer::tokenize(src);
         let mut sig_kinds = Vec::new();
         let mut sig_ranges = Vec::new();
         let mut sig_to_all = Vec::new();

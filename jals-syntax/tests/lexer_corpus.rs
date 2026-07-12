@@ -1,7 +1,7 @@
 //! Lexer edge-case regression corpus.
 //!
 //! Freezes the exact token boundaries (kind, text, and span) produced by the
-//! current lexer through its public API ([`jals_syntax::tokenize`]), so that a
+//! current lexer through its public API ([`jals_syntax::Lexer::tokenize`]), so that a
 //! future lexer rewrite can be verified token-for-token against today's output.
 //!
 //! Unlike the in-crate unit tests (which mostly assert token kinds, or only
@@ -14,7 +14,7 @@
 use std::fmt::Write as _;
 
 use expect_test::{Expect, expect};
-use jals_syntax::tokenize;
+use jals_syntax::Lexer;
 
 // ===== Corpus inputs =====
 //
@@ -163,7 +163,7 @@ const CORPUS: &[&str] = &[
 /// Renders one token per line as `KIND "escaped text"`, asserting along the
 /// way that the tokens tile the input exactly (lossless, contiguous spans).
 fn render(src: &str) -> String {
-    let tokens = tokenize(src);
+    let tokens = Lexer::tokenize(src);
     let joined: String = tokens.iter().map(|t| t.text).collect();
     assert_eq!(joined, src, "lexer is not lossless for {src:?}");
     let mut offset = 0usize;
@@ -198,7 +198,7 @@ fn check(src: &str, expect: Expect) {
 #[test]
 fn corpus_is_lossless() {
     for src in CORPUS {
-        let joined: String = tokenize(src).iter().map(|t| t.text).collect();
+        let joined: String = Lexer::tokenize(src).iter().map(|t| t.text).collect();
         assert_eq!(&joined, src, "lexer is not lossless for {src:?}");
     }
 }

@@ -1,6 +1,6 @@
 //! A hand-written, lossless lexer.
 //!
-//! [`tokenize`] / [`Lexer`] map every byte of inputs that fit in [`TextSize`] to exactly one token
+//! [`Lexer::tokenize`] / [`Lexer`] map every byte of inputs that fit in [`TextSize`] to exactly one token
 //! (concatenating each token's `text` reproduces the input) and never panic on such inputs.
 //! Unmatched bytes become [`SyntaxKind::ERROR`].
 
@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use text_size::{TextRange, TextSize};
 
 use crate::syntax_kind::SyntaxKind;
-use crate::token::{TokenKind, keyword_kind};
+use crate::token::TokenKind;
 
 /// One token produced by lexing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,11 +20,6 @@ pub struct LexedToken<'a> {
     pub text: &'a str,
     /// The byte range within the source text.
     pub range: TextRange,
-}
-
-/// Tokenizes the whole input and returns the token sequence.
-pub fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
-    Lexer::new(src).collect()
 }
 
 /// A token iterator over the input. Yields every token, trivia included.
@@ -38,18 +33,27 @@ impl<'a> Lexer<'a> {
     pub const fn new(src: &'a str) -> Self {
         Lexer { src, pos: 0 }
     }
+
+    /// Tokenizes the whole input and returns the token sequence.
+    pub fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
+        Lexer::new(src).collect()
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
     type Item = LexedToken<'a>;
 
     fn next(&mut self) -> Option<LexedToken<'a>> {
+        fn text_size(offset: usize) -> TextSize {
+            TextSize::try_from(offset).expect("source byte offset exceeds TextSize range")
+        }
+
         if self.pos >= self.src.len() {
             return None;
         }
         let start = self.pos;
-        let (token, end) = scan_token(self.src, start);
-        debug_assert!(end > start, "scan_token must always make progress");
+        let (token, end) = Scan::token(self.src, start);
+        debug_assert!(end > start, "token scan must always make progress");
         self.pos = end;
         let text = &self.src[start..end];
         let kind = match token {
@@ -59,10 +63,6 @@ impl<'a> Iterator for Lexer<'a> {
         let range = TextRange::new(text_size(start), text_size(end));
         Some(LexedToken { kind, text, range })
     }
-}
-
-fn text_size(offset: usize) -> TextSize {
-    TextSize::try_from(offset).expect("source byte offset exceeds TextSize range")
 }
 
 // === Scanner ===
@@ -105,547 +105,555 @@ impl Cursor<'_> {
             self.pos += c.len_utf8();
         }
     }
-}
 
-/// Scans one token starting at `start` (which must be `< src.len()` and on a char
-/// boundary). Returns the token kind (`Err(())` for unmatched input) and the end offset;
-/// the end is always `> start` and on a char boundary.
-fn scan_token(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
-    use TokenKind::{
-        AMP, AMP_AMP, AMP_EQ, ARROW, AT, BANG, BANG_EQ, BLOCK_COMMENT, CARET, CARET_EQ, COLON,
-        COLON_COLON, COMMA, DOT, ELLIPSIS, EQ, EQ_EQ, FLOAT_LITERAL, GT, IDENT, LBRACE, LBRACK,
-        LINE_COMMENT, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, MINUS, MINUS_EQ, MINUS_MINUS, NEWLINE,
-        PERCENT, PERCENT_EQ, PIPE, PIPE_EQ, PIPE_PIPE, PLUS, PLUS_EQ, PLUS_PLUS, QUESTION, RBRACE,
-        RBRACK, RPAREN, SEMICOLON, SLASH, SLASH_EQ, STAR, STAR_EQ, TILDE, UNDERSCORE, WHITESPACE,
-    };
-
-    let mut cursor = Cursor { src, pos: start };
-    let Some(c) = cursor.bump() else {
-        // Unreachable: the caller checks `start < src.len()`.
-        return (Err(()), src.len());
-    };
-    let kind = match c {
-        // Trivia. A line break is its own token, separate from blank trivia.
-        ' ' | '\t' | '\x0C' => {
-            cursor.eat_while(|c| matches!(c, ' ' | '\t' | '\x0C'));
-            WHITESPACE
-        }
-        '\n' => NEWLINE,
-        '\r' => {
-            // CRLF is one token.
-            cursor.eat_if('\n');
-            NEWLINE
-        }
-
-        // Comments and the `/` operators.
-        '/' => match cursor.first() {
-            Some('/') => {
-                // Up to (not including) the next line break, or to end of input.
-                cursor.bump();
-                cursor.eat_while(|c| !matches!(c, '\r' | '\n'));
-                LINE_COMMENT
-            }
-            Some('*') => {
-                cursor.bump();
-                // Through the closing `*/`, or to end of input if unterminated.
-                // (`/**` Javadoc is reclassified by `SyntaxKind::from_token`.)
-                match src[cursor.pos..].find("*/") {
-                    Some(i) => cursor.pos += i + 2,
-                    None => cursor.pos = src.len(),
-                }
-                BLOCK_COMMENT
-            }
-            Some('=') => {
-                cursor.bump();
-                SLASH_EQ
-            }
-            _ => SLASH,
-        },
-
-        // Literals.
-        '"' => return scan_string_or_text_block(src, start),
-        '\'' => return scan_char_literal(src, start),
-        '0'..='9' => {
-            let (kind, end) = scan_number(src.as_bytes(), start);
-            return (Ok(kind), end);
-        }
-
-        // `.` leads `...`, a fraction-first float (`.5`), or a plain `.`.
-        '.' => {
-            let bytes = src.as_bytes();
-            if bytes.get(start + 1) == Some(&b'.') && bytes.get(start + 2) == Some(&b'.') {
-                cursor.pos = start + 3;
-                ELLIPSIS
-            } else if bytes.get(start + 1).is_some_and(u8::is_ascii_digit) {
-                return (Ok(FLOAT_LITERAL), scan_fraction_float(bytes, start));
-            } else {
-                DOT
-            }
-        }
-
-        // Identifiers, keywords, and `_`: scan the full run, then look the slice up.
-        c if is_ident_start(c) => {
-            cursor.eat_while(is_ident_continue);
-            match &src[start..cursor.pos] {
-                "_" => UNDERSCORE,
-                text => keyword_kind(text).unwrap_or(IDENT),
-            }
-        }
-
-        // Delimiters.
-        '(' => LPAREN,
-        ')' => RPAREN,
-        '{' => LBRACE,
-        '}' => RBRACE,
-        '[' => LBRACK,
-        ']' => RBRACK,
-        ';' => SEMICOLON,
-        ',' => COMMA,
-        '@' => AT,
-
-        // Operators (maximal munch).
-        '~' => TILDE,
-        '?' => QUESTION,
-        ':' => {
-            if cursor.eat_if(':') {
-                COLON_COLON
-            } else {
-                COLON
-            }
-        }
-        '=' => {
-            if cursor.eat_if('=') {
-                EQ_EQ
-            } else {
-                EQ
-            }
-        }
-        '!' => {
-            if cursor.eat_if('=') {
-                BANG_EQ
-            } else {
-                BANG
-            }
-        }
-        '<' => {
-            if cursor.eat_if('<') {
-                if cursor.eat_if('=') {
-                    LSHIFT_EQ
-                } else {
-                    LSHIFT
-                }
-            } else if cursor.eat_if('=') {
-                LT_EQ
-            } else {
-                LT
-            }
-        }
-        // Always a single `>`: the parser fuses adjacent `GT`s for generics, so the lexer
-        // never emits `>=` / `>>` / `>>>` / `>>=` / `>>>=`.
-        '>' => GT,
-        '+' => {
-            if cursor.eat_if('+') {
-                PLUS_PLUS
-            } else if cursor.eat_if('=') {
-                PLUS_EQ
-            } else {
-                PLUS
-            }
-        }
-        '-' => {
-            if cursor.eat_if('>') {
-                ARROW
-            } else if cursor.eat_if('-') {
-                MINUS_MINUS
-            } else if cursor.eat_if('=') {
-                MINUS_EQ
-            } else {
-                MINUS
-            }
-        }
-        '*' => {
-            if cursor.eat_if('=') {
-                STAR_EQ
-            } else {
-                STAR
-            }
-        }
-        '&' => {
-            if cursor.eat_if('&') {
-                AMP_AMP
-            } else if cursor.eat_if('=') {
-                AMP_EQ
-            } else {
-                AMP
-            }
-        }
-        '|' => {
-            if cursor.eat_if('|') {
-                PIPE_PIPE
-            } else if cursor.eat_if('=') {
-                PIPE_EQ
-            } else {
-                PIPE
-            }
-        }
-        '^' => {
-            if cursor.eat_if('=') {
-                CARET_EQ
-            } else {
-                CARET
-            }
-        }
-        '%' => {
-            if cursor.eat_if('=') {
-                PERCENT_EQ
-            } else {
-                PERCENT
-            }
-        }
-
-        // Anything else is a one-char error token.
-        _ => return (Err(()), cursor.pos),
-    };
-    (Ok(kind), cursor.pos)
-}
-
-/// Scans a token starting with `"`: a text block (`"""` opener), a string literal, or an
-/// error token if the string is unterminated. On failure mid-input the error spans only
-/// the chars consumed before the failing one, which is then re-lexed on its own; at end
-/// of input it spans everything consumed.
-fn scan_string_or_text_block(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
-    let bytes = src.as_bytes();
-    if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
-        return (Ok(TokenKind::TEXT_BLOCK), scan_text_block(bytes, start + 3));
-    }
-    let mut cursor = Cursor {
-        src,
-        pos: start + 1,
-    };
-    loop {
-        match cursor.bump() {
-            // Unterminated at end of input.
-            None => return (Err(()), cursor.pos),
-            Some('"') => return (Ok(TokenKind::STRING_LITERAL), cursor.pos),
-            Some('\\') => match cursor.first() {
-                // An escape covers any char except `\n` (which stays its own token).
-                Some('\n') | None => return (Err(()), cursor.pos),
-                Some(_) => {
-                    cursor.bump();
-                }
-            },
-            // A bare line break never belongs to a string literal (1 byte; not consumed).
-            Some('\r' | '\n') => return (Err(()), cursor.pos - 1),
-            Some(_) => {}
-        }
-    }
-}
-
-/// Scans the rest of a text block whose opening `"""` ends at `pos`. The block runs
-/// through the first closing `"""` preceded by an even-length backslash run, or to the
-/// end of input if unterminated. Returns the end offset.
-fn scan_text_block(bytes: &[u8], pos: usize) -> usize {
-    let mut i = pos;
-    while i + 3 <= bytes.len() {
-        if &bytes[i..i + 3] == b"\"\"\"" {
-            // This `"""` closes the block iff the run of backslashes directly before it
-            // (within the block body) has even length.
-            let mut j = i;
-            while j > pos && bytes[j - 1] == b'\\' {
-                j -= 1;
-            }
-            if (i - j).is_multiple_of(2) {
-                return i + 3;
-            }
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
-/// Scans a token starting with `'`: a char literal (`'x'` or `'\x'`), or an error token
-/// on malformed input. The error span follows the same rule as for strings: the failing
-/// char (if any) is excluded and re-lexed on its own.
-fn scan_char_literal(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
-    let mut cursor = Cursor {
-        src,
-        pos: start + 1,
-    };
-    // The single element: a plain char or a `\` escape.
-    match cursor.first() {
-        None | Some('\'' | '\r' | '\n') => return (Err(()), cursor.pos),
-        Some('\\') => {
-            cursor.bump();
-            consume_char_escape_body(&mut cursor);
-        }
-        Some(_) => {
-            cursor.bump();
-        }
-    }
-    // The closing quote.
-    if cursor.eat_if('\'') {
-        (Ok(TokenKind::CHAR_LITERAL), cursor.pos)
-    } else {
-        (Err(()), cursor.pos)
-    }
-}
-
-/// Consumes the body of a `\`-escape inside a char literal, with the cursor positioned
-/// right after the backslash. Mirrors the JLS escape grammar just enough to find where the
-/// escape ends so the closing quote can be located: octal escapes (1-3 digits), unicode
-/// escapes (`\u`+ then 4 hex digits), and single-char escapes (`\n`, `\t`, `\\`, ...). The
-/// raw slice is kept; escape values are never validated here (that is later semantic work).
-fn consume_char_escape_body(cursor: &mut Cursor) {
-    match cursor.first() {
-        // Backslash at end of input or directly before a line break: not a valid escape.
-        // Consume nothing, so the line break re-lexes on its own and the missing closing
-        // quote turns the whole thing into an ERROR token.
-        None | Some('\n') => {}
-        // Octal escape: 1-3 octal digits. Java caps a 3-digit octal's first digit at 0-3,
-        // but we consume greedily up to 3 regardless — an over-range octal then simply
-        // fails the closing-quote check (rejecting its value is not the lexer's concern),
-        // which is more resilient than splitting it and re-lexing the trailing digits.
-        Some('0'..='7') => {
-            cursor.bump();
-            for _ in 0..2 {
-                if matches!(cursor.first(), Some('0'..='7')) {
-                    cursor.bump();
-                } else {
-                    break;
+    /// Consumes the body of a `\`-escape inside a char literal, with the cursor positioned
+    /// right after the backslash. Mirrors the JLS escape grammar just enough to find where the
+    /// escape ends so the closing quote can be located: octal escapes (1-3 digits), unicode
+    /// escapes (`\u`+ then 4 hex digits), and single-char escapes (`\n`, `\t`, `\\`, ...). The
+    /// raw slice is kept; escape values are never validated here (that is later semantic work).
+    fn consume_char_escape_body(&mut self) {
+        match self.first() {
+            // Backslash at end of input or directly before a line break: not a valid escape.
+            // Consume nothing, so the line break re-lexes on its own and the missing closing
+            // quote turns the whole thing into an ERROR token.
+            None | Some('\n') => {}
+            // Octal escape: 1-3 octal digits. Java caps a 3-digit octal's first digit at 0-3,
+            // but we consume greedily up to 3 regardless — an over-range octal then simply
+            // fails the closing-quote check (rejecting its value is not the lexer's concern),
+            // which is more resilient than splitting it and re-lexing the trailing digits.
+            Some('0'..='7') => {
+                self.bump();
+                for _ in 0..2 {
+                    if matches!(self.first(), Some('0'..='7')) {
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
             }
-        }
-        // Unicode escape: one or more `u`s, then up to 4 hex digits.
-        Some('u') => {
-            cursor.eat_while(|c| c == 'u');
-            for _ in 0..4 {
-                if cursor.first().is_some_and(|c| c.is_ascii_hexdigit()) {
-                    cursor.bump();
-                } else {
-                    break;
+            // Unicode escape: one or more `u`s, then up to 4 hex digits.
+            Some('u') => {
+                self.eat_while(|c| c == 'u');
+                for _ in 0..4 {
+                    if self.first().is_some_and(|c| c.is_ascii_hexdigit()) {
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
             }
-        }
-        // Any other single-char escape (`\t`, `\\`, `\'`, `\"`, `\r`, and invalid ones).
-        Some(_) => {
-            cursor.bump();
+            // Any other single-char escape (`\t`, `\\`, `\'`, `\"`, `\r`, and invalid ones).
+            Some(_) => {
+                self.bump();
+            }
         }
     }
 }
 
-// === Numeric literals ===
-//
-// Reproduces the combined longest match over Java's integer and floating-point literal
-// forms: for each candidate form the longest accepting end is computed, and the longest
-// one wins. An integer form and a float form never accept the same length (integers end
-// in a digit or `l`/`L`; floats end in `.`, an exponent digit, or `f`/`F`/`d`/`D`), so
-// the winner is unambiguous.
+struct Scan;
 
-/// Scans a numeric literal starting at `start` (`bytes[start]` is an ASCII digit).
-fn scan_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
-    if bytes[start] == b'0' && matches!(bytes.get(start + 1), Some(b'x' | b'X')) {
-        scan_hex_number(bytes, start)
-    } else {
-        scan_decimal_number(bytes, start)
-    }
-}
-
-/// Scans a decimal (or `0`-prefixed octal/binary) literal starting at `start`.
-fn scan_decimal_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
-    // Integer candidates: `0`, octal `0(_*[0-7])+`, binary `0[bB][01](_*[01])*`, or a
-    // decimal run `[1-9](_*[0-9])*` — each with an optional `l`/`L` suffix.
-    let int_body = if bytes[start] == b'0' {
-        if matches!(bytes.get(start + 1), Some(b'b' | b'B')) {
-            let run = digit_run(bytes, start + 2, |b| matches!(b, b'0' | b'1'));
-            // Without a binary digit the form fails; fall back to the bare `0`.
-            if run > start + 2 { run } else { start + 1 }
-        } else {
-            // The octal run includes the leading `0`; a lone `0` is also accepted.
-            digit_run(bytes, start, |b| matches!(b, b'0'..=b'7'))
-        }
-    } else {
-        digit_run(bytes, start, |b| b.is_ascii_digit())
-    };
-    let int_end = int_suffix(bytes, int_body);
-
-    // Float candidates all build on the full decimal digit run (so `089.5` lexes as one
-    // float even though `089` alone falls back to `0` + `89`).
-    let digits = digit_run(bytes, start, |b| b.is_ascii_digit());
-    #[allow(clippy::useless_let_if_seq)]
-    let mut float_end = None;
-    // `digits . [digits] [exponent] [suffix]`
-    if bytes.get(digits) == Some(&b'.') {
-        let mut end = digit_run(bytes, digits + 1, |b| b.is_ascii_digit());
-        end = decimal_exponent(bytes, end).unwrap_or(end);
-        float_end = Some(float_suffix(bytes, end));
-    }
-    // `digits exponent [suffix]`
-    if let Some(end) = decimal_exponent(bytes, digits) {
-        float_end = float_end.max(Some(float_suffix(bytes, end)));
-    }
-    // `digits suffix`
-    if matches!(bytes.get(digits), Some(b'f' | b'F' | b'd' | b'D')) {
-        float_end = float_end.max(Some(digits + 1));
-    }
-
-    match float_end {
-        Some(end) if end > int_end => (TokenKind::FLOAT_LITERAL, end),
-        _ => (TokenKind::INT_LITERAL, int_end),
-    }
-}
-
-/// Scans a hexadecimal literal starting at `start` (`bytes[start..start + 2]` is
-/// `0x`/`0X`): a hex integer, or a hex float — which always requires a `p` exponent.
-/// Falls back to the bare `0` when no hex digit follows the prefix.
-fn scan_hex_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
-    let is_hex = |b: u8| b.is_ascii_hexdigit();
-    let digits = digit_run(bytes, start + 2, is_hex);
-
-    // Integer candidate: `0x digits [lL]`, or the bare `0` when no digit follows.
-    let int_end = if digits > start + 2 {
-        int_suffix(bytes, digits)
-    } else {
-        start + 1
-    };
-
-    let mut float_end = None;
-    if digits > start + 2 {
-        // `0x digits [.] p-exponent [suffix]` (with a dot, `p` must follow immediately).
-        let after_dot = if bytes.get(digits) == Some(&b'.') {
-            digits + 1
-        } else {
-            digits
+impl Scan {
+    /// Scans one token starting at `start` (which must be `< src.len()` and on a char
+    /// boundary). Returns the token kind (`Err(())` for unmatched input) and the end offset;
+    /// the end is always `> start` and on a char boundary.
+    fn token(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
+        use TokenKind::{
+            AMP, AMP_AMP, AMP_EQ, ARROW, AT, BANG, BANG_EQ, BLOCK_COMMENT, CARET, CARET_EQ, COLON,
+            COLON_COLON, COMMA, DOT, ELLIPSIS, EQ, EQ_EQ, FLOAT_LITERAL, GT, IDENT, LBRACE, LBRACK,
+            LINE_COMMENT, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, MINUS, MINUS_EQ, MINUS_MINUS,
+            NEWLINE, PERCENT, PERCENT_EQ, PIPE, PIPE_EQ, PIPE_PIPE, PLUS, PLUS_EQ, PLUS_PLUS,
+            QUESTION, RBRACE, RBRACK, RPAREN, SEMICOLON, SLASH, SLASH_EQ, STAR, STAR_EQ, TILDE,
+            UNDERSCORE, WHITESPACE,
         };
-        if let Some(end) = hex_exponent(bytes, after_dot) {
-            float_end = Some(float_suffix(bytes, end));
+
+        let mut cursor = Cursor { src, pos: start };
+        let Some(c) = cursor.bump() else {
+            // Unreachable: the caller checks `start < src.len()`.
+            return (Err(()), src.len());
+        };
+        let kind = match c {
+            // Trivia. A line break is its own token, separate from blank trivia.
+            ' ' | '\t' | '\x0C' => {
+                cursor.eat_while(|c| matches!(c, ' ' | '\t' | '\x0C'));
+                WHITESPACE
+            }
+            '\n' => NEWLINE,
+            '\r' => {
+                // CRLF is one token.
+                cursor.eat_if('\n');
+                NEWLINE
+            }
+
+            // Comments and the `/` operators.
+            '/' => match cursor.first() {
+                Some('/') => {
+                    // Up to (not including) the next line break, or to end of input.
+                    cursor.bump();
+                    cursor.eat_while(|c| !matches!(c, '\r' | '\n'));
+                    LINE_COMMENT
+                }
+                Some('*') => {
+                    cursor.bump();
+                    // Through the closing `*/`, or to end of input if unterminated.
+                    // (`/**` Javadoc is reclassified by `SyntaxKind::from_token`.)
+                    match src[cursor.pos..].find("*/") {
+                        Some(i) => cursor.pos += i + 2,
+                        None => cursor.pos = src.len(),
+                    }
+                    BLOCK_COMMENT
+                }
+                Some('=') => {
+                    cursor.bump();
+                    SLASH_EQ
+                }
+                _ => SLASH,
+            },
+
+            // Literals.
+            '"' => return Self::string_or_text_block(src, start),
+            '\'' => return Self::char_literal(src, start),
+            '0'..='9' => {
+                let (kind, end) = Self::number(src.as_bytes(), start);
+                return (Ok(kind), end);
+            }
+
+            // `.` leads `...`, a fraction-first float (`.5`), or a plain `.`.
+            '.' => {
+                let bytes = src.as_bytes();
+                if bytes.get(start + 1) == Some(&b'.') && bytes.get(start + 2) == Some(&b'.') {
+                    cursor.pos = start + 3;
+                    ELLIPSIS
+                } else if bytes.get(start + 1).is_some_and(u8::is_ascii_digit) {
+                    return (Ok(FLOAT_LITERAL), Self::fraction_float(bytes, start));
+                } else {
+                    DOT
+                }
+            }
+
+            // Identifiers, keywords, and `_`: scan the full run, then look the slice up.
+            c if Self::is_ident_start(c) => {
+                cursor.eat_while(Self::is_ident_continue);
+                match &src[start..cursor.pos] {
+                    "_" => UNDERSCORE,
+                    text => TokenKind::keyword_kind(text).unwrap_or(IDENT),
+                }
+            }
+
+            // Delimiters.
+            '(' => LPAREN,
+            ')' => RPAREN,
+            '{' => LBRACE,
+            '}' => RBRACE,
+            '[' => LBRACK,
+            ']' => RBRACK,
+            ';' => SEMICOLON,
+            ',' => COMMA,
+            '@' => AT,
+
+            // Operators (maximal munch).
+            '~' => TILDE,
+            '?' => QUESTION,
+            ':' => {
+                if cursor.eat_if(':') {
+                    COLON_COLON
+                } else {
+                    COLON
+                }
+            }
+            '=' => {
+                if cursor.eat_if('=') {
+                    EQ_EQ
+                } else {
+                    EQ
+                }
+            }
+            '!' => {
+                if cursor.eat_if('=') {
+                    BANG_EQ
+                } else {
+                    BANG
+                }
+            }
+            '<' => {
+                if cursor.eat_if('<') {
+                    if cursor.eat_if('=') {
+                        LSHIFT_EQ
+                    } else {
+                        LSHIFT
+                    }
+                } else if cursor.eat_if('=') {
+                    LT_EQ
+                } else {
+                    LT
+                }
+            }
+            // Always a single `>`: the parser fuses adjacent `GT`s for generics, so the lexer
+            // never emits `>=` / `>>` / `>>>` / `>>=` / `>>>=`.
+            '>' => GT,
+            '+' => {
+                if cursor.eat_if('+') {
+                    PLUS_PLUS
+                } else if cursor.eat_if('=') {
+                    PLUS_EQ
+                } else {
+                    PLUS
+                }
+            }
+            '-' => {
+                if cursor.eat_if('>') {
+                    ARROW
+                } else if cursor.eat_if('-') {
+                    MINUS_MINUS
+                } else if cursor.eat_if('=') {
+                    MINUS_EQ
+                } else {
+                    MINUS
+                }
+            }
+            '*' => {
+                if cursor.eat_if('=') {
+                    STAR_EQ
+                } else {
+                    STAR
+                }
+            }
+            '&' => {
+                if cursor.eat_if('&') {
+                    AMP_AMP
+                } else if cursor.eat_if('=') {
+                    AMP_EQ
+                } else {
+                    AMP
+                }
+            }
+            '|' => {
+                if cursor.eat_if('|') {
+                    PIPE_PIPE
+                } else if cursor.eat_if('=') {
+                    PIPE_EQ
+                } else {
+                    PIPE
+                }
+            }
+            '^' => {
+                if cursor.eat_if('=') {
+                    CARET_EQ
+                } else {
+                    CARET
+                }
+            }
+            '%' => {
+                if cursor.eat_if('=') {
+                    PERCENT_EQ
+                } else {
+                    PERCENT
+                }
+            }
+
+            // Anything else is a one-char error token.
+            _ => return (Err(()), cursor.pos),
+        };
+        (Ok(kind), cursor.pos)
+    }
+
+    /// Scans a token starting with `"`: a text block (`"""` opener), a string literal, or an
+    /// error token if the string is unterminated. On failure mid-input the error spans only
+    /// the chars consumed before the failing one, which is then re-lexed on its own; at end
+    /// of input it spans everything consumed.
+    fn string_or_text_block(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
+        let bytes = src.as_bytes();
+        if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
+            return (
+                Ok(TokenKind::TEXT_BLOCK),
+                Self::text_block(bytes, start + 3),
+            );
+        }
+        let mut cursor = Cursor {
+            src,
+            pos: start + 1,
+        };
+        loop {
+            match cursor.bump() {
+                // Unterminated at end of input.
+                None => return (Err(()), cursor.pos),
+                Some('"') => return (Ok(TokenKind::STRING_LITERAL), cursor.pos),
+                Some('\\') => match cursor.first() {
+                    // An escape covers any char except `\n` (which stays its own token).
+                    Some('\n') | None => return (Err(()), cursor.pos),
+                    Some(_) => {
+                        cursor.bump();
+                    }
+                },
+                // A bare line break never belongs to a string literal (1 byte; not consumed).
+                Some('\r' | '\n') => return (Err(()), cursor.pos - 1),
+                Some(_) => {}
+            }
         }
     }
-    if bytes.get(digits) == Some(&b'.') {
-        // `0x [digits] . digits p-exponent [suffix]`
-        let frac = digit_run(bytes, digits + 1, is_hex);
-        if frac > digits + 1
-            && let Some(end) = hex_exponent(bytes, frac)
-        {
-            float_end = float_end.max(Some(float_suffix(bytes, end)));
-        }
-    }
 
-    match float_end {
-        Some(end) if end > int_end => (TokenKind::FLOAT_LITERAL, end),
-        _ => (TokenKind::INT_LITERAL, int_end),
-    }
-}
-
-/// Scans a fraction-first float (`. digits [exponent] [suffix]`) whose `.` sits at
-/// `start` (`bytes[start + 1]` is an ASCII digit). Returns the end offset.
-fn scan_fraction_float(bytes: &[u8], start: usize) -> usize {
-    let digits = digit_run(bytes, start + 1, |b| b.is_ascii_digit());
-    let end = decimal_exponent(bytes, digits).unwrap_or(digits);
-    float_suffix(bytes, end)
-}
-
-/// Scans a `digit (_* digit)*` run at `start` using `is_digit`, returning the position
-/// after the last digit (trailing underscores are not part of the run). Returns `start`
-/// if there is no digit at `start`.
-fn digit_run(bytes: &[u8], start: usize, is_digit: impl Fn(u8) -> bool) -> usize {
-    if !bytes.get(start).is_some_and(|&b| is_digit(b)) {
-        return start;
-    }
-    let mut end = start + 1;
-    loop {
-        let mut i = end;
-        while bytes.get(i) == Some(&b'_') {
+    /// Scans the rest of a text block whose opening `"""` ends at `pos`. The block runs
+    /// through the first closing `"""` preceded by an even-length backslash run, or to the
+    /// end of input if unterminated. Returns the end offset.
+    fn text_block(bytes: &[u8], pos: usize) -> usize {
+        let mut i = pos;
+        while i + 3 <= bytes.len() {
+            if &bytes[i..i + 3] == b"\"\"\"" {
+                // This `"""` closes the block iff the run of backslashes directly before it
+                // (within the block body) has even length.
+                let mut j = i;
+                while j > pos && bytes[j - 1] == b'\\' {
+                    j -= 1;
+                }
+                if (i - j).is_multiple_of(2) {
+                    return i + 3;
+                }
+            }
             i += 1;
         }
-        if bytes.get(i).is_some_and(|&b| is_digit(b)) {
-            end = i + 1;
+        bytes.len()
+    }
+
+    /// Scans a token starting with `'`: a char literal (`'x'` or `'\x'`), or an error token
+    /// on malformed input. The error span follows the same rule as for strings: the failing
+    /// char (if any) is excluded and re-lexed on its own.
+    fn char_literal(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
+        let mut cursor = Cursor {
+            src,
+            pos: start + 1,
+        };
+        // The single element: a plain char or a `\` escape.
+        match cursor.first() {
+            None | Some('\'' | '\r' | '\n') => return (Err(()), cursor.pos),
+            Some('\\') => {
+                cursor.bump();
+                cursor.consume_char_escape_body();
+            }
+            Some(_) => {
+                cursor.bump();
+            }
+        }
+        // The closing quote.
+        if cursor.eat_if('\'') {
+            (Ok(TokenKind::CHAR_LITERAL), cursor.pos)
         } else {
-            return end;
+            (Err(()), cursor.pos)
         }
     }
-}
 
-/// Scans a complete decimal exponent (`[eE][+-]?digits`) at `start`.
-fn decimal_exponent(bytes: &[u8], start: usize) -> Option<usize> {
-    exponent(bytes, start, b'e', b'E')
-}
+    // === Numeric literals ===
+    //
+    // Reproduces the combined longest match over Java's integer and floating-point literal
+    // forms: for each candidate form the longest accepting end is computed, and the longest
+    // one wins. An integer form and a float form never accept the same length (integers end
+    // in a digit or `l`/`L`; floats end in `.`, an exponent digit, or `f`/`F`/`d`/`D`), so
+    // the winner is unambiguous.
 
-/// Scans a complete hex-float exponent (`[pP][+-]?digits`; the digits are decimal) at
-/// `start`.
-fn hex_exponent(bytes: &[u8], start: usize) -> Option<usize> {
-    exponent(bytes, start, b'p', b'P')
-}
-
-/// Scans a complete exponent (`marker [+-] digits`) at `start`, returning its end.
-/// An exponent is all-or-nothing: with no digit after the marker (and optional sign),
-/// `None` is returned and the caller keeps its shorter accepting prefix.
-fn exponent(bytes: &[u8], start: usize, lower: u8, upper: u8) -> Option<usize> {
-    if !matches!(bytes.get(start), Some(&b) if b == lower || b == upper) {
-        return None;
+    /// Scans a numeric literal starting at `start` (`bytes[start]` is an ASCII digit).
+    fn number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
+        if bytes[start] == b'0' && matches!(bytes.get(start + 1), Some(b'x' | b'X')) {
+            Self::hex_number(bytes, start)
+        } else {
+            Self::decimal_number(bytes, start)
+        }
     }
-    let mut i = start + 1;
-    if matches!(bytes.get(i), Some(b'+' | b'-')) {
-        i += 1;
+
+    /// Scans a decimal (or `0`-prefixed octal/binary) literal starting at `start`.
+    fn decimal_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
+        // Integer candidates: `0`, octal `0(_*[0-7])+`, binary `0[bB][01](_*[01])*`, or a
+        // decimal run `[1-9](_*[0-9])*` — each with an optional `l`/`L` suffix.
+        let int_body = if bytes[start] == b'0' {
+            if matches!(bytes.get(start + 1), Some(b'b' | b'B')) {
+                let run = Self::digit_run(bytes, start + 2, |b| matches!(b, b'0' | b'1'));
+                // Without a binary digit the form fails; fall back to the bare `0`.
+                if run > start + 2 { run } else { start + 1 }
+            } else {
+                // The octal run includes the leading `0`; a lone `0` is also accepted.
+                Self::digit_run(bytes, start, |b| matches!(b, b'0'..=b'7'))
+            }
+        } else {
+            Self::digit_run(bytes, start, |b| b.is_ascii_digit())
+        };
+        let int_end = Self::int_suffix(bytes, int_body);
+
+        // Float candidates all build on the full decimal digit run (so `089.5` lexes as one
+        // float even though `089` alone falls back to `0` + `89`).
+        let digits = Self::digit_run(bytes, start, |b| b.is_ascii_digit());
+        #[allow(clippy::useless_let_if_seq)]
+        let mut float_end = None;
+        // `digits . [digits] [exponent] [suffix]`
+        if bytes.get(digits) == Some(&b'.') {
+            let mut end = Self::digit_run(bytes, digits + 1, |b| b.is_ascii_digit());
+            end = Self::decimal_exponent(bytes, end).unwrap_or(end);
+            float_end = Some(Self::float_suffix(bytes, end));
+        }
+        // `digits exponent [suffix]`
+        if let Some(end) = Self::decimal_exponent(bytes, digits) {
+            float_end = float_end.max(Some(Self::float_suffix(bytes, end)));
+        }
+        // `digits suffix`
+        if matches!(bytes.get(digits), Some(b'f' | b'F' | b'd' | b'D')) {
+            float_end = float_end.max(Some(digits + 1));
+        }
+
+        match float_end {
+            Some(end) if end > int_end => (TokenKind::FLOAT_LITERAL, end),
+            _ => (TokenKind::INT_LITERAL, int_end),
+        }
     }
-    let end = digit_run(bytes, i, |b| b.is_ascii_digit());
-    (end > i).then_some(end)
-}
 
-/// Extends past an optional integer suffix (`l`/`L`) at `end`.
-fn int_suffix(bytes: &[u8], end: usize) -> usize {
-    if matches!(bytes.get(end), Some(b'l' | b'L')) {
-        end + 1
-    } else {
-        end
+    /// Scans a hexadecimal literal starting at `start` (`bytes[start..start + 2]` is
+    /// `0x`/`0X`): a hex integer, or a hex float — which always requires a `p` exponent.
+    /// Falls back to the bare `0` when no hex digit follows the prefix.
+    fn hex_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
+        let is_hex = |b: u8| b.is_ascii_hexdigit();
+        let digits = Self::digit_run(bytes, start + 2, is_hex);
+
+        // Integer candidate: `0x digits [lL]`, or the bare `0` when no digit follows.
+        let int_end = if digits > start + 2 {
+            Self::int_suffix(bytes, digits)
+        } else {
+            start + 1
+        };
+
+        let mut float_end = None;
+        if digits > start + 2 {
+            // `0x digits [.] p-exponent [suffix]` (with a dot, `p` must follow immediately).
+            let after_dot = if bytes.get(digits) == Some(&b'.') {
+                digits + 1
+            } else {
+                digits
+            };
+            if let Some(end) = Self::hex_exponent(bytes, after_dot) {
+                float_end = Some(Self::float_suffix(bytes, end));
+            }
+        }
+        if bytes.get(digits) == Some(&b'.') {
+            // `0x [digits] . digits p-exponent [suffix]`
+            let frac = Self::digit_run(bytes, digits + 1, is_hex);
+            if frac > digits + 1
+                && let Some(end) = Self::hex_exponent(bytes, frac)
+            {
+                float_end = float_end.max(Some(Self::float_suffix(bytes, end)));
+            }
+        }
+
+        match float_end {
+            Some(end) if end > int_end => (TokenKind::FLOAT_LITERAL, end),
+            _ => (TokenKind::INT_LITERAL, int_end),
+        }
     }
-}
 
-/// Extends past an optional float suffix (`f`/`F`/`d`/`D`) at `end`.
-fn float_suffix(bytes: &[u8], end: usize) -> usize {
-    if matches!(bytes.get(end), Some(b'f' | b'F' | b'd' | b'D')) {
-        end + 1
-    } else {
-        end
+    /// Scans a fraction-first float (`. digits [exponent] [suffix]`) whose `.` sits at
+    /// `start` (`bytes[start + 1]` is an ASCII digit). Returns the end offset.
+    fn fraction_float(bytes: &[u8], start: usize) -> usize {
+        let digits = Self::digit_run(bytes, start + 1, |b| b.is_ascii_digit());
+        let end = Self::decimal_exponent(bytes, digits).unwrap_or(digits);
+        Self::float_suffix(bytes, end)
     }
-}
 
-// === Identifier character classes ===
-//
-// These match the identifier definition the previous lexer used:
-// start = `\p{L}\p{Nl}\p{Sc}\p{Pc}`, continue = start plus `\p{Nd}\p{Mn}\p{Mc}\p{Cf}`.
-
-/// Whether `c` can start an identifier.
-fn is_ident_start(c: char) -> bool {
-    use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
-
-    if c.is_ascii() {
-        return c.is_ascii_alphabetic() || c == '_' || c == '$';
+    /// Scans a `digit (_* digit)*` run at `start` using `is_digit`, returning the position
+    /// after the last digit (trailing underscores are not part of the run). Returns `start`
+    /// if there is no digit at `start`.
+    fn digit_run(bytes: &[u8], start: usize, is_digit: impl Fn(u8) -> bool) -> usize {
+        if !bytes.get(start).is_some_and(|&b| is_digit(b)) {
+            return start;
+        }
+        let mut end = start + 1;
+        loop {
+            let mut i = end;
+            while bytes.get(i) == Some(&b'_') {
+                i += 1;
+            }
+            if bytes.get(i).is_some_and(|&b| is_digit(b)) {
+                end = i + 1;
+            } else {
+                return end;
+            }
+        }
     }
-    matches!(
-        c.general_category(),
-        GC::UppercaseLetter
-            | GC::LowercaseLetter
-            | GC::TitlecaseLetter
-            | GC::ModifierLetter
-            | GC::OtherLetter
-            | GC::LetterNumber
-            | GC::CurrencySymbol
-            | GC::ConnectorPunctuation
-    )
-}
 
-/// Whether `c` can continue an identifier.
-fn is_ident_continue(c: char) -> bool {
-    use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
-
-    if c.is_ascii() {
-        return c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    /// Scans a complete decimal exponent (`[eE][+-]?digits`) at `start`.
+    fn decimal_exponent(bytes: &[u8], start: usize) -> Option<usize> {
+        Self::exponent(bytes, start, b'e', b'E')
     }
-    is_ident_start(c)
-        || matches!(
+
+    /// Scans a complete hex-float exponent (`[pP][+-]?digits`; the digits are decimal) at
+    /// `start`.
+    fn hex_exponent(bytes: &[u8], start: usize) -> Option<usize> {
+        Self::exponent(bytes, start, b'p', b'P')
+    }
+
+    /// Scans a complete exponent (`marker [+-] digits`) at `start`, returning its end.
+    /// An exponent is all-or-nothing: with no digit after the marker (and optional sign),
+    /// `None` is returned and the caller keeps its shorter accepting prefix.
+    fn exponent(bytes: &[u8], start: usize, lower: u8, upper: u8) -> Option<usize> {
+        if !matches!(bytes.get(start), Some(&b) if b == lower || b == upper) {
+            return None;
+        }
+        let mut i = start + 1;
+        if matches!(bytes.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        let end = Self::digit_run(bytes, i, |b| b.is_ascii_digit());
+        (end > i).then_some(end)
+    }
+
+    /// Extends past an optional integer suffix (`l`/`L`) at `end`.
+    fn int_suffix(bytes: &[u8], end: usize) -> usize {
+        if matches!(bytes.get(end), Some(b'l' | b'L')) {
+            end + 1
+        } else {
+            end
+        }
+    }
+
+    /// Extends past an optional float suffix (`f`/`F`/`d`/`D`) at `end`.
+    fn float_suffix(bytes: &[u8], end: usize) -> usize {
+        if matches!(bytes.get(end), Some(b'f' | b'F' | b'd' | b'D')) {
+            end + 1
+        } else {
+            end
+        }
+    }
+
+    // === Identifier character classes ===
+    //
+    // These match the identifier definition the previous lexer used:
+    // start = `\p{L}\p{Nl}\p{Sc}\p{Pc}`, continue = start plus `\p{Nd}\p{Mn}\p{Mc}\p{Cf}`.
+
+    /// Whether `c` can start an identifier.
+    fn is_ident_start(c: char) -> bool {
+        use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
+
+        if c.is_ascii() {
+            return c.is_ascii_alphabetic() || c == '_' || c == '$';
+        }
+        matches!(
             c.general_category(),
-            GC::DecimalNumber | GC::NonspacingMark | GC::SpacingMark | GC::Format
+            GC::UppercaseLetter
+                | GC::LowercaseLetter
+                | GC::TitlecaseLetter
+                | GC::ModifierLetter
+                | GC::OtherLetter
+                | GC::LetterNumber
+                | GC::CurrencySymbol
+                | GC::ConnectorPunctuation
         )
+    }
+
+    /// Whether `c` can continue an identifier.
+    fn is_ident_continue(c: char) -> bool {
+        use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
+
+        if c.is_ascii() {
+            return c.is_ascii_alphanumeric() || c == '_' || c == '$';
+        }
+        Self::is_ident_start(c)
+            || matches!(
+                c.general_category(),
+                GC::DecimalNumber | GC::NonspacingMark | GC::SpacingMark | GC::Format
+            )
+    }
 }
 
 #[cfg(test)]
@@ -655,7 +663,7 @@ mod tests {
 
     /// `(kind, text)` の列に落とす。
     fn lexed(src: &str) -> Vec<(SyntaxKind, &str)> {
-        tokenize(src)
+        Lexer::tokenize(src)
             .into_iter()
             .map(|t| (t.kind, t.text))
             .collect()
@@ -663,12 +671,12 @@ mod tests {
 
     /// 種別の列に落とす。
     fn kinds(src: &str) -> Vec<SyntaxKind> {
-        tokenize(src).into_iter().map(|t| t.kind).collect()
+        Lexer::tokenize(src).into_iter().map(|t| t.kind).collect()
     }
 
     /// 連結すると入力に一致する(lossless)。
     fn roundtrip(src: &str) -> String {
-        tokenize(src).iter().map(|t| t.text).collect()
+        Lexer::tokenize(src).iter().map(|t| t.text).collect()
     }
 
     #[test]
@@ -872,7 +880,7 @@ mod prop {
         /// これが lossless 保証(全バイトをちょうど 1 トークンに対応)の中核。
         #[test]
         fn roundtrip_any_string(src in any::<String>()) {
-            let joined: String = tokenize(&src).iter().map(|t| t.text).collect();
+            let joined: String = Lexer::tokenize(&src).iter().map(|t| t.text).collect();
             prop_assert_eq!(joined, src);
         }
     }

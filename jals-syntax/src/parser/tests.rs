@@ -1,55 +1,64 @@
 //! Parser snapshot tests: expect-test CST dumps plus lossless spot checks.
 
 use super::*;
-use expect_test::{Expect, expect};
+use expect_test::expect;
+use helpers::{assert_lossless, check};
 
-/// Pretty-prints the parse result's syntax tree with indentation, showing kind and range (for tests).
-/// Tokens also show the text. Trailing errors follow as `error: ...` lines.
-fn debug_tree(parse: &Parse) -> String {
-    use std::fmt::Write;
-    let mut buf = String::new();
-    let mut indent = 0;
-    for event in parse.syntax().preorder_with_tokens() {
-        use rowan::WalkEvent::{Enter, Leave};
-        match event {
-            Enter(elem) => {
-                let kind = elem.kind();
-                let range = elem.text_range();
-                match elem {
-                    rowan::NodeOrToken::Node(_) => {
-                        let _ = writeln!(buf, "{:indent$}{kind:?}@{range:?}", "");
+/// Shared snapshot-test helpers, grouped so they are not free functions.
+mod helpers {
+    use expect_test::Expect;
+
+    use crate::parser::Parse;
+
+    /// Pretty-prints the parse result's syntax tree with indentation, showing kind and range (for tests).
+    /// Tokens also show the text. Trailing errors follow as `error: ...` lines.
+    fn debug_tree(parse: &Parse) -> String {
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let mut indent = 0;
+        for event in parse.syntax().preorder_with_tokens() {
+            use rowan::WalkEvent::{Enter, Leave};
+            match event {
+                Enter(elem) => {
+                    let kind = elem.kind();
+                    let range = elem.text_range();
+                    match elem {
+                        rowan::NodeOrToken::Node(_) => {
+                            let _ = writeln!(buf, "{:indent$}{kind:?}@{range:?}", "");
+                        }
+                        rowan::NodeOrToken::Token(t) => {
+                            let _ =
+                                writeln!(buf, "{:indent$}{kind:?}@{range:?} {:?}", "", t.text());
+                        }
                     }
-                    rowan::NodeOrToken::Token(t) => {
-                        let _ = writeln!(buf, "{:indent$}{kind:?}@{range:?} {:?}", "", t.text());
-                    }
+                    indent += 2;
                 }
-                indent += 2;
+                Leave(_) => indent -= 2,
             }
-            Leave(_) => indent -= 2,
         }
+        for err in parse.errors() {
+            let _ = writeln!(buf, "error {:?}: {}", err.range(), err.message());
+        }
+        buf
     }
-    for err in parse.errors() {
-        let _ = writeln!(buf, "error {:?}: {}", err.range(), err.message());
+
+    /// Confirm that the tree dump matches the snapshot and is lossless.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(super) fn check(src: &str, expected: Expect) {
+        let parse = Parse::parse(src);
+        expected.assert_eq(&debug_tree(&parse));
+        assert_eq!(
+            parse.syntax().text().to_string(),
+            src,
+            "lossless invariant violated"
+        );
     }
-    buf
-}
 
-/// Confirm that the tree dump matches the snapshot and is lossless.
-#[allow(clippy::needless_pass_by_value)]
-fn check(src: &str, expected: Expect) {
-    let parse = parse(src);
-    expected.assert_eq(&debug_tree(&parse));
-    assert_eq!(
-        parse.syntax().text().to_string(),
-        src,
-        "lossless invariant violated"
-    );
-}
-
-/// lossless: the syntax tree's text equals the input.
-fn assert_lossless(src: &str) {
-    let parse = parse(src);
-    assert_eq!(parse.syntax().text().to_string(), src);
+    /// lossless: the syntax tree's text equals the input.
+    pub(super) fn assert_lossless(src: &str) {
+        let parse = Parse::parse(src);
+        assert_eq!(parse.syntax().text().to_string(), src);
+    }
 }
 
 #[test]
@@ -344,7 +353,7 @@ fn char_literal_escapes_parse_without_errors() {
         "class C { char a = '\\0'; }",
         "class C { char a = '\\n'; }",
     ] {
-        let parse = parse(src);
+        let parse = Parse::parse(src);
         assert!(
             parse.errors().is_empty(),
             "expected no parse errors for {src:?}, got {:?}",

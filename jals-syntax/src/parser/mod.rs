@@ -203,23 +203,26 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parse the source and return a [`Parse`].
-pub fn parse(src: &str) -> Parse {
-    let input = Input::new(src);
-    let mut p = Parser::new(&input);
-    grammar::root(&mut p);
-    let events = p.finish();
-    let (green, errors) = sink::build(&input, events);
-    Parse { green, errors }
-}
-
 /// Parse result. Holds the green tree and the list of syntax errors.
 pub struct Parse {
     green: GreenNode,
     errors: Vec<SyntaxError>,
 }
 
+// `parse` intentionally mirrors the standard `str::parse` entry-point naming even
+// though it matches the type name.
+#[allow(clippy::self_named_constructors)]
 impl Parse {
+    /// Parse the source and return a [`Parse`].
+    pub fn parse(src: &str) -> Self {
+        let input = Input::new(src);
+        let mut p = Parser::new(&input);
+        p.root();
+        let events = p.finish();
+        let (green, errors) = sink::Sink::build(&input, events);
+        Self { green, errors }
+    }
+
     /// The root node of the syntax tree.
     pub fn syntax(&self) -> SyntaxNode {
         SyntaxNode::new_root(self.green.clone())

@@ -311,6 +311,11 @@ impl SyntaxKind {
     /// `BLOCK_COMMENT` tokens that are Javadoc comments (starting with `/**` but not `/**/`)
     /// are classified as `DOC_COMMENT`. Everything else behaves the same as [`From<TokenKind>`].
     pub(crate) fn from_token(token: TokenKind, text: &str) -> Self {
+        /// Whether the text is a Javadoc comment (starts with `/**` and is not the empty comment `/**/`).
+        fn is_doc_comment(text: &str) -> bool {
+            text.starts_with("/**") && text != "/**/"
+        }
+
         match token {
             TokenKind::BLOCK_COMMENT if is_doc_comment(text) => Self::DOC_COMMENT,
             other => Self::from(other),
@@ -444,9 +449,4 @@ impl From<TokenKind> for SyntaxKind {
             TokenKind::PERCENT_EQ => Self::PERCENT_EQ,
         }
     }
-}
-
-/// Returns whether the text is a Javadoc comment (starts with `/**` and is not the empty comment `/**/`).
-fn is_doc_comment(text: &str) -> bool {
-    text.starts_with("/**") && text != "/**/"
 }

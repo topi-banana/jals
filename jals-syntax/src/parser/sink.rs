@@ -20,7 +20,7 @@ use crate::parser::input::Input;
 use crate::syntax_error::SyntaxError;
 use crate::syntax_kind::SyntaxKind;
 
-struct Sink<'a> {
+pub(super) struct Sink<'a> {
     builder: GreenNodeBuilder<'static>,
     all: &'a [LexedToken<'a>],
     all_idx: usize,
@@ -28,6 +28,72 @@ struct Sink<'a> {
 }
 
 impl Sink<'_> {
+    /// イベント列を処理して緑木とエラー一覧を得る。
+    pub(super) fn build(input: &Input, mut events: Vec<Event>) -> (GreenNode, Vec<SyntaxError>) {
+        let mut sink = Sink {
+            builder: GreenNodeBuilder::new(),
+            all: input.all(),
+            all_idx: 0,
+            errors: Vec::new(),
+        };
+        let mut depth = 0i32;
+        let mut forward_parents: Vec<Option<SyntaxKind>> = Vec::new();
+
+        for i in 0..events.len() {
+            match mem::replace(&mut events[i], Event::tombstone()) {
+                // 墓石(破棄されたノード)は無視する。
+                Event::Start {
+                    kind: None,
+                    forward_parent: None,
+                } => {}
+                Event::Start {
+                    kind,
+                    forward_parent,
+                } => {
+                    // forward_parent チェーンを辿り、外側の親から順に開く。
+                    forward_parents.push(kind);
+                    let mut idx = i;
+                    let mut fp = forward_parent;
+                    while let Some(rel) = fp {
+                        idx += rel;
+                        fp = match mem::replace(&mut events[idx], Event::tombstone()) {
+                            Event::Start {
+                                kind,
+                                forward_parent,
+                            } => {
+                                forward_parents.push(kind);
+                                forward_parent
+                            }
+                            _ => unreachable!("forward_parent は Start を指す"),
+                        };
+                    }
+                    // `drain(..)` empties the buffer while keeping its allocation for the next
+                    // `Event::Start`; `into_iter()` would drop it and reallocate on every node.
+                    #[allow(clippy::iter_with_drain)]
+                    for kind in forward_parents.drain(..).rev().flatten() {
+                        sink.start_node(kind);
+                        depth += 1;
+                    }
+                }
+                Event::Finish => {
+                    depth -= 1;
+                    // ルートを閉じる直前に末尾トリビアを積む(lossless 保証)。
+                    if depth == 0 {
+                        sink.eat_trivia();
+                    }
+                    sink.finish_node();
+                }
+                Event::Token { remap } => sink.token(remap),
+                Event::Error { msg } => sink.error(msg),
+            }
+        }
+
+        let Sink {
+            builder, errors, ..
+        } = sink;
+        (builder.finish(), errors)
+    }
+
     /// 次が significant になるまで、トリビアを木へ積む。
     fn eat_trivia(&mut self) {
         while let Some(t) = self.all.get(self.all_idx) {
@@ -70,70 +136,4 @@ impl Sink<'_> {
         self.errors
             .push(SyntaxError::new(msg, TextRange::empty(offset)));
     }
-}
-
-/// イベント列を処理して緑木とエラー一覧を得る。
-pub(super) fn build(input: &Input, mut events: Vec<Event>) -> (GreenNode, Vec<SyntaxError>) {
-    let mut sink = Sink {
-        builder: GreenNodeBuilder::new(),
-        all: input.all(),
-        all_idx: 0,
-        errors: Vec::new(),
-    };
-    let mut depth = 0i32;
-    let mut forward_parents: Vec<Option<SyntaxKind>> = Vec::new();
-
-    for i in 0..events.len() {
-        match mem::replace(&mut events[i], Event::tombstone()) {
-            // 墓石(破棄されたノード)は無視する。
-            Event::Start {
-                kind: None,
-                forward_parent: None,
-            } => {}
-            Event::Start {
-                kind,
-                forward_parent,
-            } => {
-                // forward_parent チェーンを辿り、外側の親から順に開く。
-                forward_parents.push(kind);
-                let mut idx = i;
-                let mut fp = forward_parent;
-                while let Some(rel) = fp {
-                    idx += rel;
-                    fp = match mem::replace(&mut events[idx], Event::tombstone()) {
-                        Event::Start {
-                            kind,
-                            forward_parent,
-                        } => {
-                            forward_parents.push(kind);
-                            forward_parent
-                        }
-                        _ => unreachable!("forward_parent は Start を指す"),
-                    };
-                }
-                // `drain(..)` empties the buffer while keeping its allocation for the next
-                // `Event::Start`; `into_iter()` would drop it and reallocate on every node.
-                #[allow(clippy::iter_with_drain)]
-                for kind in forward_parents.drain(..).rev().flatten() {
-                    sink.start_node(kind);
-                    depth += 1;
-                }
-            }
-            Event::Finish => {
-                depth -= 1;
-                // ルートを閉じる直前に末尾トリビアを積む(lossless 保証)。
-                if depth == 0 {
-                    sink.eat_trivia();
-                }
-                sink.finish_node();
-            }
-            Event::Token { remap } => sink.token(remap),
-            Event::Error { msg } => sink.error(msg),
-        }
-    }
-
-    let Sink {
-        builder, errors, ..
-    } = sink;
-    (builder.finish(), errors)
 }

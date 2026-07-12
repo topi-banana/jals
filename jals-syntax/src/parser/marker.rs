@@ -50,25 +50,27 @@ impl Marker {
 impl Drop for Marker {
     fn drop(&mut self) {
         assert!(
-            self.completed || currently_panicking(),
+            self.completed || Self::currently_panicking(),
             "Marker は complete か abandon で消費しなければならない"
         );
     }
 }
 
-/// Whether the current thread is unwinding from a panic. Used to avoid a double-panic in
-/// [`Marker`]'s drop guard. `std::thread::panicking` has no `core`/`alloc` equivalent, so under
-/// `no_std` this degrades to `false`. That is safe in practice: the realized `no_std` target
-/// (`wasm32`) aborts rather than unwinds on panic, so a `Marker` is never dropped mid-unwind there
-/// and this guard could not observe an in-progress panic regardless.
-#[cfg(test)]
-fn currently_panicking() -> bool {
-    std::thread::panicking()
-}
+impl Marker {
+    /// Whether the current thread is unwinding from a panic. Used to avoid a double-panic in
+    /// [`Marker`]'s drop guard. `std::thread::panicking` has no `core`/`alloc` equivalent, so under
+    /// `no_std` this degrades to `false`. That is safe in practice: the realized `no_std` target
+    /// (`wasm32`) aborts rather than unwinds on panic, so a `Marker` is never dropped mid-unwind there
+    /// and this guard could not observe an in-progress panic regardless.
+    #[cfg(test)]
+    fn currently_panicking() -> bool {
+        std::thread::panicking()
+    }
 
-#[cfg(not(test))]
-const fn currently_panicking() -> bool {
-    false
+    #[cfg(not(test))]
+    const fn currently_panicking() -> bool {
+        false
+    }
 }
 
 /// 完了したノードのマーカ。[`precede`](CompletedMarker::precede) で後から親で包める。
