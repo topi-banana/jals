@@ -50,78 +50,10 @@ pub const GOLDEN_SOURCES: &[GoldenSource] = &[
     },
 ];
 
-/// Look up a golden source by its command-line name.
-pub fn golden_source_by_name(name: &str) -> Option<&'static GoldenSource> {
-    GOLDEN_SOURCES.iter().find(|s| s.name == name)
-}
-
-/// A best-effort Google Java Style [`Config`], expressed with the options jals has
-/// today.
-///
-/// This deliberately lives in the test crate, not in `jals-fmt`, until a first-class
-/// `Config::google()` preset exists. The **continuation indent** — Google style indents
-/// wrapped continuation lines by +4 columns while the block indent is +2 — is now
-/// modeled with the dedicated `continuation-indent` option (see below); it had been the
-/// single largest gap in the similarity metric this harness reports.
-pub fn google_config() -> Config {
-    Config {
-        // Block indentation: Google style is 2 spaces.
-        indent_style: IndentStyle::Space,
-        indent_width: 2,
-        // Continuation indentation: Google style indents wrapped lines by +4 columns
-        // (double the +2 block indent).
-        continuation_indent: Some(4),
-        // Column limit and blank-line policy.
-        max_width: 100,
-        max_blank_lines: 1,
-        // google-java-format preserves a blank line at the start of a braced body (right after
-        // `{`), e.g. a class body or a control-flow block, instead of dropping it.
-        blank_line_at_block_start: true,
-        line_ending: LineEnding::Lf,
-        insert_final_newline: true,
-        // K&R / "Egyptian" braces for both declarations and control flow.
-        brace_style: BraceStyle::SameLine,
-        control_brace_style: ControlBraceStyle::SameLine,
-        // Imports: a static group, a blank line, then a non-static group, each sorted.
-        group_imports: true,
-        import_groups: vec!["static".to_string(), "*".to_string()],
-        // Modifiers in canonical JLS order; annotations on their own lines.
-        reorder_modifiers: true,
-        annotation_placement: AnnotationPlacement::Expanded,
-        // Break before binary operators, packing as many operands per line as fit (fill).
-        binop_separator: BinopSeparator::Front,
-        binop_layout: BinopLayout::Compressed,
-        // Google style has no fixed per-construct width heuristics — it wraps purely
-        // against the 100-column limit, so push every threshold up to the column limit.
-        chain_width: 100,
-        fn_call_width: 100,
-        array_width: 100,
-        single_line_if_else_max_width: 100,
-        // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
-        // and hugs them to the following argument.
-        normalize_parameter_comments: true,
-        // google-java-format keeps a block comment written immediately before a token on the same
-        // line (e.g. `java.lang./* @A */ String`) hugging that token instead of flushing it to end
-        // of line.
-        inline_block_comments: true,
-        // google-java-format never puts the closing `)` of a paren-delimited list (call /
-        // annotation args, parameters, record header) on its own line — it hugs the last item.
-        closing_paren: ClosingParen::Hug,
-        // google-java-format preserves the source row breaks of a tabular (grid-shaped) array
-        // initializer instead of reflowing it by width.
-        tabular_array_initializers: true,
-        // google-java-format puts a `switch` expression that is the value of a `=` (a variable /
-        // field initializer or an assignment) on its own continuation-indented line.
-        switch_expression_on_new_line: true,
-        // google-java-format wraps a `case` label's constant list across lines when the arm
-        // overflows the column limit (e.g. `ExpressionSwitch`'s `breakLongCaseArgs`).
-        wrap_case_labels: true,
-        // google-java-format surrounds an operator colon — an enhanced `for` (`for (T x : xs)`),
-        // a ternary (`a ? b : c`), and an `assert` message (`assert c : m`) — with spaces, while
-        // still hugging the colon of an unnamed `_` for-each variable (`for (T _: xs)`) and of
-        // label / `case` colons (`label:`, `case x:`).
-        space_around_operator_colon: true,
-        ..Config::default()
+impl GoldenSource {
+    /// Look up a golden source by its command-line name.
+    pub fn by_name(name: &str) -> Option<&'static Self> {
+        GOLDEN_SOURCES.iter().find(|s| s.name == name)
     }
 }
 
@@ -137,28 +69,15 @@ pub struct PairResult {
     pub exact: bool,
 }
 
-/// Format `input` with `cfg` and score it against the expected `expected` output:
-/// a line-level similarity ratio plus whether the two are byte-identical.
-pub fn score(input: &str, expected: &str, cfg: &Config) -> (f64, bool) {
-    let formatted = jals_fmt::format_source(input, cfg).formatted;
-    let exact = formatted == expected;
-    let ratio = TextDiff::from_lines(expected, &formatted).ratio() as f64;
-    (ratio, exact)
-}
-
-/// Recursively collect every `*.input` under `root` that has a sibling `*.output`.
-pub fn collect_pairs(root: &Path) -> Vec<(PathBuf, PathBuf)> {
-    WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|path| path.extension().is_some_and(|ext| ext == "input"))
-        .filter_map(|input| {
-            let output = input.with_extension("output");
-            output.is_file().then_some((input, output))
-        })
-        .collect()
+impl PairResult {
+    /// Format `input` with `cfg` and score it against the expected `expected` output:
+    /// a line-level similarity ratio plus whether the two are byte-identical.
+    pub fn score(input: &str, expected: &str, cfg: &Config) -> (f64, bool) {
+        let formatted = jals_fmt::FormatOutput::format_source(input, cfg).formatted;
+        let exact = formatted == expected;
+        let ratio = TextDiff::from_lines(expected, &formatted).ratio() as f64;
+        (ratio, exact)
+    }
 }
 
 /// Aggregated golden outcomes for one corpus.
@@ -187,97 +106,182 @@ impl GoldenReport {
             self.exact as f64 / self.total as f64
         }
     }
-}
 
-/// Walk `root`, format every `.input` with `cfg` in parallel, and aggregate the
-/// similarity of each result to its `.output`.
-pub fn run_golden(name: &str, root: &Path, cfg: &Config) -> GoldenReport {
-    let mut results: Vec<PairResult> = collect_pairs(root)
-        .into_par_iter()
-        .filter_map(|(input_path, output_path)| {
-            let input = std::fs::read_to_string(&input_path).ok()?;
-            let expected = std::fs::read_to_string(&output_path).ok()?;
-            let (similarity, exact) = score(&input, &expected, cfg);
-            let rel = input_path
-                .strip_prefix(root)
-                .unwrap_or(&input_path)
-                .to_path_buf();
-            Some(PairResult {
-                rel,
-                similarity,
-                exact,
-            })
-        })
-        .collect();
-
-    // Worst first, so a truncated listing surfaces the most divergent constructs.
-    results.sort_by(|a, b| a.similarity.total_cmp(&b.similarity));
-
-    let total = results.len();
-    let exact = results.iter().filter(|r| r.exact).count();
-    let mean_similarity = if total == 0 {
-        0.0
-    } else {
-        results.iter().map(|r| r.similarity).sum::<f64>() / total as f64
-    };
-
-    GoldenReport {
-        name: name.to_string(),
-        root: root.to_path_buf(),
-        total,
-        exact,
-        mean_similarity,
-        results,
-    }
-}
-
-/// Render the reports as a GitHub-flavored Markdown summary, suitable for a CI step
-/// summary or a pull-request comment.
-///
-/// `worst` is how many least-similar files to list per corpus (0 = none); the list
-/// is wrapped in a collapsed `<details>` so it stays tidy in a PR comment.
-pub fn markdown_report(reports: &[GoldenReport], worst: usize) -> String {
-    let mut out = String::from("## jals-fmt vs google-java-format\n\n");
-    out.push_str(
-        "Similarity of `jals-fmt` (Google-style config) output to `google-java-format`.\n\n",
-    );
-    out.push_str("| corpus | pairs | exact | exact rate | mean similarity |\n");
-    out.push_str("| --- | --: | --: | --: | --: |\n");
-    for r in reports {
-        out.push_str(&format!(
-            "| {} | {} | {} | {:.2}% | {:.2}% |\n",
-            r.name,
-            r.total,
-            r.exact,
-            r.exact_rate() * 100.0,
-            r.mean_similarity * 100.0
-        ));
-    }
-    if worst > 0 {
-        for r in reports {
-            // Only the inexact files are worth listing; exact matches are at 100%.
-            let divergent: Vec<&PairResult> =
-                r.results.iter().filter(|p| !p.exact).take(worst).collect();
-            if divergent.is_empty() {
-                continue;
-            }
-            out.push_str(&format!(
-                "\n<details><summary>{}: {} least similar</summary>\n\n",
-                r.name,
-                divergent.len()
-            ));
-            out.push_str("| similarity | file |\n| --: | --- |\n");
-            for p in divergent {
-                out.push_str(&format!(
-                    "| {:.2}% | `{}` |\n",
-                    p.similarity * 100.0,
-                    p.rel.display()
-                ));
-            }
-            out.push_str("\n</details>\n");
+    /// A best-effort Google Java Style [`Config`], expressed with the options jals has
+    /// today.
+    ///
+    /// This deliberately lives in the test crate, not in `jals-fmt`, until a first-class
+    /// `Config::google()` preset exists. The **continuation indent** — Google style indents
+    /// wrapped continuation lines by +4 columns while the block indent is +2 — is now
+    /// modeled with the dedicated `continuation-indent` option (see below); it had been the
+    /// single largest gap in the similarity metric this harness reports.
+    pub fn google_config() -> Config {
+        Config {
+            // Block indentation: Google style is 2 spaces.
+            indent_style: IndentStyle::Space,
+            indent_width: 2,
+            // Continuation indentation: Google style indents wrapped lines by +4 columns
+            // (double the +2 block indent).
+            continuation_indent: Some(4),
+            // Column limit and blank-line policy.
+            max_width: 100,
+            max_blank_lines: 1,
+            // google-java-format preserves a blank line at the start of a braced body (right after
+            // `{`), e.g. a class body or a control-flow block, instead of dropping it.
+            blank_line_at_block_start: true,
+            line_ending: LineEnding::Lf,
+            insert_final_newline: true,
+            // K&R / "Egyptian" braces for both declarations and control flow.
+            brace_style: BraceStyle::SameLine,
+            control_brace_style: ControlBraceStyle::SameLine,
+            // Imports: a static group, a blank line, then a non-static group, each sorted.
+            group_imports: true,
+            import_groups: vec!["static".to_string(), "*".to_string()],
+            // Modifiers in canonical JLS order; annotations on their own lines.
+            reorder_modifiers: true,
+            annotation_placement: AnnotationPlacement::Expanded,
+            // Break before binary operators, packing as many operands per line as fit (fill).
+            binop_separator: BinopSeparator::Front,
+            binop_layout: BinopLayout::Compressed,
+            // Google style has no fixed per-construct width heuristics — it wraps purely
+            // against the 100-column limit, so push every threshold up to the column limit.
+            chain_width: 100,
+            fn_call_width: 100,
+            array_width: 100,
+            single_line_if_else_max_width: 100,
+            // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
+            // and hugs them to the following argument.
+            normalize_parameter_comments: true,
+            // google-java-format keeps a block comment written immediately before a token on the
+            // same line (e.g. `java.lang./* @A */ String`) hugging that token instead of flushing
+            // it to end of line.
+            inline_block_comments: true,
+            // google-java-format never puts the closing `)` of a paren-delimited list (call /
+            // annotation args, parameters, record header) on its own line — it hugs the last item.
+            closing_paren: ClosingParen::Hug,
+            // google-java-format preserves the source row breaks of a tabular (grid-shaped) array
+            // initializer instead of reflowing it by width.
+            tabular_array_initializers: true,
+            // google-java-format puts a `switch` expression that is the value of a `=` (a variable
+            // / field initializer or an assignment) on its own continuation-indented line.
+            switch_expression_on_new_line: true,
+            // google-java-format wraps a `case` label's constant list across lines when the arm
+            // overflows the column limit (e.g. `ExpressionSwitch`'s `breakLongCaseArgs`).
+            wrap_case_labels: true,
+            // google-java-format surrounds an operator colon — an enhanced `for` (`for (T x : xs)`),
+            // a ternary (`a ? b : c`), and an `assert` message (`assert c : m`) — with spaces, while
+            // still hugging the colon of an unnamed `_` for-each variable (`for (T _: xs)`) and of
+            // label / `case` colons (`label:`, `case x:`).
+            space_around_operator_colon: true,
+            ..Config::default()
         }
     }
-    out
+
+    /// Recursively collect every `*.input` under `root` that has a sibling `*.output`.
+    pub fn collect_pairs(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+        WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(walkdir::DirEntry::into_path)
+            .filter(|path| path.extension().is_some_and(|ext| ext == "input"))
+            .filter_map(|input| {
+                let output = input.with_extension("output");
+                output.is_file().then_some((input, output))
+            })
+            .collect()
+    }
+
+    /// Walk `root`, format every `.input` with `cfg` in parallel, and aggregate the
+    /// similarity of each result to its `.output`.
+    pub fn run(name: &str, root: &Path, cfg: &Config) -> Self {
+        let mut results: Vec<PairResult> = Self::collect_pairs(root)
+            .into_par_iter()
+            .filter_map(|(input_path, output_path)| {
+                let input = std::fs::read_to_string(&input_path).ok()?;
+                let expected = std::fs::read_to_string(&output_path).ok()?;
+                let (similarity, exact) = PairResult::score(&input, &expected, cfg);
+                let rel = input_path
+                    .strip_prefix(root)
+                    .unwrap_or(&input_path)
+                    .to_path_buf();
+                Some(PairResult {
+                    rel,
+                    similarity,
+                    exact,
+                })
+            })
+            .collect();
+
+        // Worst first, so a truncated listing surfaces the most divergent constructs.
+        results.sort_by(|a, b| a.similarity.total_cmp(&b.similarity));
+
+        let total = results.len();
+        let exact = results.iter().filter(|r| r.exact).count();
+        let mean_similarity = if total == 0 {
+            0.0
+        } else {
+            results.iter().map(|r| r.similarity).sum::<f64>() / total as f64
+        };
+
+        Self {
+            name: name.to_string(),
+            root: root.to_path_buf(),
+            total,
+            exact,
+            mean_similarity,
+            results,
+        }
+    }
+
+    /// Render the reports as a GitHub-flavored Markdown summary, suitable for a CI step
+    /// summary or a pull-request comment.
+    ///
+    /// `worst` is how many least-similar files to list per corpus (0 = none); the list
+    /// is wrapped in a collapsed `<details>` so it stays tidy in a PR comment.
+    pub fn markdown_report(reports: &[Self], worst: usize) -> String {
+        let mut out = String::from("## jals-fmt vs google-java-format\n\n");
+        out.push_str(
+            "Similarity of `jals-fmt` (Google-style config) output to `google-java-format`.\n\n",
+        );
+        out.push_str("| corpus | pairs | exact | exact rate | mean similarity |\n");
+        out.push_str("| --- | --: | --: | --: | --: |\n");
+        for r in reports {
+            out.push_str(&format!(
+                "| {} | {} | {} | {:.2}% | {:.2}% |\n",
+                r.name,
+                r.total,
+                r.exact,
+                r.exact_rate() * 100.0,
+                r.mean_similarity * 100.0
+            ));
+        }
+        if worst > 0 {
+            for r in reports {
+                // Only the inexact files are worth listing; exact matches are at 100%.
+                let divergent: Vec<&PairResult> =
+                    r.results.iter().filter(|p| !p.exact).take(worst).collect();
+                if divergent.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "\n<details><summary>{}: {} least similar</summary>\n\n",
+                    r.name,
+                    divergent.len()
+                ));
+                out.push_str("| similarity | file |\n| --: | --- |\n");
+                for p in divergent {
+                    out.push_str(&format!(
+                        "| {:.2}% | `{}` |\n",
+                        p.similarity * 100.0,
+                        p.rel.display()
+                    ));
+                }
+                out.push_str("\n</details>\n");
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -288,7 +292,7 @@ mod tests {
 
     #[test]
     fn google_config_has_google_defaults() {
-        let c = google_config();
+        let c = GoldenReport::google_config();
         assert_eq!(c.indent_width, 2);
         // Google style wraps continuation lines at +4 columns (double the +2 block indent).
         assert_eq!(c.continuation_indent, Some(4));
@@ -312,22 +316,22 @@ mod tests {
     #[test]
     fn score_is_one_for_already_formatted_input() {
         // A trivially-formatted class, in Google's 2-space style, is a fixed point.
-        let cfg = google_config();
+        let cfg = GoldenReport::google_config();
         let expected = "class A {\n  void m() {}\n}\n";
-        let (similarity, exact) = score(expected, expected, &cfg);
+        let (similarity, exact) = PairResult::score(expected, expected, &cfg);
         assert!(exact, "expected an exact match for already-formatted input");
         assert_eq!(similarity, 1.0);
     }
 
     #[test]
     fn score_rewards_closeness() {
-        let cfg = google_config();
+        let cfg = GoldenReport::google_config();
         // The formatted input matches the expected output except for one extra line:
         // not exact, but highly similar. (Independent of any wrapping behavior — the
         // input is already in Google's 2-space style, so jals reproduces it verbatim.)
         let input = "class A {\n  int x;\n}\n";
         let expected = "class A {\n  int x;\n  int y;\n}\n";
-        let (similarity, exact) = score(input, expected, &cfg);
+        let (similarity, exact) = PairResult::score(input, expected, &cfg);
         assert!(!exact, "the extra `int y;` line should make this inexact");
         assert!(
             similarity > 0.5 && similarity < 1.0,
@@ -342,7 +346,7 @@ mod tests {
         fs::write(dir.path().join("A.output"), "class A {}\n").unwrap();
         // An input with no matching output is not a pair.
         fs::write(dir.path().join("B.input"), "class B{}").unwrap();
-        let pairs = collect_pairs(dir.path());
+        let pairs = GoldenReport::collect_pairs(dir.path());
         assert_eq!(pairs.len(), 1);
         assert!(pairs[0].0.ends_with("A.input"));
     }
@@ -361,7 +365,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = run_golden("tmp", dir.path(), &google_config());
+        let report = GoldenReport::run("tmp", dir.path(), &GoldenReport::google_config());
         assert_eq!(report.total, 2);
         assert_eq!(report.exact, 1);
         assert!(report.mean_similarity > 0.0 && report.mean_similarity < 1.0);
@@ -374,8 +378,8 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("A.input"), "class A {}\n").unwrap();
         fs::write(dir.path().join("A.output"), "class A {}\n").unwrap();
-        let report = run_golden("gjf-testdata", dir.path(), &google_config());
-        let md = markdown_report(std::slice::from_ref(&report), 0);
+        let report = GoldenReport::run("gjf-testdata", dir.path(), &GoldenReport::google_config());
+        let md = GoldenReport::markdown_report(std::slice::from_ref(&report), 0);
         assert!(md.contains("| corpus |"), "missing header:\n{md}");
         assert!(md.contains("gjf-testdata"), "missing corpus row:\n{md}");
     }
@@ -392,8 +396,8 @@ mod tests {
             "class B {\n  int y;\n  int z;\n}\n",
         )
         .unwrap();
-        let report = run_golden("c", dir.path(), &google_config());
-        let md = markdown_report(std::slice::from_ref(&report), 20);
+        let report = GoldenReport::run("c", dir.path(), &GoldenReport::google_config());
+        let md = GoldenReport::markdown_report(std::slice::from_ref(&report), 20);
         assert!(md.contains("<details>"), "missing details block:\n{md}");
         assert!(md.contains("Off.input"), "missing divergent file:\n{md}");
         // The exact pair must not appear in the least-similar list.

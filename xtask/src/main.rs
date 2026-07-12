@@ -10,6 +10,12 @@ mod codegen;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    fn usage(error: &str) -> ExitCode {
+        eprintln!("error: {error}");
+        eprintln!("usage: cargo run -p xtask -- codegen [--check]");
+        ExitCode::FAILURE
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((task, rest)) if task == "codegen" => {
@@ -20,7 +26,7 @@ fn main() -> ExitCode {
                     other => return usage(&format!("unknown argument `{other}`")),
                 }
             }
-            match codegen::run(check) {
+            match codegen::Codegen::run(check) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("error: {err:#}");
@@ -31,10 +37,4 @@ fn main() -> ExitCode {
         Some((task, _)) => usage(&format!("unknown task `{task}`")),
         None => usage("missing task"),
     }
-}
-
-fn usage(error: &str) -> ExitCode {
-    eprintln!("error: {error}");
-    eprintln!("usage: cargo run -p xtask -- codegen [--check]");
-    ExitCode::FAILURE
 }
