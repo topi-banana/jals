@@ -40,7 +40,7 @@ use crate::Namespace;
 use crate::def::DefKind;
 use crate::reference::{Reference, Resolution};
 use crate::resolve::Resolved;
-use crate::resolve::collect::{byte_range, first_ident_token};
+use crate::resolve::collect::Collect;
 
 /// Identifies a file within a [`ProjectIndex`]. The host maps it to a path / URL; the index only
 /// ever compares and stores it.
@@ -56,7 +56,13 @@ impl Fqn {
     /// The simple (unqualified) name: the last dotted segment (`a.b.Outer.Inner` → `Inner`). Correct
     /// because every level — packages and nested types alike — is dotted.
     pub fn simple_name(&self) -> &str {
-        self.0.rsplit('.').next().unwrap_or(&self.0)
+        Self::simple_name_of(&self.0)
+    }
+
+    /// The simple name of a dotted FQN *string* — its last `.`-separated segment. The borrowed
+    /// counterpart of [`Fqn::simple_name`] for callers that hold a raw FQN, not an [`Fqn`].
+    pub(crate) fn simple_name_of(fqn: &str) -> &str {
+        fqn.rsplit('.').next().unwrap_or(fqn)
     }
 }
 
@@ -505,7 +511,7 @@ impl ProjectIndex {
         LoweredClasspath {
             classes: classfiles
                 .iter()
-                .filter_map(crate::classpath::lower)
+                .filter_map(crate::classpath::ClasspathLower::lower)
                 .collect(),
         }
     }
@@ -523,7 +529,7 @@ impl ProjectIndex {
                 .and_then(|p| p.name())
                 .map(|n| n.text())
                 .filter(|p| !p.is_empty());
-            collect_source_locations(*file, root, package.as_deref(), None, &mut locs);
+            locs.collect(*file, root, package.as_deref(), None);
         }
         locs
     }
@@ -552,9 +558,9 @@ impl ProjectIndex {
             Vec::new()
         };
         Self::assemble_inner(
-            &borrow_facts(&project),
-            &borrow_facts(&source),
-            &borrow_facts(&stub),
+            &Self::borrow_facts(&project),
+            &Self::borrow_facts(&source),
+            &Self::borrow_facts(&stub),
             classes,
             sources,
         )
@@ -597,7 +603,7 @@ impl ProjectIndex {
             }
         }
         let mut types = Vec::new();
-        extract_types(root, package.as_deref(), None, &mut types);
+        Self::extract_types(root, package.as_deref(), None, &mut types);
         FileFacts {
             meta: Some(FileMeta {
                 package,
@@ -614,13 +620,13 @@ impl ProjectIndex {
     /// [`assemble`](Self::assemble).
     #[must_use]
     pub fn stub_facts() -> Vec<(FileId, FileFacts)> {
-        crate::stdlib::stub_sources()
+        crate::stdlib::Stdlib::stub_sources()
             .iter()
             .enumerate()
             .map(|(i, src)| {
                 (
                     FileId(u32::MAX - i as u32),
-                    Self::extract_file(&jals_syntax::parse(src).syntax()),
+                    Self::extract_file(&jals_syntax::Parse::parse(src).syntax()),
                 )
             })
             .collect()
@@ -896,7 +902,10 @@ impl ProjectIndex {
         }
 
         // 2. Same package (includes the file's own top-level types).
-        if let Some(&id) = self.by_fqn.get(&qualify(meta.package.as_deref(), name)) {
+        if let Some(&id) = self
+            .by_fqn
+            .get(&Self::qualify(meta.package.as_deref(), name))
+        {
             return TypeResolution::Project(id);
         }
 
@@ -924,7 +933,7 @@ impl ProjectIndex {
 
         // 5. Reachable from outside the index: an (unstubbed) implicit `java.lang` type, or any
         //    on-demand import that could supply an unindexed type. Either way, no diagnostic.
-        if is_java_lang(name) || !meta.on_demand.is_empty() {
+        if Self::is_java_lang(name) || !meta.on_demand.is_empty() {
             return TypeResolution::External;
         }
 
@@ -1142,7 +1151,7 @@ impl ProjectIndex {
     /// partial (the common members only) — so a stub-owned or stub-inherited overload set is treated
     /// as incomplete, never yielding a "no overload" conclusion.
     pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
-        if is_object_method(name) {
+        if Self::is_object_method(name) {
             return false;
         }
         self.walk_supertypes(owner, |current| {
@@ -1202,48 +1211,52 @@ impl ProjectIndex {
     }
 }
 
-/// Walk a library source tree, mirroring [`ProjectIndex::collect_types`]'s recursion, and record each
-/// type's and member's declaring `(file, name range)` into `locs` (first declaration wins, like
-/// `by_fqn`). Member ranges and parameter counts come straight from [`members_of_decl`] so they line
-/// up with how the index reads members; the `ItemId(0)` owner is a placeholder, only the member name,
-/// arity, and range are read.
-fn collect_source_locations(
-    file: FileId,
-    node: &SyntaxNode,
-    package: Option<&str>,
-    enclosing: Option<&str>,
-    locs: &mut SourceLocations,
-) {
-    let next_enclosing = if type_decl_kind(node.kind()).is_some()
-        && let Some(name_tok) = first_ident_token(node)
-    {
-        let fqn = build_fqn(package, enclosing, name_tok.text());
-        locs.types
-            .entry(fqn.clone())
-            .or_insert_with(|| (file, byte_range(&name_tok)));
-        for member in members_of_decl(ItemId(0), file, node, name_tok.text()) {
-            let loc = (member.file, member.name_range.clone());
-            locs.members
-                .entry((fqn.clone(), member.name.clone(), member.params.len()))
-                .or_insert_with(|| loc.clone());
-            locs.members_by_name
-                .entry((fqn.clone(), member.name.clone()))
-                .or_insert(loc);
+impl SourceLocations {
+    /// Walk a library source tree, mirroring [`ProjectIndex::extract_types`]'s recursion, and record
+    /// each type's and member's declaring `(file, name range)` into `self` (first declaration wins,
+    /// like `by_fqn`). Member ranges and parameter counts come straight from
+    /// [`ProjectIndex::members_of_decl`] so they line up with how the index reads members; the
+    /// `ItemId(0)` owner is a placeholder, only the member name, arity, and range are read.
+    fn collect(
+        &mut self,
+        file: FileId,
+        node: &SyntaxNode,
+        package: Option<&str>,
+        enclosing: Option<&str>,
+    ) {
+        let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
+            && let Some(name_tok) = Collect::first_ident_token(node)
+        {
+            let fqn = ProjectIndex::build_fqn(package, enclosing, name_tok.text());
+            self.types
+                .entry(fqn.clone())
+                .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
+            for member in ProjectIndex::members_of_decl(ItemId(0), file, node, name_tok.text()) {
+                let loc = (member.file, member.name_range.clone());
+                self.members
+                    .entry((fqn.clone(), member.name.clone(), member.params.len()))
+                    .or_insert_with(|| loc.clone());
+                self.members_by_name
+                    .entry((fqn.clone(), member.name.clone()))
+                    .or_insert(loc);
+            }
+            Some(fqn)
+        } else {
+            enclosing.map(str::to_string)
+        };
+        for child in node.children() {
+            self.collect(file, &child, package, next_enclosing.as_deref());
         }
-        Some(fqn)
-    } else {
-        enclosing.map(str::to_string)
-    };
-    for child in node.children() {
-        collect_source_locations(file, &child, package, next_enclosing.as_deref(), locs);
     }
 }
 
-/// Borrow each owned `(FileId, FileFacts)` as `(FileId, &FileFacts)`, the shape
-/// [`ProjectIndex::assemble`] takes. Lets [`build_inner`](ProjectIndex::build_inner) reuse the same
-/// assembly path an incremental host drives from its cached facts.
-fn borrow_facts(facts: &[(FileId, FileFacts)]) -> Vec<(FileId, &FileFacts)> {
-    facts.iter().map(|(file, facts)| (*file, facts)).collect()
+impl ProjectIndex {
+    /// Borrow each owned `(FileId, FileFacts)` as `(FileId, &FileFacts)`, the shape
+    /// [`ProjectIndex::assemble`] takes. Lets [`build_inner`](ProjectIndex::build_inner) reuse the same
+    /// assembly path an incremental host drives from its cached facts.
+    fn borrow_facts(facts: &[(FileId, FileFacts)]) -> Vec<(FileId, &FileFacts)> {
+        facts.iter().map(|(file, facts)| (*file, facts)).collect()
+    }
 }
 
 /// Walks `node` in pre-order, capturing each type declaration as a [`RawType`] — threading the
@@ -1253,31 +1266,33 @@ fn borrow_facts(facts: &[(FileId, FileFacts)]) -> Vec<(FileId, &FileFacts)> {
 /// members' [`owner`](Member::owner) / [`file`](Member::file) are placeholders (unknown until the
 /// facts are folded into a specific index) and are fixed up in
 /// [`register_file_members`](ProjectIndex::register_file_members).
-fn extract_types(
-    node: &SyntaxNode,
-    package: Option<&str>,
-    enclosing: Option<&str>,
-    out: &mut Vec<RawType>,
-) {
-    let next_enclosing = if let Some(kind) = type_decl_kind(node.kind())
-        && let Some(name_tok) = first_ident_token(node)
-    {
-        let fqn = build_fqn(package, enclosing, name_tok.text());
-        out.push(RawType {
-            fqn: fqn.clone(),
-            kind,
-            name_range: byte_range(&name_tok),
-            type_params: type_params_of(node),
-            // Placeholder owner/file, fixed up when these facts are folded into an index.
-            members: members_of_decl(ItemId(0), FileId(0), node, name_tok.text()),
-            raw_supertypes: raw_supertypes_of(node),
-        });
-        Some(fqn)
-    } else {
-        enclosing.map(str::to_string)
-    };
-    for child in node.children() {
-        extract_types(&child, package, next_enclosing.as_deref(), out);
+impl ProjectIndex {
+    fn extract_types(
+        node: &SyntaxNode,
+        package: Option<&str>,
+        enclosing: Option<&str>,
+        out: &mut Vec<RawType>,
+    ) {
+        let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
+            && let Some(name_tok) = Collect::first_ident_token(node)
+        {
+            let fqn = Self::build_fqn(package, enclosing, name_tok.text());
+            out.push(RawType {
+                fqn: fqn.clone(),
+                kind,
+                name_range: Collect::byte_range(&name_tok),
+                type_params: Self::type_params_of(node),
+                // Placeholder owner/file, fixed up when these facts are folded into an index.
+                members: Self::members_of_decl(ItemId(0), FileId(0), node, name_tok.text()),
+                raw_supertypes: Self::raw_supertypes_of(node),
+            });
+            Some(fqn)
+        } else {
+            enclosing.map(str::to_string)
+        };
+        for child in node.children() {
+            Self::extract_types(&child, package, next_enclosing.as_deref(), out);
+        }
     }
 }
 
@@ -1285,305 +1300,313 @@ fn extract_types(
 /// fields, methods, constructors, and enum constants. Nested type declarations are *not* members
 /// here — they are their own [`Item`]s. `owner_simple` is the declaring type's simple name, used as
 /// an enum constant's type. Pure: reads only the node.
-fn members_of_decl(
-    owner: ItemId,
-    file: FileId,
-    node: &SyntaxNode,
-    owner_simple: &str,
-) -> Vec<Member> {
-    let mut members = Vec::new();
-    // The body holds the members directly (a `ClassBody`, or an `EnumBody` whose constants and
-    // members are both direct children).
-    let Some(body) = node
-        .children()
-        .find(|c| matches!(c.kind(), CLASS_BODY | ENUM_BODY))
-    else {
-        return members;
-    };
-    // A member of `owner`/`file` with no params/varargs/throws; each call site overrides (via
-    // struct-update) only the fields that apply to its member kind.
-    let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
-        owner,
-        name: name_tok.text().to_string(),
-        kind,
-        file,
-        name_range: byte_range(name_tok),
-        ty,
-        params: Vec::new(),
-        varargs: false,
-        throws: Vec::new(),
-        // A project / stub member's own `file` already points at real (or no) source.
-        source_location: None,
-    };
-    for member in body.children() {
-        match member.kind() {
-            FIELD_DECL => {
-                if let Some(field) = ast::FieldDecl::cast(member.clone()) {
-                    let ty = member_type_of(field.ty());
-                    for name in field.names() {
-                        members.push(new_member(&name, DefKind::Field, ty.clone()));
+impl ProjectIndex {
+    fn members_of_decl(
+        owner: ItemId,
+        file: FileId,
+        node: &SyntaxNode,
+        owner_simple: &str,
+    ) -> Vec<Member> {
+        let mut members = Vec::new();
+        // The body holds the members directly (a `ClassBody`, or an `EnumBody` whose constants and
+        // members are both direct children).
+        let Some(body) = node
+            .children()
+            .find(|c| matches!(c.kind(), CLASS_BODY | ENUM_BODY))
+        else {
+            return members;
+        };
+        // A member of `owner`/`file` with no params/varargs/throws; each call site overrides (via
+        // struct-update) only the fields that apply to its member kind.
+        let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
+            owner,
+            name: name_tok.text().to_string(),
+            kind,
+            file,
+            name_range: Collect::byte_range(name_tok),
+            ty,
+            params: Vec::new(),
+            varargs: false,
+            throws: Vec::new(),
+            // A project / stub member's own `file` already points at real (or no) source.
+            source_location: None,
+        };
+        for member in body.children() {
+            match member.kind() {
+                FIELD_DECL => {
+                    if let Some(field) = ast::FieldDecl::cast(member.clone()) {
+                        let ty = MemberType::of(field.ty());
+                        for name in field.names() {
+                            members.push(new_member(&name, DefKind::Field, ty.clone()));
+                        }
                     }
                 }
-            }
-            METHOD_DECL => {
-                if let Some(name) = first_ident_token(&member) {
-                    let ty = member_type_of(
-                        ast::MethodDecl::cast(member.clone()).and_then(|m| m.return_type()),
-                    );
-                    let (params, varargs) = params_of(&member);
-                    let throws = throws_of(&member);
-                    members.push(Member {
-                        params,
-                        varargs,
-                        throws,
-                        ..new_member(&name, DefKind::Method, ty)
-                    });
+                METHOD_DECL => {
+                    if let Some(name) = Collect::first_ident_token(&member) {
+                        let ty = MemberType::of(
+                            ast::MethodDecl::cast(member.clone()).and_then(|m| m.return_type()),
+                        );
+                        let (params, varargs) = Self::params_of(&member);
+                        let throws = Self::throws_of(&member);
+                        members.push(Member {
+                            params,
+                            varargs,
+                            throws,
+                            ..new_member(&name, DefKind::Method, ty)
+                        });
+                    }
                 }
-            }
-            CONSTRUCTOR_DECL => {
-                if let Some(name) = first_ident_token(&member) {
-                    let throws = throws_of(&member);
-                    members.push(Member {
-                        throws,
-                        ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
-                    });
+                CONSTRUCTOR_DECL => {
+                    if let Some(name) = Collect::first_ident_token(&member) {
+                        let throws = Self::throws_of(&member);
+                        members.push(Member {
+                            throws,
+                            ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
+                        });
+                    }
                 }
-            }
-            ENUM_CONSTANT => {
-                if let Some(name) = first_ident_token(&member) {
-                    let ty = MemberType::Named {
-                        name: owner_simple.to_string(),
-                        qualified: None,
-                        dims: 0,
-                        args: Vec::new(),
-                    };
-                    members.push(new_member(&name, DefKind::EnumConstant, ty));
+                ENUM_CONSTANT => {
+                    if let Some(name) = Collect::first_ident_token(&member) {
+                        let ty = MemberType::Named {
+                            name: owner_simple.to_string(),
+                            qualified: None,
+                            dims: 0,
+                            args: Vec::new(),
+                        };
+                        members.push(new_member(&name, DefKind::EnumConstant, ty));
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
+        members
     }
-    members
 }
 
 /// A method declaration's formal parameters (in order) and whether it is varargs (its last
 /// parameter is `int... xs`). Each parameter's name and type are captured as self-contained data,
 /// the type like a field's. Pure.
-fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
-    let mut params = Vec::new();
-    let mut varargs = false;
-    if let Some(list) = ast::MethodDecl::cast(method.clone()).and_then(|m| m.params()) {
-        for param in list.params() {
-            if param
-                .syntax()
-                .children_with_tokens()
-                .filter_map(SyntaxElement::into_token)
-                .any(|t| t.kind() == ELLIPSIS)
-            {
-                varargs = true;
+impl ProjectIndex {
+    fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
+        let mut params = Vec::new();
+        let mut varargs = false;
+        if let Some(list) = ast::MethodDecl::cast(method.clone()).and_then(|m| m.params()) {
+            for param in list.params() {
+                if param
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(SyntaxElement::into_token)
+                    .any(|t| t.kind() == ELLIPSIS)
+                {
+                    varargs = true;
+                }
+                params.push(Param {
+                    name: param.name(),
+                    ty: MemberType::of(param.ty()),
+                });
             }
-            params.push(Param {
-                name: param.name(),
-                ty: member_type_of(param.ty()),
-            });
         }
+        (params, varargs)
     }
-    (params, varargs)
-}
 
-/// The `ast::Type`s named in a method / constructor declaration's `throws` clause, in order. Empty
-/// when there is no `throws` clause. Works for both `METHOD_DECL` and `CONSTRUCTOR_DECL` by reading
-/// the shared `THROWS_CLAUSE` child. Shared with the checked-exception analysis
-/// ([`crate::throws`]), which resolves the same types to items rather than capturing them. Pure.
-pub(crate) fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
-    node.children()
-        .find_map(ast::ThrowsClause::cast)
-        .into_iter()
-        .flat_map(|clause| clause.types())
-}
+    /// The `ast::Type`s named in a method / constructor declaration's `throws` clause, in order. Empty
+    /// when there is no `throws` clause. Works for both `METHOD_DECL` and `CONSTRUCTOR_DECL` by reading
+    /// the shared `THROWS_CLAUSE` child. Shared with the checked-exception analysis
+    /// ([`crate::throws`]), which resolves the same types to items rather than capturing them. Pure.
+    pub(crate) fn throws_clause_types(node: &SyntaxNode) -> impl Iterator<Item = ast::Type> {
+        node.children()
+            .find_map(ast::ThrowsClause::cast)
+            .into_iter()
+            .flat_map(|clause| clause.types())
+    }
 
-/// A method / constructor declaration's declared checked exceptions — the `throws` clause types —
-/// each captured as a [`MemberType`] like a parameter's type. Empty when there is no `throws` clause.
-/// Pure.
-fn throws_of(member: &SyntaxNode) -> Vec<MemberType> {
-    throws_clause_types(member)
-        .map(|ty| member_type_of(Some(ty)))
-        .collect()
-}
+    /// A method / constructor declaration's declared checked exceptions — the `throws` clause types —
+    /// each captured as a [`MemberType`] like a parameter's type. Empty when there is no `throws`
+    /// clause. Pure.
+    fn throws_of(member: &SyntaxNode) -> Vec<MemberType> {
+        Self::throws_clause_types(member)
+            .map(|ty| MemberType::of(Some(ty)))
+            .collect()
+    }
 
-/// The supertypes of a type declaration `node`: the `extends` and `implements` clause types, each
-/// captured as a [`MemberType`] (so its name, qualifier, and type arguments are all kept). Always a
-/// [`MemberType::Named`] for a well-formed clause. Pure.
-fn raw_supertypes_of(node: &SyntaxNode) -> Vec<MemberType> {
-    let mut supertypes = Vec::new();
-    for clause in node
-        .children()
-        .filter(|c| matches!(c.kind(), EXTENDS_CLAUSE | IMPLEMENTS_CLAUSE))
-    {
-        for ty in clause.children().filter_map(ast::Type::cast) {
-            supertypes.push(member_type_of(Some(ty)));
+    /// The supertypes of a type declaration `node`: the `extends` and `implements` clause types, each
+    /// captured as a [`MemberType`] (so its name, qualifier, and type arguments are all kept). Always a
+    /// [`MemberType::Named`] for a well-formed clause. Pure.
+    fn raw_supertypes_of(node: &SyntaxNode) -> Vec<MemberType> {
+        let mut supertypes = Vec::new();
+        for clause in node
+            .children()
+            .filter(|c| matches!(c.kind(), EXTENDS_CLAUSE | IMPLEMENTS_CLAUSE))
+        {
+            for ty in clause.children().filter_map(ast::Type::cast) {
+                supertypes.push(MemberType::of(Some(ty)));
+            }
         }
+        supertypes
     }
-    supertypes
+
+    /// The declared type parameters of a type declaration `node`, in order (`class Box<K, V>` → `K`,
+    /// `V`), each with its `extends` bounds captured. Empty for a non-generic type. Pure.
+    fn type_params_of(node: &SyntaxNode) -> Vec<TypeParamDecl> {
+        node.children()
+            .find_map(ast::TypeParams::cast)
+            .map(|tps| {
+                tps.params()
+                    .map(|tp| TypeParamDecl {
+                        name: tp.name().unwrap_or_default(),
+                        bounds: tp.bounds().map(|b| MemberType::of(Some(b))).collect(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
-/// The declared type parameters of a type declaration `node`, in order (`class Box<K, V>` → `K`,
-/// `V`), each with its `extends` bounds captured. Empty for a non-generic type. Pure.
-fn type_params_of(node: &SyntaxNode) -> Vec<TypeParamDecl> {
-    node.children()
-        .find_map(ast::TypeParams::cast)
-        .map(|tps| {
-            tps.params()
-                .map(|tp| TypeParamDecl {
-                    name: tp.name().unwrap_or_default(),
-                    bounds: tp.bounds().map(|b| member_type_of(Some(b))).collect(),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Captures a member's declared type (`ast::Type`) as a self-contained [`MemberType`]. `None` (a
-/// missing type) and a `var` type are [`MemberType::Unknown`].
-fn member_type_of(ty: Option<ast::Type>) -> MemberType {
-    let Some(ty) = ty else {
-        return MemberType::Unknown;
-    };
-    // One pass over the type's direct tokens: count array `[`s and capture the leading keyword.
-    let mut dims = 0u32;
-    let mut keyword: Option<SyntaxToken> = None;
-    for token in ty
-        .syntax()
-        .children_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-    {
-        match token.kind() {
-            LBRACK => dims += 1,
-            k if keyword.is_none() && !k.is_trivia() => keyword = Some(token),
-            _ => {}
+impl MemberType {
+    /// Captures a member's declared type (`ast::Type`) as a self-contained [`MemberType`]. `None` (a
+    /// missing type) and a `var` type are [`MemberType::Unknown`].
+    fn of(ty: Option<ast::Type>) -> Self {
+        let Some(ty) = ty else {
+            return Self::Unknown;
+        };
+        // One pass over the type's direct tokens: count array `[`s and capture the leading keyword.
+        let mut dims = 0u32;
+        let mut keyword: Option<SyntaxToken> = None;
+        for token in ty
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+        {
+            match token.kind() {
+                LBRACK => dims += 1,
+                k if keyword.is_none() && !k.is_trivia() => keyword = Some(token),
+                _ => {}
+            }
         }
-    }
-    if ty.is_primitive_or_var() {
-        match keyword.as_ref().map(SyntaxToken::text) {
-            Some("void") => MemberType::Void,
-            // `var`, a bare wildcard (`?`), or a missing keyword: no nameable type.
-            Some("var" | "?") | None => MemberType::Unknown,
-            Some(k) => MemberType::Primitive {
-                keyword: k.to_string(),
+        if ty.is_primitive_or_var() {
+            match keyword.as_ref().map(SyntaxToken::text) {
+                Some("void") => Self::Void,
+                // `var`, a bare wildcard (`?`), or a missing keyword: no nameable type.
+                Some("var" | "?") | None => Self::Unknown,
+                Some(k) => Self::Primitive {
+                    keyword: k.to_string(),
+                    dims,
+                },
+            }
+        } else {
+            let args = ty.type_arg_types().map(|a| Self::of(Some(a))).collect();
+            Self::Named {
+                name: ty.simple_name().unwrap_or_default(),
+                qualified: ty.qualified_text().filter(|q| q.contains('.')),
                 dims,
-            },
-        }
-    } else {
-        let args = ty
-            .type_arg_types()
-            .map(|a| member_type_of(Some(a)))
-            .collect();
-        MemberType::Named {
-            name: ty.simple_name().unwrap_or_default(),
-            qualified: ty.qualified_text().filter(|q| q.contains('.')),
-            dims,
-            args,
+                args,
+            }
         }
     }
 }
 
-/// The [`DefKind`] for a type-declaration node kind, or `None` if it is not a type declaration.
-pub(crate) const fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
-    match kind {
-        CLASS_DECL => Some(DefKind::Class),
-        INTERFACE_DECL => Some(DefKind::Interface),
-        ENUM_DECL => Some(DefKind::Enum),
-        RECORD_DECL => Some(DefKind::Record),
-        ANNOTATION_TYPE_DECL => Some(DefKind::AnnotationType),
-        _ => None,
+impl ProjectIndex {
+    /// The [`DefKind`] for a type-declaration node kind, or `None` if it is not a type declaration.
+    pub(crate) const fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
+        match kind {
+            CLASS_DECL => Some(DefKind::Class),
+            INTERFACE_DECL => Some(DefKind::Interface),
+            ENUM_DECL => Some(DefKind::Enum),
+            RECORD_DECL => Some(DefKind::Record),
+            ANNOTATION_TYPE_DECL => Some(DefKind::AnnotationType),
+            _ => None,
+        }
     }
-}
 
-/// Builds a fully-qualified name. A nested type appends to its enclosing type's FQN (which already
-/// carries the package); a top-level type prepends the package, if any.
-fn build_fqn(package: Option<&str>, enclosing: Option<&str>, simple: &str) -> String {
-    enclosing.map_or_else(|| qualify(package, simple), |e| format!("{e}.{simple}"))
-}
+    /// Builds a fully-qualified name. A nested type appends to its enclosing type's FQN (which already
+    /// carries the package); a top-level type prepends the package, if any.
+    fn build_fqn(package: Option<&str>, enclosing: Option<&str>, simple: &str) -> String {
+        enclosing.map_or_else(
+            || Self::qualify(package, simple),
+            |e| format!("{e}.{simple}"),
+        )
+    }
 
-/// Qualifies `simple` with `package` (`Some("a.b")` → `a.b.Simple`; `None` → `Simple`).
-fn qualify(package: Option<&str>, simple: &str) -> String {
-    package.map_or_else(|| simple.to_string(), |p| format!("{p}.{simple}"))
-}
+    /// Qualifies `simple` with `package` (`Some("a.b")` → `a.b.Simple`; `None` → `Simple`).
+    fn qualify(package: Option<&str>, simple: &str) -> String {
+        package.map_or_else(|| simple.to_string(), |p| format!("{p}.{simple}"))
+    }
 
-/// Whether `name` is a method every type inherits from `java.lang.Object`. A call to one of these
-/// may bind to `Object`'s declaration (not indexed), so the project member set for it is incomplete.
-fn is_object_method(name: &str) -> bool {
-    const OBJECT_METHODS: &[&str] = &[
-        "equals",
-        "hashCode",
-        "toString",
-        "getClass",
-        "clone",
-        "notify",
-        "notifyAll",
-        "wait",
-        "finalize",
-    ];
-    OBJECT_METHODS.contains(&name)
-}
+    /// Whether `name` is a method every type inherits from `java.lang.Object`. A call to one of these
+    /// may bind to `Object`'s declaration (not indexed), so the project member set for it is incomplete.
+    fn is_object_method(name: &str) -> bool {
+        const OBJECT_METHODS: &[&str] = &[
+            "equals",
+            "hashCode",
+            "toString",
+            "getClass",
+            "clone",
+            "notify",
+            "notifyAll",
+            "wait",
+            "finalize",
+        ];
+        OBJECT_METHODS.contains(&name)
+    }
 
-/// Whether `name` is a commonly-used implicit `java.lang` type (imported into every file). Kept
-/// small and conservative: it only needs to cover the names that would otherwise produce false
-/// "cannot resolve" diagnostics in files with no imports.
-fn is_java_lang(name: &str) -> bool {
-    const JAVA_LANG: &[&str] = &[
-        "Object",
-        "String",
-        "CharSequence",
-        "StringBuilder",
-        "StringBuffer",
-        "Number",
-        "Byte",
-        "Short",
-        "Integer",
-        "Long",
-        "Float",
-        "Double",
-        "Boolean",
-        "Character",
-        "Void",
-        "Math",
-        "System",
-        "Runtime",
-        "Process",
-        "Thread",
-        "Runnable",
-        "Iterable",
-        "Comparable",
-        "Cloneable",
-        "AutoCloseable",
-        "Class",
-        "Enum",
-        "Record",
-        "Throwable",
-        "Error",
-        "Exception",
-        "RuntimeException",
-        "IllegalArgumentException",
-        "NumberFormatException",
-        "IllegalStateException",
-        "NullPointerException",
-        "IndexOutOfBoundsException",
-        "ArrayIndexOutOfBoundsException",
-        "StringIndexOutOfBoundsException",
-        "UnsupportedOperationException",
-        "ClassCastException",
-        "ArithmeticException",
-        "NegativeArraySizeException",
-        "InterruptedException",
-        "CloneNotSupportedException",
-        "Override",
-        "Deprecated",
-        "SuppressWarnings",
-        "FunctionalInterface",
-        "SafeVarargs",
-    ];
-    JAVA_LANG.contains(&name)
+    /// Whether `name` is a commonly-used implicit `java.lang` type (imported into every file). Kept
+    /// small and conservative: it only needs to cover the names that would otherwise produce false
+    /// "cannot resolve" diagnostics in files with no imports.
+    fn is_java_lang(name: &str) -> bool {
+        const JAVA_LANG: &[&str] = &[
+            "Object",
+            "String",
+            "CharSequence",
+            "StringBuilder",
+            "StringBuffer",
+            "Number",
+            "Byte",
+            "Short",
+            "Integer",
+            "Long",
+            "Float",
+            "Double",
+            "Boolean",
+            "Character",
+            "Void",
+            "Math",
+            "System",
+            "Runtime",
+            "Process",
+            "Thread",
+            "Runnable",
+            "Iterable",
+            "Comparable",
+            "Cloneable",
+            "AutoCloseable",
+            "Class",
+            "Enum",
+            "Record",
+            "Throwable",
+            "Error",
+            "Exception",
+            "RuntimeException",
+            "IllegalArgumentException",
+            "NumberFormatException",
+            "IllegalStateException",
+            "NullPointerException",
+            "IndexOutOfBoundsException",
+            "ArrayIndexOutOfBoundsException",
+            "StringIndexOutOfBoundsException",
+            "UnsupportedOperationException",
+            "ClassCastException",
+            "ArithmeticException",
+            "NegativeArraySizeException",
+            "InterruptedException",
+            "CloneNotSupportedException",
+            "Override",
+            "Deprecated",
+            "SuppressWarnings",
+            "FunctionalInterface",
+            "SafeVarargs",
+        ];
+        JAVA_LANG.contains(&name)
+    }
 }
 
 #[cfg(test)]
@@ -1615,8 +1638,8 @@ mod tests {
         let a = "package p; class Base { int f() { return 0; } }";
         let b = "package p; class Sub extends Base { String g(int x) { return null; } }";
         let files = [
-            (FileId(0), jals_syntax::parse(a).syntax()),
-            (FileId(1), jals_syntax::parse(b).syntax()),
+            (FileId(0), jals_syntax::Parse::parse(a).syntax()),
+            (FileId(1), jals_syntax::Parse::parse(b).syntax()),
         ];
         let built = ProjectIndex::builder(&files).with_stdlib().build();
 
@@ -1626,9 +1649,9 @@ mod tests {
             .collect();
         let stub = ProjectIndex::stub_facts();
         let assembled = ProjectIndex::assemble(
-            &borrow_facts(&facts),
+            &ProjectIndex::borrow_facts(&facts),
             &[],
-            &borrow_facts(&stub),
+            &ProjectIndex::borrow_facts(&stub),
             &ProjectIndex::lower_classpath(&[]),
             &SourceLocations::default(),
         );
@@ -1646,7 +1669,7 @@ mod tests {
     #[test]
     fn extract_file_is_deterministic() {
         let src = "package p; import a.B; class C<T> extends B { T get() { return null; } }";
-        let root = jals_syntax::parse(src).syntax();
+        let root = jals_syntax::Parse::parse(src).syntax();
         assert_eq!(
             ProjectIndex::extract_file(&root),
             ProjectIndex::extract_file(&root)
@@ -1660,8 +1683,8 @@ mod tests {
         let a = "package p; class A { B b; }";
         let b = "package p; class B extends A { int x; }";
         let files = [
-            (FileId(0), jals_syntax::parse(a).syntax()),
-            (FileId(1), jals_syntax::parse(b).syntax()),
+            (FileId(0), jals_syntax::Parse::parse(a).syntax()),
+            (FileId(1), jals_syntax::Parse::parse(b).syntax()),
         ];
         let mut facts: Vec<(FileId, FileFacts)> = files
             .iter()
@@ -1671,9 +1694,9 @@ mod tests {
         let empty_cp = ProjectIndex::lower_classpath(&[]);
         let assemble = |facts: &[(FileId, FileFacts)]| {
             ProjectIndex::assemble(
-                &borrow_facts(facts),
+                &ProjectIndex::borrow_facts(facts),
                 &[],
-                &borrow_facts(&stub),
+                &ProjectIndex::borrow_facts(&stub),
                 &empty_cp,
                 &SourceLocations::default(),
             )

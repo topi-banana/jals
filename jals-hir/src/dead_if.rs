@@ -31,9 +31,9 @@ use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxNode};
 
 use crate::def::DefId;
-use crate::infer::{declarator_initializers, node_span, op_kinds, token_start};
+use crate::infer::Cst;
 use crate::resolve::Resolved;
-use crate::resolve::collect::first_ident_token;
+use crate::resolve::collect::Collect;
 
 /// An `if` statement whose condition is provably constant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,50 +56,50 @@ impl DeadIf {
             if self.value { "true" } else { "false" }
         )
     }
-}
 
-/// Every `if` statement in `root` whose condition folds to a constant, in source order.
-/// `resolved` is the file's name resolution, used to fold `final` constant variables.
-pub fn dead_ifs(root: &SyntaxNode, resolved: &Resolved) -> Vec<DeadIf> {
-    let mut evaluator = Evaluator {
-        root,
-        resolved,
-        decls: None,
-        visiting: Vec::new(),
-    };
-    let mut out = Vec::new();
-    for if_stmt in root.descendants().filter_map(ast::IfStmt::cast) {
-        let Some(condition) = if_stmt.condition() else {
-            continue; // broken parse (`if () {}`) — nothing to evaluate.
+    /// Every `if` statement in `root` whose condition folds to a constant, in source order.
+    /// `resolved` is the file's name resolution, used to fold `final` constant variables.
+    pub fn collect(root: &SyntaxNode, resolved: &Resolved) -> Vec<Self> {
+        let mut evaluator = Evaluator {
+            root,
+            resolved,
+            decls: None,
+            visiting: Vec::new(),
         };
-        // A non-boolean constant condition (`if (1)`) is a type error, not a dead branch.
-        let Some(ConstValue::Bool(value)) = evaluator.eval(&condition) else {
-            continue;
-        };
-        let mut branches = if_stmt.branches();
-        let then_branch = branches.next();
-        let else_branch = branches.next();
-        let dead = if value { else_branch } else { then_branch };
-        out.push(DeadIf {
-            condition_range: trimmed_span(condition.syntax()),
-            value,
-            dead_range: dead.map(|stmt| trimmed_span(stmt.syntax())),
-        });
+        let mut out = Vec::new();
+        for if_stmt in root.descendants().filter_map(ast::IfStmt::cast) {
+            let Some(condition) = if_stmt.condition() else {
+                continue; // broken parse (`if () {}`) — nothing to evaluate.
+            };
+            // A non-boolean constant condition (`if (1)`) is a type error, not a dead branch.
+            let Some(ConstValue::Bool(value)) = evaluator.eval(&condition) else {
+                continue;
+            };
+            let mut branches = if_stmt.branches();
+            let then_branch = branches.next();
+            let else_branch = branches.next();
+            let dead = if value { else_branch } else { then_branch };
+            out.push(Self {
+                condition_range: Self::trimmed_span(condition.syntax()),
+                value,
+                dead_range: dead.map(|stmt| Self::trimmed_span(stmt.syntax())),
+            });
+        }
+        out
     }
-    out
-}
 
-/// The byte span of `node` with the leading trivia it carries trimmed off (this CST attaches the
-/// trivia between two siblings to the *following* node, so a branch statement's range would
-/// otherwise start at the space before it).
-fn trimmed_span(node: &SyntaxNode) -> Range<usize> {
-    let full = node_span(node);
-    let start = node
-        .descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .find(|t| !t.kind().is_trivia())
-        .map_or(full.start, |t| usize::from(t.text_range().start()));
-    start..full.end
+    /// The byte span of `node` with the leading trivia it carries trimmed off (this CST attaches the
+    /// trivia between two siblings to the *following* node, so a branch statement's range would
+    /// otherwise start at the space before it).
+    fn trimmed_span(node: &SyntaxNode) -> Range<usize> {
+        let full = Collect::node_span(node);
+        let start = node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|t| !t.kind().is_trivia())
+            .map_or(full.start, |t| usize::from(t.text_range().start()));
+        start..full.end
+    }
 }
 
 /// A folded constant value. Java's `boolean` and its integral types as evaluated at `int` / `long`
@@ -131,11 +131,11 @@ impl Evaluator<'_> {
     /// Folds `expr` to a constant, or `None` when it cannot be proven constant.
     fn eval(&mut self, expr: &ast::Expr) -> Option<ConstValue> {
         match expr {
-            ast::Expr::Literal(l) => literal_value(l),
+            ast::Expr::Literal(l) => ConstValue::from_literal(l),
             ast::Expr::Paren(p) => self.eval(&p.expr()?),
             ast::Expr::Unary(u) => {
                 let value = self.eval(&u.operand()?)?;
-                match (*op_kinds(u.syntax()).first()?, value) {
+                match (*Cst::op_kinds(u.syntax()).first()?, value) {
                     (BANG, ConstValue::Bool(b)) => Some(ConstValue::Bool(!b)),
                     // Wrapping matches Java two's complement (`-0x8000000000000000L` is `Long.MIN_VALUE`).
                     (MINUS, ConstValue::Int(v)) => Some(ConstValue::Int(v.wrapping_neg())),
@@ -156,7 +156,7 @@ impl Evaluator<'_> {
         // Operator spellings as in `infer`: `>` is `GT`, `>=` is `GT EQ`; `instanceof`, shifts
         // (`GT GT`), arithmetic, and non-short-circuit `&` / `|` / `^` all bail here, before
         // either operand is folded.
-        let value = match op_kinds(expr.syntax()).as_slice() {
+        let value = match Cst::op_kinds(expr.syntax()).as_slice() {
             // Three-valued: one provably-`false` side decides `&&` even if the other side is
             // unknown — short-circuiting affects evaluation, never the value. A deciding lhs
             // skips folding the rhs at all.
@@ -176,8 +176,12 @@ impl Evaluator<'_> {
                     _ => return None,
                 },
             },
-            [EQ_EQ] => equal(self.eval_opt(expr.lhs())?, self.eval_opt(expr.rhs())?)?,
-            [BANG_EQ] => !equal(self.eval_opt(expr.lhs())?, self.eval_opt(expr.rhs())?)?,
+            [EQ_EQ] => self
+                .eval_opt(expr.lhs())?
+                .equal(self.eval_opt(expr.rhs())?)?,
+            [BANG_EQ] => !self
+                .eval_opt(expr.lhs())?
+                .equal(self.eval_opt(expr.rhs())?)?,
             [LT] => self.compare(expr, |a, b| a < b)?,
             [LT_EQ] => self.compare(expr, |a, b| a <= b)?,
             [GT] => self.compare(expr, |a, b| a > b)?,
@@ -214,10 +218,10 @@ impl Evaluator<'_> {
     fn eval_name(&mut self, name: &ast::NameRef) -> Option<ConstValue> {
         // References are keyed by the identifier *token* start (a `NAME_REF` node may carry
         // leading trivia), exactly as `infer` looks them up.
-        let token = first_ident_token(name.syntax())?;
+        let token = Collect::first_ident_token(name.syntax())?;
         let def_id = self
             .resolved
-            .reference_at(token_start(&token))?
+            .reference_at(Collect::token_start(&token))?
             .resolution
             .def_id()?;
         if self.visiting.contains(&def_id) || self.visiting.len() >= MAX_CONST_CHAIN {
@@ -225,7 +229,9 @@ impl Evaluator<'_> {
         }
         let name_start = self.resolved.def(def_id).name_range.start;
         let root = self.root;
-        let decls = self.decls.get_or_insert_with(|| final_initializers(root));
+        let decls = self
+            .decls
+            .get_or_insert_with(|| Evaluator::final_initializers(root));
         let init = decls.get(&name_start)?.clone();
         self.visiting.push(def_id);
         let value = self.eval(&init);
@@ -234,86 +240,92 @@ impl Evaluator<'_> {
     }
 }
 
-/// Every `final` declarator's initializer in the file, keyed by the declaring `IDENT` token start.
-/// Declarators are paired with their initializers by the same walk `infer`'s initializer check
-/// uses ([`declarator_initializers`]).
-fn final_initializers(root: &SyntaxNode) -> BTreeMap<usize, ast::Expr> {
-    let mut decls = BTreeMap::new();
-    for node in root.descendants() {
-        if !matches!(node.kind(), LOCAL_VAR_DECL | FIELD_DECL) {
-            continue;
+impl Evaluator<'_> {
+    /// Every `final` declarator's initializer in the file, keyed by the declaring `IDENT` token start.
+    /// Declarators are paired with their initializers by the same walk `infer`'s initializer check
+    /// uses ([`Cst::declarator_initializers`]).
+    fn final_initializers(root: &SyntaxNode) -> BTreeMap<usize, ast::Expr> {
+        let mut decls = BTreeMap::new();
+        for node in root.descendants() {
+            if !matches!(node.kind(), LOCAL_VAR_DECL | FIELD_DECL) {
+                continue;
+            }
+            let is_final = node
+                .children()
+                .find_map(ast::Modifiers::cast)
+                .is_some_and(|m| m.has(FINAL_KW));
+            if !is_final {
+                continue;
+            }
+            for (name, value) in Cst::declarator_initializers(&node) {
+                decls.insert(Collect::token_start(&name), value);
+            }
         }
-        let is_final = node
-            .children()
-            .find_map(ast::Modifiers::cast)
-            .is_some_and(|m| m.has(FINAL_KW));
-        if !is_final {
-            continue;
-        }
-        for (name, value) in declarator_initializers(&node) {
-            decls.insert(token_start(&name), value);
-        }
-    }
-    decls
-}
-
-fn literal_value(literal: &ast::Literal) -> Option<ConstValue> {
-    let token = literal.token()?;
-    match token.kind() {
-        TRUE_KW => Some(ConstValue::Bool(true)),
-        FALSE_KW => Some(ConstValue::Bool(false)),
-        INT_LITERAL => parse_int_literal(token.text()).map(ConstValue::Int),
-        // `char` / `String` / float / `null` literals are out of scope.
-        _ => None,
+        decls
     }
 }
 
-/// Java `==` on two constants of the same kind; a mixed comparison (`1 == true`) is a type error
-/// and stays unknown.
-const fn equal(lhs: ConstValue, rhs: ConstValue) -> Option<bool> {
-    match (lhs, rhs) {
-        (ConstValue::Bool(a), ConstValue::Bool(b)) => Some(a == b),
-        (ConstValue::Int(a), ConstValue::Int(b)) => Some(a == b),
-        _ => None,
+impl ConstValue {
+    /// The constant value of a literal token: `true` / `false` and integer literals fold; every other
+    /// literal shape (`char` / `String` / float / `null`) is out of scope.
+    fn from_literal(literal: &ast::Literal) -> Option<Self> {
+        let token = literal.token()?;
+        match token.kind() {
+            TRUE_KW => Some(Self::Bool(true)),
+            FALSE_KW => Some(Self::Bool(false)),
+            INT_LITERAL => Self::parse_int_literal(token.text()).map(Self::Int),
+            // `char` / `String` / float / `null` literals are out of scope.
+            _ => None,
+        }
     }
-}
 
-/// Parses a Java integer literal (JLS §3.10.1) to the `i64` Java evaluates it as: decimal, hex
-/// `0x`, binary `0b`, and octal `0…` radixes, `_` separators, and an `l` / `L` suffix. An `int`
-/// literal is evaluated at 32-bit width and sign-extended (`0xFFFFFFFF` is `-1`, as in Java);
-/// out-of-range and malformed literals are `None`. A bare decimal `2147483648` (legal only under
-/// unary `-`) is conservatively `None`, so `-2147483648` does not fold.
-fn parse_int_literal(text: &str) -> Option<i64> {
-    let (body, is_long) = match text.as_bytes().last() {
-        Some(b'l' | b'L') => (&text[..text.len() - 1], true),
-        _ => (text, false),
-    };
-    let body: String = body.chars().filter(|&c| c != '_').collect();
-    // A radix-prefix chain reads far more clearly as an if/else ladder than nested `map_or_else`.
-    #[allow(clippy::option_if_let_else)]
-    let (radix, digits, is_decimal) =
-        if let Some(rest) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-            (16, rest, false)
-        } else if let Some(rest) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-            (2, rest, false)
-        } else if body.len() > 1 && body.starts_with('0') {
-            (8, &body[1..], false)
-        } else {
-            (10, body.as_str(), true)
+    /// Java `==` on two constants of the same kind; a mixed comparison (`1 == true`) is a type error
+    /// and stays unknown.
+    const fn equal(self, other: Self) -> Option<bool> {
+        match (self, other) {
+            (Self::Bool(a), Self::Bool(b)) => Some(a == b),
+            (Self::Int(a), Self::Int(b)) => Some(a == b),
+            _ => None,
+        }
+    }
+
+    /// Parses a Java integer literal (JLS §3.10.1) to the `i64` Java evaluates it as: decimal, hex
+    /// `0x`, binary `0b`, and octal `0…` radixes, `_` separators, and an `l` / `L` suffix. An `int`
+    /// literal is evaluated at 32-bit width and sign-extended (`0xFFFFFFFF` is `-1`, as in Java);
+    /// out-of-range and malformed literals are `None`. A bare decimal `2147483648` (legal only under
+    /// unary `-`) is conservatively `None`, so `-2147483648` does not fold.
+    fn parse_int_literal(text: &str) -> Option<i64> {
+        let (body, is_long) = match text.as_bytes().last() {
+            Some(b'l' | b'L') => (&text[..text.len() - 1], true),
+            _ => (text, false),
         };
-    if digits.is_empty() {
-        return None;
-    }
-    let value = u64::from_str_radix(digits, radix).ok()?;
-    match (is_decimal, is_long) {
-        // A decimal literal is written as a magnitude — it must fit the positive range.
-        (true, false) => i32::try_from(value).ok().map(i64::from),
-        (true, true) => i64::try_from(value).ok(),
-        // A hex / binary / octal literal is a bit pattern — sign-extend from its width.
-        (false, false) => u32::try_from(value)
-            .ok()
-            .map(|bits| i64::from(bits.cast_signed())),
-        (false, true) => Some(value.cast_signed()),
+        let body: String = body.chars().filter(|&c| c != '_').collect();
+        // A radix-prefix chain reads far more clearly as an if/else ladder than nested `map_or_else`.
+        #[allow(clippy::option_if_let_else)]
+        let (radix, digits, is_decimal) =
+            if let Some(rest) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+                (16, rest, false)
+            } else if let Some(rest) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+                (2, rest, false)
+            } else if body.len() > 1 && body.starts_with('0') {
+                (8, &body[1..], false)
+            } else {
+                (10, body.as_str(), true)
+            };
+        if digits.is_empty() {
+            return None;
+        }
+        let value = u64::from_str_radix(digits, radix).ok()?;
+        match (is_decimal, is_long) {
+            // A decimal literal is written as a magnitude — it must fit the positive range.
+            (true, false) => i32::try_from(value).ok().map(i64::from),
+            (true, true) => i64::try_from(value).ok(),
+            // A hex / binary / octal literal is a bit pattern — sign-extend from its width.
+            (false, false) => u32::try_from(value)
+                .ok()
+                .map(|bits| i64::from(bits.cast_signed())),
+            (false, true) => Some(value.cast_signed()),
+        }
     }
 }
 
@@ -323,51 +335,66 @@ mod tests {
 
     #[test]
     fn parses_decimal_literals() {
-        assert_eq!(parse_int_literal("0"), Some(0));
-        assert_eq!(parse_int_literal("42"), Some(42));
-        assert_eq!(parse_int_literal("1_000"), Some(1000));
-        assert_eq!(parse_int_literal("2147483647"), Some(i64::from(i32::MAX)));
+        assert_eq!(ConstValue::parse_int_literal("0"), Some(0));
+        assert_eq!(ConstValue::parse_int_literal("42"), Some(42));
+        assert_eq!(ConstValue::parse_int_literal("1_000"), Some(1000));
+        assert_eq!(
+            ConstValue::parse_int_literal("2147483647"),
+            Some(i64::from(i32::MAX))
+        );
         // Legal only under unary `-`, so conservatively unparsed.
-        assert_eq!(parse_int_literal("2147483648"), None);
+        assert_eq!(ConstValue::parse_int_literal("2147483648"), None);
     }
 
     #[test]
     fn parses_long_literals() {
-        assert_eq!(parse_int_literal("42L"), Some(42));
-        assert_eq!(parse_int_literal("42l"), Some(42));
-        assert_eq!(parse_int_literal("9223372036854775807L"), Some(i64::MAX));
-        assert_eq!(parse_int_literal("9223372036854775808L"), None);
+        assert_eq!(ConstValue::parse_int_literal("42L"), Some(42));
+        assert_eq!(ConstValue::parse_int_literal("42l"), Some(42));
+        assert_eq!(
+            ConstValue::parse_int_literal("9223372036854775807L"),
+            Some(i64::MAX)
+        );
+        assert_eq!(ConstValue::parse_int_literal("9223372036854775808L"), None);
     }
 
     #[test]
     fn parses_hex_binary_octal() {
-        assert_eq!(parse_int_literal("0xFF"), Some(255));
-        assert_eq!(parse_int_literal("0Xff"), Some(255));
-        assert_eq!(parse_int_literal("0b1010"), Some(10));
-        assert_eq!(parse_int_literal("0B1010"), Some(10));
-        assert_eq!(parse_int_literal("010"), Some(8));
-        assert_eq!(parse_int_literal("0xFF_FF"), Some(0xFFFF));
+        assert_eq!(ConstValue::parse_int_literal("0xFF"), Some(255));
+        assert_eq!(ConstValue::parse_int_literal("0Xff"), Some(255));
+        assert_eq!(ConstValue::parse_int_literal("0b1010"), Some(10));
+        assert_eq!(ConstValue::parse_int_literal("0B1010"), Some(10));
+        assert_eq!(ConstValue::parse_int_literal("010"), Some(8));
+        assert_eq!(ConstValue::parse_int_literal("0xFF_FF"), Some(0xFFFF));
     }
 
     #[test]
     fn sign_extends_int_width_bit_patterns() {
         // Java evaluates an `int` hex literal at 32-bit width: `0xFFFFFFFF == -1`.
-        assert_eq!(parse_int_literal("0xFFFFFFFF"), Some(-1));
-        assert_eq!(parse_int_literal("0x80000000"), Some(i64::from(i32::MIN)));
+        assert_eq!(ConstValue::parse_int_literal("0xFFFFFFFF"), Some(-1));
+        assert_eq!(
+            ConstValue::parse_int_literal("0x80000000"),
+            Some(i64::from(i32::MIN))
+        );
         // Five bytes overflow `int`.
-        assert_eq!(parse_int_literal("0x1FFFFFFFF"), None);
+        assert_eq!(ConstValue::parse_int_literal("0x1FFFFFFFF"), None);
         // At `long` width the full pattern wraps instead.
-        assert_eq!(parse_int_literal("0xFFFFFFFFFFFFFFFFL"), Some(-1));
-        assert_eq!(parse_int_literal("0x8000000000000000L"), Some(i64::MIN));
+        assert_eq!(
+            ConstValue::parse_int_literal("0xFFFFFFFFFFFFFFFFL"),
+            Some(-1)
+        );
+        assert_eq!(
+            ConstValue::parse_int_literal("0x8000000000000000L"),
+            Some(i64::MIN)
+        );
     }
 
     #[test]
     fn rejects_malformed_literals() {
-        assert_eq!(parse_int_literal(""), None);
-        assert_eq!(parse_int_literal("L"), None);
-        assert_eq!(parse_int_literal("0x"), None);
-        assert_eq!(parse_int_literal("0b"), None);
-        assert_eq!(parse_int_literal("08"), None);
-        assert_eq!(parse_int_literal("abc"), None);
+        assert_eq!(ConstValue::parse_int_literal(""), None);
+        assert_eq!(ConstValue::parse_int_literal("L"), None);
+        assert_eq!(ConstValue::parse_int_literal("0x"), None);
+        assert_eq!(ConstValue::parse_int_literal("0b"), None);
+        assert_eq!(ConstValue::parse_int_literal("08"), None);
+        assert_eq!(ConstValue::parse_int_literal("abc"), None);
     }
 }

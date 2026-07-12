@@ -290,7 +290,7 @@ impl Ty {
             (self, target),
             (Self::Class(ClassTy::Project { id: s, .. }), Self::Class(ClassTy::Project { id: t, .. }))
                 if s == t
-        ) && args_definitely_differ(self, target)
+        ) && self.args_definitely_differ(target)
     }
 
     /// This type with every standard-library *stub* class type (a [`ClassTy::Project`] whose item has
@@ -348,6 +348,83 @@ impl Ty {
             Self::Primitive(_) | Self::Void | Self::Null | Self::Unknown => self.clone(),
         }
     }
+
+    /// Whether two type arguments are *provably different* concrete types — the basis for the
+    /// generic-invariance check ([`Ty::type_args_conflict`]). Lenient (`false`) whenever either side is
+    /// not fully known: an [`Unknown`](Ty::Unknown) or [`TypeVar`](Ty::TypeVar), or an external
+    /// ([`ClassTy::External`]) by-name type. Two project class types differ when their items differ, or
+    /// (recursively, invariantly) any of their own arguments do; two primitives by inequality; two
+    /// arrays by their elements. Any other (mixed-kind) pair is treated as not-provably-different to
+    /// stay safe.
+    fn args_definitely_differ(&self, other: &Self) -> bool {
+        use ClassTy::Project;
+        match (self, other) {
+            (
+                Self::Class(Project {
+                    id: i, args: ia, ..
+                }),
+                Self::Class(Project {
+                    id: j, args: ja, ..
+                }),
+            ) => {
+                if i != j {
+                    true
+                } else if ia.is_empty() || ja.is_empty() || ia.len() != ja.len() {
+                    // A raw argument at this level is lenient (`List<Map>` vs `List<Map<…>>`).
+                    false
+                } else {
+                    ia.iter().zip(ja).any(|(x, y)| x.args_definitely_differ(y))
+                }
+            }
+            (Self::Array(x), Self::Array(y)) => x.args_definitely_differ(y),
+            (Self::Primitive(p), Self::Primitive(q)) => p != q,
+            // Not fully known on either side (`Unknown`/`TypeVar`), an external by-name type, or any
+            // other mixed-kind pair: not provably different, so lenient.
+            _ => false,
+        }
+    }
+
+    /// Wraps `self` in `dims` array levels (`dims = 2` → `self[][]`).
+    #[must_use]
+    pub(crate) fn array_of(self, dims: usize) -> Self {
+        (0..dims).fold(self, |acc, _| Self::Array(Box::new(acc)))
+    }
+
+    /// The `java.lang.String` type as the MVP models it.
+    pub(crate) fn string() -> Self {
+        Self::Class(ClassTy::external("String"))
+    }
+
+    /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
+    /// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
+    pub(crate) const fn unary_promote(&self) -> Self {
+        match self.as_numeric() {
+            Some(Primitive::Byte | Primitive::Short | Primitive::Char) => {
+                Self::Primitive(Primitive::Int)
+            }
+            Some(p) => Self::Primitive(p),
+            None => Self::Unknown,
+        }
+    }
+
+    /// Binary numeric promotion (JLS §5.6.2): the result widens to the larger of `self` and `other`
+    /// along `double > float > long > int`, with everything narrower than `int` promoted to `int`. A
+    /// non-numeric operand yields [`Ty::Unknown`].
+    pub(crate) fn binary_numeric(&self, other: &Self) -> Self {
+        let (Some(a), Some(b)) = (self.as_numeric(), other.as_numeric()) else {
+            return Self::Unknown;
+        };
+        let result = if a == Primitive::Double || b == Primitive::Double {
+            Primitive::Double
+        } else if a == Primitive::Float || b == Primitive::Float {
+            Primitive::Float
+        } else if a == Primitive::Long || b == Primitive::Long {
+            Primitive::Long
+        } else {
+            Primitive::Int
+        };
+        Self::Primitive(result)
+    }
 }
 
 impl fmt::Display for Ty {
@@ -374,74 +451,6 @@ impl fmt::Display for Ty {
     }
 }
 
-/// Whether two type arguments are *provably different* concrete types — the basis for the
-/// generic-invariance check ([`Ty::type_args_conflict`]). Lenient (`false`) whenever either side is
-/// not fully known: an [`Unknown`](Ty::Unknown) or [`TypeVar`](Ty::TypeVar), or an external
-/// ([`ClassTy::External`]) by-name type. Two project class types differ when their items differ, or
-/// (recursively, invariantly) any of their own arguments do; two primitives by inequality; two arrays
-/// by their elements. Any other (mixed-kind) pair is treated as not-provably-different to stay safe.
-fn args_definitely_differ(a: &Ty, b: &Ty) -> bool {
-    use ClassTy::Project;
-    match (a, b) {
-        (
-            Ty::Class(Project {
-                id: i, args: ia, ..
-            }),
-            Ty::Class(Project {
-                id: j, args: ja, ..
-            }),
-        ) => {
-            if i != j {
-                true
-            } else if ia.is_empty() || ja.is_empty() || ia.len() != ja.len() {
-                // A raw argument at this level is lenient (`List<Map>` vs `List<Map<…>>`).
-                false
-            } else {
-                ia.iter().zip(ja).any(|(x, y)| args_definitely_differ(x, y))
-            }
-        }
-        (Ty::Array(x), Ty::Array(y)) => args_definitely_differ(x, y),
-        (Ty::Primitive(p), Ty::Primitive(q)) => p != q,
-        // Not fully known on either side (`Unknown`/`TypeVar`), an external by-name type, or any
-        // other mixed-kind pair: not provably different, so lenient.
-        _ => false,
-    }
-}
-
-/// The `java.lang.String` type as the MVP models it.
-pub(crate) fn string_ty() -> Ty {
-    Ty::Class(ClassTy::external("String"))
-}
-
-/// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
-/// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
-pub(crate) const fn unary_promote(t: &Ty) -> Ty {
-    match t.as_numeric() {
-        Some(Primitive::Byte | Primitive::Short | Primitive::Char) => Ty::Primitive(Primitive::Int),
-        Some(p) => Ty::Primitive(p),
-        None => Ty::Unknown,
-    }
-}
-
-/// Binary numeric promotion (JLS §5.6.2): the result widens to the larger of the two operands
-/// along `double > float > long > int`, with everything narrower than `int` promoted to `int`. A
-/// non-numeric operand yields [`Ty::Unknown`].
-pub(crate) fn binary_numeric(l: &Ty, r: &Ty) -> Ty {
-    let (Some(a), Some(b)) = (l.as_numeric(), r.as_numeric()) else {
-        return Ty::Unknown;
-    };
-    let result = if a == Primitive::Double || b == Primitive::Double {
-        Primitive::Double
-    } else if a == Primitive::Float || b == Primitive::Float {
-        Primitive::Float
-    } else if a == Primitive::Long || b == Primitive::Long {
-        Primitive::Long
-    } else {
-        Primitive::Int
-    };
-    Ty::Primitive(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,7 +460,7 @@ mod tests {
         assert_eq!(Ty::Primitive(Primitive::Int).to_string(), "int");
         assert_eq!(Ty::Void.to_string(), "void");
         assert_eq!(Ty::Null.to_string(), "null");
-        assert_eq!(string_ty().to_string(), "String");
+        assert_eq!(Ty::string().to_string(), "String");
         assert_eq!(
             Ty::Array(Box::new(Ty::Primitive(Primitive::Long))).to_string(),
             "long[]"
@@ -474,13 +483,13 @@ mod tests {
         // A single type argument: `List<String>`.
         let list_of_string = Ty::Class(ClassTy::External {
             name: "List".to_string(),
-            args: vec![string_ty()],
+            args: vec![Ty::string()],
         });
         assert_eq!(list_of_string.to_string(), "List<String>");
         // Several arguments, comma-separated, and nesting: `Map<String, List<int>>`.
         let map = Ty::Class(ClassTy::External {
             name: "Map".to_string(),
-            args: vec![string_ty(), list_of_string],
+            args: vec![Ty::string(), list_of_string],
         });
         assert_eq!(map.to_string(), "Map<String, List<String>>");
     }
@@ -492,15 +501,15 @@ mod tests {
         let long = Ty::Primitive(Primitive::Long);
         let double = Ty::Primitive(Primitive::Double);
         // byte + byte = int (the common surprise).
-        assert_eq!(binary_numeric(&byte, &byte), int);
-        assert_eq!(binary_numeric(&int, &long), long);
-        assert_eq!(binary_numeric(&long, &double), double);
+        assert_eq!(byte.binary_numeric(&byte), int);
+        assert_eq!(int.binary_numeric(&long), long);
+        assert_eq!(long.binary_numeric(&double), double);
         // Unary promotion lifts the sub-int types to int.
-        assert_eq!(unary_promote(&byte), int);
-        assert_eq!(unary_promote(&double), double);
+        assert_eq!(byte.unary_promote(), int);
+        assert_eq!(double.unary_promote(), double);
         // A non-numeric operand is unknown.
         assert_eq!(
-            binary_numeric(&Ty::Primitive(Primitive::Boolean), &int),
+            Ty::Primitive(Primitive::Boolean).binary_numeric(&int),
             Ty::Unknown
         );
     }
@@ -559,7 +568,7 @@ mod tests {
         let int_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Int)));
         let long_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Long)));
         let obj = Ty::Class(ClassTy::external("Object"));
-        let str_arr = Ty::Array(Box::new(string_ty()));
+        let str_arr = Ty::Array(Box::new(Ty::string()));
         let cs_arr = Ty::Array(Box::new(Ty::Class(ClassTy::external("CharSequence"))));
 
         // Primitive element arrays are invariant.

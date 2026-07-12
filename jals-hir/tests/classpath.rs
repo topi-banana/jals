@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use jals_classfile::ClassFile;
-use jals_hir::{FileId, Namespace, ProjectIndex, SourceLocations, infer, resolve_node};
+use jals_hir::{FileId, Namespace, ProjectIndex, Resolved, SourceLocations, TypeInference};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
 
@@ -18,19 +18,19 @@ fn box_classfile() -> ClassFile {
 const BOX_SOURCE: &str = include_str!("fixtures/Box.java");
 
 fn parse(src: &str) -> SyntaxNode {
-    jals_syntax::parse(src).syntax()
+    jals_syntax::Parse::parse(src).syntax()
 }
 
 /// The inferred type of the expression whose source text is exactly `text`, with `classfiles` folded
 /// into the index as classpath types.
 fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
     let node = parse(src);
-    let resolved = resolve_node(&node);
+    let resolved = Resolved::resolve_node(&node);
     let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
         .with_stdlib()
         .with_classpath(&ProjectIndex::lower_classpath(classfiles))
         .build();
-    let ti = infer(&node, &resolved, &index, FileId(0));
+    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
     let expr = node
         .descendants()
         .filter_map(ast::Expr::cast)
@@ -64,7 +64,7 @@ fn classpath_type_is_not_a_navigation_target() {
     // A classpath type has no host-openable source, so go-to-definition is suppressed (like a stub).
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
-    let resolved = resolve_node(&node);
+    let resolved = Resolved::resolve_node(&node);
     let index = ProjectIndex::builder(&[(FileId(0), node)])
         .with_stdlib()
         .with_classpath(&ProjectIndex::lower_classpath(std::slice::from_ref(
@@ -84,7 +84,7 @@ fn classpath_type_navigates_to_library_source() {
     // classpath type lands on its real source declaration instead of being suppressed.
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
-    let resolved = resolve_node(&node);
+    let resolved = Resolved::resolve_node(&node);
 
     let lib = FileId(100);
     let sources = ProjectIndex::index_source_locations(&[(lib, parse(BOX_SOURCE))]);
@@ -111,7 +111,7 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     // A `git`/`path` dependency: `Box.java` is folded in as a `Source`-origin type with NO `.class`
     // backing it, so the source is both the typing authority and the navigation target.
     let node = parse(SRC);
-    let resolved = resolve_node(&node);
+    let resolved = Resolved::resolve_node(&node);
 
     let lib = FileId(100);
     let lib_box = parse(BOX_SOURCE);
@@ -123,7 +123,7 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
         .build();
 
     // Typing flows through the library source: `Box<String>.get()` substitutes `T` ↦ `String`.
-    let ti = infer(&node, &resolved, &index, FileId(0));
+    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
     let expr = node
         .descendants()
         .filter_map(ast::Expr::cast)

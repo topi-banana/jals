@@ -12,7 +12,7 @@ fn build(sources: &[&str]) -> (Vec<(FileId, SyntaxNode)>, ProjectIndex) {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::parse(s).syntax(),
+                jals_syntax::Parse::parse(s).syntax(),
             )
         })
         .collect();

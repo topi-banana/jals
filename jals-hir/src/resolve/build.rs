@@ -19,7 +19,7 @@ use jals_syntax::ast::{
 use jals_syntax::ast::{FieldDecl, ResourceList};
 
 use super::Resolver;
-use super::collect::{first_ident_token, pattern_var_tokens};
+use super::collect::Collect;
 use crate::def::DefKind;
 use crate::scope::{ScopeId, ScopeKind};
 
@@ -99,7 +99,7 @@ impl Resolver {
             _ => DefKind::AnnotationType,
         };
         // The type's own name lives in the *enclosing* scope, visible to its siblings.
-        if let Some(tok) = first_ident_token(node) {
+        if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(scope, kind, &tok);
         }
         let ts = self.new_scope(ScopeKind::Type, scope, node);
@@ -107,7 +107,7 @@ impl Resolver {
         // Record components are value bindings (effectively fields) of the record body.
         if let Some(header) = node.children().find(|c| c.kind() == RECORD_HEADER) {
             for comp in header.children().filter(|c| c.kind() == RECORD_COMPONENT) {
-                if let Some(tok) = first_ident_token(&comp) {
+                if let Some(tok) = Collect::first_ident_token(&comp) {
                     self.add_def(ts, DefKind::Field, &tok);
                 }
             }
@@ -121,7 +121,7 @@ impl Resolver {
         } else {
             DefKind::Method
         };
-        if let Some(tok) = first_ident_token(node) {
+        if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(scope, kind, &tok);
         }
         let ms = self.new_scope(ScopeKind::Method, scope, node);
@@ -131,7 +131,7 @@ impl Resolver {
         let has_body = node.children().any(|c| c.kind() == BLOCK);
         if has_body && let Some(plist) = node.children().find(|c| c.kind() == PARAM_LIST) {
             for p in plist.children().filter(|c| c.kind() == PARAM) {
-                if let Some(tok) = first_ident_token(&p) {
+                if let Some(tok) = Collect::first_ident_token(&p) {
                     self.add_def(ms, DefKind::Param, &tok);
                 }
             }
@@ -142,7 +142,7 @@ impl Resolver {
     fn register_type_params(&mut self, node: &SyntaxNode, scope: ScopeId) {
         if let Some(tps) = node.children().find(|c| c.kind() == TYPE_PARAMS) {
             for tp in tps.children().filter(|c| c.kind() == TYPE_PARAM) {
-                if let Some(tok) = first_ident_token(&tp) {
+                if let Some(tok) = Collect::first_ident_token(&tp) {
                     self.add_def(scope, DefKind::TypeParam, &tok);
                 }
             }
@@ -150,7 +150,7 @@ impl Resolver {
     }
 
     fn build_enum_constant(&mut self, node: &SyntaxNode, scope: ScopeId) {
-        if let Some(tok) = first_ident_token(node) {
+        if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(scope, DefKind::EnumConstant, &tok);
         }
         for child in node.children() {
@@ -173,7 +173,7 @@ impl Resolver {
         let Some(fe) = ForEachStmt::cast(node.clone()) else {
             return;
         };
-        if let Some(tok) = first_ident_token(node) {
+        if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(fs, DefKind::Local, &tok);
         }
         // The element type is a type reference (`for (Foo f : ...)`); it does not see the variable.
@@ -254,7 +254,7 @@ impl Resolver {
                 SWITCH_RULE | SWITCH_GROUP => {
                     let ss = self.new_scope(ScopeKind::Switch, scope, &child);
                     for label in child.children().filter(|c| c.kind() == SWITCH_LABEL) {
-                        for tok in pattern_var_tokens(&label) {
+                        for tok in Collect::pattern_var_tokens(&label) {
                             self.add_def(ss, DefKind::PatternVar, &tok);
                         }
                     }
@@ -273,7 +273,7 @@ impl Resolver {
         };
         if let Some(params) = lambda.params() {
             for p in params.params() {
-                if let Some(tok) = first_ident_token(p.syntax()) {
+                if let Some(tok) = Collect::first_ident_token(p.syntax()) {
                     self.add_def(ls, DefKind::LambdaParam, &tok);
                 }
                 // An explicitly-typed parameter (`(Foo f) -> ...`) contributes a type reference.

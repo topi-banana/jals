@@ -34,9 +34,10 @@ use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
 
 use crate::def::{DefKind, Namespace};
-use crate::infer::{TypeInference, call_target, infer, member_type_to_ty, node_span};
-use crate::project::{FileId, ItemId, ProjectIndex, TypeResolution, throws_clause_types};
+use crate::infer::TypeInference;
+use crate::project::{FileId, ItemId, ProjectIndex, TypeResolution};
 use crate::resolve::Resolved;
+use crate::resolve::collect::Collect;
 
 /// A checked exception a method / constructor can raise that is neither declared nor caught.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,36 +56,37 @@ impl UnreportedException {
             self.name
         )
     }
-}
 
-/// Every checked exception raised in `root` that its enclosing method / constructor neither declares
-/// in `throws` nor catches. Requires a project `index` (with stdlib stubs) — returns empty otherwise.
-pub fn unreported_exceptions(
-    root: &SyntaxNode,
-    resolved: &Resolved,
-    project: Option<(&ProjectIndex, FileId)>,
-) -> Vec<UnreportedException> {
-    let Some((index, file)) = project else {
-        return Vec::new();
-    };
-    // Without the modelled top of the `Throwable` hierarchy nothing can be classified checked.
-    let Some(classifier) = Classifier::new(index, file) else {
-        return Vec::new();
-    };
-    let ti = infer(root, resolved, index, file);
-    let cx = Cx {
-        index,
-        file,
-        ti: &ti,
-        classifier,
-    };
-    let mut out = Vec::new();
-    for node in root.descendants() {
-        if matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
-            cx.check_decl(&node, &mut out);
+    /// Every checked exception raised in `root` that its enclosing method / constructor neither
+    /// declares in `throws` nor catches. Requires a project `index` (with stdlib stubs) — returns
+    /// empty otherwise.
+    pub fn collect(
+        root: &SyntaxNode,
+        resolved: &Resolved,
+        project: Option<(&ProjectIndex, FileId)>,
+    ) -> Vec<Self> {
+        let Some((index, file)) = project else {
+            return Vec::new();
+        };
+        // Without the modelled top of the `Throwable` hierarchy nothing can be classified checked.
+        let Some(classifier) = Classifier::new(index, file) else {
+            return Vec::new();
+        };
+        let ti = TypeInference::infer(root, resolved, index, file);
+        let cx = Cx {
+            index,
+            file,
+            ti: &ti,
+            classifier,
+        };
+        let mut out = Vec::new();
+        for node in root.descendants() {
+            if matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
+                cx.check_decl(&node, &mut out);
+            }
         }
+        out
     }
-    out
 }
 
 /// The well-known exception items that partition the `Throwable` hierarchy into checked / unchecked.
@@ -147,7 +149,7 @@ impl Cx<'_> {
                 continue;
             }
             // Only sources whose nearest throws boundary is *this* declaration belong to it.
-            if nearest_throws_boundary(&node).as_ref() != Some(decl) {
+            if Self::nearest_throws_boundary(&node).as_ref() != Some(decl) {
                 continue;
             }
             for exc in self.raised_at(&node) {
@@ -161,7 +163,7 @@ impl Cx<'_> {
                     continue; // caught by an enclosing `try`.
                 }
                 out.push(UnreportedException {
-                    range: node_span(&node),
+                    range: Collect::node_span(&node),
                     name: self.index.item(exc).fqn.simple_name().into(),
                 });
             }
@@ -170,7 +172,7 @@ impl Cx<'_> {
 
     /// The indexed types named in `decl`'s `throws` clause (unresolvable names dropped).
     fn declared_throws(&self, decl: &SyntaxNode) -> Vec<ItemId> {
-        throws_clause_types(decl)
+        ProjectIndex::throws_clause_types(decl)
             .filter_map(|ty| self.resolve_type(&ty))
             .collect()
     }
@@ -200,16 +202,16 @@ impl Cx<'_> {
     /// declared `throws` across every overload whose arity the call could bind to. Intersecting keeps
     /// it sound — an exception is attributed only if *whichever* overload resolves declares it.
     fn call_throws(&self, call: &ast::CallExpr) -> Vec<ItemId> {
-        let Some((owner, name)) = call_target(call, self.ti, self.index, self.file) else {
+        let Some((owner, name)) = self.ti.call_target(call, self.index, self.file) else {
             return Vec::new();
         };
-        let argc = arg_count(call.args());
+        let argc = Self::arg_count(call.args());
         let candidates: Vec<&crate::Member> = self
             .index
             .resolve_members_all(owner, &name, Namespace::Method)
             .into_iter()
             .map(|id| self.index.member(id))
-            .filter(|m| m.kind == DefKind::Method && applies_to_arity(m, argc))
+            .filter(|m| m.kind == DefKind::Method && Self::applies_to_arity(m, argc))
             .collect();
         self.intersect_member_throws(&candidates)
     }
@@ -224,14 +226,14 @@ impl Cx<'_> {
         else {
             return Vec::new();
         };
-        let argc = arg_count(new.args());
+        let argc = Self::arg_count(new.args());
         // Constructors are never inherited, so only `owner`'s own members can apply — no supertype walk.
         let candidates: Vec<&crate::Member> = self
             .index
             .own_members(owner)
             .iter()
             .map(|&id| self.index.member(id))
-            .filter(|m| m.kind == DefKind::Constructor && applies_to_arity(m, argc))
+            .filter(|m| m.kind == DefKind::Constructor && Self::applies_to_arity(m, argc))
             .collect();
         self.intersect_member_throws(&candidates)
     }
@@ -256,7 +258,9 @@ impl Cx<'_> {
             .throws
             .iter()
             .filter_map(|mt| {
-                member_type_to_ty(self.index, member.file, member.owner, mt).project_id()
+                self.index
+                    .member_type_to_ty(member.file, member.owner, mt)
+                    .project_id()
             })
             .collect()
     }
@@ -276,7 +280,7 @@ impl Cx<'_> {
             let Some(try_stmt) = ast::TryStmt::cast(ancestor.clone()) else {
                 continue;
             };
-            if !guards(&try_stmt, source) {
+            if !Self::guards(&try_stmt, source) {
                 continue; // the source is in this try's catch / finally, not its protected region.
             }
             for catch in try_stmt.catches() {
@@ -297,7 +301,7 @@ impl Cx<'_> {
 
     /// The indexed item an expression's inferred type denotes, if it is a project/stub/classpath type.
     fn expr_item(&self, expr: &SyntaxNode) -> Option<ItemId> {
-        self.ti.type_of_expr(node_span(expr))?.project_id()
+        self.ti.type_of_expr(Collect::node_span(expr))?.project_id()
     }
 
     /// Resolve an AST type reference (a `throws` / `catch` type) to an indexed item, honouring whether
@@ -317,50 +321,50 @@ impl Cx<'_> {
             _ => None,
         }
     }
-}
 
-/// The nearest ancestor of `node` that establishes a `throws` boundary — a method / constructor
-/// declaration, an initializer, or a lambda. Used to attribute a raising site to exactly one
-/// declaration: [`unreported_exceptions`] only analyzes sites whose nearest boundary is a
-/// `METHOD_DECL` / `CONSTRUCTOR_DECL`. `INITIALIZER` and `LAMBDA_EXPR` are listed so a raise inside
-/// one is *excluded* from the enclosing method rather than misattributed to it; their own
-/// checked-exception rules (a lambda's are governed by its target type; an initializer's by javac's
-/// static / instance-initializer rules) are not yet modelled, so such a raise is conservatively left
-/// unreported.
-fn nearest_throws_boundary(node: &SyntaxNode) -> Option<SyntaxNode> {
-    node.ancestors().find(|a| {
-        matches!(
-            a.kind(),
-            METHOD_DECL | CONSTRUCTOR_DECL | INITIALIZER | LAMBDA_EXPR
-        )
-    })
-}
+    /// The nearest ancestor of `node` that establishes a `throws` boundary — a method / constructor
+    /// declaration, an initializer, or a lambda. Used to attribute a raising site to exactly one
+    /// declaration: [`UnreportedException::collect`] only analyzes sites whose nearest boundary is a
+    /// `METHOD_DECL` / `CONSTRUCTOR_DECL`. `INITIALIZER` and `LAMBDA_EXPR` are listed so a raise inside
+    /// one is *excluded* from the enclosing method rather than misattributed to it; their own
+    /// checked-exception rules (a lambda's are governed by its target type; an initializer's by javac's
+    /// static / instance-initializer rules) are not yet modelled, so such a raise is conservatively left
+    /// unreported.
+    fn nearest_throws_boundary(node: &SyntaxNode) -> Option<SyntaxNode> {
+        node.ancestors().find(|a| {
+            matches!(
+                a.kind(),
+                METHOD_DECL | CONSTRUCTOR_DECL | INITIALIZER | LAMBDA_EXPR
+            )
+        })
+    }
 
-/// Whether `try_stmt` protects `source`: `source` lies within the guarded block or the resource list,
-/// not within a `catch` or `finally` clause.
-fn guards(try_stmt: &ast::TryStmt, source: &SyntaxNode) -> bool {
-    let range = source.text_range();
-    let in_block = try_stmt
-        .block()
-        .is_some_and(|b| b.syntax().text_range().contains_range(range));
-    let in_resources = try_stmt
-        .resources()
-        .is_some_and(|r| r.syntax().text_range().contains_range(range));
-    in_block || in_resources
-}
+    /// Whether `try_stmt` protects `source`: `source` lies within the guarded block or the resource
+    /// list, not within a `catch` or `finally` clause.
+    fn guards(try_stmt: &ast::TryStmt, source: &SyntaxNode) -> bool {
+        let range = source.text_range();
+        let in_block = try_stmt
+            .block()
+            .is_some_and(|b| b.syntax().text_range().contains_range(range));
+        let in_resources = try_stmt
+            .resources()
+            .is_some_and(|r| r.syntax().text_range().contains_range(range));
+        in_block || in_resources
+    }
 
-/// The number of arguments in an optional argument list.
-fn arg_count(args: Option<ast::ArgList>) -> usize {
-    args.map_or(0, |list| list.args().count())
-}
+    /// The number of arguments in an optional argument list.
+    fn arg_count(args: Option<ast::ArgList>) -> usize {
+        args.map_or(0, |list| list.args().count())
+    }
 
-/// Whether a member's arity can bind a call of `argc` arguments: an exact match, or a varargs method
-/// whose fixed parameters are no more than `argc`. Including varargs candidates keeps the
-/// intersection in [`Cx::call_throws`] sound (the actually-resolved overload is never excluded).
-const fn applies_to_arity(member: &crate::Member, argc: usize) -> bool {
-    if member.varargs {
-        member.params.len().saturating_sub(1) <= argc
-    } else {
-        member.params.len() == argc
+    /// Whether a member's arity can bind a call of `argc` arguments: an exact match, or a varargs
+    /// method whose fixed parameters are no more than `argc`. Including varargs candidates keeps the
+    /// intersection in [`Cx::call_throws`] sound (the actually-resolved overload is never excluded).
+    const fn applies_to_arity(member: &crate::Member, argc: usize) -> bool {
+        if member.varargs {
+            member.params.len().saturating_sub(1) <= argc
+        } else {
+            member.params.len() == argc
+        }
     }
 }

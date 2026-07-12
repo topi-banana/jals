@@ -1,7 +1,7 @@
-//! Tests for `jals_hir::signature_help`: locating the call at the cursor, resolving its overloads,
+//! Tests for `jals_hir::ProjectIndex::signature_help`: locating the call at the cursor, resolving its overloads,
 //! and rendering each signature (`name(type1 p1, type2 p2)`) with the active parameter/overload.
 
-use jals_hir::{FileId, ProjectIndex, SignatureHelp, resolve_node, signature_help};
+use jals_hir::{FileId, ProjectIndex, Resolved, SignatureHelp};
 use jals_syntax::SyntaxNode;
 
 /// Build an index over `sources`, place the cursor at the `$0` marker in `sources[file]` (removed
@@ -16,14 +16,14 @@ fn help(sources: &[&str], file: usize) -> Option<SignatureHelp> {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::parse(s).syntax(),
+                jals_syntax::Parse::parse(s).syntax(),
             )
         })
         .collect();
     let index = ProjectIndex::builder(&nodes).build();
     let (fid, root) = &nodes[file];
-    let resolved = resolve_node(root);
-    signature_help(root, &resolved, &index, *fid, offset)
+    let resolved = Resolved::resolve_node(root);
+    index.signature_help(root, &resolved, *fid, offset)
 }
 
 #[test]

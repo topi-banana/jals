@@ -7,7 +7,7 @@
 use core::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_hir::{FileId, Namespace, ProjectIndex, Resolution, TypeResolution, resolve_node};
+use jals_hir::{FileId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
 use jals_syntax::SyntaxNode;
 
 /// Parses each source and keeps its `SOURCE_FILE` node alive (rowan nodes are ref-counted, so the
@@ -19,7 +19,7 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::parse(s).syntax(),
+                jals_syntax::Parse::parse(s).syntax(),
             )
         })
         .collect()
@@ -30,7 +30,7 @@ fn render(sources: &[&str]) -> String {
     let index = ProjectIndex::builder(&nodes).build();
     let mut out = String::new();
     for (file, root) in &nodes {
-        let resolved = resolve_node(root);
+        let resolved = Resolved::resolve_node(root);
         for r in &resolved.references {
             if r.namespace != Namespace::Type {
                 continue;
@@ -190,7 +190,7 @@ fn definition_at_jumps_across_files() {
     ];
     let nodes = nodes(&srcs);
     let index = ProjectIndex::builder(&nodes).build();
-    let resolved = resolve_node(&nodes[1].1);
+    let resolved = Resolved::resolve_node(&nodes[1].1);
     let offset = srcs[1].find("Foo").unwrap();
 
     let (file, range) = index
@@ -207,7 +207,7 @@ fn unresolved_types_reports_only_genuine_unknowns() {
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);
     let index = ProjectIndex::builder(&nodes).build();
-    let resolved = resolve_node(&nodes[0].1);
+    let resolved = Resolved::resolve_node(&nodes[0].1);
 
     let spans = index.unresolved_types(FileId(0), &resolved);
     assert_eq!(spans.len(), 1);
