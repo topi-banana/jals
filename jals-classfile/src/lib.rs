@@ -35,8 +35,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 mod annotation;
 mod attribute;
 mod bytes;
@@ -62,10 +60,7 @@ pub use attribute::{
 };
 pub use class_file::ClassFile;
 pub use constant_pool::{ConstantPool, ConstantPoolEntry};
-pub use descriptor::{
-    BaseType, FieldType, MethodDescriptor, ReturnType, parse_field_descriptor,
-    parse_method_descriptor,
-};
+pub use descriptor::{BaseType, FieldType, MethodDescriptor, ReturnType};
 pub use error::{ClassfileError, Result};
 pub use field::FieldInfo;
 pub use flags::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
@@ -73,17 +68,6 @@ pub use instruction::{Instruction, WideInstruction};
 pub use method::MethodInfo;
 pub use signature::{
     ClassSignature, ClassTypeSignature, MethodSignature, ResultSignature, SimpleClassTypeSignature,
-    ThrowsSignature, TypeArgument, TypeParameter, TypeSignature, parse_class_signature,
-    parse_field_signature, parse_method_signature,
+    ThrowsSignature, TypeArgument, TypeParameter, TypeSignature,
 };
 pub use stackmap::{StackMapFrame, VerificationType};
-
-/// Parse a class file from its raw bytes. A thin alias for [`ClassFile::read`].
-pub fn read(bytes: &[u8]) -> Result<ClassFile> {
-    ClassFile::read(bytes)
-}
-
-/// Serialise a class file back to bytes. A thin alias for [`ClassFile::write`].
-pub fn write(class: &ClassFile) -> Vec<u8> {
-    class.write()
-}

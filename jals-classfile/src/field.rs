@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::attribute::{self, Attribute};
+use crate::attribute::Attribute;
 use crate::bytes::{Reader, Writer};
 use crate::constant_pool::ConstantPool;
 use crate::error::Result;
@@ -28,7 +28,7 @@ impl FieldInfo {
         let access_flags = FieldAccessFlags(r.u16()?);
         let name_index = r.u16()?;
         let descriptor_index = r.u16()?;
-        let attributes = attribute::read_attributes(r, pool)?;
+        let attributes = Attribute::read_all(r, pool)?;
         Ok(Self {
             access_flags,
             name_index,
@@ -41,6 +41,6 @@ impl FieldInfo {
         w.u16(self.access_flags.0);
         w.u16(self.name_index);
         w.u16(self.descriptor_index);
-        attribute::write_attributes(&self.attributes, w);
+        Attribute::write_all(&self.attributes, w);
     }
 }

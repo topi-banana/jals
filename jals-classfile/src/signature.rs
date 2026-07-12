@@ -29,6 +29,15 @@ pub enum TypeSignature {
 }
 
 impl TypeSignature {
+    /// Parse a field signature (a `ReferenceTypeSignature`), e.g.
+    /// `Ljava/util/List<Ljava/lang/String;>;`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        let sig = p.reference_type_signature()?;
+        p.expect_eof()?;
+        Ok(sig)
+    }
+
     /// Whether this signature is exactly `java.lang.Object` (a raw, non-restrictive class bound —
     /// the implicit bound that renderers omit).
     pub fn is_java_lang_object(&self) -> bool {
@@ -124,28 +133,24 @@ pub enum ThrowsSignature {
     TypeVariable(String),
 }
 
-/// Parse a class signature, e.g. `<T:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/List<TT;>;`.
-pub fn parse_class_signature(s: &str) -> Result<ClassSignature> {
-    let mut p = Parser::new(s);
-    let sig = p.class_signature()?;
-    p.expect_eof()?;
-    Ok(sig)
+impl ClassSignature {
+    /// Parse a class signature, e.g. `<T:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/List<TT;>;`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        let sig = p.class_signature()?;
+        p.expect_eof()?;
+        Ok(sig)
+    }
 }
 
-/// Parse a method signature, e.g. `(Ljava/lang/Object;I)TV;`.
-pub fn parse_method_signature(s: &str) -> Result<MethodSignature> {
-    let mut p = Parser::new(s);
-    let sig = p.method_signature()?;
-    p.expect_eof()?;
-    Ok(sig)
-}
-
-/// Parse a field signature (a `ReferenceTypeSignature`), e.g. `Ljava/util/List<Ljava/lang/String;>;`.
-pub fn parse_field_signature(s: &str) -> Result<TypeSignature> {
-    let mut p = Parser::new(s);
-    let sig = p.reference_type_signature()?;
-    p.expect_eof()?;
-    Ok(sig)
+impl MethodSignature {
+    /// Parse a method signature, e.g. `(Ljava/lang/Object;I)TV;`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        let sig = p.method_signature()?;
+        p.expect_eof()?;
+        Ok(sig)
+    }
 }
 
 /// A byte cursor over a signature string. All grammar punctuation is ASCII, so byte indexing never
@@ -386,24 +391,27 @@ impl fmt::Display for TypeSignature {
     }
 }
 
-fn write_type_arguments(f: &mut fmt::Formatter<'_>, args: &[TypeArgument]) -> fmt::Result {
-    if args.is_empty() {
-        return Ok(());
+impl TypeArgument {
+    /// Render a `<...>`-delimited run of type arguments (nothing when empty).
+    fn fmt_list(f: &mut fmt::Formatter<'_>, args: &[Self]) -> fmt::Result {
+        if args.is_empty() {
+            return Ok(());
+        }
+        f.write_str("<")?;
+        for arg in args {
+            write!(f, "{arg}")?;
+        }
+        f.write_str(">")
     }
-    f.write_str("<")?;
-    for arg in args {
-        write!(f, "{arg}")?;
-    }
-    f.write_str(">")
 }
 
 impl fmt::Display for ClassTypeSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "L{}", self.name)?;
-        write_type_arguments(f, &self.type_arguments)?;
+        TypeArgument::fmt_list(f, &self.type_arguments)?;
         for suffix in &self.suffixes {
             write!(f, ".{}", suffix.name)?;
-            write_type_arguments(f, &suffix.type_arguments)?;
+            TypeArgument::fmt_list(f, &suffix.type_arguments)?;
         }
         f.write_str(";")
     }
@@ -420,26 +428,29 @@ impl fmt::Display for TypeArgument {
     }
 }
 
-fn write_type_parameters(f: &mut fmt::Formatter<'_>, params: &[TypeParameter]) -> fmt::Result {
-    if params.is_empty() {
-        return Ok(());
-    }
-    f.write_str("<")?;
-    for p in params {
-        write!(f, "{}:", p.name)?;
-        if let Some(bound) = &p.class_bound {
-            write!(f, "{bound}")?;
+impl TypeParameter {
+    /// Render a `<...>`-delimited run of type parameters with their bounds (nothing when empty).
+    fn fmt_list(f: &mut fmt::Formatter<'_>, params: &[Self]) -> fmt::Result {
+        if params.is_empty() {
+            return Ok(());
         }
-        for bound in &p.interface_bounds {
-            write!(f, ":{bound}")?;
+        f.write_str("<")?;
+        for p in params {
+            write!(f, "{}:", p.name)?;
+            if let Some(bound) = &p.class_bound {
+                write!(f, "{bound}")?;
+            }
+            for bound in &p.interface_bounds {
+                write!(f, ":{bound}")?;
+            }
         }
+        f.write_str(">")
     }
-    f.write_str(">")
 }
 
 impl fmt::Display for ClassSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_type_parameters(f, &self.type_parameters)?;
+        TypeParameter::fmt_list(f, &self.type_parameters)?;
         write!(f, "{}", self.superclass)?;
         for i in &self.superinterfaces {
             write!(f, "{i}")?;
@@ -450,7 +461,7 @@ impl fmt::Display for ClassSignature {
 
 impl fmt::Display for MethodSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_type_parameters(f, &self.type_parameters)?;
+        TypeParameter::fmt_list(f, &self.type_parameters)?;
         f.write_str("(")?;
         for p in &self.parameters {
             write!(f, "{p}")?;
@@ -476,7 +487,7 @@ mod tests {
 
     #[test]
     fn method_signature_with_type_variable_result() {
-        let m = parse_method_signature("(Ljava/lang/Object;I)TV;").unwrap();
+        let m = MethodSignature::parse("(Ljava/lang/Object;I)TV;").unwrap();
         assert_eq!(m.parameters.len(), 2);
         assert_eq!(
             m.result,
@@ -488,7 +499,7 @@ mod tests {
     #[test]
     fn generic_map_class_signature() {
         let s = "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/util/AbstractMap<TK;TV;>;Ljava/util/Map<TK;TV;>;";
-        let sig = parse_class_signature(s).unwrap();
+        let sig = ClassSignature::parse(s).unwrap();
         assert_eq!(sig.type_parameters.len(), 2);
         assert_eq!(sig.type_parameters[0].name, "K");
         assert_eq!(sig.superclass.name, "java/util/AbstractMap");
@@ -506,14 +517,14 @@ mod tests {
             "Ljava/util/Map<TK;TV;>.Entry<TK;TV;>;",
             "[Ljava/util/List<Ljava/lang/String;>;",
         ] {
-            assert_eq!(parse_field_signature(s).unwrap().to_string(), s, "{s}");
+            assert_eq!(TypeSignature::parse(s).unwrap().to_string(), s, "{s}");
         }
     }
 
     #[test]
     fn bounded_type_parameter() {
         let s = "<T:Ljava/lang/Object;:Ljava/lang/Comparable<TT;>;>Ljava/lang/Object;";
-        let sig = parse_class_signature(s).unwrap();
+        let sig = ClassSignature::parse(s).unwrap();
         assert_eq!(sig.type_parameters[0].interface_bounds.len(), 1);
         assert_eq!(sig.to_string(), s);
     }
@@ -521,15 +532,15 @@ mod tests {
     #[test]
     fn method_with_throws() {
         let s = "()V^Ljava/io/IOException;^TE;";
-        let sig = parse_method_signature(s).unwrap();
+        let sig = MethodSignature::parse(s).unwrap();
         assert_eq!(sig.throws.len(), 2);
         assert_eq!(sig.to_string(), s);
     }
 
     #[test]
     fn rejects_malformed() {
-        assert!(parse_field_signature("Ljava/lang/Object").is_err());
-        assert!(parse_field_signature("Q").is_err());
-        assert!(parse_method_signature("Ljava/lang/Object;").is_err());
+        assert!(TypeSignature::parse("Ljava/lang/Object").is_err());
+        assert!(TypeSignature::parse("Q").is_err());
+        assert!(MethodSignature::parse("Ljava/lang/Object;").is_err());
     }
 }

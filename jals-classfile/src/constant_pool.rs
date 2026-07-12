@@ -167,9 +167,61 @@ impl ConstantPool {
     /// The decoded text of a `Utf8` entry at `index`, or `None` if it is not a `Utf8`.
     pub fn utf8(&self, index: u16) -> Option<Cow<'_, str>> {
         match self.get(index) {
-            Some(ConstantPoolEntry::Utf8(bytes)) => Some(decode_modified_utf8(bytes)),
+            Some(ConstantPoolEntry::Utf8(bytes)) => Some(Self::decode_modified_utf8(bytes)),
             _ => None,
         }
+    }
+
+    /// Decode JVM *modified* UTF-8 (JVMS §4.4.7) into a Rust string. ASCII is borrowed verbatim;
+    /// anything else (two-/three-byte forms, the six-byte supplementary form, NUL as `0xC0 0x80`) is
+    /// decoded into an owned `String`, with malformed sequences replaced by U+FFFD.
+    fn decode_modified_utf8(bytes: &[u8]) -> Cow<'_, str> {
+        if bytes.is_ascii() {
+            // ASCII is identical in modified UTF-8 and is valid Rust `str`.
+            return Cow::Borrowed(core::str::from_utf8(bytes).unwrap_or_default());
+        }
+        let mut out = String::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let b0 = bytes[i];
+            if b0 < 0x80 {
+                out.push(b0 as char);
+                i += 1;
+            } else if b0 == 0xED
+                && i + 5 < bytes.len()
+                && bytes[i + 1] & 0xF0 == 0xA0
+                && bytes[i + 3] == 0xED
+                && bytes[i + 4] & 0xF0 == 0xB0
+            {
+                // Six-byte supplementary form: a surrogate pair, each surrogate as a 3-byte sequence.
+                let b1 = u32::from(bytes[i + 1]);
+                let b2 = u32::from(bytes[i + 2]);
+                let b4 = u32::from(bytes[i + 4]);
+                let b5 = u32::from(bytes[i + 5]);
+                let c = 0x10000
+                    + (((b1 & 0x0F) << 16)
+                        | ((b2 & 0x3F) << 10)
+                        | ((b4 & 0x0F) << 6)
+                        | (b5 & 0x3F));
+                out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
+                i += 6;
+            } else if b0 & 0xE0 == 0xC0 && i + 1 < bytes.len() {
+                let b1 = u32::from(bytes[i + 1]);
+                let c = ((u32::from(b0) & 0x1F) << 6) | (b1 & 0x3F);
+                out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
+                i += 2;
+            } else if b0 & 0xF0 == 0xE0 && i + 2 < bytes.len() {
+                let b1 = u32::from(bytes[i + 1]);
+                let b2 = u32::from(bytes[i + 2]);
+                let c = ((u32::from(b0) & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+                out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
+                i += 3;
+            } else {
+                out.push('\u{FFFD}');
+                i += 1;
+            }
+        }
+        Cow::Owned(out)
     }
 
     /// The internal-form name (`a/b/C`) a `Class` entry at `index` points to.
@@ -341,53 +393,4 @@ impl ConstantPoolEntry {
             }
         }
     }
-}
-
-/// Decode JVM *modified* UTF-8 (JVMS §4.4.7) into a Rust string. ASCII is borrowed verbatim;
-/// anything else (two-/three-byte forms, the six-byte supplementary form, NUL as `0xC0 0x80`) is
-/// decoded into an owned `String`, with malformed sequences replaced by U+FFFD.
-fn decode_modified_utf8(bytes: &[u8]) -> Cow<'_, str> {
-    if bytes.is_ascii() {
-        // ASCII is identical in modified UTF-8 and is valid Rust `str`.
-        return Cow::Borrowed(core::str::from_utf8(bytes).unwrap_or_default());
-    }
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes[i];
-        if b0 < 0x80 {
-            out.push(b0 as char);
-            i += 1;
-        } else if b0 == 0xED
-            && i + 5 < bytes.len()
-            && bytes[i + 1] & 0xF0 == 0xA0
-            && bytes[i + 3] == 0xED
-            && bytes[i + 4] & 0xF0 == 0xB0
-        {
-            // Six-byte supplementary form: a surrogate pair, each surrogate as a 3-byte sequence.
-            let b1 = u32::from(bytes[i + 1]);
-            let b2 = u32::from(bytes[i + 2]);
-            let b4 = u32::from(bytes[i + 4]);
-            let b5 = u32::from(bytes[i + 5]);
-            let c = 0x10000
-                + (((b1 & 0x0F) << 16) | ((b2 & 0x3F) << 10) | ((b4 & 0x0F) << 6) | (b5 & 0x3F));
-            out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
-            i += 6;
-        } else if b0 & 0xE0 == 0xC0 && i + 1 < bytes.len() {
-            let b1 = u32::from(bytes[i + 1]);
-            let c = ((u32::from(b0) & 0x1F) << 6) | (b1 & 0x3F);
-            out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
-            i += 2;
-        } else if b0 & 0xF0 == 0xE0 && i + 2 < bytes.len() {
-            let b1 = u32::from(bytes[i + 1]);
-            let b2 = u32::from(bytes[i + 2]);
-            let c = ((u32::from(b0) & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
-            out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
-            i += 3;
-        } else {
-            out.push('\u{FFFD}');
-            i += 1;
-        }
-    }
-    Cow::Owned(out)
 }

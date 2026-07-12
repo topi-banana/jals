@@ -159,17 +159,24 @@ pub struct TypePathEntry {
     pub type_argument_index: u8,
 }
 
+impl ElementValuePair {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
+            element_name_index: r.u16()?,
+            value: ElementValue::read(r)?,
+        })
+    }
+
+    fn write(&self, w: &mut Writer) {
+        w.u16(self.element_name_index);
+        self.value.write(w);
+    }
+}
+
 impl Annotation {
     pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let type_index = r.u16()?;
-        let count = r.u16()?;
-        let mut element_value_pairs = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            element_value_pairs.push(ElementValuePair {
-                element_name_index: r.u16()?,
-                value: ElementValue::read(r)?,
-            });
-        }
+        let element_value_pairs = r.list(ElementValuePair::read)?;
         Ok(Self {
             type_index,
             element_value_pairs,
@@ -178,11 +185,7 @@ impl Annotation {
 
     pub(crate) fn write(&self, w: &mut Writer) {
         w.u16(self.type_index);
-        w.u16(self.element_value_pairs.len() as u16);
-        for pair in &self.element_value_pairs {
-            w.u16(pair.element_name_index);
-            pair.value.write(w);
-        }
+        w.list(&self.element_value_pairs, ElementValuePair::write);
     }
 }
 
@@ -202,14 +205,7 @@ impl ElementValue {
                 class_info_index: r.u16()?,
             },
             b'@' => Self::Annotation(Annotation::read(r)?),
-            b'[' => {
-                let count = r.u16()?;
-                let mut values = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    values.push(Self::read(r)?);
-                }
-                Self::Array(values)
-            }
+            b'[' => Self::Array(r.list(Self::read)?),
             _ => return Err(ClassfileError::Malformed("element_value tag")),
         })
     }
@@ -241,10 +237,7 @@ impl ElementValue {
             }
             Self::Array(values) => {
                 w.u8(b'[');
-                w.u16(values.len() as u16);
-                for v in values {
-                    v.write(w);
-                }
+                w.list(values, Self::write);
             }
         }
     }
@@ -262,14 +255,7 @@ impl TypeAnnotation {
             });
         }
         let type_index = r.u16()?;
-        let count = r.u16()?;
-        let mut element_value_pairs = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            element_value_pairs.push(ElementValuePair {
-                element_name_index: r.u16()?,
-                value: ElementValue::read(r)?,
-            });
-        }
+        let element_value_pairs = r.list(ElementValuePair::read)?;
         Ok(Self {
             target_info,
             target_path,
@@ -286,11 +272,7 @@ impl TypeAnnotation {
             w.u8(step.type_argument_index);
         }
         w.u16(self.type_index);
-        w.u16(self.element_value_pairs.len() as u16);
-        for pair in &self.element_value_pairs {
-            w.u16(pair.element_name_index);
-            pair.value.write(w);
-        }
+        w.list(&self.element_value_pairs, ElementValuePair::write);
     }
 }
 
@@ -317,18 +299,16 @@ impl TargetInfo {
             0x17 => Self::Throws {
                 throws_type_index: r.u16()?,
             },
-            0x40 | 0x41 => {
-                let count = r.u16()?;
-                let mut table = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    table.push(LocalVarTargetEntry {
+            0x40 | 0x41 => Self::LocalVar {
+                target_type,
+                table: r.list(|r| {
+                    Ok(LocalVarTargetEntry {
                         start_pc: r.u16()?,
                         length: r.u16()?,
                         index: r.u16()?,
-                    });
-                }
-                Self::LocalVar { target_type, table }
-            }
+                    })
+                })?,
+            },
             0x42 => Self::Catch {
                 exception_table_index: r.u16()?,
             },
@@ -380,12 +360,11 @@ impl TargetInfo {
             }
             Self::LocalVar { target_type, table } => {
                 w.u8(*target_type);
-                w.u16(table.len() as u16);
-                for e in table {
+                w.list(table, |e, w| {
                     w.u16(e.start_pc);
                     w.u16(e.length);
                     w.u16(e.index);
-                }
+                });
             }
             Self::Catch {
                 exception_table_index,

@@ -1,10 +1,11 @@
 //! JVM bytecode instructions (JVMS §6.5) and the `Code` array codec.
 //!
-//! [`decode_code`] turns a raw `code` byte array into a `Vec<Instruction>`; [`encode_code`] turns it
-//! back. The two are exact inverses for valid bytecode: branch offsets are stored verbatim (never
-//! recomputed), and the variable-length forms — `tableswitch` / `lookupswitch` 4-byte alignment
-//! padding and the `wide` prefix — are reproduced byte-for-byte. An unknown opcode makes
-//! `decode_code` fail, which degrades the whole `Code` attribute to `Unknown` (still byte-exact).
+//! [`Instruction::decode_code`] turns a raw `code` byte array into a `Vec<Instruction>`;
+//! [`Instruction::encode_code`] turns it back. The two are exact inverses for valid bytecode: branch
+//! offsets are stored verbatim (never recomputed), and the variable-length forms — `tableswitch` /
+//! `lookupswitch` 4-byte alignment padding and the `wide` prefix — are reproduced byte-for-byte. An
+//! unknown opcode makes `decode_code` fail, which degrades the whole `Code` attribute to `Unknown`
+//! (still byte-exact).
 
 use alloc::vec::Vec;
 
@@ -334,26 +335,26 @@ pub enum WideInstruction {
     },
 }
 
-/// Decode a `Code` attribute's `code` array into instructions.
-pub(crate) fn decode_code(bytes: &[u8]) -> Result<Vec<Instruction>> {
-    let mut r = Reader::new(bytes);
-    let mut out = Vec::new();
-    while r.remaining() > 0 {
-        out.push(Instruction::read(&mut r)?);
-    }
-    Ok(out)
-}
-
-/// Encode instructions back into a `code` array, reproducing switch alignment padding exactly.
-pub(crate) fn encode_code(instructions: &[Instruction]) -> Vec<u8> {
-    let mut w = Writer::new();
-    for ins in instructions {
-        ins.write(&mut w);
-    }
-    w.into_vec()
-}
-
 impl Instruction {
+    /// Decode a `Code` attribute's `code` array into instructions.
+    pub(crate) fn decode_code(bytes: &[u8]) -> Result<Vec<Self>> {
+        let mut r = Reader::new(bytes);
+        let mut out = Vec::new();
+        while r.remaining() > 0 {
+            out.push(Self::read(&mut r)?);
+        }
+        Ok(out)
+    }
+
+    /// Encode instructions back into a `code` array, reproducing switch alignment padding exactly.
+    pub(crate) fn encode_code(instructions: &[Self]) -> Vec<u8> {
+        let mut w = Writer::new();
+        for ins in instructions {
+            ins.write(&mut w);
+        }
+        w.into_vec()
+    }
+
     fn read(r: &mut Reader<'_>) -> Result<Self> {
         let opcode = r.u8()?;
         Ok(match opcode {
@@ -579,7 +580,7 @@ impl Instruction {
     }
 
     fn read_table_switch(r: &mut Reader<'_>) -> Result<Self> {
-        skip_switch_padding(r)?;
+        Self::skip_switch_padding(r)?;
         let default = r.u32()? as i32;
         let low = r.u32()? as i32;
         let high = r.u32()? as i32;
@@ -600,7 +601,7 @@ impl Instruction {
     }
 
     fn read_lookup_switch(r: &mut Reader<'_>) -> Result<Self> {
-        skip_switch_padding(r)?;
+        Self::skip_switch_padding(r)?;
         let default = r.u32()? as i32;
         let npairs = r.u32()?;
         let mut pairs = Vec::with_capacity(npairs as usize);
@@ -816,22 +817,22 @@ impl Instruction {
             Self::Fcmpg => w.u8(0x96),
             Self::Dcmpl => w.u8(0x97),
             Self::Dcmpg => w.u8(0x98),
-            Self::Ifeq(v) => write_branch(w, 0x99, *v),
-            Self::Ifne(v) => write_branch(w, 0x9a, *v),
-            Self::Iflt(v) => write_branch(w, 0x9b, *v),
-            Self::Ifge(v) => write_branch(w, 0x9c, *v),
-            Self::Ifgt(v) => write_branch(w, 0x9d, *v),
-            Self::Ifle(v) => write_branch(w, 0x9e, *v),
-            Self::IfIcmpeq(v) => write_branch(w, 0x9f, *v),
-            Self::IfIcmpne(v) => write_branch(w, 0xa0, *v),
-            Self::IfIcmplt(v) => write_branch(w, 0xa1, *v),
-            Self::IfIcmpge(v) => write_branch(w, 0xa2, *v),
-            Self::IfIcmpgt(v) => write_branch(w, 0xa3, *v),
-            Self::IfIcmple(v) => write_branch(w, 0xa4, *v),
-            Self::IfAcmpeq(v) => write_branch(w, 0xa5, *v),
-            Self::IfAcmpne(v) => write_branch(w, 0xa6, *v),
-            Self::Goto(v) => write_branch(w, 0xa7, *v),
-            Self::Jsr(v) => write_branch(w, 0xa8, *v),
+            Self::Ifeq(v) => Self::write_branch(w, 0x99, *v),
+            Self::Ifne(v) => Self::write_branch(w, 0x9a, *v),
+            Self::Iflt(v) => Self::write_branch(w, 0x9b, *v),
+            Self::Ifge(v) => Self::write_branch(w, 0x9c, *v),
+            Self::Ifgt(v) => Self::write_branch(w, 0x9d, *v),
+            Self::Ifle(v) => Self::write_branch(w, 0x9e, *v),
+            Self::IfIcmpeq(v) => Self::write_branch(w, 0x9f, *v),
+            Self::IfIcmpne(v) => Self::write_branch(w, 0xa0, *v),
+            Self::IfIcmplt(v) => Self::write_branch(w, 0xa1, *v),
+            Self::IfIcmpge(v) => Self::write_branch(w, 0xa2, *v),
+            Self::IfIcmpgt(v) => Self::write_branch(w, 0xa3, *v),
+            Self::IfIcmple(v) => Self::write_branch(w, 0xa4, *v),
+            Self::IfAcmpeq(v) => Self::write_branch(w, 0xa5, *v),
+            Self::IfAcmpne(v) => Self::write_branch(w, 0xa6, *v),
+            Self::Goto(v) => Self::write_branch(w, 0xa7, *v),
+            Self::Jsr(v) => Self::write_branch(w, 0xa8, *v),
             Self::Ret(v) => {
                 w.u8(0xa9);
                 w.u8(*v);
@@ -843,7 +844,7 @@ impl Instruction {
                 offsets,
             } => {
                 w.u8(0xaa);
-                write_switch_padding(w);
+                Self::write_switch_padding(w);
                 w.u32(*default as u32);
                 w.u32(*low as u32);
                 w.u32(*high as u32);
@@ -853,7 +854,7 @@ impl Instruction {
             }
             Self::LookupSwitch { default, pairs } => {
                 w.u8(0xab);
-                write_switch_padding(w);
+                Self::write_switch_padding(w);
                 w.u32(*default as u32);
                 w.u32(pairs.len() as u32);
                 for (key, off) in pairs {
@@ -939,8 +940,8 @@ impl Instruction {
                 w.u16(*index);
                 w.u8(*dimensions);
             }
-            Self::IfNull(v) => write_branch(w, 0xc6, *v),
-            Self::IfNonNull(v) => write_branch(w, 0xc7, *v),
+            Self::IfNull(v) => Self::write_branch(w, 0xc6, *v),
+            Self::IfNonNull(v) => Self::write_branch(w, 0xc7, *v),
             Self::GotoW(v) => {
                 w.u8(0xc8);
                 w.u32(*v as u32);
@@ -1050,31 +1051,33 @@ impl WideInstruction {
     }
 }
 
-/// Branch instructions all share the `opcode` + `i16 offset` shape.
-fn write_branch(w: &mut Writer, opcode: u8, offset: i16) {
-    w.u8(opcode);
-    w.u16(offset as u16);
-}
+impl Instruction {
+    /// Branch instructions all share the `opcode` + `i16 offset` shape.
+    fn write_branch(w: &mut Writer, opcode: u8, offset: i16) {
+        w.u8(opcode);
+        w.u16(offset as u16);
+    }
 
-/// Skip the 0–3 alignment-padding bytes after a `tableswitch` / `lookupswitch` opcode. The reader's
-/// position is the code-array offset, so the padded position lands on a 4-byte boundary.
-fn skip_switch_padding(r: &mut Reader<'_>) -> Result<()> {
-    let pad = (4 - (r.pos() % 4)) % 4;
-    r.bytes(pad)?;
-    Ok(())
-}
+    /// Skip the 0–3 alignment-padding bytes after a `tableswitch` / `lookupswitch` opcode. The
+    /// reader's position is the code-array offset, so the padded position lands on a 4-byte boundary.
+    fn skip_switch_padding(r: &mut Reader<'_>) -> Result<()> {
+        let pad = (4 - (r.pos() % 4)) % 4;
+        r.bytes(pad)?;
+        Ok(())
+    }
 
-/// Emit the matching 0–3 padding bytes when writing a switch.
-fn write_switch_padding(w: &mut Writer) {
-    let pad = (4 - (w.len() % 4)) % 4;
-    for _ in 0..pad {
-        w.u8(0);
+    /// Emit the matching 0–3 padding bytes when writing a switch.
+    fn write_switch_padding(w: &mut Writer) {
+        let pad = (4 - (w.len() % 4)) % 4;
+        for _ in 0..pad {
+            w.u8(0);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Instruction, WideInstruction, encode_code};
+    use super::{Instruction, WideInstruction};
     use crate::bytes::Reader;
 
     /// `encoded_len(pc)` must report exactly the bytes `write`/`read` use at that offset — including
@@ -1116,7 +1119,7 @@ mod tests {
             },
             Instruction::Return,
         ];
-        let bytes = encode_code(&code);
+        let bytes = Instruction::encode_code(&code);
         let mut r = Reader::new(&bytes);
         let mut pc = 0usize;
         for ins in &code {

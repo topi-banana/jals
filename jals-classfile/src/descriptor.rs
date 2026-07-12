@@ -106,29 +106,33 @@ pub struct MethodDescriptor {
     pub return_type: ReturnType,
 }
 
-/// Parse a field descriptor such as `Ljava/lang/Object;` or `[[I`.
-pub fn parse_field_descriptor(s: &str) -> Result<FieldType> {
-    let mut p = Parser::new(s);
-    let ty = p.field_type()?;
-    p.expect_eof()?;
-    Ok(ty)
+impl FieldType {
+    /// Parse a field descriptor such as `Ljava/lang/Object;` or `[[I`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        let ty = p.field_type()?;
+        p.expect_eof()?;
+        Ok(ty)
+    }
 }
 
-/// Parse a method descriptor such as `(Ljava/lang/Object;I)V`.
-pub fn parse_method_descriptor(s: &str) -> Result<MethodDescriptor> {
-    let mut p = Parser::new(s);
-    p.expect(b'(')?;
-    let mut params = Vec::new();
-    while p.peek() != Some(b')') {
-        params.push(p.field_type()?);
+impl MethodDescriptor {
+    /// Parse a method descriptor such as `(Ljava/lang/Object;I)V`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        p.expect(b'(')?;
+        let mut params = Vec::new();
+        while p.peek() != Some(b')') {
+            params.push(p.field_type()?);
+        }
+        p.expect(b')')?;
+        let return_type = p.return_type()?;
+        p.expect_eof()?;
+        Ok(Self {
+            params,
+            return_type,
+        })
     }
-    p.expect(b')')?;
-    let return_type = p.return_type()?;
-    p.expect_eof()?;
-    Ok(MethodDescriptor {
-        params,
-        return_type,
-    })
 }
 
 /// A byte cursor over a descriptor string. Descriptor punctuation is ASCII, so byte indexing never
@@ -245,7 +249,7 @@ mod tests {
     use super::*;
 
     fn field(s: &str) -> FieldType {
-        parse_field_descriptor(s).unwrap()
+        FieldType::parse(s).unwrap()
     }
 
     #[test]
@@ -269,11 +273,11 @@ mod tests {
 
     #[test]
     fn method_descriptor() {
-        let m = parse_method_descriptor("(Ljava/lang/Object;I)V").unwrap();
+        let m = MethodDescriptor::parse("(Ljava/lang/Object;I)V").unwrap();
         assert_eq!(m.params.len(), 2);
         assert_eq!(m.return_type, ReturnType::Void);
         assert_eq!(
-            parse_method_descriptor("()[Ljava/lang/String;")
+            MethodDescriptor::parse("()[Ljava/lang/String;")
                 .unwrap()
                 .return_type,
             ReturnType::Type(FieldType::Array(Box::new(FieldType::Object(
@@ -284,16 +288,16 @@ mod tests {
 
     #[test]
     fn rejects_malformed() {
-        assert!(parse_field_descriptor("Ljava/lang/Object").is_err());
-        assert!(parse_field_descriptor("X").is_err());
-        assert!(parse_field_descriptor("II").is_err());
-        assert!(parse_method_descriptor("Ljava/lang/Object;").is_err());
+        assert!(FieldType::parse("Ljava/lang/Object").is_err());
+        assert!(FieldType::parse("X").is_err());
+        assert!(FieldType::parse("II").is_err());
+        assert!(MethodDescriptor::parse("Ljava/lang/Object;").is_err());
     }
 
     #[test]
     fn render_round_trips() {
         for s in ["I", "[[J", "Ljava/util/Map;", "[Ljava/lang/String;", "Z"] {
-            assert_eq!(parse_field_descriptor(s).unwrap().to_string(), s);
+            assert_eq!(FieldType::parse(s).unwrap().to_string(), s);
         }
         for s in [
             "()V",
@@ -301,7 +305,7 @@ mod tests {
             "([IJ)Ljava/lang/String;",
             "()[Ljava/lang/Object;",
         ] {
-            assert_eq!(parse_method_descriptor(s).unwrap().to_string(), s);
+            assert_eq!(MethodDescriptor::parse(s).unwrap().to_string(), s);
         }
     }
 }

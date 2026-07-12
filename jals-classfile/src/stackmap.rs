@@ -128,8 +128,8 @@ impl StackMapFrame {
             }
             255 => {
                 let offset_delta = r.u16()?;
-                let locals = read_verification_list(r)?;
-                let stack = read_verification_list(r)?;
+                let locals = r.list(VerificationType::read)?;
+                let stack = r.list(VerificationType::read)?;
                 Self::Full {
                     offset_delta,
                     locals,
@@ -186,8 +186,8 @@ impl StackMapFrame {
             } => {
                 w.u8(255);
                 w.u16(*offset_delta);
-                write_verification_list(locals, w);
-                write_verification_list(stack, w);
+                w.list(locals, VerificationType::write);
+                w.list(stack, VerificationType::write);
             }
         }
     }
@@ -230,21 +230,5 @@ impl VerificationType {
                 w.u16(*offset);
             }
         }
-    }
-}
-
-fn read_verification_list(r: &mut Reader<'_>) -> Result<Vec<VerificationType>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(VerificationType::read(r)?);
-    }
-    Ok(v)
-}
-
-fn write_verification_list(items: &[VerificationType], w: &mut Writer) {
-    w.u16(items.len() as u16);
-    for item in items {
-        item.write(w);
     }
 }
