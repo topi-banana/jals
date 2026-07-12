@@ -213,7 +213,12 @@ jobs:
         with:
           workspaces: editors/zed
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall wasm-tools --no-confirm
+      # `--force`: the `rust-cache` step above restores cargo's install metadata
+      # (`.crates.toml`) marking wasm-tools as "already installed" while *not* restoring the
+      # `~/.cargo/bin/wasm-tools` binary itself, so a plain `binstall` skips the install and the
+      # component-encode step below fails with `wasm-tools: command not found`. Forcing the
+      # (re)install ignores that stale metadata and always places the binary.
+      - run: cargo binstall wasm-tools --no-confirm --force
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build the extension (wasm32-wasip1 core module)
