@@ -145,6 +145,53 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
+  zed-extension:
+    name: zed extension
+    runs-on: ubuntu-latest
+    env:
+      # The wasi-preview1 reactor adapter used to component-encode the extension, pinned to the
+      # wasmtime release Zed's extension host tracks (`wasmtime` in zed-industries/zed's
+      # Cargo.toml). Zed loads a wasm *component*, but `cargo build` emits a core module, so the
+      # module is adapted into a component with this exact adapter — matching Zed's own build so
+      # the artifact loads. Bump this when Zed bumps its wasmtime.
+      WASMTIME_VERSION: "36.0.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      # The extension (`editors/zed`) is its own workspace root (excluded from the outer one), so
+      # its target dir is `editors/zed/target`.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: editors/zed
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall wasm-tools --no-confirm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the extension (wasm32-wasip1 core module)
+        run: cargo build --release --locked --target wasm32-wasip1 --manifest-path editors/zed/Cargo.toml
+      - name: Download the wasi-preview1 reactor adapter
+        run: |
+          curl -fL --retry 3 \
+            -o wasi_snapshot_preview1.reactor.wasm \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasi_snapshot_preview1.reactor.wasm"
+      - name: Component-encode the extension
+        run: |
+          mkdir -p dist
+          wasm-tools component new \
+            editors/zed/target/wasm32-wasip1/release/zed_jals.wasm \
+            --adapt "wasi_snapshot_preview1=wasi_snapshot_preview1.reactor.wasm" \
+            -o dist/extension.wasm
+          cp editors/zed/extension.toml dist/extension.toml
+      - name: Upload the compiled extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-jals-extension
+          # The compiled Zed extension: the component `extension.wasm` + its `extension.toml`.
+          path: dist/
+          if-no-files-found: error
+
   corpus-reports:
     name: corpus reports
     runs-on: ubuntu-latest
