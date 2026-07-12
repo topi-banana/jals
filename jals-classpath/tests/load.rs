@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use jals_classpath::load_classpath;
+use jals_classpath::ClasspathLoad;
 
 /// `Box.class` (the same fixture `jals-hir` uses for its classpath-bridge tests).
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
@@ -25,7 +25,7 @@ fn loads_class_files_from_a_directory() {
     // A non-class file is ignored.
     write(&dir.path().join("README.txt"), b"not a class");
 
-    let load = load_classpath(&[dir.path().to_path_buf()]);
+    let load = ClasspathLoad::load_classpath(&[dir.path().to_path_buf()]);
     assert_eq!(load.classes.len(), 2);
     assert!(load.warnings.is_empty(), "{:?}", load.warnings);
 }
@@ -47,7 +47,7 @@ fn loads_class_files_from_a_jar() {
     zip.write_all(b"Manifest-Version: 1.0\n").unwrap();
     zip.finish().unwrap();
 
-    let load = load_classpath(&[jar_path]);
+    let load = ClasspathLoad::load_classpath(&[jar_path]);
     assert_eq!(load.classes.len(), 1);
     assert!(load.warnings.is_empty(), "{:?}", load.warnings);
 }
@@ -58,14 +58,14 @@ fn loads_a_bare_class_file_entry() {
     let class = dir.path().join("Box.class");
     write(&class, BOX_CLASS);
 
-    let load = load_classpath(&[class]);
+    let load = ClasspathLoad::load_classpath(&[class]);
     assert_eq!(load.classes.len(), 1);
     assert!(load.warnings.is_empty());
 }
 
 #[test]
 fn missing_entry_is_a_warning_not_a_failure() {
-    let load = load_classpath(&[PathBuf::from("/no/such/path.jar")]);
+    let load = ClasspathLoad::load_classpath(&[PathBuf::from("/no/such/path.jar")]);
     assert!(load.classes.is_empty());
     assert_eq!(load.warnings.len(), 1);
     assert!(load.warnings[0].message.contains("does not exist"));
@@ -80,7 +80,7 @@ fn a_corrupt_class_is_skipped_but_siblings_still_load() {
         b"\xca\xfe\xba\xbe not really a class",
     );
 
-    let load = load_classpath(&[dir.path().to_path_buf()]);
+    let load = ClasspathLoad::load_classpath(&[dir.path().to_path_buf()]);
     // The good one still loads; the bad one is a warning.
     assert_eq!(load.classes.len(), 1);
     assert_eq!(load.warnings.len(), 1);
@@ -93,7 +93,7 @@ fn unrecognized_file_entry_is_a_warning() {
     let txt = dir.path().join("notes.txt");
     write(&txt, b"hello");
 
-    let load = load_classpath(&[txt]);
+    let load = ClasspathLoad::load_classpath(&[txt]);
     assert!(load.classes.is_empty());
     assert_eq!(load.warnings.len(), 1);
     assert!(load.warnings[0].message.contains("unrecognized"));

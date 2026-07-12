@@ -27,8 +27,8 @@ pub(crate) enum Event {
 
 impl Event {
     /// 墓石イベント(まだ種別が確定していない `Start`)。
-    pub(crate) fn tombstone() -> Self {
-        Event::Start {
+    pub(crate) const fn tombstone() -> Self {
+        Self::Start {
             kind: None,
             forward_parent: None,
         }

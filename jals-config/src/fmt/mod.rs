@@ -8,7 +8,8 @@
 //! whole config surface is reachable as `fmt::*`. The load / parse error is the shared
 //! [`ConfigError`](crate::ConfigError).
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -31,6 +32,7 @@ pub use options::{
 /// Formatter style settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Spaces vs. tab for indentation.
     pub indent_style: IndentStyle,
@@ -327,7 +329,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             indent_style: IndentStyle::Space,
             indent_width: 4,
             continuation_indent: None,
@@ -353,10 +355,10 @@ impl Default for Config {
             trailing_comma: TrailingComma::Preserve,
             group_imports: false,
             import_groups: vec![
-                "java.".to_string(),
-                "javax.".to_string(),
-                "*".to_string(),
-                "static".to_string(),
+                "java.".to_owned(),
+                "javax.".to_owned(),
+                "*".to_owned(),
+                "static".to_owned(),
             ],
             binop_separator: BinopSeparator::Front,
             binop_layout: BinopLayout::Tall,
@@ -386,7 +388,7 @@ impl Config {
     /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
     pub fn indent_unit(&self) -> String {
         match self.indent_style {
-            IndentStyle::Tab => "\t".to_string(),
+            IndentStyle::Tab => "\t".to_owned(),
             IndentStyle::Space => " ".repeat(self.indent_width),
         }
     }
@@ -427,8 +429,8 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
-        crate::loader::load(fs, path)
+    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
+        <Self as crate::DiscoverableConfig>::load(fs, path)
     }
 
     /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalsfmt.toml`, read
@@ -438,7 +440,11 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
-        crate::loader::discover(fs, start_dir, "jalsfmt.toml")
+    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
+        <Self as crate::DiscoverableConfig>::discover(fs, start_dir)
     }
+}
+
+impl crate::DiscoverableConfig for Config {
+    const FILE_NAME: &'static str = "jalsfmt.toml";
 }

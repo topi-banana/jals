@@ -1,6 +1,7 @@
 //! The result of formatting: the rendered text plus any warnings.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -19,16 +20,16 @@ pub struct Warning {
 }
 
 impl Warning {
-    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Warning {
+    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Self {
         let range = err.range();
-        Warning {
-            message: err.message().to_string(),
+        Self {
+            message: err.message().to_owned(),
             range: usize::from(range.start())..usize::from(range.end()),
         }
     }
 }
 
-/// The output of [`format_source`](crate::format_source).
+/// The output of [`FormatOutput::format_source`].
 #[derive(Debug, Clone)]
 pub struct FormatOutput {
     /// The formatted source text.
@@ -39,7 +40,7 @@ pub struct FormatOutput {
 
 impl FormatOutput {
     /// Whether any warnings were produced.
-    pub fn has_warnings(&self) -> bool {
+    pub const fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
     }
 }

@@ -7,7 +7,8 @@ use crate::def::DefId;
 
 /// A stable, dense identifier for a [`Scope`] within one [`Resolved`](crate::Resolved) file.
 ///
-/// It indexes [`Resolved::scopes`](crate::Resolved::scopes). The file scope is always [`ScopeId`]`(0)`.
+/// It indexes [`Resolved::scopes`](crate::Resolved::scopes). The file scope is always the zeroth
+/// [`ScopeId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScopeId(pub(crate) u32);
 
@@ -41,11 +42,8 @@ impl ScopeKind {
     /// Local variables and resources are sequential (`use(x); int x;` does not see `x`). Members,
     /// parameters, type parameters, and pattern bindings are visible throughout their scope, so
     /// forward references resolve.
-    pub fn is_sequential(self) -> bool {
-        matches!(
-            self,
-            ScopeKind::Block | ScopeKind::For | ScopeKind::Resources
-        )
+    pub const fn is_sequential(self) -> bool {
+        matches!(self, Self::Block | Self::For | Self::Resources)
     }
 }
 

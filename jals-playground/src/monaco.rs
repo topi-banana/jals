@@ -149,35 +149,44 @@ extern "C" {
     ) -> JsValue;
 }
 
-/// The Monaco `CompletionItemKind` (the item icon) for a completion's [`DefKind`].
-pub fn completion_kind(kind: DefKind) -> u32 {
-    use DefKind::*;
-    match kind {
-        Method | Constructor => 0, // Method
-        Field => 3,                // Field
-        EnumConstant => 16,        // EnumMember
-        Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 4, // Variable
-        TypeParam => 24,           // TypeParameter
-        Class | Record => 5,       // Class
-        Interface | AnnotationType => 7, // Interface
-        Enum => 15,                // Enum
-    }
+/// The Monaco numeric kinds a `jals-hir` [`DefKind`] maps to — the icon vocabularies the
+/// completion and document-symbol providers marshal with.
+pub trait DefKindExt {
+    /// The Monaco `CompletionItemKind` (the item icon) for a completion's [`DefKind`].
+    fn completion_kind(self) -> u32;
+    /// The Monaco `SymbolKind` (the outline icon) for a document symbol's [`DefKind`].
+    fn symbol_kind(self) -> u32;
 }
 
-/// The Monaco `SymbolKind` (the outline icon) for a document symbol's [`DefKind`].
-pub fn symbol_kind(kind: DefKind) -> u32 {
-    use DefKind::*;
-    match kind {
-        Class => 4,                                                             // Class
-        Record => 22,                                                           // Struct
-        Interface | AnnotationType => 10,                                       // Interface
-        Enum => 9,                                                              // Enum
-        Field => 7,                                                             // Field
-        Method => 5,                                                            // Method
-        Constructor => 8,                                                       // Constructor
-        EnumConstant => 21,                                                     // EnumMember
-        TypeParam => 25,                                                        // TypeParameter
-        Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 12, // Variable
+impl DefKindExt for DefKind {
+    fn completion_kind(self) -> u32 {
+        use DefKind::*;
+        match self {
+            Method | Constructor => 0, // Method
+            Field => 3,                // Field
+            EnumConstant => 16,        // EnumMember
+            Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 4, // Variable
+            TypeParam => 24,           // TypeParameter
+            Class | Record => 5,       // Class
+            Interface | AnnotationType => 7, // Interface
+            Enum => 15,                // Enum
+        }
+    }
+
+    fn symbol_kind(self) -> u32 {
+        use DefKind::*;
+        match self {
+            Class => 4,                                                             // Class
+            Record => 22,                                                           // Struct
+            Interface | AnnotationType => 10,                                       // Interface
+            Enum => 9,                                                              // Enum
+            Field => 7,                                                             // Field
+            Method => 5,                                                            // Method
+            Constructor => 8,                                                       // Constructor
+            EnumConstant => 21,                                                     // EnumMember
+            TypeParam => 25,                                                        // TypeParameter
+            Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 12, // Variable
+        }
     }
 }
 
@@ -186,7 +195,7 @@ pub const COMPLETION_KIND_KEYWORD: u32 = 17;
 
 /// One diagnostic marker in Monaco coordinates — one-based line/column, UTF-16, ready to display.
 /// The caller maps its byte-offset diagnostics into these (via [`crate::line_index::LineIndex`]);
-/// the `js_sys`/`JsValue` marshalling stays behind [`set_diagnostics`].
+/// the `js_sys`/`JsValue` marshalling stays behind [`Marker::set_diagnostics`].
 pub struct Marker<'a> {
     pub start_line: u32,
     pub start_col: u32,
@@ -196,27 +205,30 @@ pub struct Marker<'a> {
     pub severity: Severity,
 }
 
-/// Replace the current model's diagnostic markers with `markers`.
-pub fn set_diagnostics<'a>(markers: impl IntoIterator<Item = Marker<'a>>) {
-    let array = js_sys::Array::new();
-    for m in markers {
-        array.push(&marker(
-            m.start_line,
-            m.start_col,
-            m.end_line,
-            m.end_col,
-            m.message,
-            marker_severity(m.severity),
-        ));
+impl<'a> Marker<'a> {
+    /// Replace the current model's diagnostic markers with `markers`.
+    pub fn set_diagnostics(markers: impl IntoIterator<Item = Marker<'a>>) {
+        let array = js_sys::Array::new();
+        for m in markers {
+            array.push(&marker(
+                m.start_line,
+                m.start_col,
+                m.end_line,
+                m.end_col,
+                m.message,
+                m.monaco_severity(),
+            ));
+        }
+        set_markers(&array);
     }
-    set_markers(&array);
-}
 
-/// Map a lint [`Severity`] to a Monaco `MarkerSeverity` (Error = 8, Warning = 4, Hint = 1).
-fn marker_severity(severity: Severity) -> u32 {
-    match severity {
-        Severity::Error => 8,
-        Severity::Warn => 4,
-        Severity::Allow => 1,
+    /// Map this marker's lint [`Severity`] to a Monaco `MarkerSeverity` (Error = 8, Warning = 4,
+    /// Hint = 1).
+    fn monaco_severity(&self) -> u32 {
+        match self.severity {
+            Severity::Error => 8,
+            Severity::Warn => 4,
+            Severity::Allow => 1,
+        }
     }
 }

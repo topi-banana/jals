@@ -7,7 +7,7 @@ proptest! {
     /// Never panics on any UTF-8 string, and the syntax tree's text equals the input (lossless).
     #[test]
     fn parse_is_lossless_and_never_panics(src in any::<String>()) {
-        let parse = parse(&src);
+        let parse = Parse::parse(&src);
         prop_assert_eq!(parse.syntax().text().to_string(), src);
     }
 
@@ -35,7 +35,7 @@ proptest! {
             0..48,
         ).prop_map(|parts| parts.concat())
     ) {
-        let parse = parse(&src);
+        let parse = Parse::parse(&src);
         prop_assert_eq!(parse.syntax().text().to_string(), src);
     }
 }

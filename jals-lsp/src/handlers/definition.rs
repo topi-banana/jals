@@ -10,19 +10,24 @@ use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
 
-/// The LSP range of the definition the reference under `position` binds to within this one file, if
-/// any. Resolution is the file-local pass ([`jals_hir::resolve_node`]); the cursor may sit on a
-/// local, parameter, field, method call, or a file-local type name.
-pub(crate) fn goto_definition_local(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    position: Position,
-) -> Option<Range> {
-    let resolved = jals_hir::resolve_node(&parse.syntax());
-    let offset = u32::from(line_index.offset(text, position)) as usize;
-    let def = resolved.definition_at(offset)?;
-    Some(line_index.byte_range(text, &def.name_range))
+/// Go-to-definition (`textDocument/definition`): the file-local fallback.
+pub(crate) struct Definition;
+
+impl Definition {
+    /// The LSP range of the definition the reference under `position` binds to within this one file, if
+    /// any. Resolution is the file-local pass ([`jals_hir::Resolved::resolve_node`]); the cursor may sit
+    /// on a local, parameter, field, method call, or a file-local type name.
+    pub(crate) fn goto_definition_local(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        position: Position,
+    ) -> Option<Range> {
+        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
+        let offset = u32::from(line_index.offset(text, position)) as usize;
+        let def = resolved.definition_at(offset)?;
+        Some(line_index.byte_range(text, &def.name_range))
+    }
 }
 
 #[cfg(test)]
@@ -37,8 +42,8 @@ mod tests {
         let line_index = LineIndex::new(text);
         let offset = text.find(needle).expect("needle not found");
         let pos = line_index.position(text, TextSize::from(offset as u32));
-        let parse = jals_syntax::parse(text);
-        goto_definition_local(&parse, text, &line_index, pos)
+        let parse = jals_syntax::Parse::parse(text);
+        Definition::goto_definition_local(&parse, text, &line_index, pos)
             .map(|r| (r.start.line, r.start.character, r.end.line, r.end.character))
     }
 
@@ -50,8 +55,9 @@ mod tests {
         let use_x = text.rfind('x').unwrap();
         let line_index = LineIndex::new(text);
         let pos = line_index.position(text, TextSize::from(use_x as u32));
-        let parse = jals_syntax::parse(text);
-        let range = goto_definition_local(&parse, text, &line_index, pos).expect("resolves");
+        let parse = jals_syntax::Parse::parse(text);
+        let range =
+            Definition::goto_definition_local(&parse, text, &line_index, pos).expect("resolves");
         // The declaration `x` is at byte 25.
         assert_eq!((range.start.line, range.start.character), (0, 25));
     }
@@ -73,9 +79,14 @@ mod tests {
     fn never_panics_on_broken_or_out_of_range() {
         for text in ["", "class", "class C {", "@", "a ="] {
             let line_index = LineIndex::new(text);
-            let parse = jals_syntax::parse(text);
+            let parse = jals_syntax::Parse::parse(text);
             for (line, character) in [(0, 0), (999, 999), (0, 999)] {
-                goto_definition_local(&parse, text, &line_index, Position { line, character });
+                Definition::goto_definition_local(
+                    &parse,
+                    text,
+                    &line_index,
+                    Position { line, character },
+                );
             }
         }
     }

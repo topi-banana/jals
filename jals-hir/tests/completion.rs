@@ -1,10 +1,7 @@
-//! Tests for `jals_hir::member_completions`: anchoring on the `.` before the cursor, inferring the
-//! receiver, and enumerating its fields and methods (own and inherited) on a project type.
+//! Tests for `jals_hir::ProjectIndex::member_completions`: anchoring on the `.` before the cursor,
+//! inferring the receiver, and enumerating its fields and methods (own and inherited) on a project type.
 
-use jals_hir::{
-    Completion, DefKind, FileId, ProjectIndex, Resolved, at_member_access, member_completions,
-    resolve_node, scope_completions,
-};
+use jals_hir::{Completion, DefKind, FileId, ProjectIndex, Resolved};
 use jals_syntax::SyntaxNode;
 
 /// Build an index over `sources`, place the cursor at the `$0` marker in `sources[file]` (removed
@@ -14,28 +11,37 @@ fn at(
     file: usize,
     run: impl Fn(&SyntaxNode, &Resolved, &ProjectIndex, FileId, usize) -> Vec<Completion>,
 ) -> Vec<Completion> {
-    let mut texts: Vec<String> = sources.iter().map(|s| s.to_string()).collect();
+    let mut texts: Vec<String> = sources.iter().map(ToString::to_string).collect();
     let offset = texts[file].find("$0").expect("a $0 cursor marker");
     texts[file].replace_range(offset..offset + 2, "");
     let nodes: Vec<(FileId, SyntaxNode)> = texts
         .iter()
         .enumerate()
-        .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+        .map(|(i, s)| {
+            (
+                FileId(u32::try_from(i).unwrap()),
+                jals_syntax::Parse::parse(s).syntax(),
+            )
+        })
         .collect();
     let index = ProjectIndex::builder(&nodes).build();
     let (fid, root) = &nodes[file];
-    let resolved = resolve_node(root);
+    let resolved = Resolved::resolve_node(root);
     run(root, &resolved, &index, *fid, offset)
 }
 
 /// Run member completion at the `$0` marker in `sources[file]`.
 fn complete(sources: &[&str], file: usize) -> Vec<Completion> {
-    at(sources, file, member_completions)
+    at(sources, file, |root, resolved, index, file, offset| {
+        index.member_completions(root, resolved, file, offset)
+    })
 }
 
 /// Run scope completion (a non-member-access position) at the `$0` marker in `sources[file]`.
 fn scope(sources: &[&str], file: usize) -> Vec<Completion> {
-    at(sources, file, scope_completions)
+    at(sources, file, |root, resolved, index, file, offset| {
+        index.scope_completions(root, resolved, file, offset)
+    })
 }
 
 /// The labels of the scope completions at `$0`, sorted.
@@ -73,17 +79,13 @@ fn completes_fields_and_methods_with_detail() {
         items(&[src], 0),
         [
             (
-                "area".to_string(),
+                "area".to_owned(),
                 DefKind::Method,
-                "(int w, int h): int".to_string()
+                "(int w, int h): int".to_owned()
             ),
-            ("id".to_string(), DefKind::Field, "long".to_string()),
-            (
-                "m".to_string(),
-                DefKind::Method,
-                "(Box b): void".to_string()
-            ),
-            ("size".to_string(), DefKind::Field, "int".to_string()),
+            ("id".to_owned(), DefKind::Field, "long".to_owned()),
+            ("m".to_owned(), DefKind::Method, "(Box b): void".to_owned()),
+            ("size".to_owned(), DefKind::Field, "int".to_owned()),
         ]
     );
 }
@@ -148,7 +150,7 @@ fn scope_offers_locals_params_and_members() {
     let labels = scope_labels(&[src], 0);
     for expected in ["C", "count", "helper", "m", "n", "total"] {
         assert!(
-            labels.contains(&expected.to_string()),
+            labels.contains(&expected.to_owned()),
             "missing `{expected}` in {labels:?}"
         );
     }
@@ -160,8 +162,8 @@ fn scope_hides_a_local_declared_after_the_cursor() {
     // visible at the cursor.
     let src = "class C { void m() { int early = 1; $0 int late = 2; } }";
     let labels = scope_labels(&[src], 0);
-    assert!(labels.contains(&"early".to_string()));
-    assert!(!labels.contains(&"late".to_string()));
+    assert!(labels.contains(&"early".to_owned()));
+    assert!(!labels.contains(&"late".to_owned()));
 }
 
 #[test]
@@ -169,20 +171,20 @@ fn scope_offers_project_types_from_other_files() {
     let other = "package a; class Helper { }";
     let main = "package a; class Main { void m() { $0 } }";
     let labels = scope_labels(&[other, main], 1);
-    assert!(labels.contains(&"Helper".to_string()));
-    assert!(labels.contains(&"Main".to_string()));
+    assert!(labels.contains(&"Helper".to_owned()));
+    assert!(labels.contains(&"Main".to_owned()));
 }
 
 #[test]
 fn at_member_access_distinguishes_the_two_contexts() {
     let src = "class C { void m(C c) { c. } }";
-    let root = jals_syntax::parse(src).syntax();
+    let root = jals_syntax::Parse::parse(src).syntax();
     // Right after `c.`: a member-access position.
     let dot = src.find("c.").unwrap() + 2;
-    assert!(at_member_access(&root, dot));
+    assert!(ProjectIndex::at_member_access(&root, dot));
     // Inside the method body but not after a dot: a scope position.
     let body = src.find("{ c").unwrap() + 1;
-    assert!(!at_member_access(&root, body));
+    assert!(!ProjectIndex::at_member_access(&root, body));
 }
 
 #[test]
@@ -195,11 +197,11 @@ fn never_panics_on_broken_input() {
         ".",
         "class C { .$0 }",
     ] {
-        let nodes = [(FileId(0), jals_syntax::parse(src).syntax())];
+        let nodes = [(FileId(0), jals_syntax::Parse::parse(src).syntax())];
         let index = ProjectIndex::builder(&nodes).build();
-        let resolved = resolve_node(&nodes[0].1);
+        let resolved = Resolved::resolve_node(&nodes[0].1);
         for offset in [0, src.len(), src.len().saturating_sub(1)] {
-            let _ = member_completions(&nodes[0].1, &resolved, &index, FileId(0), offset);
+            let _ = index.member_completions(&nodes[0].1, &resolved, FileId(0), offset);
         }
     }
 }

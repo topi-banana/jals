@@ -32,26 +32,16 @@ mod skeleton;
 #[cfg(feature = "native")]
 mod native;
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 pub use io::{Fetcher, Git};
-pub use load::{
-    ClasspathLoad, extract_nested_jars_in, extract_sources_in, load_classpath_in,
-    synthesize_classpath_sources_in,
-};
-pub use project::{ProjectInputOptions, ProjectInputsIn, assemble_project_inputs_in};
-pub use resolve::{
-    resolve_dependencies_in, resolve_project_dependencies_in, resolve_project_source_deps_in,
-    resolve_project_sources_in,
-};
+pub use load::{ClasspathLoad, JarExtraction};
+pub use project::{ProjectInputOptions, ProjectInputsIn};
+pub use resolve::DepsCache;
+pub use skeleton::SkeletonGroup;
 
 #[cfg(feature = "native")]
 pub use native::{
     NestedJarsExtraction, ProjectInputs, ReqwestFetcher, ResolvedDependencies, SourcesExtraction,
-    SubprocessGit, assemble_project_inputs, cached_jar_path, extract_nested_jars, extract_sources,
-    load_classpath, resolve_dependencies, resolve_project_dependencies,
-    resolve_project_source_deps, resolve_project_sources, synthesize_classpath_sources,
+    SubprocessGit,
 };
 
 /// A single classpath entry or member file that could not be loaded, or a dependency that could not be
@@ -68,19 +58,10 @@ pub struct Warning {
 impl Warning {
     /// Build a [`Warning`] for `path` with `message`, owning both. The single construction site shared
     /// by the load (`load.rs`) and resolve (`resolve.rs`) halves of this crate.
-    pub(crate) fn new(path: &str, message: &str) -> Warning {
-        Warning {
-            path: path.to_string(),
-            message: message.to_string(),
+    pub(crate) fn new(path: &str, message: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            message: message.to_owned(),
         }
     }
-}
-
-/// A 16-hex-digit [`DefaultHasher`] digest of `value`, used to disambiguate cache filenames / subdirs
-/// (e.g. two URLs or jar paths that share a name). [`DefaultHasher`] is fixed-keyed, so the digest is
-/// stable across runs — only disambiguation matters here, not collision resistance.
-pub(crate) fn hash_hex(value: impl Hash) -> String {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }

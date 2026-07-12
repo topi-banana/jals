@@ -20,8 +20,6 @@ mod expr;
 mod literal;
 mod types;
 
-pub use attrs::{constant_value_initializer, declared_throws, parameter_names};
-pub use body::decompile_method_body;
-pub use types::{
-    internal_to_java, render_class_type_sig, render_field_type, render_throws, render_type_sig,
-};
+pub use attrs::Attrs;
+pub use body::MethodBody;
+pub use types::JavaType;

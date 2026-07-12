@@ -21,10 +21,10 @@ pub enum Resolution {
 impl Resolution {
     /// The definition this reference bound to, or `None` if it stayed
     /// [`Unresolved`](Self::Unresolved).
-    pub fn def_id(self) -> Option<DefId> {
+    pub const fn def_id(self) -> Option<DefId> {
         match self {
-            Resolution::Def(id) => Some(id),
-            Resolution::Unresolved => None,
+            Self::Def(id) => Some(id),
+            Self::Unresolved => None,
         }
     }
 }

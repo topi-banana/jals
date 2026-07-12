@@ -1,8 +1,6 @@
 //! Property tests: resolution never panics and produces internally consistent, in-bounds results.
 
-use jals_hir::{
-    FileId, ProjectIndex, Resolution, infer, infer_node, resolve, resolve_node, type_mismatches,
-};
+use jals_hir::{FileId, ProjectIndex, Resolution, Resolved, TypeInference};
 use jals_syntax::SyntaxNode;
 use proptest::prelude::*;
 
@@ -56,19 +54,19 @@ proptest! {
     /// Resolution never panics on Java-ish input.
     #[test]
     fn never_panics(src in javaish()) {
-        let _ = resolve(&src);
+        let _ = Resolved::resolve(&src);
     }
 
     /// Resolution never panics on arbitrary input (including arbitrary Unicode).
     #[test]
     fn never_panics_on_arbitrary(src in ".*") {
-        let _ = resolve(&src);
+        let _ = Resolved::resolve(&src);
     }
 
     /// Every definition, reference, and scope range is well-formed and within the source bounds.
     #[test]
     fn ranges_in_bounds(src in javaish()) {
-        let resolved = resolve(&src);
+        let resolved = Resolved::resolve(&src);
         let n = src.len();
         for d in &resolved.defs {
             prop_assert!(d.name_range.start <= d.name_range.end);
@@ -87,7 +85,7 @@ proptest! {
     /// A resolved reference points at a real definition whose name and name-space match it.
     #[test]
     fn resolutions_are_consistent(src in javaish()) {
-        let resolved = resolve(&src);
+        let resolved = Resolved::resolve(&src);
         for r in &resolved.references {
             if let Resolution::Def(id) = r.resolution {
                 let d = resolved.def(id);
@@ -104,11 +102,11 @@ proptest! {
         let nodes: Vec<(FileId, SyntaxNode)> = srcs
             .iter()
             .enumerate()
-            .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+            .map(|(i, s)| (FileId(u32::try_from(i).unwrap()), jals_syntax::Parse::parse(s).syntax()))
             .collect();
         let index = ProjectIndex::builder(&nodes).build();
         for (file, root) in &nodes {
-            let resolved = resolve_node(root);
+            let resolved = Resolved::resolve_node(root);
             let _ = index.unresolved_types(*file, &resolved);
             for r in &resolved.references {
                 let _ = index.definition_at(*file, &resolved, r.range.start);
@@ -124,11 +122,11 @@ proptest! {
     /// definition and source offset can be queried.
     #[test]
     fn infer_never_panics(src in javaish()) {
-        let node = jals_syntax::parse(&src).syntax();
-        let resolved = resolve_node(&node);
+        let node = jals_syntax::Parse::parse(&src).syntax();
+        let resolved = Resolved::resolve_node(&node);
         let index = ProjectIndex::builder(&[(FileId(0), node.clone())]).build();
 
-        let ti = infer(&node, &resolved, &index, FileId(0));
+        let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
         for d in &resolved.defs {
             let _ = ti.type_of_def(d.id);
         }
@@ -137,7 +135,7 @@ proptest! {
         }
 
         // The project-free path must hold up too.
-        let ti_local = infer_node(&node, &resolved);
+        let ti_local = TypeInference::infer_node(&node, &resolved);
         for d in &resolved.defs {
             let _ = ti_local.type_of_def(d.id);
         }
@@ -147,14 +145,14 @@ proptest! {
     /// well-formed and within the source bounds.
     #[test]
     fn type_mismatches_never_panic(src in javaish()) {
-        let node = jals_syntax::parse(&src).syntax();
-        let resolved = resolve_node(&node);
+        let node = jals_syntax::Parse::parse(&src).syntax();
+        let resolved = Resolved::resolve_node(&node);
         let index = ProjectIndex::builder(&[(FileId(0), node.clone())]).build();
         let n = src.len();
 
         for mismatches in [
-            type_mismatches(&node, &resolved, Some((&index, FileId(0)))),
-            type_mismatches(&node, &resolved, None),
+            TypeInference::type_mismatches(&node, &resolved, Some((&index, FileId(0)))),
+            TypeInference::type_mismatches(&node, &resolved, None),
         ] {
             for m in &mismatches {
                 prop_assert!(m.range.start <= m.range.end);

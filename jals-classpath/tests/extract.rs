@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use jals_classpath::extract_sources;
+use jals_classpath::SourcesExtraction;
 
 /// Build a tiny but real (deflated) jar at `path` whose members are the given `(name, content)` pairs,
 /// mirroring `write_jar` in `resolve.rs` but for source jars.
@@ -38,7 +38,7 @@ fn extracts_only_java_members_to_disk() {
     );
 
     let dest = dir.path().join("out");
-    let extraction = extract_sources(std::slice::from_ref(&jar), &dest);
+    let extraction = SourcesExtraction::extract_sources(std::slice::from_ref(&jar), &dest);
     assert!(extraction.warnings.is_empty(), "{:?}", extraction.warnings);
 
     // Only the `.java` member is extracted; the manifest and `.class` are ignored.
@@ -61,10 +61,10 @@ fn extraction_is_idempotent() {
     write_sources_jar(&jar, &[("a/B.java", "class B {}")]);
     let dest = dir.path().join("out");
 
-    let first = extract_sources(std::slice::from_ref(&jar), &dest);
+    let first = SourcesExtraction::extract_sources(std::slice::from_ref(&jar), &dest);
     assert_eq!(first.java_files.len(), 1);
     // A second extraction reuses the file already on disk (skip-if-exists), yielding the same path.
-    let second = extract_sources(std::slice::from_ref(&jar), &dest);
+    let second = SourcesExtraction::extract_sources(std::slice::from_ref(&jar), &dest);
     assert_eq!(first.java_files, second.java_files);
     assert!(second.warnings.is_empty(), "{:?}", second.warnings);
     assert_eq!(
@@ -79,7 +79,8 @@ fn corrupt_jar_is_a_warning_not_a_failure() {
     let bogus = dir.path().join("bad-sources.jar");
     std::fs::write(&bogus, b"not a zip archive").unwrap();
 
-    let extraction = extract_sources(std::slice::from_ref(&bogus), &dir.path().join("out"));
+    let extraction =
+        SourcesExtraction::extract_sources(std::slice::from_ref(&bogus), &dir.path().join("out"));
     assert!(extraction.java_files.is_empty());
     assert_eq!(extraction.warnings.len(), 1);
     assert!(

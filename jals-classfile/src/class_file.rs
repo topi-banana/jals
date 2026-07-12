@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::attribute::{self, Attribute};
+use crate::attribute::Attribute;
 use crate::bytes::{Reader, Writer};
 use crate::constant_pool::ConstantPool;
 use crate::error::{ClassfileError, Result};
@@ -48,7 +48,7 @@ pub struct ClassFile {
 impl ClassFile {
     /// Parse a class file from its raw bytes. Returns an [`Err`] (never panics) on any structural
     /// problem, including a bad magic or trailing bytes.
-    pub fn read(bytes: &[u8]) -> Result<ClassFile> {
+    pub fn read(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
         let magic = r.u32()?;
         if magic != MAGIC {
@@ -60,16 +60,16 @@ impl ClassFile {
         let access_flags = ClassAccessFlags(r.u16()?);
         let this_class = r.u16()?;
         let super_class = r.u16()?;
-        let interfaces = read_u16_list(&mut r)?;
-        let fields = read_fields(&mut r, &constant_pool)?;
-        let methods = read_methods(&mut r, &constant_pool)?;
-        let attributes = attribute::read_attributes(&mut r, &constant_pool)?;
+        let interfaces = r.u16_list()?;
+        let fields = r.list(|r| FieldInfo::read(r, &constant_pool))?;
+        let methods = r.list(|r| MethodInfo::read(r, &constant_pool))?;
+        let attributes = Attribute::read_all(&mut r, &constant_pool)?;
         if r.remaining() != 0 {
             return Err(ClassfileError::TrailingBytes {
                 remaining: r.remaining(),
             });
         }
-        Ok(ClassFile {
+        Ok(Self {
             minor_version,
             major_version,
             constant_pool,
@@ -94,46 +94,10 @@ impl ClassFile {
         w.u16(self.access_flags.0);
         w.u16(self.this_class);
         w.u16(self.super_class);
-        w.u16(self.interfaces.len() as u16);
-        for &i in &self.interfaces {
-            w.u16(i);
-        }
-        w.u16(self.fields.len() as u16);
-        for f in &self.fields {
-            f.write(&mut w);
-        }
-        w.u16(self.methods.len() as u16);
-        for m in &self.methods {
-            m.write(&mut w);
-        }
-        attribute::write_attributes(&self.attributes, &mut w);
+        w.u16_list(&self.interfaces);
+        w.list(&self.fields, FieldInfo::write);
+        w.list(&self.methods, MethodInfo::write);
+        Attribute::write_all(&self.attributes, &mut w);
         w.into_vec()
     }
-}
-
-fn read_u16_list(r: &mut Reader<'_>) -> Result<Vec<u16>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(r.u16()?);
-    }
-    Ok(v)
-}
-
-fn read_fields(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<FieldInfo>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(FieldInfo::read(r, pool)?);
-    }
-    Ok(v)
-}
-
-fn read_methods(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<MethodInfo>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(MethodInfo::read(r, pool)?);
-    }
-    Ok(v)
 }

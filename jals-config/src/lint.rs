@@ -27,11 +27,11 @@ pub enum Severity {
 
 impl Severity {
     /// The lowercase name (`"allow"` / `"warn"` / `"error"`).
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Severity::Allow => "allow",
-            Severity::Warn => "warn",
-            Severity::Error => "error",
+            Self::Allow => "allow",
+            Self::Warn => "warn",
+            Self::Error => "error",
         }
     }
 }
@@ -71,8 +71,8 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Config, ConfigError> {
-        crate::loader::load(fs, path)
+    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
+        <Self as crate::DiscoverableConfig>::load(fs, path)
     }
 
     /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalslint.toml`, read
@@ -82,9 +82,13 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Config, ConfigError> {
-        crate::loader::discover(fs, start_dir, "jalslint.toml")
+    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
+        <Self as crate::DiscoverableConfig>::discover(fs, start_dir)
     }
+}
+
+impl crate::DiscoverableConfig for Config {
+    const FILE_NAME: &'static str = "jalslint.toml";
 }
 
 #[cfg(test)]

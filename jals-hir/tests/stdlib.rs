@@ -6,7 +6,6 @@
 
 use jals_hir::{
     FileId, ItemOrigin, ProjectIndex, Resolved, Ty, TypeInference, TypeMismatch, TypeResolution,
-    infer, resolve_node, type_mismatches,
 };
 use jals_syntax::SyntaxNode;
 
@@ -15,25 +14,30 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
     sources
         .iter()
         .enumerate()
-        .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+        .map(|(i, s)| {
+            (
+                FileId(u32::try_from(i).unwrap()),
+                jals_syntax::Parse::parse(s).syntax(),
+            )
+        })
         .collect()
 }
 
 /// Analyses a single-file project *with the stdlib stubs*, returning the pieces a test queries.
 fn analyse_with_stdlib(src: &str) -> (SyntaxNode, Resolved, TypeInference, ProjectIndex) {
-    let node = jals_syntax::parse(src).syntax();
-    let resolved = resolve_node(&node);
+    let node = jals_syntax::Parse::parse(src).syntax();
+    let resolved = Resolved::resolve_node(&node);
     let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
         .with_stdlib()
         .build();
-    let ti = infer(&node, &resolved, &index, FileId(0));
+    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
     (node, resolved, ti, index)
 }
 
 /// The type-mismatch diagnostics for a single-file project analysed *with the stdlib stubs*.
 fn mismatches_with_stdlib(src: &str) -> Vec<TypeMismatch> {
     let (node, resolved, _ti, index) = analyse_with_stdlib(src);
-    type_mismatches(&node, &resolved, Some((&index, FileId(0))))
+    TypeInference::type_mismatches(&node, &resolved, Some((&index, FileId(0))))
 }
 
 /// The inferred type of the first definition named `name`.

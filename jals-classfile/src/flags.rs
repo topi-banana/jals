@@ -22,7 +22,7 @@ macro_rules! access_flags {
             $($(#[$cmeta])* pub const $flag: u16 = $val;)*
 
             /// Whether every bit set in `mask` is also set here.
-            pub fn contains(self, mask: u16) -> bool {
+            pub const fn contains(self, mask: u16) -> bool {
                 self.0 & mask == mask
             }
 
@@ -45,15 +45,15 @@ access_flags! {
         const MODULE = 0x8000;
     }
     /// Whether `ACC_INTERFACE` is set.
-    pub fn is_interface(self) -> bool { self.contains(Self::INTERFACE) }
+    pub const fn is_interface(self) -> bool { self.contains(Self::INTERFACE) }
     /// Whether `ACC_ANNOTATION` is set.
-    pub fn is_annotation(self) -> bool { self.contains(Self::ANNOTATION) }
+    pub const fn is_annotation(self) -> bool { self.contains(Self::ANNOTATION) }
     /// Whether `ACC_ENUM` is set.
-    pub fn is_enum(self) -> bool { self.contains(Self::ENUM) }
+    pub const fn is_enum(self) -> bool { self.contains(Self::ENUM) }
     /// Whether `ACC_ABSTRACT` is set.
-    pub fn is_abstract(self) -> bool { self.contains(Self::ABSTRACT) }
+    pub const fn is_abstract(self) -> bool { self.contains(Self::ABSTRACT) }
     /// Whether `ACC_MODULE` is set.
-    pub fn is_module(self) -> bool { self.contains(Self::MODULE) }
+    pub const fn is_module(self) -> bool { self.contains(Self::MODULE) }
 }
 
 access_flags! {
@@ -70,11 +70,11 @@ access_flags! {
         const ENUM = 0x4000;
     }
     /// Whether `ACC_STATIC` is set.
-    pub fn is_static(self) -> bool { self.contains(Self::STATIC) }
+    pub const fn is_static(self) -> bool { self.contains(Self::STATIC) }
     /// Whether `ACC_PUBLIC` is set.
-    pub fn is_public(self) -> bool { self.contains(Self::PUBLIC) }
+    pub const fn is_public(self) -> bool { self.contains(Self::PUBLIC) }
     /// Whether `ACC_ENUM` is set.
-    pub fn is_enum(self) -> bool { self.contains(Self::ENUM) }
+    pub const fn is_enum(self) -> bool { self.contains(Self::ENUM) }
 }
 
 access_flags! {
@@ -94,11 +94,11 @@ access_flags! {
         const SYNTHETIC = 0x1000;
     }
     /// Whether `ACC_STATIC` is set.
-    pub fn is_static(self) -> bool { self.contains(Self::STATIC) }
+    pub const fn is_static(self) -> bool { self.contains(Self::STATIC) }
     /// Whether `ACC_PUBLIC` is set.
-    pub fn is_public(self) -> bool { self.contains(Self::PUBLIC) }
+    pub const fn is_public(self) -> bool { self.contains(Self::PUBLIC) }
     /// Whether `ACC_VARARGS` is set.
-    pub fn is_varargs(self) -> bool { self.contains(Self::VARARGS) }
+    pub const fn is_varargs(self) -> bool { self.contains(Self::VARARGS) }
     /// Whether `ACC_ABSTRACT` is set.
-    pub fn is_abstract(self) -> bool { self.contains(Self::ABSTRACT) }
+    pub const fn is_abstract(self) -> bool { self.contains(Self::ABSTRACT) }
 }

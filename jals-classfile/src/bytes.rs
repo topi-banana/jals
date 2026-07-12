@@ -14,18 +14,18 @@ pub(crate) struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) fn new(buf: &'a [u8]) -> Self {
+    pub(crate) const fn new(buf: &'a [u8]) -> Self {
         Reader { buf, pos: 0 }
     }
 
     /// The current absolute byte offset. Used by `Code` to compute the alignment padding of
     /// `tableswitch` / `lookupswitch`, which is relative to the start of the code array.
-    pub(crate) fn pos(&self) -> usize {
+    pub(crate) const fn pos(&self) -> usize {
         self.pos
     }
 
     /// How many bytes are left unread.
-    pub(crate) fn remaining(&self) -> usize {
+    pub(crate) const fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
 
@@ -69,10 +69,34 @@ impl<'a> Reader<'a> {
     pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         self.take(n)
     }
+
+    /// Read a `u16`-counted run of items, each parsed by `read_one`.
+    pub(crate) fn list<T>(
+        &mut self,
+        read_one: impl Fn(&mut Reader<'_>) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let count = self.u16()?;
+        let mut v = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            v.push(read_one(self)?);
+        }
+        Ok(v)
+    }
+
+    /// Read a `u16`-counted run of raw `u16` indices.
+    pub(crate) fn u16_list(&mut self) -> Result<Vec<u16>> {
+        let count = self.u16()?;
+        let mut v = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            v.push(self.u16()?);
+        }
+        Ok(v)
+    }
 }
 
 /// A reserved 4-byte slot in a [`Writer`], to be filled in later with the byte length of whatever
 /// was written after it. See [`Writer::reserve_u32_len`] / [`Writer::patch_u32_len`].
+#[derive(Clone, Copy)]
 #[must_use]
 pub(crate) struct LenPatch(usize);
 
@@ -84,7 +108,7 @@ pub(crate) struct Writer {
 
 impl Writer {
     pub(crate) fn new() -> Self {
-        Writer::default()
+        Self::default()
     }
 
     pub(crate) fn u8(&mut self, v: u8) {
@@ -107,9 +131,25 @@ impl Writer {
         self.buf.extend_from_slice(b);
     }
 
+    /// Write a `u16`-counted run of items, each emitted by `write_one`.
+    pub(crate) fn list<T>(&mut self, items: &[T], write_one: impl Fn(&T, &mut Self)) {
+        self.u16(items.len() as u16);
+        for item in items {
+            write_one(item, self);
+        }
+    }
+
+    /// Write a `u16`-counted run of raw `u16` indices.
+    pub(crate) fn u16_list(&mut self, items: &[u16]) {
+        self.u16(items.len() as u16);
+        for &i in items {
+            self.u16(i);
+        }
+    }
+
     /// The number of bytes written so far. Used as the current code-array offset when emitting
     /// alignment padding for `tableswitch` / `lookupswitch`.
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.buf.len()
     }
 

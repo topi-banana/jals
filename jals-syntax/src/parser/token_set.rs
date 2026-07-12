@@ -8,7 +8,7 @@ pub(crate) struct TokenSet([u128; 2]);
 
 impl TokenSet {
     /// 種別の列から集合を作る。
-    pub(crate) const fn new(kinds: &[SyntaxKind]) -> TokenSet {
+    pub(crate) const fn new(kinds: &[SyntaxKind]) -> Self {
         let mut bits = [0u128; 2];
         let mut i = 0;
         while i < kinds.len() {
@@ -16,7 +16,7 @@ impl TokenSet {
             bits[v / 128] |= 1u128 << (v % 128);
             i += 1;
         }
-        TokenSet(bits)
+        Self(bits)
     }
 
     /// `kind` を含むか。

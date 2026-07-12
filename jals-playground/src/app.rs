@@ -80,6 +80,15 @@ impl ConfigKind {
     fn from_path(path: &str) -> Option<ConfigKind> {
         ConfigKind::ALL.into_iter().find(|kind| kind.path() == path)
     }
+
+    /// Parse this config from `text`, returning the first error — or `None` when it parses cleanly.
+    /// The error's span (when present) drives the marker's range.
+    fn parse_error(self, text: &str) -> Option<ConfigParseError> {
+        match self {
+            ConfigKind::Fmt => ConfigParseError::parse_fmt(text).err(),
+            ConfigKind::Manifest => ConfigParseError::parse_manifest(text).err(),
+        }
+    }
 }
 
 /// A config-editor parse error to paint as a marker: an optional byte `span` (the marker range; a
@@ -87,6 +96,46 @@ impl ConfigKind {
 struct ConfigParseError {
     span: Option<Range<usize>>,
     message: String,
+}
+
+impl ConfigParseError {
+    /// Parse `jalsfmt.toml` text into a formatter [`Config`], shaping a TOML syntax/type error as a
+    /// [`ConfigParseError`]. The single parse shared by [`App::apply_fmt`] (on edit) and
+    /// [`ConfigKind::parse_error`] (on select).
+    fn parse_fmt(text: &str) -> Result<Config, Self> {
+        toml::from_str::<Config>(text).map_err(|err| Self::from_toml(&err))
+    }
+
+    /// Parse + validate `jals.toml` text into a `jals_config::Manifest`, shaping the parse/validation
+    /// error as a [`ConfigParseError`]. The single parse shared by [`App::apply_manifest`] (on edit)
+    /// and [`ConfigKind::parse_error`] (on select).
+    fn parse_manifest(text: &str) -> Result<jals_config::Manifest, Self> {
+        text.parse::<jals_config::Manifest>()
+            .map_err(|err| Self::from_manifest(&err))
+    }
+
+    /// A manifest parse/validation error as a [`ConfigParseError`]: a TOML syntax/type error carries a
+    /// span from the underlying [`toml`] error; a structural validation error has none (marked on the
+    /// first line).
+    fn from_manifest(err: &ManifestParseError) -> Self {
+        match err {
+            ManifestParseError::Parse { source, .. } => Self::from_toml(source),
+            ManifestParseError::Invalid { source, .. } => Self {
+                span: None,
+                message: source.to_string(),
+            },
+        }
+    }
+
+    /// Shape a [`toml`] deserialize error as a [`ConfigParseError`] for
+    /// [`App::set_config_diagnostic`] — the marker range comes from the span when the error carries
+    /// one.
+    fn from_toml(err: &toml::de::Error) -> Self {
+        Self {
+            span: err.span(),
+            message: err.message().to_string(),
+        }
+    }
 }
 
 /// A message driving an [`App`] state transition.
@@ -153,7 +202,7 @@ pub struct App {
 impl App {
     /// Recompute the active file's diagnostics and push them to Monaco as inline markers. The
     /// workspace already maps each range to Monaco's UTF-16 coordinates, so this only marshals
-    /// through [`monaco::set_diagnostics`].
+    /// through [`monaco::Marker::set_diagnostics`].
     fn refresh_markers(&self) {
         // Fold the resolved `[package] edition` into the lint config so the edition-gated rules
         // (`compact-source-file`, `module-import`) fire; every other key stays at its default.
@@ -162,7 +211,7 @@ impl App {
             ..Default::default()
         };
         let diags = self.workspace.borrow().analyze_active(&config);
-        monaco::set_diagnostics(diags.iter().map(|d| monaco::Marker {
+        monaco::Marker::set_diagnostics(diags.iter().map(|d| monaco::Marker {
             start_line: d.range.start_line,
             start_col: d.range.start_col,
             end_line: d.range.end_line,
@@ -220,6 +269,11 @@ impl App {
     /// derived from `error` (spanning its byte range, or the first line when the error carries no
     /// span), or no markers when `error` is `None` (a clean parse). Reuses the Java marker path.
     fn set_config_diagnostic(&self, text: &str, error: Option<ConfigParseError>) {
+        /// The byte length of `text`'s first line (up to the first `\n`, or the whole string) — the
+        /// fallback marker range for a config error that carries no span.
+        fn first_line_len(text: &str) -> usize {
+            text.find('\n').unwrap_or(text.len())
+        }
         let marker = error.as_ref().map(|ConfigParseError { span, message }| {
             let range = span.clone().unwrap_or_else(|| 0..first_line_len(text));
             // Built only when there is an error to place — a clean parse (the common keystroke) skips
@@ -236,14 +290,14 @@ impl App {
             }
         });
         // `Option<Marker>` is an iterator of zero or one marker; either paints the error or clears.
-        monaco::set_diagnostics(marker);
+        monaco::Marker::set_diagnostics(marker);
     }
 
     /// Parse `jalsfmt.toml` text into the shared formatter [`Config`] and repaint the config editor's
     /// diagnostics. On success the new config takes effect immediately (the Format button and
     /// Monaco's *Format Document* both read the shared `config`); on failure the config is left as-is.
     fn apply_fmt(&self, text: &str) {
-        let error = match parse_fmt(text) {
+        let error = match ConfigParseError::parse_fmt(text) {
             Ok(config) => {
                 *self.config.borrow_mut() = config;
                 None
@@ -261,7 +315,7 @@ impl App {
     /// one — a comment / whitespace / other-section edit yields the same classpath, so the full
     /// download-clone + jar-parse + classpath-lower pipeline would be wasted work.
     fn apply_manifest(&mut self, ctx: &Context<Self>, text: &str) -> bool {
-        let manifest = match parse_manifest(text) {
+        let manifest = match ConfigParseError::parse_manifest(text) {
             Ok(manifest) => manifest,
             Err(err) => {
                 self.set_config_diagnostic(text, Some(err));
@@ -284,7 +338,7 @@ impl App {
         let proxy = self.proxy.clone();
         let link = ctx.link().clone();
         spawn_local(async move {
-            let result = resolve_classpath(manifest, proxy, cache).await;
+            let result = Self::resolve_classpath(manifest, proxy, cache).await;
             link.send_message(Msg::ClasspathResolved(result));
         });
         true
@@ -318,7 +372,7 @@ impl App {
     /// into subdirectories so the whole tree is flattened in pre-order.
     fn collect_entries(&self, dir: &str, depth: usize, out: &mut Vec<TreeEntry>) {
         for path in self.workspace.borrow().read_dir(dir) {
-            let name = jals_fs::path::file_name(&path)
+            let name = jals_fs::path::VPath::file_name(&path)
                 .map(str::to_string)
                 .unwrap_or_else(|| path.clone());
             let is_dir = self.workspace.borrow().is_dir(&path);
@@ -332,6 +386,54 @@ impl App {
                 self.collect_entries(&path, depth + 1, out);
             }
         }
+    }
+
+    /// Assemble a parsed `manifest`'s analysis inputs into a lowered classpath, in the browser:
+    /// download each remote `[dependencies]` jar with a [`BrowserFetcher`] into the in-memory `cache`,
+    /// load the `.class` files, and lower them for the project index. Returns the classpath, the
+    /// target Java version from `[package] edition` (for the edition-gated lint rules), and a
+    /// human-readable status line (class/jar counts plus any warnings), or an error message.
+    ///
+    /// The whole resolution runs against a *snapshot clone* of `cache` so no `RefCell` borrow is held
+    /// across an `.await`; the populated snapshot is written back afterwards, so a re-resolve reuses
+    /// the already-downloaded jars (skip-if-exists) — the browser's `target/jals/deps`.
+    async fn resolve_classpath(
+        manifest: jals_config::Manifest,
+        proxy: String,
+        cache: Rc<RefCell<InMemoryFileTree>>,
+    ) -> Result<(LoweredClasspath, Option<u32>, String), String> {
+        let fetcher = BrowserFetcher::new(proxy);
+        let mut snapshot = cache.borrow().clone();
+        let mut warnings = Vec::new();
+        // A synthetic `/` root: remote (`https://`) jars ignore it; local `file://`/`path` jars are
+        // not reachable in the browser anyway. No `Git` capability (browser), and analysis-only
+        // options — jars → classpath; sources jars, `git`/`path` source deps, and skeletons are
+        // host-only features.
+        let inputs = jals_classpath::ProjectInputsIn::assemble_project_inputs_in(
+            &fetcher,
+            None,
+            &mut snapshot,
+            &manifest,
+            "/",
+            jals_classpath::ProjectInputOptions::Analysis,
+            |message| warnings.push(message),
+        )
+        .await;
+        *cache.borrow_mut() = snapshot;
+        let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes);
+        let mut status = format!(
+            "resolved {} class(es) from {} jar(s)",
+            inputs.classpath_classes.len(),
+            inputs.dependency_jars.len()
+        );
+        if !warnings.is_empty() {
+            status.push_str(&format!(
+                " — {} warning(s): {}",
+                warnings.len(),
+                warnings.join("; ")
+            ));
+        }
+        Ok((classpath, inputs.target_java_version, status))
     }
 }
 
@@ -387,7 +489,7 @@ impl Component for App {
                     let src = self.config_src(kind).to_string();
                     monaco::switch_model(&path, &src);
                     // Show this config's current parse state (selecting never triggers a resolve).
-                    self.set_config_diagnostic(&src, config_parse_error(kind, &src));
+                    self.set_config_diagnostic(&src, kind.parse_error(&src));
                 } else {
                     self.active_config = None;
                     self.workspace.borrow_mut().set_active(&path);
@@ -435,7 +537,7 @@ impl Component for App {
                 }
                 monaco::create_models(&files);
                 // Register the language-feature providers, backed by the shared workspace.
-                providers::install(self.workspace.clone());
+                providers::Providers::install(self.workspace.clone());
                 self.refresh_markers();
                 false
             }
@@ -518,103 +620,4 @@ impl Component for App {
             </div>
         }
     }
-}
-
-/// Assemble a parsed `manifest`'s analysis inputs into a lowered classpath, in the browser: download
-/// each remote `[dependencies]` jar with a [`BrowserFetcher`] into the in-memory `cache`, load the
-/// `.class` files, and lower them for the project index. Returns the classpath, the target Java
-/// version from `[package] edition` (for the edition-gated lint rules), and a human-readable status
-/// line (class/jar counts plus any warnings), or an error message.
-///
-/// The whole resolution runs against a *snapshot clone* of `cache` so no `RefCell` borrow is held
-/// across an `.await`; the populated snapshot is written back afterwards, so a re-resolve reuses the
-/// already-downloaded jars (skip-if-exists) — the browser's `target/jals/deps`.
-async fn resolve_classpath(
-    manifest: jals_config::Manifest,
-    proxy: String,
-    cache: Rc<RefCell<InMemoryFileTree>>,
-) -> Result<(LoweredClasspath, Option<u32>, String), String> {
-    let fetcher = BrowserFetcher::new(proxy);
-    let mut snapshot = cache.borrow().clone();
-    let mut warnings = Vec::new();
-    // A synthetic `/` root: remote (`https://`) jars ignore it; local `file://`/`path` jars are not
-    // reachable in the browser anyway. No `Git` capability (browser), and analysis-only options —
-    // jars → classpath; sources jars, `git`/`path` source deps, and skeletons are host-only features.
-    let inputs = jals_classpath::assemble_project_inputs_in(
-        &fetcher,
-        None,
-        &mut snapshot,
-        &manifest,
-        "/",
-        jals_classpath::ProjectInputOptions::Analysis,
-        |message| warnings.push(message),
-    )
-    .await;
-    *cache.borrow_mut() = snapshot;
-    let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes);
-    let mut status = format!(
-        "resolved {} class(es) from {} jar(s)",
-        inputs.classpath_classes.len(),
-        inputs.dependency_jars.len()
-    );
-    if !warnings.is_empty() {
-        status.push_str(&format!(
-            " — {} warning(s): {}",
-            warnings.len(),
-            warnings.join("; ")
-        ));
-    }
-    Ok((classpath, inputs.target_java_version, status))
-}
-
-/// Parse config file `kind` from `text`, returning the first error — or `None` when it parses
-/// cleanly. The error's span (when present) drives the marker's range.
-fn config_parse_error(kind: ConfigKind, text: &str) -> Option<ConfigParseError> {
-    match kind {
-        ConfigKind::Fmt => parse_fmt(text).err(),
-        ConfigKind::Manifest => parse_manifest(text).err(),
-    }
-}
-
-/// Parse `jalsfmt.toml` text into a formatter [`Config`], shaping a TOML syntax/type error as a
-/// [`ConfigParseError`]. The single parse shared by [`App::apply_fmt`] (on edit) and
-/// [`config_parse_error`] (on select).
-fn parse_fmt(text: &str) -> Result<Config, ConfigParseError> {
-    toml::from_str::<Config>(text).map_err(|err| toml_error(&err))
-}
-
-/// Parse + validate `jals.toml` text into a `jals_config::Manifest`, shaping the parse/validation
-/// error as a [`ConfigParseError`]. The single parse shared by [`App::apply_manifest`] (on edit) and
-/// [`config_parse_error`] (on select).
-fn parse_manifest(text: &str) -> Result<jals_config::Manifest, ConfigParseError> {
-    text.parse::<jals_config::Manifest>()
-        .map_err(|err| manifest_error(&err))
-}
-
-/// A manifest parse/validation error as a [`ConfigParseError`]: a TOML syntax/type error carries a
-/// span from the underlying [`toml`] error; a structural validation error has none (marked on the
-/// first line).
-fn manifest_error(err: &ManifestParseError) -> ConfigParseError {
-    match err {
-        ManifestParseError::Parse { source, .. } => toml_error(source),
-        ManifestParseError::Invalid { source, .. } => ConfigParseError {
-            span: None,
-            message: source.to_string(),
-        },
-    }
-}
-
-/// Shape a [`toml`] deserialize error as a [`ConfigParseError`] for [`App::set_config_diagnostic`] —
-/// the marker range comes from the span when the error carries one.
-fn toml_error(err: &toml::de::Error) -> ConfigParseError {
-    ConfigParseError {
-        span: err.span(),
-        message: err.message().to_string(),
-    }
-}
-
-/// The byte length of `text`'s first line (up to the first `\n`, or the whole string) — the fallback
-/// marker range for a config error that carries no span.
-fn first_line_len(text: &str) -> usize {
-    text.find('\n').unwrap_or(text.len())
 }

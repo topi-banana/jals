@@ -1,18 +1,18 @@
-//! Tests for the checked-exception analysis (`jals_hir::unreported_exceptions`): a checked exception a
+//! Tests for the checked-exception analysis (`jals_hir::UnreportedException::collect`): a checked exception a
 //! method / constructor can raise that is neither declared in its `throws` clause nor caught by an
 //! enclosing `try` / `catch`. All cases build a single-file project index with the stdlib stubs (the
 //! `Throwable` hierarchy the classifier needs).
 
-use jals_hir::{FileId, ProjectIndex, resolve_node, unreported_exceptions};
+use jals_hir::{FileId, ProjectIndex, Resolved, UnreportedException};
 
 /// The simple names of the exceptions reported unreported in `src`, index built over the whole file.
 fn reported(src: &str) -> Vec<String> {
-    let root = jals_syntax::parse(src).syntax();
+    let root = jals_syntax::Parse::parse(src).syntax();
     let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
         .with_stdlib()
         .build();
-    let resolved = resolve_node(&root);
-    unreported_exceptions(&root, &resolved, Some((&index, FileId(0))))
+    let resolved = Resolved::resolve_node(&root);
+    UnreportedException::collect(&root, &resolved, Some((&index, FileId(0))))
         .into_iter()
         .map(|e| e.name)
         .collect()
@@ -168,19 +168,19 @@ fn a_throw_inside_a_lambda_is_not_attributed_to_the_method() {
 
 #[test]
 fn without_an_index_nothing_is_reported() {
-    let root = jals_syntax::parse(&with_checked("throw new MyEx();")).syntax();
-    let resolved = resolve_node(&root);
-    assert!(unreported_exceptions(&root, &resolved, None).is_empty());
+    let root = jals_syntax::Parse::parse(&with_checked("throw new MyEx();")).syntax();
+    let resolved = Resolved::resolve_node(&root);
+    assert!(UnreportedException::collect(&root, &resolved, None).is_empty());
 }
 
 #[test]
 fn the_message_names_the_exception() {
-    let root = jals_syntax::parse(&with_checked("throw new MyEx();")).syntax();
+    let root = jals_syntax::Parse::parse(&with_checked("throw new MyEx();")).syntax();
     let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
         .with_stdlib()
         .build();
-    let resolved = resolve_node(&root);
-    let found = unreported_exceptions(&root, &resolved, Some((&index, FileId(0))));
+    let resolved = Resolved::resolve_node(&root);
+    let found = UnreportedException::collect(&root, &resolved, Some((&index, FileId(0))));
     assert_eq!(found.len(), 1);
     assert_eq!(
         found[0].message(),

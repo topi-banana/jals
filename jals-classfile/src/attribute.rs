@@ -17,7 +17,7 @@ use crate::annotation::{Annotation, ElementValue, TypeAnnotation};
 use crate::bytes::{Reader, Writer};
 use crate::constant_pool::ConstantPool;
 use crate::error::Result;
-use crate::instruction::{self, Instruction};
+use crate::instruction::Instruction;
 use crate::stackmap::StackMapFrame;
 
 /// A single `attribute_info` (JVMS §4.7).
@@ -145,7 +145,7 @@ pub struct CodeAttribute {
 }
 
 /// One entry of a `Code` attribute's exception table.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExceptionTableEntry {
     /// Inclusive start of the covered range (bytecode offset).
     pub start_pc: u16,
@@ -158,7 +158,7 @@ pub struct ExceptionTableEntry {
 }
 
 /// One entry of an `InnerClasses` attribute.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InnerClassEntry {
     /// `Class` index of the inner class.
     pub inner_class_info_index: u16,
@@ -171,7 +171,7 @@ pub struct InnerClassEntry {
 }
 
 /// One entry of a `LineNumberTable`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineNumberEntry {
     /// Bytecode offset where the line begins.
     pub start_pc: u16,
@@ -180,7 +180,7 @@ pub struct LineNumberEntry {
 }
 
 /// One entry of a `LocalVariableTable`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalVariableEntry {
     /// Start of the variable's live range.
     pub start_pc: u16,
@@ -195,7 +195,7 @@ pub struct LocalVariableEntry {
 }
 
 /// One entry of a `LocalVariableTypeTable` (like [`LocalVariableEntry`] but with a generic signature).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalVariableTypeEntry {
     /// Start of the variable's live range.
     pub start_pc: u16,
@@ -210,7 +210,7 @@ pub struct LocalVariableTypeEntry {
 }
 
 /// One entry of a `BootstrapMethods` attribute.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapMethod {
     /// `MethodHandle` index of the bootstrap method.
     pub bootstrap_method_ref: u16,
@@ -219,7 +219,7 @@ pub struct BootstrapMethod {
 }
 
 /// One entry of a `MethodParameters` attribute.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MethodParameterEntry {
     /// `Utf8` index of the parameter name, or 0 if unnamed.
     pub name_index: u16,
@@ -239,7 +239,7 @@ pub struct RecordComponentInfo {
 }
 
 /// The body of a `Module` attribute (JVMS §4.7.25).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleAttribute {
     /// `Module` index of this module's name.
     pub module_name_index: u16,
@@ -260,7 +260,7 @@ pub struct ModuleAttribute {
 }
 
 /// A `requires` directive of a [`ModuleAttribute`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleRequire {
     /// `Module` index of the required module.
     pub requires_index: u16,
@@ -271,7 +271,7 @@ pub struct ModuleRequire {
 }
 
 /// An `exports` directive of a [`ModuleAttribute`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleExport {
     /// `Package` index of the exported package.
     pub exports_index: u16,
@@ -282,7 +282,7 @@ pub struct ModuleExport {
 }
 
 /// An `opens` directive of a [`ModuleAttribute`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleOpen {
     /// `Package` index of the opened package.
     pub opens_index: u16,
@@ -293,7 +293,7 @@ pub struct ModuleOpen {
 }
 
 /// A `provides` directive of a [`ModuleAttribute`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleProvide {
     /// `Class` index of the provided service interface.
     pub provides_index: u16,
@@ -302,15 +302,15 @@ pub struct ModuleProvide {
 }
 
 impl Attribute {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Attribute> {
+    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
         let name_index = r.u16()?;
         let length = r.u32()? as usize;
         let body_bytes = r.bytes(length)?;
         let body = pool
             .utf8(name_index)
-            .and_then(|name| parse_body(&name, body_bytes, pool))
+            .and_then(|name| AttributeBody::parse(&name, body_bytes, pool))
             .unwrap_or_else(|| AttributeBody::Unknown(body_bytes.to_vec()));
-        Ok(Attribute { name_index, body })
+        Ok(Self { name_index, body })
     }
 
     fn write(&self, w: &mut Writer) {
@@ -319,180 +319,195 @@ impl Attribute {
         self.body.write(w);
         w.patch_u32_len(patch);
     }
-}
 
-/// Decode a recognised attribute body, or `None` to fall back to [`AttributeBody::Unknown`]. Returns
-/// `None` for an unknown name, a parse error, or a body that does not consume exactly `bytes`.
-fn parse_body(name: &str, bytes: &[u8], pool: &ConstantPool) -> Option<AttributeBody> {
-    let mut r = Reader::new(bytes);
-    let body = match name {
-        "ConstantValue" => AttributeBody::ConstantValue {
-            constantvalue_index: r.u16().ok()?,
-        },
-        "Code" => AttributeBody::Code(CodeAttribute::read(&mut r, pool).ok()?),
-        "StackMapTable" => {
-            AttributeBody::StackMapTable(read_list(&mut r, StackMapFrame::read).ok()?)
-        }
-        "Exceptions" => AttributeBody::Exceptions {
-            exception_index_table: read_u16_list(&mut r).ok()?,
-        },
-        "InnerClasses" => {
-            AttributeBody::InnerClasses(read_list(&mut r, InnerClassEntry::read).ok()?)
-        }
-        "EnclosingMethod" => AttributeBody::EnclosingMethod {
-            class_index: r.u16().ok()?,
-            method_index: r.u16().ok()?,
-        },
-        "Synthetic" => AttributeBody::Synthetic,
-        "Signature" => AttributeBody::Signature {
-            signature_index: r.u16().ok()?,
-        },
-        "SourceFile" => AttributeBody::SourceFile {
-            sourcefile_index: r.u16().ok()?,
-        },
-        "SourceDebugExtension" => {
-            let n = r.remaining();
-            AttributeBody::SourceDebugExtension(r.bytes(n).ok()?.to_vec())
-        }
-        "LineNumberTable" => {
-            AttributeBody::LineNumberTable(read_list(&mut r, LineNumberEntry::read).ok()?)
-        }
-        "LocalVariableTable" => {
-            AttributeBody::LocalVariableTable(read_list(&mut r, LocalVariableEntry::read).ok()?)
-        }
-        "LocalVariableTypeTable" => AttributeBody::LocalVariableTypeTable(
-            read_list(&mut r, LocalVariableTypeEntry::read).ok()?,
-        ),
-        "Deprecated" => AttributeBody::Deprecated,
-        "RuntimeVisibleAnnotations" => {
-            AttributeBody::RuntimeVisibleAnnotations(read_list(&mut r, Annotation::read).ok()?)
-        }
-        "RuntimeInvisibleAnnotations" => {
-            AttributeBody::RuntimeInvisibleAnnotations(read_list(&mut r, Annotation::read).ok()?)
-        }
-        "RuntimeVisibleParameterAnnotations" => AttributeBody::RuntimeVisibleParameterAnnotations(
-            read_parameter_annotations(&mut r).ok()?,
-        ),
-        "RuntimeInvisibleParameterAnnotations" => {
-            AttributeBody::RuntimeInvisibleParameterAnnotations(
-                read_parameter_annotations(&mut r).ok()?,
-            )
-        }
-        "RuntimeVisibleTypeAnnotations" => AttributeBody::RuntimeVisibleTypeAnnotations(
-            read_list(&mut r, TypeAnnotation::read).ok()?,
-        ),
-        "RuntimeInvisibleTypeAnnotations" => AttributeBody::RuntimeInvisibleTypeAnnotations(
-            read_list(&mut r, TypeAnnotation::read).ok()?,
-        ),
-        "AnnotationDefault" => AttributeBody::AnnotationDefault(ElementValue::read(&mut r).ok()?),
-        "BootstrapMethods" => {
-            AttributeBody::BootstrapMethods(read_list(&mut r, BootstrapMethod::read).ok()?)
-        }
-        "MethodParameters" => {
-            let count = r.u8().ok()?;
-            let mut v = Vec::with_capacity(count as usize);
-            for _ in 0..count {
-                v.push(MethodParameterEntry::read(&mut r).ok()?);
-            }
-            AttributeBody::MethodParameters(v)
-        }
-        "Module" => AttributeBody::Module(ModuleAttribute::read(&mut r).ok()?),
-        "ModulePackages" => AttributeBody::ModulePackages {
-            package_index: read_u16_list(&mut r).ok()?,
-        },
-        "ModuleMainClass" => AttributeBody::ModuleMainClass {
-            main_class_index: r.u16().ok()?,
-        },
-        "NestHost" => AttributeBody::NestHost {
-            host_class_index: r.u16().ok()?,
-        },
-        "NestMembers" => AttributeBody::NestMembers {
-            classes: read_u16_list(&mut r).ok()?,
-        },
-        "Record" => {
-            AttributeBody::Record(read_list(&mut r, |r| RecordComponentInfo::read(r, pool)).ok()?)
-        }
-        "PermittedSubclasses" => AttributeBody::PermittedSubclasses {
-            classes: read_u16_list(&mut r).ok()?,
-        },
-        _ => return None,
-    };
-    (r.remaining() == 0).then_some(body)
+    /// Read an `attributes_count`-prefixed run of attributes, dispatching each by name.
+    pub(crate) fn read_all(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<Self>> {
+        r.list(|r| Self::read(r, pool))
+    }
+
+    /// Write an `attributes_count`-prefixed run of attributes; the count is derived from the slice.
+    pub(crate) fn write_all(attrs: &[Self], w: &mut Writer) {
+        w.list(attrs, Self::write);
+    }
 }
 
 impl AttributeBody {
+    /// Decode a recognised attribute body, or `None` to fall back to [`AttributeBody::Unknown`].
+    /// Returns `None` for an unknown name, a parse error, or a body that does not consume exactly
+    /// `bytes`.
+    fn parse(name: &str, bytes: &[u8], pool: &ConstantPool) -> Option<Self> {
+        /// Read the per-parameter annotation lists of a `Runtime*ParameterAnnotations` attribute (a
+        /// `u8` parameter count, then a `u16`-counted annotation list per parameter).
+        fn read_parameter_annotations(r: &mut Reader<'_>) -> Result<Vec<Vec<Annotation>>> {
+            let count = r.u8()?;
+            let mut params = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                params.push(r.list(Annotation::read)?);
+            }
+            Ok(params)
+        }
+
+        let mut r = Reader::new(bytes);
+        let body = match name {
+            "ConstantValue" => Self::ConstantValue {
+                constantvalue_index: r.u16().ok()?,
+            },
+            "Code" => Self::Code(CodeAttribute::read(&mut r, pool).ok()?),
+            "StackMapTable" => Self::StackMapTable(r.list(StackMapFrame::read).ok()?),
+            "Exceptions" => Self::Exceptions {
+                exception_index_table: r.u16_list().ok()?,
+            },
+            "InnerClasses" => Self::InnerClasses(r.list(InnerClassEntry::read).ok()?),
+            "EnclosingMethod" => Self::EnclosingMethod {
+                class_index: r.u16().ok()?,
+                method_index: r.u16().ok()?,
+            },
+            "Synthetic" => Self::Synthetic,
+            "Signature" => Self::Signature {
+                signature_index: r.u16().ok()?,
+            },
+            "SourceFile" => Self::SourceFile {
+                sourcefile_index: r.u16().ok()?,
+            },
+            "SourceDebugExtension" => {
+                let n = r.remaining();
+                Self::SourceDebugExtension(r.bytes(n).ok()?.to_vec())
+            }
+            "LineNumberTable" => Self::LineNumberTable(r.list(LineNumberEntry::read).ok()?),
+            "LocalVariableTable" => {
+                Self::LocalVariableTable(r.list(LocalVariableEntry::read).ok()?)
+            }
+            "LocalVariableTypeTable" => {
+                Self::LocalVariableTypeTable(r.list(LocalVariableTypeEntry::read).ok()?)
+            }
+            "Deprecated" => Self::Deprecated,
+            "RuntimeVisibleAnnotations" => {
+                Self::RuntimeVisibleAnnotations(r.list(Annotation::read).ok()?)
+            }
+            "RuntimeInvisibleAnnotations" => {
+                Self::RuntimeInvisibleAnnotations(r.list(Annotation::read).ok()?)
+            }
+            "RuntimeVisibleParameterAnnotations" => {
+                Self::RuntimeVisibleParameterAnnotations(read_parameter_annotations(&mut r).ok()?)
+            }
+            "RuntimeInvisibleParameterAnnotations" => {
+                Self::RuntimeInvisibleParameterAnnotations(read_parameter_annotations(&mut r).ok()?)
+            }
+            "RuntimeVisibleTypeAnnotations" => {
+                Self::RuntimeVisibleTypeAnnotations(r.list(TypeAnnotation::read).ok()?)
+            }
+            "RuntimeInvisibleTypeAnnotations" => {
+                Self::RuntimeInvisibleTypeAnnotations(r.list(TypeAnnotation::read).ok()?)
+            }
+            "AnnotationDefault" => Self::AnnotationDefault(ElementValue::read(&mut r).ok()?),
+            "BootstrapMethods" => Self::BootstrapMethods(r.list(BootstrapMethod::read).ok()?),
+            "MethodParameters" => {
+                let count = r.u8().ok()?;
+                let mut v = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    v.push(MethodParameterEntry::read(&mut r).ok()?);
+                }
+                Self::MethodParameters(v)
+            }
+            "Module" => Self::Module(ModuleAttribute::read(&mut r).ok()?),
+            "ModulePackages" => Self::ModulePackages {
+                package_index: r.u16_list().ok()?,
+            },
+            "ModuleMainClass" => Self::ModuleMainClass {
+                main_class_index: r.u16().ok()?,
+            },
+            "NestHost" => Self::NestHost {
+                host_class_index: r.u16().ok()?,
+            },
+            "NestMembers" => Self::NestMembers {
+                classes: r.u16_list().ok()?,
+            },
+            "Record" => Self::Record(r.list(|r| RecordComponentInfo::read(r, pool)).ok()?),
+            "PermittedSubclasses" => Self::PermittedSubclasses {
+                classes: r.u16_list().ok()?,
+            },
+            _ => return None,
+        };
+        (r.remaining() == 0).then_some(body)
+    }
+
     fn write(&self, w: &mut Writer) {
+        /// Write the per-parameter annotation lists of a `Runtime*ParameterAnnotations` attribute (a
+        /// `u8` parameter count, then a `u16`-counted annotation list per parameter).
+        fn write_parameter_annotations(params: &[Vec<Annotation>], w: &mut Writer) {
+            w.u8(params.len() as u8);
+            for annotations in params {
+                w.list(annotations, Annotation::write);
+            }
+        }
+
         match self {
-            AttributeBody::ConstantValue {
+            Self::ConstantValue {
                 constantvalue_index,
             } => w.u16(*constantvalue_index),
-            AttributeBody::Code(c) => c.write(w),
-            AttributeBody::StackMapTable(frames) => write_list(frames, w, StackMapFrame::write),
-            AttributeBody::Exceptions {
+            Self::Code(c) => c.write(w),
+            Self::StackMapTable(frames) => w.list(frames, StackMapFrame::write),
+            Self::Exceptions {
                 exception_index_table,
-            } => write_u16_list(exception_index_table, w),
-            AttributeBody::InnerClasses(entries) => write_list(entries, w, InnerClassEntry::write),
-            AttributeBody::EnclosingMethod {
+            } => w.u16_list(exception_index_table),
+            Self::InnerClasses(entries) => w.list(entries, InnerClassEntry::write),
+            Self::EnclosingMethod {
                 class_index,
                 method_index,
             } => {
                 w.u16(*class_index);
                 w.u16(*method_index);
             }
-            AttributeBody::Synthetic | AttributeBody::Deprecated => {}
-            AttributeBody::Signature { signature_index } => w.u16(*signature_index),
-            AttributeBody::SourceFile { sourcefile_index } => w.u16(*sourcefile_index),
-            AttributeBody::SourceDebugExtension(b) => w.bytes(b),
-            AttributeBody::LineNumberTable(entries) => {
-                write_list(entries, w, LineNumberEntry::write)
+            Self::Synthetic | Self::Deprecated => {}
+            Self::Signature { signature_index } => w.u16(*signature_index),
+            Self::SourceFile { sourcefile_index } => w.u16(*sourcefile_index),
+            Self::SourceDebugExtension(b) | Self::Unknown(b) => w.bytes(b),
+            Self::LineNumberTable(entries) => w.list(entries, LineNumberEntry::write),
+            Self::LocalVariableTable(entries) => {
+                w.list(entries, LocalVariableEntry::write);
             }
-            AttributeBody::LocalVariableTable(entries) => {
-                write_list(entries, w, LocalVariableEntry::write);
+            Self::LocalVariableTypeTable(entries) => {
+                w.list(entries, LocalVariableTypeEntry::write);
             }
-            AttributeBody::LocalVariableTypeTable(entries) => {
-                write_list(entries, w, LocalVariableTypeEntry::write);
+            Self::RuntimeVisibleAnnotations(a) | Self::RuntimeInvisibleAnnotations(a) => {
+                w.list(a, Annotation::write);
             }
-            AttributeBody::RuntimeVisibleAnnotations(a)
-            | AttributeBody::RuntimeInvisibleAnnotations(a) => write_list(a, w, Annotation::write),
-            AttributeBody::RuntimeVisibleParameterAnnotations(p)
-            | AttributeBody::RuntimeInvisibleParameterAnnotations(p) => {
+            Self::RuntimeVisibleParameterAnnotations(p)
+            | Self::RuntimeInvisibleParameterAnnotations(p) => {
                 write_parameter_annotations(p, w);
             }
-            AttributeBody::RuntimeVisibleTypeAnnotations(a)
-            | AttributeBody::RuntimeInvisibleTypeAnnotations(a) => {
-                write_list(a, w, TypeAnnotation::write);
+            Self::RuntimeVisibleTypeAnnotations(a) | Self::RuntimeInvisibleTypeAnnotations(a) => {
+                w.list(a, TypeAnnotation::write);
             }
-            AttributeBody::AnnotationDefault(v) => v.write(w),
-            AttributeBody::BootstrapMethods(m) => write_list(m, w, BootstrapMethod::write),
-            AttributeBody::MethodParameters(p) => {
+            Self::AnnotationDefault(v) => v.write(w),
+            Self::BootstrapMethods(m) => w.list(m, BootstrapMethod::write),
+            Self::MethodParameters(p) => {
                 w.u8(p.len() as u8);
                 for e in p {
                     e.write(w);
                 }
             }
-            AttributeBody::Module(m) => m.write(w),
-            AttributeBody::ModulePackages { package_index } => write_u16_list(package_index, w),
-            AttributeBody::ModuleMainClass { main_class_index } => w.u16(*main_class_index),
-            AttributeBody::NestHost { host_class_index } => w.u16(*host_class_index),
-            AttributeBody::NestMembers { classes }
-            | AttributeBody::PermittedSubclasses { classes } => write_u16_list(classes, w),
-            AttributeBody::Record(components) => {
-                write_list(components, w, RecordComponentInfo::write)
+            Self::Module(m) => m.write(w),
+            Self::ModulePackages { package_index } => w.u16_list(package_index),
+            Self::ModuleMainClass { main_class_index } => w.u16(*main_class_index),
+            Self::NestHost { host_class_index } => w.u16(*host_class_index),
+            Self::NestMembers { classes } | Self::PermittedSubclasses { classes } => {
+                w.u16_list(classes);
             }
-            AttributeBody::Unknown(b) => w.bytes(b),
+            Self::Record(components) => w.list(components, RecordComponentInfo::write),
         }
     }
 }
 
 impl CodeAttribute {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<CodeAttribute> {
+    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
         let max_stack = r.u16()?;
         let max_locals = r.u16()?;
         let code_length = r.u32()? as usize;
-        let code = instruction::decode_code(r.bytes(code_length)?)?;
-        let exception_table = read_list(r, ExceptionTableEntry::read)?;
-        let attributes = read_attributes(r, pool)?;
-        Ok(CodeAttribute {
+        let code = Instruction::decode_code(r.bytes(code_length)?)?;
+        let exception_table = r.list(ExceptionTableEntry::read)?;
+        let attributes = Attribute::read_all(r, pool)?;
+        Ok(Self {
             max_stack,
             max_locals,
             code,
@@ -504,17 +519,17 @@ impl CodeAttribute {
     fn write(&self, w: &mut Writer) {
         w.u16(self.max_stack);
         w.u16(self.max_locals);
-        let code = instruction::encode_code(&self.code);
+        let code = Instruction::encode_code(&self.code);
         w.u32(code.len() as u32);
         w.bytes(&code);
-        write_list(&self.exception_table, w, ExceptionTableEntry::write);
-        write_attributes(&self.attributes, w);
+        w.list(&self.exception_table, ExceptionTableEntry::write);
+        Attribute::write_all(&self.attributes, w);
     }
 }
 
 impl ExceptionTableEntry {
-    fn read(r: &mut Reader<'_>) -> Result<ExceptionTableEntry> {
-        Ok(ExceptionTableEntry {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             start_pc: r.u16()?,
             end_pc: r.u16()?,
             handler_pc: r.u16()?,
@@ -531,8 +546,8 @@ impl ExceptionTableEntry {
 }
 
 impl InnerClassEntry {
-    fn read(r: &mut Reader<'_>) -> Result<InnerClassEntry> {
-        Ok(InnerClassEntry {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             inner_class_info_index: r.u16()?,
             outer_class_info_index: r.u16()?,
             inner_name_index: r.u16()?,
@@ -549,8 +564,8 @@ impl InnerClassEntry {
 }
 
 impl LineNumberEntry {
-    fn read(r: &mut Reader<'_>) -> Result<LineNumberEntry> {
-        Ok(LineNumberEntry {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             start_pc: r.u16()?,
             line_number: r.u16()?,
         })
@@ -563,8 +578,8 @@ impl LineNumberEntry {
 }
 
 impl LocalVariableEntry {
-    fn read(r: &mut Reader<'_>) -> Result<LocalVariableEntry> {
-        Ok(LocalVariableEntry {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             start_pc: r.u16()?,
             length: r.u16()?,
             name_index: r.u16()?,
@@ -583,8 +598,8 @@ impl LocalVariableEntry {
 }
 
 impl LocalVariableTypeEntry {
-    fn read(r: &mut Reader<'_>) -> Result<LocalVariableTypeEntry> {
-        Ok(LocalVariableTypeEntry {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             start_pc: r.u16()?,
             length: r.u16()?,
             name_index: r.u16()?,
@@ -603,22 +618,22 @@ impl LocalVariableTypeEntry {
 }
 
 impl BootstrapMethod {
-    fn read(r: &mut Reader<'_>) -> Result<BootstrapMethod> {
-        Ok(BootstrapMethod {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             bootstrap_method_ref: r.u16()?,
-            bootstrap_arguments: read_u16_list(r)?,
+            bootstrap_arguments: r.u16_list()?,
         })
     }
 
     fn write(&self, w: &mut Writer) {
         w.u16(self.bootstrap_method_ref);
-        write_u16_list(&self.bootstrap_arguments, w);
+        w.u16_list(&self.bootstrap_arguments);
     }
 }
 
 impl MethodParameterEntry {
-    fn read(r: &mut Reader<'_>) -> Result<MethodParameterEntry> {
-        Ok(MethodParameterEntry {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             name_index: r.u16()?,
             access_flags: r.u16()?,
         })
@@ -631,32 +646,32 @@ impl MethodParameterEntry {
 }
 
 impl RecordComponentInfo {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<RecordComponentInfo> {
-        Ok(RecordComponentInfo {
+    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
+        Ok(Self {
             name_index: r.u16()?,
             descriptor_index: r.u16()?,
-            attributes: read_attributes(r, pool)?,
+            attributes: Attribute::read_all(r, pool)?,
         })
     }
 
     fn write(&self, w: &mut Writer) {
         w.u16(self.name_index);
         w.u16(self.descriptor_index);
-        write_attributes(&self.attributes, w);
+        Attribute::write_all(&self.attributes, w);
     }
 }
 
 impl ModuleAttribute {
-    fn read(r: &mut Reader<'_>) -> Result<ModuleAttribute> {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
         let module_name_index = r.u16()?;
         let module_flags = r.u16()?;
         let module_version_index = r.u16()?;
-        let requires = read_list(r, ModuleRequire::read)?;
-        let exports = read_list(r, ModuleExport::read)?;
-        let opens = read_list(r, ModuleOpen::read)?;
-        let uses_index = read_u16_list(r)?;
-        let provides = read_list(r, ModuleProvide::read)?;
-        Ok(ModuleAttribute {
+        let requires = r.list(ModuleRequire::read)?;
+        let exports = r.list(ModuleExport::read)?;
+        let opens = r.list(ModuleOpen::read)?;
+        let uses_index = r.u16_list()?;
+        let provides = r.list(ModuleProvide::read)?;
+        Ok(Self {
             module_name_index,
             module_flags,
             module_version_index,
@@ -672,17 +687,17 @@ impl ModuleAttribute {
         w.u16(self.module_name_index);
         w.u16(self.module_flags);
         w.u16(self.module_version_index);
-        write_list(&self.requires, w, ModuleRequire::write);
-        write_list(&self.exports, w, ModuleExport::write);
-        write_list(&self.opens, w, ModuleOpen::write);
-        write_u16_list(&self.uses_index, w);
-        write_list(&self.provides, w, ModuleProvide::write);
+        w.list(&self.requires, ModuleRequire::write);
+        w.list(&self.exports, ModuleExport::write);
+        w.list(&self.opens, ModuleOpen::write);
+        w.u16_list(&self.uses_index);
+        w.list(&self.provides, ModuleProvide::write);
     }
 }
 
 impl ModuleRequire {
-    fn read(r: &mut Reader<'_>) -> Result<ModuleRequire> {
-        Ok(ModuleRequire {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             requires_index: r.u16()?,
             requires_flags: r.u16()?,
             requires_version_index: r.u16()?,
@@ -697,122 +712,47 @@ impl ModuleRequire {
 }
 
 impl ModuleExport {
-    fn read(r: &mut Reader<'_>) -> Result<ModuleExport> {
-        Ok(ModuleExport {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             exports_index: r.u16()?,
             exports_flags: r.u16()?,
-            exports_to_index: read_u16_list(r)?,
+            exports_to_index: r.u16_list()?,
         })
     }
 
     fn write(&self, w: &mut Writer) {
         w.u16(self.exports_index);
         w.u16(self.exports_flags);
-        write_u16_list(&self.exports_to_index, w);
+        w.u16_list(&self.exports_to_index);
     }
 }
 
 impl ModuleOpen {
-    fn read(r: &mut Reader<'_>) -> Result<ModuleOpen> {
-        Ok(ModuleOpen {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             opens_index: r.u16()?,
             opens_flags: r.u16()?,
-            opens_to_index: read_u16_list(r)?,
+            opens_to_index: r.u16_list()?,
         })
     }
 
     fn write(&self, w: &mut Writer) {
         w.u16(self.opens_index);
         w.u16(self.opens_flags);
-        write_u16_list(&self.opens_to_index, w);
+        w.u16_list(&self.opens_to_index);
     }
 }
 
 impl ModuleProvide {
-    fn read(r: &mut Reader<'_>) -> Result<ModuleProvide> {
-        Ok(ModuleProvide {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
             provides_index: r.u16()?,
-            provides_with_index: read_u16_list(r)?,
+            provides_with_index: r.u16_list()?,
         })
     }
 
     fn write(&self, w: &mut Writer) {
         w.u16(self.provides_index);
-        write_u16_list(&self.provides_with_index, w);
-    }
-}
-
-/// Read an `attributes_count`-prefixed run of attributes, dispatching each by name.
-pub(crate) fn read_attributes(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<Attribute>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(Attribute::read(r, pool)?);
-    }
-    Ok(v)
-}
-
-/// Write an `attributes_count`-prefixed run of attributes; the count is derived from the slice.
-pub(crate) fn write_attributes(attrs: &[Attribute], w: &mut Writer) {
-    w.u16(attrs.len() as u16);
-    for a in attrs {
-        a.write(w);
-    }
-}
-
-/// Read a `u16`-counted run of items parsed by `read_one`.
-fn read_list<T>(
-    r: &mut Reader<'_>,
-    read_one: impl Fn(&mut Reader<'_>) -> Result<T>,
-) -> Result<Vec<T>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(read_one(r)?);
-    }
-    Ok(v)
-}
-
-/// Write a `u16`-counted run of items via `write_one`.
-fn write_list<T>(items: &[T], w: &mut Writer, write_one: impl Fn(&T, &mut Writer)) {
-    w.u16(items.len() as u16);
-    for item in items {
-        write_one(item, w);
-    }
-}
-
-/// Read a `u16`-counted run of raw `u16` indices.
-fn read_u16_list(r: &mut Reader<'_>) -> Result<Vec<u16>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(r.u16()?);
-    }
-    Ok(v)
-}
-
-/// Write a `u16`-counted run of raw `u16` indices.
-fn write_u16_list(items: &[u16], w: &mut Writer) {
-    w.u16(items.len() as u16);
-    for &i in items {
-        w.u16(i);
-    }
-}
-
-/// Read the per-parameter annotation lists of a `Runtime*ParameterAnnotations` attribute (a `u8`
-/// parameter count, then a `u16`-counted annotation list per parameter).
-fn read_parameter_annotations(r: &mut Reader<'_>) -> Result<Vec<Vec<Annotation>>> {
-    let count = r.u8()?;
-    let mut params = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        params.push(read_list(r, Annotation::read)?);
-    }
-    Ok(params)
-}
-
-fn write_parameter_annotations(params: &[Vec<Annotation>], w: &mut Writer) {
-    w.u8(params.len() as u8);
-    for annotations in params {
-        write_list(annotations, w, Annotation::write);
+        w.u16_list(&self.provides_with_index);
     }
 }

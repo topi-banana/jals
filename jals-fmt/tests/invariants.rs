@@ -5,16 +5,16 @@ use jals_config::fmt::{
     FnParamsLayout, HexLiteralCase, LiteralSuffixCase, SwitchCaseBody, TrailingComma,
     TypePunctuationDensity,
 };
-use jals_fmt::format_source;
-use jals_syntax::{SyntaxKind, parse};
+use jals_fmt::FormatOutput;
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind};
 use proptest::prelude::*;
 
 fn fmt(src: &str) -> String {
-    format_source(src, &Config::default()).formatted
+    FormatOutput::format_source(src, &Config::default()).formatted
 }
 
 fn fmt_with(src: &str, config: &Config) -> String {
-    format_source(src, config).formatted
+    FormatOutput::format_source(src, config).formatted
 }
 
 /// Config with comment reflow on at a narrow width, so the property tests exercise wrapping.
@@ -46,10 +46,10 @@ fn blank_line_at_block_start_config() -> Config {
 /// comment marker (`/` or `*`), in document order. Reflow only changes whitespace and
 /// markers and never splits or reorders a word, so this sequence is invariant under it.
 fn comment_skeleton(src: &str) -> String {
-    parse(src)
+    Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| {
             matches!(
                 t.kind(),
@@ -63,21 +63,21 @@ fn comment_skeleton(src: &str) -> String {
 
 /// The sequence of non-trivia tokens (kind + text) of `src`.
 fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
-    parse(src)
+    Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
-        .map(|t| (t.kind(), t.text().to_string()))
+        .map(|t| (t.kind(), t.text().to_owned()))
         .collect()
 }
 
 /// The comment contents of `src`, with interior whitespace normalized.
 fn comment_contents(src: &str) -> Vec<String> {
-    parse(src)
+    Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| {
             matches!(
                 t.kind(),
@@ -104,10 +104,10 @@ fn param_comment_config() -> Config {
 /// with its import); this canonicalization checks the comment *multiset* — no comment is added,
 /// dropped, or mangled — independent of order.
 fn comment_multiset_no_ws(src: &str) -> Vec<String> {
-    let mut comments: Vec<String> = parse(src)
+    let mut comments: Vec<String> = Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
+        .filter_map(SyntaxElement::into_token)
         .filter(|t| {
             matches!(
                 t.kind(),
@@ -240,7 +240,7 @@ fn reorder_mods_config() -> Config {
 /// The canonical rank of a keyword modifier, or `None` for an annotation (or any non-modifier
 /// element). Mirrors the formatter's internal `modifiers::rank_of` so a canonical layout can be
 /// asserted on formatted output.
-fn modifier_rank(kind: SyntaxKind) -> Option<usize> {
+const fn modifier_rank(kind: SyntaxKind) -> Option<usize> {
     Some(match kind {
         SyntaxKind::PUBLIC_KW => 0,
         SyntaxKind::PROTECTED_KW => 1,
@@ -450,7 +450,7 @@ fn java_with_imports() -> impl Strategy<Value = String> {
 /// formatter's internal `import_sort_key` so a sorted output can be asserted.
 fn import_keys(src: &str) -> Vec<(bool, String)> {
     use jals_syntax::ast::{AstNode, SourceFile};
-    let file = SourceFile::cast(parse(src).syntax()).expect("parse yields a source file");
+    let file = SourceFile::cast(Parse::parse(src).syntax()).expect("parse yields a source file");
     file.imports()
         .map(|imp| {
             let name = imp.name().map(|n| n.text()).unwrap_or_default();
@@ -478,7 +478,7 @@ fn default_group_rank(is_static: bool, name: &str) -> usize {
 /// the formatter's `group-imports` should produce under the default `import-groups`.
 fn import_group_keys(src: &str) -> Vec<(usize, String)> {
     use jals_syntax::ast::{AstNode, SourceFile};
-    let file = SourceFile::cast(parse(src).syntax()).expect("parse yields a source file");
+    let file = SourceFile::cast(Parse::parse(src).syntax()).expect("parse yields a source file");
     file.imports()
         .map(|imp| {
             let name = imp.name().map(|n| n.text()).unwrap_or_default();
@@ -566,11 +566,11 @@ fn java_with_hex_literals() -> impl Strategy<Value = String> {
 /// option may change.
 fn canon_hex(kind: SyntaxKind, text: &str) -> String {
     if !matches!(kind, SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL) {
-        return text.to_string();
+        return text.to_owned();
     }
     let bytes = text.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'0' || !matches!(bytes[1], b'x' | b'X') {
-        return text.to_string();
+        return text.to_owned();
     }
     let mantissa_end = match bytes[2..].iter().position(|b| matches!(b, b'p' | b'P')) {
         Some(i) => i + 2,
@@ -657,15 +657,15 @@ fn java_with_float_literals() -> impl Strategy<Value = String> {
 /// left as-is). Used to compare token streams modulo the only thing the option may change.
 fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
     if kind != SyntaxKind::FLOAT_LITERAL {
-        return text.to_string();
+        return text.to_owned();
     }
     let bytes = text.as_bytes();
     // Hex floats are out of scope.
     if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
-        return text.to_string();
+        return text.to_owned();
     }
     let Some(dot) = bytes.iter().position(|&b| b == b'.') else {
-        return text.to_string();
+        return text.to_owned();
     };
     let mut frac_end = dot + 1;
     while frac_end < bytes.len() && (bytes[frac_end].is_ascii_digit() || bytes[frac_end] == b'_') {
@@ -674,9 +674,9 @@ fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
     // Strip an all-zero fraction (with a non-empty integer part) to the bare dot: `1.0` / `1.00`
     // canonicalize to `1.`, exactly the form the empty fraction already has.
     if dot > 0 && frac_end > dot + 1 && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') {
-        format!("{}{}", &text[..dot + 1], &text[frac_end..])
+        format!("{}{}", &text[..=dot], &text[frac_end..])
     } else {
-        text.to_string()
+        text.to_owned()
     }
 }
 
@@ -751,7 +751,7 @@ fn java_with_suffix_literals() -> impl Strategy<Value = String> {
 /// token streams modulo the only thing the option may change.
 fn canon_suffix(kind: SyntaxKind, text: &str) -> String {
     let Some(&last) = text.as_bytes().last() else {
-        return text.to_string();
+        return text.to_owned();
     };
     let is_suffix = match kind {
         SyntaxKind::INT_LITERAL => matches!(last, b'l' | b'L'),
@@ -759,7 +759,7 @@ fn canon_suffix(kind: SyntaxKind, text: &str) -> String {
         _ => false,
     };
     if !is_suffix {
-        return text.to_string();
+        return text.to_owned();
     }
     format!(
         "{}{}",
@@ -1764,7 +1764,7 @@ proptest! {
     #[test]
     fn reorder_mods_emits_canonical_order(src in java_with_modifiers()) {
         let out = fmt_with(&src, &reorder_mods_config());
-        for m in parse(&out)
+        for m in Parse::parse(&out)
             .syntax()
             .descendants()
             .filter(|n| n.kind() == SyntaxKind::MODIFIERS)

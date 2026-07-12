@@ -23,49 +23,65 @@
 mod ext;
 mod generated;
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 
 pub use rowan::ast::{AstChildren, AstNode, AstPtr, SyntaxNodePtr};
 
 pub use generated::*;
 
 use crate::language::{SyntaxNode, SyntaxToken};
-use crate::syntax_kind::SyntaxKind::*;
+use crate::syntax_kind::SyntaxKind::IDENT;
 
 // ===== Shared accessor helpers =====
 
-/// Returns the first significant token (non-trivia) of `node`, if any.
-fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-    node.children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .find(|t| !t.kind().is_trivia())
-}
+/// Namespace for the shared typed-AST accessor helpers that walk a node's tokens.
+struct AstSupport;
 
-/// Concatenates the text of all non-trivia tokens beneath `node` (drops whitespace/comments).
-fn non_trivia_text(node: &SyntaxNode) -> String {
-    node.descendants_with_tokens()
-        .filter_map(|it| it.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .map(|t| t.text().to_string())
-        .collect()
-}
+impl AstSupport {
+    /// Returns the first significant token (non-trivia) of `node`, if any.
+    fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+        node.children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .find(|t| !t.kind().is_trivia())
+    }
 
-/// Returns the name (`IDENT`) declared directly under `node` (e.g. the type/method name).
-fn name_text(node: &SyntaxNode) -> Option<String> {
-    node.children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .find(|t| t.kind() == IDENT)
-        .map(|t| t.text().to_string())
+    /// Concatenates the text of all non-trivia tokens beneath `node` (drops whitespace/comments).
+    fn non_trivia_text(node: &SyntaxNode) -> String {
+        node.descendants_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .filter(|t| !t.kind().is_trivia())
+            .map(|t| t.text().to_owned())
+            .collect()
+    }
+
+    /// Returns the name (`IDENT`) declared directly under `node` (e.g. the type/method name).
+    fn name_text(node: &SyntaxNode) -> Option<String> {
+        node.children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .find(|t| t.kind() == IDENT)
+            .map(|t| t.text().to_owned())
+    }
+
+    /// The directly-declared name tokens (`IDENT` children) of `node`, in source order. The type of a
+    /// declaration is a nested `TYPE` node, so its identifiers are not direct children; an unnamed `_`
+    /// binding is an `UNDERSCORE` token and is likewise excluded.
+    fn ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
+        node.children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .filter(|t| t.kind() == IDENT)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
+    use crate::parser::Parse;
+    use crate::syntax_kind::SyntaxKind::{FINAL_KW, PUBLIC_KW};
 
     /// Casts the parsed root to a [`SourceFile`].
     fn source_file(src: &str) -> SourceFile {
-        SourceFile::cast(parse(src).syntax()).expect("root is SOURCE_FILE")
+        SourceFile::cast(Parse::parse(src).syntax()).expect("root is SOURCE_FILE")
     }
 
     /// Parses `class C { void m() { <body> } }` and returns the statements of `m`.

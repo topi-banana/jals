@@ -6,154 +6,165 @@ use jals_syntax::{Parse, SyntaxNode};
 
 use crate::line_index::LineIndex;
 
-/// Build the document-symbol tree from the cached parse of `text`.
-pub(crate) fn document_symbols(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-) -> Vec<DocumentSymbol> {
-    let Some(file) = SourceFile::cast(parse.syntax()) else {
-        return Vec::new();
-    };
-    file.decls()
-        .map(|decl| symbol_for_decl(&decl, text, line_index))
-        .collect()
-}
+/// Document symbols (`textDocument/documentSymbol`).
+pub(crate) struct DocumentSymbols;
 
-fn symbol_for_decl(decl: &Decl, text: &str, idx: &LineIndex) -> DocumentSymbol {
-    match decl {
-        Decl::Class(d) => type_symbol(d.syntax(), d.name(), SymbolKind::CLASS, d.body(), text, idx),
-        Decl::Interface(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            SymbolKind::INTERFACE,
-            d.body(),
-            text,
-            idx,
-        ),
-        Decl::Record(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            SymbolKind::STRUCT,
-            d.body(),
-            text,
-            idx,
-        ),
-        Decl::AnnotationType(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            SymbolKind::INTERFACE,
-            d.body(),
-            text,
-            idx,
-        ),
-        Decl::Enum(d) => enum_symbol(d, text, idx),
-        // Top-level field / method of a compact source file (JEP 512).
-        Decl::Field(d) => leaf(d.syntax(), d.name(), SymbolKind::FIELD, text, idx),
-        Decl::Method(d) => leaf(d.syntax(), d.name(), SymbolKind::METHOD, text, idx),
-    }
-}
-
-fn symbol_for_member(member: &Member, text: &str, idx: &LineIndex) -> Option<DocumentSymbol> {
-    let sym = match member {
-        Member::Field(d) => leaf(d.syntax(), d.name(), SymbolKind::FIELD, text, idx),
-        Member::Method(d) => leaf(d.syntax(), d.name(), SymbolKind::METHOD, text, idx),
-        Member::Constructor(d) => leaf(d.syntax(), d.name(), SymbolKind::CONSTRUCTOR, text, idx),
-        // Unnamed static/instance initializer block: skip.
-        Member::Initializer(_) => return None,
-        Member::Class(d) => {
-            type_symbol(d.syntax(), d.name(), SymbolKind::CLASS, d.body(), text, idx)
-        }
-        Member::Interface(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            SymbolKind::INTERFACE,
-            d.body(),
-            text,
-            idx,
-        ),
-        Member::Record(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            SymbolKind::STRUCT,
-            d.body(),
-            text,
-            idx,
-        ),
-        Member::AnnotationType(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            SymbolKind::INTERFACE,
-            d.body(),
-            text,
-            idx,
-        ),
-        Member::Enum(d) => enum_symbol(d, text, idx),
-    };
-    Some(sym)
-}
-
-/// A type-like symbol (class/interface/record/annotation) whose children are its members.
-fn type_symbol(
-    node: &SyntaxNode,
-    name: Option<String>,
-    kind: SymbolKind,
-    body: Option<ClassBody>,
-    text: &str,
-    idx: &LineIndex,
-) -> DocumentSymbol {
-    let children = body.map(|b| {
-        b.members()
-            .filter_map(|m| symbol_for_member(&m, text, idx))
+impl DocumentSymbols {
+    /// Build the document-symbol tree from the cached parse of `text`.
+    pub(crate) fn document_symbols(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+    ) -> Vec<DocumentSymbol> {
+        let Some(file) = SourceFile::cast(parse.syntax()) else {
+            return Vec::new();
+        };
+        file.decls()
+            .map(|decl| Self::symbol_for_decl(&decl, text, line_index))
             .collect()
-    });
-    make(node, name, kind, children, text, idx)
-}
+    }
 
-/// An enum symbol, whose children are its constants followed by its members.
-fn enum_symbol(d: &EnumDecl, text: &str, idx: &LineIndex) -> DocumentSymbol {
-    let children = d.body().map(|b| {
-        let constants = b
-            .constants()
-            .map(|c| leaf(c.syntax(), c.name(), SymbolKind::ENUM_MEMBER, text, idx));
-        let members = b.members().filter_map(|m| symbol_for_member(&m, text, idx));
-        constants.chain(members).collect()
-    });
-    make(d.syntax(), d.name(), SymbolKind::ENUM, children, text, idx)
-}
+    fn symbol_for_decl(decl: &Decl, text: &str, idx: &LineIndex) -> DocumentSymbol {
+        match decl {
+            Decl::Class(d) => {
+                Self::type_symbol(d.syntax(), d.name(), SymbolKind::CLASS, d.body(), text, idx)
+            }
+            Decl::Interface(d) => Self::type_symbol(
+                d.syntax(),
+                d.name(),
+                SymbolKind::INTERFACE,
+                d.body(),
+                text,
+                idx,
+            ),
+            Decl::Record(d) => Self::type_symbol(
+                d.syntax(),
+                d.name(),
+                SymbolKind::STRUCT,
+                d.body(),
+                text,
+                idx,
+            ),
+            Decl::AnnotationType(d) => Self::type_symbol(
+                d.syntax(),
+                d.name(),
+                SymbolKind::INTERFACE,
+                d.body(),
+                text,
+                idx,
+            ),
+            Decl::Enum(d) => Self::enum_symbol(d, text, idx),
+            // Top-level field / method of a compact source file (JEP 512).
+            Decl::Field(d) => Self::leaf(d.syntax(), d.name(), SymbolKind::FIELD, text, idx),
+            Decl::Method(d) => Self::leaf(d.syntax(), d.name(), SymbolKind::METHOD, text, idx),
+        }
+    }
 
-/// A symbol with no children.
-fn leaf(
-    node: &SyntaxNode,
-    name: Option<String>,
-    kind: SymbolKind,
-    text: &str,
-    idx: &LineIndex,
-) -> DocumentSymbol {
-    make(node, name, kind, None, text, idx)
-}
+    fn symbol_for_member(member: &Member, text: &str, idx: &LineIndex) -> Option<DocumentSymbol> {
+        let sym = match member {
+            Member::Field(d) => Self::leaf(d.syntax(), d.name(), SymbolKind::FIELD, text, idx),
+            Member::Method(d) => Self::leaf(d.syntax(), d.name(), SymbolKind::METHOD, text, idx),
+            Member::Constructor(d) => {
+                Self::leaf(d.syntax(), d.name(), SymbolKind::CONSTRUCTOR, text, idx)
+            }
+            // Unnamed static/instance initializer block: skip.
+            Member::Initializer(_) => return None,
+            Member::Class(d) => {
+                Self::type_symbol(d.syntax(), d.name(), SymbolKind::CLASS, d.body(), text, idx)
+            }
+            Member::Interface(d) => Self::type_symbol(
+                d.syntax(),
+                d.name(),
+                SymbolKind::INTERFACE,
+                d.body(),
+                text,
+                idx,
+            ),
+            Member::Record(d) => Self::type_symbol(
+                d.syntax(),
+                d.name(),
+                SymbolKind::STRUCT,
+                d.body(),
+                text,
+                idx,
+            ),
+            Member::AnnotationType(d) => Self::type_symbol(
+                d.syntax(),
+                d.name(),
+                SymbolKind::INTERFACE,
+                d.body(),
+                text,
+                idx,
+            ),
+            Member::Enum(d) => Self::enum_symbol(d, text, idx),
+        };
+        Some(sym)
+    }
 
-fn make(
-    node: &SyntaxNode,
-    name: Option<String>,
-    kind: SymbolKind,
-    children: Option<Vec<DocumentSymbol>>,
-    text: &str,
-    idx: &LineIndex,
-) -> DocumentSymbol {
-    let range = idx.range(text, node.text_range());
-    #[allow(deprecated)]
-    DocumentSymbol {
-        name: name.unwrap_or_else(|| "<anonymous>".to_string()),
-        detail: None,
-        kind,
-        tags: None,
-        deprecated: None,
-        range,
-        // The AST has no separate name-token accessor, so the whole node is the selection
-        // range. This still satisfies LSP's "contained by range" requirement.
-        selection_range: range,
-        children: children.filter(|c| !c.is_empty()),
+    /// A type-like symbol (class/interface/record/annotation) whose children are its members.
+    fn type_symbol(
+        node: &SyntaxNode,
+        name: Option<String>,
+        kind: SymbolKind,
+        body: Option<ClassBody>,
+        text: &str,
+        idx: &LineIndex,
+    ) -> DocumentSymbol {
+        let children = body.map(|b| {
+            b.members()
+                .filter_map(|m| Self::symbol_for_member(&m, text, idx))
+                .collect()
+        });
+        Self::make(node, name, kind, children, text, idx)
+    }
+
+    /// An enum symbol, whose children are its constants followed by its members.
+    fn enum_symbol(d: &EnumDecl, text: &str, idx: &LineIndex) -> DocumentSymbol {
+        let children = d.body().map(|b| {
+            let constants = b
+                .constants()
+                .map(|c| Self::leaf(c.syntax(), c.name(), SymbolKind::ENUM_MEMBER, text, idx));
+            let members = b
+                .members()
+                .filter_map(|m| Self::symbol_for_member(&m, text, idx));
+            constants.chain(members).collect()
+        });
+        Self::make(d.syntax(), d.name(), SymbolKind::ENUM, children, text, idx)
+    }
+
+    /// A symbol with no children.
+    fn leaf(
+        node: &SyntaxNode,
+        name: Option<String>,
+        kind: SymbolKind,
+        text: &str,
+        idx: &LineIndex,
+    ) -> DocumentSymbol {
+        Self::make(node, name, kind, None, text, idx)
+    }
+
+    fn make(
+        node: &SyntaxNode,
+        name: Option<String>,
+        kind: SymbolKind,
+        children: Option<Vec<DocumentSymbol>>,
+        text: &str,
+        idx: &LineIndex,
+    ) -> DocumentSymbol {
+        let range = idx.range(text, node.text_range());
+        #[allow(deprecated)]
+        DocumentSymbol {
+            name: name.unwrap_or_else(|| "<anonymous>".to_owned()),
+            detail: None,
+            kind,
+            tags: None,
+            deprecated: None,
+            range,
+            // The AST has no separate name-token accessor, so the whole node is the selection
+            // range. This still satisfies LSP's "contained by range" requirement.
+            selection_range: range,
+            children: children.filter(|c| !c.is_empty()),
+        }
     }
 }
 
@@ -162,7 +173,11 @@ mod tests {
     use super::*;
 
     fn symbols(text: &str) -> Vec<DocumentSymbol> {
-        document_symbols(&jals_syntax::parse(text), text, &LineIndex::new(text))
+        DocumentSymbols::document_symbols(
+            &jals_syntax::Parse::parse(text),
+            text,
+            &LineIndex::new(text),
+        )
     }
 
     #[test]

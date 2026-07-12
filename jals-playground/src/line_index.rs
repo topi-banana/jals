@@ -36,7 +36,7 @@ impl LineIndex {
     /// `text` must be the source this index was built from. Offsets past the end, or not on a
     /// char boundary, are clamped so this never panics.
     fn position(&self, text: &str, offset: usize) -> (u32, u32) {
-        let off = clamp_to_boundary(text, offset.min(self.len));
+        let off = Self::clamp_to_boundary(text, offset.min(self.len));
         let line = self.line_starts.partition_point(|&start| start <= off) - 1;
         let line_start = self.line_starts[line];
         let character: u32 = text[line_start..off]
@@ -83,17 +83,17 @@ impl LineIndex {
         }
         off
     }
-}
 
-/// Round `off` down to the nearest UTF-8 char boundary in `text`.
-fn clamp_to_boundary(text: &str, off: usize) -> usize {
-    if off >= text.len() {
-        return text.len();
+    /// Round `off` down to the nearest UTF-8 char boundary in `text`.
+    fn clamp_to_boundary(text: &str, off: usize) -> usize {
+        if off >= text.len() {
+            return text.len();
+        }
+        (0..=off)
+            .rev()
+            .find(|&o| text.is_char_boundary(o))
+            .unwrap_or(0)
     }
-    (0..=off)
-        .rev()
-        .find(|&o| text.is_char_boundary(o))
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

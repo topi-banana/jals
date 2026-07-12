@@ -66,23 +66,23 @@ pub enum DefKind {
 
 impl DefKind {
     /// The name-space this kind of definition occupies.
-    pub fn namespace(self) -> Namespace {
+    pub const fn namespace(self) -> Namespace {
         match self {
-            DefKind::TypeParam
-            | DefKind::Class
-            | DefKind::Interface
-            | DefKind::Enum
-            | DefKind::Record
-            | DefKind::AnnotationType => Namespace::Type,
-            DefKind::Method | DefKind::Constructor => Namespace::Method,
-            DefKind::Local
-            | DefKind::Param
-            | DefKind::LambdaParam
-            | DefKind::Field
-            | DefKind::EnumConstant
-            | DefKind::CatchParam
-            | DefKind::Resource
-            | DefKind::PatternVar => Namespace::Value,
+            Self::TypeParam
+            | Self::Class
+            | Self::Interface
+            | Self::Enum
+            | Self::Record
+            | Self::AnnotationType => Namespace::Type,
+            Self::Method | Self::Constructor => Namespace::Method,
+            Self::Local
+            | Self::Param
+            | Self::LambdaParam
+            | Self::Field
+            | Self::EnumConstant
+            | Self::CatchParam
+            | Self::Resource
+            | Self::PatternVar => Namespace::Value,
         }
     }
 }

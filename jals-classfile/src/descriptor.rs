@@ -34,45 +34,45 @@ pub enum BaseType {
 }
 
 impl BaseType {
-    pub(crate) fn from_byte(b: u8) -> Option<BaseType> {
+    pub(crate) const fn from_byte(b: u8) -> Option<Self> {
         Some(match b {
-            b'B' => BaseType::Byte,
-            b'C' => BaseType::Char,
-            b'D' => BaseType::Double,
-            b'F' => BaseType::Float,
-            b'I' => BaseType::Int,
-            b'J' => BaseType::Long,
-            b'S' => BaseType::Short,
-            b'Z' => BaseType::Boolean,
+            b'B' => Self::Byte,
+            b'C' => Self::Char,
+            b'D' => Self::Double,
+            b'F' => Self::Float,
+            b'I' => Self::Int,
+            b'J' => Self::Long,
+            b'S' => Self::Short,
+            b'Z' => Self::Boolean,
             _ => return None,
         })
     }
 
     /// The single descriptor character (`Int` → `'I'`).
-    pub fn as_char(self) -> char {
+    pub const fn as_char(self) -> char {
         match self {
-            BaseType::Byte => 'B',
-            BaseType::Char => 'C',
-            BaseType::Double => 'D',
-            BaseType::Float => 'F',
-            BaseType::Int => 'I',
-            BaseType::Long => 'J',
-            BaseType::Short => 'S',
-            BaseType::Boolean => 'Z',
+            Self::Byte => 'B',
+            Self::Char => 'C',
+            Self::Double => 'D',
+            Self::Float => 'F',
+            Self::Int => 'I',
+            Self::Long => 'J',
+            Self::Short => 'S',
+            Self::Boolean => 'Z',
         }
     }
 
     /// The Java keyword this primitive is spelled with (`Int` → `"int"`).
-    pub fn keyword(self) -> &'static str {
+    pub const fn keyword(self) -> &'static str {
         match self {
-            BaseType::Byte => "byte",
-            BaseType::Char => "char",
-            BaseType::Double => "double",
-            BaseType::Float => "float",
-            BaseType::Int => "int",
-            BaseType::Long => "long",
-            BaseType::Short => "short",
-            BaseType::Boolean => "boolean",
+            Self::Byte => "byte",
+            Self::Char => "char",
+            Self::Double => "double",
+            Self::Float => "float",
+            Self::Int => "int",
+            Self::Long => "long",
+            Self::Short => "short",
+            Self::Boolean => "boolean",
         }
     }
 }
@@ -85,7 +85,7 @@ pub enum FieldType {
     /// `L ClassName ;` — a class reference, by internal binary name (`java/lang/Object`).
     Object(String),
     /// `[ ComponentType` — an array; nest for multiple dimensions.
-    Array(Box<FieldType>),
+    Array(Box<Self>),
 }
 
 /// A method's return descriptor (JVMS §4.3.3): a [`FieldType`] or `void`.
@@ -106,29 +106,33 @@ pub struct MethodDescriptor {
     pub return_type: ReturnType,
 }
 
-/// Parse a field descriptor such as `Ljava/lang/Object;` or `[[I`.
-pub fn parse_field_descriptor(s: &str) -> Result<FieldType> {
-    let mut p = Parser::new(s);
-    let ty = p.field_type()?;
-    p.expect_eof()?;
-    Ok(ty)
+impl FieldType {
+    /// Parse a field descriptor such as `Ljava/lang/Object;` or `[[I`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        let ty = p.field_type()?;
+        p.expect_eof()?;
+        Ok(ty)
+    }
 }
 
-/// Parse a method descriptor such as `(Ljava/lang/Object;I)V`.
-pub fn parse_method_descriptor(s: &str) -> Result<MethodDescriptor> {
-    let mut p = Parser::new(s);
-    p.expect(b'(')?;
-    let mut params = Vec::new();
-    while p.peek() != Some(b')') {
-        params.push(p.field_type()?);
+impl MethodDescriptor {
+    /// Parse a method descriptor such as `(Ljava/lang/Object;I)V`.
+    pub fn parse(s: &str) -> Result<Self> {
+        let mut p = Parser::new(s);
+        p.expect(b'(')?;
+        let mut params = Vec::new();
+        while p.peek() != Some(b')') {
+            params.push(p.field_type()?);
+        }
+        p.expect(b')')?;
+        let return_type = p.return_type()?;
+        p.expect_eof()?;
+        Ok(Self {
+            params,
+            return_type,
+        })
     }
-    p.expect(b')')?;
-    let return_type = p.return_type()?;
-    p.expect_eof()?;
-    Ok(MethodDescriptor {
-        params,
-        return_type,
-    })
 }
 
 /// A byte cursor over a descriptor string. Descriptor punctuation is ASCII, so byte indexing never
@@ -139,7 +143,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(s: &'a str) -> Self {
+    const fn new(s: &'a str) -> Self {
         Parser { s, pos: 0 }
     }
 
@@ -163,7 +167,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_eof(&self) -> Result<()> {
+    const fn expect_eof(&self) -> Result<()> {
         if self.pos == self.s.len() {
             Ok(())
         } else {
@@ -214,9 +218,9 @@ impl<'a> Parser<'a> {
 impl fmt::Display for FieldType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FieldType::Base(b) => write!(f, "{}", b.as_char()),
-            FieldType::Object(name) => write!(f, "L{name};"),
-            FieldType::Array(inner) => write!(f, "[{inner}"),
+            Self::Base(b) => write!(f, "{}", b.as_char()),
+            Self::Object(name) => write!(f, "L{name};"),
+            Self::Array(inner) => write!(f, "[{inner}"),
         }
     }
 }
@@ -224,8 +228,8 @@ impl fmt::Display for FieldType {
 impl fmt::Display for ReturnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ReturnType::Void => f.write_str("V"),
-            ReturnType::Type(ty) => write!(f, "{ty}"),
+            Self::Void => f.write_str("V"),
+            Self::Type(ty) => write!(f, "{ty}"),
         }
     }
 }
@@ -245,7 +249,7 @@ mod tests {
     use super::*;
 
     fn field(s: &str) -> FieldType {
-        parse_field_descriptor(s).unwrap()
+        FieldType::parse(s).unwrap()
     }
 
     #[test]
@@ -269,11 +273,11 @@ mod tests {
 
     #[test]
     fn method_descriptor() {
-        let m = parse_method_descriptor("(Ljava/lang/Object;I)V").unwrap();
+        let m = MethodDescriptor::parse("(Ljava/lang/Object;I)V").unwrap();
         assert_eq!(m.params.len(), 2);
         assert_eq!(m.return_type, ReturnType::Void);
         assert_eq!(
-            parse_method_descriptor("()[Ljava/lang/String;")
+            MethodDescriptor::parse("()[Ljava/lang/String;")
                 .unwrap()
                 .return_type,
             ReturnType::Type(FieldType::Array(Box::new(FieldType::Object(
@@ -284,16 +288,16 @@ mod tests {
 
     #[test]
     fn rejects_malformed() {
-        assert!(parse_field_descriptor("Ljava/lang/Object").is_err());
-        assert!(parse_field_descriptor("X").is_err());
-        assert!(parse_field_descriptor("II").is_err());
-        assert!(parse_method_descriptor("Ljava/lang/Object;").is_err());
+        assert!(FieldType::parse("Ljava/lang/Object").is_err());
+        assert!(FieldType::parse("X").is_err());
+        assert!(FieldType::parse("II").is_err());
+        assert!(MethodDescriptor::parse("Ljava/lang/Object;").is_err());
     }
 
     #[test]
     fn render_round_trips() {
         for s in ["I", "[[J", "Ljava/util/Map;", "[Ljava/lang/String;", "Z"] {
-            assert_eq!(parse_field_descriptor(s).unwrap().to_string(), s);
+            assert_eq!(FieldType::parse(s).unwrap().to_string(), s);
         }
         for s in [
             "()V",
@@ -301,7 +305,7 @@ mod tests {
             "([IJ)Ljava/lang/String;",
             "()[Ljava/lang/Object;",
         ] {
-            assert_eq!(parse_method_descriptor(s).unwrap().to_string(), s);
+            assert_eq!(MethodDescriptor::parse(s).unwrap().to_string(), s);
         }
     }
 }

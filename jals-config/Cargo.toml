@@ -11,3 +11,6 @@ edition.workspace = true
 jals-fs.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
+
+[lints]
+workspace = true

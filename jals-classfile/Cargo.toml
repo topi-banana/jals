@@ -10,3 +10,6 @@ serde = { workspace = true }
 expect-test = "1.5"
 proptest = "1"
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

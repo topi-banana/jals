@@ -16,14 +16,14 @@ pub(crate) struct LineIndex {
 }
 
 impl LineIndex {
-    pub(crate) fn new(text: &str) -> LineIndex {
+    pub(crate) fn new(text: &str) -> Self {
         let mut line_starts = vec![0u32];
         for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
                 line_starts.push((i + 1) as u32);
             }
         }
-        LineIndex {
+        Self {
             line_starts,
             len: text.len() as u32,
         }
@@ -34,6 +34,16 @@ impl LineIndex {
     /// `text` must be the source this index was built from. Offsets past the end, or not
     /// on a char boundary, are clamped so this never panics (syntax invariant #2).
     pub(crate) fn position(&self, text: &str, offset: TextSize) -> Position {
+        /// Round `off` down to the nearest UTF-8 char boundary in `text`.
+        fn clamp_to_boundary(text: &str, off: usize) -> usize {
+            if off >= text.len() {
+                return text.len();
+            }
+            (0..=off)
+                .rev()
+                .find(|&o| text.is_char_boundary(o))
+                .unwrap_or(0)
+        }
         let off = clamp_to_boundary(text, u32::from(offset).min(self.len) as usize);
         let line = self
             .line_starts
@@ -98,17 +108,6 @@ impl LineIndex {
         }
         TextSize::from(off as u32)
     }
-}
-
-/// Round `off` down to the nearest UTF-8 char boundary in `text`.
-fn clamp_to_boundary(text: &str, off: usize) -> usize {
-    if off >= text.len() {
-        return text.len();
-    }
-    (0..=off)
-        .rev()
-        .find(|&o| text.is_char_boundary(o))
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -46,40 +46,46 @@ pub(crate) struct Finding {
 
 impl Finding {
     /// A finding spanning `node`.
-    pub(crate) fn at_node(node: &SyntaxNode, message: impl Into<String>) -> Finding {
+    pub(crate) fn at_node(node: &SyntaxNode, message: impl Into<String>) -> Self {
         let range = node.text_range();
-        Finding {
+        Self {
             range: usize::from(range.start())..usize::from(range.end()),
             message: message.into(),
-            ..Finding::default()
+            ..Self::default()
         }
     }
 
     /// A finding spanning `token`.
-    pub(crate) fn at_token(token: &SyntaxToken, message: impl Into<String>) -> Finding {
+    pub(crate) fn at_token(token: &SyntaxToken, message: impl Into<String>) -> Self {
         let range = token.text_range();
-        Finding {
+        Self {
             range: usize::from(range.start())..usize::from(range.end()),
             message: message.into(),
-            ..Finding::default()
+            ..Self::default()
         }
     }
 }
 
-/// The shared preamble of an edition-gated ([`Checker::Versioned`]) rule: gate on the project's
-/// target Java version, then cast the root to a [`SourceFile`]. Returns `Some((version, file))` —
-/// the target feature version to name in the diagnostic and the file to scan — only when a feature
-/// that stabilized in `stable_in` is still a *preview* at the target (`target_java_version` is
-/// declared and *below* `stable_in`). Returns `None` (so the rule reports nothing) when no edition
-/// is declared, the target is already at/above `stable_in`, or the root is not a source file.
-pub(crate) fn gated_source_file(
-    target_java_version: Option<u32>,
-    stable_in: u32,
-    root: &SyntaxNode,
-) -> Option<(u32, SourceFile)> {
-    let version = target_java_version.filter(|&v| v < stable_in)?;
-    let file = SourceFile::cast(root.clone())?;
-    Some((version, file))
+/// The version gate shared by the edition-gated ([`Checker::Versioned`]) rules.
+pub(crate) struct VersionGate;
+
+impl VersionGate {
+    /// The shared preamble of an edition-gated ([`Checker::Versioned`]) rule: gate on the project's
+    /// target Java version, then cast the root to a [`SourceFile`]. Returns `Some((version, file))`
+    /// — the target feature version to name in the diagnostic and the file to scan — only when a
+    /// feature that stabilized in `stable_in` is still a *preview* at the target
+    /// (`target_java_version` is declared and *below* `stable_in`). Returns `None` (so the rule
+    /// reports nothing) when no edition is declared, the target is already at/above `stable_in`, or
+    /// the root is not a source file.
+    pub(crate) fn source_file(
+        target_java_version: Option<u32>,
+        stable_in: u32,
+        root: &SyntaxNode,
+    ) -> Option<(u32, SourceFile)> {
+        let version = target_java_version.filter(|&v| v < stable_in)?;
+        let file = SourceFile::cast(root.clone())?;
+        Some((version, file))
+    }
 }
 
 /// How a rule is invoked. Most rules need only the CST; resolution-based rules additionally take

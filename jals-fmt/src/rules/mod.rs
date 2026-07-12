@@ -64,7 +64,7 @@ impl Registry {
     }
 
     /// The literal-rewrite chain applied in [`crate::lower`]'s token emission.
-    pub(crate) fn literals(&self) -> &LiteralRegistry {
+    pub(crate) const fn literals(&self) -> &LiteralRegistry {
         &self.literals
     }
 

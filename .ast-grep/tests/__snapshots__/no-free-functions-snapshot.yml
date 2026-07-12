@@ -1,0 +1,16 @@
+id: no-free-functions
+snapshots:
+  ? |
+    fn parse_user() {}
+  : labels:
+    - source: fn parse_user() {}
+      style: primary
+      start: 0
+      end: 18
+  ? |
+    pub fn create_user() {}
+  : labels:
+    - source: pub fn create_user() {}
+      style: primary
+      start: 0
+      end: 23

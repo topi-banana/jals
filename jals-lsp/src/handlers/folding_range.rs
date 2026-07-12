@@ -9,115 +9,120 @@
 
 use async_lsp::lsp_types::{FoldingRange, FoldingRangeKind};
 use jals_syntax::ast::{AstNode, SourceFile};
-use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind, SyntaxNode};
 use text_size::{TextRange, TextSize};
 
 use crate::line_index::LineIndex;
 
-/// Compute folding ranges from the cached parse of `text`.
-pub(crate) fn folding_range(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-) -> Vec<FoldingRange> {
-    let root = parse.syntax();
-    let mut ranges = Vec::new();
+/// Folding ranges (`textDocument/foldingRange`).
+pub(crate) struct FoldingRanges;
 
-    // Brace-delimited body nodes. A `BLOCK` is the body of methods/constructors/initializers
-    // and of every control-flow statement (if/while/for/try/...) and block-bodied lambda, so
-    // matching `BLOCK` covers those without enumerating each statement kind.
-    for node in root.descendants() {
-        if is_foldable_body(node.kind())
-            && let Some(r) = brace_fold(&node, text, line_index)
-        {
-            ranges.push(r);
-        }
-    }
+impl FoldingRanges {
+    /// Compute folding ranges from the cached parse of `text`.
+    pub(crate) fn folding_range(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+    ) -> Vec<FoldingRange> {
+        let root = parse.syntax();
+        let mut ranges = Vec::new();
 
-    // Multi-line block/doc comments (license headers, Javadoc). Line comments are one line
-    // each and are not folded.
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-    {
-        if matches!(
-            token.kind(),
-            SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
-        ) {
-            let range = token.text_range();
-            let start = line_index.position(text, range.start()).line;
-            let end = line_index.position(text, last_offset(range)).line;
-            if let Some(r) = line_fold(start, end, Some(FoldingRangeKind::Comment)) {
+        // Brace-delimited body nodes. A `BLOCK` is the body of methods/constructors/initializers
+        // and of every control-flow statement (if/while/for/try/...) and block-bodied lambda, so
+        // matching `BLOCK` covers those without enumerating each statement kind.
+        for node in root.descendants() {
+            if Self::is_foldable_body(node.kind())
+                && let Some(r) = Self::brace_fold(&node, text, line_index)
+            {
                 ranges.push(r);
             }
         }
-    }
 
-    // A consecutive group of imports collapses into one region (first import line .. last
-    // import line), so a long import block can be tucked away.
-    if let Some(file) = SourceFile::cast(root.clone()) {
-        let mut imports = file.imports();
-        if let Some(first) = imports.next()
-            && let Some(last) = imports.last()
+        // Multi-line block/doc comments (license headers, Javadoc). Line comments are one line
+        // each and are not folded.
+        for token in root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
         {
-            let start = line_index
-                .position(text, first.syntax().text_range().start())
-                .line;
-            let end = line_index
-                .position(text, last_offset(last.syntax().text_range()))
-                .line;
-            if let Some(r) = line_fold(start, end, Some(FoldingRangeKind::Imports)) {
-                ranges.push(r);
+            if matches!(
+                token.kind(),
+                SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
+            ) {
+                let range = token.text_range();
+                let start = line_index.position(text, range.start()).line;
+                let end = line_index.position(text, Self::last_offset(range)).line;
+                if let Some(r) = Self::line_fold(start, end, Some(FoldingRangeKind::Comment)) {
+                    ranges.push(r);
+                }
             }
         }
+
+        // A consecutive group of imports collapses into one region (first import line .. last
+        // import line), so a long import block can be tucked away.
+        if let Some(file) = SourceFile::cast(root) {
+            let mut imports = file.imports();
+            if let Some(first) = imports.next()
+                && let Some(last) = imports.last()
+            {
+                let start = line_index
+                    .position(text, first.syntax().text_range().start())
+                    .line;
+                let end = line_index
+                    .position(text, Self::last_offset(last.syntax().text_range()))
+                    .line;
+                if let Some(r) = Self::line_fold(start, end, Some(FoldingRangeKind::Imports)) {
+                    ranges.push(r);
+                }
+            }
+        }
+
+        ranges
     }
 
-    ranges
-}
-
-/// The brace-delimited body node kinds we fold.
-fn is_foldable_body(kind: SyntaxKind) -> bool {
-    use SyntaxKind::*;
-    matches!(
-        kind,
-        CLASS_BODY | ENUM_BODY | MODULE_BODY | BLOCK | SWITCH_BLOCK | ARRAY_INIT
-    )
-}
-
-/// Fold a `{ ... }` node from the line of its `{` to the line *before* its `}`, keeping the
-/// closing brace visible after folding (rust-analyzer / TypeScript-LS convention).
-fn brace_fold(node: &SyntaxNode, text: &str, idx: &LineIndex) -> Option<FoldingRange> {
-    let range = node.text_range();
-    let open = idx.position(text, range.start()).line;
-    let close = idx.position(text, last_offset(range)).line;
-    line_fold(open, close.saturating_sub(1), None)
-}
-
-/// Build a line-based fold, or `None` if it does not span at least two lines.
-fn line_fold(
-    start_line: u32,
-    end_line: u32,
-    kind: Option<FoldingRangeKind>,
-) -> Option<FoldingRange> {
-    if start_line < end_line {
-        Some(FoldingRange {
-            start_line,
-            end_line,
+    /// The brace-delimited body node kinds we fold.
+    const fn is_foldable_body(kind: SyntaxKind) -> bool {
+        use SyntaxKind::{ARRAY_INIT, BLOCK, CLASS_BODY, ENUM_BODY, MODULE_BODY, SWITCH_BLOCK};
+        matches!(
             kind,
-            ..FoldingRange::default()
-        })
-    } else {
-        None
+            CLASS_BODY | ENUM_BODY | MODULE_BODY | BLOCK | SWITCH_BLOCK | ARRAY_INIT
+        )
     }
-}
 
-/// Offset of the last byte of `range` (`end` − 1), clamped so an empty range never
-/// underflows. Lands on the closing `}` / `*/` / `;` glyph.
-fn last_offset(range: TextRange) -> TextSize {
-    range
-        .end()
-        .checked_sub(TextSize::from(1))
-        .unwrap_or(range.end())
+    /// Fold a `{ ... }` node from the line of its `{` to the line *before* its `}`, keeping the
+    /// closing brace visible after folding (rust-analyzer / TypeScript-LS convention).
+    fn brace_fold(node: &SyntaxNode, text: &str, idx: &LineIndex) -> Option<FoldingRange> {
+        let range = node.text_range();
+        let open = idx.position(text, range.start()).line;
+        let close = idx.position(text, Self::last_offset(range)).line;
+        Self::line_fold(open, close.saturating_sub(1), None)
+    }
+
+    /// Build a line-based fold, or `None` if it does not span at least two lines.
+    fn line_fold(
+        start_line: u32,
+        end_line: u32,
+        kind: Option<FoldingRangeKind>,
+    ) -> Option<FoldingRange> {
+        if start_line < end_line {
+            Some(FoldingRange {
+                start_line,
+                end_line,
+                kind,
+                ..FoldingRange::default()
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Offset of the last byte of `range` (`end` − 1), clamped so an empty range never
+    /// underflows. Lands on the closing `}` / `*/` / `;` glyph.
+    fn last_offset(range: TextRange) -> TextSize {
+        range
+            .end()
+            .checked_sub(TextSize::from(1))
+            .unwrap_or_else(|| range.end())
+    }
 }
 
 #[cfg(test)]
@@ -126,10 +131,14 @@ mod tests {
 
     /// `(start_line, end_line, kind)` tuples, sorted, for order-independent asserts.
     fn folds(text: &str) -> Vec<(u32, u32, Option<FoldingRangeKind>)> {
-        let mut v: Vec<_> = folding_range(&jals_syntax::parse(text), text, &LineIndex::new(text))
-            .into_iter()
-            .map(|r| (r.start_line, r.end_line, r.kind))
-            .collect();
+        let mut v: Vec<_> = FoldingRanges::folding_range(
+            &jals_syntax::Parse::parse(text),
+            text,
+            &LineIndex::new(text),
+        )
+        .into_iter()
+        .map(|r| (r.start_line, r.end_line, r.kind))
+        .collect();
         v.sort_by_key(|&(s, e, _)| (s, e));
         v
     }

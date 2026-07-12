@@ -233,12 +233,12 @@ impl Workspace {
 
     /// Format the active file (file-local; no project index needed).
     pub fn format_active(&self, config: &FmtConfig) -> FormatOutput {
-        jals_fmt::format_source(&self.active_source(), config)
+        jals_fmt::FormatOutput::format_source(&self.active_source(), config)
     }
 
     /// Parse the active file for the syntax-tree dump.
     pub fn syntax_active(&self) -> Parse {
-        jals_syntax::parse(&self.active_source())
+        jals_syntax::Parse::parse(&self.active_source())
     }
 
     /// Build a [`ProjectIndex`] over *every* file (with the embedded stdlib stubs), analyse the
@@ -272,8 +272,11 @@ impl Workspace {
         // The parser's syntax errors plus every enabled lint rule (and the index-aware cross-file
         // `type-mismatch`). `lint.parse_errors` already carries the syntax errors, so the raw
         // `Parse::errors` are not counted separately.
-        let lint =
-            jals_lint::lint_parse_with_index(&ctx.parse, config, Some((&ctx.index, ctx.active_id)));
+        let lint = jals_lint::LintOutput::lint_parse_with_index(
+            &ctx.parse,
+            config,
+            Some((&ctx.index, ctx.active_id)),
+        );
         for diag in lint.parse_errors.iter().chain(lint.diagnostics.iter()) {
             diags.push(PlaygroundDiagnostic {
                 message: format!("{}: {}", diag.rule, diag.message),
@@ -300,9 +303,9 @@ impl Workspace {
             .enumerate()
             .map(|(i, path)| {
                 let parse = if i == active_idx {
-                    jals_syntax::parse(active_text)
+                    jals_syntax::Parse::parse(active_text)
                 } else {
-                    jals_syntax::parse(&self.read(path))
+                    jals_syntax::Parse::parse(&self.read(path))
                 };
                 (FileId(i as u32), parse)
             })
@@ -324,7 +327,7 @@ impl Workspace {
         drop(files);
 
         let parse = parses.swap_remove(active_idx).1;
-        let resolved = jals_hir::resolve_node(&parse.syntax());
+        let resolved = Resolved::resolve_node(&parse.syntax());
         ActiveContext {
             source: active_text.to_string(),
             parse,
@@ -363,7 +366,8 @@ impl Workspace {
     pub fn hover(&self, active_text: &str, line: u32, col: u32) -> Option<String> {
         let (ctx, offset) = self.context_at(active_text, line, col);
         let root = ctx.parse.syntax();
-        let inference = jals_hir::infer(&root, &ctx.resolved, &ctx.index, ctx.active_id);
+        let inference =
+            jals_hir::TypeInference::infer(&root, &ctx.resolved, &ctx.index, ctx.active_id);
         let ty = inference.type_at(offset)?;
         // Nothing useful to show for an un-inferable type.
         if matches!(ty, Ty::Unknown) {
@@ -377,22 +381,19 @@ impl Workspace {
     pub fn completions(&self, active_text: &str, line: u32, col: u32) -> Vec<CompletionEntry> {
         let (ctx, offset) = self.context_at(active_text, line, col);
         let root = ctx.parse.syntax();
-        if jals_hir::at_member_access(&root, offset) {
-            jals_hir::member_completions(&root, &ctx.resolved, &ctx.index, ctx.active_id, offset)
+        if ProjectIndex::at_member_access(&root, offset) {
+            ctx.index
+                .member_completions(&root, &ctx.resolved, ctx.active_id, offset)
                 .into_iter()
-                .map(completion_entry)
+                .map(CompletionEntry::from_completion)
                 .collect()
         } else {
-            let mut entries: Vec<CompletionEntry> = jals_hir::scope_completions(
-                &root,
-                &ctx.resolved,
-                &ctx.index,
-                ctx.active_id,
-                offset,
-            )
-            .into_iter()
-            .map(completion_entry)
-            .collect();
+            let mut entries: Vec<CompletionEntry> = ctx
+                .index
+                .scope_completions(&root, &ctx.resolved, ctx.active_id, offset)
+                .into_iter()
+                .map(CompletionEntry::from_completion)
+                .collect();
             entries.extend(JAVA_KEYWORDS.iter().map(|kw| CompletionEntry {
                 label: (*kw).to_string(),
                 kind: DefKind::Local,
@@ -406,10 +407,15 @@ impl Workspace {
     /// Signature help for the call at `(line, col)` in the active file, with cross-file type
     /// resolution. `None` if the cursor is in no resolvable call.
     pub fn signature_help(&self, active_text: &str, line: u32, col: u32) -> Option<SigHelp> {
+        /// The number of UTF-16 code units in `s` (Monaco parameter offsets are counted in UTF-16).
+        fn utf16_len(s: &str) -> u32 {
+            s.encode_utf16().count() as u32
+        }
         let (ctx, offset) = self.context_at(active_text, line, col);
         let root = ctx.parse.syntax();
-        let help =
-            jals_hir::signature_help(&root, &ctx.resolved, &ctx.index, ctx.active_id, offset)?;
+        let help = ctx
+            .index
+            .signature_help(&root, &ctx.resolved, ctx.active_id, offset)?;
         let signatures = help
             .signatures
             .iter()
@@ -437,13 +443,13 @@ impl Workspace {
 
     /// The document-symbol outline of the active file (types with their members nested).
     pub fn document_symbols(&self, active_text: &str) -> Vec<SymbolNode> {
-        let parse = jals_syntax::parse(active_text);
+        let parse = jals_syntax::Parse::parse(active_text);
         let Some(file) = ast::SourceFile::cast(parse.syntax()) else {
             return Vec::new();
         };
         let mapper = RangeMapper::new(active_text);
         file.decls()
-            .map(|decl| symbol_for_decl(&decl, &mapper))
+            .map(|decl| SymbolNode::for_decl(&decl, &mapper))
             .collect()
     }
 
@@ -455,7 +461,7 @@ impl Workspace {
         let root = ctx.parse.syntax();
         let mapper = RangeMapper::new(&ctx.source);
         let offset = mapper.offset(line, col);
-        let Some(target) = ident_at(&root, offset) else {
+        let Some(target) = Cst::ident_at(&root, offset) else {
             return Vec::new();
         };
         let anchor = usize::from(target.text_range().start());
@@ -466,12 +472,12 @@ impl Workspace {
                 .resolved
                 .occurrences(id, true)
                 .into_iter()
-                .map(|range| highlight_at(&root, &mapper, range))
+                .map(|range| Highlight::at(&root, &mapper, range))
                 .collect();
         }
         // No file-local binding, but the index may bind the cursor to a cross-file type: highlight
         // just the references in this file that resolve to that same declaration.
-        if let Some(item) = cross_file_type_at(&ctx.index, ctx.active_id, &ctx.resolved, anchor) {
+        if let Some(item) = ctx.cross_file_type_at(anchor) {
             let name = target.text();
             return ctx
                 .resolved
@@ -484,7 +490,7 @@ impl Workspace {
                 .filter(|r| {
                     ctx.index.resolve_reference(ctx.active_id, r).project_id() == Some(item)
                 })
-                .map(|r| highlight_at(&root, &mapper, r.range.clone()))
+                .map(|r| Highlight::at(&root, &mapper, r.range.clone()))
                 .collect();
         }
         // Lexical fallback: every same-text `IDENT` token, in document order.
@@ -492,8 +498,8 @@ impl Workspace {
             .filter_map(|element| element.into_token())
             .filter(|t| t.kind() == SyntaxKind::IDENT && t.text() == target.text())
             .map(|t| Highlight {
-                range: mapper.range(&to_std_range(t.text_range())),
-                write: is_write(&t),
+                range: mapper.range(&Cst::to_std_range(t.text_range())),
+                write: Highlight::is_write(&t),
             })
             .collect()
     }
@@ -526,7 +532,7 @@ impl Workspace {
         root: &SyntaxNode,
         offset: usize,
     ) -> Option<(FileId, Range<usize>)> {
-        let token = ident_at(root, offset)?;
+        let token = Cst::ident_at(root, offset)?;
         let field_access = token
             .parent()
             .filter(|p| p.kind() == SyntaxKind::FIELD_ACCESS)?;
@@ -539,9 +545,10 @@ impl Workspace {
         } else {
             Namespace::Value
         };
-        let inference = jals_hir::infer(root, &ctx.resolved, &ctx.index, ctx.active_id);
+        let inference =
+            jals_hir::TypeInference::infer(root, &ctx.resolved, &ctx.index, ctx.active_id);
         let owner = inference
-            .type_of_expr(to_std_range(receiver.syntax().text_range()))?
+            .type_of_expr(Cst::to_std_range(receiver.syntax().text_range()))?
             .project_id()?;
         let member = ctx
             .index
@@ -569,7 +576,7 @@ impl Workspace {
         let root = ctx.parse.syntax();
         let mapper = RangeMapper::new(&ctx.source);
         let offset = mapper.offset(line, col);
-        let Some(ident) = ident_at(&root, offset) else {
+        let Some(ident) = Cst::ident_at(&root, offset) else {
             return Vec::new();
         };
         let anchor = usize::from(ident.text_range().start());
@@ -596,7 +603,7 @@ impl Workspace {
         }
 
         // The cursor is on a cross-file type reference the file-local pass left unresolved.
-        if let Some(item) = cross_file_type_at(&ctx.index, ctx.active_id, &ctx.resolved, anchor) {
+        if let Some(item) = ctx.cross_file_type_at(anchor) {
             return self.item_references(&ctx, item, include_declaration);
         }
         Vec::new()
@@ -620,7 +627,7 @@ impl Workspace {
                 (ctx.source.clone(), ctx.resolved.clone())
             } else {
                 let text = self.read(path);
-                let resolved = jals_hir::resolve_node(&jals_syntax::parse(&text).syntax());
+                let resolved = Resolved::resolve_node(&jals_syntax::Parse::parse(&text).syntax());
                 (text, resolved)
             };
             let mapper = RangeMapper::new(&text);
@@ -666,16 +673,22 @@ impl Workspace {
     }
 }
 
-/// The `IDENT` token at byte `offset`, preferring it at a token boundary (so a cursor at the end of
-/// a word still anchors to it). Mirrors `jals-lsp`'s `handlers::ident_at`.
-fn ident_at(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
-    root.token_at_offset(TextSize::from(offset as u32))
-        .find(|token| token.kind() == SyntaxKind::IDENT)
-}
+/// Small CST helpers shared by the language-feature queries — token lookup and range conversion over
+/// the parsed tree, with no natural owning type of their own.
+struct Cst;
 
-/// A `text_size::TextRange` as a plain `Range<usize>` of byte offsets.
-fn to_std_range(range: TextRange) -> Range<usize> {
-    usize::from(range.start())..usize::from(range.end())
+impl Cst {
+    /// The `IDENT` token at byte `offset`, preferring it at a token boundary (so a cursor at the end
+    /// of a word still anchors to it). Mirrors `jals-lsp`'s `handlers::ident_at`.
+    fn ident_at(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+        root.token_at_offset(TextSize::from(offset as u32))
+            .find(|token| token.kind() == SyntaxKind::IDENT)
+    }
+
+    /// A `text_size::TextRange` as a plain `Range<usize>` of byte offsets.
+    fn to_std_range(range: TextRange) -> Range<usize> {
+        usize::from(range.start())..usize::from(range.end())
+    }
 }
 
 /// Maps positions/ranges within one document between `jals` byte offsets and Monaco coordinates,
@@ -711,191 +724,200 @@ impl<'a> RangeMapper<'a> {
     }
 }
 
-/// The number of UTF-16 code units in `s` (Monaco parameter offsets are counted in UTF-16).
-fn utf16_len(s: &str) -> u32 {
-    s.encode_utf16().count() as u32
-}
-
-/// Map a `jals-hir` completion to the playground's neutral [`CompletionEntry`] (a semantic binding,
-/// never a keyword).
-fn completion_entry(completion: jals_hir::Completion) -> CompletionEntry {
-    CompletionEntry {
-        label: completion.label,
-        kind: completion.kind,
-        detail: completion.detail,
-        keyword: false,
-    }
-}
-
-/// The project type the cursor at `anchor` denotes when the file-local pass left it unresolved: a
-/// type-name reference the index binds to a project declaration. Mirrors `document_highlight`'s
-/// `cross_file_type_at`.
-fn cross_file_type_at(
-    index: &ProjectIndex,
-    file: FileId,
-    resolved: &Resolved,
-    anchor: usize,
-) -> Option<ItemId> {
-    let reference = resolved.reference_at(anchor)?;
-    if reference.namespace != Namespace::Type {
-        return None;
-    }
-    index.resolve_reference(file, reference).project_id()
-}
-
-/// The highlight for the occurrence at byte `range`, re-finding the token there to read its
-/// Read/Write role (name resolution yields bare byte ranges).
-fn highlight_at(root: &SyntaxNode, mapper: &RangeMapper<'_>, range: Range<usize>) -> Highlight {
-    let write = ident_at(root, range.start)
-        .map(|t| is_write(&t))
-        .unwrap_or(false);
-    Highlight {
-        range: mapper.range(&range),
-        write,
-    }
-}
-
-/// Whether an occurrence token is a write: a declaration/binding name, or a mutating simple-name use
-/// (`=` target, `++`/`--`). Mirrors `document_highlight`'s `classify` collapsed to a bool.
-fn is_write(token: &SyntaxToken) -> bool {
-    use SyntaxKind::*;
-    let Some(parent) = token.parent() else {
-        return false;
-    };
-    match parent.kind() {
-        CLASS_DECL | RECORD_DECL | INTERFACE_DECL | ANNOTATION_TYPE_DECL | ENUM_DECL
-        | METHOD_DECL | CONSTRUCTOR_DECL | TYPE_PARAM | PARAM | RECORD_COMPONENT
-        | ENUM_CONSTANT | FIELD_DECL | LOCAL_VAR_DECL | RESOURCE | CATCH_CLAUSE | TYPE_PATTERN
-        | FOR_EACH_STMT => true,
-        NAME_REF => is_write_name_ref(&parent),
-        _ => false,
-    }
-}
-
-/// A simple name reference is a write when it is an assignment target or the operand of `++`/`--`.
-fn is_write_name_ref(name_ref: &SyntaxNode) -> bool {
-    use SyntaxKind::*;
-    match name_ref.parent() {
-        // The target is the first child *node* of `ASSIGNMENT_EXPR` (the operator is a token).
-        Some(p) if p.kind() == ASSIGNMENT_EXPR => p.children().next().as_ref() == Some(name_ref),
-        Some(p) if p.kind() == POSTFIX_EXPR => true,
-        Some(p) if p.kind() == UNARY_EXPR => p
-            .children_with_tokens()
-            .filter_map(|element| element.into_token())
-            .any(|t| matches!(t.kind(), PLUS_PLUS | MINUS_MINUS)),
-        _ => false,
-    }
-}
-
-/// The document symbol for a top-level declaration. Mirrors `jals-lsp`'s `handlers/symbols.rs`, with
-/// the LSP `SymbolKind` replaced by a `DefKind` the UI maps.
-fn symbol_for_decl(decl: &ast::Decl, mapper: &RangeMapper<'_>) -> SymbolNode {
-    match decl {
-        ast::Decl::Class(d) => type_symbol(d.syntax(), d.name(), DefKind::Class, d.body(), mapper),
-        ast::Decl::Interface(d) => {
-            type_symbol(d.syntax(), d.name(), DefKind::Interface, d.body(), mapper)
+impl CompletionEntry {
+    /// Map a `jals-hir` completion to the playground's neutral [`CompletionEntry`] (a semantic
+    /// binding, never a keyword).
+    fn from_completion(completion: jals_hir::Completion) -> Self {
+        Self {
+            label: completion.label,
+            kind: completion.kind,
+            detail: completion.detail,
+            keyword: false,
         }
-        ast::Decl::Record(d) => {
-            type_symbol(d.syntax(), d.name(), DefKind::Record, d.body(), mapper)
-        }
-        ast::Decl::AnnotationType(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            DefKind::AnnotationType,
-            d.body(),
-            mapper,
-        ),
-        ast::Decl::Enum(d) => enum_symbol(d, mapper),
-        // Top-level field / method of a compact source file (JEP 512).
-        ast::Decl::Field(d) => leaf(d.syntax(), d.name(), DefKind::Field, mapper),
-        ast::Decl::Method(d) => leaf(d.syntax(), d.name(), DefKind::Method, mapper),
     }
 }
 
-/// The document symbol for a type member, or `None` for an unnamed initializer block.
-fn symbol_for_member(member: &ast::Member, mapper: &RangeMapper<'_>) -> Option<SymbolNode> {
-    let sym = match member {
-        ast::Member::Field(d) => leaf(d.syntax(), d.name(), DefKind::Field, mapper),
-        ast::Member::Method(d) => leaf(d.syntax(), d.name(), DefKind::Method, mapper),
-        ast::Member::Constructor(d) => leaf(d.syntax(), d.name(), DefKind::Constructor, mapper),
-        ast::Member::Initializer(_) => return None,
-        ast::Member::Class(d) => {
-            type_symbol(d.syntax(), d.name(), DefKind::Class, d.body(), mapper)
+impl ActiveContext {
+    /// The project type the cursor at `anchor` denotes when the file-local pass left it unresolved: a
+    /// type-name reference the index binds to a project declaration. Shared by
+    /// [`Workspace::document_highlight`] and [`Workspace::references`].
+    fn cross_file_type_at(&self, anchor: usize) -> Option<ItemId> {
+        let reference = self.resolved.reference_at(anchor)?;
+        if reference.namespace != Namespace::Type {
+            return None;
         }
-        ast::Member::Interface(d) => {
-            type_symbol(d.syntax(), d.name(), DefKind::Interface, d.body(), mapper)
+        self.index
+            .resolve_reference(self.active_id, reference)
+            .project_id()
+    }
+}
+
+impl Highlight {
+    /// The highlight for the occurrence at byte `range`, re-finding the token there to read its
+    /// Read/Write role (name resolution yields bare byte ranges).
+    fn at(root: &SyntaxNode, mapper: &RangeMapper<'_>, range: Range<usize>) -> Self {
+        let write = Cst::ident_at(root, range.start)
+            .map(|t| Self::is_write(&t))
+            .unwrap_or(false);
+        Self {
+            range: mapper.range(&range),
+            write,
         }
-        ast::Member::Record(d) => {
-            type_symbol(d.syntax(), d.name(), DefKind::Record, d.body(), mapper)
+    }
+
+    /// Whether an occurrence token is a write: a declaration/binding name, or a mutating simple-name
+    /// use (`=` target, `++`/`--`). Mirrors `document_highlight`'s `classify` collapsed to a bool.
+    fn is_write(token: &SyntaxToken) -> bool {
+        use SyntaxKind::*;
+
+        /// A simple name reference is a write when it is an assignment target or the operand of
+        /// `++`/`--`.
+        fn is_write_name_ref(name_ref: &SyntaxNode) -> bool {
+            use SyntaxKind::*;
+            match name_ref.parent() {
+                // The target is the first child *node* of `ASSIGNMENT_EXPR` (the operator is a
+                // token).
+                Some(p) if p.kind() == ASSIGNMENT_EXPR => {
+                    p.children().next().as_ref() == Some(name_ref)
+                }
+                Some(p) if p.kind() == POSTFIX_EXPR => true,
+                Some(p) if p.kind() == UNARY_EXPR => p
+                    .children_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|t| matches!(t.kind(), PLUS_PLUS | MINUS_MINUS)),
+                _ => false,
+            }
         }
-        ast::Member::AnnotationType(d) => type_symbol(
-            d.syntax(),
-            d.name(),
-            DefKind::AnnotationType,
-            d.body(),
-            mapper,
-        ),
-        ast::Member::Enum(d) => enum_symbol(d, mapper),
-    };
-    Some(sym)
+
+        let Some(parent) = token.parent() else {
+            return false;
+        };
+        match parent.kind() {
+            CLASS_DECL | RECORD_DECL | INTERFACE_DECL | ANNOTATION_TYPE_DECL | ENUM_DECL
+            | METHOD_DECL | CONSTRUCTOR_DECL | TYPE_PARAM | PARAM | RECORD_COMPONENT
+            | ENUM_CONSTANT | FIELD_DECL | LOCAL_VAR_DECL | RESOURCE | CATCH_CLAUSE
+            | TYPE_PATTERN | FOR_EACH_STMT => true,
+            NAME_REF => is_write_name_ref(&parent),
+            _ => false,
+        }
+    }
 }
 
-/// A type-like symbol (class/interface/record/annotation) whose children are its members.
-fn type_symbol(
-    node: &SyntaxNode,
-    name: Option<String>,
-    kind: DefKind,
-    body: Option<ast::ClassBody>,
-    mapper: &RangeMapper<'_>,
-) -> SymbolNode {
-    let children = body
-        .map(|b| {
-            b.members()
-                .filter_map(|m| symbol_for_member(&m, mapper))
-                .collect()
-        })
-        .unwrap_or_default();
-    make(node, name, kind, children, mapper)
-}
+impl SymbolNode {
+    /// The document symbol for a top-level declaration. Mirrors `jals-lsp`'s `handlers/symbols.rs`,
+    /// with the LSP `SymbolKind` replaced by a `DefKind` the UI maps.
+    fn for_decl(decl: &ast::Decl, mapper: &RangeMapper<'_>) -> Self {
+        match decl {
+            ast::Decl::Class(d) => {
+                Self::for_type(d.syntax(), d.name(), DefKind::Class, d.body(), mapper)
+            }
+            ast::Decl::Interface(d) => {
+                Self::for_type(d.syntax(), d.name(), DefKind::Interface, d.body(), mapper)
+            }
+            ast::Decl::Record(d) => {
+                Self::for_type(d.syntax(), d.name(), DefKind::Record, d.body(), mapper)
+            }
+            ast::Decl::AnnotationType(d) => Self::for_type(
+                d.syntax(),
+                d.name(),
+                DefKind::AnnotationType,
+                d.body(),
+                mapper,
+            ),
+            ast::Decl::Enum(d) => Self::for_enum(d, mapper),
+            // Top-level field / method of a compact source file (JEP 512).
+            ast::Decl::Field(d) => Self::leaf(d.syntax(), d.name(), DefKind::Field, mapper),
+            ast::Decl::Method(d) => Self::leaf(d.syntax(), d.name(), DefKind::Method, mapper),
+        }
+    }
 
-/// An enum symbol, whose children are its constants followed by its members.
-fn enum_symbol(d: &ast::EnumDecl, mapper: &RangeMapper<'_>) -> SymbolNode {
-    let children = d
-        .body()
-        .map(|b| {
-            let constants = b
-                .constants()
-                .map(|c| leaf(c.syntax(), c.name(), DefKind::EnumConstant, mapper));
-            let members = b.members().filter_map(|m| symbol_for_member(&m, mapper));
-            constants.chain(members).collect()
-        })
-        .unwrap_or_default();
-    make(d.syntax(), d.name(), DefKind::Enum, children, mapper)
-}
+    /// The document symbol for a type member, or `None` for an unnamed initializer block.
+    fn for_member(member: &ast::Member, mapper: &RangeMapper<'_>) -> Option<Self> {
+        let sym = match member {
+            ast::Member::Field(d) => Self::leaf(d.syntax(), d.name(), DefKind::Field, mapper),
+            ast::Member::Method(d) => Self::leaf(d.syntax(), d.name(), DefKind::Method, mapper),
+            ast::Member::Constructor(d) => {
+                Self::leaf(d.syntax(), d.name(), DefKind::Constructor, mapper)
+            }
+            ast::Member::Initializer(_) => return None,
+            ast::Member::Class(d) => {
+                Self::for_type(d.syntax(), d.name(), DefKind::Class, d.body(), mapper)
+            }
+            ast::Member::Interface(d) => {
+                Self::for_type(d.syntax(), d.name(), DefKind::Interface, d.body(), mapper)
+            }
+            ast::Member::Record(d) => {
+                Self::for_type(d.syntax(), d.name(), DefKind::Record, d.body(), mapper)
+            }
+            ast::Member::AnnotationType(d) => Self::for_type(
+                d.syntax(),
+                d.name(),
+                DefKind::AnnotationType,
+                d.body(),
+                mapper,
+            ),
+            ast::Member::Enum(d) => Self::for_enum(d, mapper),
+        };
+        Some(sym)
+    }
 
-/// A symbol with no children.
-fn leaf(
-    node: &SyntaxNode,
-    name: Option<String>,
-    kind: DefKind,
-    mapper: &RangeMapper<'_>,
-) -> SymbolNode {
-    make(node, name, kind, Vec::new(), mapper)
-}
+    /// A type-like symbol (class/interface/record/annotation) whose children are its members.
+    fn for_type(
+        node: &SyntaxNode,
+        name: Option<String>,
+        kind: DefKind,
+        body: Option<ast::ClassBody>,
+        mapper: &RangeMapper<'_>,
+    ) -> Self {
+        let children = body
+            .map(|b| {
+                b.members()
+                    .filter_map(|m| Self::for_member(&m, mapper))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::new(node, name, kind, children, mapper)
+    }
 
-/// Assemble a [`SymbolNode`], mapping the node's byte range to Monaco coordinates.
-fn make(
-    node: &SyntaxNode,
-    name: Option<String>,
-    kind: DefKind,
-    children: Vec<SymbolNode>,
-    mapper: &RangeMapper<'_>,
-) -> SymbolNode {
-    SymbolNode {
-        name: name.unwrap_or_else(|| "<anonymous>".to_string()),
-        kind,
-        range: mapper.range(&to_std_range(node.text_range())),
-        children,
+    /// An enum symbol, whose children are its constants followed by its members.
+    fn for_enum(d: &ast::EnumDecl, mapper: &RangeMapper<'_>) -> Self {
+        let children = d
+            .body()
+            .map(|b| {
+                let constants = b
+                    .constants()
+                    .map(|c| Self::leaf(c.syntax(), c.name(), DefKind::EnumConstant, mapper));
+                let members = b.members().filter_map(|m| Self::for_member(&m, mapper));
+                constants.chain(members).collect()
+            })
+            .unwrap_or_default();
+        Self::new(d.syntax(), d.name(), DefKind::Enum, children, mapper)
+    }
+
+    /// A symbol with no children.
+    fn leaf(
+        node: &SyntaxNode,
+        name: Option<String>,
+        kind: DefKind,
+        mapper: &RangeMapper<'_>,
+    ) -> Self {
+        Self::new(node, name, kind, Vec::new(), mapper)
+    }
+
+    /// Assemble a [`SymbolNode`], mapping the node's byte range to Monaco coordinates.
+    fn new(
+        node: &SyntaxNode,
+        name: Option<String>,
+        kind: DefKind,
+        children: Vec<Self>,
+        mapper: &RangeMapper<'_>,
+    ) -> Self {
+        Self {
+            name: name.unwrap_or_else(|| "<anonymous>".to_string()),
+            kind,
+            range: mapper.range(&Cst::to_std_range(node.text_range())),
+            children,
+        }
     }
 }
 
@@ -969,7 +991,7 @@ mod tests {
     #[test]
     fn seed_files_parse_clean() {
         for (path, contents) in SAMPLE_FILES {
-            let parse = jals_syntax::parse(contents);
+            let parse = jals_syntax::Parse::parse(contents);
             assert!(
                 parse.errors().is_empty(),
                 "seed file {path} has syntax errors: {:?}",
@@ -1190,7 +1212,10 @@ mod tests {
                 "/../jals-classpath/tests/fixtures/Box.class"
             )),
         );
-        let load = jals_classpath::load_classpath_in(&cache, &["deps/Box.class".to_string()]);
+        let load = jals_classpath::ClasspathLoad::load_classpath_in(
+            &cache,
+            &["deps/Box.class".to_string()],
+        );
         assert!(load.warnings.is_empty(), "{:?}", load.warnings);
         let lowered = jals_hir::ProjectIndex::lower_classpath(&load.classes);
 

@@ -29,11 +29,11 @@ pub enum FsError {
 impl fmt::Display for FsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FsError::NotFound(path) => write!(f, "no such file or directory: {path}"),
-            FsError::NotADirectory(path) => write!(f, "not a directory: {path}"),
-            FsError::NotAFile(path) => write!(f, "not a file: {path}"),
-            FsError::InvalidUtf8(path) => write!(f, "file is not valid UTF-8: {path}"),
-            FsError::Io(message) => write!(f, "I/O error: {message}"),
+            Self::NotFound(path) => write!(f, "no such file or directory: {path}"),
+            Self::NotADirectory(path) => write!(f, "not a directory: {path}"),
+            Self::NotAFile(path) => write!(f, "not a file: {path}"),
+            Self::InvalidUtf8(path) => write!(f, "file is not valid UTF-8: {path}"),
+            Self::Io(message) => write!(f, "I/O error: {message}"),
         }
     }
 }

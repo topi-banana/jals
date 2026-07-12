@@ -27,10 +27,10 @@ const SOURCE_DEP_FILE_BASE: u32 = (1 << 31) + (1 << 30);
 pub(crate) enum WorkspaceFileId {
     /// A project's own `.java`, indexed and linted. Id `index` (base 0).
     Project(u32),
-    /// A `-sources.jar` overlay: navigation-only library source. Id [`LIBRARY_FILE_BASE`]` + index`.
+    /// A `-sources.jar` overlay: navigation-only library source. Id <code>[LIBRARY_FILE_BASE] + index</code>.
     Library(u32),
     /// A `git`/`path` source dependency: an index input *and* a navigation target. Id
-    /// [`SOURCE_DEP_FILE_BASE`]` + index`.
+    /// <code>[SOURCE_DEP_FILE_BASE] + index</code>.
     SourceDep(u32),
 }
 
@@ -44,23 +44,23 @@ impl WorkspaceFileId {
     /// check (`source_dep_files.get(huge)`) then yields `None` — the same "no real file" result the
     /// old range check produced, with no special fourth case to maintain.
     #[inline]
-    pub(crate) fn from_raw(id: FileId) -> Self {
+    pub(crate) const fn from_raw(id: FileId) -> Self {
         if id.0 >= SOURCE_DEP_FILE_BASE {
-            WorkspaceFileId::SourceDep(id.0 - SOURCE_DEP_FILE_BASE)
+            Self::SourceDep(id.0 - SOURCE_DEP_FILE_BASE)
         } else if id.0 >= LIBRARY_FILE_BASE {
-            WorkspaceFileId::Library(id.0 - LIBRARY_FILE_BASE)
+            Self::Library(id.0 - LIBRARY_FILE_BASE)
         } else {
-            WorkspaceFileId::Project(id.0)
+            Self::Project(id.0)
         }
     }
 
     /// Encode an id-space + within-space index back into a raw [`FileId`] (`base + index`).
     #[inline]
-    pub(crate) fn to_raw(self) -> FileId {
+    pub(crate) const fn to_raw(self) -> FileId {
         match self {
-            WorkspaceFileId::Project(i) => FileId(i),
-            WorkspaceFileId::Library(i) => FileId(LIBRARY_FILE_BASE + i),
-            WorkspaceFileId::SourceDep(i) => FileId(SOURCE_DEP_FILE_BASE + i),
+            Self::Project(i) => FileId(i),
+            Self::Library(i) => FileId(LIBRARY_FILE_BASE + i),
+            Self::SourceDep(i) => FileId(SOURCE_DEP_FILE_BASE + i),
         }
     }
 }

@@ -1,12 +1,14 @@
-//! The shared config loader: a single [`ConfigError`] and the generic `load` / `discover` helpers
-//! backing every config file's `from_file` / `discover`.
+//! The shared config loader: a single [`ConfigError`] and the [`DiscoverableConfig`] trait whose
+//! provided `load` / `discover` back every config file's `from_file` / `discover`.
 //!
 //! `jalsfmt.toml` and `jalslint.toml` historically carried byte-identical loaders (an `Io`/`Parse`
 //! error, a read-and-parse `from_file`, and an upward-walking `discover`). They are unified here as
-//! free functions generic over any `Deserialize` (plus `Default` for `discover`'s "no file found"
-//! branch), so a future config language server can drive them for any schema.
+//! provided methods on a trait any `Deserialize` config model implements by naming its file (plus
+//! `Default` for `discover`'s "no file found" branch), so a future config language server can drive
+//! them for any schema.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 
 use jals_fs::FileTree;
 use serde::Deserialize;
@@ -34,10 +36,10 @@ pub enum ConfigError {
 impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ConfigError::Io { path, source } => {
+            Self::Io { path, source } => {
                 write!(f, "failed to read config {path}: {source}")
             }
-            ConfigError::Parse { path, source } => {
+            Self::Parse { path, source } => {
                 write!(f, "failed to parse config {path}: {source}")
             }
         }
@@ -47,50 +49,59 @@ impl core::fmt::Display for ConfigError {
 impl core::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            ConfigError::Io { source, .. } => Some(source),
-            ConfigError::Parse { source, .. } => Some(source),
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
         }
     }
 }
 
-/// Load and parse the config file at `path`, read through `fs`.
+/// A config model that is loaded from — and discovered upward through — a [`FileTree`] by its
+/// well-known file name.
 ///
-/// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
-/// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
-///
-/// # Errors
-/// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-pub fn load<T>(fs: &dyn FileTree, path: &str) -> Result<T, ConfigError>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
-        path: path.to_string(),
-        source,
-    })?;
-    toml::from_str(&text).map_err(|source| ConfigError::Parse {
-        path: path.to_string(),
-        source,
-    })
-}
+/// Implementors only name their file ([`FILE_NAME`](Self::FILE_NAME)); `load` / `discover` are
+/// provided. The config structs keep inherent `from_file` / `discover` wrappers with the same
+/// signatures, so consumers do not need this trait in scope.
+pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
+    /// The file name this config is discovered by (e.g. `jalsfmt.toml`).
+    const FILE_NAME: &'static str;
 
-/// Search upward from `start_dir` (a `/`-separated virtual path) for `filename`, read through `fs`.
-///
-/// Returns the parsed config if a file is found, otherwise `T::default()`.
-///
-/// # Errors
-/// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-pub fn discover<T>(fs: &dyn FileTree, start_dir: &str, filename: &str) -> Result<T, ConfigError>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    let mut dir = Some(start_dir);
-    while let Some(d) = dir {
-        let candidate = jals_fs::path::join(d, filename);
-        if fs.is_file(&candidate) {
-            return load(fs, &candidate);
-        }
-        dir = jals_fs::path::parent(d);
+    /// Load and parse the config file at `path`, read through `fs`.
+    ///
+    /// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
+    /// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
+    fn load(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
+        let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        toml::from_str(&text).map_err(|source| ConfigError::Parse {
+            path: path.to_owned(),
+            source,
+        })
     }
-    Ok(T::default())
+
+    /// Search upward from `start_dir` (a `/`-separated virtual path) for
+    /// [`FILE_NAME`](Self::FILE_NAME), read through `fs`.
+    ///
+    /// Returns the parsed config if a file is found, otherwise `Self::default()`.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
+    fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError>
+    where
+        Self: Default,
+    {
+        let mut dir = Some(start_dir);
+        while let Some(d) = dir {
+            let candidate = jals_fs::path::VPath::join(d, Self::FILE_NAME);
+            if fs.is_file(&candidate) {
+                return Self::load(fs, &candidate);
+            }
+            dir = jals_fs::path::VPath::parent(d);
+        }
+        Ok(Self::default())
+    }
 }

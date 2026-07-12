@@ -11,57 +11,62 @@ use text_size::TextRange;
 
 use crate::line_index::LineIndex;
 
-/// Build a selection-range chain for each requested position, in request order.
-pub(crate) fn selection_ranges(
-    parse: &Parse,
-    text: &str,
-    line_index: &LineIndex,
-    positions: &[Position],
-) -> Vec<SelectionRange> {
-    let root = parse.syntax();
-    positions
-        .iter()
-        .map(|&pos| range_at(&root, text, line_index, pos))
-        .collect()
-}
+/// Selection ranges (`textDocument/selectionRange`).
+pub(crate) struct SelectionRanges;
 
-/// The nested-range chain at a single position: the covering token (if any), then each of its
-/// ancestor nodes out to the root, collapsed so equal ranges don't repeat.
-fn range_at(root: &SyntaxNode, text: &str, idx: &LineIndex, pos: Position) -> SelectionRange {
-    let offset = idx.offset(text, pos);
-    // Deepest element covering the empty range at the cursor. `offset` is clamped into
-    // `[0, len]`, so the precondition (range contained in the root) holds.
-    let elem = root.covering_element(TextRange::new(offset, offset));
+impl SelectionRanges {
+    /// Build a selection-range chain for each requested position, in request order.
+    pub(crate) fn selection_ranges(
+        parse: &Parse,
+        text: &str,
+        line_index: &LineIndex,
+        positions: &[Position],
+    ) -> Vec<SelectionRange> {
+        let root = parse.syntax();
+        positions
+            .iter()
+            .map(|&pos| Self::range_at(&root, text, line_index, pos))
+            .collect()
+    }
 
-    // Byte ranges, innermost first: the covering token, then every ancestor node.
-    let mut ranges: Vec<TextRange> = Vec::new();
-    let mut node = match elem {
-        SyntaxElement::Token(token) => {
-            ranges.push(token.text_range());
-            token.parent()
+    /// The nested-range chain at a single position: the covering token (if any), then each of its
+    /// ancestor nodes out to the root, collapsed so equal ranges don't repeat.
+    fn range_at(root: &SyntaxNode, text: &str, idx: &LineIndex, pos: Position) -> SelectionRange {
+        let offset = idx.offset(text, pos);
+        // Deepest element covering the empty range at the cursor. `offset` is clamped into
+        // `[0, len]`, so the precondition (range contained in the root) holds.
+        let elem = root.covering_element(TextRange::new(offset, offset));
+
+        // Byte ranges, innermost first: the covering token, then every ancestor node.
+        let mut ranges: Vec<TextRange> = Vec::new();
+        let mut node = match elem {
+            SyntaxElement::Token(token) => {
+                ranges.push(token.text_range());
+                token.parent()
+            }
+            SyntaxElement::Node(n) => Some(n),
+        };
+        while let Some(n) = node {
+            ranges.push(n.text_range());
+            node = n.parent();
         }
-        SyntaxElement::Node(n) => Some(n),
-    };
-    while let Some(n) = node {
-        ranges.push(n.text_range());
-        node = n.parent();
-    }
-    // A node wrapping a single child shares its range; collapse so the chain strictly nests.
-    ranges.dedup();
+        // A node wrapping a single child shares its range; collapse so the chain strictly nests.
+        ranges.dedup();
 
-    // Link outermost -> innermost, so each inner range's `parent` points one step out.
-    let mut selection: Option<SelectionRange> = None;
-    for range in ranges.iter().rev() {
-        selection = Some(SelectionRange {
-            range: idx.range(text, *range),
-            parent: selection.map(Box::new),
-        });
+        // Link outermost -> innermost, so each inner range's `parent` points one step out.
+        let mut selection: Option<SelectionRange> = None;
+        for range in ranges.iter().rev() {
+            selection = Some(SelectionRange {
+                range: idx.range(text, *range),
+                parent: selection.map(Box::new),
+            });
+        }
+        // `ranges` always holds at least the root, but stay total just in case.
+        selection.unwrap_or_else(|| SelectionRange {
+            range: idx.range(text, TextRange::new(offset, offset)),
+            parent: None,
+        })
     }
-    // `ranges` always holds at least the root, but stay total just in case.
-    selection.unwrap_or_else(|| SelectionRange {
-        range: idx.range(text, TextRange::new(offset, offset)),
-        parent: None,
-    })
 }
 
 #[cfg(test)]
@@ -77,8 +82,8 @@ mod tests {
     /// `(start_line, start_char, end_line, end_char)`, innermost first.
     fn chain_at(text: &str, line: u32, character: u32) -> Vec<(u32, u32, u32, u32)> {
         let idx = LineIndex::new(text);
-        let got = selection_ranges(
-            &jals_syntax::parse(text),
+        let got = SelectionRanges::selection_ranges(
+            &jals_syntax::Parse::parse(text),
             text,
             &idx,
             &[Position { line, character }],
@@ -120,8 +125,8 @@ mod tests {
     fn one_chain_per_position_in_order() {
         let text = "class Cls { int xy; }";
         let idx = LineIndex::new(text);
-        let got = selection_ranges(
-            &jals_syntax::parse(text),
+        let got = SelectionRanges::selection_ranges(
+            &jals_syntax::Parse::parse(text),
             text,
             &idx,
             &[
@@ -167,7 +172,12 @@ mod tests {
                     character: 999,
                 },
             ];
-            let got = selection_ranges(&jals_syntax::parse(text), text, &idx, &positions);
+            let got = SelectionRanges::selection_ranges(
+                &jals_syntax::Parse::parse(text),
+                text,
+                &idx,
+                &positions,
+            );
             assert_eq!(got.len(), positions.len());
         }
     }

@@ -12,9 +12,9 @@ use crate::bytes::{Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// One `stack_map_frame` (JVMS §4.7.4).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StackMapFrame {
-    /// `same_frame` (frame_type 0–63): same locals, empty stack; the type *is* the delta.
+    /// `same_frame` (`frame_type` 0–63): same locals, empty stack; the type *is* the delta.
     Same {
         /// Bytecode offset delta (0–63).
         offset_delta: u16,
@@ -64,7 +64,7 @@ pub enum StackMapFrame {
 }
 
 /// A `verification_type_info` (JVMS §4.7.4): the abstract type of a local or stack slot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VerificationType {
     /// `ITEM_Top` (0).
     Top,
@@ -93,25 +93,25 @@ pub enum VerificationType {
 }
 
 impl StackMapFrame {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<StackMapFrame> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let frame_type = r.u8()?;
         Ok(match frame_type {
-            0..=63 => StackMapFrame::Same {
+            0..=63 => Self::Same {
                 offset_delta: u16::from(frame_type),
             },
-            64..=127 => StackMapFrame::SameLocals1StackItem {
+            64..=127 => Self::SameLocals1StackItem {
                 offset_delta: u16::from(frame_type - 64),
                 stack: VerificationType::read(r)?,
             },
-            247 => StackMapFrame::SameLocals1StackItemExtended {
+            247 => Self::SameLocals1StackItemExtended {
                 offset_delta: r.u16()?,
                 stack: VerificationType::read(r)?,
             },
-            248..=250 => StackMapFrame::Chop {
+            248..=250 => Self::Chop {
                 count: 251 - frame_type,
                 offset_delta: r.u16()?,
             },
-            251 => StackMapFrame::SameFrameExtended {
+            251 => Self::SameFrameExtended {
                 offset_delta: r.u16()?,
             },
             252..=254 => {
@@ -121,16 +121,16 @@ impl StackMapFrame {
                 for _ in 0..count {
                     locals.push(VerificationType::read(r)?);
                 }
-                StackMapFrame::Append {
+                Self::Append {
                     offset_delta,
                     locals,
                 }
             }
             255 => {
                 let offset_delta = r.u16()?;
-                let locals = read_verification_list(r)?;
-                let stack = read_verification_list(r)?;
-                StackMapFrame::Full {
+                let locals = r.list(VerificationType::read)?;
+                let stack = r.list(VerificationType::read)?;
+                Self::Full {
                     offset_delta,
                     locals,
                     stack,
@@ -142,15 +142,15 @@ impl StackMapFrame {
 
     pub(crate) fn write(&self, w: &mut Writer) {
         match self {
-            StackMapFrame::Same { offset_delta } => w.u8(*offset_delta as u8),
-            StackMapFrame::SameLocals1StackItem {
+            Self::Same { offset_delta } => w.u8(*offset_delta as u8),
+            Self::SameLocals1StackItem {
                 offset_delta,
                 stack,
             } => {
                 w.u8(64 + *offset_delta as u8);
                 stack.write(w);
             }
-            StackMapFrame::SameLocals1StackItemExtended {
+            Self::SameLocals1StackItemExtended {
                 offset_delta,
                 stack,
             } => {
@@ -158,18 +158,18 @@ impl StackMapFrame {
                 w.u16(*offset_delta);
                 stack.write(w);
             }
-            StackMapFrame::Chop {
+            Self::Chop {
                 count,
                 offset_delta,
             } => {
                 w.u8(251 - *count);
                 w.u16(*offset_delta);
             }
-            StackMapFrame::SameFrameExtended { offset_delta } => {
+            Self::SameFrameExtended { offset_delta } => {
                 w.u8(251);
                 w.u16(*offset_delta);
             }
-            StackMapFrame::Append {
+            Self::Append {
                 offset_delta,
                 locals,
             } => {
@@ -179,72 +179,56 @@ impl StackMapFrame {
                     l.write(w);
                 }
             }
-            StackMapFrame::Full {
+            Self::Full {
                 offset_delta,
                 locals,
                 stack,
             } => {
                 w.u8(255);
                 w.u16(*offset_delta);
-                write_verification_list(locals, w);
-                write_verification_list(stack, w);
+                w.list(locals, VerificationType::write);
+                w.list(stack, VerificationType::write);
             }
         }
     }
 }
 
 impl VerificationType {
-    fn read(r: &mut Reader<'_>) -> Result<VerificationType> {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
-            0 => VerificationType::Top,
-            1 => VerificationType::Integer,
-            2 => VerificationType::Float,
-            3 => VerificationType::Double,
-            4 => VerificationType::Long,
-            5 => VerificationType::Null,
-            6 => VerificationType::UninitializedThis,
-            7 => VerificationType::Object {
+            0 => Self::Top,
+            1 => Self::Integer,
+            2 => Self::Float,
+            3 => Self::Double,
+            4 => Self::Long,
+            5 => Self::Null,
+            6 => Self::UninitializedThis,
+            7 => Self::Object {
                 cpool_index: r.u16()?,
             },
-            8 => VerificationType::Uninitialized { offset: r.u16()? },
+            8 => Self::Uninitialized { offset: r.u16()? },
             _ => return Err(ClassfileError::Malformed("verification_type_info tag")),
         })
     }
 
     fn write(&self, w: &mut Writer) {
         match self {
-            VerificationType::Top => w.u8(0),
-            VerificationType::Integer => w.u8(1),
-            VerificationType::Float => w.u8(2),
-            VerificationType::Double => w.u8(3),
-            VerificationType::Long => w.u8(4),
-            VerificationType::Null => w.u8(5),
-            VerificationType::UninitializedThis => w.u8(6),
-            VerificationType::Object { cpool_index } => {
+            Self::Top => w.u8(0),
+            Self::Integer => w.u8(1),
+            Self::Float => w.u8(2),
+            Self::Double => w.u8(3),
+            Self::Long => w.u8(4),
+            Self::Null => w.u8(5),
+            Self::UninitializedThis => w.u8(6),
+            Self::Object { cpool_index } => {
                 w.u8(7);
                 w.u16(*cpool_index);
             }
-            VerificationType::Uninitialized { offset } => {
+            Self::Uninitialized { offset } => {
                 w.u8(8);
                 w.u16(*offset);
             }
         }
-    }
-}
-
-fn read_verification_list(r: &mut Reader<'_>) -> Result<Vec<VerificationType>> {
-    let count = r.u16()?;
-    let mut v = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        v.push(VerificationType::read(r)?);
-    }
-    Ok(v)
-}
-
-fn write_verification_list(items: &[VerificationType], w: &mut Writer) {
-    w.u16(items.len() as u16);
-    for item in items {
-        item.write(w);
     }
 }

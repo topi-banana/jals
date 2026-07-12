@@ -1,0 +1,53 @@
+id: no-free-functions
+language: Rust
+severity: error
+message: Prefer associated functions or nested helper functions instead of free functions.
+note: |
+  Move this function into an impl/trait, or make it a nested function inside the caller
+  when it is only a local helper.
+
+rule:
+  all:
+    - kind: function_item
+
+    - not:
+        any:
+          - inside:
+              kind: impl_item
+              stopBy: end
+          - inside:
+              kind: trait_item
+              stopBy: end
+          - inside:
+              kind: function_item
+              stopBy: end
+          - inside:
+              kind: mod_item
+              stopBy: end
+
+    - not:
+        has:
+          field: name
+          regex: '^main$'
+
+    # Attributes like `#[test]` are preceding siblings of the function_item (not
+    # children), so match them with `follows`. `stopBy` walks back through the
+    # consecutive attribute siblings and stops at the first non-attribute node, so
+    # a stacked `#[test]`/`#[should_panic]` block is covered without crossing into
+    # a preceding item's attributes.
+    - not:
+        follows:
+          kind: attribute_item
+          regex: '#\[(test|tokio::test|async_std::test|rstest|proc_macro|proc_macro_derive|proc_macro_attribute|no_mangle|export_name)'
+          stopBy:
+            not:
+              kind: attribute_item
+
+# Globs are matched against workspace-relative paths, so crate subdirectories
+# (`jals-fmt/tests/…`) need the leading `**/`.
+ignores:
+  - '**/target/**'
+  - '**/build.rs'
+  - '**/benches/**/*.rs'
+  - '**/tests/**/*.rs'
+  - '**/examples/**/*.rs'

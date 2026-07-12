@@ -9,7 +9,12 @@ fn build(sources: &[&str]) -> (Vec<(FileId, SyntaxNode)>, ProjectIndex) {
     let nodes: Vec<(FileId, SyntaxNode)> = sources
         .iter()
         .enumerate()
-        .map(|(i, s)| (FileId(i as u32), jals_syntax::parse(s).syntax()))
+        .map(|(i, s)| {
+            (
+                FileId(u32::try_from(i).unwrap()),
+                jals_syntax::Parse::parse(s).syntax(),
+            )
+        })
         .collect();
     let index = ProjectIndex::builder(&nodes).build();
     (nodes, index)
@@ -26,7 +31,7 @@ fn project_ty(index: &ProjectIndex, sources: &[&str], file: u32, decl_name: &str
         .expect("a project item declared there");
     Ty::Class(ClassTy::Project {
         id,
-        name: decl_name.to_string(),
+        name: decl_name.to_owned(),
         args: Vec::new(),
     })
 }

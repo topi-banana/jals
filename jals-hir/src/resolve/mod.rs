@@ -9,7 +9,8 @@
 mod build;
 pub(crate) mod collect;
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -21,7 +22,7 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::def::{Def, DefId, DefKind, Namespace};
 use crate::reference::{Reference, Resolution};
 use crate::scope::{Scope, ScopeId, ScopeKind};
-use collect::{byte_range, first_ident_token};
+use collect::Collect;
 
 /// The result of resolving names within one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,20 @@ pub struct Resolved {
 }
 
 impl Resolved {
+    /// Parses `src` and resolves names within it.
+    pub fn resolve(src: &str) -> Self {
+        Self::resolve_node(&jals_syntax::Parse::parse(src).syntax())
+    }
+
+    /// Resolves names over an already-parsed CST `root` (the `SOURCE_FILE` node).
+    ///
+    /// This is the half a caller holding a cached parse tree (the language server, which keeps an
+    /// `Arc<Parse>` per document; a lint rule, which is handed the root) calls without reparsing —
+    /// mirroring `jals_lint::LintOutput::lint_node`.
+    pub fn resolve_node(root: &SyntaxNode) -> Self {
+        Resolver::new(root).run()
+    }
+
     /// The definition with the given id.
     pub fn def(&self, id: DefId) -> &Def {
         &self.defs[id.0 as usize]
@@ -185,16 +200,15 @@ pub(crate) struct Resolver {
 
 impl Resolver {
     /// Creates a resolver rooted at `root` (the `SOURCE_FILE` node), seeded with the file scope.
-    pub(crate) fn new(root: &SyntaxNode) -> Resolver {
-        let r = root.text_range();
+    pub(crate) fn new(root: &SyntaxNode) -> Self {
         let file_scope = Scope {
             id: ScopeId(0),
             kind: ScopeKind::File,
             parent: None,
-            range: usize::from(r.start())..usize::from(r.end()),
+            range: Collect::node_span(root),
             defs: Vec::new(),
         };
-        Resolver {
+        Self {
             root: root.clone(),
             defs: Vec::new(),
             scopes: vec![file_scope],
@@ -215,10 +229,8 @@ impl Resolver {
             let resolution = if raw.qualified.is_some() {
                 Resolution::Unresolved
             } else {
-                match self.lookup(raw.scope, &raw.name, raw.namespace, raw.range.start) {
-                    Some(id) => Resolution::Def(id),
-                    None => Resolution::Unresolved,
-                }
+                self.lookup(raw.scope, &raw.name, raw.namespace, raw.range.start)
+                    .map_or(Resolution::Unresolved, Resolution::Def)
             };
             references.push(Reference {
                 range: raw.range,
@@ -240,12 +252,11 @@ impl Resolver {
     /// Creates a child scope of `parent` covering `node`, and returns its id.
     fn new_scope(&mut self, kind: ScopeKind, parent: ScopeId, node: &SyntaxNode) -> ScopeId {
         let id = ScopeId(self.scopes.len() as u32);
-        let r = node.text_range();
         self.scopes.push(Scope {
             id,
             kind,
             parent: Some(parent),
-            range: usize::from(r.start())..usize::from(r.end()),
+            range: Collect::node_span(node),
             defs: Vec::new(),
         });
         id
@@ -257,8 +268,8 @@ impl Resolver {
         self.defs.push(Def {
             id,
             kind,
-            name: name_tok.text().to_string(),
-            name_range: byte_range(name_tok),
+            name: name_tok.text().to_owned(),
+            name_range: Collect::byte_range(name_tok),
             scope,
         });
         self.scopes[scope.0 as usize].defs.push(id);
@@ -271,7 +282,7 @@ impl Resolver {
     /// file-local definition target and are skipped. The namespace is decided by position: a bare
     /// callee of a call is a method reference, everything else is a value reference.
     fn record_ref(&mut self, scope: ScopeId, node: &SyntaxNode) {
-        let Some(tok) = first_ident_token(node) else {
+        let Some(tok) = Collect::first_ident_token(node) else {
             return;
         };
         let namespace = if node.parent().map(|p| p.kind()) == Some(CALL_EXPR) {
@@ -280,8 +291,8 @@ impl Resolver {
             Namespace::Value
         };
         self.raw_refs.push(RawRef {
-            range: byte_range(&tok),
-            name: tok.text().to_string(),
+            range: Collect::byte_range(&tok),
+            name: tok.text().to_owned(),
             namespace,
             scope,
             qualified: None,
@@ -305,8 +316,8 @@ impl Resolver {
         // The full dotted text only for a qualified type (`a.b.C`); a bare name has no `.`.
         let qualified = ty.qualified_text().filter(|q| q.contains('.'));
         self.raw_refs.push(RawRef {
-            range: byte_range(&tok),
-            name: tok.text().to_string(),
+            range: Collect::byte_range(&tok),
+            name: tok.text().to_owned(),
             namespace: Namespace::Type,
             scope,
             qualified,

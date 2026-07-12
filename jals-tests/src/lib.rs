@@ -16,6 +16,34 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
+/// Shared CLI-harness setup for the crate's two binaries (`jals-tests` and `jals-golden`),
+/// which run the same worker-pool and source-directory conventions.
+pub struct Harness;
+
+impl Harness {
+    /// Per-worker stack size. Deeply nested Java (long binary-expression chains,
+    /// nested generics) can overflow the default ~2 MiB stack of a recursive-descent
+    /// parser (and the formatter), so each worker gets a generous stack.
+    const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+    /// Build the global rayon pool with a large per-worker stack and an optional
+    /// `--jobs` thread count.
+    pub fn configure_threads(jobs: Option<usize>) -> Result<(), String> {
+        let mut builder = rayon::ThreadPoolBuilder::new().stack_size(Self::WORKER_STACK_SIZE);
+        if let Some(jobs) = jobs {
+            builder = builder.num_threads(jobs);
+        }
+        builder
+            .build_global()
+            .map_err(|e| format!("could not configure the worker thread pool: {e}"))
+    }
+
+    /// The default `sources/` directory, resolved relative to this crate.
+    pub fn default_sources_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sources")
+    }
+}
+
 /// A named corpus, rooted at a path relative to the `sources/` directory.
 pub struct Source {
     /// Stable identifier used on the command line.
@@ -40,9 +68,11 @@ pub const ALL_SOURCES: &[Source] = &[
     },
 ];
 
-/// Look up a source by its command-line name.
-pub fn source_by_name(name: &str) -> Option<&'static Source> {
-    ALL_SOURCES.iter().find(|s| s.name == name)
+impl Source {
+    /// Look up a source by its command-line name.
+    pub fn by_name(name: &str) -> Option<&'static Self> {
+        ALL_SOURCES.iter().find(|s| s.name == name)
+    }
 }
 
 /// The classification of a single file's parse.
@@ -81,54 +111,43 @@ impl Outcome {
             Outcome::ReadError => "read-error",
         }
     }
-}
 
-/// Parse a single file and classify the result.
-///
-/// Never panics: a panic inside the parser is caught and reported as
-/// [`Outcome::Panicked`], since catching invariant violations is the whole point.
-pub fn check_file(path: &Path) -> Outcome {
-    let src = match std::fs::read_to_string(path) {
-        Ok(src) => src,
-        Err(_) => return Outcome::ReadError,
-    };
-    let parsed = panic::catch_unwind(AssertUnwindSafe(|| {
-        let parse = jals_syntax::parse(&src);
-        let lossless = parse.syntax().text().to_string() == src;
-        (parse.errors().len(), lossless)
-    }));
-    match parsed {
-        Err(_) => Outcome::Panicked,
-        Ok((_, false)) => Outcome::NonLossless,
-        Ok((0, true)) => Outcome::Ok,
-        Ok((errors, true)) => Outcome::SyntaxErrors(errors),
+    /// Parse a single file and classify the result.
+    ///
+    /// Never panics: a panic inside the parser is caught and reported as
+    /// [`Outcome::Panicked`], since catching invariant violations is the whole point.
+    pub fn check_file(path: &Path) -> Self {
+        let src = match std::fs::read_to_string(path) {
+            Ok(src) => src,
+            Err(_) => return Self::ReadError,
+        };
+        let parsed = panic::catch_unwind(AssertUnwindSafe(|| {
+            let parse = jals_syntax::Parse::parse(&src);
+            let lossless = parse.syntax().text().to_string() == src;
+            (parse.errors().len(), lossless)
+        }));
+        match parsed {
+            Err(_) => Self::Panicked,
+            Ok((_, false)) => Self::NonLossless,
+            Ok((0, true)) => Self::Ok,
+            Ok((errors, true)) => Self::SyntaxErrors(errors),
+        }
     }
-}
 
-/// Re-parse `path` and format its first syntax error, for `--show-errors`.
-///
-/// Best-effort: returns `None` if the file is unreadable, panics, or has no errors.
-pub fn first_error(path: &Path) -> Option<String> {
-    let src = std::fs::read_to_string(path).ok()?;
-    panic::catch_unwind(AssertUnwindSafe(|| {
-        jals_syntax::parse(&src)
-            .errors()
-            .first()
-            .map(|e| format!("{} @ {:?}", e.message(), e.range()))
-    }))
-    .ok()
-    .flatten()
-}
-
-/// Recursively collect every `.java` file under `root`.
-pub fn collect_java_files(root: &Path) -> Vec<PathBuf> {
-    WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(walkdir::DirEntry::into_path)
-        .filter(|path| path.extension().is_some_and(|ext| ext == "java"))
-        .collect()
+    /// Re-parse `path` and format its first syntax error, for `--show-errors`.
+    ///
+    /// Best-effort: returns `None` if the file is unreadable, panics, or has no errors.
+    pub fn first_error(path: &Path) -> Option<String> {
+        let src = std::fs::read_to_string(path).ok()?;
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            jals_syntax::Parse::parse(&src)
+                .errors()
+                .first()
+                .map(|e| format!("{} @ {:?}", e.message(), e.range()))
+        }))
+        .ok()
+        .flatten()
+    }
 }
 
 /// Aggregated outcomes for one source.
@@ -168,68 +187,81 @@ impl SourceReport {
     pub fn has_invariant_violations(&self) -> bool {
         self.panicked > 0 || self.non_lossless > 0
     }
-}
 
-/// Walk `root`, parse every `.java` file in parallel, and aggregate the outcomes.
-pub fn run_source(name: &str, root: &Path) -> SourceReport {
-    let outcomes: Vec<(PathBuf, Outcome)> = collect_java_files(root)
-        .into_par_iter()
-        .map(|path| {
-            let outcome = check_file(&path);
-            (path, outcome)
-        })
-        .collect();
-
-    let mut report = SourceReport {
-        name: name.to_string(),
-        root: root.to_path_buf(),
-        total: outcomes.len(),
-        ok: 0,
-        syntax_errors: 0,
-        non_lossless: 0,
-        panicked: 0,
-        read_errors: 0,
-        failures: Vec::new(),
-    };
-    for (path, outcome) in outcomes {
-        match outcome {
-            Outcome::Ok => report.ok += 1,
-            Outcome::SyntaxErrors(_) => report.syntax_errors += 1,
-            Outcome::NonLossless => report.non_lossless += 1,
-            Outcome::Panicked => report.panicked += 1,
-            Outcome::ReadError => report.read_errors += 1,
+    /// Walk `root`, parse every `.java` file in parallel, and aggregate the outcomes.
+    pub fn run(name: &str, root: &Path) -> Self {
+        // Recursively collect every `.java` file under `root`.
+        fn collect_java_files(root: &Path) -> Vec<PathBuf> {
+            WalkDir::new(root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(walkdir::DirEntry::into_path)
+                .filter(|path| path.extension().is_some_and(|ext| ext == "java"))
+                .collect()
         }
-        if !outcome.is_ok() {
-            report.failures.push((path, outcome));
-        }
-    }
-    report
-}
 
-/// Render the reports as a GitHub-flavored Markdown summary: a parse-rate table,
-/// suitable for a CI step summary or a pull-request comment.
-pub fn markdown_report(reports: &[SourceReport]) -> String {
-    let mut out = String::from("## jals parse soundness\n\n");
-    out.push_str("Parse rate of `jals_syntax::parse` over real Java corpora.\n\n");
-    out.push_str(
-        "| source | files | ok | parse rate | syntax errors | non-lossless | panicked |\n",
-    );
-    out.push_str("| --- | --: | --: | --: | --: | --: | --: |\n");
-    for r in reports {
-        let rate = if r.total == 0 {
-            0.0
-        } else {
-            r.ok as f64 * 100.0 / r.total as f64
+        let outcomes: Vec<(PathBuf, Outcome)> = collect_java_files(root)
+            .into_par_iter()
+            .map(|path| {
+                let outcome = Outcome::check_file(&path);
+                (path, outcome)
+            })
+            .collect();
+
+        let mut report = Self {
+            name: name.to_string(),
+            root: root.to_path_buf(),
+            total: outcomes.len(),
+            ok: 0,
+            syntax_errors: 0,
+            non_lossless: 0,
+            panicked: 0,
+            read_errors: 0,
+            failures: Vec::new(),
         };
-        out.push_str(&format!(
-            "| {} | {} | {} | {:.2}% | {} | {} | {} |\n",
-            r.name, r.total, r.ok, rate, r.syntax_errors, r.non_lossless, r.panicked
-        ));
+        for (path, outcome) in outcomes {
+            match outcome {
+                Outcome::Ok => report.ok += 1,
+                Outcome::SyntaxErrors(_) => report.syntax_errors += 1,
+                Outcome::NonLossless => report.non_lossless += 1,
+                Outcome::Panicked => report.panicked += 1,
+                Outcome::ReadError => report.read_errors += 1,
+            }
+            if !outcome.is_ok() {
+                report.failures.push((path, outcome));
+            }
+        }
+        report
     }
-    if reports.iter().any(SourceReport::has_invariant_violations) {
-        out.push_str("\n⚠️ **Invariant violation**: `non-lossless` and `panicked` must be 0.\n");
+
+    /// Render the reports as a GitHub-flavored Markdown summary: a parse-rate table,
+    /// suitable for a CI step summary or a pull-request comment.
+    pub fn markdown_report(reports: &[Self]) -> String {
+        let mut out = String::from("## jals parse soundness\n\n");
+        out.push_str("Parse rate of `jals_syntax::parse` over real Java corpora.\n\n");
+        out.push_str(
+            "| source | files | ok | parse rate | syntax errors | non-lossless | panicked |\n",
+        );
+        out.push_str("| --- | --: | --: | --: | --: | --: | --: |\n");
+        for r in reports {
+            let rate = if r.total == 0 {
+                0.0
+            } else {
+                r.ok as f64 * 100.0 / r.total as f64
+            };
+            out.push_str(&format!(
+                "| {} | {} | {} | {:.2}% | {} | {} | {} |\n",
+                r.name, r.total, r.ok, rate, r.syntax_errors, r.non_lossless, r.panicked
+            ));
+        }
+        if reports.iter().any(Self::has_invariant_violations) {
+            out.push_str(
+                "\n⚠️ **Invariant violation**: `non-lossless` and `panicked` must be 0.\n",
+            );
+        }
+        out
     }
-    out
 }
 
 #[cfg(test)]
@@ -244,19 +276,19 @@ mod tests {
 
         let good = dir.path().join("Good.java");
         fs::write(&good, "class Good { void m() {} }").unwrap();
-        assert_eq!(check_file(&good), Outcome::Ok);
+        assert_eq!(Outcome::check_file(&good), Outcome::Ok);
 
         // Unclosed class body — the parser recovers but records a syntax error.
         let bad = dir.path().join("Bad.java");
         fs::write(&bad, "class Bad {").unwrap();
         assert!(
-            matches!(check_file(&bad), Outcome::SyntaxErrors(_)),
+            matches!(Outcome::check_file(&bad), Outcome::SyntaxErrors(_)),
             "expected syntax errors, got {:?}",
-            check_file(&bad)
+            Outcome::check_file(&bad)
         );
 
         let missing = dir.path().join("Missing.java");
-        assert_eq!(check_file(&missing), Outcome::ReadError);
+        assert_eq!(Outcome::check_file(&missing), Outcome::ReadError);
     }
 
     #[test]
@@ -269,7 +301,7 @@ mod tests {
         // Non-.java files are ignored.
         fs::write(dir.path().join("notes.txt"), "class D {}").unwrap();
 
-        let report = run_source("tmp", dir.path());
+        let report = SourceReport::run("tmp", dir.path());
         assert_eq!(report.total, 3);
         assert_eq!(report.ok, 2);
         assert_eq!(report.syntax_errors, 1);
@@ -283,8 +315,8 @@ mod tests {
     fn markdown_report_has_a_row_per_source() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("A.java"), "class A {}").unwrap();
-        let report = run_source("openjdk", dir.path());
-        let md = markdown_report(std::slice::from_ref(&report));
+        let report = SourceReport::run("openjdk", dir.path());
+        let md = SourceReport::markdown_report(std::slice::from_ref(&report));
         assert!(md.contains("| source |"), "missing header:\n{md}");
         assert!(md.contains("openjdk"), "missing source row:\n{md}");
         assert!(md.contains("100.00%"), "missing parse rate:\n{md}");

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use jals_build::ManifestExt;
-use jals_classpath::resolve_project_source_deps;
+use jals_classpath::DepsCache;
 use jals_config::Manifest;
 
 /// Write `jals.toml` with `body` under `root` and load it (parsing + validating), so the test drives
@@ -25,7 +25,7 @@ fn write(path: &Path, content: &str) {
 /// Collect the resolved `.java`, asserting no warnings were produced.
 fn resolve_ok(manifest: &Manifest, root: &Path) -> Vec<std::path::PathBuf> {
     let mut warnings = Vec::new();
-    let files = resolve_project_source_deps(manifest, root, |m| warnings.push(m));
+    let files = DepsCache::resolve_project_source_deps(manifest, root, |m| warnings.push(m));
     assert!(warnings.is_empty(), "{warnings:?}");
     files
 }
@@ -91,7 +91,7 @@ fn missing_path_dependency_is_a_warning_not_a_failure() {
     let m = manifest(root, "[dependencies]\ndep = { path = \"absent\" }\n");
 
     let mut warnings = Vec::new();
-    let files = resolve_project_source_deps(&m, root, |m| warnings.push(m));
+    let files = DepsCache::resolve_project_source_deps(&m, root, |m| warnings.push(m));
     assert!(files.is_empty());
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("does not exist"), "{warnings:?}");

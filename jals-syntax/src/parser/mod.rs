@@ -41,7 +41,7 @@ pub(crate) struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a Input<'a>) -> Self {
+    const fn new(input: &'a Input<'a>) -> Self {
         Parser {
             input,
             pos: 0,
@@ -63,7 +63,7 @@ impl<'a> Parser<'a> {
 
     /// Current significant token position. Used for the loop's progress guarantee (if the value
     /// does not change, the token was not consumed).
-    pub(crate) fn pos(&self) -> usize {
+    pub(crate) const fn pos(&self) -> usize {
         self.pos
     }
 
@@ -203,23 +203,26 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parse the source and return a [`Parse`].
-pub fn parse(src: &str) -> Parse {
-    let input = Input::new(src);
-    let mut p = Parser::new(&input);
-    grammar::root(&mut p);
-    let events = p.finish();
-    let (green, errors) = sink::build(&input, events);
-    Parse { green, errors }
-}
-
 /// Parse result. Holds the green tree and the list of syntax errors.
 pub struct Parse {
     green: GreenNode,
     errors: Vec<SyntaxError>,
 }
 
+// `parse` intentionally mirrors the standard `str::parse` entry-point naming even
+// though it matches the type name.
+#[allow(clippy::self_named_constructors)]
 impl Parse {
+    /// Parse the source and return a [`Parse`].
+    pub fn parse(src: &str) -> Self {
+        let input = Input::new(src);
+        let mut p = Parser::new(&input);
+        p.root();
+        let events = p.finish();
+        let (green, errors) = sink::Sink::build(&input, events);
+        Self { green, errors }
+    }
+
     /// The root node of the syntax tree.
     pub fn syntax(&self) -> SyntaxNode {
         SyntaxNode::new_root(self.green.clone())
@@ -231,7 +234,7 @@ impl Parse {
     }
 
     /// A reference to the green tree.
-    pub fn green(&self) -> &GreenNode {
+    pub const fn green(&self) -> &GreenNode {
         &self.green
     }
 }

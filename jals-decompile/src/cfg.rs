@@ -46,7 +46,7 @@ pub(crate) enum Term {
 impl Block {
     /// The instruction range the value-level simulator should replay: the whole block, except an
     /// explicit `goto` / conditional-branch terminator (which the structurer interprets itself).
-    pub fn body(&self) -> core::ops::Range<usize> {
+    pub const fn body(&self) -> core::ops::Range<usize> {
         match self.term {
             Term::Goto(_) | Term::Branch { .. } => self.start..self.end - 1,
             Term::Fall(_) | Term::Ret | Term::Throw => self.start..self.end,
@@ -70,99 +70,104 @@ enum Flow {
     Unsupported,
 }
 
-fn flow(ins: &Instruction) -> Flow {
-    use Instruction as I;
-    match ins {
-        I::Ifeq(o)
-        | I::Ifne(o)
-        | I::Iflt(o)
-        | I::Ifge(o)
-        | I::Ifgt(o)
-        | I::Ifle(o)
-        | I::IfIcmpeq(o)
-        | I::IfIcmpne(o)
-        | I::IfIcmplt(o)
-        | I::IfIcmpge(o)
-        | I::IfIcmpgt(o)
-        | I::IfIcmple(o)
-        | I::IfAcmpeq(o)
-        | I::IfAcmpne(o)
-        | I::IfNull(o)
-        | I::IfNonNull(o) => Flow::Cond(i32::from(*o)),
-        I::Goto(o) => Flow::Goto(i32::from(*o)),
-        I::GotoW(o) => Flow::Goto(*o),
-        I::Return | I::Ireturn | I::Lreturn | I::Freturn | I::Dreturn | I::Areturn => Flow::Ret,
-        I::Athrow => Flow::Throw,
-        I::TableSwitch { .. }
-        | I::LookupSwitch { .. }
-        | I::Jsr(_)
-        | I::JsrW(_)
-        | I::Ret(_)
-        | I::Wide(WideInstruction::Ret(_)) => Flow::Unsupported,
-        _ => Flow::Normal,
-    }
-}
-
-/// Build the CFG for a method's instructions, or `None` if it uses a construct M2 does not model.
-pub(crate) fn build(code: &[Instruction]) -> Option<Cfg> {
-    if code.is_empty() {
-        return None;
-    }
-    // Byte offset (pc) of each instruction. Strictly increasing, so a branch target resolves to its
-    // instruction index by binary search — no reverse map to build.
-    let mut pcs = Vec::with_capacity(code.len());
-    let mut pc = 0usize;
-    for ins in code {
-        pcs.push(pc);
-        pc += ins.encoded_len(pc);
-    }
-    let target = |i: usize, offset: i32| -> Option<usize> {
-        let dest = i64::try_from(pcs[i]).ok()? + i64::from(offset);
-        pcs.binary_search(&usize::try_from(dest).ok()?).ok()
-    };
-
-    // Leaders: the entry, every branch target, and the instruction after a branch / exit.
-    let mut leaders = BTreeSet::new();
-    leaders.insert(0usize);
-    for (i, ins) in code.iter().enumerate() {
-        match flow(ins) {
-            Flow::Cond(o) | Flow::Goto(o) => {
-                leaders.insert(target(i, o)?);
-                if i + 1 < code.len() {
-                    leaders.insert(i + 1);
+impl Cfg {
+    /// Build the CFG for a method's instructions, or `None` if it uses a construct M2 does not model.
+    pub(crate) fn build(code: &[Instruction]) -> Option<Self> {
+        /// How an instruction affects control flow.
+        fn flow(ins: &Instruction) -> Flow {
+            use Instruction as I;
+            match ins {
+                I::Ifeq(o)
+                | I::Ifne(o)
+                | I::Iflt(o)
+                | I::Ifge(o)
+                | I::Ifgt(o)
+                | I::Ifle(o)
+                | I::IfIcmpeq(o)
+                | I::IfIcmpne(o)
+                | I::IfIcmplt(o)
+                | I::IfIcmpge(o)
+                | I::IfIcmpgt(o)
+                | I::IfIcmple(o)
+                | I::IfAcmpeq(o)
+                | I::IfAcmpne(o)
+                | I::IfNull(o)
+                | I::IfNonNull(o) => Flow::Cond(i32::from(*o)),
+                I::Goto(o) => Flow::Goto(i32::from(*o)),
+                I::GotoW(o) => Flow::Goto(*o),
+                I::Return | I::Ireturn | I::Lreturn | I::Freturn | I::Dreturn | I::Areturn => {
+                    Flow::Ret
                 }
+                I::Athrow => Flow::Throw,
+                I::TableSwitch { .. }
+                | I::LookupSwitch { .. }
+                | I::Jsr(_)
+                | I::JsrW(_)
+                | I::Ret(_)
+                | I::Wide(WideInstruction::Ret(_)) => Flow::Unsupported,
+                _ => Flow::Normal,
             }
-            Flow::Ret | Flow::Throw => {
-                if i + 1 < code.len() {
-                    leaders.insert(i + 1);
-                }
-            }
-            Flow::Unsupported => return None,
-            Flow::Normal => {}
         }
-    }
 
-    // Cut into blocks at the leaders. `leaders` is sorted, so a block start resolves to its block
-    // index by binary search — the successor lookups below need no side map.
-    let leaders: Vec<usize> = leaders.into_iter().collect();
-    let block_of = |start: usize| -> Option<usize> { leaders.binary_search(&start).ok() };
-    let mut blocks = Vec::with_capacity(leaders.len());
-    for (b, &start) in leaders.iter().enumerate() {
-        let end = leaders.get(b + 1).copied().unwrap_or(code.len());
-        let last = end - 1;
-        let term = match flow(&code[last]) {
-            Flow::Cond(o) => Term::Branch {
-                instr: last,
-                taken: block_of(target(last, o)?)?,
-                fallthrough: block_of(end)?,
-            },
-            Flow::Goto(o) => Term::Goto(block_of(target(last, o)?)?),
-            Flow::Ret => Term::Ret,
-            Flow::Throw => Term::Throw,
-            Flow::Normal => Term::Fall(block_of(end)?),
-            Flow::Unsupported => return None,
+        if code.is_empty() {
+            return None;
+        }
+        // Byte offset (pc) of each instruction. Strictly increasing, so a branch target resolves to
+        // its instruction index by binary search — no reverse map to build.
+        let mut pcs = Vec::with_capacity(code.len());
+        let mut pc = 0usize;
+        for ins in code {
+            pcs.push(pc);
+            pc += ins.encoded_len(pc);
+        }
+        let target = |i: usize, offset: i32| -> Option<usize> {
+            let dest = i64::try_from(pcs[i]).ok()? + i64::from(offset);
+            pcs.binary_search(&usize::try_from(dest).ok()?).ok()
         };
-        blocks.push(Block { start, end, term });
+
+        // Leaders: the entry, every branch target, and the instruction after a branch / exit.
+        let mut leaders = BTreeSet::new();
+        leaders.insert(0usize);
+        for (i, ins) in code.iter().enumerate() {
+            match flow(ins) {
+                Flow::Cond(o) | Flow::Goto(o) => {
+                    leaders.insert(target(i, o)?);
+                    if i + 1 < code.len() {
+                        leaders.insert(i + 1);
+                    }
+                }
+                Flow::Ret | Flow::Throw => {
+                    if i + 1 < code.len() {
+                        leaders.insert(i + 1);
+                    }
+                }
+                Flow::Unsupported => return None,
+                Flow::Normal => {}
+            }
+        }
+
+        // Cut into blocks at the leaders. `leaders` is sorted, so a block start resolves to its block
+        // index by binary search — the successor lookups below need no side map.
+        let leaders: Vec<usize> = leaders.into_iter().collect();
+        let block_of = |start: usize| -> Option<usize> { leaders.binary_search(&start).ok() };
+        let mut blocks = Vec::with_capacity(leaders.len());
+        for (b, &start) in leaders.iter().enumerate() {
+            let end = leaders.get(b + 1).copied().unwrap_or(code.len());
+            let last = end - 1;
+            let term = match flow(&code[last]) {
+                Flow::Cond(o) => Term::Branch {
+                    instr: last,
+                    taken: block_of(target(last, o)?)?,
+                    fallthrough: block_of(end)?,
+                },
+                Flow::Goto(o) => Term::Goto(block_of(target(last, o)?)?),
+                Flow::Ret => Term::Ret,
+                Flow::Throw => Term::Throw,
+                Flow::Normal => Term::Fall(block_of(end)?),
+                Flow::Unsupported => return None,
+            };
+            blocks.push(Block { start, end, term });
+        }
+        Some(Self { blocks })
     }
-    Some(Cfg { blocks })
 }

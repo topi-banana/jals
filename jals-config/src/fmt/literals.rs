@@ -5,9 +5,11 @@
 use serde::Deserialize;
 
 /// Case of the hexadecimal digit letters (`a`–`f` / `A`–`F`) of an integer or floating-point
-/// literal — `0xFF` vs. `0xff`. Mirrors rustfmt's `hex_literal_case`, plus a
-/// [`Preserve`](Self::Preserve) default (rustfmt's is `Preserve` too) that keeps the source
-/// case exactly, so the strict significant-token invariant holds unless this is opted into.
+/// literal — `0xFF` vs. `0xff`.
+///
+/// Mirrors rustfmt's `hex_literal_case`, plus a [`Preserve`](Self::Preserve) default (rustfmt's
+/// is `Preserve` too) that keeps the source case exactly, so the strict significant-token
+/// invariant holds unless this is opted into.
 ///
 /// Only the hex *mantissa* digits are affected. The `0x` / `0X` radix prefix, the `p` / `P`
 /// binary exponent marker of a hex float and its decimal digits, and any `l` / `L` integer or
@@ -26,9 +28,11 @@ pub enum HexLiteralCase {
     Lower,
 }
 
-/// Whether a decimal floating-point literal carries a trailing zero — `1.0` vs. `1.`. Mirrors
-/// rustfmt's `float_literal_trailing_zero`, plus a [`Preserve`](Self::Preserve) default that keeps
-/// the source exactly, so the strict significant-token invariant holds unless this is opted into.
+/// Whether a decimal floating-point literal carries a trailing zero — `1.0` vs. `1.`.
+///
+/// Mirrors rustfmt's `float_literal_trailing_zero`, plus a [`Preserve`](Self::Preserve) default
+/// that keeps the source exactly, so the strict significant-token invariant holds unless this is
+/// opted into.
 /// (rustfmt's Rust-only `IfNoPostfix` mode is intentionally omitted: in Java both `1.f` and `1.0f`
 /// are legal, so it would be semantically empty.)
 ///
@@ -49,8 +53,9 @@ pub enum FloatLiteralTrailingZero {
     Never,
 }
 
-/// Case of a numeric literal's trailing type suffix — `123l` vs. `123L`, `1.5f` vs. `1.5F`. A
-/// Java-specific extension with no rustfmt equivalent (rustfmt's `hex_literal_case` covers only
+/// Case of a numeric literal's trailing type suffix — `123l` vs. `123L`, `1.5f` vs. `1.5F`.
+///
+/// A Java-specific extension with no rustfmt equivalent (rustfmt's `hex_literal_case` covers only
 /// the digits), plus a [`Preserve`](Self::Preserve) default that keeps the source exactly, so the
 /// strict significant-token invariant holds unless this is opted into.
 ///

@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use jals_classfile::{
-    Attribute, AttributeBody, ClassFile, parse_class_signature, parse_field_descriptor,
-    parse_field_signature, parse_method_descriptor, parse_method_signature,
+    Attribute, AttributeBody, ClassFile, ClassSignature, FieldType, MethodDescriptor,
+    MethodSignature, TypeSignature,
 };
 
 const FIXTURES: &[&str] = &[
@@ -32,7 +32,7 @@ fn signature(cf: &ClassFile, attrs: &[Attribute]) -> Option<String> {
         AttributeBody::Signature { signature_index } => cf
             .constant_pool
             .utf8(*signature_index)
-            .map(|c| c.into_owned()),
+            .map(std::borrow::Cow::into_owned),
         _ => None,
     })
 }
@@ -48,7 +48,7 @@ fn field_and_method_descriptors_round_trip() {
                 .utf8(field.descriptor_index)
                 .unwrap()
                 .into_owned();
-            let parsed = parse_field_descriptor(&desc)
+            let parsed = FieldType::parse(&desc)
                 .unwrap_or_else(|e| panic!("{name}: field descriptor {desc:?}: {e}"));
             assert_eq!(parsed.to_string(), desc, "{name}: field descriptor");
             checked += 1;
@@ -59,7 +59,7 @@ fn field_and_method_descriptors_round_trip() {
                 .utf8(method.descriptor_index)
                 .unwrap()
                 .into_owned();
-            let parsed = parse_method_descriptor(&desc)
+            let parsed = MethodDescriptor::parse(&desc)
                 .unwrap_or_else(|e| panic!("{name}: method descriptor {desc:?}: {e}"));
             assert_eq!(parsed.to_string(), desc, "{name}: method descriptor");
             checked += 1;
@@ -75,14 +75,14 @@ fn signatures_round_trip() {
         let cf = load(name);
 
         if let Some(sig) = signature(&cf, &cf.attributes) {
-            let parsed = parse_class_signature(&sig)
+            let parsed = ClassSignature::parse(&sig)
                 .unwrap_or_else(|e| panic!("{name}: class signature {sig:?}: {e}"));
             assert_eq!(parsed.to_string(), sig, "{name}: class signature");
             checked += 1;
         }
         for field in &cf.fields {
             if let Some(sig) = signature(&cf, &field.attributes) {
-                let parsed = parse_field_signature(&sig)
+                let parsed = TypeSignature::parse(&sig)
                     .unwrap_or_else(|e| panic!("{name}: field signature {sig:?}: {e}"));
                 assert_eq!(parsed.to_string(), sig, "{name}: field signature");
                 checked += 1;
@@ -90,7 +90,7 @@ fn signatures_round_trip() {
         }
         for method in &cf.methods {
             if let Some(sig) = signature(&cf, &method.attributes) {
-                let parsed = parse_method_signature(&sig)
+                let parsed = MethodSignature::parse(&sig)
                     .unwrap_or_else(|e| panic!("{name}: method signature {sig:?}: {e}"));
                 assert_eq!(parsed.to_string(), sig, "{name}: method signature");
                 checked += 1;

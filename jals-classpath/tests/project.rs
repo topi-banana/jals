@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use jals_classpath::{ProjectInputOptions, assemble_project_inputs};
+use jals_classpath::{ProjectInputOptions, ProjectInputs};
 use jals_config::Manifest;
 
 /// `Box.class` (the same fixture the load tests / `jals-hir`'s classpath bridge use).
@@ -41,13 +41,15 @@ fn analysis_loads_the_classpath_and_reads_edition() {
     write_jar(&jar);
     let manifest = manifest_with_jar(&jar, Some("java25"));
 
-    let inputs =
-        assemble_project_inputs(&manifest, dir.path(), ProjectInputOptions::Analysis, |m| {
-            panic!("unexpected warning: {m}")
-        });
+    let inputs = ProjectInputs::assemble_project_inputs(
+        &manifest,
+        dir.path(),
+        ProjectInputOptions::Analysis,
+        |m| panic!("unexpected warning: {m}"),
+    );
 
     // The jar is resolved and its `.class` loaded for the index.
-    assert_eq!(inputs.dependency_jars, vec![jar.clone()]);
+    assert_eq!(inputs.dependency_jars, vec![jar]);
     assert_eq!(inputs.classpath_classes.len(), 1);
     // Analysis pulls no navigation source and no git/path source deps.
     assert!(inputs.library_sources.is_empty());
@@ -63,10 +65,12 @@ fn compile_resolves_jars_without_loading_classes() {
     write_jar(&jar);
     let manifest = manifest_with_jar(&jar, None);
 
-    let inputs =
-        assemble_project_inputs(&manifest, dir.path(), ProjectInputOptions::Compile, |m| {
-            panic!("unexpected warning: {m}")
-        });
+    let inputs = ProjectInputs::assemble_project_inputs(
+        &manifest,
+        dir.path(),
+        ProjectInputOptions::Compile,
+        |m| panic!("unexpected warning: {m}"),
+    );
 
     // The jar path is resolved for `javac -classpath`, but the `.class` is not loaded (the compiler
     // reads the jar itself).

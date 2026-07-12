@@ -7,6 +7,11 @@
 //! [`futures::executor::block_on`]. The blocking `reqwest` client must not run inside a Tokio runtime
 //! (it would panic spinning up its own), so `jals-lsp` calls these from a dedicated `std::thread`;
 //! `block_on` itself establishes no runtime, so the blocking client is safe under it.
+//!
+//! Each facade lives on the same type as the core operation it wraps: [`ClasspathLoad::load_classpath`]
+//! next to [`ClasspathLoad::load_classpath_in`], the resolution facades on [`DepsCache`], the
+//! extraction facades on [`SourcesExtraction`] / [`NestedJarsExtraction`], the skeleton facade on
+//! [`SkeletonGroup`], and the assembly facade on [`ProjectInputs`].
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,21 +24,18 @@ use jals_fs::OsFileTree;
 
 use crate::Warning;
 use crate::io::{Fetcher, Git};
-use crate::load::{
-    ClasspathLoad, extract_nested_jars_in, extract_sources_in, load_classpath_in,
-    synthesize_classpath_sources_in,
-};
-use crate::project::{ProjectInputOptions, assemble_project_inputs_in};
-use crate::resolve::{
-    cached_jar_path_str, resolve_dependencies_in, resolve_project_dependencies_in,
-    resolve_project_source_deps_in, resolve_project_sources_in, vpath,
-};
+use crate::load::{ClasspathLoad, JarExtraction};
+use crate::project::{ProjectInputOptions, ProjectInputsIn};
+use crate::resolve::{DepsCache, PathExt};
+use crate::skeleton::SkeletonGroup;
 
 // ---- Capability implementations -------------------------------------------------------------
 
-/// A [`Fetcher`] backed by `reqwest`'s **blocking** client. Its `fetch` does blocking work and the
-/// returned future resolves in a single poll, so a synchronous host drives it with `block_on` —
-/// provided no Tokio runtime is active on the current thread (`reqwest::blocking` panics inside one).
+/// A [`Fetcher`] backed by `reqwest`'s **blocking** client.
+///
+/// Its `fetch` does blocking work and the returned future resolves in a single poll, so a synchronous
+/// host drives it with `block_on` — provided no Tokio runtime is active on the current thread
+/// (`reqwest::blocking` panics inside one).
 pub struct ReqwestFetcher {
     client: reqwest::blocking::Client,
 }
@@ -41,7 +43,7 @@ pub struct ReqwestFetcher {
 impl ReqwestFetcher {
     /// Build a fetcher with a fresh blocking client (cheap; reused across a resolution batch).
     pub fn new() -> Self {
-        ReqwestFetcher {
+        Self {
             client: reqwest::blocking::Client::new(),
         }
     }
@@ -75,54 +77,58 @@ pub struct SubprocessGit;
 
 impl Git for SubprocessGit {
     fn clone_checkout(&self, url: &str, reference: &GitRef, dest: &str) -> Result<(), String> {
-        clone_git(url, reference, Path::new(dest))
+        Self::clone_git(url, reference, Path::new(dest))
     }
 }
 
-/// Clone `url` into `dest` and check out `reference`. Skips the work when `dest` already exists (a
-/// pinned ref's checkout is immutable). Clones into a `.part` sibling and renames into place, so an
-/// interrupted clone never leaves a partial checkout a later run mistakes for a cache hit.
-fn clone_git(url: &str, reference: &GitRef, dest: &Path) -> Result<(), String> {
-    if dest.exists() {
-        return Ok(()); // cache hit
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("creating git cache dir {}: {e}", parent.display()))?;
-    }
-    let tmp = dest.with_extension("part");
-    // A leftover `.part` from an interrupted run would make `git clone` refuse a non-empty target.
-    let _ = std::fs::remove_dir_all(&tmp);
+impl SubprocessGit {
+    /// Clone `url` into `dest` and check out `reference`. Skips the work when `dest` already exists (a
+    /// pinned ref's checkout is immutable). Clones into a `.part` sibling and renames into place, so an
+    /// interrupted clone never leaves a partial checkout a later run mistakes for a cache hit.
+    fn clone_git(url: &str, reference: &GitRef, dest: &Path) -> Result<(), String> {
+        if dest.exists() {
+            return Ok(()); // cache hit
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating git cache dir {}: {e}", parent.display()))?;
+        }
+        let tmp = dest.with_extension("part");
+        // A leftover `.part` from an interrupted run would make `git clone` refuse a non-empty target.
+        let _ = std::fs::remove_dir_all(&tmp);
 
-    let mut clone = Command::new("git");
-    clone.arg("clone").arg("--quiet").arg(url).arg(&tmp);
-    run_git(&mut clone)?;
+        let mut clone = Command::new("git");
+        clone.arg("clone").arg("--quiet").arg(url).arg(&tmp);
+        Self::run_git(&mut clone)?;
 
-    if let Some(name) = reference.checkout_arg() {
-        let mut co = Command::new("git");
-        co.arg("-C")
-            .arg(&tmp)
-            .arg("checkout")
-            .arg("--quiet")
-            .arg(name);
-        run_git(&mut co).inspect_err(|_| {
-            // Don't leave a clone parked at the wrong ref for a later cache hit.
-            let _ = std::fs::remove_dir_all(&tmp);
-        })?;
+        if let Some(name) = reference.checkout_arg() {
+            let mut co = Command::new("git");
+            co.arg("-C")
+                .arg(&tmp)
+                .arg("checkout")
+                .arg("--quiet")
+                .arg(name);
+            Self::run_git(&mut co).inspect_err(|_| {
+                // Don't leave a clone parked at the wrong ref for a later cache hit.
+                let _ = std::fs::remove_dir_all(&tmp);
+            })?;
+        }
+        std::fs::rename(&tmp, dest)
+            .map_err(|e| format!("finalizing git clone {}: {e}", dest.display()))
     }
-    std::fs::rename(&tmp, dest).map_err(|e| format!("finalizing git clone {}: {e}", dest.display()))
-}
 
-/// Run a configured `git` command, mapping a non-zero exit (or a missing `git` binary) to a message.
-fn run_git(cmd: &mut Command) -> Result<(), String> {
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run git (is it installed?): {e}"))?;
-    if output.status.success() {
-        return Ok(());
+    /// Run a configured `git` command, mapping a non-zero exit (or a missing `git` binary) to a
+    /// message.
+    fn run_git(cmd: &mut Command) -> Result<(), String> {
+        let output = cmd
+            .output()
+            .map_err(|e| format!("failed to run git (is it installed?): {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("git failed: {}", stderr.trim()))
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!("git failed: {}", stderr.trim()))
 }
 
 // ---- PathBuf result structs (the historic public API) --------------------------------------
@@ -156,7 +162,8 @@ pub struct NestedJarsExtraction {
 
 /// A project's assembled analysis / build inputs, on the real filesystem — the host `PathBuf`-based
 /// form of [`ProjectInputsIn`](crate::ProjectInputsIn), with the manifest's source roots added.
-/// Produced by [`assemble_project_inputs`]. Which fields are populated depends on the
+///
+/// Produced by [`ProjectInputs::assemble_project_inputs`]. Which fields are populated depends on the
 /// [`ProjectInputOptions`] passed.
 #[derive(Debug, Default)]
 pub struct ProjectInputs {
@@ -178,169 +185,192 @@ pub struct ProjectInputs {
 
 // ---- Path helpers ---------------------------------------------------------------------------
 
-/// Every path in `ps` as a virtual path.
-fn vpaths(ps: &[PathBuf]) -> Vec<String> {
-    ps.iter().map(|p| vpath(p)).collect()
-}
+/// Conversions between the native `PathBuf` world and the core's `/`-separated virtual `&str` paths
+/// (on a host a virtual path *is* the OS path string, so both directions are lossless).
+struct VPaths;
 
-/// Virtual paths back into `PathBuf`s (on a host a virtual path *is* the OS path string).
-fn to_pathbufs(ss: Vec<String>) -> Vec<PathBuf> {
-    ss.into_iter().map(PathBuf::from).collect()
+impl VPaths {
+    /// Every path in `ps` as a virtual path.
+    fn strings(ps: &[PathBuf]) -> Vec<String> {
+        ps.iter().map(|p| p.vpath()).collect()
+    }
+
+    /// Virtual paths back into `PathBuf`s.
+    fn pathbufs(ss: Vec<String>) -> Vec<PathBuf> {
+        ss.into_iter().map(PathBuf::from).collect()
+    }
 }
 
 // ---- Facades (historic signatures) ----------------------------------------------------------
 
-/// Load every `.class` file reachable from `entries` off the real filesystem. See
-/// [`load_classpath_in`](crate::load_classpath_in).
-pub fn load_classpath(entries: &[PathBuf]) -> ClasspathLoad {
-    let fs = OsFileTree;
-    load_classpath_in(&fs, &vpaths(entries))
-}
-
-/// The cache path a remote dependency downloads to: `<cache_dir>/<name>-<url-hash>.jar`. Public so
-/// tests can pre-seed the cache and exercise the skip-if-exists path without the network.
-pub fn cached_jar_path(name: &str, url: &str, cache_dir: &Path) -> PathBuf {
-    PathBuf::from(cached_jar_path_str(name, url, &vpath(cache_dir)))
-}
-
-/// Resolve classified dependency `sources` to local `.jar` paths, downloading remote ones into
-/// `cache_dir`. See [`resolve_dependencies_in`](crate::resolve_dependencies_in).
-pub fn resolve_dependencies(
-    sources: &[(String, DependencySource)],
-    cache_dir: &Path,
-) -> ResolvedDependencies {
-    let mut fs = OsFileTree;
-    let fetcher = ReqwestFetcher::new();
-    let (jars, warnings) = block_on(resolve_dependencies_in(
-        &fetcher,
-        &mut fs,
-        sources,
-        &vpath(cache_dir),
-    ));
-    ResolvedDependencies {
-        jars: to_pathbufs(jars),
-        warnings,
+impl ClasspathLoad {
+    /// Load every `.class` file reachable from `entries` off the real filesystem. See
+    /// [`ClasspathLoad::load_classpath_in`].
+    pub fn load_classpath(entries: &[PathBuf]) -> Self {
+        let fs = OsFileTree;
+        Self::load_classpath_in(&fs, &VPaths::strings(entries))
     }
 }
 
-/// Extract every `*.java` member of each sources jar in `jars` into `dest_dir`. See
-/// [`extract_sources_in`](crate::extract_sources_in).
-pub fn extract_sources(jars: &[PathBuf], dest_dir: &Path) -> SourcesExtraction {
-    let mut fs = OsFileTree;
-    let (java_files, warnings) = extract_sources_in(&mut fs, &vpaths(jars), &vpath(dest_dir));
-    SourcesExtraction {
-        java_files: to_pathbufs(java_files),
-        warnings,
+impl DepsCache {
+    /// The cache path a remote dependency downloads to: `<cache_dir>/<name>-<url-hash>.jar`. Public so
+    /// tests can pre-seed the cache and exercise the skip-if-exists path without the network.
+    pub fn cached_jar_path(name: &str, url: &str, cache_dir: &Path) -> PathBuf {
+        PathBuf::from(Self::jar_path_str(name, url, &cache_dir.vpath()))
+    }
+
+    /// Resolve classified dependency `sources` to local `.jar` paths, downloading remote ones into
+    /// `cache_dir`. See [`DepsCache::resolve_dependencies_in`].
+    pub fn resolve_dependencies(
+        sources: &[(String, DependencySource)],
+        cache_dir: &Path,
+    ) -> ResolvedDependencies {
+        let mut fs = OsFileTree;
+        let fetcher = ReqwestFetcher::new();
+        let (jars, warnings) = block_on(Self::resolve_dependencies_in(
+            &fetcher,
+            &mut fs,
+            sources,
+            &cache_dir.vpath(),
+        ));
+        ResolvedDependencies {
+            jars: VPaths::pathbufs(jars),
+            warnings,
+        }
+    }
+
+    /// Resolve a project's `[dependencies]` to local jar paths (downloading remotes into
+    /// `<root>/target/jals/deps`). See [`DepsCache::resolve_project_dependencies_in`].
+    pub fn resolve_project_dependencies(
+        manifest: &Manifest,
+        root: &Path,
+        warn: impl FnMut(String),
+    ) -> Vec<PathBuf> {
+        let mut fs = OsFileTree;
+        let fetcher = ReqwestFetcher::new();
+        let jars = block_on(Self::resolve_project_dependencies_in(
+            &fetcher,
+            &mut fs,
+            manifest,
+            &root.vpath(),
+            warn,
+        ));
+        VPaths::pathbufs(jars)
+    }
+
+    /// Resolve a project's `[dependencies]` **sources** jars and extract their `.java`. See
+    /// [`DepsCache::resolve_project_sources_in`].
+    pub fn resolve_project_sources(
+        manifest: &Manifest,
+        root: &Path,
+        warn: impl FnMut(String),
+    ) -> Vec<PathBuf> {
+        let mut fs = OsFileTree;
+        let fetcher = ReqwestFetcher::new();
+        let files = block_on(Self::resolve_project_sources_in(
+            &fetcher,
+            &mut fs,
+            manifest,
+            &root.vpath(),
+            warn,
+        ));
+        VPaths::pathbufs(files)
+    }
+
+    /// Resolve a project's **source-form** `[dependencies]` (`git`/`path`) to `.java` files. See
+    /// [`DepsCache::resolve_project_source_deps_in`].
+    pub fn resolve_project_source_deps(
+        manifest: &Manifest,
+        root: &Path,
+        warn: impl FnMut(String),
+    ) -> Vec<PathBuf> {
+        let fs = OsFileTree;
+        let git = SubprocessGit;
+        let files =
+            Self::resolve_project_source_deps_in(&fs, Some(&git), manifest, &root.vpath(), warn);
+        VPaths::pathbufs(files)
     }
 }
 
-/// Recursively extract every **bundled jar** of `jar` into `dest_dir`. See
-/// [`extract_nested_jars_in`](crate::extract_nested_jars_in).
-pub fn extract_nested_jars(jar: &Path, dest_dir: &Path) -> NestedJarsExtraction {
-    let mut fs = OsFileTree;
-    let (jars, warnings) = extract_nested_jars_in(&mut fs, &vpath(jar), &vpath(dest_dir));
-    NestedJarsExtraction {
-        jars: to_pathbufs(jars),
-        warnings,
+impl SourcesExtraction {
+    /// Extract every `*.java` member of each sources jar in `jars` into `dest_dir`. See
+    /// [`JarExtraction::extract_sources_in`].
+    pub fn extract_sources(jars: &[PathBuf], dest_dir: &Path) -> Self {
+        let mut fs = OsFileTree;
+        let (java_files, warnings) =
+            JarExtraction::extract_sources_in(&mut fs, &VPaths::strings(jars), &dest_dir.vpath());
+        Self {
+            java_files: VPaths::pathbufs(java_files),
+            warnings,
+        }
     }
 }
 
-/// Resolve a project's `[dependencies]` to local jar paths (downloading remotes into
-/// `<root>/target/jals/deps`). See [`resolve_project_dependencies_in`](crate::resolve_project_dependencies_in).
-pub fn resolve_project_dependencies(
-    manifest: &Manifest,
-    root: &Path,
-    warn: impl FnMut(String),
-) -> Vec<PathBuf> {
-    let mut fs = OsFileTree;
-    let fetcher = ReqwestFetcher::new();
-    let jars = block_on(resolve_project_dependencies_in(
-        &fetcher,
-        &mut fs,
-        manifest,
-        &vpath(root),
-        warn,
-    ));
-    to_pathbufs(jars)
+impl NestedJarsExtraction {
+    /// Recursively extract every **bundled jar** of `jar` into `dest_dir`. See
+    /// [`JarExtraction::extract_nested_jars_in`].
+    pub fn extract_nested_jars(jar: &Path, dest_dir: &Path) -> Self {
+        let mut fs = OsFileTree;
+        let (jars, warnings) =
+            JarExtraction::extract_nested_jars_in(&mut fs, &jar.vpath(), &dest_dir.vpath());
+        Self {
+            jars: VPaths::pathbufs(jars),
+            warnings,
+        }
+    }
 }
 
-/// Resolve a project's `[dependencies]` **sources** jars and extract their `.java`. See
-/// [`resolve_project_sources_in`](crate::resolve_project_sources_in).
-pub fn resolve_project_sources(
-    manifest: &Manifest,
-    root: &Path,
-    warn: impl FnMut(String),
-) -> Vec<PathBuf> {
-    let mut fs = OsFileTree;
-    let fetcher = ReqwestFetcher::new();
-    let files = block_on(resolve_project_sources_in(
-        &fetcher,
-        &mut fs,
-        manifest,
-        &vpath(root),
-        warn,
-    ));
-    to_pathbufs(files)
+impl SkeletonGroup<'_> {
+    /// Synthesize signature-only `.java` skeletons for `classes` into
+    /// `<root>/target/jals/deps/decompiled`. See [`SkeletonGroup::synthesize_classpath_sources_in`].
+    pub fn synthesize_classpath_sources(
+        classes: &[ClassFile],
+        root: &Path,
+        warn: impl FnMut(String),
+    ) -> Vec<PathBuf> {
+        let mut fs = OsFileTree;
+        let files = Self::synthesize_classpath_sources_in(&mut fs, classes, &root.vpath(), warn);
+        VPaths::pathbufs(files)
+    }
 }
 
-/// Resolve a project's **source-form** `[dependencies]` (`git`/`path`) to `.java` files. See
-/// [`resolve_project_source_deps_in`](crate::resolve_project_source_deps_in).
-pub fn resolve_project_source_deps(
-    manifest: &Manifest,
-    root: &Path,
-    warn: impl FnMut(String),
-) -> Vec<PathBuf> {
-    let fs = OsFileTree;
-    let git = SubprocessGit;
-    let files = resolve_project_source_deps_in(&fs, Some(&git), manifest, &vpath(root), warn);
-    to_pathbufs(files)
-}
-
-/// Synthesize signature-only `.java` skeletons for `classes` into `<root>/target/jals/deps/decompiled`.
-/// See [`synthesize_classpath_sources_in`](crate::synthesize_classpath_sources_in).
-pub fn synthesize_classpath_sources(
-    classes: &[ClassFile],
-    root: &Path,
-    warn: impl FnMut(String),
-) -> Vec<PathBuf> {
-    let mut fs = OsFileTree;
-    let files = synthesize_classpath_sources_in(&mut fs, classes, &vpath(root), warn);
-    to_pathbufs(files)
-}
-
-/// Assemble a project's analysis / build inputs off the real filesystem: resolve `[dependencies]`
-/// (downloading remotes with a blocking `reqwest` [`Fetcher`], cloning `git` deps with a subprocess
-/// [`Git`]), load / synthesize per `options`, and add the manifest's source roots + edition. The
-/// single seam `jals-cli` and `jals-lsp` build their `ProjectIndex` / compile inputs from. See
-/// [`assemble_project_inputs_in`](crate::assemble_project_inputs_in) for the pure core.
-///
-/// Uses the blocking `reqwest` client via [`block_on`], which panics inside a Tokio runtime — so
-/// `jals-lsp` calls this from a dedicated `std::thread` (the `git` subprocess and tree I/O are safe
-/// under `block_on` regardless).
-pub fn assemble_project_inputs(
-    manifest: &Manifest,
-    root: &Path,
-    options: ProjectInputOptions,
-    warn: impl FnMut(String),
-) -> ProjectInputs {
-    let mut fs = OsFileTree;
-    let fetcher = ReqwestFetcher::new();
-    let git = SubprocessGit;
-    let inputs = block_on(assemble_project_inputs_in(
-        &fetcher,
-        Some(&git),
-        &mut fs,
-        manifest,
-        &vpath(root),
-        options,
-        warn,
-    ));
-    ProjectInputs {
-        source_roots: manifest.source_roots(root),
-        dependency_jars: to_pathbufs(inputs.dependency_jars),
-        classpath_classes: inputs.classpath_classes,
-        library_sources: to_pathbufs(inputs.library_sources),
-        source_dep_sources: to_pathbufs(inputs.source_dep_sources),
-        target_java_version: inputs.target_java_version,
+impl ProjectInputs {
+    /// Assemble a project's analysis / build inputs off the real filesystem.
+    ///
+    /// Resolves `[dependencies]` (downloading remotes with a blocking `reqwest` [`Fetcher`], cloning
+    /// `git` deps with a subprocess [`Git`]), loads / synthesizes per `options`, and adds the
+    /// manifest's source roots + edition. The single seam `jals-cli` and `jals-lsp` build their
+    /// `ProjectIndex` / compile inputs from. See
+    /// [`ProjectInputsIn::assemble_project_inputs_in`] for the pure core.
+    ///
+    /// Uses the blocking `reqwest` client via [`block_on`], which panics inside a Tokio runtime — so
+    /// `jals-lsp` calls this from a dedicated `std::thread` (the `git` subprocess and tree I/O are safe
+    /// under `block_on` regardless).
+    pub fn assemble_project_inputs(
+        manifest: &Manifest,
+        root: &Path,
+        options: ProjectInputOptions,
+        warn: impl FnMut(String),
+    ) -> Self {
+        let mut fs = OsFileTree;
+        let fetcher = ReqwestFetcher::new();
+        let git = SubprocessGit;
+        let inputs = block_on(ProjectInputsIn::assemble_project_inputs_in(
+            &fetcher,
+            Some(&git),
+            &mut fs,
+            manifest,
+            &root.vpath(),
+            options,
+            warn,
+        ));
+        Self {
+            source_roots: manifest.source_roots(root),
+            dependency_jars: VPaths::pathbufs(inputs.dependency_jars),
+            classpath_classes: inputs.classpath_classes,
+            library_sources: VPaths::pathbufs(inputs.library_sources),
+            source_dep_sources: VPaths::pathbufs(inputs.source_dep_sources),
+            target_java_version: inputs.target_java_version,
+        }
     }
 }

@@ -89,7 +89,7 @@ impl Component for EditorPane {
         let config = props.config.clone();
         let formatter = Closure::<dyn FnMut(String) -> String>::new(move |text: String| {
             let cfg = config.borrow();
-            jals_fmt::format_source(&text, &cfg).formatted
+            jals_fmt::FormatOutput::format_source(&text, &cfg).formatted
         });
 
         let on_ready = props.on_ready.clone();

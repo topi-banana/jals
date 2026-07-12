@@ -1,6 +1,7 @@
 //! The result of linting: the diagnostics found, plus any parser errors.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -37,8 +38,8 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// Build a diagnostic from a rule's [`Finding`], stamping it with the rule name and the
     /// severity resolved from configuration.
-    pub(crate) fn new(rule: &'static str, severity: Severity, finding: Finding) -> Diagnostic {
-        Diagnostic {
+    pub(crate) fn new(rule: &'static str, severity: Severity, finding: Finding) -> Self {
+        Self {
             rule,
             severity,
             message: finding.message,
@@ -49,12 +50,12 @@ impl Diagnostic {
     }
 
     /// Build an `Error` diagnostic from a parser [`SyntaxError`], under the `syntax-error` rule.
-    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Diagnostic {
+    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Self {
         let range = err.range();
-        Diagnostic {
+        Self {
             rule: "syntax-error",
             severity: Severity::Error,
-            message: err.message().to_string(),
+            message: err.message().to_owned(),
             range: usize::from(range.start())..usize::from(range.end()),
             unnecessary: false,
             unnecessary_range: None,
@@ -73,7 +74,7 @@ pub struct LintOutput {
 
 impl LintOutput {
     /// Whether any diagnostic or parser error was produced.
-    pub fn has_diagnostics(&self) -> bool {
+    pub const fn has_diagnostics(&self) -> bool {
         !self.diagnostics.is_empty() || !self.parse_errors.is_empty()
     }
 }

@@ -36,10 +36,10 @@ pub(crate) struct Document {
 }
 
 impl Document {
-    fn new(text: String, version: i32) -> Document {
+    fn new(text: String, version: i32) -> Self {
         let line_index = Arc::new(LineIndex::new(&text));
-        let parse = Arc::new(jals_syntax::parse(&text));
-        Document {
+        let parse = Arc::new(jals_syntax::Parse::parse(&text));
+        Self {
             text: Arc::from(text),
             version,
             line_index,
@@ -79,7 +79,7 @@ impl DocumentStore {
             doc.version = version;
             return;
         }
-        *doc = Document::new(apply_content_changes(&doc.text, changes), version);
+        *doc = Document::new(Self::apply_content_changes(&doc.text, changes), version);
     }
 
     /// Snapshot the document for `uri` (cheap `Arc` clones), if open.
@@ -92,28 +92,30 @@ impl DocumentStore {
     }
 }
 
-/// Apply LSP `didChange` content changes to `text`, in order.
-///
-/// Per the LSP spec each event's range refers to the document state after the previous
-/// event, so a fresh `LineIndex` is built per ranged event. An event without a range
-/// replaces the whole document. Reversed ranges are normalized and out-of-range
-/// positions are clamped by `LineIndex::offset`, so this never panics.
-pub(crate) fn apply_content_changes(
-    text: &str,
-    changes: &[TextDocumentContentChangeEvent],
-) -> String {
-    let mut text = text.to_owned();
-    for change in changes {
-        let Some(range) = change.range else {
-            text = change.text.clone();
-            continue;
-        };
-        let index = LineIndex::new(&text);
-        let start = u32::from(index.offset(&text, range.start)) as usize;
-        let end = u32::from(index.offset(&text, range.end)) as usize;
-        text.replace_range(start.min(end)..start.max(end), &change.text);
+impl DocumentStore {
+    /// Apply LSP `didChange` content changes to `text`, in order.
+    ///
+    /// Per the LSP spec each event's range refers to the document state after the previous
+    /// event, so a fresh `LineIndex` is built per ranged event. An event without a range
+    /// replaces the whole document. Reversed ranges are normalized and out-of-range
+    /// positions are clamped by `LineIndex::offset`, so this never panics.
+    pub(crate) fn apply_content_changes(
+        text: &str,
+        changes: &[TextDocumentContentChangeEvent],
+    ) -> String {
+        let mut text = text.to_owned();
+        for change in changes {
+            let Some(range) = change.range else {
+                text.clone_from(&change.text);
+                continue;
+            };
+            let index = LineIndex::new(&text);
+            let start = u32::from(index.offset(&text, range.start)) as usize;
+            let end = u32::from(index.offset(&text, range.end)) as usize;
+            text.replace_range(start.min(end)..start.max(end), &change.text);
+        }
+        text
     }
-    text
 }
 
 /// A file tracked by the project [`Workspace`]: its URI and cached CST + coordinate map. Mirrors
@@ -138,10 +140,10 @@ struct WorkspaceFile {
 }
 
 impl WorkspaceFile {
-    fn new(uri: Url, text: String) -> WorkspaceFile {
+    fn new(uri: Url, text: String) -> Self {
         let line_index = Arc::new(LineIndex::new(&text));
-        let parse = Arc::new(jals_syntax::parse(&text));
-        WorkspaceFile {
+        let parse = Arc::new(jals_syntax::Parse::parse(&text));
+        Self {
             uri,
             text: Arc::from(text),
             line_index,
@@ -154,7 +156,7 @@ impl WorkspaceFile {
     /// The file's cached name resolution (computed on first use).
     fn resolved(&self) -> &Resolved {
         self.resolved
-            .get_or_init(|| jals_hir::resolve_node(&self.parse.syntax()))
+            .get_or_init(|| jals_hir::Resolved::resolve_node(&self.parse.syntax()))
     }
 
     /// The file's cached index facts (computed on first use), the input to the incremental
@@ -231,46 +233,48 @@ pub(crate) struct Workspace<F: FileTree = OsFileTree> {
     index: ProjectIndex,
 }
 
-/// Read and parse each library `.java` in `paths` through `fs`, skipping unreadable / non-UTF-8 /
-/// non-`file://` ones and de-duplicating by URI, into [`WorkspaceFile`]s. Shared by both
-/// library-source kinds (the `-sources.jar` overlays and the `git`/`path` source dependencies). The
-/// virtual path fed to `fs` is each `PathBuf`'s UTF-8 form; the `Url` keeps the original path.
-fn read_library_files(fs: &dyn FileTree, paths: Vec<PathBuf>) -> Vec<WorkspaceFile> {
-    let mut files = Vec::new();
-    let mut seen = HashSet::new();
-    for path in paths {
-        let Some(vpath) = path.to_str() else {
-            continue;
-        };
-        if let (Ok(text), Ok(uri)) = (fs.read_to_string(vpath), Url::from_file_path(&path))
-            && seen.insert(uri.clone())
-        {
-            files.push(WorkspaceFile::new(uri, text));
+impl WorkspaceFile {
+    /// Read and parse each library `.java` in `paths` through `fs`, skipping unreadable / non-UTF-8 /
+    /// non-`file://` ones and de-duplicating by URI, into [`WorkspaceFile`]s. Shared by both
+    /// library-source kinds (the `-sources.jar` overlays and the `git`/`path` source dependencies). The
+    /// virtual path fed to `fs` is each `PathBuf`'s UTF-8 form; the `Url` keeps the original path.
+    fn read_library_files(fs: &dyn FileTree, paths: Vec<PathBuf>) -> Vec<Self> {
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        for path in paths {
+            let Some(vpath) = path.to_str() else {
+                continue;
+            };
+            if let (Ok(text), Ok(uri)) = (fs.read_to_string(vpath), Url::from_file_path(&path))
+                && seen.insert(uri.clone())
+            {
+                files.push(Self::new(uri, text));
+            }
         }
+        files
     }
-    files
-}
 
-/// Pair each file in `files` with a sequential [`FileId`] in the id-space named by `space`, mapping
-/// it through `extract` — the `(FileId, T)` inputs the index builds from. Shared by the project files
-/// ([`WorkspaceFileId::Project`]) and the two library-source id-spaces
-/// ([`Library`](WorkspaceFileId::Library) / [`SourceDep`](WorkspaceFileId::SourceDep)), so every id
-/// space derives its inputs the same way — the base offset lives only in [`WorkspaceFileId::to_raw`].
-///
-/// `extract` picks the per-file input: the cached parse tree ([`parse`](WorkspaceFile::parse)) for the
-/// from-scratch [`ProjectIndex::builder`] path, or the cached index [`FileFacts`]
-/// ([`facts`](WorkspaceFile::facts)) for the incremental [`ProjectIndex::assemble`] path — where only
-/// the just-edited file re-extracts and the rest return their cache, so a rebuild re-walks one file.
-fn file_inputs<'a, T>(
-    files: &'a [WorkspaceFile],
-    space: fn(u32) -> WorkspaceFileId,
-    extract: impl Fn(&'a WorkspaceFile) -> T,
-) -> Vec<(FileId, T)> {
-    files
-        .iter()
-        .enumerate()
-        .map(|(k, f)| (space(k as u32).to_raw(), extract(f)))
-        .collect()
+    /// Pair each file in `files` with a sequential [`FileId`] in the id-space named by `space`, mapping
+    /// it through `extract` — the `(FileId, T)` inputs the index builds from. Shared by the project files
+    /// ([`WorkspaceFileId::Project`]) and the two library-source id-spaces
+    /// ([`Library`](WorkspaceFileId::Library) / [`SourceDep`](WorkspaceFileId::SourceDep)), so every id
+    /// space derives its inputs the same way — the base offset lives only in [`WorkspaceFileId::to_raw`].
+    ///
+    /// `extract` picks the per-file input: the cached parse tree ([`parse`](WorkspaceFile::parse)) for the
+    /// from-scratch [`ProjectIndex::builder`] path, or the cached index [`FileFacts`]
+    /// ([`facts`](WorkspaceFile::facts)) for the incremental [`ProjectIndex::assemble`] path — where only
+    /// the just-edited file re-extracts and the rest return their cache, so a rebuild re-walks one file.
+    fn file_inputs<'a, T>(
+        files: &'a [Self],
+        space: fn(u32) -> WorkspaceFileId,
+        extract: impl Fn(&'a Self) -> T,
+    ) -> Vec<(FileId, T)> {
+        files
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (space(k as u32).to_raw(), extract(f)))
+            .collect()
+    }
 }
 
 impl Workspace<OsFileTree> {
@@ -281,7 +285,7 @@ impl Workspace<OsFileTree> {
     ///
     /// The workspace has an empty classpath; use [`load_with_classpath`](Workspace::load_with_classpath)
     /// to fold a project's external library types into the index.
-    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Workspace<OsFileTree> {
+    pub(crate) fn load(project_root: PathBuf, source_roots: Vec<PathBuf>) -> Self {
         Self::load_with_classpath(project_root, source_roots, Vec::new())
     }
 
@@ -293,7 +297,7 @@ impl Workspace<OsFileTree> {
         project_root: PathBuf,
         source_roots: Vec<PathBuf>,
         classfiles: Vec<jals_classfile::ClassFile>,
-    ) -> Workspace<OsFileTree> {
+    ) -> Self {
         Self::load_with_classpath_and_sources(
             project_root,
             source_roots,
@@ -324,7 +328,7 @@ impl Workspace<OsFileTree> {
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
         target_java_version: Option<u32>,
-    ) -> Workspace<OsFileTree> {
+    ) -> Self {
         Self::load_in(
             OsFileTree,
             project_root,
@@ -348,6 +352,9 @@ impl<F: FileTree> Workspace<F> {
     /// identity stays a `file://` [`Url`] derived from it. See
     /// [`load_with_classpath_and_sources`](Workspace::load_with_classpath_and_sources) for the roles
     /// of `library_sources` / `source_dep_sources` / `target_java_version`.
+    // The load chain moves owned inputs through a uniform signature; `classfiles` is only read (to
+    // lower the classpath) before being dropped, but keeping it owned matches the rest of the chain.
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn load_in(
         fs: F,
         project_root: PathBuf,
@@ -356,7 +363,7 @@ impl<F: FileTree> Workspace<F> {
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
         target_java_version: Option<u32>,
-    ) -> Workspace<F> {
+    ) -> Self {
         let mut paths: Vec<String> = source_roots
             .iter()
             .filter_map(|root| root.to_str())
@@ -367,16 +374,17 @@ impl<F: FileTree> Workspace<F> {
 
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
-        let library_files = read_library_files(&fs, library_sources);
-        let library_inputs = file_inputs(&library_files, WorkspaceFileId::Library, |f| {
-            f.parse.syntax()
-        });
+        let library_files = WorkspaceFile::read_library_files(&fs, library_sources);
+        let library_inputs =
+            WorkspaceFile::file_inputs(&library_files, WorkspaceFileId::Library, |f| {
+                f.parse.syntax()
+            });
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types on
         // every rebuild (their `FileId`s are assigned in `rebuild_index`).
-        let source_dep_files = read_library_files(&fs, source_dep_sources);
+        let source_dep_files = WorkspaceFile::read_library_files(&fs, source_dep_sources);
 
-        let mut ws = Workspace {
+        let mut ws = Self {
             fs,
             project_root,
             source_roots,
@@ -411,20 +419,22 @@ impl<F: FileTree> Workspace<F> {
     /// item with members and supertypes — hover, completion, member navigation, and assignment
     /// checks see through it instead of stopping at a bare name.
     ///
-    /// Incremental: [`file_inputs`] over each file's [`facts`](WorkspaceFile::facts) re-extracts only
+    /// Incremental: [`file_inputs`](WorkspaceFile::file_inputs) over each file's [`facts`](WorkspaceFile::facts) re-extracts only
     /// the file whose facts cache was cleared (the one just edited, via
     /// [`set_overlay`](Workspace::set_overlay)); every other file, plus the stubs,
     /// reuses its cache. So a keystroke re-walks a single file's CST, and this step (which allocates
     /// and resolves supertypes but walks nothing) reassembles the whole index — identical to a
     /// from-scratch build, but without re-walking the project.
     fn rebuild_index(&mut self) {
-        let project = file_inputs(&self.files, WorkspaceFileId::Project, |f| f.facts());
+        let project =
+            WorkspaceFile::file_inputs(&self.files, WorkspaceFileId::Project, WorkspaceFile::facts);
         // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types),
         // under their own `SourceDep` ids so they navigate back to the right files. The
         // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
-        let source_deps = file_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep, |f| {
-            f.facts()
-        });
+        let source_deps =
+            WorkspaceFile::file_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep, |f| {
+                f.facts()
+            });
         let stub: Vec<(FileId, &FileFacts)> = self
             .stub_facts
             .iter()
@@ -454,13 +464,13 @@ impl<F: FileTree> Workspace<F> {
     }
 
     /// The project symbol index.
-    pub(crate) fn index(&self) -> &ProjectIndex {
+    pub(crate) const fn index(&self) -> &ProjectIndex {
         &self.index
     }
 
     /// The project's target Java feature version (from `[package] edition`), if declared. Feeds the
     /// edition-gated lint rules.
-    pub(crate) fn target_java_version(&self) -> Option<u32> {
+    pub(crate) const fn target_java_version(&self) -> Option<u32> {
         self.target_java_version
     }
 
@@ -500,16 +510,15 @@ impl<F: FileTree> Workspace<F> {
             // its cache, so a keystroke re-walks only the edited file.
             facts: OnceLock::new(),
         };
-        match self.by_uri.get(uri).copied() {
-            Some(id) => self.files[id.0 as usize] = file,
-            None => {
-                if !self.under_source_root(uri) {
-                    return false;
-                }
-                let id = WorkspaceFileId::Project(self.files.len() as u32).to_raw();
-                self.by_uri.insert(uri.clone(), id);
-                self.files.push(file);
+        if let Some(id) = self.by_uri.get(uri).copied() {
+            self.files[id.0 as usize] = file;
+        } else {
+            if !self.under_source_root(uri) {
+                return false;
             }
+            let id = WorkspaceFileId::Project(self.files.len() as u32).to_raw();
+            self.by_uri.insert(uri.clone(), id);
+            self.files.push(file);
         }
         self.rebuild_index();
         true
@@ -549,7 +558,7 @@ impl<F: FileTree> Workspace<F> {
     ) -> Option<(FileId, Range<usize>)> {
         // The member-name identifier sits directly under a `FIELD_ACCESS` node — both for a plain
         // `obj.field` and for the `recv.method` callee of a call.
-        let token = crate::handlers::ident_at(root, offset)?;
+        let token = crate::handlers::Cursor::ident_at(root, offset)?;
         let field_access = token
             .parent()
             .filter(|p| p.kind() == SyntaxKind::FIELD_ACCESS)?;
@@ -562,7 +571,7 @@ impl<F: FileTree> Workspace<F> {
         } else {
             Namespace::Value
         };
-        let inference = jals_hir::infer(root, resolved, &self.index, file);
+        let inference = jals_hir::TypeInference::infer(root, resolved, &self.index, file);
         let span = receiver.syntax().text_range();
         let owner = inference
             .type_of_expr(usize::from(span.start())..usize::from(span.end()))?
@@ -589,9 +598,9 @@ impl<F: FileTree> Workspace<F> {
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
         let resolved = source.resolved();
-        let inference = jals_hir::infer(&root, resolved, &self.index, file);
+        let inference = jals_hir::TypeInference::infer(&root, resolved, &self.index, file);
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        crate::handlers::type_hover(inference.type_at(offset)?)
+        crate::handlers::Hovers::type_hover(inference.type_at(offset)?)
     }
 
     /// The signature help for the call at `position` in `uri`, with cross-file type resolution (so a
@@ -602,8 +611,10 @@ impl<F: FileTree> Workspace<F> {
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        let help = jals_hir::signature_help(&root, source.resolved(), &self.index, file, offset)?;
-        Some(crate::handlers::signature_help_to_lsp(&help))
+        let help = self
+            .index
+            .signature_help(&root, source.resolved(), file, offset)?;
+        Some(crate::handlers::SignatureHelpHandler::signature_help_to_lsp(&help))
     }
 
     /// Completions for the cursor at `position` in `uri`, resolved against the project (so a receiver
@@ -618,7 +629,7 @@ impl<F: FileTree> Workspace<F> {
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        Some(crate::handlers::completions(
+        Some(crate::handlers::Completions::completions(
             &root,
             source.resolved(),
             &self.index,
@@ -637,7 +648,7 @@ impl<F: FileTree> Workspace<F> {
     ) -> Option<Vec<DocumentHighlight>> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        Some(crate::handlers::document_highlight(
+        Some(crate::handlers::DocumentHighlights::document_highlight(
             &source.parse,
             &source.text,
             &source.line_index,
@@ -652,7 +663,7 @@ impl<F: FileTree> Workspace<F> {
     pub(crate) fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        Some(crate::handlers::semantic_tokens(
+        Some(crate::handlers::SemanticTokensBuilder::semantic_tokens(
             &source.parse,
             &source.text,
             &source.line_index,
@@ -677,9 +688,10 @@ impl<F: FileTree> Workspace<F> {
         let resolved = source.resolved();
         // Anchor on the identifier under the cursor (boundary-aware), as the find-references handler
         // does, then ask name resolution for the binding it denotes.
-        let Some(ident) =
-            crate::handlers::ident_at(&root, source.line_index.offset(&source.text, position))
-        else {
+        let Some(ident) = crate::handlers::Cursor::ident_at(
+            &root,
+            source.line_index.offset(&source.text, position),
+        ) else {
             return Some(Vec::new());
         };
         let anchor = usize::from(ident.text_range().start());
@@ -762,7 +774,7 @@ impl<F: FileTree> Workspace<F> {
 
     /// Whether the symbol anchored at byte `anchor` in `file` may be renamed soundly. A file-local
     /// binding qualifies by kind (locals and project types yes, members no — see
-    /// [`is_renamable_kind`](crate::handlers::is_renamable_kind)); a cross-file *use* of a project
+    /// [`is_renamable_kind`](crate::handlers::Rename::is_renamable_kind)); a cross-file *use* of a project
     /// type (one the file-local pass left unresolved) qualifies too, since the workspace rewrites it
     /// project-wide. A use that resolves to anything *outside* the project's own sources — a
     /// `java.lang` stub, a classpath `.class` type, or a `git`/`path` library-source type — does
@@ -772,7 +784,7 @@ impl<F: FileTree> Workspace<F> {
     /// renamable symbol always has a complete, in-project occurrence set.
     fn is_renamable(&self, file: FileId, resolved: &Resolved, anchor: usize) -> bool {
         if let Some(id) = resolved.symbol_at(anchor) {
-            return crate::handlers::is_renamable_kind(resolved.def(id).kind);
+            return crate::handlers::Rename::is_renamable_kind(resolved.def(id).kind);
         }
         resolved.reference_at(anchor).is_some_and(|reference| {
             reference.namespace == Namespace::Type
@@ -794,8 +806,10 @@ impl<F: FileTree> Workspace<F> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
         let root = source.parse.syntax();
-        let ident =
-            crate::handlers::ident_at(&root, source.line_index.offset(&source.text, position))?;
+        let ident = crate::handlers::Cursor::ident_at(
+            &root,
+            source.line_index.offset(&source.text, position),
+        )?;
         if !self.is_renamable(
             file,
             source.resolved(),
@@ -816,30 +830,29 @@ impl<F: FileTree> Workspace<F> {
         position: Position,
         new_name: &str,
     ) -> Option<WorkspaceEdit> {
+        /// Group `locations` into a [`WorkspaceEdit`] that rewrites each occurrence to `new_name`,
+        /// keyed by file. `None` if there is nothing to rewrite.
+        fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceEdit> {
+            if locations.is_empty() {
+                return None;
+            }
+            let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+            for location in locations {
+                changes.entry(location.uri).or_default().push(TextEdit {
+                    range: location.range,
+                    new_text: new_name.to_owned(),
+                });
+            }
+            Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            })
+        }
         // Gate on the same renamability check `prepareRename` performs, then rewrite every
         // occurrence the find-references pass gathers.
         self.prepare_rename(uri, position)?;
         workspace_edit(self.references(uri, position, true)?, new_name)
     }
-}
-
-/// Group `locations` into a [`WorkspaceEdit`] that rewrites each occurrence to `new_name`, keyed by
-/// file. `None` if there is nothing to rewrite.
-fn workspace_edit(locations: Vec<Location>, new_name: &str) -> Option<WorkspaceEdit> {
-    if locations.is_empty() {
-        return None;
-    }
-    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    for location in locations {
-        changes.entry(location.uri).or_default().push(TextEdit {
-            range: location.range,
-            new_text: new_name.to_owned(),
-        });
-    }
-    Some(WorkspaceEdit {
-        changes: Some(changes),
-        ..Default::default()
-    })
 }
 
 /// A config the LSP discovers by walking up from a document's directory to a well-known TOML
@@ -857,19 +870,26 @@ pub(crate) trait DiscoverableConfig: Clone + Default {
             .and_then(Self::discover_str)
             .unwrap_or_default()
     }
+
+    /// Whether `uri` refers to a config file named [`Self::FILE_NAME`] (e.g. `jalsfmt.toml`), used to
+    /// invalidate the discovery caches when a watched config file changes on disk.
+    fn is_config_file(uri: &Url) -> bool {
+        uri.to_file_path()
+            .is_ok_and(|path| path.file_name().is_some_and(|name| name == Self::FILE_NAME))
+    }
 }
 
 impl DiscoverableConfig for Config {
     const FILE_NAME: &'static str = "jalsfmt.toml";
     fn discover_str(dir: &str) -> Option<Self> {
-        Config::discover(&OsFileTree, dir).ok()
+        Self::discover(&OsFileTree, dir).ok()
     }
 }
 
 impl DiscoverableConfig for jals_config::lint::Config {
     const FILE_NAME: &'static str = "jalslint.toml";
     fn discover_str(dir: &str) -> Option<Self> {
-        jals_config::lint::Config::discover(&OsFileTree, dir).ok()
+        Self::discover(&OsFileTree, dir).ok()
     }
 }
 
@@ -907,22 +927,6 @@ impl<C: DiscoverableConfig> Discovery<C> {
     }
 }
 
-/// Whether `uri` refers to a config file named `C::FILE_NAME` (e.g. `jalsfmt.toml`).
-fn is_config_file_for<C: DiscoverableConfig>(uri: &Url) -> bool {
-    uri.to_file_path()
-        .is_ok_and(|path| path.file_name().is_some_and(|name| name == C::FILE_NAME))
-}
-
-/// Whether a watched-file URI refers to a `jalsfmt.toml` config file.
-pub(crate) fn is_config_file(uri: &Url) -> bool {
-    is_config_file_for::<Config>(uri)
-}
-
-/// Whether a watched-file URI refers to a `jalslint.toml` config file.
-pub(crate) fn is_lint_config_file(uri: &Url) -> bool {
-    is_config_file_for::<jals_config::lint::Config>(uri)
-}
-
 #[cfg(test)]
 mod tests {
     use async_lsp::lsp_types::{HoverContents, Position, Range};
@@ -953,19 +957,20 @@ mod tests {
 
     #[test]
     fn apply_single_insert() {
-        let out = apply_content_changes("class A {}", &[ranged((0, 9), (0, 9), "int x;")]);
+        let out =
+            DocumentStore::apply_content_changes("class A {}", &[ranged((0, 9), (0, 9), "int x;")]);
         assert_eq!(out, "class A {int x;}");
     }
 
     #[test]
     fn apply_single_delete() {
-        let out = apply_content_changes("abcdef", &[ranged((0, 1), (0, 4), "")]);
+        let out = DocumentStore::apply_content_changes("abcdef", &[ranged((0, 1), (0, 4), "")]);
         assert_eq!(out, "aef");
     }
 
     #[test]
     fn apply_single_replace() {
-        let out = apply_content_changes("abc", &[ranged((0, 1), (0, 2), "XY")]);
+        let out = DocumentStore::apply_content_changes("abc", &[ranged((0, 1), (0, 2), "XY")]);
         assert_eq!(out, "aXYc");
     }
 
@@ -974,15 +979,15 @@ mod tests {
         // The second event's range is only meaningful against "aXYb", the state
         // after the first event: (0,2)..(0,3) deletes the "Y".
         let changes = [ranged((0, 1), (0, 1), "XY"), ranged((0, 2), (0, 3), "")];
-        assert_eq!(apply_content_changes("ab", &changes), "aXb");
+        assert_eq!(DocumentStore::apply_content_changes("ab", &changes), "aXb");
     }
 
     #[test]
     fn apply_counts_utf16_columns() {
         // '😀' = 4 UTF-8 bytes, 2 UTF-16 units, so 'y' starts at character 3.
-        let out = apply_content_changes("x😀y", &[ranged((0, 1), (0, 3), "Z")]);
+        let out = DocumentStore::apply_content_changes("x😀y", &[ranged((0, 1), (0, 3), "Z")]);
         assert_eq!(out, "xZy");
-        let out = apply_content_changes("x😀y", &[ranged((0, 3), (0, 3), "!")]);
+        let out = DocumentStore::apply_content_changes("x😀y", &[ranged((0, 3), (0, 3), "!")]);
         assert_eq!(out, "x😀!y");
     }
 
@@ -994,12 +999,15 @@ mod tests {
             full("new"),
             ranged((0, 0), (0, 0), "A"),
         ];
-        assert_eq!(apply_content_changes("abc", &changes), "Anew");
+        assert_eq!(
+            DocumentStore::apply_content_changes("abc", &changes),
+            "Anew"
+        );
     }
 
     #[test]
     fn apply_reversed_range_is_normalized() {
-        let out = apply_content_changes("abcde", &[ranged((0, 3), (0, 1), "X")]);
+        let out = DocumentStore::apply_content_changes("abcde", &[ranged((0, 3), (0, 1), "X")]);
         assert_eq!(out, "aXde");
     }
 
@@ -1008,24 +1016,27 @@ mod tests {
         // After the first event the document has two lines; the second event
         // addresses the freshly created line 1.
         let changes = [ranged((0, 2), (0, 2), "\n"), ranged((1, 1), (1, 1), "X")];
-        assert_eq!(apply_content_changes("abcd", &changes), "ab\ncXd");
+        assert_eq!(
+            DocumentStore::apply_content_changes("abcd", &changes),
+            "ab\ncXd"
+        );
     }
 
     #[test]
     fn apply_delete_spanning_newline_joins_lines() {
-        let out = apply_content_changes("ab\ncd", &[ranged((0, 2), (1, 0), "")]);
+        let out = DocumentStore::apply_content_changes("ab\ncd", &[ranged((0, 2), (1, 0), "")]);
         assert_eq!(out, "abcd");
     }
 
     #[test]
     fn apply_range_past_eof_clamps_to_append() {
-        let out = apply_content_changes("ab", &[ranged((5, 0), (5, 0), "!")]);
+        let out = DocumentStore::apply_content_changes("ab", &[ranged((5, 0), (5, 0), "!")]);
         assert_eq!(out, "ab!");
     }
 
     #[test]
     fn apply_empty_changes_keeps_text() {
-        assert_eq!(apply_content_changes("abc", &[]), "abc");
+        assert_eq!(DocumentStore::apply_content_changes("abc", &[]), "abc");
     }
 
     #[test]
@@ -1104,11 +1115,11 @@ mod tests {
     #[test]
     fn is_config_file_matches_only_jalsfmt_toml() {
         let config = Url::parse("file:///p/jalsfmt.toml").unwrap();
-        assert!(is_config_file(&config));
+        assert!(Config::is_config_file(&config));
         let other = Url::parse("file:///p/other.toml").unwrap();
-        assert!(!is_config_file(&other));
+        assert!(!Config::is_config_file(&other));
         let non_file = Url::parse("untitled:jalsfmt.toml").unwrap();
-        assert!(!is_config_file(&non_file));
+        assert!(!Config::is_config_file(&non_file));
     }
 
     #[test]
@@ -1147,11 +1158,11 @@ mod tests {
     #[test]
     fn is_lint_config_file_matches_only_jalslint_toml() {
         let config = Url::parse("file:///p/jalslint.toml").unwrap();
-        assert!(is_lint_config_file(&config));
+        assert!(jals_config::lint::Config::is_config_file(&config));
         let other = Url::parse("file:///p/jalsfmt.toml").unwrap();
-        assert!(!is_lint_config_file(&other));
+        assert!(!jals_config::lint::Config::is_config_file(&other));
         let non_file = Url::parse("untitled:jalslint.toml").unwrap();
-        assert!(!is_lint_config_file(&non_file));
+        assert!(!jals_config::lint::Config::is_config_file(&non_file));
     }
 
     #[test]
@@ -1160,7 +1171,7 @@ mod tests {
         // index as a `Classpath`-origin type, so external library types resolve here.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Main.java"), "class Main { }").unwrap();
-        let box_class = jals_classfile::read(include_bytes!(concat!(
+        let box_class = jals_classfile::ClassFile::read(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/Box.class"
         )))
@@ -1201,7 +1212,7 @@ mod tests {
         let main = "class Main { void m(Box<String> b) { b.get(); } }";
         std::fs::write(src_dir.join("Main.java"), main).unwrap();
 
-        let box_class = jals_classfile::read(include_bytes!(concat!(
+        let box_class = jals_classfile::ClassFile::read(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/Box.class"
         )))
@@ -1229,7 +1240,7 @@ mod tests {
     /// project source.
     fn workspace_with_box_sources() -> (Workspace, Url, &'static str, Url, String) {
         workspace_with_box(|dir, _class| {
-            let box_src = "public class Box<T> { public T get() { return null; } }".to_string();
+            let box_src = "public class Box<T> { public T get() { return null; } }".to_owned();
             let lib_dir = dir.join("libsrc");
             std::fs::create_dir_all(&lib_dir).unwrap();
             let box_java = lib_dir.join("Box.java");
@@ -1269,7 +1280,7 @@ mod tests {
     /// `-sources.jar`) and fed as the navigation source.
     fn workspace_with_synthesized_box() -> (Workspace, Url, &'static str, Url, String) {
         workspace_with_box(|dir, box_class| {
-            let synthesized = jals_classpath::synthesize_classpath_sources(
+            let synthesized = jals_classpath::SkeletonGroup::synthesize_classpath_sources(
                 std::slice::from_ref(box_class),
                 dir,
                 |message| panic!("unexpected synthesis warning: {message}"),
@@ -1465,7 +1476,7 @@ mod tests {
         );
 
         // The editor opens a new Foo.java under the source root; the overlay adds it to the index.
-        let doc = Document::new("package a; class Foo { }".to_string(), 1);
+        let doc = Document::new("package a; class Foo { }".to_owned(), 1);
         assert!(ws.set_overlay(&foo_uri, &doc));
         let loc = ws
             .goto_definition(&bar_uri, Position::new(0, use_col))
@@ -1495,7 +1506,7 @@ mod tests {
 
         // Editing Types.java to add a sibling `B` re-extracts just that file; Use.java's reference
         // to `B` now resolves through the reassembled index.
-        let edited = Document::new("package a; class A { } class B { }".to_string(), 2);
+        let edited = Document::new("package a; class A { } class B { }".to_owned(), 2);
         assert!(ws.set_overlay(&types_uri, &edited));
         let loc = ws
             .goto_definition(&use_uri, Position::new(0, use_col))
@@ -1808,11 +1819,11 @@ mod tests {
             .map(|item| item.label)
             .collect();
         assert!(
-            labels.contains(&"Helper".to_string()),
+            labels.contains(&"Helper".to_owned()),
             "cross-file type in {labels:?}"
         );
-        assert!(labels.contains(&"x".to_string()));
-        assert!(labels.contains(&"return".to_string()));
+        assert!(labels.contains(&"x".to_owned()));
+        assert!(labels.contains(&"return".to_owned()));
     }
 
     #[test]
@@ -1854,7 +1865,7 @@ mod tests {
         let tokens = ws
             .semantic_tokens(&bar_uri)
             .expect("Bar.java is in the workspace");
-        let legend = crate::handlers::semantic_tokens_legend();
+        let legend = crate::handlers::SemanticTokensBuilder::legend();
         let enum_index = legend
             .token_types
             .iter()

@@ -22,15 +22,13 @@
 //! and `NEWLINE` is a standalone token (CRLF is one token).
 
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
-use crate::doc::{
-    CommentKind, Doc, blank_line, comment, concat, hardline, line_suffix, nil, raw, text,
-};
+use crate::doc::{CommentKind, Doc};
 
 struct Comment {
     kind: SyntaxKind,
@@ -59,103 +57,105 @@ pub(crate) struct CommentMap {
     orphans: Vec<Comment>,
 }
 
-/// Build the comment map for a tree. `normalize_param_comments` is the resolved
-/// `normalize-parameter-comments` policy, threaded down to [`classify`]. `inline_block_comments`
-/// is the resolved `inline-block-comments` policy: when set, a block / doc comment written
-/// immediately before a significant token on the same line hugs that token as a leading-inline
-/// comment instead of trailing the previous one to end of line.
-pub(crate) fn build(
-    root: &SyntaxNode,
-    normalize_param_comments: bool,
-    inline_block_comments: bool,
-) -> CommentMap {
-    let mut leading: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
-    let mut leading_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
-    let mut trailing_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
-    let mut trailing_below: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+impl CommentMap {
+    /// Build the comment map for a tree. `normalize_param_comments` is the resolved
+    /// `normalize-parameter-comments` policy, threaded down to [`CommentMap::classify`].
+    /// `inline_block_comments` is the resolved `inline-block-comments` policy: when set, a block /
+    /// doc comment written immediately before a significant token on the same line hugs that token
+    /// as a leading-inline comment instead of trailing the previous one to end of line.
+    pub(crate) fn build(
+        root: &SyntaxNode,
+        normalize_param_comments: bool,
+        inline_block_comments: bool,
+    ) -> Self {
+        let mut leading: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+        let mut leading_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+        let mut trailing_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
+        let mut trailing_below: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
 
-    let mut last_sig: Option<usize> = None;
-    let mut newlines: usize = 0; // newlines since the last significant token or comment
-    let mut pending: Vec<Comment> = Vec::new();
+        let mut last_sig: Option<usize> = None;
+        let mut newlines: usize = 0; // newlines since the last significant token or comment
+        let mut pending: Vec<Comment> = Vec::new();
 
-    for tok in root
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-    {
-        let kind = tok.kind();
-        if is_comment(kind) {
-            let (text, mut inline) = classify(&tok, normalize_param_comments);
-            // A block / doc comment written immediately before a significant token *on the same
-            // line* hugs that token instead of trailing the previous one to end of line, when
-            // `inline-block-comments` is on (e.g. `java.lang./* @A */ String`). The condition is
-            // purely "followed by a same-line significant token": the hug glues the comment to that
-            // token with one space and no break, so the property survives reformatting and the hug
-            // is idempotent — whereas keying on the *preceding* token's line would flip once the
-            // following token wraps onto its own line. A line comment runs to end of line, so it is
-            // never followed by a same-line token and never qualifies.
-            if inline_block_comments
-                && !inline
-                && matches!(kind, SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT)
-                && followed_by_same_line_sig(&tok)
-            {
-                inline = true;
+        for tok in root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+        {
+            let kind = tok.kind();
+            if Self::is_comment(kind) {
+                let (text, mut inline) = Self::classify(&tok, normalize_param_comments);
+                // A block / doc comment written immediately before a significant token *on the same
+                // line* hugs that token instead of trailing the previous one to end of line, when
+                // `inline-block-comments` is on (e.g. `java.lang./* @A */ String`). The condition is
+                // purely "followed by a same-line significant token": the hug glues the comment to that
+                // token with one space and no break, so the property survives reformatting and the hug
+                // is idempotent — whereas keying on the *preceding* token's line would flip once the
+                // following token wraps onto its own line. A line comment runs to end of line, so it is
+                // never followed by a same-line token and never qualifies.
+                if inline_block_comments
+                    && !inline
+                    && matches!(kind, SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT)
+                    && Self::followed_by_same_line_sig(&tok)
+                {
+                    inline = true;
+                }
+                let comment = Comment {
+                    kind,
+                    text,
+                    blank_lines_before: newlines.saturating_sub(1),
+                    inline,
+                };
+                match last_sig {
+                    // A parameter comment (`inline`) always *leads* the following token (it hugs it),
+                    // so it is never attached as a trailing comment of the previous one — route it to
+                    // `pending` like an own-line leading comment regardless of an intervening newline.
+                    Some(anchor) if newlines == 0 && pending.is_empty() && !inline => {
+                        trailing_inline.entry(anchor).or_default().push(comment);
+                    }
+                    _ => pending.push(comment),
+                }
+                newlines = 0;
+            } else if kind == SyntaxKind::NEWLINE {
+                newlines += 1;
+            } else if !kind.is_trivia() {
+                let offset = usize::from(tok.text_range().start());
+                if !pending.is_empty() {
+                    // Inline (hugging) parameter comments go to `leading_inline`; own-line comments
+                    // to `leading`. `partition` keeps each group's source order, and the two groups
+                    // never interleave at emit time (own-line above, inline hugging the token).
+                    let (inline_lead, own_lead): (Vec<Comment>, Vec<Comment>) =
+                        core::mem::take(&mut pending)
+                            .into_iter()
+                            .partition(|c| c.inline);
+                    if !own_lead.is_empty() {
+                        leading.insert(offset, own_lead);
+                    }
+                    if !inline_lead.is_empty() {
+                        leading_inline.insert(offset, inline_lead);
+                    }
+                }
+                last_sig = Some(offset);
+                newlines = 0;
             }
-            let comment = Comment {
-                kind,
-                text,
-                blank_lines_before: newlines.saturating_sub(1),
-                inline,
-            };
+        }
+        // Comments after the last significant token (e.g. end of file): keep them on the last
+        // token, each on its own line so they are never merged or lost. If the file has no
+        // significant tokens at all, keep them as orphans (emitted at the root).
+        let mut orphans = Vec::new();
+        if !pending.is_empty() {
             match last_sig {
-                // A parameter comment (`inline`) always *leads* the following token (it hugs it),
-                // so it is never attached as a trailing comment of the previous one — route it to
-                // `pending` like an own-line leading comment regardless of an intervening newline.
-                Some(anchor) if newlines == 0 && pending.is_empty() && !inline => {
-                    trailing_inline.entry(anchor).or_default().push(comment);
-                }
-                _ => pending.push(comment),
+                Some(off) => trailing_below.entry(off).or_default().extend(pending),
+                None => orphans = pending,
             }
-            newlines = 0;
-        } else if kind == SyntaxKind::NEWLINE {
-            newlines += 1;
-        } else if !kind.is_trivia() {
-            let offset = usize::from(tok.text_range().start());
-            if !pending.is_empty() {
-                // Inline (hugging) parameter comments go to `leading_inline`; own-line comments
-                // to `leading`. `partition` keeps each group's source order, and the two groups
-                // never interleave at emit time (own-line above, inline hugging the token).
-                let (inline_lead, own_lead): (Vec<Comment>, Vec<Comment>) =
-                    core::mem::take(&mut pending)
-                        .into_iter()
-                        .partition(|c| c.inline);
-                if !own_lead.is_empty() {
-                    leading.insert(offset, own_lead);
-                }
-                if !inline_lead.is_empty() {
-                    leading_inline.insert(offset, inline_lead);
-                }
-            }
-            last_sig = Some(offset);
-            newlines = 0;
         }
-    }
-    // Comments after the last significant token (e.g. end of file): keep them on the last
-    // token, each on its own line so they are never merged or lost. If the file has no
-    // significant tokens at all, keep them as orphans (emitted at the root).
-    let mut orphans = Vec::new();
-    if !pending.is_empty() {
-        match last_sig {
-            Some(off) => trailing_below.entry(off).or_default().extend(pending),
-            None => orphans = pending,
-        }
-    }
 
-    CommentMap {
-        leading,
-        leading_inline,
-        trailing_inline,
-        trailing_below,
-        orphans,
+        Self {
+            leading,
+            leading_inline,
+            trailing_inline,
+            trailing_below,
+            orphans,
+        }
     }
 }
 
@@ -173,13 +173,13 @@ impl CommentMap {
             // safe whether or not the caller already broke the line.
             for c in lead {
                 parts.push(if c.blank_lines_before > 0 {
-                    blank_line(c.blank_lines_before)
+                    Doc::blank_line(c.blank_lines_before)
                 } else {
-                    hardline()
+                    Doc::hardline()
                 });
-                parts.push(comment_doc(c));
+                parts.push(c.doc());
             }
-            parts.push(hardline());
+            parts.push(Doc::hardline());
         }
         // Inline (hugging) leading comments sit immediately before the token text on the same
         // line, e.g. `/* a= */ 1`. They are concatenated into the token's own unit so they wrap
@@ -189,38 +189,38 @@ impl CommentMap {
             Some(inline) => {
                 let mut hug: Vec<Doc> = Vec::new();
                 for c in inline {
-                    hug.push(raw(c.text.clone()));
-                    hug.push(text(" "));
+                    hug.push(Doc::raw(c.text.clone()));
+                    hug.push(Doc::text(" "));
                 }
                 hug.push(token_doc);
-                concat(hug)
+                Doc::concat(hug)
             }
         });
         if let Some(trail) = self.trailing_inline.get(&offset) {
-            parts.push(trailing_inline_doc(trail));
+            parts.push(Self::trailing_inline_doc(trail));
         }
         if let Some(trail) = self.trailing_below.get(&offset) {
             for c in trail {
-                parts.push(hardline());
-                parts.push(comment_doc(c));
+                parts.push(Doc::hardline());
+                parts.push(c.doc());
             }
         }
-        concat(parts)
+        Doc::concat(parts)
     }
 
     /// The document for orphan comments (a file with no significant tokens), one per line.
     pub(crate) fn orphan_doc(&self) -> Doc {
         if self.orphans.is_empty() {
-            return nil();
+            return Doc::nil();
         }
         let mut parts = Vec::new();
         for (i, c) in self.orphans.iter().enumerate() {
             if i > 0 {
-                parts.push(hardline());
+                parts.push(Doc::hardline());
             }
-            parts.push(comment_doc(c));
+            parts.push(c.doc());
         }
-        concat(parts)
+        Doc::concat(parts)
     }
 
     /// Whether the token has any leading comments.
@@ -268,15 +268,15 @@ impl CommentMap {
         let offset = usize::from(tok.text_range().start());
         let mut parts = Vec::new();
         if let Some(trail) = self.trailing_inline.get(&offset) {
-            parts.push(trailing_inline_doc(trail));
+            parts.push(Self::trailing_inline_doc(trail));
         }
         if let Some(trail) = self.trailing_below.get(&offset) {
             for c in trail {
-                parts.push(hardline());
-                parts.push(comment_doc(c));
+                parts.push(Doc::hardline());
+                parts.push(c.doc());
             }
         }
-        concat(parts)
+        Doc::concat(parts)
     }
 
     /// Whether the token carries any *dangling* comment — an own-line `leading` comment or a
@@ -304,101 +304,109 @@ impl CommentMap {
         let mut parts = Vec::new();
         for c in lead.chain(inline) {
             if !parts.is_empty() {
-                parts.push(hardline());
+                parts.push(Doc::hardline());
             }
-            parts.push(comment_doc(c));
+            parts.push(c.doc());
         }
-        concat(parts)
+        Doc::concat(parts)
     }
 }
 
-/// The document for a token's same-line trailing comments: each emitted as a line suffix
-/// (deferred to the end of the line). A `//` line comment runs to end of line, so anything
-/// after it — the next token *or another trailing comment* — must start a fresh line; a
-/// trailing [`hardline`] forces that break (it coalesces with any following break). Shared by
-/// [`CommentMap::token`] and [`CommentMap::trailing_doc`] so a closing brace's trailing line
-/// comment forces the break too, never colliding with the next comment under error recovery.
-fn trailing_inline_doc(trail: &[Comment]) -> Doc {
-    let mut parts = Vec::new();
-    let mut force_break = false;
-    for c in trail {
-        parts.push(line_suffix(concat(vec![text(" "), comment_inline(c)])));
-        if c.kind == SyntaxKind::LINE_COMMENT {
-            force_break = true;
-        }
-    }
-    if force_break {
-        parts.push(hardline());
-    }
-    concat(parts)
-}
-
-/// Whether the next significant (non-trivia) token after `tok` is on the same line — i.e. no
-/// `NEWLINE` separates them. Intervening comments and whitespace are skipped. Used by
-/// `inline-block-comments` to decide whether a comment should hug the following token. Returns
-/// `false` at end of input.
-fn followed_by_same_line_sig(tok: &SyntaxToken) -> bool {
-    let mut cur = tok.next_token();
-    while let Some(t) = cur {
-        let k = t.kind();
-        if k == SyntaxKind::NEWLINE {
-            return false;
-        }
-        if !k.is_trivia() {
-            return true;
-        }
-        // A comment or whitespace on the same line: keep scanning for the next significant token.
-        cur = t.next_token();
-    }
-    false
-}
-
-/// Is this token kind a comment?
-pub(crate) fn is_comment(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
-    )
-}
-
-/// Classify a comment token into its emitted text and whether it is an inline (hugging)
-/// parameter comment.
-///
-/// Line comments have their trailing whitespace stripped; block / doc comments are kept verbatim
-/// (their interior alignment is preserved). The one exception is `normalize-parameter-comments`:
-/// a `BLOCK_COMMENT` that is a parameter-name label (`/*a=*/`) is rewritten to the canonical
-/// `/* a= */` form (see [`crate::rules::parameter_comment`]) and flagged `inline` so it hugs the
-/// following token instead of trailing the previous one or sitting on its own line.
-fn classify(tok: &SyntaxToken, normalize_param_comments: bool) -> (String, bool) {
-    match tok.kind() {
-        SyntaxKind::LINE_COMMENT => (tok.text().trim_end().to_string(), false),
-        SyntaxKind::BLOCK_COMMENT if normalize_param_comments => {
-            match crate::rules::parameter_comment::normalize(tok.text()) {
-                Some(normalized) => (normalized, true),
-                None => (tok.text().to_string(), false),
+impl CommentMap {
+    /// The document for a token's same-line trailing comments: each emitted as a line suffix
+    /// (deferred to the end of the line). A `//` line comment runs to end of line, so anything
+    /// after it — the next token *or another trailing comment* — must start a fresh line; a
+    /// trailing [`Doc::hardline`] forces that break (it coalesces with any following break). Shared
+    /// by [`CommentMap::token`] and [`CommentMap::trailing_doc`] so a closing brace's trailing line
+    /// comment forces the break too, never colliding with the next comment under error recovery.
+    fn trailing_inline_doc(trail: &[Comment]) -> Doc {
+        let mut parts = Vec::new();
+        let mut force_break = false;
+        for c in trail {
+            parts.push(Doc::line_suffix(Doc::concat(vec![
+                Doc::text(" "),
+                c.inline_doc(),
+            ])));
+            if c.kind == SyntaxKind::LINE_COMMENT {
+                force_break = true;
             }
         }
-        _ => (tok.text().to_string(), false),
+        if force_break {
+            parts.push(Doc::hardline());
+        }
+        Doc::concat(parts)
+    }
+
+    /// Whether the next significant (non-trivia) token after `tok` is on the same line — i.e. no
+    /// `NEWLINE` separates them. Intervening comments and whitespace are skipped. Used by
+    /// `inline-block-comments` to decide whether a comment should hug the following token. Returns
+    /// `false` at end of input.
+    fn followed_by_same_line_sig(tok: &SyntaxToken) -> bool {
+        let mut cur = tok.next_token();
+        while let Some(t) = cur {
+            let k = t.kind();
+            if k == SyntaxKind::NEWLINE {
+                return false;
+            }
+            if !k.is_trivia() {
+                return true;
+            }
+            // A comment or whitespace on the same line: keep scanning for the next significant token.
+            cur = t.next_token();
+        }
+        false
+    }
+
+    /// Is this token kind a comment?
+    pub(crate) const fn is_comment(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
+        )
+    }
+
+    /// Classify a comment token into its emitted text and whether it is an inline (hugging)
+    /// parameter comment.
+    ///
+    /// Line comments have their trailing whitespace stripped; block / doc comments are kept verbatim
+    /// (their interior alignment is preserved). The one exception is `normalize-parameter-comments`:
+    /// a `BLOCK_COMMENT` that is a parameter-name label (`/*a=*/`) is rewritten to the canonical
+    /// `/* a= */` form (see [`crate::rules::parameter_comment`]) and flagged `inline` so it hugs the
+    /// following token instead of trailing the previous one or sitting on its own line.
+    fn classify(tok: &SyntaxToken, normalize_param_comments: bool) -> (String, bool) {
+        match tok.kind() {
+            SyntaxKind::LINE_COMMENT => (tok.text().trim_end().into(), false),
+            SyntaxKind::BLOCK_COMMENT if normalize_param_comments => {
+                crate::rules::parameter_comment::ParameterComment::normalize(tok.text())
+                    .map_or_else(
+                        || (tok.text().into(), false),
+                        |normalized| (normalized, true),
+                    )
+            }
+            _ => (tok.text().into(), false),
+        }
     }
 }
 
-/// The document for a standalone comment (leading, dangling, orphan, or own-line
-/// trailing). These are reflowable: under `wrap-comments` the renderer rewraps them to
-/// `comment-width` at their final indentation.
-fn comment_doc(c: &Comment) -> Doc {
-    let kind = match c.kind {
-        SyntaxKind::DOC_COMMENT => CommentKind::Doc,
-        SyntaxKind::BLOCK_COMMENT => CommentKind::Block,
-        _ => CommentKind::Line,
-    };
-    comment(kind, c.text.clone())
-}
+impl Comment {
+    /// The document for a standalone comment (leading, dangling, orphan, or own-line
+    /// trailing). These are reflowable: under `wrap-comments` the renderer rewraps them to
+    /// `comment-width` at their final indentation.
+    fn doc(&self) -> Doc {
+        let kind = match self.kind {
+            SyntaxKind::DOC_COMMENT => CommentKind::Doc,
+            SyntaxKind::BLOCK_COMMENT => CommentKind::Block,
+            _ => CommentKind::Line,
+        };
+        Doc::comment(kind, self.text.clone())
+    }
 
-/// The document for a same-line trailing comment, emitted verbatim as a line suffix. These
-/// are never reflowed: they sit after code, so wrapping them onto new lines is ambiguous.
-fn comment_inline(c: &Comment) -> Doc {
-    match c.kind {
-        SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT => raw(c.text.clone()),
-        _ => text(c.text.clone()),
+    /// The document for a same-line trailing comment, emitted verbatim as a line suffix. These
+    /// are never reflowed: they sit after code, so wrapping them onto new lines is ambiguous.
+    fn inline_doc(&self) -> Doc {
+        match self.kind {
+            SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT => Doc::raw(self.text.clone()),
+            _ => Doc::text(self.text.clone()),
+        }
     }
 }

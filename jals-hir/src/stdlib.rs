@@ -21,7 +21,7 @@
 //! and member set are deliberately partial; see [`Ty::is_assignable_to`](crate::Ty::is_assignable_to).
 
 /// The `java.lang` core, as one compilation unit. Top-level types here become `java.lang.<Name>`.
-const JAVA_LANG: &str = r#"
+const JAVA_LANG: &str = r"
 package java.lang;
 
 public class Object {
@@ -174,14 +174,14 @@ public class InterruptedException extends Exception {
 
 public class CloneNotSupportedException extends Exception {
 }
-"#;
+";
 
 /// The `java.util` containers, as one compilation unit. Top-level types here become `java.util.<Name>`.
 /// These are the generic ones: their type parameters and the type arguments their members and
 /// supertypes carry are indexed, so a use like `List<String>` substitutes `E := String` into `get`
 /// (`String`) through the same machinery user generics use. References to `java.lang` types resolve
 /// via the implicit `java.lang` import.
-const JAVA_UTIL: &str = r#"
+const JAVA_UTIL: &str = r"
 package java.util;
 
 public interface Iterator<E> {
@@ -250,14 +250,14 @@ public class Optional<T> {
     public boolean isEmpty();
     public T orElse(T other);
 }
-"#;
+";
 
 /// The `java.io` exceptions, as one compilation unit. Only the exception hierarchy is modelled (no
 /// streams/readers yet) — enough that a thrown / propagated `IOException` classifies as *checked* and
 /// an `UncheckedIOException` as *unchecked* through the [`ProjectIndex::is_subtype`](crate::ProjectIndex)
 /// walk. References to `java.lang` supertypes (`Exception`, `RuntimeException`) resolve via the
 /// implicit `java.lang` import.
-const JAVA_IO: &str = r#"
+const JAVA_IO: &str = r"
 package java.io;
 
 public class IOException extends Exception {
@@ -268,12 +268,17 @@ public class FileNotFoundException extends IOException {
 
 public class UncheckedIOException extends RuntimeException {
 }
-"#;
+";
 
-/// The embedded stub sources, each a self-contained compilation unit (`java.lang`, `java.util`, then
-/// `java.io`). Later units may reference earlier ones, but build order does not actually matter
-/// (members and supertypes are resolved in a second pass over all units); the list is kept in
-/// package-dependency order.
-pub(crate) fn stub_sources() -> &'static [&'static str] {
-    &[JAVA_LANG, JAVA_UTIL, JAVA_IO]
+/// The embedded standard-library signature stubs.
+pub(crate) struct Stdlib;
+
+impl Stdlib {
+    /// The embedded stub sources, each a self-contained compilation unit (`java.lang`, `java.util`,
+    /// then `java.io`). Later units may reference earlier ones, but build order does not actually
+    /// matter (members and supertypes are resolved in a second pass over all units); the list is kept
+    /// in package-dependency order.
+    pub(crate) const fn stub_sources() -> &'static [&'static str] {
+        &[JAVA_LANG, JAVA_UTIL, JAVA_IO]
+    }
 }

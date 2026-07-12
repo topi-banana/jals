@@ -125,7 +125,7 @@ pub enum ConstantPoolEntry {
 }
 
 impl ConstantPool {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<ConstantPool> {
+    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
         let count = r.u16()?;
         let mut entries = Vec::with_capacity(count as usize);
         entries.push(ConstantSlot::Sentinel);
@@ -144,7 +144,7 @@ impl ConstantPool {
                 i += 1;
             }
         }
-        Ok(ConstantPool { entries })
+        Ok(Self { entries })
     }
 
     pub(crate) fn write(&self, w: &mut Writer) {
@@ -167,9 +167,61 @@ impl ConstantPool {
     /// The decoded text of a `Utf8` entry at `index`, or `None` if it is not a `Utf8`.
     pub fn utf8(&self, index: u16) -> Option<Cow<'_, str>> {
         match self.get(index) {
-            Some(ConstantPoolEntry::Utf8(bytes)) => Some(decode_modified_utf8(bytes)),
+            Some(ConstantPoolEntry::Utf8(bytes)) => Some(Self::decode_modified_utf8(bytes)),
             _ => None,
         }
+    }
+
+    /// Decode JVM *modified* UTF-8 (JVMS §4.4.7) into a Rust string. ASCII is borrowed verbatim;
+    /// anything else (two-/three-byte forms, the six-byte supplementary form, NUL as `0xC0 0x80`) is
+    /// decoded into an owned `String`, with malformed sequences replaced by U+FFFD.
+    fn decode_modified_utf8(bytes: &[u8]) -> Cow<'_, str> {
+        if bytes.is_ascii() {
+            // ASCII is identical in modified UTF-8 and is valid Rust `str`.
+            return Cow::Borrowed(core::str::from_utf8(bytes).unwrap_or_default());
+        }
+        let mut out = String::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let b0 = bytes[i];
+            if b0 < 0x80 {
+                out.push(b0 as char);
+                i += 1;
+            } else if b0 == 0xED
+                && i + 5 < bytes.len()
+                && bytes[i + 1] & 0xF0 == 0xA0
+                && bytes[i + 3] == 0xED
+                && bytes[i + 4] & 0xF0 == 0xB0
+            {
+                // Six-byte supplementary form: a surrogate pair, each surrogate as a 3-byte sequence.
+                let b1 = u32::from(bytes[i + 1]);
+                let b2 = u32::from(bytes[i + 2]);
+                let b4 = u32::from(bytes[i + 4]);
+                let b5 = u32::from(bytes[i + 5]);
+                let c = 0x10000
+                    + (((b1 & 0x0F) << 16)
+                        | ((b2 & 0x3F) << 10)
+                        | ((b4 & 0x0F) << 6)
+                        | (b5 & 0x3F));
+                out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
+                i += 6;
+            } else if b0 & 0xE0 == 0xC0 && i + 1 < bytes.len() {
+                let b1 = u32::from(bytes[i + 1]);
+                let c = ((u32::from(b0) & 0x1F) << 6) | (b1 & 0x3F);
+                out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
+                i += 2;
+            } else if b0 & 0xF0 == 0xE0 && i + 2 < bytes.len() {
+                let b1 = u32::from(bytes[i + 1]);
+                let b2 = u32::from(bytes[i + 2]);
+                let c = ((u32::from(b0) & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+                out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
+                i += 3;
+            } else {
+                out.push('\u{FFFD}');
+                i += 1;
+            }
+        }
+        Cow::Owned(out)
     }
 
     /// The internal-form name (`a/b/C`) a `Class` entry at `index` points to.
@@ -182,58 +234,58 @@ impl ConstantPool {
 }
 
 impl ConstantPoolEntry {
-    fn read(r: &mut Reader<'_>) -> Result<ConstantPoolEntry> {
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
             1 => {
                 let len = r.u16()? as usize;
-                ConstantPoolEntry::Utf8(r.bytes(len)?.to_vec())
+                Self::Utf8(r.bytes(len)?.to_vec())
             }
-            3 => ConstantPoolEntry::Integer(r.u32()? as i32),
-            4 => ConstantPoolEntry::Float(f32::from_bits(r.u32()?)),
-            5 => ConstantPoolEntry::Long(r.u64()? as i64),
-            6 => ConstantPoolEntry::Double(f64::from_bits(r.u64()?)),
-            7 => ConstantPoolEntry::Class {
+            3 => Self::Integer(r.u32()? as i32),
+            4 => Self::Float(f32::from_bits(r.u32()?)),
+            5 => Self::Long(r.u64()? as i64),
+            6 => Self::Double(f64::from_bits(r.u64()?)),
+            7 => Self::Class {
                 name_index: r.u16()?,
             },
-            8 => ConstantPoolEntry::String {
+            8 => Self::String {
                 string_index: r.u16()?,
             },
-            9 => ConstantPoolEntry::FieldRef {
+            9 => Self::FieldRef {
                 class_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            10 => ConstantPoolEntry::MethodRef {
+            10 => Self::MethodRef {
                 class_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            11 => ConstantPoolEntry::InterfaceMethodRef {
+            11 => Self::InterfaceMethodRef {
                 class_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            12 => ConstantPoolEntry::NameAndType {
+            12 => Self::NameAndType {
                 name_index: r.u16()?,
                 descriptor_index: r.u16()?,
             },
-            15 => ConstantPoolEntry::MethodHandle {
+            15 => Self::MethodHandle {
                 reference_kind: r.u8()?,
                 reference_index: r.u16()?,
             },
-            16 => ConstantPoolEntry::MethodType {
+            16 => Self::MethodType {
                 descriptor_index: r.u16()?,
             },
-            17 => ConstantPoolEntry::Dynamic {
+            17 => Self::Dynamic {
                 bootstrap_method_attr_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            18 => ConstantPoolEntry::InvokeDynamic {
+            18 => Self::InvokeDynamic {
                 bootstrap_method_attr_index: r.u16()?,
                 name_and_type_index: r.u16()?,
             },
-            19 => ConstantPoolEntry::Module {
+            19 => Self::Module {
                 name_index: r.u16()?,
             },
-            20 => ConstantPoolEntry::Package {
+            20 => Self::Package {
                 name_index: r.u16()?,
             },
             other => return Err(ClassfileError::InvalidConstantTag(other)),
@@ -242,36 +294,36 @@ impl ConstantPoolEntry {
 
     fn write(&self, w: &mut Writer) {
         match self {
-            ConstantPoolEntry::Utf8(bytes) => {
+            Self::Utf8(bytes) => {
                 w.u8(1);
                 w.u16(bytes.len() as u16);
                 w.bytes(bytes);
             }
-            ConstantPoolEntry::Integer(v) => {
+            Self::Integer(v) => {
                 w.u8(3);
-                w.u32(*v as u32);
+                w.u32(v.cast_unsigned());
             }
-            ConstantPoolEntry::Float(v) => {
+            Self::Float(v) => {
                 w.u8(4);
                 w.u32(v.to_bits());
             }
-            ConstantPoolEntry::Long(v) => {
+            Self::Long(v) => {
                 w.u8(5);
                 w.u64(*v as u64);
             }
-            ConstantPoolEntry::Double(v) => {
+            Self::Double(v) => {
                 w.u8(6);
                 w.u64(v.to_bits());
             }
-            ConstantPoolEntry::Class { name_index } => {
+            Self::Class { name_index } => {
                 w.u8(7);
                 w.u16(*name_index);
             }
-            ConstantPoolEntry::String { string_index } => {
+            Self::String { string_index } => {
                 w.u8(8);
                 w.u16(*string_index);
             }
-            ConstantPoolEntry::FieldRef {
+            Self::FieldRef {
                 class_index,
                 name_and_type_index,
             } => {
@@ -279,7 +331,7 @@ impl ConstantPoolEntry {
                 w.u16(*class_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::MethodRef {
+            Self::MethodRef {
                 class_index,
                 name_and_type_index,
             } => {
@@ -287,7 +339,7 @@ impl ConstantPoolEntry {
                 w.u16(*class_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::InterfaceMethodRef {
+            Self::InterfaceMethodRef {
                 class_index,
                 name_and_type_index,
             } => {
@@ -295,7 +347,7 @@ impl ConstantPoolEntry {
                 w.u16(*class_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::NameAndType {
+            Self::NameAndType {
                 name_index,
                 descriptor_index,
             } => {
@@ -303,7 +355,7 @@ impl ConstantPoolEntry {
                 w.u16(*name_index);
                 w.u16(*descriptor_index);
             }
-            ConstantPoolEntry::MethodHandle {
+            Self::MethodHandle {
                 reference_kind,
                 reference_index,
             } => {
@@ -311,11 +363,11 @@ impl ConstantPoolEntry {
                 w.u8(*reference_kind);
                 w.u16(*reference_index);
             }
-            ConstantPoolEntry::MethodType { descriptor_index } => {
+            Self::MethodType { descriptor_index } => {
                 w.u8(16);
                 w.u16(*descriptor_index);
             }
-            ConstantPoolEntry::Dynamic {
+            Self::Dynamic {
                 bootstrap_method_attr_index,
                 name_and_type_index,
             } => {
@@ -323,7 +375,7 @@ impl ConstantPoolEntry {
                 w.u16(*bootstrap_method_attr_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::InvokeDynamic {
+            Self::InvokeDynamic {
                 bootstrap_method_attr_index,
                 name_and_type_index,
             } => {
@@ -331,63 +383,14 @@ impl ConstantPoolEntry {
                 w.u16(*bootstrap_method_attr_index);
                 w.u16(*name_and_type_index);
             }
-            ConstantPoolEntry::Module { name_index } => {
+            Self::Module { name_index } => {
                 w.u8(19);
                 w.u16(*name_index);
             }
-            ConstantPoolEntry::Package { name_index } => {
+            Self::Package { name_index } => {
                 w.u8(20);
                 w.u16(*name_index);
             }
         }
     }
-}
-
-/// Decode JVM *modified* UTF-8 (JVMS §4.4.7) into a Rust string. ASCII is borrowed verbatim;
-/// anything else (two-/three-byte forms, the six-byte supplementary form, NUL as `0xC0 0x80`) is
-/// decoded into an owned `String`, with malformed sequences replaced by U+FFFD.
-fn decode_modified_utf8(bytes: &[u8]) -> Cow<'_, str> {
-    if bytes.is_ascii() {
-        // ASCII is identical in modified UTF-8 and is valid Rust `str`.
-        return Cow::Borrowed(core::str::from_utf8(bytes).unwrap_or_default());
-    }
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes[i];
-        if b0 < 0x80 {
-            out.push(b0 as char);
-            i += 1;
-        } else if b0 == 0xED
-            && i + 5 < bytes.len()
-            && bytes[i + 1] & 0xF0 == 0xA0
-            && bytes[i + 3] == 0xED
-            && bytes[i + 4] & 0xF0 == 0xB0
-        {
-            // Six-byte supplementary form: a surrogate pair, each surrogate as a 3-byte sequence.
-            let b1 = u32::from(bytes[i + 1]);
-            let b2 = u32::from(bytes[i + 2]);
-            let b4 = u32::from(bytes[i + 4]);
-            let b5 = u32::from(bytes[i + 5]);
-            let c = 0x10000
-                + (((b1 & 0x0F) << 16) | ((b2 & 0x3F) << 10) | ((b4 & 0x0F) << 6) | (b5 & 0x3F));
-            out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
-            i += 6;
-        } else if b0 & 0xE0 == 0xC0 && i + 1 < bytes.len() {
-            let b1 = u32::from(bytes[i + 1]);
-            let c = ((u32::from(b0) & 0x1F) << 6) | (b1 & 0x3F);
-            out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
-            i += 2;
-        } else if b0 & 0xF0 == 0xE0 && i + 2 < bytes.len() {
-            let b1 = u32::from(bytes[i + 1]);
-            let b2 = u32::from(bytes[i + 2]);
-            let c = ((u32::from(b0) & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
-            out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
-            i += 3;
-        } else {
-            out.push('\u{FFFD}');
-            i += 1;
-        }
-    }
-    Cow::Owned(out)
 }
