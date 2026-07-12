@@ -1,8 +1,8 @@
 //! `unreported-exception`: flag a checked exception a method / constructor can raise but neither
 //! declares in its `throws` clause nor handles with an enclosing `try` / `catch`.
 //!
-//! This is the lint-side adapter over [`jals_hir::unreported_exceptions`], which does the whole
-//! analysis (see there): it classifies each raised type as a checked exception via the project's
+//! This is the lint-side adapter over [`jals_hir::UnreportedException::collect`], which does the
+//! whole analysis (see there): it classifies each raised type as a checked exception via the project's
 //! `Throwable` hierarchy, subtracts the ones the enclosing declaration declares or an enclosing
 //! `try`/`catch` catches, and is conservative — a raise it cannot fully prove is never reported.
 //!
@@ -21,16 +21,22 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unreported-exception",
     default: Severity::Warn,
-    check: Checker::Indexed(check),
+    check: Checker::Indexed(UnreportedExceptionRule::check),
 };
 
-fn check(root: &SyntaxNode, resolved: &Resolved, index: Option<IndexCtx>) -> Vec<Finding> {
-    jals_hir::unreported_exceptions(root, resolved, index)
-        .into_iter()
-        .map(|e| Finding {
-            message: e.message(),
-            range: e.range,
-            ..Finding::default()
-        })
-        .collect()
+/// The `unreported-exception` rule (named with a `Rule` suffix to avoid clashing with the
+/// [`jals_hir::UnreportedException`] analysis type it delegates to).
+struct UnreportedExceptionRule;
+
+impl UnreportedExceptionRule {
+    fn check(root: &SyntaxNode, resolved: &Resolved, index: Option<IndexCtx>) -> Vec<Finding> {
+        jals_hir::UnreportedException::collect(root, resolved, index)
+            .into_iter()
+            .map(|e| Finding {
+                message: e.message(),
+                range: e.range,
+                ..Finding::default()
+            })
+            .collect()
+    }
 }

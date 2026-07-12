@@ -3,7 +3,7 @@ use std::fmt::Write;
 use expect_test::{Expect, expect};
 use jals_config::Severity;
 use jals_config::lint::Config;
-use jals_lint::{LintOutput, lint_source};
+use jals_lint::LintOutput;
 
 /// Render the diagnostics (then parser errors) of a default-config lint run as one line each:
 /// `rule:start..end: message`.
@@ -21,7 +21,7 @@ fn render(out: &LintOutput) -> String {
 }
 
 fn lint(src: &str) -> String {
-    render(&lint_source(src, &Config::default()))
+    render(&LintOutput::lint_source(src, &Config::default()))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -261,7 +261,7 @@ fn allow_suppresses_a_rule() {
     config
         .rules
         .insert("wildcard-import".to_string(), Severity::Allow);
-    let out = lint_source("import java.util.*;", &config);
+    let out = LintOutput::lint_source("import java.util.*;", &config);
     assert!(
         out.diagnostics.is_empty(),
         "rule set to allow should not fire"
@@ -274,7 +274,7 @@ fn severity_is_resolved_from_config() {
     config
         .rules
         .insert("wildcard-import".to_string(), Severity::Error);
-    let out = lint_source("import java.util.*;", &config);
+    let out = LintOutput::lint_source("import java.util.*;", &config);
     assert_eq!(out.diagnostics.len(), 1);
     assert_eq!(out.diagnostics[0].severity, Severity::Error);
 }
@@ -318,7 +318,7 @@ fn lint_edition(src: &str, version: Option<u32>) -> String {
         target_java_version: version,
         ..Default::default()
     };
-    render(&lint_source(src, &config))
+    render(&LintOutput::lint_source(src, &config))
 }
 
 #[test]
@@ -365,7 +365,7 @@ fn compact_source_file_respects_allow_config() {
     config
         .rules
         .insert("compact-source-file".to_string(), Severity::Allow);
-    let out = lint_source("void main() {}", &config);
+    let out = LintOutput::lint_source("void main() {}", &config);
     assert!(
         out.diagnostics
             .iter()
@@ -414,7 +414,7 @@ fn module_import_respects_allow_config() {
     config
         .rules
         .insert("module-import".to_string(), Severity::Allow);
-    let out = lint_source("import module java.base;", &config);
+    let out = LintOutput::lint_source("import module java.base;", &config);
     assert!(
         out.diagnostics.iter().all(|d| d.rule != "module-import"),
         "expected the rule to be suppressed: {:?}",

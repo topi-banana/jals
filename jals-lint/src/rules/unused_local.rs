@@ -20,24 +20,29 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-local",
     default: Severity::Warn,
-    check: Checker::Resolved(check),
+    check: Checker::Resolved(UnusedLocal::check),
 };
 
-fn check(_root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for def in resolved.unused_defs() {
-        let what = match def.kind {
-            DefKind::Local => "local variable",
-            DefKind::Param => "parameter",
-            _ => continue,
-        };
-        out.push(Finding {
-            range: def.name_range.clone(),
-            message: format!("unused {what} `{}`", def.name),
-            // The binding itself is the unnecessary code — consumers fade it in place.
-            unnecessary: true,
-            ..Finding::default()
-        });
+/// The `unused-local` rule.
+struct UnusedLocal;
+
+impl UnusedLocal {
+    fn check(_root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for def in resolved.unused_defs() {
+            let what = match def.kind {
+                DefKind::Local => "local variable",
+                DefKind::Param => "parameter",
+                _ => continue,
+            };
+            out.push(Finding {
+                range: def.name_range.clone(),
+                message: format!("unused {what} `{}`", def.name),
+                // The binding itself is the unnecessary code — consumers fade it in place.
+                unnecessary: true,
+                ..Finding::default()
+            });
+        }
+        out
     }
-    out
 }

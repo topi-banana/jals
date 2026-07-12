@@ -24,16 +24,21 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: crate::TYPE_MISMATCH_RULE,
     default: Severity::Warn,
-    check: Checker::Indexed(check),
+    check: Checker::Indexed(TypeMismatch::check),
 };
 
-fn check(root: &SyntaxNode, resolved: &Resolved, index: Option<IndexCtx>) -> Vec<Finding> {
-    jals_hir::type_mismatches(root, resolved, index)
-        .into_iter()
-        .map(|m| Finding {
-            message: m.message(),
-            range: m.range,
-            ..Finding::default()
-        })
-        .collect()
+/// The `type-mismatch` rule.
+struct TypeMismatch;
+
+impl TypeMismatch {
+    fn check(root: &SyntaxNode, resolved: &Resolved, index: Option<IndexCtx>) -> Vec<Finding> {
+        jals_hir::TypeInference::type_mismatches(root, resolved, index)
+            .into_iter()
+            .map(|m| Finding {
+                message: m.message(),
+                range: m.range,
+                ..Finding::default()
+            })
+            .collect()
+    }
 }

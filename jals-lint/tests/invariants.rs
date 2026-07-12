@@ -1,5 +1,5 @@
 use jals_config::lint::Config;
-use jals_lint::lint_source;
+use jals_lint::LintOutput;
 use proptest::prelude::*;
 
 /// A generator of Java-ish source built from fragments that exercise every rule.
@@ -53,19 +53,19 @@ proptest! {
     /// Linting never panics on Java-ish input.
     #[test]
     fn never_panics(src in javaish()) {
-        let _ = lint_source(&src, &Config::default());
+        let _ = LintOutput::lint_source(&src, &Config::default());
     }
 
     /// Linting never panics on arbitrary input.
     #[test]
     fn never_panics_on_arbitrary(src in ".*") {
-        let _ = lint_source(&src, &Config::default());
+        let _ = LintOutput::lint_source(&src, &Config::default());
     }
 
     /// Every diagnostic range is well-formed and within the source bounds.
     #[test]
     fn ranges_in_bounds(src in javaish()) {
-        let out = lint_source(&src, &Config::default());
+        let out = LintOutput::lint_source(&src, &Config::default());
         for d in out.diagnostics.iter().chain(&out.parse_errors) {
             prop_assert!(d.range.start <= d.range.end);
             prop_assert!(d.range.end <= src.len());

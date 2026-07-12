@@ -11,26 +11,31 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "wildcard-import",
     default: Severity::Warn,
-    check: Checker::Syntactic(check),
+    check: Checker::Syntactic(WildcardImport::check),
 };
 
-fn check(root: &jals_syntax::SyntaxNode) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for node in root.descendants() {
-        if node.kind() != SyntaxKind::IMPORT_DECL {
-            continue;
+/// The `wildcard-import` rule.
+struct WildcardImport;
+
+impl WildcardImport {
+    fn check(root: &jals_syntax::SyntaxNode) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for node in root.descendants() {
+            if node.kind() != SyntaxKind::IMPORT_DECL {
+                continue;
+            }
+            let Some(import) = ImportDecl::cast(node) else {
+                continue;
+            };
+            if let Some(name) = import.name()
+                && name.is_wildcard()
+            {
+                out.push(Finding::at_node(
+                    import.syntax(),
+                    "avoid wildcard imports; import the specific types you use",
+                ));
+            }
         }
-        let Some(import) = ImportDecl::cast(node) else {
-            continue;
-        };
-        if let Some(name) = import.name()
-            && name.is_wildcard()
-        {
-            out.push(Finding::at_node(
-                import.syntax(),
-                "avoid wildcard imports; import the specific types you use",
-            ));
-        }
+        out
     }
-    out
 }
