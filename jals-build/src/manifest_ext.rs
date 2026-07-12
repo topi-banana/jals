@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use jals_config::{
     Dependency, DependencyError, GitDependency, GitRef, Manifest, ManifestParseError,
-    PathDependency, ValidationError, validate_jar_location,
+    PathDependency, ValidationError,
 };
 
 /// A `git` dependency's classified spec.
@@ -124,126 +124,131 @@ impl Error for ManifestError {
     }
 }
 
-/// Classify a jar-location string (a `jar` or `sources` value) into a [`DependencySource`] without any
-/// I/O, shared by [`jar_source`] and [`sources_source`]. Reuses [`validate_jar_location`] for the
-/// value-level errors, then resolves the happy path to a `PathBuf` / URL. `field` names the source
-/// field for error messages; `manifest_dir` is joined onto a bare relative path (mirrors
-/// [`ManifestExt::classpath_entries`]).
-fn classify(
-    value: &str,
-    name: &str,
-    field: &'static str,
-    manifest_dir: &Path,
-) -> Result<DependencySource, DependencyError> {
-    validate_jar_location(value, name, field)?;
-    if let Some(rest) = value.strip_prefix("file://") {
-        // `file:///abs/path` -> `/abs/path`. A full file-URL decode (percent-encoding, Windows
-        // drive letters) can come later; this is enough for the common Unix absolute-path form.
-        return Ok(DependencySource::Path(PathBuf::from(rest)));
+impl DependencySource {
+    /// Classify a jar-location string (a `jar` or `sources` value) into a [`DependencySource`]
+    /// without any I/O, shared by [`Self::from_jar`] and [`Self::from_sources`]. Reuses
+    /// [`Dependency::validate_jar_location`] for the value-level errors, then resolves the happy path to a
+    /// `PathBuf` / URL. `field` names the source field for error messages; `manifest_dir` is joined
+    /// onto a bare relative path (mirrors [`ManifestExt::classpath_entries`]).
+    fn classify(
+        value: &str,
+        name: &str,
+        field: &'static str,
+        manifest_dir: &Path,
+    ) -> Result<Self, DependencyError> {
+        Dependency::validate_jar_location(value, name, field)?;
+        if let Some(rest) = value.strip_prefix("file://") {
+            // `file:///abs/path` -> `/abs/path`. A full file-URL decode (percent-encoding, Windows
+            // drive letters) can come later; this is enough for the common Unix absolute-path form.
+            return Ok(Self::Path(PathBuf::from(rest)));
+        }
+        if value.starts_with("https://") || value.starts_with("http://") {
+            return Ok(Self::Url(value.to_string()));
+        }
+        // Validated bare path: relative to the manifest directory (mirrors `classpath_entries`).
+        Ok(Self::Path(manifest_dir.join(value)))
     }
-    if value.starts_with("https://") || value.starts_with("http://") {
-        return Ok(DependencySource::Url(value.to_string()));
-    }
-    // Validated bare path: relative to the manifest directory (mirrors `classpath_entries`).
-    Ok(DependencySource::Path(manifest_dir.join(value)))
-}
 
-/// The compiled-jar classpath source of a `jar` dependency, or `None` for a `git`/`path` source
-/// dependency (which contributes no classpath jar).
-fn jar_source(
-    dep: &Dependency,
-    name: &str,
-    manifest_dir: &Path,
-) -> Option<Result<DependencySource, DependencyError>> {
-    match dep {
-        Dependency::Jar(jar) => Some(classify(&jar.jar, name, "jar", manifest_dir)),
-        Dependency::Git(_) | Dependency::Path(_) => None,
-    }
-}
-
-/// The optional companion **sources** jar of a `jar` dependency, classified the same way as the `jar`
-/// value. `None` when this is not a `jar` dependency or it declares no `sources`.
-fn sources_source(
-    dep: &Dependency,
-    name: &str,
-    manifest_dir: &Path,
-) -> Option<Result<DependencySource, DependencyError>> {
-    match dep {
-        Dependency::Jar(jar) => jar
-            .sources
-            .as_deref()
-            .map(|sources| classify(sources, name, "sources", manifest_dir)),
-        Dependency::Git(_) | Dependency::Path(_) => None,
-    }
-}
-
-/// The resolved `.java` source tree of a `git`/`path` dependency, or `None` for a `jar` dependency
-/// (whose classes come from the classpath).
-fn source_dependency(
-    dep: &Dependency,
-    name: &str,
-    manifest_dir: &Path,
-) -> Option<Result<SourceDependency, DependencyError>> {
-    match dep {
-        Dependency::Jar(_) => None,
-        Dependency::Git(git) => Some(git_source(git, name)),
-        Dependency::Path(path) => Some(path_source(path, name, manifest_dir)),
-    }
-}
-
-/// Resolve a `git` dependency into a [`SourceDependency::Git`]: a non-empty clone URL and a single
-/// pinned [`GitRef`] (from `jals_config`'s pure [`GitDependency::git_ref`]).
-fn git_source(git: &GitDependency, name: &str) -> Result<SourceDependency, DependencyError> {
-    if git.git.is_empty() {
-        return Err(DependencyError::Empty {
-            name: name.to_string(),
-            field: "git",
-        });
-    }
-    Ok(SourceDependency::Git(GitSource {
-        url: git.git.clone(),
-        reference: git.git_ref(name)?,
-        dir: git.dir.clone(),
-    }))
-}
-
-/// Resolve a `path` dependency into a [`SourceDependency::Path`]: a non-empty directory resolved
-/// against `manifest_dir`, plus the optional source-root `dir`.
-fn path_source(
-    path: &PathDependency,
-    name: &str,
-    manifest_dir: &Path,
-) -> Result<SourceDependency, DependencyError> {
-    if path.path.is_empty() {
-        return Err(DependencyError::Empty {
-            name: name.to_string(),
-            field: "path",
-        });
-    }
-    Ok(SourceDependency::Path(PathSource {
-        root: manifest_dir.join(&path.path),
-        dir: path.dir.clone(),
-    }))
-}
-
-/// Classify every `[dependencies]` entry through `classify`, collecting the `Some(Ok)` values (each
-/// paired with its dependency name) and the `Some(Err)`s into separate vectors; a `None` (a form this
-/// `classify` does not apply to) is skipped. The shared spine of the `dependency_*` accessors.
-fn collect_dependencies<T>(
-    manifest: &Manifest,
-    manifest_dir: &Path,
-    classify: impl Fn(&Dependency, &str, &Path) -> Option<Result<T, DependencyError>>,
-) -> (Vec<(String, T)>, Vec<DependencyError>) {
-    let mut oks = Vec::new();
-    let mut errors = Vec::new();
-    for (name, dep) in &manifest.dependencies {
-        match classify(dep, name, manifest_dir) {
-            Some(Ok(value)) => oks.push((name.clone(), value)),
-            Some(Err(err)) => errors.push(err),
-            None => {}
+    /// The compiled-jar classpath source of a `jar` dependency, or `None` for a `git`/`path` source
+    /// dependency (which contributes no classpath jar).
+    fn from_jar(
+        dep: &Dependency,
+        name: &str,
+        manifest_dir: &Path,
+    ) -> Option<Result<Self, DependencyError>> {
+        match dep {
+            Dependency::Jar(jar) => Some(Self::classify(&jar.jar, name, "jar", manifest_dir)),
+            Dependency::Git(_) | Dependency::Path(_) => None,
         }
     }
-    (oks, errors)
+
+    /// The optional companion **sources** jar of a `jar` dependency, classified the same way as the
+    /// `jar` value. `None` when this is not a `jar` dependency or it declares no `sources`.
+    fn from_sources(
+        dep: &Dependency,
+        name: &str,
+        manifest_dir: &Path,
+    ) -> Option<Result<Self, DependencyError>> {
+        match dep {
+            Dependency::Jar(jar) => jar
+                .sources
+                .as_deref()
+                .map(|sources| Self::classify(sources, name, "sources", manifest_dir)),
+            Dependency::Git(_) | Dependency::Path(_) => None,
+        }
+    }
+
+    /// Classify every `[dependencies]` entry through `classify`, collecting the `Some(Ok)` values
+    /// (each paired with its dependency name) and the `Some(Err)`s into separate vectors; a `None`
+    /// (a form this `classify` does not apply to) is skipped. The shared spine of the
+    /// `dependency_*` accessors.
+    fn collect_dependencies<T>(
+        manifest: &Manifest,
+        manifest_dir: &Path,
+        classify: impl Fn(&Dependency, &str, &Path) -> Option<Result<T, DependencyError>>,
+    ) -> (Vec<(String, T)>, Vec<DependencyError>) {
+        let mut oks = Vec::new();
+        let mut errors = Vec::new();
+        for (name, dep) in &manifest.dependencies {
+            match classify(dep, name, manifest_dir) {
+                Some(Ok(value)) => oks.push((name.clone(), value)),
+                Some(Err(err)) => errors.push(err),
+                None => {}
+            }
+        }
+        (oks, errors)
+    }
+}
+
+impl SourceDependency {
+    /// The resolved `.java` source tree of a `git`/`path` dependency, or `None` for a `jar`
+    /// dependency (whose classes come from the classpath).
+    fn from_dependency(
+        dep: &Dependency,
+        name: &str,
+        manifest_dir: &Path,
+    ) -> Option<Result<Self, DependencyError>> {
+        match dep {
+            Dependency::Jar(_) => None,
+            Dependency::Git(git) => Some(Self::from_git(git, name)),
+            Dependency::Path(path) => Some(Self::from_path(path, name, manifest_dir)),
+        }
+    }
+
+    /// Resolve a `git` dependency into a [`SourceDependency::Git`]: a non-empty clone URL and a
+    /// single pinned [`GitRef`] (from `jals_config`'s pure [`GitDependency::git_ref`]).
+    fn from_git(git: &GitDependency, name: &str) -> Result<Self, DependencyError> {
+        if git.git.is_empty() {
+            return Err(DependencyError::Empty {
+                name: name.to_string(),
+                field: "git",
+            });
+        }
+        Ok(Self::Git(GitSource {
+            url: git.git.clone(),
+            reference: git.git_ref(name)?,
+            dir: git.dir.clone(),
+        }))
+    }
+
+    /// Resolve a `path` dependency into a [`SourceDependency::Path`]: a non-empty directory resolved
+    /// against `manifest_dir`, plus the optional source-root `dir`.
+    fn from_path(
+        path: &PathDependency,
+        name: &str,
+        manifest_dir: &Path,
+    ) -> Result<Self, DependencyError> {
+        if path.path.is_empty() {
+            return Err(DependencyError::Empty {
+                name: name.to_string(),
+                field: "path",
+            });
+        }
+        Ok(Self::Path(PathSource {
+            root: manifest_dir.join(&path.path),
+            dir: path.dir.clone(),
+        }))
+    }
 }
 
 /// The host-side, `std::path`-based resolution over a [`Manifest`].
@@ -356,21 +361,25 @@ impl ManifestExt for Manifest {
         &self,
         manifest_dir: &Path,
     ) -> (Vec<(String, DependencySource)>, Vec<DependencyError>) {
-        collect_dependencies(self, manifest_dir, jar_source)
+        DependencySource::collect_dependencies(self, manifest_dir, DependencySource::from_jar)
     }
 
     fn dependency_source_jars(
         &self,
         manifest_dir: &Path,
     ) -> (Vec<(String, DependencySource)>, Vec<DependencyError>) {
-        collect_dependencies(self, manifest_dir, sources_source)
+        DependencySource::collect_dependencies(self, manifest_dir, DependencySource::from_sources)
     }
 
     fn dependency_source_dirs(
         &self,
         manifest_dir: &Path,
     ) -> (Vec<(String, SourceDependency)>, Vec<DependencyError>) {
-        collect_dependencies(self, manifest_dir, source_dependency)
+        DependencySource::collect_dependencies(
+            self,
+            manifest_dir,
+            SourceDependency::from_dependency,
+        )
     }
 }
 
@@ -418,7 +427,7 @@ mod tests {
     fn dependency_jar_classifies_https_as_url() {
         let dep = jar_dep("https://example.com/lib.jar");
         assert_eq!(
-            jar_source(&dep, "testlib", Path::new("/proj")),
+            DependencySource::from_jar(&dep, "testlib", Path::new("/proj")),
             Some(Ok(DependencySource::Url(
                 "https://example.com/lib.jar".to_string()
             )))
@@ -429,7 +438,7 @@ mod tests {
     fn dependency_jar_classifies_file_url_as_path() {
         let dep = jar_dep("file:///abs/path/lib.jar");
         assert_eq!(
-            jar_source(&dep, "otherlib", Path::new("/proj")),
+            DependencySource::from_jar(&dep, "otherlib", Path::new("/proj")),
             Some(Ok(DependencySource::Path(PathBuf::from(
                 "/abs/path/lib.jar"
             ))))
@@ -440,7 +449,7 @@ mod tests {
     fn dependency_jar_classifies_bare_path_relative_to_manifest_dir() {
         let dep = jar_dep("libs/lib.jar");
         assert_eq!(
-            jar_source(&dep, "locallib", Path::new("/proj")),
+            DependencySource::from_jar(&dep, "locallib", Path::new("/proj")),
             Some(Ok(DependencySource::Path(PathBuf::from(
                 "/proj/libs/lib.jar"
             ))))
@@ -476,7 +485,10 @@ mod tests {
     #[test]
     fn sources_source_is_none_without_a_sources_field() {
         let dep = jar_dep("libs/lib.jar");
-        assert_eq!(sources_source(&dep, "lib", Path::new("/proj")), None);
+        assert_eq!(
+            DependencySource::from_sources(&dep, "lib", Path::new("/proj")),
+            None
+        );
     }
 
     #[test]
@@ -487,7 +499,7 @@ mod tests {
             recursive: None,
         });
         assert_eq!(
-            sources_source(&dep, "lib", Path::new("/proj")),
+            DependencySource::from_sources(&dep, "lib", Path::new("/proj")),
             Some(Ok(DependencySource::Url(
                 "https://example.com/lib-sources.jar".to_string()
             )))
@@ -499,7 +511,7 @@ mod tests {
             recursive: None,
         });
         assert_eq!(
-            sources_source(&local, "lib", Path::new("/proj")),
+            DependencySource::from_sources(&local, "lib", Path::new("/proj")),
             Some(Ok(DependencySource::Path(PathBuf::from(
                 "/proj/libs/lib-sources.jar"
             ))))
@@ -537,25 +549,31 @@ mod tests {
     fn jar_and_path_forms_resolve() {
         let jar = jar_dep("libs/lib.jar");
         assert_eq!(
-            jar_source(&jar, "lib", Path::new("/proj")),
+            DependencySource::from_jar(&jar, "lib", Path::new("/proj")),
             Some(Ok(DependencySource::Path(PathBuf::from(
                 "/proj/libs/lib.jar"
             ))))
         );
-        assert_eq!(source_dependency(&jar, "lib", Path::new("/proj")), None);
+        assert_eq!(
+            SourceDependency::from_dependency(&jar, "lib", Path::new("/proj")),
+            None
+        );
 
         let path = Dependency::Path(PathDependency {
             path: "../sibling".to_string(),
             dir: Some("src".to_string()),
         });
         assert_eq!(
-            source_dependency(&path, "lib", Path::new("/proj")),
+            SourceDependency::from_dependency(&path, "lib", Path::new("/proj")),
             Some(Ok(SourceDependency::Path(PathSource {
                 root: PathBuf::from("/proj/../sibling"),
                 dir: Some("src".to_string()),
             })))
         );
-        assert_eq!(jar_source(&path, "lib", Path::new("/proj")), None);
+        assert_eq!(
+            DependencySource::from_jar(&path, "lib", Path::new("/proj")),
+            None
+        );
     }
 
     #[test]
@@ -569,10 +587,11 @@ mod tests {
                 dir: None,
             })
         };
-        let git_ref = |d: &Dependency| match source_dependency(d, "r", Path::new("/proj")) {
-            Some(Ok(SourceDependency::Git(g))) => g.reference,
-            other => panic!("expected git source, got {other:?}"),
-        };
+        let git_ref =
+            |d: &Dependency| match SourceDependency::from_dependency(d, "r", Path::new("/proj")) {
+                Some(Ok(SourceDependency::Git(g))) => g.reference,
+                other => panic!("expected git source, got {other:?}"),
+            };
         assert_eq!(git_ref(&make(None, None, None)), GitRef::Default);
         assert_eq!(
             git_ref(&make(Some("main".to_string()), None, None)),
