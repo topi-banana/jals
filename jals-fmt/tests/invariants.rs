@@ -5,16 +5,16 @@ use jals_config::fmt::{
     FnParamsLayout, HexLiteralCase, LiteralSuffixCase, SwitchCaseBody, TrailingComma,
     TypePunctuationDensity,
 };
-use jals_fmt::format_source;
-use jals_syntax::{SyntaxElement, SyntaxKind, parse};
+use jals_fmt::FormatOutput;
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind};
 use proptest::prelude::*;
 
 fn fmt(src: &str) -> String {
-    format_source(src, &Config::default()).formatted
+    FormatOutput::format_source(src, &Config::default()).formatted
 }
 
 fn fmt_with(src: &str, config: &Config) -> String {
-    format_source(src, config).formatted
+    FormatOutput::format_source(src, config).formatted
 }
 
 /// Config with comment reflow on at a narrow width, so the property tests exercise wrapping.
@@ -46,7 +46,7 @@ fn blank_line_at_block_start_config() -> Config {
 /// comment marker (`/` or `*`), in document order. Reflow only changes whitespace and
 /// markers and never splits or reorders a word, so this sequence is invariant under it.
 fn comment_skeleton(src: &str) -> String {
-    parse(src)
+    Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -63,7 +63,7 @@ fn comment_skeleton(src: &str) -> String {
 
 /// The sequence of non-trivia tokens (kind + text) of `src`.
 fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
-    parse(src)
+    Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -74,7 +74,7 @@ fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
 
 /// The comment contents of `src`, with interior whitespace normalized.
 fn comment_contents(src: &str) -> Vec<String> {
-    parse(src)
+    Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -104,7 +104,7 @@ fn param_comment_config() -> Config {
 /// with its import); this canonicalization checks the comment *multiset* — no comment is added,
 /// dropped, or mangled — independent of order.
 fn comment_multiset_no_ws(src: &str) -> Vec<String> {
-    let mut comments: Vec<String> = parse(src)
+    let mut comments: Vec<String> = Parse::parse(src)
         .syntax()
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
@@ -450,7 +450,7 @@ fn java_with_imports() -> impl Strategy<Value = String> {
 /// formatter's internal `import_sort_key` so a sorted output can be asserted.
 fn import_keys(src: &str) -> Vec<(bool, String)> {
     use jals_syntax::ast::{AstNode, SourceFile};
-    let file = SourceFile::cast(parse(src).syntax()).expect("parse yields a source file");
+    let file = SourceFile::cast(Parse::parse(src).syntax()).expect("parse yields a source file");
     file.imports()
         .map(|imp| {
             let name = imp.name().map(|n| n.text()).unwrap_or_default();
@@ -478,7 +478,7 @@ fn default_group_rank(is_static: bool, name: &str) -> usize {
 /// the formatter's `group-imports` should produce under the default `import-groups`.
 fn import_group_keys(src: &str) -> Vec<(usize, String)> {
     use jals_syntax::ast::{AstNode, SourceFile};
-    let file = SourceFile::cast(parse(src).syntax()).expect("parse yields a source file");
+    let file = SourceFile::cast(Parse::parse(src).syntax()).expect("parse yields a source file");
     file.imports()
         .map(|imp| {
             let name = imp.name().map(|n| n.text()).unwrap_or_default();
@@ -1764,7 +1764,7 @@ proptest! {
     #[test]
     fn reorder_mods_emits_canonical_order(src in java_with_modifiers()) {
         let out = fmt_with(&src, &reorder_mods_config());
-        for m in parse(&out)
+        for m in Parse::parse(&out)
             .syntax()
             .descendants()
             .filter(|n| n.kind() == SyntaxKind::MODIFIERS)

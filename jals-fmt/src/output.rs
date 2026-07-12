@@ -28,7 +28,7 @@ impl Warning {
     }
 }
 
-/// The output of [`format_source`](crate::format_source).
+/// The output of [`FormatOutput::format_source`].
 #[derive(Debug, Clone)]
 pub struct FormatOutput {
     /// The formatted source text.

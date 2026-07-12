@@ -18,61 +18,70 @@ impl LiteralSuffix {
     pub(crate) fn new(case: LiteralSuffixCase) -> Option<Self> {
         (case != LiteralSuffixCase::Preserve).then_some(Self { case })
     }
+
+    /// Normalize the case of the trailing type suffix of the numeric literal `lit` (whose token is
+    /// `kind`) per `case`, returning the rewritten text — or `None` when nothing should change (the
+    /// policy is [`Preserve`](LiteralSuffixCase::Preserve), the literal carries no suffix, or it is
+    /// already in the requested case).
+    ///
+    /// The suffix is always the literal's final character: the `l` / `L` `long` suffix of an
+    /// [`INT_LITERAL`](S::INT_LITERAL), or the `f` / `F` / `d` / `D` `float` / `double` suffix of a
+    /// [`FLOAT_LITERAL`](S::FLOAT_LITERAL). The token kind disambiguates the otherwise ambiguous
+    /// trailing letters: a final `f` / `d` on an integer literal is a hex digit (`0xabcdef`), not a
+    /// suffix, and a float literal never ends in `l` / `L`. Only that one letter is remapped; the
+    /// value, radix prefix, mantissa, and exponent are kept verbatim. The literal's text is pure
+    /// ASCII, so the final byte is the final character.
+    fn map_literal_suffix(lit: &str, kind: S, case: LiteralSuffixCase) -> Option<String> {
+        if case == LiteralSuffixCase::Preserve {
+            return None;
+        }
+        let last = *lit.as_bytes().last()?;
+        let is_suffix = match kind {
+            S::INT_LITERAL => matches!(last, b'l' | b'L'),
+            S::FLOAT_LITERAL => matches!(last, b'f' | b'F' | b'd' | b'D'),
+            _ => false,
+        };
+        if !is_suffix {
+            return None;
+        }
+        let mapped = match case {
+            LiteralSuffixCase::Upper => last.to_ascii_uppercase(),
+            LiteralSuffixCase::Lower => last.to_ascii_lowercase(),
+            LiteralSuffixCase::Preserve => unreachable!("handled above"),
+        };
+        if mapped == last {
+            return None;
+        }
+        Some(format!("{}{}", &lit[..lit.len() - 1], mapped as char))
+    }
 }
 
 impl LiteralRule for LiteralSuffix {
     fn rewrite(&self, text: &str, kind: S) -> Option<String> {
-        map_literal_suffix(text, kind, self.case)
+        Self::map_literal_suffix(text, kind, self.case)
     }
-}
-
-/// Normalize the case of the trailing type suffix of the numeric literal `lit` (whose token is
-/// `kind`) per `case`, returning the rewritten text — or `None` when nothing should change (the
-/// policy is [`Preserve`](LiteralSuffixCase::Preserve), the literal carries no suffix, or it is
-/// already in the requested case).
-///
-/// The suffix is always the literal's final character: the `l` / `L` `long` suffix of an
-/// [`INT_LITERAL`](S::INT_LITERAL), or the `f` / `F` / `d` / `D` `float` / `double` suffix of a
-/// [`FLOAT_LITERAL`](S::FLOAT_LITERAL). The token kind disambiguates the otherwise ambiguous
-/// trailing letters: a final `f` / `d` on an integer literal is a hex digit (`0xabcdef`), not a
-/// suffix, and a float literal never ends in `l` / `L`. Only that one letter is remapped; the
-/// value, radix prefix, mantissa, and exponent are kept verbatim. The literal's text is pure
-/// ASCII, so the final byte is the final character.
-fn map_literal_suffix(lit: &str, kind: S, case: LiteralSuffixCase) -> Option<String> {
-    if case == LiteralSuffixCase::Preserve {
-        return None;
-    }
-    let last = *lit.as_bytes().last()?;
-    let is_suffix = match kind {
-        S::INT_LITERAL => matches!(last, b'l' | b'L'),
-        S::FLOAT_LITERAL => matches!(last, b'f' | b'F' | b'd' | b'D'),
-        _ => false,
-    };
-    if !is_suffix {
-        return None;
-    }
-    let mapped = match case {
-        LiteralSuffixCase::Upper => last.to_ascii_uppercase(),
-        LiteralSuffixCase::Lower => last.to_ascii_lowercase(),
-        LiteralSuffixCase::Preserve => unreachable!("handled above"),
-    };
-    if mapped == last {
-        return None;
-    }
-    Some(format!("{}{}", &lit[..lit.len() - 1], mapped as char))
 }
 
 #[cfg(test)]
 mod tests {
     use jals_syntax::SyntaxKind;
 
-    use super::map_literal_suffix;
+    use super::LiteralSuffix;
+    use crate::config::LiteralSuffixCase;
     use crate::config::LiteralSuffixCase::{
         Lower as SufLower, Preserve as SufPreserve, Upper as SufUpper,
     };
 
     const INT: SyntaxKind = SyntaxKind::INT_LITERAL;
     const FLOAT: SyntaxKind = SyntaxKind::FLOAT_LITERAL;
+
+    fn map_literal_suffix(
+        lit: &str,
+        kind: SyntaxKind,
+        case: LiteralSuffixCase,
+    ) -> Option<alloc::string::String> {
+        LiteralSuffix::map_literal_suffix(lit, kind, case)
+    }
 
     #[test]
     fn literal_suffix_preserve_is_a_no_op() {

@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 //! A pretty-printer for JALS/Java source, driven by the `jals-syntax` CST.
 //!
-//! [`format_source`] parses `src`, lowers the lossless CST into a Wadler/Prettier-style
+//! [`FormatOutput::format_source`] parses `src`, lowers the lossless CST into a Wadler/Prettier-style
 //! document, and renders it back to text using a [`Config`]. It never panics: a source
 //! with syntax errors is still formatted best-effort (the CST is lossless), and the
 //! errors are surfaced as [`Warning`]s.
@@ -45,19 +45,21 @@ use config::Config;
 
 pub use output::{FormatOutput, Warning};
 
-/// Format `src` according to `config`.
-pub fn format_source(src: &str, config: &Config) -> FormatOutput {
-    let parse = jals_syntax::parse(src);
-    let root = parse.syntax();
-    let doc = lower::lower_root(&root, config);
-    let formatted = render::print(&doc, config, src);
-    let warnings = parse
-        .errors()
-        .iter()
-        .map(Warning::from_syntax_error)
-        .collect();
-    FormatOutput {
-        formatted,
-        warnings,
+impl FormatOutput {
+    /// Format `src` according to `config`.
+    pub fn format_source(src: &str, config: &Config) -> Self {
+        let parse = jals_syntax::Parse::parse(src);
+        let root = parse.syntax();
+        let doc = lower::Ctx::lower_root(&root, config);
+        let formatted = render::Out::print(&doc, config, src);
+        let warnings = parse
+            .errors()
+            .iter()
+            .map(Warning::from_syntax_error)
+            .collect();
+        Self {
+            formatted,
+            warnings,
+        }
     }
 }

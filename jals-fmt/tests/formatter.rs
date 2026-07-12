@@ -10,14 +10,14 @@ use jals_config::fmt::{
     ControlBraceStyle, FloatLiteralTrailingZero, FnParamsLayout, HexLiteralCase, IndentStyle,
     LineEnding, LiteralSuffixCase, SwitchCaseBody, TrailingComma, TypePunctuationDensity,
 };
-use jals_fmt::format_source;
+use jals_fmt::FormatOutput;
 
 fn fmt(src: &str) -> String {
-    format_source(src, &Config::default()).formatted
+    FormatOutput::format_source(src, &Config::default()).formatted
 }
 
 fn fmt_with(src: &str, config: &Config) -> String {
-    format_source(src, config).formatted
+    FormatOutput::format_source(src, config).formatted
 }
 
 fn check(src: &str, expected: Expect) {
@@ -31,7 +31,7 @@ fn fmt_wrapped(src: &str, comment_width: usize) -> String {
         comment_width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_wrapped(src: &str, comment_width: usize, expected: Expect) {
@@ -44,7 +44,7 @@ fn fmt_param_comments(src: &str) -> String {
         normalize_parameter_comments: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_param_comments(src: &str, expected: Expect) {
@@ -57,7 +57,7 @@ fn fmt_reorder(src: &str) -> String {
         reorder_imports: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_reorder(src: &str, expected: Expect) {
@@ -70,7 +70,7 @@ fn fmt_group(src: &str) -> String {
         group_imports: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_group(src: &str, expected: Expect) {
@@ -87,7 +87,7 @@ fn fmt_group_with(src: &str, import_groups: &[&str]) -> String {
             .collect(),
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// Format with `annotation-placement = expanded` (each leading annotation on its own line).
@@ -96,7 +96,7 @@ fn fmt_expanded(src: &str) -> String {
         annotation_placement: AnnotationPlacement::Expanded,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn fmt_hug(src: &str) -> String {
         closing_paren: ClosingParen::Hug,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_hug(src: &str, expected: Expect) {
@@ -701,7 +701,7 @@ fn fmt_next_line(src: &str) -> String {
         brace_style: BraceStyle::NextLine,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -794,7 +794,7 @@ fn fmt_no_empty_single_line(src: &str) -> String {
         empty_item_single_line: false,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// Format with `empty-item-single-line = false` and `brace-style = next-line`.
@@ -804,7 +804,7 @@ fn fmt_no_empty_single_line_next_line(src: &str) -> String {
         brace_style: BraceStyle::NextLine,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1136,7 +1136,7 @@ fn fmt_fn_single_line(src: &str) -> String {
         fn_single_line: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1193,7 +1193,7 @@ fn fn_single_line_keeps_overflowing_body_multiline() {
         }
     "]]
     .assert_eq(
-        &format_source(
+        &FormatOutput::format_source(
             "class C{int wide(){return aVeryLongMethodCallThatOverflows();}}",
             &cfg,
         )
@@ -1280,7 +1280,7 @@ fn fn_single_line_next_line_collapses_when_fits_else_opens_brace() {
         }
     "]]
     .assert_eq(
-        &format_source(
+        &FormatOutput::format_source(
             "class C{int foo(){return 1;}int wide(){return aVeryLongMethodCallThatOverflows();}}",
             &cfg,
         )
@@ -1330,7 +1330,7 @@ fn fmt_force_multiline_blocks(src: &str) -> String {
         force_multiline_blocks: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1410,7 +1410,7 @@ fn force_multiline_blocks_overrides_fn_single_line() {
             }
         }
     "]]
-    .assert_eq(&format_source("class C{int foo(){return 1;}}", &cfg).formatted);
+    .assert_eq(&FormatOutput::format_source("class C{int foo(){return 1;}}", &cfg).formatted);
 }
 
 #[test]
@@ -1430,7 +1430,7 @@ fn force_multiline_blocks_next_line_empty_body_opens_brace() {
             }
         }
     "]]
-    .assert_eq(&format_source("class C{void m(){}}", &cfg).formatted);
+    .assert_eq(&FormatOutput::format_source("class C{void m(){}}", &cfg).formatted);
 }
 
 #[test]
@@ -1451,7 +1451,7 @@ fn force_multiline_blocks_control_next_line_empty_block_opens_brace() {
             }
         }
     "]]
-    .assert_eq(&format_source("class C{void m(){if(true){}}}", &cfg).formatted);
+    .assert_eq(&FormatOutput::format_source("class C{void m(){if(true){}}}", &cfg).formatted);
 }
 
 #[test]
@@ -1485,7 +1485,7 @@ fn fmt_ctrl_next_line(src: &str) -> String {
         control_brace_style: ControlBraceStyle::NextLine,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// Format in full Allman: both `brace-style` and `control-brace-style` break onto their lines.
@@ -1495,7 +1495,7 @@ fn fmt_full_allman(src: &str) -> String {
         control_brace_style: ControlBraceStyle::NextLine,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1630,7 +1630,7 @@ fn fmt_le(src: &str, line_ending: LineEnding) -> String {
         line_ending,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// Every `\n` in `s` is part of a `\r\n` (no bare LF slipped through).
@@ -1709,7 +1709,7 @@ fn fmt_chain(src: &str, chain_width: usize) -> String {
         chain_width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1836,7 +1836,7 @@ fn fmt_fn_call(src: &str, fn_call_width: usize) -> String {
         fn_call_width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1899,7 +1899,7 @@ fn fmt_array_init(src: &str, array_width: usize) -> String {
         array_width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -1955,7 +1955,7 @@ fn fmt_trailing(src: &str, trailing_comma: TrailingComma) -> String {
         trailing_comma,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// Format with a `trailing-comma` policy and a narrow `array-width`, so the initializer breaks
@@ -1966,7 +1966,7 @@ fn fmt_trailing_narrow(src: &str, trailing_comma: TrailingComma) -> String {
         array_width: 10,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -2488,7 +2488,7 @@ fn group_imports_independent_of_reorder() {
         reorder_imports: false,
         ..Config::default()
     };
-    let out = format_source("import b.B;import a.A;class C{}", &cfg).formatted;
+    let out = FormatOutput::format_source("import b.B;import a.A;class C{}", &cfg).formatted;
     expect![[r"
         import a.A;
         import b.B;
@@ -2549,7 +2549,7 @@ fn group_imports_overrides_reorder() {
             reorder_imports: true,
             ..Config::default()
         };
-        format_source(src, &cfg).formatted
+        FormatOutput::format_source(src, &cfg).formatted
     };
     assert_eq!(group_only, both);
 }
@@ -2564,7 +2564,7 @@ fn fmt_binop(src: &str, max_width: usize, binop_separator: BinopSeparator) -> St
         binop_separator,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -2804,7 +2804,7 @@ fn binary_inside_broken_arg_list_refits_at_its_column() {
         }
     "]]
     .assert_eq(
-        &format_source(
+        &FormatOutput::format_source(
             "class A{void m(){process(alphaValue+betaValue,gammaValue);}}",
             &cfg,
         )
@@ -2835,7 +2835,7 @@ fn fmt_binop_layout(
         binop_layout,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -2904,7 +2904,7 @@ fn fmt_overflow(src: &str) -> String {
         overflow_delimited_expr: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_overflow(src: &str, expected: Expect) {
@@ -3237,7 +3237,7 @@ fn fmt_ternary(src: &str, width: usize) -> String {
         single_line_if_else_max_width: width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn fmt_ternary_back(src: &str, width: usize) -> String {
@@ -3246,7 +3246,7 @@ fn fmt_ternary_back(src: &str, width: usize) -> String {
         binop_separator: BinopSeparator::Back,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -3630,7 +3630,7 @@ fn fmt_params(src: &str, layout: FnParamsLayout) -> String {
         fn_params_layout: layout,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// Format with a parameter-list layout and a narrow `max-width` to force wrapping.
@@ -3640,7 +3640,7 @@ fn fmt_params_narrow(src: &str, layout: FnParamsLayout, max_width: usize) -> Str
         max_width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// A four-parameter method whose flat signature fits the default width but not a narrow one.
@@ -3860,7 +3860,7 @@ fn fmt_reorder_mods(src: &str) -> String {
         reorder_modifiers: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_reorder_mods(src: &str, expected: Expect) {
@@ -3993,7 +3993,7 @@ fn fmt_annotation_placement(src: &str, placement: AnnotationPlacement) -> String
         annotation_placement: placement,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_expanded(src: &str, expected: Expect) {
@@ -4212,7 +4212,7 @@ fn fmt_reorder_expanded(src: &str) -> String {
         annotation_placement: AnnotationPlacement::Expanded,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -4591,7 +4591,7 @@ fn fmt_cont(src: &str, n: usize) -> String {
         continuation_indent: Some(n),
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn fmt_cont_narrow(src: &str, n: usize, max_width: usize) -> String {
@@ -4600,7 +4600,7 @@ fn fmt_cont_narrow(src: &str, n: usize, max_width: usize) -> String {
         max_width,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 #[test]
@@ -4761,7 +4761,7 @@ fn continuation_indent_ignored_in_tab_style() {
         max_width: 40,
         ..Config::default()
     };
-    let out = format_source(
+    let out = FormatOutput::format_source(
         "class A{void m(){result=alphaOperandName+betaOperandName+gammaName;}}",
         &cfg,
     )
@@ -4873,7 +4873,7 @@ fn fmt_inline_block(src: &str) -> String {
         inline_block_comments: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_inline_block(src: &str, expected: Expect) {
@@ -4986,7 +4986,7 @@ fn fmt_tabular(src: &str) -> String {
         tabular_array_initializers: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_tabular(src: &str, expected: Expect) {
@@ -5103,7 +5103,7 @@ fn fmt_switch_nl(src: &str) -> String {
         switch_expression_on_new_line: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_switch_nl(src: &str, expected: Expect) {
@@ -5222,7 +5222,7 @@ fn fmt_wrap_case(src: &str) -> String {
         wrap_case_labels: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_wrap_case(src: &str, expected: Expect) {
@@ -5514,7 +5514,7 @@ fn fmt_case_body(src: &str, mode: SwitchCaseBody) -> String {
         switch_case_body: mode,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 /// A legacy (colon-form) switch exercising a single-statement case, a multi-statement case, a
@@ -5616,7 +5616,7 @@ fn switch_case_body_always_indents_label_and_body_comments() {
           }
         }
     "#]]
-    .assert_eq(&format_source(src, &cfg).formatted);
+    .assert_eq(&FormatOutput::format_source(src, &cfg).formatted);
 }
 
 #[test]
@@ -5641,7 +5641,7 @@ fn fmt_blank_line_at_block_start(src: &str) -> String {
         blank_line_at_block_start: true,
         ..Config::default()
     };
-    format_source(src, &cfg).formatted
+    FormatOutput::format_source(src, &cfg).formatted
 }
 
 fn check_blank_line_at_block_start(src: &str, expected: Expect) {

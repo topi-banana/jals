@@ -25,10 +25,8 @@ use alloc::vec::Vec;
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{AnnotationPlacement, Config};
-use crate::doc::{Doc, concat, hardline};
-use crate::lower::{
-    Ctx, first_sig_token, last_sig_token, lower, lower_elements, lower_generic, sep, tok,
-};
+use crate::doc::Doc;
+use crate::lower::Ctx;
 use crate::rules::StructuralRule;
 
 /// The `reorder-modifiers` / `annotation-placement` rule: owns lowering of a `MODIFIERS` node.
@@ -36,341 +34,369 @@ pub(crate) struct ModifierRule;
 
 impl StructuralRule for ModifierRule {
     fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-        lower_modifiers(node, ctx)
+        Self::lower_modifiers(node, ctx)
     }
 }
 
-/// The canonical rank of a keyword modifier, or `None` for any other element (annotations and
-/// anything else stay fixed, hoisted to the front). The order follows the JLS recommended
-/// modifier order (§8.1.1 / §8.3.1 / §8.4.3) as codified by Checkstyle's `ModifierOrder` and
-/// the Google Java Style Guide. `SEALED_KW` is a token (promoted from `IDENT` only inside the
-/// `modifiers()` rule) and `NON_SEALED_KW` is a node; both rank uniformly via `SyntaxKind`.
-const fn rank_of(kind: S) -> Option<usize> {
-    Some(match kind {
-        S::PUBLIC_KW => 0,
-        S::PROTECTED_KW => 1,
-        S::PRIVATE_KW => 2,
-        S::ABSTRACT_KW => 3,
-        S::DEFAULT_KW => 4,
-        S::STATIC_KW => 5,
-        S::SEALED_KW => 6,
-        S::NON_SEALED_KW => 7,
-        S::FINAL_KW => 8,
-        S::TRANSIENT_KW => 9,
-        S::VOLATILE_KW => 10,
-        S::SYNCHRONIZED_KW => 11,
-        S::NATIVE_KW => 12,
-        S::STRICTFP_KW => 13,
-        _ => return None,
-    })
-}
-
-/// Whether a `TYPE` node immediately follows this `MODIFIERS` node — i.e. the declaration carries
-/// a type whose leading annotations sit in *type-use* position. `rowan`'s [`SyntaxNode::next_sibling`]
-/// skips tokens, so this is `Some(TYPE)` for a method (its return type, including `void` / primitives,
-/// is a `TYPE` node), a field, a local variable, a parameter, and a record component; it is *not*
-/// `TYPE` for a constructor (next sibling is the `PARAM_LIST`), a type declaration (a `CLASS_BODY`
-/// etc.), an initializer (a `BLOCK`), or a generic method whose `TYPE_PARAMS` come first. In those
-/// type-less / type-params-first cases there is no trailing type-use run, so every annotation is a
-/// declaration annotation — as google-java-format also formats them.
-fn type_node_follows(node: &SyntaxNode) -> bool {
-    node.next_sibling().map(|n| n.kind()) == Some(S::TYPE)
-}
-
-/// The index at which the trailing *type-use* annotation run begins in `els` (a `MODIFIERS` node's
-/// significant elements, in emitted order): the maximal run of trailing `ANNOTATION`s that sit after
-/// the last keyword modifier and directly before the type. These annotate the type, so they stay
-/// inline and are never hoisted — the position-based half of google-java-format's split that a
-/// syntactic formatter can reproduce. Two cases yield an empty run (`els.len()`): no type follows
-/// (`type_follows == false`, e.g. a constructor — no type-use position exists), and a run with no
-/// preceding keyword modifier (the whole list, which gjf classifies by `@Target`; see the body).
-fn trailing_type_use_start(els: &[SyntaxElement], type_follows: bool) -> usize {
-    if !type_follows {
-        return els.len();
+impl ModifierRule {
+    /// The canonical rank of a keyword modifier, or `None` for any other element (annotations and
+    /// anything else stay fixed, hoisted to the front). The order follows the JLS recommended
+    /// modifier order (§8.1.1 / §8.3.1 / §8.4.3) as codified by Checkstyle's `ModifierOrder` and
+    /// the Google Java Style Guide. `SEALED_KW` is a token (promoted from `IDENT` only inside the
+    /// `modifiers()` rule) and `NON_SEALED_KW` is a node; both rank uniformly via `SyntaxKind`.
+    const fn rank_of(kind: S) -> Option<usize> {
+        Some(match kind {
+            S::PUBLIC_KW => 0,
+            S::PROTECTED_KW => 1,
+            S::PRIVATE_KW => 2,
+            S::ABSTRACT_KW => 3,
+            S::DEFAULT_KW => 4,
+            S::STATIC_KW => 5,
+            S::SEALED_KW => 6,
+            S::NON_SEALED_KW => 7,
+            S::FINAL_KW => 8,
+            S::TRANSIENT_KW => 9,
+            S::VOLATILE_KW => 10,
+            S::SYNCHRONIZED_KW => 11,
+            S::NATIVE_KW => 12,
+            S::STRICTFP_KW => 13,
+            _ => return None,
+        })
     }
-    let mut i = els.len();
-    while i > 0 && els[i - 1].kind() == S::ANNOTATION {
-        i -= 1;
+
+    /// Whether a `TYPE` node immediately follows this `MODIFIERS` node — i.e. the declaration
+    /// carries a type whose leading annotations sit in *type-use* position. `rowan`'s
+    /// [`SyntaxNode::next_sibling`] skips tokens, so this is `Some(TYPE)` for a method (its return
+    /// type, including `void` / primitives, is a `TYPE` node), a field, a local variable, a
+    /// parameter, and a record component; it is *not* `TYPE` for a constructor (next sibling is the
+    /// `PARAM_LIST`), a type declaration (a `CLASS_BODY` etc.), an initializer (a `BLOCK`), or a
+    /// generic method whose `TYPE_PARAMS` come first. In those type-less / type-params-first cases
+    /// there is no trailing type-use run, so every annotation is a declaration annotation — as
+    /// google-java-format also formats them.
+    fn type_node_follows(node: &SyntaxNode) -> bool {
+        node.next_sibling().map(|n| n.kind()) == Some(S::TYPE)
     }
-    // Only a run *after* a keyword modifier is recognized as type-use position. A run with no
-    // preceding keyword (the whole list, e.g. `@Override void m()` or `@Nullable Foo handle()`)
-    // is syntactically a declaration annotation; google-java-format keeps it inline only when its
-    // `@Target` is `TYPE_USE`, which a purely syntactic formatter cannot resolve, so those keep
-    // the declaration-annotation behavior (break under `expanded`, hoist under `reorder`).
-    if i == 0 { els.len() } else { i }
-}
 
-/// Reorder a `MODIFIERS` node's elements: the leading declaration annotations (and any non-modifier
-/// element) first in their original order, then the keyword modifiers in canonical order, then the
-/// trailing *type-use* annotation run left untouched at the end. `type_follows` reports whether a
-/// type follows the modifiers (see [`type_node_follows`]); when it does, the trailing annotation run
-/// directly before the type annotates the type and is kept in place rather than hoisted to the front.
-/// The pure planning step, separate from `Doc` emission so it is unit-testable without rendering.
-///
-/// Every input element is returned exactly once (the multiset is preserved). The sort is
-/// **stable**, so equal-rank duplicates keep their order and an already-canonical list is
-/// returned unchanged — which keeps formatting idempotent (the trailing run is at a fixed point
-/// because it sits after every keyword and so is never re-classified as leading).
-pub(crate) fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
-    let split = trailing_type_use_start(&els, type_follows);
-    let mut head = els;
-    let trailing = head.split_off(split);
-    let (mut mods, front): (Vec<SyntaxElement>, Vec<SyntaxElement>) =
-        head.into_iter().partition(|e| rank_of(e.kind()).is_some());
-    mods.sort_by_key(|e| rank_of(e.kind()).unwrap_or(usize::MAX));
-    let mut out = front;
-    out.extend(mods);
-    out.extend(trailing);
-    out
-}
+    /// The index at which the trailing *type-use* annotation run begins in `els` (a `MODIFIERS`
+    /// node's significant elements, in emitted order): the maximal run of trailing `ANNOTATION`s
+    /// that sit after the last keyword modifier and directly before the type. These annotate the
+    /// type, so they stay inline and are never hoisted — the position-based half of
+    /// google-java-format's split that a syntactic formatter can reproduce. Two cases yield an empty
+    /// run (`els.len()`): no type follows (`type_follows == false`, e.g. a constructor — no type-use
+    /// position exists), and a run with no preceding keyword modifier (the whole list, which gjf
+    /// classifies by `@Target`; see the body).
+    fn trailing_type_use_start(els: &[SyntaxElement], type_follows: bool) -> usize {
+        if !type_follows {
+            return els.len();
+        }
+        let mut i = els.len();
+        while i > 0 && els[i - 1].kind() == S::ANNOTATION {
+            i -= 1;
+        }
+        // Only a run *after* a keyword modifier is recognized as type-use position. A run with no
+        // preceding keyword (the whole list, e.g. `@Override void m()` or `@Nullable Foo handle()`)
+        // is syntactically a declaration annotation; google-java-format keeps it inline only when
+        // its `@Target` is `TYPE_USE`, which a purely syntactic formatter cannot resolve, so those
+        // keep the declaration-annotation behavior (break under `expanded`, hoist under `reorder`).
+        if i == 0 { els.len() } else { i }
+    }
 
-/// The first significant token of an element: the first non-trivia token of a node, or the
-/// token itself.
-fn element_first_token(el: &SyntaxElement) -> Option<SyntaxToken> {
-    el.as_node()
-        .map_or_else(|| el.as_token().cloned(), first_sig_token)
-}
+    /// Reorder a `MODIFIERS` node's elements: the leading declaration annotations (and any
+    /// non-modifier element) first in their original order, then the keyword modifiers in canonical
+    /// order, then the trailing *type-use* annotation run left untouched at the end. `type_follows`
+    /// reports whether a type follows the modifiers (see [`Self::type_node_follows`]); when it does,
+    /// the trailing annotation run directly before the type annotates the type and is kept in place
+    /// rather than hoisted to the front. The pure planning step, separate from `Doc` emission so it
+    /// is unit-testable without rendering.
+    ///
+    /// Every input element is returned exactly once (the multiset is preserved). The sort is
+    /// **stable**, so equal-rank duplicates keep their order and an already-canonical list is
+    /// returned unchanged — which keeps formatting idempotent (the trailing run is at a fixed point
+    /// because it sits after every keyword and so is never re-classified as leading).
+    pub(crate) fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
+        let split = Self::trailing_type_use_start(&els, type_follows);
+        let mut head = els;
+        let trailing = head.split_off(split);
+        let (mut mods, front): (Vec<SyntaxElement>, Vec<SyntaxElement>) = head
+            .into_iter()
+            .partition(|e| Self::rank_of(e.kind()).is_some());
+        mods.sort_by_key(|e| Self::rank_of(e.kind()).unwrap_or(usize::MAX));
+        let mut out = front;
+        out.extend(mods);
+        out.extend(trailing);
+        out
+    }
 
-/// The last significant token of an element: the last non-trivia token of a node, or the token
-/// itself.
-fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
-    el.as_node()
-        .map_or_else(|| el.as_token().cloned(), last_sig_token)
-}
+    /// The first significant token of an element: the first non-trivia token of a node, or the
+    /// token itself.
+    fn element_first_token(el: &SyntaxElement) -> Option<SyntaxToken> {
+        el.as_node()
+            .map_or_else(|| el.as_token().cloned(), Ctx::first_sig_token)
+    }
 
-/// Whether reordering this `MODIFIERS` node is safe — i.e. it sits in a genuine declaration
-/// context and is not poisoned by a preceding annotation-absorbing token. In valid code a
-/// `MODIFIERS` node always has one of these parents. An error-recovery artifact does not: e.g.
-/// `<public@` parses a stray `MODIFIERS` (holding `public` and an incomplete `@`) directly under
-/// `SOURCE_FILE`, next to a `TYPE_PARAMS` sibling. Hoisting the annotation to the front there
-/// changes the significant-token *sequence* such that re-parsing the output regroups the `@` into
-/// the preceding `<…>` as a type-parameter annotation — a different tree, so the layout never
-/// reaches a fixed point. Reordering is confined to these contexts so the multiset-preserving
-/// relaxation never costs idempotency; elsewhere the node emits in source order (the
-/// byte-for-byte-stable baseline).
-fn is_reorderable_context(node: &SyntaxNode) -> bool {
-    matches!(
-        node.parent().map(|p| p.kind()),
-        Some(
-            S::CLASS_DECL
-                | S::INTERFACE_DECL
-                | S::ENUM_DECL
-                | S::RECORD_DECL
-                | S::ANNOTATION_TYPE_DECL
-                | S::MODULE_DECL
-                | S::METHOD_DECL
-                | S::CONSTRUCTOR_DECL
-                | S::FIELD_DECL
-                | S::INITIALIZER
-                | S::LOCAL_VAR_DECL
-                | S::PARAM
-                | S::FOR_EACH_STMT
-                | S::RESOURCE
-                | S::CATCH_CLAUSE
-        )
-    ) && !preceded_by_dangling_lt(node)
-}
+    /// The last significant token of an element: the last non-trivia token of a node, or the token
+    /// itself.
+    fn element_last_token(el: &SyntaxElement) -> Option<SyntaxToken> {
+        el.as_node()
+            .map_or_else(|| el.as_token().cloned(), Ctx::last_sig_token)
+    }
 
-/// Whether the significant token immediately preceding this `MODIFIERS` run is a `<` (`LT`). Even
-/// inside a genuine declaration, an error-recovery `<` directly before the modifiers (a dangling
-/// `TYPE_PARAMS` opener, as in `<public@x x`, where `public @x` lands in a real `FIELD_DECL` next
-/// to a stray `<` sibling) would absorb a hoisted leading `@` into the preceding `<…>` on re-parse
-/// as a type-parameter annotation — the same idempotency trap [`is_reorderable_context`] guards
-/// against. A `@` is only ever legal directly after a `<` in type-parameter / type-use position,
-/// so a preceding `<` fully characterizes this absorber; in valid code a declaration's modifiers
-/// are never preceded by a bare `<`, so this never fires there.
-///
-/// Sibling traversal is used rather than [`SyntaxToken::prev_token`], which does not cross the
-/// empty error-recovery nodes (an empty `TYPE_PARAM`) that produce exactly this shape.
-fn preceded_by_dangling_lt(node: &SyntaxNode) -> bool {
-    // Walk back from the modifiers' owning declaration to the nearest preceding significant token.
-    let mut cursor = node.parent().and_then(|decl| decl.prev_sibling_or_token());
-    while let Some(el) = cursor {
-        match el {
-            SyntaxElement::Token(t) => {
-                if !t.kind().is_trivia() {
-                    return t.kind() == S::LT;
+    /// Whether reordering this `MODIFIERS` node is safe — i.e. it sits in a genuine declaration
+    /// context and is not poisoned by a preceding annotation-absorbing token. In valid code a
+    /// `MODIFIERS` node always has one of these parents. An error-recovery artifact does not: e.g.
+    /// `<public@` parses a stray `MODIFIERS` (holding `public` and an incomplete `@`) directly under
+    /// `SOURCE_FILE`, next to a `TYPE_PARAMS` sibling. Hoisting the annotation to the front there
+    /// changes the significant-token *sequence* such that re-parsing the output regroups the `@`
+    /// into the preceding `<…>` as a type-parameter annotation — a different tree, so the layout
+    /// never reaches a fixed point. Reordering is confined to these contexts so the
+    /// multiset-preserving relaxation never costs idempotency; elsewhere the node emits in source
+    /// order (the byte-for-byte-stable baseline).
+    fn is_reorderable_context(node: &SyntaxNode) -> bool {
+        matches!(
+            node.parent().map(|p| p.kind()),
+            Some(
+                S::CLASS_DECL
+                    | S::INTERFACE_DECL
+                    | S::ENUM_DECL
+                    | S::RECORD_DECL
+                    | S::ANNOTATION_TYPE_DECL
+                    | S::MODULE_DECL
+                    | S::METHOD_DECL
+                    | S::CONSTRUCTOR_DECL
+                    | S::FIELD_DECL
+                    | S::INITIALIZER
+                    | S::LOCAL_VAR_DECL
+                    | S::PARAM
+                    | S::FOR_EACH_STMT
+                    | S::RESOURCE
+                    | S::CATCH_CLAUSE
+            )
+        ) && !Self::preceded_by_dangling_lt(node)
+    }
+
+    /// Whether the significant token immediately preceding this `MODIFIERS` run is a `<` (`LT`).
+    /// Even inside a genuine declaration, an error-recovery `<` directly before the modifiers (a
+    /// dangling `TYPE_PARAMS` opener, as in `<public@x x`, where `public @x` lands in a real
+    /// `FIELD_DECL` next to a stray `<` sibling) would absorb a hoisted leading `@` into the
+    /// preceding `<…>` on re-parse as a type-parameter annotation — the same idempotency trap
+    /// [`Self::is_reorderable_context`] guards against. A `@` is only ever legal directly after a `<`
+    /// in type-parameter / type-use position, so a preceding `<` fully characterizes this absorber;
+    /// in valid code a declaration's modifiers are never preceded by a bare `<`, so this never fires
+    /// there.
+    ///
+    /// Sibling traversal is used rather than [`SyntaxToken::prev_token`], which does not cross the
+    /// empty error-recovery nodes (an empty `TYPE_PARAM`) that produce exactly this shape.
+    fn preceded_by_dangling_lt(node: &SyntaxNode) -> bool {
+        // Walk back from the modifiers' owning declaration to the nearest preceding significant
+        // token.
+        let mut cursor = node.parent().and_then(|decl| decl.prev_sibling_or_token());
+        while let Some(el) = cursor {
+            match el {
+                SyntaxElement::Token(t) => {
+                    if !t.kind().is_trivia() {
+                        return t.kind() == S::LT;
+                    }
+                    cursor = t.prev_sibling_or_token();
                 }
-                cursor = t.prev_sibling_or_token();
+                SyntaxElement::Node(n) => match Ctx::last_sig_token(&n) {
+                    Some(t) => return t.kind() == S::LT,
+                    None => cursor = n.prev_sibling_or_token(),
+                },
             }
-            SyntaxElement::Node(n) => match last_sig_token(&n) {
-                Some(t) => return t.kind() == S::LT,
-                None => cursor = n.prev_sibling_or_token(),
-            },
         }
+        false
     }
-    false
-}
 
-/// The first and last significant tokens of a `MODIFIERS` node *as emitted*. With
-/// `reorder-modifiers` off (or in a non-reorderable error-recovery context) these are the
-/// structural [`first_sig_token`] / [`last_sig_token`]; with it on, [`plan`] may move an
-/// annotation to the front (or a keyword to the end), so the emitted boundary tokens differ from
-/// the structural ones.
-///
-/// The parent node uses these (rather than the structural tokens) to compute the separators
-/// around the `MODIFIERS` node, keeping the boundary spacing consistent with what is actually
-/// emitted: when [`plan`] hoists an annotation that was structurally last to the front, the
-/// emitted-last token becomes a keyword, and the parent's trailing separator must follow the
-/// keyword (not the structural-last `@`) so the spacing is the same on every pass. Reordering is
-/// confined to genuine declaration contexts ([`is_reorderable_context`]), so this only ever runs
-/// where the boundary token is followed by ordinary, space-separated declaration syntax.
-pub(crate) fn emitted_boundary_tokens(
-    node: &SyntaxNode,
-    cfg: &Config,
-) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
-    if !cfg.reorder_modifiers || !is_reorderable_context(node) {
-        return (first_sig_token(node), last_sig_token(node));
+    /// The first and last significant tokens of a `MODIFIERS` node *as emitted*. With
+    /// `reorder-modifiers` off (or in a non-reorderable error-recovery context) these are the
+    /// structural [`Ctx::first_sig_token`] / [`Ctx::last_sig_token`]; with it on, [`Self::plan`] may
+    /// move an annotation to the front (or a keyword to the end), so the emitted boundary tokens
+    /// differ from the structural ones.
+    ///
+    /// The parent node uses these (rather than the structural tokens) to compute the separators
+    /// around the `MODIFIERS` node, keeping the boundary spacing consistent with what is actually
+    /// emitted: when [`Self::plan`] hoists an annotation that was structurally last to the front,
+    /// the emitted-last token becomes a keyword, and the parent's trailing separator must follow the
+    /// keyword (not the structural-last `@`) so the spacing is the same on every pass. Reordering is
+    /// confined to genuine declaration contexts ([`Self::is_reorderable_context`]), so this only
+    /// ever runs where the boundary token is followed by ordinary, space-separated declaration
+    /// syntax.
+    pub(crate) fn emitted_boundary_tokens(
+        node: &SyntaxNode,
+        cfg: &Config,
+    ) -> (Option<SyntaxToken>, Option<SyntaxToken>) {
+        if !cfg.reorder_modifiers || !Self::is_reorderable_context(node) {
+            return (Ctx::first_sig_token(node), Ctx::last_sig_token(node));
+        }
+        let els: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|e| !e.kind().is_trivia())
+            .collect();
+        let planned = Self::plan(els, Self::type_node_follows(node));
+        let first = planned.first().and_then(Self::element_first_token);
+        let last = planned.last().and_then(Self::element_last_token);
+        (first, last)
     }
-    let els: Vec<SyntaxElement> = node
-        .children_with_tokens()
-        .filter(|e| !e.kind().is_trivia())
-        .collect();
-    let planned = plan(els, type_node_follows(node));
-    let first = planned.first().and_then(element_first_token);
-    let last = planned.last().and_then(element_last_token);
-    (first, last)
-}
 
-/// The declaration-level targets whose leading declaration-annotation run
-/// `annotation-placement = expanded` breaks onto its own line. A parameter's `MODIFIERS` (parent
-/// `PARAM`) is deliberately excluded so parameter annotations stay inline; enum-constant /
-/// type-parameter annotations never live in a `MODIFIERS` node and so never reach this code at
-/// all. A type-use annotation written directly before the type *does* land in `MODIFIERS` (the
-/// lexer-driven `modifiers()` rule is greedy), but [`lower_modifiers_with_breaks`] keeps that
-/// trailing run inline regardless of this predicate.
-fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
-    matches!(
-        node.parent().map(|p| p.kind()),
-        Some(
-            S::CLASS_DECL
-                | S::INTERFACE_DECL
-                | S::ENUM_DECL
-                | S::RECORD_DECL
-                | S::ANNOTATION_TYPE_DECL
-                | S::METHOD_DECL
-                | S::CONSTRUCTOR_DECL
-                | S::FIELD_DECL
-                | S::INITIALIZER
-                | S::LOCAL_VAR_DECL
+    /// The declaration-level targets whose leading declaration-annotation run
+    /// `annotation-placement = expanded` breaks onto its own line. A parameter's `MODIFIERS` (parent
+    /// `PARAM`) is deliberately excluded so parameter annotations stay inline; enum-constant /
+    /// type-parameter annotations never live in a `MODIFIERS` node and so never reach this code at
+    /// all. A type-use annotation written directly before the type *does* land in `MODIFIERS` (the
+    /// lexer-driven `modifiers()` rule is greedy), but [`Self::lower_modifiers_with_breaks`] keeps
+    /// that trailing run inline regardless of this predicate.
+    fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
+        matches!(
+            node.parent().map(|p| p.kind()),
+            Some(
+                S::CLASS_DECL
+                    | S::INTERFACE_DECL
+                    | S::ENUM_DECL
+                    | S::RECORD_DECL
+                    | S::ANNOTATION_TYPE_DECL
+                    | S::METHOD_DECL
+                    | S::CONSTRUCTOR_DECL
+                    | S::FIELD_DECL
+                    | S::INITIALIZER
+                    | S::LOCAL_VAR_DECL
+            )
         )
-    )
-}
-
-/// Lower a `MODIFIERS` node. With `reorder-modifiers` off and `annotation-placement = compact`
-/// this is exactly [`lower_generic`] (byte-identical to the prior behavior). With
-/// `reorder-modifiers` on, the node's significant children are reordered by [`plan`]; with
-/// `annotation-placement = expanded` on a declaration-level target, the leading annotations are
-/// broken onto their own lines by [`lower_modifiers_with_breaks`].
-///
-/// The reorder is confined to the `MODIFIERS` subtree; the rowan tree is unchanged. For valid
-/// code the boundary spacing is order-invariant (any modifier/annotation end takes a single
-/// space before the following type token), but malformed input can put an annotation
-/// structurally last while reordering emits a keyword last, desyncing the parent's trailing
-/// separator. So the parent computes the separators around this node from
-/// [`emitted_boundary_tokens`] (the emitted-order first / last token), not the structural ones,
-/// which keeps idempotency. When the last emitted part is a forced break, that trailing parent
-/// space is trimmed by the renderer.
-pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-    let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
-    // The hot path: nothing to reorder and no annotation to break out.
-    if !ctx.cfg.reorder_modifiers && !expanded {
-        return lower_generic(node, ctx);
     }
-    // Whether a type follows the modifiers; both the reorder and the break step keep the trailing
-    // type-use annotation run (directly before that type) inline instead of treating it as a
-    // declaration annotation.
-    let type_follows = type_node_follows(node);
-    let els: Vec<SyntaxElement> = node
-        .children_with_tokens()
-        .filter(|e| !e.kind().is_trivia())
-        .collect();
-    // Reorder only in a genuine declaration context; a stray `MODIFIERS` from error recovery is
-    // emitted in source order so reordering can't change the re-parse and break idempotency
-    // (see [`is_reorderable_context`]).
-    let els = if ctx.cfg.reorder_modifiers && is_reorderable_context(node) {
-        plan(els, type_follows)
-    } else {
-        els
-    };
-    if expanded && is_decl_level_modifiers(node) {
-        lower_modifiers_with_breaks(&els, ctx, type_follows)
-    } else {
-        lower_elements(els.into_iter(), ctx, false)
-    }
-}
 
-/// Lay out a declaration's modifiers, breaking each annotation in the leading contiguous run
-/// onto its own line (`annotation-placement = expanded`). Mirrors [`lower_elements`]'s inline
-/// emission, but the separator *after* a leading-run annotation is a forced break instead of a
-/// space. Only the leading *declaration*-annotation run breaks; two kinds of annotation stay
-/// inline: one interleaved after a keyword (`public @A static`, possible only without
-/// `reorder-modifiers`) and the trailing *type-use* run sitting after a keyword, directly before
-/// the type (`public @Nullable Object`). The trailing run is identified by `type_follows` +
-/// [`trailing_type_use_start`], the position-based half of google-java-format's split. With
-/// `reorder-modifiers` on, [`plan`] has already grouped the leading declaration annotations into one
-/// front run, so every one of those breaks.
-fn lower_modifiers_with_breaks(els: &[SyntaxElement], ctx: &Ctx<'_>, type_follows: bool) -> Doc {
-    let trailing_start = trailing_type_use_start(els, type_follows);
-    let mut parts: Vec<Doc> = Vec::new();
-    let mut prev: Option<SyntaxToken> = None;
-    // Whether the previous emitted element was an annotation in the leading run (so this
-    // element starts a fresh line).
-    let mut prev_was_leading_annotation = false;
-    // Whether we are still inside the leading contiguous run of annotations.
-    let mut still_leading = true;
-
-    for (idx, el) in els.iter().enumerate() {
-        let is_annotation = el.kind() == S::ANNOTATION;
-        // An annotation in the trailing type-use run annotates the type, so it stays inline.
-        let in_trailing_run = idx >= trailing_start;
-        if !is_annotation {
-            still_leading = false;
+    /// Lower a `MODIFIERS` node. With `reorder-modifiers` off and `annotation-placement = compact`
+    /// this is exactly [`Ctx::lower_generic`] (byte-identical to the prior behavior). With
+    /// `reorder-modifiers` on, the node's significant children are reordered by [`Self::plan`]; with
+    /// `annotation-placement = expanded` on a declaration-level target, the leading annotations are
+    /// broken onto their own lines by [`Self::lower_modifiers_with_breaks`].
+    ///
+    /// The reorder is confined to the `MODIFIERS` subtree; the rowan tree is unchanged. For valid
+    /// code the boundary spacing is order-invariant (any modifier/annotation end takes a single
+    /// space before the following type token), but malformed input can put an annotation
+    /// structurally last while reordering emits a keyword last, desyncing the parent's trailing
+    /// separator. So the parent computes the separators around this node from
+    /// [`Self::emitted_boundary_tokens`] (the emitted-order first / last token), not the structural
+    /// ones, which keeps idempotency. When the last emitted part is a forced break, that trailing
+    /// parent space is trimmed by the renderer.
+    pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+        let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
+        // The hot path: nothing to reorder and no annotation to break out.
+        if !ctx.cfg.reorder_modifiers && !expanded {
+            return ctx.lower_generic(node);
         }
-        let is_leading_annotation = is_annotation && still_leading && !in_trailing_run;
-
-        let first = element_first_token(el);
-        let el_doc = el.as_node().map_or_else(
-            || tok(el.as_token().expect("element is a node or a token"), ctx),
-            |n| lower(n, ctx),
-        );
-        let last = element_last_token(el);
-
-        if let Some(first) = first.as_ref() {
-            let s = if prev_was_leading_annotation {
-                hardline()
-            } else {
-                sep(prev.as_ref(), first, ctx.cfg)
-            };
-            parts.push(s);
+        // Whether a type follows the modifiers; both the reorder and the break step keep the
+        // trailing type-use annotation run (directly before that type) inline instead of treating it
+        // as a declaration annotation.
+        let type_follows = Self::type_node_follows(node);
+        let els: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|e| !e.kind().is_trivia())
+            .collect();
+        // Reorder only in a genuine declaration context; a stray `MODIFIERS` from error recovery is
+        // emitted in source order so reordering can't change the re-parse and break idempotency
+        // (see [`Self::is_reorderable_context`]).
+        let els = if ctx.cfg.reorder_modifiers && Self::is_reorderable_context(node) {
+            Self::plan(els, type_follows)
+        } else {
+            els
+        };
+        if expanded && Self::is_decl_level_modifiers(node) {
+            Self::lower_modifiers_with_breaks(&els, ctx, type_follows)
+        } else {
+            ctx.lower_elements(els.into_iter(), false)
         }
-        parts.push(el_doc);
-        if last.is_some() {
-            prev = last;
+    }
+
+    /// Lay out a declaration's modifiers, breaking each annotation in the leading contiguous run
+    /// onto its own line (`annotation-placement = expanded`). Mirrors [`Ctx::lower_elements`]'s
+    /// inline emission, but the separator *after* a leading-run annotation is a forced break instead
+    /// of a space. Only the leading *declaration*-annotation run breaks; two kinds of annotation
+    /// stay inline: one interleaved after a keyword (`public @A static`, possible only without
+    /// `reorder-modifiers`) and the trailing *type-use* run sitting after a keyword, directly before
+    /// the type (`public @Nullable Object`). The trailing run is identified by `type_follows` +
+    /// [`Self::trailing_type_use_start`], the position-based half of google-java-format's split. With
+    /// `reorder-modifiers` on, [`Self::plan`] has already grouped the leading declaration
+    /// annotations into one front run, so every one of those breaks.
+    fn lower_modifiers_with_breaks(
+        els: &[SyntaxElement],
+        ctx: &Ctx<'_>,
+        type_follows: bool,
+    ) -> Doc {
+        let trailing_start = Self::trailing_type_use_start(els, type_follows);
+        let mut parts: Vec<Doc> = Vec::new();
+        let mut prev: Option<SyntaxToken> = None;
+        // Whether the previous emitted element was an annotation in the leading run (so this
+        // element starts a fresh line).
+        let mut prev_was_leading_annotation = false;
+        // Whether we are still inside the leading contiguous run of annotations.
+        let mut still_leading = true;
+
+        for (idx, el) in els.iter().enumerate() {
+            let is_annotation = el.kind() == S::ANNOTATION;
+            // An annotation in the trailing type-use run annotates the type, so it stays inline.
+            let in_trailing_run = idx >= trailing_start;
+            if !is_annotation {
+                still_leading = false;
+            }
+            let is_leading_annotation = is_annotation && still_leading && !in_trailing_run;
+
+            let first = Self::element_first_token(el);
+            let el_doc = el.as_node().map_or_else(
+                || ctx.tok(el.as_token().expect("element is a node or a token")),
+                |n| ctx.lower(n),
+            );
+            let last = Self::element_last_token(el);
+
+            if let Some(first) = first.as_ref() {
+                let s = if prev_was_leading_annotation {
+                    Doc::hardline()
+                } else {
+                    ctx.sep(prev.as_ref(), first)
+                };
+                parts.push(s);
+            }
+            parts.push(el_doc);
+            if last.is_some() {
+                prev = last;
+            }
+            prev_was_leading_annotation = is_leading_annotation;
         }
-        prev_was_leading_annotation = is_leading_annotation;
+        // When the leading run is the whole modifier list and no type follows (e.g. `@A @B class D`
+        // or a constructor's `@A @B C()`), the break before the declaration keyword must be emitted
+        // here as a trailing forced break — that keyword lives in the parent node, not in
+        // `MODIFIERS`. The renderer drops the parent's following separator space at the fresh line's
+        // start. A trailing type-use run never reaches this (it is not a leading annotation), so the
+        // modifiers end inline against the type, as in `public @Nullable Object`.
+        if prev_was_leading_annotation {
+            parts.push(Doc::hardline());
+        }
+        Doc::concat(parts)
     }
-    // When the leading run is the whole modifier list and no type follows (e.g. `@A @B class D`
-    // or a constructor's `@A @B C()`), the break before the declaration keyword must be emitted
-    // here as a trailing forced break — that keyword lives in the parent node, not in `MODIFIERS`.
-    // The renderer drops the parent's following separator space at the fresh line's start. A
-    // trailing type-use run never reaches this (it is not a leading annotation), so the modifiers
-    // end inline against the type, as in `public @Nullable Object`.
-    if prev_was_leading_annotation {
-        parts.push(hardline());
-    }
-    concat(parts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Thin shims so the tests reach the planning / classification helpers, which now live as
+    // associated functions on `ModifierRule`, without qualifying every call site.
+    fn plan(els: Vec<SyntaxElement>, type_follows: bool) -> Vec<SyntaxElement> {
+        ModifierRule::plan(els, type_follows)
+    }
+    fn type_node_follows(node: &SyntaxNode) -> bool {
+        ModifierRule::type_node_follows(node)
+    }
+    fn is_decl_level_modifiers(node: &SyntaxNode) -> bool {
+        ModifierRule::is_decl_level_modifiers(node)
+    }
+    fn is_reorderable_context(node: &SyntaxNode) -> bool {
+        ModifierRule::is_reorderable_context(node)
+    }
+
     /// The first non-empty `MODIFIERS` node of the member in `class C { <member> }` (the outer
     /// class decl carries its own empty `MODIFIERS`, which is skipped).
     fn modifiers_of(member: &str) -> SyntaxNode {
         let src = format!("class C {{ {member} }}");
-        jals_syntax::parse(&src)
+        jals_syntax::Parse::parse(&src)
             .syntax()
             .descendants()
             .filter(|n| n.kind() == S::MODIFIERS)
@@ -516,7 +542,7 @@ mod tests {
 
     /// The first `MODIFIERS` node in `src` whose parent has kind `parent`.
     fn modifiers_under(src: &str, parent: S) -> SyntaxNode {
-        jals_syntax::parse(src)
+        jals_syntax::Parse::parse(src)
             .syntax()
             .descendants()
             .filter(|n| n.kind() == S::MODIFIERS)

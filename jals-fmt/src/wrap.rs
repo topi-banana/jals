@@ -22,182 +22,187 @@ use alloc::vec::Vec;
 
 use unicode_width::UnicodeWidthStr;
 
-/// Reflow a `// ...` line comment.
-///
-/// `indent_str` is emitted before each continuation line and `indent_cols` is its display
-/// width (a tab counts as one indentation level wide). A comment that already fits is
-/// returned verbatim, so well-formed comments are never re-spaced.
-pub(crate) fn reflow_line(
-    text: &str,
-    indent_str: &str,
-    indent_cols: usize,
-    newline: &str,
-    comment_width: usize,
-) -> String {
-    if indent_cols + UnicodeWidthStr::width(text) <= comment_width {
-        return text.to_string();
-    }
-    let words: Vec<&str> = text
-        .strip_prefix("//")
-        .unwrap_or(text)
-        .split_whitespace()
-        .collect();
-    if words.is_empty() {
-        return text.to_string();
-    }
-    let prefix = "// ";
-    let avail = comment_width
-        .saturating_sub(indent_cols + prefix.len())
-        .max(1);
-    let mut out = String::new();
-    for (i, line) in pack(&words, avail).iter().enumerate() {
-        if i > 0 {
-            out.push_str(newline);
-            out.push_str(indent_str);
-        }
-        out.push_str(prefix);
-        out.push_str(line);
-    }
-    out
-}
+/// Namespace for the `wrap-comments` reflow helpers.
+pub(crate) struct Wrap;
 
-/// Reflow a `/* ... */` or `/** ... */` block / documentation comment.
-///
-/// Multi-line comments keep their line structure (each line wrapped independently, never
-/// merged) and are re-emitted in canonical form: the opener alone, ` * ` margins, and a
-/// ` */` closer alone. A single-line comment is kept on one line unless it overflows, in
-/// which case it expands to the same canonical multi-line form. Anything that is not a
-/// cleanly delimited `/* ... */` (e.g. an unterminated comment from error recovery) is
-/// returned verbatim.
-pub(crate) fn reflow_block(
-    text: &str,
-    is_doc: bool,
-    indent_str: &str,
-    indent_cols: usize,
-    newline: &str,
-    comment_width: usize,
-) -> String {
-    let opener = if is_doc { "/**" } else { "/*" };
-    let Some(inner) = text.strip_prefix(opener).and_then(|s| s.strip_suffix("*/")) else {
-        return text.to_string();
-    };
-
-    let margin_cols = indent_cols + " * ".len();
-    let avail = comment_width.saturating_sub(margin_cols).max(1);
-
-    if !text.contains('\n') {
-        // Single line: keep it unless it overflows, then expand to a multi-line block.
+impl Wrap {
+    /// Reflow a `// ...` line comment.
+    ///
+    /// `indent_str` is emitted before each continuation line and `indent_cols` is its display
+    /// width (a tab counts as one indentation level wide). A comment that already fits is
+    /// returned verbatim, so well-formed comments are never re-spaced.
+    pub(crate) fn reflow_line(
+        text: &str,
+        indent_str: &str,
+        indent_cols: usize,
+        newline: &str,
+        comment_width: usize,
+    ) -> String {
         if indent_cols + UnicodeWidthStr::width(text) <= comment_width {
             return text.to_string();
         }
-        let words: Vec<&str> = inner.split_whitespace().collect();
+        let words: Vec<&str> = text
+            .strip_prefix("//")
+            .unwrap_or(text)
+            .split_whitespace()
+            .collect();
         if words.is_empty() {
             return text.to_string();
         }
-        return emit_block(opener, &pack(&words, avail), indent_str, newline);
-    }
-
-    // Multi-line: strip each line's star margin to recover its content, wrapping the ones
-    // that overflow. Preformatted regions are passed through untouched.
-    let mut content: Vec<String> = Vec::new();
-    let mut in_pre = false;
-    for raw_line in inner.split('\n') {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        let stripped = strip_star_margin(line);
-        let lower = stripped.to_ascii_lowercase();
-        let opens = lower.contains("<pre>");
-        let closes = lower.contains("</pre>");
-        let fence = stripped.trim_start().starts_with("```");
-        if in_pre || opens || closes || fence {
-            content.push(stripped.to_string());
-            if fence {
-                in_pre = !in_pre;
-            } else {
-                in_pre = (in_pre || opens) && !closes;
+        let prefix = "// ";
+        let avail = comment_width
+            .saturating_sub(indent_cols + prefix.len())
+            .max(1);
+        let mut out = String::new();
+        for (i, line) in Self::pack(&words, avail).iter().enumerate() {
+            if i > 0 {
+                out.push_str(newline);
+                out.push_str(indent_str);
             }
-            continue;
-        }
-        let width = UnicodeWidthStr::width(stripped);
-        if width == 0 {
-            content.push(String::new());
-        } else if margin_cols + width <= comment_width {
-            content.push(stripped.to_string());
-        } else {
-            content.extend(pack(
-                &stripped.split_whitespace().collect::<Vec<_>>(),
-                avail,
-            ));
-        }
-    }
-
-    // The opener and closer sit on their own lines, so the first and last content lines are
-    // blank artifacts; drop them (but keep interior blank lines as paragraph breaks).
-    while content.first().is_some_and(String::is_empty) {
-        content.remove(0);
-    }
-    while content.last().is_some_and(String::is_empty) {
-        content.pop();
-    }
-    if content.is_empty() {
-        return format!("{opener} */");
-    }
-    emit_block(opener, &content, indent_str, newline)
-}
-
-/// Assemble a canonical multi-line block comment from its content lines.
-fn emit_block(opener: &str, content: &[String], indent_str: &str, newline: &str) -> String {
-    let mut out = String::from(opener);
-    for line in content {
-        out.push_str(newline);
-        out.push_str(indent_str);
-        if line.is_empty() {
-            out.push_str(" *");
-        } else {
-            out.push_str(" * ");
+            out.push_str(prefix);
             out.push_str(line);
         }
+        out
     }
-    out.push_str(newline);
-    out.push_str(indent_str);
-    out.push_str(" */");
-    out
-}
 
-/// Strip a line's leading whitespace, an optional `*`, and a single following space,
-/// recovering the line's content. `strip_star_margin` composed with the ` * ` margin that
-/// [`emit_block`] adds is the identity, which is what makes reflow idempotent.
-fn strip_star_margin(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    trimmed
-        .strip_prefix('*')
-        .map_or(trimmed, |rest| rest.strip_prefix(' ').unwrap_or(rest))
-}
+    /// Reflow a `/* ... */` or `/** ... */` block / documentation comment.
+    ///
+    /// Multi-line comments keep their line structure (each line wrapped independently, never
+    /// merged) and are re-emitted in canonical form: the opener alone, ` * ` margins, and a
+    /// ` */` closer alone. A single-line comment is kept on one line unless it overflows, in
+    /// which case it expands to the same canonical multi-line form. Anything that is not a
+    /// cleanly delimited `/* ... */` (e.g. an unterminated comment from error recovery) is
+    /// returned verbatim.
+    pub(crate) fn reflow_block(
+        text: &str,
+        is_doc: bool,
+        indent_str: &str,
+        indent_cols: usize,
+        newline: &str,
+        comment_width: usize,
+    ) -> String {
+        let opener = if is_doc { "/**" } else { "/*" };
+        let Some(inner) = text.strip_prefix(opener).and_then(|s| s.strip_suffix("*/")) else {
+            return text.to_string();
+        };
 
-/// Greedily pack words into lines no wider than `avail`. A word longer than `avail` lands
-/// on its own line rather than being split, so reflowing the result is a fixed point.
-fn pack(words: &[&str], avail: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_width = 0;
-    for &word in words {
-        let word_width = UnicodeWidthStr::width(word);
-        if cur.is_empty() {
-            cur.push_str(word);
-            cur_width = word_width;
-        } else if cur_width + 1 + word_width <= avail {
-            cur.push(' ');
-            cur.push_str(word);
-            cur_width += 1 + word_width;
-        } else {
-            lines.push(core::mem::take(&mut cur));
-            cur.push_str(word);
-            cur_width = word_width;
+        let margin_cols = indent_cols + " * ".len();
+        let avail = comment_width.saturating_sub(margin_cols).max(1);
+
+        if !text.contains('\n') {
+            // Single line: keep it unless it overflows, then expand to a multi-line block.
+            if indent_cols + UnicodeWidthStr::width(text) <= comment_width {
+                return text.to_string();
+            }
+            let words: Vec<&str> = inner.split_whitespace().collect();
+            if words.is_empty() {
+                return text.to_string();
+            }
+            return Self::emit_block(opener, &Self::pack(&words, avail), indent_str, newline);
         }
+
+        // Multi-line: strip each line's star margin to recover its content, wrapping the ones
+        // that overflow. Preformatted regions are passed through untouched.
+        let mut content: Vec<String> = Vec::new();
+        let mut in_pre = false;
+        for raw_line in inner.split('\n') {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            let stripped = Self::strip_star_margin(line);
+            let lower = stripped.to_ascii_lowercase();
+            let opens = lower.contains("<pre>");
+            let closes = lower.contains("</pre>");
+            let fence = stripped.trim_start().starts_with("```");
+            if in_pre || opens || closes || fence {
+                content.push(stripped.to_string());
+                if fence {
+                    in_pre = !in_pre;
+                } else {
+                    in_pre = (in_pre || opens) && !closes;
+                }
+                continue;
+            }
+            let width = UnicodeWidthStr::width(stripped);
+            if width == 0 {
+                content.push(String::new());
+            } else if margin_cols + width <= comment_width {
+                content.push(stripped.to_string());
+            } else {
+                content.extend(Self::pack(
+                    &stripped.split_whitespace().collect::<Vec<_>>(),
+                    avail,
+                ));
+            }
+        }
+
+        // The opener and closer sit on their own lines, so the first and last content lines are
+        // blank artifacts; drop them (but keep interior blank lines as paragraph breaks).
+        while content.first().is_some_and(String::is_empty) {
+            content.remove(0);
+        }
+        while content.last().is_some_and(String::is_empty) {
+            content.pop();
+        }
+        if content.is_empty() {
+            return format!("{opener} */");
+        }
+        Self::emit_block(opener, &content, indent_str, newline)
     }
-    if !cur.is_empty() {
-        lines.push(cur);
+
+    /// Assemble a canonical multi-line block comment from its content lines.
+    fn emit_block(opener: &str, content: &[String], indent_str: &str, newline: &str) -> String {
+        let mut out = String::from(opener);
+        for line in content {
+            out.push_str(newline);
+            out.push_str(indent_str);
+            if line.is_empty() {
+                out.push_str(" *");
+            } else {
+                out.push_str(" * ");
+                out.push_str(line);
+            }
+        }
+        out.push_str(newline);
+        out.push_str(indent_str);
+        out.push_str(" */");
+        out
     }
-    lines
+
+    /// Strip a line's leading whitespace, an optional `*`, and a single following space,
+    /// recovering the line's content. `strip_star_margin` composed with the ` * ` margin that
+    /// [`Wrap::emit_block`] adds is the identity, which is what makes reflow idempotent.
+    fn strip_star_margin(line: &str) -> &str {
+        let trimmed = line.trim_start();
+        trimmed
+            .strip_prefix('*')
+            .map_or(trimmed, |rest| rest.strip_prefix(' ').unwrap_or(rest))
+    }
+
+    /// Greedily pack words into lines no wider than `avail`. A word longer than `avail` lands
+    /// on its own line rather than being split, so reflowing the result is a fixed point.
+    fn pack(words: &[&str], avail: usize) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut cur_width = 0;
+        for &word in words {
+            let word_width = UnicodeWidthStr::width(word);
+            if cur.is_empty() {
+                cur.push_str(word);
+                cur_width = word_width;
+            } else if cur_width + 1 + word_width <= avail {
+                cur.push(' ');
+                cur.push_str(word);
+                cur_width += 1 + word_width;
+            } else {
+                lines.push(core::mem::take(&mut cur));
+                cur.push_str(word);
+                cur_width = word_width;
+            }
+        }
+        if !cur.is_empty() {
+            lines.push(cur);
+        }
+        lines
+    }
 }
 
 #[cfg(test)]
@@ -206,12 +211,12 @@ mod tests {
 
     fn line(text: &str, indent_cols: usize, width: usize) -> String {
         let indent = " ".repeat(indent_cols);
-        reflow_line(text, &indent, indent_cols, "\n", width)
+        Wrap::reflow_line(text, &indent, indent_cols, "\n", width)
     }
 
     fn block(text: &str, is_doc: bool, indent_cols: usize, width: usize) -> String {
         let indent = " ".repeat(indent_cols);
-        reflow_block(text, is_doc, &indent, indent_cols, "\n", width)
+        Wrap::reflow_block(text, is_doc, &indent, indent_cols, "\n", width)
     }
 
     #[test]
