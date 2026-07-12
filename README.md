@@ -6,8 +6,11 @@ A Java toolchain written in Rust, built on a **lossless** syntax tree.
 
 `jals` parses Java source into a full-fidelity concrete syntax tree (CST) — every byte,
 including whitespace and comments, is preserved — and uses that tree to power source
-tooling. Today it ships a code formatter and a language server (LSP); the same foundation is
-designed to host a linter too. Alongside them, a Cargo-style build front end
+tooling. Today it ships a code formatter, a linter, and a language server (LSP), all
+backed by a shared semantic layer (`jals-hir`) that does name resolution, cross-file type
+indexing, and type inference/checking — including resolving types from a project's compiled
+classpath and `[dependencies]` (local, remote, and `git`/`path` jars, decompiled to readable
+Java when no source jar is available). Alongside them, a Cargo-style build front end
 (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac` / `java` from a `jals.toml`
 manifest.
 
@@ -21,33 +24,59 @@ manifest.
   lambdas, switch expressions, patterns (including record patterns and guards), and more.
 - **A formatter with guarantees.** Significant tokens are never changed, comments are never
   dropped or reordered, and formatting is idempotent (`format(format(x)) == format(x)`).
+- **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused
+  locals, type mismatches, unreported checked exceptions, and dead conditionals, using name
+  resolution and type inference over the CST — not just pattern matching.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `clean` / `init`, a thin, pure `javac`/`java` wrapper that
   plans commands as data and never touches the JDK itself until the CLI runs them.
-- **`wasm32`-ready core.** Everything except the CLI builds for `wasm32-unknown-unknown`,
-  so the syntax and formatting layers can run in the browser.
+- **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
+  (`jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`, `jals-decompile`,
+  `jals-fs`, `jals-config`) are `no_std` and build for `wasm32-unknown-unknown`, and
+  `jals-classpath`'s resolution core does too (host I/O sits behind a `native` feature) — so
+  the browser playground runs the same analysis stack client-side.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of five core crates plus a browser playground:
+`jals` is a Cargo workspace of thirteen crates plus a browser playground:
 
 | Crate | Description |
 | --- | --- |
-| [`jals-syntax`](jals-syntax) | A lossless Java 26 lexer (`logos`) and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
+| [`jals-syntax`](jals-syntax) | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
-| [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, and formatting from the same CST. Host-only. |
+| [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and edition-gated preview-feature checks. |
+| [`jals-hir`](jals-hir) | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath. |
+| [`jals-classfile`](jals-classfile) | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4). |
+| [`jals-decompile`](jals-decompile) | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode. |
+| [`jals-classpath`](jals-classpath) | Resolves and loads a project's classpath and `[dependencies]` (local/remote jars, bundled/nested jars, `git`/`path` source deps) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources. |
+| [`jals-config`](jals-config) | The pure data model, parsing, discovery, and validation for all three config files (`jals.toml`, `jalsfmt.toml`, `jalslint.toml`). |
+| [`jals-fs`](jals-fs) | A virtual filesystem trait (`FileTree`) the pure crates read config and sources through, with an in-memory implementation and a `std`-gated real-filesystem one. |
 | [`jals-build`](jals-build) | A Cargo-style build orchestrator: it parses a `jals.toml` manifest and turns it into `javac`/`java` command plans, clean paths, and project scaffolding — all as pure data, with no `jals-syntax` dependency and no I/O. Backs `jals build`/`run`/`clean`/`init`. |
+| [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only. |
 | [`jals-cli`](jals-cli) | The `jals` command-line binary. |
-| [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the `jals-syntax`/`jals-fmt` layers entirely in the browser. |
+| [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser. |
+
+Two more workspace members are development-only tooling, not part of the shipped product:
+[`jals-tests`](jals-tests) (corpus harnesses that check parser soundness and formatter
+fidelity against real-world Java) and `xtask` (the `cargo xtask codegen` AST generator).
 
 ```
 jals/
-├── jals-syntax/      # lexer + CST parser + typed AST  (wasm-compatible)
-├── jals-fmt/         # formatter (CST -> Doc IR -> text)
+├── jals-syntax/      # lexer + CST parser + typed AST      (wasm-compatible)
+├── jals-fmt/         # formatter (CST -> Doc IR -> text)   (wasm-compatible)
+├── jals-lint/        # linter (rules over CST + jals-hir)  (wasm-compatible)
+├── jals-hir/         # name resolution + type inference    (wasm-compatible)
+├── jals-classfile/   # JVM .class read/write model         (wasm-compatible)
+├── jals-decompile/   # .class -> readable Java             (wasm-compatible)
+├── jals-classpath/   # classpath + dependency resolution   (wasm-compatible core)
+├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (wasm-compatible)
+├── jals-fs/          # virtual filesystem abstraction       (wasm-compatible)
+├── jals-build/       # Cargo-style javac/java build planner (wasm-compatible)
 ├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)
-├── jals-build/       # Cargo-style javac/java build planner  (wasm-compatible)
 ├── jals-cli/         # `jals` binary
-└── jals-playground/  # browser playground (Yew + Trunk -> wasm)
+├── jals-playground/  # browser playground (Yew + Trunk -> wasm)
+├── jals-tests/       # corpus test harnesses (dev-only)
+└── xtask/            # codegen automation (dev-only)
 ```
 
 ## Installation
@@ -88,8 +117,8 @@ The release binary is produced at `target/release/jals`.
 
 ## Usage
 
-`jals` is invoked through subcommands: `fmt` (format source), `lsp` (language server), and a
-Cargo-style build front end — `init`, `build`, `run`, and `clean`.
+`jals` is invoked through subcommands: `fmt` (format source), `lint` (lint source), `lsp`
+(language server), and a Cargo-style build front end — `init`, `build`, `run`, and `clean`.
 
 ### Format files in place
 
@@ -127,10 +156,28 @@ Pass `-D warnings` to make any syntax error fail the run:
 jals fmt -D warnings src/
 ```
 
+### Lint files
+
+```sh
+# Lint specific files
+jals lint src/Main.java src/Util.java
+
+# Lint a directory tree (searched recursively for *.java)
+jals lint src/
+```
+
+`jals lint` checks unused locals, type mismatches, unreported checked exceptions, dead
+(constant-condition) branches, and edition-gated preview features, using name resolution and
+type inference (`jals-hir`) — not just pattern matching over the syntax tree. If a `jals.toml`
+manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so types
+from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
+way as `jalsfmt.toml`).
+
 ### Run the language server
 
-`jals lsp` starts an LSP server over stdio for editor integration — diagnostics, document
-symbols, and whole-document formatting, all driven by the same CST. It is launched by an
+`jals lsp` starts an LSP server over stdio for editor integration — diagnostics (including
+lint diagnostics), document symbols, hover, go-to-definition, find-references, and whole-
+document formatting, all driven by the same CST and semantic layer. It is launched by an
 editor rather than run by hand; see [`jals-lsp`](jals-lsp/README.md) for editor setup.
 
 ```sh
@@ -237,8 +284,9 @@ public class Foo {
 ## Playground
 
 `jals-playground` is a small browser app ([Yew](https://yew.rs), built and served with
-[Trunk](https://trunkrs.dev)) that runs the `wasm32`-compiled syntax and formatting layers
-client-side, with no server round-trip.
+[Trunk](https://trunkrs.dev)) that runs the `wasm32`-compiled syntax, formatting, and
+analysis layers client-side, with no server round-trip — including resolving a `jals.toml`'s
+`[dependencies]` in-browser so hover/completion/type-check see external library types.
 
 ```sh
 # One-time setup: the wasm target and Trunk
@@ -287,15 +335,15 @@ assert!(!out.has_warnings());
 ## Architecture
 
 ```
-source ──▶ lexer (logos) ──▶ CST parser (rowan) ──▶ typed AST
-              lossless           error-resilient        (jals-syntax)
-                                       │
-                                       ▼
+source ──▶ lexer (hand-written) ──▶ CST parser (rowan) ──▶ typed AST
+              lossless                error-resilient        (jals-syntax)
+                                            │
+                                            ▼
                             lower CST ──▶ Doc IR ──▶ render ──▶ formatted text
                                           Wadler/Prettier        (jals-fmt)
 ```
 
-- **Lexer** (`jals-syntax`): a `logos`-based scanner that emits trivia (whitespace,
+- **Lexer** (`jals-syntax`): a hand-written scanner that emits trivia (whitespace,
   newlines, comments) as real tokens so the stream is lossless. Context-sensitive keywords
   (`var`, `record`, `sealed`, `when`, module directives, …) are lexed as identifiers and
   promoted by the parser.
@@ -358,15 +406,21 @@ for any change to the syntax or formatting layers:
 - The parser always returns a tree and never panics.
 - The formatter preserves the significant-token sequence, never drops or reorders comments,
   and is idempotent.
-- `jals-syntax` (and `jals-fmt`) build for `wasm32-unknown-unknown`.
+- `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`, `jals-decompile`,
+  `jals-fs`, and `jals-config` build for `wasm32-unknown-unknown` as `no_std` crates;
+  `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`).
 
 ## Status
 
-Early stage (`0.1.0`). The formatter and language server are functional and the syntax layer
-covers a broad slice of Java 26, but APIs may change. The `jals build`/`run`/`clean`/`init`
-front end is a faithful but thin `javac`/`java` wrapper today, with dependency management,
-testing, and packaging on its [roadmap](jals-build/README.md#roadmap). A linter (`jals-lint`)
-is the intended next consumer of the syntax layer.
+Early stage (`0.1.0`). The formatter, linter, and language server are functional and the
+syntax layer covers a broad slice of Java, but APIs may change. Semantic analysis
+(`jals-hir`) covers name resolution, cross-file type indexing, and type inference/checking,
+including types resolved from a project's classpath and `[dependencies]`; generic-method
+inference, richer bytecode decompilation (`switch`/`try`-`catch`/`break`/`continue`), and
+Maven-coordinate (`group:artifact:version`) dependency resolution are still open. The `jals
+build`/`run`/`clean`/`init` front end is a faithful but thin `javac`/`java` wrapper today,
+with fuller dependency management, testing, and packaging on its
+[roadmap](jals-build/README.md#roadmap).
 
 ## License
 

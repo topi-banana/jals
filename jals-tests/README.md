@@ -19,6 +19,12 @@ git submodule update --init --depth 1 jals-tests/sources/openjdk
 cargo run -p jals-tests -- openjdk --list-failures
 ```
 
+Two sources, both under the `openjdk` submodule (`src/lib.rs`'s `ALL_SOURCES`): `openjdk`
+(every `.java` file in the repository) and `langtools` (`test/langtools`, OpenJDK's own
+compiler test suite, which *intentionally* contains invalid Java — a nonzero syntax-error
+rate there is expected, not a bug). Running with no source argument checks both; `--markdown`
+emits the GitHub-flavored summary table CI posts to pull requests.
+
 See `src/lib.rs` for the outcome classification.
 
 ## Formatter fidelity vs google-java-format — `jals-golden`
@@ -44,11 +50,10 @@ cargo run -p jals-tests --bin jals-golden -- --markdown
 ### Corpora
 
 **`gjf-testdata`** — google-java-format's own `.input`/`.output` regression suite
-(Apache-2.0). Add it as a submodule (kept upstream, not vendored):
+(Apache-2.0), kept upstream as a submodule (not vendored):
 
 ```sh
-git submodule add --depth 1 https://github.com/google/google-java-format \
-  jals-tests/sources/google-java-format
+git submodule update --init --depth 1 jals-tests/sources/google-java-format
 ```
 
 These cases are mostly bug-tracker regressions, so they are an *edge-case* set more

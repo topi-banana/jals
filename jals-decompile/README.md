@@ -36,28 +36,38 @@ and it bails (falls back) rather than guess on anything it is unsure of.
 
 ## Public API
 
+Each module exposes a zero-sized namespace type with its functions as associated functions (no free
+functions — see the workspace's `no-free-functions` convention).
+
 ```rust
-// Method-body decompilation. `param_names` are the exact names the signature renders (in order);
-// the body reuses them and bails on a count mismatch (e.g. an enum ctor's synthetic `String, int`).
-// Returns indented Java statement lines, or `None` to fall back to a safe placeholder body.
-pub fn decompile_method_body(method: &MethodInfo, cf: &ClassFile, param_names: &[String])
-    -> Option<Vec<String>>;
+pub struct MethodBody;
+impl MethodBody {
+    // Method-body decompilation. `param_names` are the exact names the signature renders (in order);
+    // the body reuses them and bails on a count mismatch (e.g. an enum ctor's synthetic `String, int`).
+    // Returns indented Java statement lines, or `None` to fall back to a safe placeholder body.
+    pub fn decompile(method: &MethodInfo, cf: &ClassFile, param_names: &[String])
+        -> Option<Vec<String>>;
+}
 
-// Attribute readers a signature skeleton needs but bytecode analysis does not.
-pub fn constant_value_initializer(field: &FieldInfo, pool: &ConstantPool) -> Option<String>;
-pub fn declared_throws(method: &MethodInfo, pool: &ConstantPool) -> Vec<String>;
-pub fn parameter_names(method: &MethodInfo, pool: &ConstantPool, is_static: bool, arity: usize)
-    -> Option<Vec<String>>;
+pub struct Attrs;
+impl Attrs {
+    // Attribute readers a signature skeleton needs but bytecode analysis does not.
+    pub fn constant_value_initializer(field: &FieldInfo, pool: &ConstantPool) -> Option<String>;
+    pub fn signature_string(attrs: &[Attribute], pool: &ConstantPool) -> Option<String>;
+    pub fn declared_throws(method: &MethodInfo, pool: &ConstantPool) -> Vec<String>;
+    pub fn parameter_names(method: &MethodInfo, pool: &ConstantPool, is_static: bool, arity: usize)
+        -> Option<Vec<String>>;
+}
 
-// The descriptor / generic-signature → Java type vocabulary, shared with `skeleton.rs`.
-pub fn internal_to_java(internal: &str) -> String;          // a/b/Outer$Inner -> a.b.Outer.Inner
-pub fn render_field_type(ft: &FieldType) -> String;         // [Ljava/lang/String; -> java.lang.String[]
-pub fn render_type_sig(ts: &TypeSignature) -> String;       // generic type signature -> Java
-pub fn render_class_type_sig(c: &ClassTypeSignature) -> String;
-pub fn render_type_args(args: &[TypeArgument]) -> String;
-pub fn render_type_arg(arg: &TypeArgument) -> String;
-pub fn render_throws(t: &ThrowsSignature) -> String;
-pub fn is_object_sig(ts: &TypeSignature) -> bool;
+pub struct JavaType;
+impl JavaType {
+    // The descriptor / generic-signature → Java type vocabulary, shared with `skeleton.rs`.
+    pub fn internal_to_java(internal: &str) -> String;    // a/b/Outer$Inner -> a.b.Outer.Inner
+    pub fn render_field_type(ft: &FieldType) -> String;   // [Ljava/lang/String; -> java.lang.String[]
+    pub fn render_type_sig(ts: &TypeSignature) -> String; // generic type signature -> Java
+    pub fn render_class_type_sig(c: &ClassTypeSignature) -> String;
+    pub fn render_throws(t: &ThrowsSignature) -> String;
+}
 ```
 
 ## Modules

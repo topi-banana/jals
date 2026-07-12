@@ -6,7 +6,7 @@ The formatter lowers the lossless concrete syntax tree into a document IR (`Doc`
 it, choosing for each group whether it fits on one line or must break:
 
 ```
-CST ──▶ lower.rs ──▶ Doc IR ──▶ render.rs ──▶ formatted text
+CST ──▶ lower/ ──▶ Doc IR ──▶ render.rs ──▶ formatted text
         (comments.rs attaches comments to significant tokens)
 ```
 
@@ -65,6 +65,12 @@ The current formatter is intentionally minimal. It performs:
   lists, and array initializers wrap **all-or-nothing** against `max-width`. Call argument
   lists additionally honor `fn-call-width` and array initializers `array-width` (see below);
   the other lists have no finer per-construct width heuristics yet.
+- **Closing parenthesis placement** — a wrapped **paren-delimited** list (a call / annotation
+  argument list, a method / constructor parameter list, or a record header) follows
+  `closing-paren`: `own-line` (default) dedents the closing `)` onto its own line, mirroring
+  the array initializer's `}`; `hug` keeps it on the last item's line with no break before it
+  (`f(` … `last);`), matching google-java-format. The array initializer's `}` is never
+  affected. Layout-only (the significant-token sequence is preserved exactly). See below.
 - **Method chains** — a `a.b().c().d()` chain with at least two calls is laid out one call per
   line when its flat width exceeds `chain-width` or the line would overflow `max-width`. The
   receiver and any leading field accesses stay on the first line and the first call hugs them
@@ -76,6 +82,14 @@ The current formatter is intentionally minimal. It performs:
 - **Array initializers** — an array initializer (`{a, b, c}`, including `new T[]{…}`) whose
   flat width exceeds `array-width` is laid out one element per line, even when the line would
   otherwise fit `max-width`. Argument and parameter lists are unaffected.
+- **Tabular array initializers** — with `tabular-array-initializers` enabled, an array
+  initializer already laid out in the source as a *table* — at least two rows, every row but
+  the last holding the same element count, the last holding that many or fewer, and no
+  interior comments — keeps its source row breaks instead of reflowing against `array-width` /
+  `max-width`: each row renders on its own line, elements separated by a single space. Any
+  other multi-line array (an irregular row shape, a single row, or one with a comment) still
+  wraps by width. Off by default; layout-only (the significant-token sequence is preserved
+  exactly). See below.
 - **Parameter layout** — a method or constructor parameter list follows `fn-params-layout`:
   `tall` (the default, all-or-nothing — one line when it fits, else one parameter per line),
   `vertical` (always one parameter per line, even when the list would fit), or `compressed`
@@ -97,10 +111,12 @@ The current formatter is intentionally minimal. It performs:
   comment is never dropped. Off by default (`preserve`); see below.
 - **Operator spacing** — binary and unary expressions get canonical spacing.
 - **Binary-expression wrapping** — a binary expression that overflows `max-width` breaks at
-  its operators: a same-precedence run wraps together, one operand per line, and
-  lower-precedence operators break first (`a == b && c == d || e == f` breaks at `||`, then
-  `&&`, while each `==` stays on its line). The operator sits at the start of the
-  continuation line (`binop-separator = "front"`, default) or at the end of the broken line
+  its operators: a same-precedence run wraps together, and lower-precedence operators break
+  first (`a == b && c == d || e == f` breaks at `||`, then `&&`, while each `==` stays on its
+  line). `binop-layout` chooses how a wrapping run is laid out: `tall` (default,
+  all-or-nothing — one operand per line) or `compressed` (a fill that packs as many operands
+  per line as fit `max-width`, matching google-java-format). The operator sits at the start of
+  the continuation line (`binop-separator = "front"`, default) or at the end of the broken line
   (`"back"`). Assignments (`=`) are not wrapped yet.
 - **Ternary wrapping** — a ternary conditional (`a ? b : c`) is kept on one line while its flat
   width fits `single-line-if-else-max-width` (default `50`); a wider ternary, or one that would
@@ -109,6 +125,26 @@ The current formatter is intentionally minimal. It performs:
   byte-identical to the inline emission (the `:` spacing follows the colon options), and a nested
   ternary wraps independently. Set the width to `0` to wrap every ternary. Layout-only (the
   significant-token sequence is preserved exactly). See below.
+- **Legacy `switch` body layout** — a legacy (colon-form) `switch` group's body relative to
+  its `case x:` / `default:` colon follows `switch-case-body`: `always` (default) puts each
+  label on its own line and breaks every body statement onto its own indented line
+  (google-java-format's layout), `single-line` keeps a lone label with a single, comment-free
+  statement inline (`case x: stmt;`) and breaks the rest, `same-line` keeps the whole group
+  inline. The arrow form (`case x -> …`) is never affected. Layout-only (the significant-token
+  sequence is preserved exactly). See below.
+- **`switch`-expression assignment** — with `switch-expression-on-new-line` enabled, a
+  `switch` expression that is the right-hand side of a `=` (a variable / field initializer or
+  an assignment) breaks onto its own continuation-indented line right after the `=`, instead of
+  riding on the `=` line. Only the `=` form is affected; `return switch …` (no `=`) and a
+  `switch` *statement* are never touched. Off by default; layout-only (the significant-token
+  sequence is preserved exactly). See below.
+- **`case`-label wrapping** — with `wrap-case-labels` enabled, a `case` label's
+  comma-separated constant list wraps across lines when the arm overflows `max-width`: the
+  first constant stays on the `case` line, each later constant hangs at one continuation
+  indent with its comma attached, and the trailing `->` / `:` plus body ride on the last
+  constant's line. A short list, a single constant, and a bare `default` are never affected;
+  applies to both the arrow (`case A, B -> …`) and legacy colon (`case A, B: …`) forms. Off by
+  default; layout-only (the significant-token sequence is preserved exactly). See below.
 - **Token spacing** — normalized single-space spacing between tokens, with a fusion-safety
   net so operator fusion (`>>`, `->`, …) is never introduced or changed.
 - **Colon spacing** — the spacing around a `:` follows `space-before-colon` (default off) and
@@ -233,11 +269,16 @@ are kebab-case.
 | `group-imports` | bool | `false` | ✅ wired — partition the leading `import` block into the prefix groups of `import-groups`, each group sorted and separated by one blank line. Overrides `reorder-imports`; when on, the significant-token *sequence* may change (the multiset is preserved). Mirrors rustfmt's `group_imports` |
 | `import-groups` | array of strings | `["java.", "javax.", "*", "static"]` | ✅ wired — ordered prefix groups for `group-imports`: a non-static import joins its *longest* matching prefix, `"*"` is the catch-all for the rest, and `"static"` groups all static imports. A missing `"*"` / `"static"` becomes an implicit trailing group. Only consulted when `group-imports` is enabled |
 | `binop-separator` | `"front"` \| `"back"` | `"front"` | ✅ wired — placement of a binary operator when its expression wraps (driven by `max-width` alone): `front` starts the continuation line with the operator, `back` ends the broken line with it; mirrors rustfmt's `binop_separator` |
+| `binop-layout` | `"tall"` \| `"compressed"` | `"tall"` | ✅ wired — how a same-precedence binary-operator run lays out when it wraps: `tall` breaks at every operator (one operand per line), `compressed` is a fill packing as many operands per line as fit `max-width` (google-java-format's layout). Orthogonal to `binop-separator`, which decides where the operator sits, not how the run packs. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
 | `overflow-delimited-expr` | bool | `false` | ✅ wired — let the last item of a call / annotation argument list hang past the call line when it is a block-bodied lambda, anonymous-class `new`, or array initializer (`f(a, () -> {` … `});`); falls back to the all-or-nothing layout when an earlier item is multi-line or the first line overflows `fn-call-width`/`max-width`. Layout-only (the significant-token sequence is preserved exactly); mirrors rustfmt's `overflow_delimited_expr` |
+| `closing-paren` | `"own-line"` \| `"hug"` | `"own-line"` | ✅ wired — placement of the closing `)` of a wrapped paren-delimited list (a call / annotation argument list, a method / constructor parameter list, or a record header): `own-line` dedents it onto its own line (mirroring the array initializer's `}`), `hug` keeps it on the last item's line with no break before it, matching google-java-format. The array initializer's `}` is never affected. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent (Rust always dangles) |
+| `tabular-array-initializers` | bool | `false` | ✅ wired — preserve a *tabular* (grid-shaped) array initializer's source row breaks instead of reflowing against `array-width`/`max-width`: requires at least two source rows, every row but the last holding the same element count, the last holding that many or fewer, and no interior comments. Each row renders on its own block-indented line, elements separated by a single space; any other multi-line array (an irregular shape, a single row, or one with a comment) still wraps by width. Off by default. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent, mirroring google-java-format's tabular array-initializer preservation |
+| `switch-expression-on-new-line` | bool | `false` | ✅ wired — break a `switch` *expression* that is the right-hand side of a `=` (a variable/field initializer or an assignment) onto its own continuation-indented line, right after the `=`. Off by default (the switch stays on the `=` line). Only the `=` form is affected; `return switch …` (no `=`) and a `switch` *statement* are never touched. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent, mirroring google-java-format's layout of an assignment whose value is a switch expression |
 | `space-before-colon` | bool | `false` | ✅ wired — emit a space before a `:`, applied uniformly to every Java colon context (ternary, enhanced-`for`, labels, `assert`, `case`/`default`). Off by default (idiomatic `label:` / `case x:`). `::` is a distinct token and is never affected. Layout-only; mirrors rustfmt's `space_before_colon` |
 | `space-after-colon` | bool | `true` | ✅ wired — emit a space after a `:`, in the same contexts as `space-before-colon`. On by default. `::` is never affected. Layout-only; mirrors rustfmt's `space_after_colon` |
 | `space-around-operator-colon` | bool | `false` | ✅ wired — emit a space before an **operator** colon — the `:` separating two operands: an enhanced `for` (`for (T x : xs)`), a ternary (`a ? b : c`), and an `assert` message (`assert c : m`). Additive over `space-before-colon` (space emitted when either is on); the label colons (`label:`, `case x:`) are unaffected. Off by default. Exception: an unnamed `_` for-each variable keeps hugging (`for (T _: xs)`), matching google-java-format. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
 | `switch-case-body` | `"always"` \| `"single-line"` \| `"same-line"` | `"always"` | ✅ wired — layout of a **legacy** (colon-form) `switch` group's body relative to its `case x:` / `default:` colon: `always` puts each label on its own line and breaks every body statement onto its own line indented one level (google-java-format's layout), `single-line` keeps a lone label with a single, comment-free statement inline (`case x: stmt;`) and breaks the rest, `same-line` keeps the whole group inline (`case x: stmt; stmt;`). The arrow form (`case x -> …`) is never affected. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent |
+| `wrap-case-labels` | bool | `false` | ✅ wired — wrap a `switch` `case` label's comma-separated constant list across lines when the arm overflows `max-width`: the first constant stays on the `case` line, each later constant hangs at one continuation indent with its comma attached, and the trailing `->` / `:` plus body ride on the last constant's line. A short list, a single constant, and a bare `default` are never affected; applies to both the arrow (`case A, B -> …`) and legacy colon (`case A, B: …`) forms. Off by default. Layout-only (the significant-token sequence is preserved exactly). A Java-specific option with no rustfmt equivalent, mirroring google-java-format's wrapping of a long `case` label list |
 | `fn-params-layout` | `"tall"` \| `"compressed"` \| `"vertical"` | `"tall"` | ✅ wired — layout of a method / constructor parameter list: `tall` (all-or-nothing), `compressed` (pack as many parameters per line as fit `max-width`), or `vertical` (always one per line, even when it fits). Governs only declaration parameter lists, never call argument lists. Layout-only (the significant-token sequence is preserved exactly). The deprecated key `fn-args-layout` is accepted as an alias. Mirrors rustfmt's `fn_params_layout` |
 | `type-punctuation-density` | `"wide"` \| `"compressed"` | `"wide"` | ✅ wired — spacing around the `&` of a Java intersection type: `wide` (`A & B`) or `compressed` (`A&B`). Governs both a type-parameter bound (`<T extends A & B>`) and a cast intersection (`(A & B) x`); the bitwise-AND operator `&` (`a & b`) is never affected. Layout-only (the significant-token sequence is preserved exactly). Mirrors rustfmt's `type_punctuation_density` |
 | `reorder-modifiers` | bool | `false` | ✅ wired — sort each declaration's keyword modifiers into the canonical JLS / Checkstyle order (public, protected, private, abstract, default, static, sealed, non-sealed, final, transient, volatile, synchronized, native, strictfp) and hoist all annotations to the front (relative order kept). Off by default; when on, the significant-token *sequence* may change (the multiset is preserved, comments stay glued to their modifier). A Java-specific option with no rustfmt equivalent |
@@ -419,5 +460,8 @@ overflow — `overflow_delimited_expr` — colon spacing — `space_before_colon
 density — `type_punctuation_density` — modifier ordering — `reorder_modifiers` —
 annotation placement — `annotation-placement` — hex-literal case —
 `hex_literal_case` — float trailing zero — `float_literal_trailing_zero` — ternary
-wrapping — `single_line_if_else_max_width` — and forcing every block multi-line —
-`force_multiline_blocks` — are done.)
+wrapping — `single_line_if_else_max_width` — forcing every block multi-line —
+`force_multiline_blocks` — binary-expression layout — `binop_layout` — closing-parenthesis
+placement — `closing_paren` — tabular array initializers — `tabular_array_initializers` —
+legacy `switch` body layout — `switch_case_body` — `switch`-expression assignment layout —
+`switch_expression_on_new_line` — and `case`-label wrapping — `wrap_case_labels` — are done.)
