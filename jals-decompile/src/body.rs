@@ -18,161 +18,171 @@ use alloc::vec::Vec;
 
 use jals_classfile::{
     AttributeBody, ClassFile, CodeAttribute, ConstantPool, ConstantPoolEntry, Instruction,
-    MethodInfo, ReturnType, WideInstruction, parse_method_descriptor,
+    MethodDescriptor, MethodInfo, ReturnType, WideInstruction,
 };
 
-use crate::attrs::{self, parameter_slots};
-use crate::cfg::{self, Cfg, Term};
-use crate::expr::{Expr, Stmt, render_block};
-use crate::literal::{class_literal, double_literal, float_literal, string_literal};
-use crate::types::internal_to_java;
+use crate::attrs::Attrs;
+use crate::cfg::{Cfg, Term};
+use crate::expr::{Expr, Stmt};
+use crate::literal::Literal;
+use crate::types::JavaType;
 
-/// Reconstruct a method's body as indented Java statement lines, or `None` if it cannot be
-/// decompiled confidently.
-///
-/// It returns `None` on a control-flow shape not yet modelled, an exception handler, or any
-/// unsupported instruction; the caller wraps the lines in a block and falls back to a safe
-/// placeholder on `None`.
-///
-/// `param_names` are the exact parameter names the caller renders in the signature, in order; the
-/// body reuses them (never a name the signature doesn't declare), and a mismatch between them and the
-/// descriptor's parameters (a generic signature that hides synthetic parameters, e.g. an `enum`
-/// constructor's `String, int`) makes this bail so the body can never reference a phantom parameter.
-pub fn decompile_method_body(
-    method: &MethodInfo,
-    cf: &ClassFile,
-    param_names: &[String],
-) -> Option<Vec<String>> {
-    let pool = &cf.constant_pool;
-    let code = method.attributes.iter().find_map(|a| match &a.body {
-        AttributeBody::Code(code) => Some(code),
-        _ => None,
-    })?;
-    // A non-empty exception table means try/catch/finally — not yet structured.
-    if !code.exception_table.is_empty() {
-        return None;
-    }
-    let owner = pool.class_name(cf.this_class)?.into_owned();
-    let is_static = method.access_flags.is_static();
-    let mut locals = local_slots(method, pool, is_static, param_names)?;
-    // Hoist a typed declaration for every non-parameter local the method stores into, registering
-    // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
-    // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
-    let decls = local_declarations(code, pool, is_static, &mut locals)?;
-    let cfg = cfg::build(&code.code)?;
-    let structurer = Structurer {
-        code: &code.code,
-        cfg: &cfg,
-        pool,
-        owner,
-        is_static,
-        locals,
-    };
-    let mut stmts = decls;
-    stmts.extend(structurer.structure()?);
-    Some(render_body(&stmts))
-}
+/// Namespace for method-body decompilation: the entry point and its slot / declaration pre-passes.
+pub struct MethodBody;
 
-/// The parameter slot → source-name map (slot 0 is `this` for an instance method and is not listed),
-/// naming each slot from `param_names`. Returns `None` when the descriptor's parameter count differs
-/// from `param_names`, so the body cannot name a slot the signature does not declare.
-fn local_slots(
-    method: &MethodInfo,
-    pool: &ConstantPool,
-    is_static: bool,
-    param_names: &[String],
-) -> Option<BTreeMap<u16, String>> {
-    let descriptor = pool.utf8(method.descriptor_index)?;
-    let params = parse_method_descriptor(&descriptor).ok()?.params;
-    if params.len() != param_names.len() {
-        return None;
-    }
-    let map = parameter_slots(&params, is_static)
-        .zip(param_names)
-        .map(|((slot, _param), name)| (slot, name.clone()))
-        .collect();
-    Some(map)
-}
-
-/// Plan the hoisted local declarations for a method: scan its bytecode for stored slots, drop `this`
-/// and the parameters (already named), and resolve each remaining slot to a typed declaration from
-/// the `LocalVariableTable`, registering its name in `locals` for the body to reference. Returns the
-/// declarations in slot order, or `None` — bailing the whole method — when a stored local has no
-/// usable LVT entry (no `-g` build, a synthetic temporary, or a reused slot) or its name collides
-/// with a parameter or another local.
-fn local_declarations(
-    code: &CodeAttribute,
-    pool: &ConstantPool,
-    is_static: bool,
-    locals: &mut BTreeMap<u16, String>,
-) -> Option<Vec<Stmt>> {
-    // Slots written by a store / `iinc`, minus `this` (slot 0, instance) and the parameters —
-    // `locals` holds exactly those slots here, before any hoisted local is registered.
-    let mut stored: BTreeSet<u16> = code.code.iter().filter_map(stored_slot).collect();
-    if !is_static {
-        stored.remove(&0);
-    }
-    stored.retain(|slot| !locals.contains_key(slot));
-    if stored.is_empty() {
-        return Some(Vec::new());
-    }
-    // Locals need types (a bare `var x;` is illegal), so the `LocalVariableTable` is required here.
-    let table = attrs::local_variable_table(code)?;
-    let mut decls = Vec::with_capacity(stored.len());
-    for slot in stored {
-        let (name, ty) = attrs::local_variable(table, pool, slot)?;
-        // A hoisted declaration must never shadow a parameter or an already-hoisted local.
-        if locals.values().any(|n| *n == name) {
+impl MethodBody {
+    /// Reconstruct a method's body as indented Java statement lines, or `None` if it cannot be
+    /// decompiled confidently.
+    ///
+    /// It returns `None` on a control-flow shape not yet modelled, an exception handler, or any
+    /// unsupported instruction; the caller wraps the lines in a block and falls back to a safe
+    /// placeholder on `None`.
+    ///
+    /// `param_names` are the exact parameter names the caller renders in the signature, in order; the
+    /// body reuses them (never a name the signature doesn't declare), and a mismatch between them and
+    /// the descriptor's parameters (a generic signature that hides synthetic parameters, e.g. an
+    /// `enum` constructor's `String, int`) makes this bail so the body can never reference a phantom
+    /// parameter.
+    pub fn decompile(
+        method: &MethodInfo,
+        cf: &ClassFile,
+        param_names: &[String],
+    ) -> Option<Vec<String>> {
+        let pool = &cf.constant_pool;
+        let code = method.attributes.iter().find_map(|a| match &a.body {
+            AttributeBody::Code(code) => Some(code),
+            _ => None,
+        })?;
+        // A non-empty exception table means try/catch/finally — not yet structured.
+        if !code.exception_table.is_empty() {
             return None;
         }
-        locals.insert(slot, name.clone());
-        decls.push(Stmt::Declare { ty, name });
+        let owner = pool.class_name(cf.this_class)?.into_owned();
+        let is_static = method.access_flags.is_static();
+        let mut locals = Self::local_slots(method, pool, is_static, param_names)?;
+        // Hoist a typed declaration for every non-parameter local the method stores into, registering
+        // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
+        // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
+        let decls = Self::local_declarations(code, pool, is_static, &mut locals)?;
+        let cfg = Cfg::build(&code.code)?;
+        let structurer = Structurer {
+            code: &code.code,
+            cfg: &cfg,
+            pool,
+            owner,
+            is_static,
+            locals,
+        };
+        let mut stmts = decls;
+        stmts.extend(structurer.structure()?);
+        Some(Self::render_body(&stmts))
     }
-    Some(decls)
-}
 
-/// The local slot a *store* instruction writes (a store form, its numbered shorthand, or the `wide`
-/// form), or `None` for a non-store. The single source of truth for the store opcode set, shared by
-/// declaration discovery ([`stored_slot`]) and the simulator ([`Sim::step`]) so the two never drift.
-/// `iinc` is deliberately excluded — it read-modify-writes and carries a delta, handled separately.
-fn store_slot(ins: &Instruction) -> Option<u16> {
-    use Instruction as I;
-    Some(match ins {
-        I::Istore(s) | I::Lstore(s) | I::Fstore(s) | I::Dstore(s) | I::Astore(s) => u16::from(*s),
-        I::Istore0 | I::Lstore0 | I::Fstore0 | I::Dstore0 | I::Astore0 => 0,
-        I::Istore1 | I::Lstore1 | I::Fstore1 | I::Dstore1 | I::Astore1 => 1,
-        I::Istore2 | I::Lstore2 | I::Fstore2 | I::Dstore2 | I::Astore2 => 2,
-        I::Istore3 | I::Lstore3 | I::Fstore3 | I::Dstore3 | I::Astore3 => 3,
-        I::Wide(
-            WideInstruction::Istore(s)
-            | WideInstruction::Lstore(s)
-            | WideInstruction::Fstore(s)
-            | WideInstruction::Dstore(s)
-            | WideInstruction::Astore(s),
-        ) => *s,
-        _ => return None,
-    })
-}
+    /// The parameter slot → source-name map (slot 0 is `this` for an instance method and is not
+    /// listed), naming each slot from `param_names`. Returns `None` when the descriptor's parameter
+    /// count differs from `param_names`, so the body cannot name a slot the signature does not
+    /// declare.
+    fn local_slots(
+        method: &MethodInfo,
+        pool: &ConstantPool,
+        is_static: bool,
+        param_names: &[String],
+    ) -> Option<BTreeMap<u16, String>> {
+        let descriptor = pool.utf8(method.descriptor_index)?;
+        let params = MethodDescriptor::parse(&descriptor).ok()?.params;
+        if params.len() != param_names.len() {
+            return None;
+        }
+        let map = Attrs::parameter_slots(&params, is_static)
+            .zip(param_names)
+            .map(|((slot, _param), name)| (slot, name.clone()))
+            .collect();
+        Some(map)
+    }
 
-/// The local slot an instruction writes — a store (via [`store_slot`]) or an `iinc` (and its `wide`
-/// form) — or `None` if it writes no local. Drives declaration discovery.
-fn stored_slot(ins: &Instruction) -> Option<u16> {
-    use Instruction as I;
-    store_slot(ins).or_else(|| match ins {
-        I::Iinc { index, .. } => Some(u16::from(*index)),
-        I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
-        _ => None,
-    })
-}
+    /// Plan the hoisted local declarations for a method: scan its bytecode for stored slots, drop
+    /// `this` and the parameters (already named), and resolve each remaining slot to a typed
+    /// declaration from the `LocalVariableTable`, registering its name in `locals` for the body to
+    /// reference. Returns the declarations in slot order, or `None` — bailing the whole method — when
+    /// a stored local has no usable LVT entry (no `-g` build, a synthetic temporary, or a reused
+    /// slot) or its name collides with a parameter or another local.
+    fn local_declarations(
+        code: &CodeAttribute,
+        pool: &ConstantPool,
+        is_static: bool,
+        locals: &mut BTreeMap<u16, String>,
+    ) -> Option<Vec<Stmt>> {
+        // Slots written by a store / `iinc`, minus `this` (slot 0, instance) and the parameters —
+        // `locals` holds exactly those slots here, before any hoisted local is registered.
+        let mut stored: BTreeSet<u16> = code.code.iter().filter_map(Self::stored_slot).collect();
+        if !is_static {
+            stored.remove(&0);
+        }
+        stored.retain(|slot| !locals.contains_key(slot));
+        if stored.is_empty() {
+            return Some(Vec::new());
+        }
+        // Locals need types (a bare `var x;` is illegal), so the `LocalVariableTable` is required.
+        let table = Attrs::local_variable_table(code)?;
+        let mut decls = Vec::with_capacity(stored.len());
+        for slot in stored {
+            let (name, ty) = Attrs::local_variable(table, pool, slot)?;
+            // A hoisted declaration must never shadow a parameter or an already-hoisted local.
+            if locals.values().any(|n| *n == name) {
+                return None;
+            }
+            locals.insert(slot, name.clone());
+            decls.push(Stmt::Declare { ty, name });
+        }
+        Some(decls)
+    }
 
-/// Trim a trailing implicit `return;` (a `void` method's fall-off return) and render the rest.
-fn render_body(stmts: &[Stmt]) -> Vec<String> {
-    let end = if matches!(stmts.last(), Some(Stmt::Return(None))) {
-        stmts.len() - 1
-    } else {
-        stmts.len()
-    };
-    render_block(&stmts[..end])
+    /// The local slot a *store* instruction writes (a store form, its numbered shorthand, or the
+    /// `wide` form), or `None` for a non-store. The single source of truth for the store opcode set,
+    /// shared by declaration discovery ([`MethodBody::stored_slot`]) and the simulator
+    /// ([`Sim::step`]) so the two never drift. `iinc` is deliberately excluded — it read-modify-
+    /// writes and carries a delta, handled separately.
+    fn store_slot(ins: &Instruction) -> Option<u16> {
+        use Instruction as I;
+        Some(match ins {
+            I::Istore(s) | I::Lstore(s) | I::Fstore(s) | I::Dstore(s) | I::Astore(s) => {
+                u16::from(*s)
+            }
+            I::Istore0 | I::Lstore0 | I::Fstore0 | I::Dstore0 | I::Astore0 => 0,
+            I::Istore1 | I::Lstore1 | I::Fstore1 | I::Dstore1 | I::Astore1 => 1,
+            I::Istore2 | I::Lstore2 | I::Fstore2 | I::Dstore2 | I::Astore2 => 2,
+            I::Istore3 | I::Lstore3 | I::Fstore3 | I::Dstore3 | I::Astore3 => 3,
+            I::Wide(
+                WideInstruction::Istore(s)
+                | WideInstruction::Lstore(s)
+                | WideInstruction::Fstore(s)
+                | WideInstruction::Dstore(s)
+                | WideInstruction::Astore(s),
+            ) => *s,
+            _ => return None,
+        })
+    }
+
+    /// The local slot an instruction writes — a store (via [`MethodBody::store_slot`]) or an `iinc`
+    /// (and its `wide` form) — or `None` if it writes no local. Drives declaration discovery.
+    fn stored_slot(ins: &Instruction) -> Option<u16> {
+        use Instruction as I;
+        Self::store_slot(ins).or_else(|| match ins {
+            I::Iinc { index, .. } => Some(u16::from(*index)),
+            I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
+            _ => None,
+        })
+    }
+
+    /// Trim a trailing implicit `return;` (a `void` method's fall-off return) and render the rest.
+    fn render_body(stmts: &[Stmt]) -> Vec<String> {
+        let end = if matches!(stmts.last(), Some(Stmt::Return(None))) {
+            stmts.len() - 1
+        } else {
+            stmts.len()
+        };
+        Stmt::render_block(&stmts[..end])
+    }
 }
 
 /// The straight-line symbolic-execution state for one basic block.
@@ -235,7 +245,7 @@ impl Sim<'_> {
             value: Expr::Binary {
                 op,
                 lhs: Box::new(Expr::Local(name)),
-                rhs: Box::new(lit(mag.to_string())),
+                rhs: Box::new(Expr::lit(mag.to_string())),
             },
         });
         Some(())
@@ -274,10 +284,10 @@ impl Sim<'_> {
     /// carries its owner type as its receiver expression instead).
     fn invoke(&mut self, index: u16, is_static: bool) -> Option<()> {
         let (owner, name, descriptor) = self.method_ref(index)?;
-        let md = parse_method_descriptor(&descriptor).ok()?;
+        let md = MethodDescriptor::parse(&descriptor).ok()?;
         let args = self.pop_args(md.params.len())?;
         let recv = if is_static {
-            Box::new(Expr::Type(internal_to_java(&owner)))
+            Box::new(Expr::Type(JavaType::internal_to_java(&owner)))
         } else {
             Box::new(self.pop()?)
         };
@@ -296,7 +306,7 @@ impl Sim<'_> {
     /// (`new X(...)`), or a non-virtual instance call (a `private` / `super.m()` method).
     fn invoke_special(&mut self, index: u16) -> Option<()> {
         let (owner, name, descriptor) = self.method_ref(index)?;
-        let md = parse_method_descriptor(&descriptor).ok()?;
+        let md = MethodDescriptor::parse(&descriptor).ok()?;
         let args = self.pop_args(md.params.len())?;
         if name != "<init>" {
             let recv = self.pop()?;
@@ -345,7 +355,7 @@ impl Sim<'_> {
     /// reference popped from the stack.
     fn field_receiver(&mut self, owner: &str, is_static: bool) -> Option<Expr> {
         if is_static {
-            Some(Expr::Type(internal_to_java(owner)))
+            Some(Expr::Type(JavaType::internal_to_java(owner)))
         } else {
             self.pop()
         }
@@ -380,30 +390,30 @@ impl Sim<'_> {
         // Local stores (all forms) — the opcode set lives in `store_slot`, shared with declaration
         // discovery so the simulator and the pre-pass can never drift. Handled before the `match`
         // (a guard can't bind the slot there) so `store_slot` is computed once.
-        if let Some(slot) = store_slot(ins) {
+        if let Some(slot) = MethodBody::store_slot(ins) {
             return self.store(slot);
         }
         match ins {
             I::Nop => {}
 
             // Constants.
-            I::AconstNull => self.stack.push(lit("null")),
-            I::IconstM1 => self.stack.push(lit("-1")),
-            I::Iconst0 => self.stack.push(lit("0")),
-            I::Iconst1 => self.stack.push(lit("1")),
-            I::Iconst2 => self.stack.push(lit("2")),
-            I::Iconst3 => self.stack.push(lit("3")),
-            I::Iconst4 => self.stack.push(lit("4")),
-            I::Iconst5 => self.stack.push(lit("5")),
-            I::Lconst0 => self.stack.push(lit("0L")),
-            I::Lconst1 => self.stack.push(lit("1L")),
-            I::Fconst0 => self.stack.push(lit(float_literal(0.0))),
-            I::Fconst1 => self.stack.push(lit(float_literal(1.0))),
-            I::Fconst2 => self.stack.push(lit(float_literal(2.0))),
-            I::Dconst0 => self.stack.push(lit(double_literal(0.0))),
-            I::Dconst1 => self.stack.push(lit(double_literal(1.0))),
-            I::Bipush(v) => self.stack.push(lit(v.to_string())),
-            I::Sipush(v) => self.stack.push(lit(v.to_string())),
+            I::AconstNull => self.stack.push(Expr::lit("null")),
+            I::IconstM1 => self.stack.push(Expr::lit("-1")),
+            I::Iconst0 => self.stack.push(Expr::lit("0")),
+            I::Iconst1 => self.stack.push(Expr::lit("1")),
+            I::Iconst2 => self.stack.push(Expr::lit("2")),
+            I::Iconst3 => self.stack.push(Expr::lit("3")),
+            I::Iconst4 => self.stack.push(Expr::lit("4")),
+            I::Iconst5 => self.stack.push(Expr::lit("5")),
+            I::Lconst0 => self.stack.push(Expr::lit("0L")),
+            I::Lconst1 => self.stack.push(Expr::lit("1L")),
+            I::Fconst0 => self.stack.push(Expr::lit(Literal::float_literal(0.0))),
+            I::Fconst1 => self.stack.push(Expr::lit(Literal::float_literal(1.0))),
+            I::Fconst2 => self.stack.push(Expr::lit(Literal::float_literal(2.0))),
+            I::Dconst0 => self.stack.push(Expr::lit(Literal::double_literal(0.0))),
+            I::Dconst1 => self.stack.push(Expr::lit(Literal::double_literal(1.0))),
+            I::Bipush(v) => self.stack.push(Expr::lit(v.to_string())),
+            I::Sipush(v) => self.stack.push(Expr::lit(v.to_string())),
             I::Ldc(i) => {
                 let e = self.constant(u16::from(*i))?;
                 self.stack.push(e);
@@ -464,7 +474,7 @@ impl Sim<'_> {
 
             // Object creation.
             I::New(i) => {
-                let ty = internal_to_java(&self.class_ref(*i)?);
+                let ty = JavaType::internal_to_java(&self.class_ref(*i)?);
                 self.stack.push(Expr::Uninitialized(ty));
             }
             I::Dup => match self.stack.last() {
@@ -482,7 +492,7 @@ impl Sim<'_> {
                 if internal.starts_with('[') {
                     return None;
                 }
-                self.cast(internal_to_java(&internal))?;
+                self.cast(JavaType::internal_to_java(&internal))?;
             }
             I::ArrayLength => {
                 let array = self.pop()?;
@@ -522,15 +532,15 @@ impl Sim<'_> {
     /// Resolve a constant-pool constant (for `ldc` / `ldc_w` / `ldc2_w`) to a literal expression.
     fn constant(&self, index: u16) -> Option<Expr> {
         Some(match self.pool.get(index)? {
-            ConstantPoolEntry::Integer(v) => lit(v.to_string()),
-            ConstantPoolEntry::Long(v) => lit(format!("{v}L")),
-            ConstantPoolEntry::Float(v) => lit(float_literal(*v)),
-            ConstantPoolEntry::Double(v) => lit(double_literal(*v)),
+            ConstantPoolEntry::Integer(v) => Expr::lit(v.to_string()),
+            ConstantPoolEntry::Long(v) => Expr::lit(format!("{v}L")),
+            ConstantPoolEntry::Float(v) => Expr::lit(Literal::float_literal(*v)),
+            ConstantPoolEntry::Double(v) => Expr::lit(Literal::double_literal(*v)),
             ConstantPoolEntry::String { string_index } => {
-                lit(string_literal(&self.pool.utf8(*string_index)?))
+                Expr::lit(Literal::string_literal(&self.pool.utf8(*string_index)?))
             }
             ConstantPoolEntry::Class { name_index } => {
-                lit(class_literal(&self.pool.utf8(*name_index)?))
+                Expr::lit(Literal::class_literal(&self.pool.utf8(*name_index)?))
             }
             _ => return None,
         })
@@ -589,11 +599,6 @@ impl Sim<'_> {
             .class_name(index)
             .map(alloc::borrow::Cow::into_owned)
     }
-}
-
-/// A literal expression from already-rendered Java source text.
-fn lit(text: impl Into<String>) -> Expr {
-    Expr::Literal(text.into())
 }
 
 /// Recovers structured statements from a method's [`Cfg`], running each block through [`Sim`] and
@@ -679,7 +684,7 @@ impl Structurer<'_> {
                     fallthrough,
                 } => {
                     let (instr, taken, fallthrough) = (*instr, *taken, *fallthrough);
-                    let cond = branch_condition(&self.code[instr], true, cond_stack)?;
+                    let cond = Self::branch_condition(&self.code[instr], true, cond_stack)?;
                     // Acyclic only: the fall-through is the next block and the taken edge is forward
                     // and within this region. A back-edge (loop) or a jump out is not yet structured.
                     if fallthrough != b + 1 || taken <= b || taken > hi {
@@ -772,10 +777,10 @@ impl Structurer<'_> {
                 // Body: the forward region `[header, latch)` that flows into the latch, then the
                 // latch's own statements finish the body (its leftover operands are the condition).
                 let mut body = self.emit_region(header, latch, latch, visited)?;
-                claim(visited, latch)?;
+                Self::claim(visited, latch)?;
                 let (mut tail, cond_stack) = self.run_block(latch)?;
                 body.append(&mut tail);
-                let cond = branch_condition(&self.code[instr], false, cond_stack)?;
+                let cond = Self::branch_condition(&self.code[instr], false, cond_stack)?;
                 Some((Stmt::DoWhile { body, cond }, exit))
             }
             // while (top-test): the latch's `goto` is the back-edge; the header's branch exits.
@@ -792,13 +797,13 @@ impl Structurer<'_> {
                 if body_start != header + 1 || exit <= latch || exit > hi {
                     return None;
                 }
-                claim(visited, header)?;
+                Self::claim(visited, header)?;
                 // The header carries only the loop condition — a side effect there would repeat.
                 let (head_stmts, cond_stack) = self.run_block(header)?;
                 if !head_stmts.is_empty() {
                     return None;
                 }
-                let cond = branch_condition(&self.code[instr], true, cond_stack)?;
+                let cond = Self::branch_condition(&self.code[instr], true, cond_stack)?;
                 // The body `[body_start, latch]` exits back to the header (the latch's goto-back).
                 let body = self.emit_region(body_start, latch + 1, header, visited)?;
                 Some((Stmt::While { cond, body }, exit))
@@ -806,76 +811,77 @@ impl Structurer<'_> {
             _ => None,
         }
     }
-}
 
-/// Claim block `b` as emitted exactly once — the "emitted exactly once" invariant `structure`
-/// asserts — bailing if it was already visited.
-fn claim(visited: &mut [bool], b: usize) -> Option<()> {
-    if visited[b] {
-        return None;
-    }
-    visited[b] = true;
-    Some(())
-}
-
-/// Recover the source condition from a conditional branch and the operand(s) it tested. With
-/// `negate` the *fall-through* condition is returned — the branch is taken to skip a body, so control
-/// falls through under the negation of its jump test (a forward `if`, or a top-test `while` whose
-/// branch exits the loop). Without it the branch's own (positive) jump test is returned — the branch
-/// is taken to *continue* the loop (the `while (cond)` of a `do`-`while`).
-fn branch_condition(branch: &Instruction, negate: bool, mut stack: Vec<Expr>) -> Option<Expr> {
-    use Instruction as I;
-    // Pick the branch-taken operator, or its negation for the fall-through condition.
-    let op = |taken, negated| if negate { negated } else { taken };
-    let cond = match branch {
-        I::IfIcmpeq(_) | I::IfAcmpeq(_) => compare(op("==", "!="), &mut stack)?,
-        I::IfIcmpne(_) | I::IfAcmpne(_) => compare(op("!=", "=="), &mut stack)?,
-        I::IfIcmplt(_) => compare(op("<", ">="), &mut stack)?,
-        I::IfIcmpge(_) => compare(op(">=", "<"), &mut stack)?,
-        I::IfIcmpgt(_) => compare(op(">", "<="), &mut stack)?,
-        I::IfIcmple(_) => compare(op("<=", ">"), &mut stack)?,
-        I::Iflt(_) => compare_lit(op("<", ">="), "0", &mut stack)?,
-        I::Ifge(_) => compare_lit(op(">=", "<"), "0", &mut stack)?,
-        I::Ifgt(_) => compare_lit(op(">", "<="), "0", &mut stack)?,
-        I::Ifle(_) => compare_lit(op("<=", ">"), "0", &mut stack)?,
-        I::IfNull(_) => compare_lit(op("==", "!="), "null", &mut stack)?,
-        I::IfNonNull(_) => compare_lit(op("!=", "=="), "null", &mut stack)?,
-        // A bare `ifne` is taken when the value is truthy, `ifeq` when it is falsy; negating the
-        // taken test gives the fall-through condition.
-        I::Ifne(_) | I::Ifeq(_) => {
-            let value = stack.pop()?;
-            if matches!(branch, I::Ifne(_)) == negate {
-                Expr::Unary {
-                    op: "!",
-                    expr: Box::new(value),
-                }
-            } else {
-                value
-            }
+    /// Claim block `b` as emitted exactly once — the "emitted exactly once" invariant `structure`
+    /// asserts — bailing if it was already visited.
+    fn claim(visited: &mut [bool], b: usize) -> Option<()> {
+        if visited[b] {
+            return None;
         }
-        _ => return None,
-    };
-    // The condition must consume exactly the operands the block left; a leftover means we mis-read it.
-    if stack.is_empty() { Some(cond) } else { None }
-}
+        visited[b] = true;
+        Some(())
+    }
 
-/// Pop two operands into `lhs op rhs`.
-fn compare(op: &'static str, stack: &mut Vec<Expr>) -> Option<Expr> {
-    let rhs = stack.pop()?;
-    let lhs = stack.pop()?;
-    Some(Expr::Binary {
-        op,
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-    })
-}
+    /// Recover the source condition from a conditional branch and the operand(s) it tested. With
+    /// `negate` the *fall-through* condition is returned — the branch is taken to skip a body, so
+    /// control falls through under the negation of its jump test (a forward `if`, or a top-test
+    /// `while` whose branch exits the loop). Without it the branch's own (positive) jump test is
+    /// returned — the branch is taken to *continue* the loop (the `while (cond)` of a `do`-`while`).
+    fn branch_condition(branch: &Instruction, negate: bool, mut stack: Vec<Expr>) -> Option<Expr> {
+        use Instruction as I;
+        // Pick the branch-taken operator, or its negation for the fall-through condition.
+        let op = |taken, negated| if negate { negated } else { taken };
+        let cond = match branch {
+            I::IfIcmpeq(_) | I::IfAcmpeq(_) => Self::compare(op("==", "!="), &mut stack)?,
+            I::IfIcmpne(_) | I::IfAcmpne(_) => Self::compare(op("!=", "=="), &mut stack)?,
+            I::IfIcmplt(_) => Self::compare(op("<", ">="), &mut stack)?,
+            I::IfIcmpge(_) => Self::compare(op(">=", "<"), &mut stack)?,
+            I::IfIcmpgt(_) => Self::compare(op(">", "<="), &mut stack)?,
+            I::IfIcmple(_) => Self::compare(op("<=", ">"), &mut stack)?,
+            I::Iflt(_) => Self::compare_lit(op("<", ">="), "0", &mut stack)?,
+            I::Ifge(_) => Self::compare_lit(op(">=", "<"), "0", &mut stack)?,
+            I::Ifgt(_) => Self::compare_lit(op(">", "<="), "0", &mut stack)?,
+            I::Ifle(_) => Self::compare_lit(op("<=", ">"), "0", &mut stack)?,
+            I::IfNull(_) => Self::compare_lit(op("==", "!="), "null", &mut stack)?,
+            I::IfNonNull(_) => Self::compare_lit(op("!=", "=="), "null", &mut stack)?,
+            // A bare `ifne` is taken when the value is truthy, `ifeq` when it is falsy; negating the
+            // taken test gives the fall-through condition.
+            I::Ifne(_) | I::Ifeq(_) => {
+                let value = stack.pop()?;
+                if matches!(branch, I::Ifne(_)) == negate {
+                    Expr::Unary {
+                        op: "!",
+                        expr: Box::new(value),
+                    }
+                } else {
+                    value
+                }
+            }
+            _ => return None,
+        };
+        // The condition must consume exactly the operands the block left; a leftover means we
+        // mis-read it.
+        if stack.is_empty() { Some(cond) } else { None }
+    }
 
-/// Pop one operand into `lhs op <literal>` (a comparison against `0` or `null`).
-fn compare_lit(op: &'static str, literal: &str, stack: &mut Vec<Expr>) -> Option<Expr> {
-    let lhs = stack.pop()?;
-    Some(Expr::Binary {
-        op,
-        lhs: Box::new(lhs),
-        rhs: Box::new(lit(literal)),
-    })
+    /// Pop two operands into `lhs op rhs`.
+    fn compare(op: &'static str, stack: &mut Vec<Expr>) -> Option<Expr> {
+        let rhs = stack.pop()?;
+        let lhs = stack.pop()?;
+        Some(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        })
+    }
+
+    /// Pop one operand into `lhs op <literal>` (a comparison against `0` or `null`).
+    fn compare_lit(op: &'static str, literal: &str, stack: &mut Vec<Expr>) -> Option<Expr> {
+        let lhs = stack.pop()?;
+        Some(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(Expr::lit(literal)),
+        })
+    }
 }

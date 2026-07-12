@@ -77,110 +77,121 @@ pub(crate) enum Stmt {
     DoWhile { body: Vec<Self>, cond: Expr },
 }
 
-/// Render a statement tree to indented Java lines. Top-level statements are at indent 0 (the caller
-/// adds the method-body indentation); a nested block indents its contents four spaces further.
-pub(crate) fn render_block(stmts: &[Stmt]) -> Vec<String> {
-    let mut out = Vec::new();
-    for stmt in stmts {
-        render_into(stmt, 0, &mut out);
+impl Stmt {
+    /// Render a statement tree to indented Java lines. Top-level statements are at indent 0 (the
+    /// caller adds the method-body indentation); a nested block indents its contents four spaces
+    /// further.
+    pub(crate) fn render_block(stmts: &[Self]) -> Vec<String> {
+        let mut out = Vec::new();
+        for stmt in stmts {
+            stmt.render_into(0, &mut out);
+        }
+        out
     }
-    out
-}
 
-fn render_into(stmt: &Stmt, indent: usize, out: &mut Vec<String>) {
-    let pad = " ".repeat(indent);
-    match stmt {
-        Stmt::If { cond, then, els } => {
-            out.push(format!("{pad}if ({}) {{", render_expr(cond)));
-            for s in then {
-                render_into(s, indent + 4, out);
-            }
-            if !els.is_empty() {
-                out.push(format!("{pad}}} else {{"));
-                for s in els {
-                    render_into(s, indent + 4, out);
+    fn render_into(&self, indent: usize, out: &mut Vec<String>) {
+        let pad = " ".repeat(indent);
+        match self {
+            Self::If { cond, then, els } => {
+                out.push(format!("{pad}if ({}) {{", cond.render()));
+                for s in then {
+                    s.render_into(indent + 4, out);
                 }
+                if !els.is_empty() {
+                    out.push(format!("{pad}}} else {{"));
+                    for s in els {
+                        s.render_into(indent + 4, out);
+                    }
+                }
+                out.push(format!("{pad}}}"));
             }
-            out.push(format!("{pad}}}"));
-        }
-        Stmt::While { cond, body } => {
-            out.push(format!("{pad}while ({}) {{", render_expr(cond)));
-            for s in body {
-                render_into(s, indent + 4, out);
+            Self::While { cond, body } => {
+                out.push(format!("{pad}while ({}) {{", cond.render()));
+                for s in body {
+                    s.render_into(indent + 4, out);
+                }
+                out.push(format!("{pad}}}"));
             }
-            out.push(format!("{pad}}}"));
-        }
-        Stmt::DoWhile { body, cond } => {
-            out.push(format!("{pad}do {{"));
-            for s in body {
-                render_into(s, indent + 4, out);
+            Self::DoWhile { body, cond } => {
+                out.push(format!("{pad}do {{"));
+                for s in body {
+                    s.render_into(indent + 4, out);
+                }
+                out.push(format!("{pad}}} while ({});", cond.render()));
             }
-            out.push(format!("{pad}}} while ({});", render_expr(cond)));
-        }
-        simple => out.push(format!("{pad}{}", render_simple(simple))),
-    }
-}
-
-/// Render a non-`If` statement to a single line of Java (terminated with `;`).
-fn render_simple(stmt: &Stmt) -> String {
-    match stmt {
-        Stmt::Expr(e) => format!("{};", render_expr(e)),
-        Stmt::Declare { ty, name } => format!("{ty} {name};"),
-        Stmt::Return(None) => "return;".to_string(),
-        Stmt::Return(Some(e)) => format!("return {};", render_expr(e)),
-        Stmt::Assign { target, value } => {
-            format!("{} = {};", render_expr(target), render_expr(value))
-        }
-        Stmt::Throw(e) => format!("throw {};", render_expr(e)),
-        Stmt::SuperCall(args) => format!("super({});", render_args(args)),
-        Stmt::ThisCall(args) => format!("this({});", render_args(args)),
-        Stmt::If { .. } | Stmt::While { .. } | Stmt::DoWhile { .. } => {
-            unreachable!("block statements are rendered by render_into")
+            simple => out.push(format!("{pad}{}", simple.render_simple())),
         }
     }
-}
 
-/// Render an expression to Java source.
-pub(crate) fn render_expr(e: &Expr) -> String {
-    match e {
-        Expr::This => "this".into(),
-        Expr::Local(name) | Expr::Type(name) => name.clone(),
-        Expr::Literal(text) => text.clone(),
-        Expr::Field { recv, name } => format!("{}.{name}", receiver(recv)),
-        Expr::Call { recv, name, args } => recv.as_ref().map_or_else(
-            || format!("{name}({})", render_args(args)),
-            |r| format!("{}.{name}({})", receiver(r), render_args(args)),
-        ),
-        Expr::New { ty, args } => format!("new {ty}({})", render_args(args)),
-        Expr::Binary { op, lhs, rhs } => format!("{} {op} {}", operand(lhs), operand(rhs)),
-        Expr::Unary { op, expr } => format!("{op}{}", operand(expr)),
-        Expr::Cast { ty, expr } => format!("({ty}) {}", operand(expr)),
-        Expr::ArrayLength(a) => format!("{}.length", receiver(a)),
-        Expr::Uninitialized(ty) => format!("new {ty}()"),
-    }
-}
-
-/// Render an operand of a binary / unary / cast, wrapping a binary sub-expression in parentheses so
-/// the grouping the bytecode evaluated is preserved (cast / unary bind tighter, so they need none).
-fn operand(e: &Expr) -> String {
-    match e {
-        Expr::Binary { .. } => format!("({})", render_expr(e)),
-        _ => render_expr(e),
-    }
-}
-
-/// Render a receiver of a field access / call / `.length`, wrapping any non-primary expression so the
-/// postfix access binds to the whole thing (`((Foo) x).bar()`, `(a + b).baz()`).
-fn receiver(e: &Expr) -> String {
-    match e {
-        Expr::Binary { .. } | Expr::Unary { .. } | Expr::Cast { .. } => {
-            format!("({})", render_expr(e))
+    /// Render a non-`If` statement to a single line of Java (terminated with `;`).
+    fn render_simple(&self) -> String {
+        match self {
+            Self::Expr(e) => format!("{};", e.render()),
+            Self::Declare { ty, name } => format!("{ty} {name};"),
+            Self::Return(None) => "return;".to_string(),
+            Self::Return(Some(e)) => format!("return {};", e.render()),
+            Self::Assign { target, value } => {
+                format!("{} = {};", target.render(), value.render())
+            }
+            Self::Throw(e) => format!("throw {};", e.render()),
+            Self::SuperCall(args) => format!("super({});", Expr::render_args(args)),
+            Self::ThisCall(args) => format!("this({});", Expr::render_args(args)),
+            Self::If { .. } | Self::While { .. } | Self::DoWhile { .. } => {
+                unreachable!("block statements are rendered by render_into")
+            }
         }
-        _ => render_expr(e),
     }
 }
 
-/// Render a comma-separated argument list.
-fn render_args(args: &[Expr]) -> String {
-    args.iter().map(render_expr).collect::<Vec<_>>().join(", ")
+impl Expr {
+    /// A literal expression from already-rendered Java source text.
+    pub(crate) fn lit(text: impl Into<String>) -> Self {
+        Self::Literal(text.into())
+    }
+
+    /// Render an expression to Java source.
+    pub(crate) fn render(&self) -> String {
+        match self {
+            Self::This => "this".into(),
+            Self::Local(name) | Self::Type(name) => name.clone(),
+            Self::Literal(text) => text.clone(),
+            Self::Field { recv, name } => format!("{}.{name}", recv.receiver()),
+            Self::Call { recv, name, args } => recv.as_ref().map_or_else(
+                || format!("{name}({})", Self::render_args(args)),
+                |r| format!("{}.{name}({})", r.receiver(), Self::render_args(args)),
+            ),
+            Self::New { ty, args } => format!("new {ty}({})", Self::render_args(args)),
+            Self::Binary { op, lhs, rhs } => format!("{} {op} {}", lhs.operand(), rhs.operand()),
+            Self::Unary { op, expr } => format!("{op}{}", expr.operand()),
+            Self::Cast { ty, expr } => format!("({ty}) {}", expr.operand()),
+            Self::ArrayLength(a) => format!("{}.length", a.receiver()),
+            Self::Uninitialized(ty) => format!("new {ty}()"),
+        }
+    }
+
+    /// Render an operand of a binary / unary / cast, wrapping a binary sub-expression in parentheses
+    /// so the grouping the bytecode evaluated is preserved (cast / unary bind tighter, so they need
+    /// none).
+    fn operand(&self) -> String {
+        match self {
+            Self::Binary { .. } => format!("({})", self.render()),
+            _ => self.render(),
+        }
+    }
+
+    /// Render a receiver of a field access / call / `.length`, wrapping any non-primary expression so
+    /// the postfix access binds to the whole thing (`((Foo) x).bar()`, `(a + b).baz()`).
+    fn receiver(&self) -> String {
+        match self {
+            Self::Binary { .. } | Self::Unary { .. } | Self::Cast { .. } => {
+                format!("({})", self.render())
+            }
+            _ => self.render(),
+        }
+    }
+
+    /// Render a comma-separated argument list.
+    fn render_args(args: &[Self]) -> String {
+        args.iter().map(Self::render).collect::<Vec<_>>().join(", ")
+    }
 }
