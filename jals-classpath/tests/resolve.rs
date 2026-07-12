@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use jals_build::DependencySource;
-use jals_classpath::{cached_jar_path, resolve_dependencies};
+use jals_classpath::DepsCache;
 
 /// Build a tiny but real (deflated) jar at `path`, like `load.rs` does, so resolved jars are
 /// loadable end-to-end.
@@ -30,7 +30,7 @@ fn file_url_resolves_to_existing_jar() {
     // A `file://`-classified source resolves to a `Path`; resolution confirms it exists and passes
     // it through verbatim (loading it is `load_classpath`'s job).
     let sources = vec![("dep".to_string(), DependencySource::Path(jar.clone()))];
-    let resolved = resolve_dependencies(&sources, &dir.path().join("cache"));
+    let resolved = DepsCache::resolve_dependencies(&sources, &dir.path().join("cache"));
     assert_eq!(resolved.jars, vec![jar]);
     assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
 }
@@ -41,7 +41,7 @@ fn missing_file_jar_is_a_warning_not_a_failure() {
     let missing = PathBuf::from("/no/such/dep.jar");
     let sources = vec![("dep".to_string(), DependencySource::Path(missing))];
 
-    let resolved = resolve_dependencies(&sources, &dir.path().join("cache"));
+    let resolved = DepsCache::resolve_dependencies(&sources, &dir.path().join("cache"));
     assert!(resolved.jars.is_empty());
     assert_eq!(resolved.warnings.len(), 1);
     assert!(resolved.warnings[0].message.contains("does not exist"));
@@ -56,12 +56,12 @@ fn cache_hit_skips_download() {
     // Pre-seed the cache at exactly the path the resolver computes, with non-empty contents. The
     // resolver must return that path through the skip-if-exists branch, never touching the network
     // (the URL is unreachable, so a real request would error and warn instead).
-    let cached = cached_jar_path("lib", url, &cache);
+    let cached = DepsCache::cached_jar_path("lib", url, &cache);
     std::fs::create_dir_all(&cache).unwrap();
     write_jar(&cached);
 
     let sources = vec![("lib".to_string(), DependencySource::Url(url.to_string()))];
-    let resolved = resolve_dependencies(&sources, &cache);
+    let resolved = DepsCache::resolve_dependencies(&sources, &cache);
     assert_eq!(resolved.jars, vec![cached]);
     assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
 }
@@ -95,7 +95,7 @@ fn downloads_from_localhost() {
     let url = format!("http://{addr}/lib.jar");
     let sources = vec![("lib".to_string(), DependencySource::Url(url))];
 
-    let resolved = resolve_dependencies(&sources, &cache);
+    let resolved = DepsCache::resolve_dependencies(&sources, &cache);
     handle.join().unwrap();
     assert_eq!(resolved.jars.len(), 1, "{:?}", resolved.warnings);
     assert_eq!(std::fs::read(&resolved.jars[0]).unwrap(), body);

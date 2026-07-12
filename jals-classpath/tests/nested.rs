@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::Path;
 
-use jals_classpath::{extract_nested_jars, load_classpath, resolve_project_dependencies};
+use jals_classpath::{ClasspathLoad, DepsCache, NestedJarsExtraction};
 use jals_config::{Dependency, JarDependency, Manifest};
 
 /// `Box.class` (the same fixture `load.rs` and `jals-hir`'s classpath-bridge tests use).
@@ -50,7 +50,7 @@ fn extracts_and_loads_a_bundled_jar() {
     );
 
     let dest = dir.path().join("nested");
-    let extraction = extract_nested_jars(&fat, &dest);
+    let extraction = NestedJarsExtraction::extract_nested_jars(&fat, &dest);
     assert!(extraction.warnings.is_empty(), "{:?}", extraction.warnings);
 
     // Only the `*.jar` member is unpacked; the top-level `.class` is left to `load_classpath`.
@@ -64,7 +64,7 @@ fn extracts_and_loads_a_bundled_jar() {
     assert!(nested_jar.starts_with(&dest));
 
     // And it is loadable: the bundled library's class parses through the normal classpath path.
-    let load = load_classpath(std::slice::from_ref(nested_jar));
+    let load = ClasspathLoad::load_classpath(std::slice::from_ref(nested_jar));
     assert_eq!(load.classes.len(), 1, "{:?}", load.warnings);
     assert!(load.warnings.is_empty(), "{:?}", load.warnings);
 }
@@ -78,7 +78,7 @@ fn recurses_into_doubly_nested_jars() {
     write_jar(&fat, &[("lib/mid.jar", &mid)]);
 
     let dest = dir.path().join("nested");
-    let extraction = extract_nested_jars(&fat, &dest);
+    let extraction = NestedJarsExtraction::extract_nested_jars(&fat, &dest);
     assert!(extraction.warnings.is_empty(), "{:?}", extraction.warnings);
 
     // Both the middle jar and the jar it itself bundles are extracted (jar-in-jar-in-jar).
@@ -91,7 +91,7 @@ fn recurses_into_doubly_nested_jars() {
         .expect("the doubly-nested jar is extracted");
 
     // The deepest jar carries the class.
-    let load = load_classpath(std::slice::from_ref(leaf));
+    let load = ClasspathLoad::load_classpath(std::slice::from_ref(leaf));
     assert_eq!(load.classes.len(), 1, "{:?}", load.warnings);
 }
 
@@ -103,10 +103,10 @@ fn extraction_is_idempotent() {
     write_jar(&fat, &[("BOOT-INF/lib/inner.jar", &inner)]);
     let dest = dir.path().join("nested");
 
-    let first = extract_nested_jars(&fat, &dest);
+    let first = NestedJarsExtraction::extract_nested_jars(&fat, &dest);
     assert_eq!(first.jars.len(), 1);
     // A second run reuses the file already on disk (skip-if-exists), yielding the same path.
-    let second = extract_nested_jars(&fat, &dest);
+    let second = NestedJarsExtraction::extract_nested_jars(&fat, &dest);
     assert_eq!(first.jars, second.jars);
     assert!(second.warnings.is_empty(), "{:?}", second.warnings);
 }
@@ -118,7 +118,7 @@ fn corrupt_bundled_jar_is_a_warning_not_a_failure() {
     // A bundled "jar" that is not a real archive.
     write_jar(&fat, &[("lib/bad.jar", b"not a zip archive")]);
 
-    let extraction = extract_nested_jars(&fat, &dir.path().join("nested"));
+    let extraction = NestedJarsExtraction::extract_nested_jars(&fat, &dir.path().join("nested"));
     // The bytes are still written to disk and returned (the host will warn again if it can't load it)...
     assert_eq!(extraction.jars.len(), 1);
     assert!(extraction.jars[0].ends_with("lib/bad.jar"));
@@ -155,7 +155,7 @@ fn resolve_project_dependencies_unpacks_a_recursive_jar() {
     };
 
     let mut warnings = Vec::new();
-    let jars = resolve_project_dependencies(&manifest, root, |m| warnings.push(m));
+    let jars = DepsCache::resolve_project_dependencies(&manifest, root, |m| warnings.push(m));
     assert!(warnings.is_empty(), "{warnings:?}");
 
     // The fat jar itself (resolved as-is) plus its one bundled jar (unpacked under target/jals/deps).
@@ -179,6 +179,6 @@ fn resolve_project_dependencies_unpacks_a_recursive_jar() {
         )]),
         ..Default::default()
     };
-    let jars = resolve_project_dependencies(&plain, root, |m| warnings.push(m));
+    let jars = DepsCache::resolve_project_dependencies(&plain, root, |m| warnings.push(m));
     assert_eq!(jars, vec![fat]);
 }
