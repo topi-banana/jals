@@ -2419,6 +2419,9 @@ impl SwitchRule {
     pub fn label(&self) -> Option<SwitchLabel> {
         support::child(&self.syntax)
     }
+    pub fn expr(&self) -> Option<Expr> {
+        support::child(&self.syntax)
+    }
 }
 
 impl AstNode for SwitchRule {
