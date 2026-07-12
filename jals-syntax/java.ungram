@@ -332,8 +332,11 @@ SwitchStmt =
 SwitchBlock =
   '{' rules:SwitchRule* groups:SwitchGroup* '}'
 
+// `expr` is the value-producing arm body (`case X -> expr;`); the label's own
+// case-constant / guard expressions are nested inside the SwitchLabel node, so
+// they never match the direct-child accessor.
 SwitchRule =
-  label:SwitchLabel '->' (Block | ThrowStmt | Expr ';')
+  label:SwitchLabel '->' (Block | ThrowStmt | expr:Expr ';')
 
 SwitchGroup =
   labels:(SwitchLabel ':')* stmts:Stmt*

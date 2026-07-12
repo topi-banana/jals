@@ -580,9 +580,10 @@ impl<'a> Inferer<'a> {
             ast::Expr::Ternary(t) => self.ternary_ty(t),
             ast::Expr::FieldAccess(f) => self.field_access_ty(f),
             ast::Expr::Call(c) => self.call_ty(c),
-            // Target-typed forms still need a later phase (a method reference / lambda takes its
-            // type from context; a switch expression unifies its arms).
-            ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) | ast::Expr::Switch(_) => Ty::Unknown,
+            ast::Expr::Switch(s) => self.switch_ty(s),
+            // Target-typed forms still need a later phase: a method reference / lambda takes its
+            // type from context.
+            ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) => Ty::Unknown,
             ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::external("Class")),
         }
     }
@@ -682,15 +683,31 @@ impl<'a> Inferer<'a> {
     }
 
     fn ternary_ty(&self, t: &ast::TernaryExpr) -> Ty {
-        // parts: condition, then-branch, else-branch. Take the type only when both branches agree.
+        // parts: condition, then-branch, else-branch.
         let mut parts = t.parts();
         let _cond = parts.next();
         let then_ty = self.child_ty(parts.next());
         let else_ty = self.child_ty(parts.next());
-        if then_ty == else_ty {
-            then_ty
-        } else {
-            Ty::Unknown
+        Self::join_exact([then_ty, else_ty])
+    }
+
+    /// A switch expression's type: the [`join_exact`](Inferer::join_exact) of every arm that
+    /// produces a value ([`ast::SwitchExpr::result_exprs`]). A `throw` arm produces no value and
+    /// is ignored; a body-less or value-less switch joins empty, to [`Ty::Unknown`].
+    fn switch_ty(&self, s: &ast::SwitchExpr) -> Ty {
+        Self::join_exact(s.result_exprs().map(|e| self.expr_ty(e.syntax())))
+    }
+
+    /// The exact-equality join shared by the branching expressions (ternary, switch): the arms'
+    /// common type when they all agree, else [`Ty::Unknown`] — also for an empty join or an
+    /// un-inferable arm. No numeric promotion, `null` widening, or least-upper-bound over a
+    /// common supertype (a mixed-numeric or subtype join is `Ty::Unknown`), which keeps the
+    /// "never a false type" guarantee. Short-circuits on the first disagreeing arm.
+    fn join_exact(tys: impl IntoIterator<Item = Ty>) -> Ty {
+        let mut tys = tys.into_iter();
+        match tys.next() {
+            Some(first) if tys.all(|t| t == first) => first,
+            _ => Ty::Unknown,
         }
     }
 

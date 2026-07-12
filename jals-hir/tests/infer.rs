@@ -36,6 +36,12 @@ fn def_ty(src: &str, name: &str) -> String {
     ti.type_of_def(def.id).to_string()
 }
 
+/// The recorded type of the expression node `n` — the `type_of_expr` lookup keyed by `n`'s span.
+fn type_at<'t>(ti: &'t TypeInference, n: &SyntaxNode) -> Option<&'t Ty> {
+    let r = n.text_range();
+    ti.type_of_expr(usize::from(r.start())..usize::from(r.end()))
+}
+
 /// The inferred type of the (first) expression whose source text is exactly `text`.
 fn expr_ty(src: &str, text: &str) -> String {
     let (node, _, ti) = analyse(src);
@@ -44,10 +50,18 @@ fn expr_ty(src: &str, text: &str) -> String {
         .filter_map(ast::Expr::cast)
         .find(|e| e.syntax().text().to_string().trim() == text)
         .unwrap_or_else(|| panic!("no expression `{text}`"));
-    let r = expr.syntax().text_range();
-    ti.type_of_expr(usize::from(r.start())..usize::from(r.end()))
-        .unwrap()
-        .to_string()
+    type_at(&ti, expr.syntax()).unwrap().to_string()
+}
+
+/// The inferred types of every switch *expression* in `src`, in source (pre-order) order — the
+/// outer switch first, then any nested ones — so one call checks every switch of a fixture
+/// without repeating each switch's full text as an `expr_ty` match.
+fn switch_tys(src: &str) -> Vec<String> {
+    let (node, _, ti) = analyse(src);
+    node.descendants()
+        .filter(|n| n.kind() == jals_syntax::SyntaxKind::SWITCH_EXPR)
+        .map(|n| type_at(&ti, &n).cloned().unwrap_or(Ty::Unknown).to_string())
+        .collect()
 }
 
 // --- Literals -------------------------------------------------------------------------------------
@@ -289,6 +303,66 @@ fn project_free_inference_names_reference_types_externally() {
     assert_eq!(ti.type_of_def(n.id).to_string(), "int");
 }
 
+// --- Switch expressions ---------------------------------------------------------------------------
+
+#[test]
+fn switch_arrow_arms_of_one_type_infer_that_type() {
+    let src = "class C { int m(int x) { return switch (x) { case 1 -> 10; default -> 20; }; } }";
+    assert_eq!(switch_tys(src), ["int"]);
+}
+
+#[test]
+fn switch_arms_of_different_types_are_unknown() {
+    // Exact-equality join (like the ternary): a mismatch is `Unknown`, not a common supertype.
+    let src =
+        "class C { Object m(int x) { return switch (x) { case 1 -> 10; default -> \"s\"; }; } }";
+    assert_eq!(switch_tys(src), ["?"]);
+}
+
+#[test]
+fn switch_arrow_block_yields_are_the_arm_value() {
+    let src = "class C { int m(int x) { \
+               return switch (x) { case 1 -> { yield 10; } default -> { yield 20; } }; } }";
+    assert_eq!(switch_tys(src), ["int"]);
+}
+
+#[test]
+fn switch_colon_group_yields_are_the_arm_value() {
+    let src = "class C { int m(int x) { \
+               return switch (x) { case 1: yield 10; default: yield 20; }; } }";
+    assert_eq!(switch_tys(src), ["int"]);
+}
+
+#[test]
+fn switch_throw_arm_produces_no_value() {
+    // A `throw` arm never completes normally, so it does not constrain the switch's type.
+    let src = "class C { int m(int x) { \
+               return switch (x) { case 1 -> 10; default -> throw new RuntimeException(); }; } }";
+    assert_eq!(switch_tys(src), ["int"]);
+}
+
+#[test]
+fn switch_of_a_project_type_resolves_to_it() {
+    let src = "class Foo { } class C { Foo m(int x) { \
+               return switch (x) { case 1 -> new Foo(); default -> new Foo(); }; } }";
+    assert_eq!(switch_tys(src), ["Foo"]);
+}
+
+#[test]
+fn nested_switch_yields_are_attributed_to_their_own_switch() {
+    // The inner switch yields `String`; the outer must not be polluted by it and stays `int`.
+    let src = "class C { int m(int x, int y) { \
+               return switch (x) { \
+                   case 1 -> { \
+                       String s = switch (y) { case 2 -> \"a\"; default -> \"b\"; }; \
+                       yield 10; \
+                   } \
+                   default -> 20; \
+               }; } }";
+    // Pre-order: the outer switch first, then the inner one.
+    assert_eq!(switch_tys(src), ["int", "String"]);
+}
+
 // --- Snapshots ------------------------------------------------------------------------------------
 
 fn render(src: &str) -> String {
@@ -302,11 +376,7 @@ fn render(src: &str) -> String {
     }
     out.push_str("exprs:\n");
     for e in node.descendants().filter_map(ast::Expr::cast) {
-        let r = e.syntax().text_range();
-        let ty = ti
-            .type_of_expr(usize::from(r.start())..usize::from(r.end()))
-            .cloned()
-            .unwrap_or(Ty::Unknown);
+        let ty = type_at(&ti, e.syntax()).cloned().unwrap_or(Ty::Unknown);
         let text = e.syntax().text().to_string().trim().replace('\n', " ");
         writeln!(out, "  {text}: {ty}").unwrap();
     }
@@ -349,6 +419,24 @@ fn snapshot_new_and_array() {
               new Helper(): Helper
               new int[2]: int[]
               2: int
+        "]],
+    );
+}
+
+#[test]
+fn snapshot_switch_expression() {
+    check(
+        "class C { void m(int x) { var r = switch (x) { case 1 -> 10; default -> 20; }; } }",
+        expect![[r"
+            defs:
+              Param x: int
+              Local r: int
+            exprs:
+              switch (x) { case 1 -> 10; default -> 20; }: int
+              x: int
+              1: int
+              10: int
+              20: int
         "]],
     );
 }

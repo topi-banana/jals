@@ -9,15 +9,18 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use rowan::WalkEvent;
 use rowan::ast::support;
 
 use super::{
     AssignmentExpr, AstNode, AstSupport, BinaryExpr, CatchClause, ExportsDirective, Expr,
     FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, NameRef, OpensDirective,
-    ProvidesDirective, QualifiedName, Resource, Type,
+    ProvidesDirective, QualifiedName, Resource, SwitchExpr, Type, YieldStmt,
 };
 use crate::language::SyntaxToken;
-use crate::syntax_kind::SyntaxKind::{self, DOT, IDENT, NON_SEALED_KW};
+use crate::syntax_kind::SyntaxKind::{
+    self, DOT, IDENT, NON_SEALED_KW, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT,
+};
 
 impl QualifiedName {
     /// The full dotted text as written (without surrounding trivia), e.g. `a.b.c` or `a.b.*`.
@@ -265,10 +268,49 @@ impl Resource {
     }
 }
 
+impl SwitchExpr {
+    /// The value-producing expressions of this switch expression: each arrow rule's
+    /// [`expr`](super::SwitchRule::expr) body (`case X -> expr;`), plus every `yield`'s value —
+    /// covering both arrow blocks and colon groups. A `throw` or otherwise value-less arm
+    /// contributes nothing.
+    ///
+    /// A nested switch expression or statement is skipped as a whole subtree, so an inner
+    /// switch's arms and yields are never misattributed to this one.
+    pub fn result_exprs(&self) -> impl Iterator<Item = Expr> {
+        let arrows = self
+            .body()
+            .into_iter()
+            .flat_map(|b| b.rules())
+            .filter_map(|r| r.expr());
+        let mut walk = self.body().map(|b| b.syntax().preorder());
+        let yields = core::iter::from_fn(move || {
+            let walk = walk.as_mut()?;
+            while let Some(event) = walk.next() {
+                let WalkEvent::Enter(node) = event else {
+                    continue;
+                };
+                match node.kind() {
+                    SWITCH_EXPR | SWITCH_STMT => walk.skip_subtree(),
+                    YIELD_STMT => {
+                        if let Some(expr) = YieldStmt::cast(node).and_then(|y| y.expr()) {
+                            return Some(expr);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        });
+        arrows.chain(yields)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AstNode;
-    use crate::ast::{CatchClause, FieldDecl, LocalVarDecl, QualifiedName, Resource, Type};
+    use crate::ast::{
+        CatchClause, FieldDecl, LocalVarDecl, QualifiedName, Resource, SwitchExpr, Type,
+    };
     use crate::parser::Parse;
 
     /// Returns the first descendant of `src` that casts to `T`.
@@ -375,5 +417,24 @@ mod tests {
         assert_eq!(qn.last_segment(), None);
         assert_eq!(qn.qualifier().as_deref(), Some("a.b"));
         assert!(qn.is_wildcard());
+    }
+
+    #[test]
+    fn switch_result_exprs_covers_every_arm_shape_and_skips_nested_switches() {
+        // Arrow expr, arrow block (whose yield's value is itself a nested switch), throw arm,
+        // and a colon group; the nested switch's own arm must not leak into the outer list.
+        let switch: SwitchExpr = first(
+            "class C { int m(int x) { return switch (x) { \
+                 case 1 -> 10; \
+                 case 2 -> { yield switch (x) { default -> 30; }; } \
+                 case 3 -> throw new RuntimeException(); \
+                 default: yield 40; \
+             }; } }",
+        );
+        let texts: Vec<String> = switch
+            .result_exprs()
+            .map(|e| e.syntax().text().to_string().trim().to_owned())
+            .collect();
+        assert_eq!(texts, ["10", "switch (x) { default -> 30; }", "40"]);
     }
 }
