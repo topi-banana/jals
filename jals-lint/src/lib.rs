@@ -207,7 +207,7 @@ mod tests {
             constant.unnecessary_range,
             Some((
                 else_start..else_start + "{ b(); }".len(),
-                "this code is never executed".to_string()
+                "this code is never executed".to_owned()
             ))
         );
         // Every other rule leaves the secondary range empty.

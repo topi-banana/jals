@@ -79,17 +79,13 @@ fn completes_fields_and_methods_with_detail() {
         items(&[src], 0),
         [
             (
-                "area".to_string(),
+                "area".to_owned(),
                 DefKind::Method,
-                "(int w, int h): int".to_string()
+                "(int w, int h): int".to_owned()
             ),
-            ("id".to_string(), DefKind::Field, "long".to_string()),
-            (
-                "m".to_string(),
-                DefKind::Method,
-                "(Box b): void".to_string()
-            ),
-            ("size".to_string(), DefKind::Field, "int".to_string()),
+            ("id".to_owned(), DefKind::Field, "long".to_owned()),
+            ("m".to_owned(), DefKind::Method, "(Box b): void".to_owned()),
+            ("size".to_owned(), DefKind::Field, "int".to_owned()),
         ]
     );
 }
@@ -154,7 +150,7 @@ fn scope_offers_locals_params_and_members() {
     let labels = scope_labels(&[src], 0);
     for expected in ["C", "count", "helper", "m", "n", "total"] {
         assert!(
-            labels.contains(&expected.to_string()),
+            labels.contains(&expected.to_owned()),
             "missing `{expected}` in {labels:?}"
         );
     }
@@ -166,8 +162,8 @@ fn scope_hides_a_local_declared_after_the_cursor() {
     // visible at the cursor.
     let src = "class C { void m() { int early = 1; $0 int late = 2; } }";
     let labels = scope_labels(&[src], 0);
-    assert!(labels.contains(&"early".to_string()));
-    assert!(!labels.contains(&"late".to_string()));
+    assert!(labels.contains(&"early".to_owned()));
+    assert!(!labels.contains(&"late".to_owned()));
 }
 
 #[test]
@@ -175,8 +171,8 @@ fn scope_offers_project_types_from_other_files() {
     let other = "package a; class Helper { }";
     let main = "package a; class Main { void m() { $0 } }";
     let labels = scope_labels(&[other, main], 1);
-    assert!(labels.contains(&"Helper".to_string()));
-    assert!(labels.contains(&"Main".to_string()));
+    assert!(labels.contains(&"Helper".to_owned()));
+    assert!(labels.contains(&"Main".to_owned()));
 }
 
 #[test]

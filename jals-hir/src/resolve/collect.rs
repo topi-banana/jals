@@ -72,7 +72,7 @@ mod tests {
 
     #[allow(clippy::needless_pass_by_value)]
     fn text(tokens: Vec<SyntaxToken>) -> Vec<String> {
-        tokens.iter().map(|t| t.text().to_string()).collect()
+        tokens.iter().map(|t| t.text().to_owned()).collect()
     }
 
     fn node_of(src: &str, kind: jals_syntax::SyntaxKind) -> SyntaxNode {
@@ -88,7 +88,7 @@ mod tests {
         let method = node_of("class C { int compute() { return 0; } }", METHOD_DECL);
         assert_eq!(
             Collect::first_ident_token(&method)
-                .map(|t| t.text().to_string())
+                .map(|t| t.text().to_owned())
                 .as_deref(),
             Some("compute"),
         );

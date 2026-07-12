@@ -415,11 +415,11 @@ mod tests {
     /// node's text can carry leading trivia, so it is trimmed (e.g. `NON_SEALED_KW`).
     fn label(e: &SyntaxElement) -> String {
         if e.kind() == S::ANNOTATION {
-            "@".to_string()
+            "@".to_owned()
         } else {
             match e {
-                SyntaxElement::Token(t) => t.text().to_string(),
-                SyntaxElement::Node(n) => n.text().to_string().trim().to_string(),
+                SyntaxElement::Token(t) => t.text().to_owned(),
+                SyntaxElement::Node(n) => n.text().to_string().trim().to_owned(),
             }
         }
     }

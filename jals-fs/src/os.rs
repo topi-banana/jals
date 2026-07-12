@@ -22,7 +22,7 @@ impl OsFileTree {
     /// Render a `std::io::Error` into an [`FsError`], preserving the not-found case.
     fn map_io(path: &str, err: &std::io::Error) -> FsError {
         match err.kind() {
-            std::io::ErrorKind::NotFound => FsError::NotFound(path.to_string()),
+            std::io::ErrorKind::NotFound => FsError::NotFound(path.to_owned()),
             _ => FsError::Io(format!("{path}: {err}")),
         }
     }
@@ -45,7 +45,7 @@ impl OsFileTree {
                 && path.extension().and_then(|e| e.to_str()) == Some(ext)
                 && let Some(child) = path.to_str()
             {
-                out.push(child.to_string());
+                out.push(child.to_owned());
             }
         }
     }
@@ -55,7 +55,7 @@ impl FileTree for OsFileTree {
     fn read_to_string(&self, path: &str) -> Result<String> {
         match std::fs::read(Path::new(path)) {
             Ok(bytes) => {
-                String::from_utf8(bytes).map_err(|_| FsError::InvalidUtf8(path.to_string()))
+                String::from_utf8(bytes).map_err(|_| FsError::InvalidUtf8(path.to_owned()))
             }
             Err(err) => Err(Self::map_io(path, &err)),
         }
@@ -79,7 +79,7 @@ impl FileTree for OsFileTree {
         // permission error, …) is what `map_io` already renders — including its `NotFound` case.
         let entries = std::fs::read_dir(dir).map_err(|err| {
             if dir.exists() {
-                FsError::NotADirectory(path.to_string())
+                FsError::NotADirectory(path.to_owned())
             } else {
                 Self::map_io(path, &err)
             }
@@ -87,7 +87,7 @@ impl FileTree for OsFileTree {
         let mut out = Vec::new();
         for entry in entries.flatten() {
             if let Some(child) = entry.path().to_str() {
-                out.push(child.to_string());
+                out.push(child.to_owned());
             }
         }
         out.sort();

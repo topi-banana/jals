@@ -4,6 +4,7 @@
 //! conservative — it returns `None`/empty when it cannot produce something a Java parser accepts, so
 //! the caller falls back to a safe form (no initializer, `argN` names) and the output stays valid.
 
+use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -40,7 +41,7 @@ impl Attrs {
         Some(match pool.get(index)? {
             ConstantPoolEntry::Integer(v) => {
                 if is_boolean {
-                    if *v != 0 { "true" } else { "false" }.to_string()
+                    if *v != 0 { "true" } else { "false" }.to_owned()
                 } else {
                     v.to_string()
                 }

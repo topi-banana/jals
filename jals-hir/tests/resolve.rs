@@ -18,7 +18,7 @@ fn render(src: &str) -> String {
                     d.kind, d.name, d.name_range.start, d.name_range.end
                 )
             }
-            Resolution::Unresolved => "<unresolved>".to_string(),
+            Resolution::Unresolved => "<unresolved>".to_owned(),
         };
         writeln!(
             s,

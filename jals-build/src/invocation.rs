@@ -52,7 +52,7 @@ impl Invocation {
         if s.chars().any(char::is_whitespace) {
             format!("\"{s}\"")
         } else {
-            s.to_string()
+            s.to_owned()
         }
     }
 }
@@ -84,20 +84,20 @@ impl Invocation {
         let mut args = Vec::new();
 
         // Output directory. `javac` creates it if needed, so no mkdir is required here.
-        args.push("-d".to_string());
+        args.push("-d".to_owned());
         args.push(Self::resolved(project_root, &build.classes_dir));
 
         // Java version: `--release` wins; otherwise emit whichever of `--source`/`--target` are set.
         if let Some(release) = build.release {
-            args.push("--release".to_string());
+            args.push("--release".to_owned());
             args.push(release.to_string());
         } else {
             if let Some(source) = build.source {
-                args.push("--source".to_string());
+                args.push("--source".to_owned());
                 args.push(source.to_string());
             }
             if let Some(target) = build.target {
-                args.push("--target".to_string());
+                args.push("--target".to_owned());
                 args.push(target.to_string());
             }
         }
@@ -111,7 +111,7 @@ impl Invocation {
             .collect();
         classpath.extend(extra_classpath.iter().map(|p| Self::path_string(p)));
         if !classpath.is_empty() {
-            args.push("-classpath".to_string());
+            args.push("-classpath".to_owned());
             args.push(Self::join_with(&classpath, path_sep));
         }
 
@@ -122,7 +122,7 @@ impl Invocation {
                 .iter()
                 .map(|d| Self::resolved(project_root, d))
                 .collect();
-            args.push("-sourcepath".to_string());
+            args.push("-sourcepath".to_owned());
             args.push(Self::join_with(&source_path, path_sep));
         }
 
@@ -139,7 +139,7 @@ impl Invocation {
         );
 
         Self {
-            program: "javac".to_string(),
+            program: "javac".to_owned(),
             args,
         }
     }
@@ -169,14 +169,14 @@ impl Invocation {
         classpath.extend(extra_classpath.iter().map(|p| Self::path_string(p)));
 
         let mut args = vec![
-            "-cp".to_string(),
+            "-cp".to_owned(),
             Self::join_with(&classpath, path_sep),
-            main_class.to_string(),
+            main_class.to_owned(),
         ];
         args.extend(program_args.iter().cloned());
 
         Self {
-            program: "java".to_string(),
+            program: "java".to_owned(),
             args,
         }
     }
@@ -222,7 +222,7 @@ mod tests {
         let inv = Invocation::build(&m, Path::new(ROOT), &[], &[], &[], ':');
         assert!(!inv.args.iter().any(|a| a == "-classpath"));
 
-        m.build.classpath = vec!["a.jar".to_string(), "b".to_string()];
+        m.build.classpath = vec!["a.jar".to_owned(), "b".to_owned()];
         let inv = Invocation::build(&m, Path::new(ROOT), &[], &[], &[], ':');
         assert!(has_pair(&inv.args, "-classpath", "/proj/a.jar:/proj/b"));
     }
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn javac_flags_passed_verbatim_before_sources() {
         let mut m = Manifest::default();
-        m.build.javac_flags = vec!["-Xlint:all".to_string(), "-g".to_string()];
+        m.build.javac_flags = vec!["-Xlint:all".to_owned(), "-g".to_owned()];
         let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
         let inv = Invocation::build(&m, Path::new(ROOT), &sources, &[], &[], ':');
         let lint = inv.args.iter().position(|a| a == "-Xlint:all").unwrap();
@@ -279,8 +279,8 @@ mod tests {
     fn full_javac_command_snapshot() {
         let mut m = Manifest::default();
         m.build.release = Some(21);
-        m.build.classpath = vec!["libs/guava.jar".to_string(), "libs/extra".to_string()];
-        m.build.javac_flags = vec!["-Xlint:all".to_string()];
+        m.build.classpath = vec!["libs/guava.jar".to_owned(), "libs/extra".to_owned()];
+        m.build.javac_flags = vec!["-Xlint:all".to_owned()];
         let sources = vec![
             PathBuf::from("/proj/src/main/java/com/example/A.java"),
             PathBuf::from("/proj/src/main/java/com/example/B.java"),
@@ -308,12 +308,12 @@ mod tests {
     #[test]
     fn run_invocation_prepends_classes_dir_to_classpath() {
         let mut m = Manifest::default();
-        m.build.classpath = vec!["libs/x.jar".to_string()];
+        m.build.classpath = vec!["libs/x.jar".to_owned()];
         let inv = Invocation::run(
             &m,
             Path::new(ROOT),
             "com.example.Main",
-            &["arg1".to_string()],
+            &["arg1".to_owned()],
             &[],
             ':',
         );
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn extra_classpath_appended_after_manifest_classpath() {
         let mut m = Manifest::default();
-        m.build.classpath = vec!["libs/guava.jar".to_string()];
+        m.build.classpath = vec!["libs/guava.jar".to_owned()];
         let extra = vec![
             PathBuf::from("/proj/target/jals/deps/dep.jar"),
             PathBuf::from("/abs/other.jar"),
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn display_command_quotes_whitespace() {
         let inv = Invocation {
-            program: "javac".to_string(),
-            args: vec!["-d".to_string(), "/has space/out".to_string()],
+            program: "javac".to_owned(),
+            args: vec!["-d".to_owned(), "/has space/out".to_owned()],
         };
         assert_eq!(inv.display_command(), "javac -d \"/has space/out\"");
     }

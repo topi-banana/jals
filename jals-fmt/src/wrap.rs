@@ -16,8 +16,9 @@
 //! (the renderer has already positioned the cursor at the comment's column); every
 //! continuation line begins with `newline` followed by `indent_str`.
 
+use alloc::borrow::ToOwned;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use unicode_width::UnicodeWidthStr;
@@ -39,7 +40,7 @@ impl Wrap {
         comment_width: usize,
     ) -> String {
         if indent_cols + UnicodeWidthStr::width(text) <= comment_width {
-            return text.to_string();
+            return text.to_owned();
         }
         let words: Vec<&str> = text
             .strip_prefix("//")
@@ -47,7 +48,7 @@ impl Wrap {
             .split_whitespace()
             .collect();
         if words.is_empty() {
-            return text.to_string();
+            return text.to_owned();
         }
         let prefix = "// ";
         let avail = comment_width
@@ -83,7 +84,7 @@ impl Wrap {
     ) -> String {
         let opener = if is_doc { "/**" } else { "/*" };
         let Some(inner) = text.strip_prefix(opener).and_then(|s| s.strip_suffix("*/")) else {
-            return text.to_string();
+            return text.to_owned();
         };
 
         let margin_cols = indent_cols + " * ".len();
@@ -92,11 +93,11 @@ impl Wrap {
         if !text.contains('\n') {
             // Single line: keep it unless it overflows, then expand to a multi-line block.
             if indent_cols + UnicodeWidthStr::width(text) <= comment_width {
-                return text.to_string();
+                return text.to_owned();
             }
             let words: Vec<&str> = inner.split_whitespace().collect();
             if words.is_empty() {
-                return text.to_string();
+                return text.to_owned();
             }
             return Self::emit_block(opener, &Self::pack(&words, avail), indent_str, newline);
         }
@@ -113,7 +114,7 @@ impl Wrap {
             let closes = lower.contains("</pre>");
             let fence = stripped.trim_start().starts_with("```");
             if in_pre || opens || closes || fence {
-                content.push(stripped.to_string());
+                content.push(stripped.to_owned());
                 if fence {
                     in_pre = !in_pre;
                 } else {
@@ -125,7 +126,7 @@ impl Wrap {
             if width == 0 {
                 content.push(String::new());
             } else if margin_cols + width <= comment_width {
-                content.push(stripped.to_string());
+                content.push(stripped.to_owned());
             } else {
                 content.extend(Self::pack(
                     &stripped.split_whitespace().collect::<Vec<_>>(),

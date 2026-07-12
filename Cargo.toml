@@ -89,6 +89,18 @@ iter_count = "warn"
 bytes_count_to_len = "warn"
 unnecessary_to_owned = "warn"
 implicit_clone = "warn"
+# Ban `<&str>.to_string()` in favor of the more explicit `.to_owned()`; the redundant
+# `String::to_string()` case is already covered by `implicit_clone` (clippy retired
+# `string_to_string`), and `&&str`/`Display`-machinery misuse by `inefficient_to_string`.
+str_to_string = "warn"
+# Further `restriction`-group allocation lints (not in any preset group, opted in individually):
+# `format_push_string` bans `s.push_str(&format!(..))` (an intermediate `String` alloc; prefer
+# `write!`), `rc_buffer` bans `Rc<String>`/`Rc<Vec<T>>` (double indirection; prefer `Rc<str>`/
+# `Rc<[T]>`), and `string_add`/`string_add_assign` ban `String + &str` allocation via `+`.
+format_push_string = "warn"
+rc_buffer = "warn"
+string_add = "warn"
+string_add_assign = "warn"
 
 dbg_macro = "deny"
 todo = "deny"

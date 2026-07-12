@@ -5,8 +5,9 @@
 //! well-formed Java type reference (`[Ljava/lang/String;` → `java.lang.String[]`,
 //! `Ljava/util/List<Ljava/lang/String;>;` → `java.util.List<java.lang.String>`). Pure, never panics.
 
+use alloc::borrow::ToOwned;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_classfile::{ClassTypeSignature, FieldType, ThrowsSignature, TypeArgument, TypeSignature};
@@ -27,7 +28,7 @@ impl JavaType {
     /// Render a field-descriptor type to Java source (`[Ljava/lang/String;` → `java.lang.String[]`).
     pub fn render_field_type(ft: &FieldType) -> String {
         match ft {
-            FieldType::Base(b) => b.keyword().to_string(),
+            FieldType::Base(b) => b.keyword().to_owned(),
             FieldType::Object(internal) => Self::internal_to_java(internal),
             FieldType::Array(inner) => format!("{}[]", Self::render_field_type(inner)),
         }
@@ -37,7 +38,7 @@ impl JavaType {
     /// (`Ljava/util/List<Ljava/lang/String;>;` → `java.util.List<java.lang.String>`).
     pub fn render_type_sig(ts: &TypeSignature) -> String {
         match ts {
-            TypeSignature::Base(b) => b.keyword().to_string(),
+            TypeSignature::Base(b) => b.keyword().to_owned(),
             TypeSignature::TypeVariable(name) => name.clone(),
             TypeSignature::Array(inner) => format!("{}[]", Self::render_type_sig(inner)),
             TypeSignature::Class(c) => Self::render_class_type_sig(c),
@@ -71,7 +72,7 @@ impl JavaType {
     /// Render one type argument (`?`, `T`, `? extends T`, `? super T`).
     pub(crate) fn render_type_arg(arg: &TypeArgument) -> String {
         match arg {
-            TypeArgument::Any => "?".to_string(),
+            TypeArgument::Any => "?".to_owned(),
             TypeArgument::Exact(t) => Self::render_type_sig(t),
             TypeArgument::Extends(t) => format!("? extends {}", Self::render_type_sig(t)),
             TypeArgument::Super(t) => format!("? super {}", Self::render_type_sig(t)),

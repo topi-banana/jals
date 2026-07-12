@@ -45,7 +45,7 @@ fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
 #[test]
 fn decompiles_arithmetic_return() {
     let cf = consts();
-    let body = MethodBody::decompile(method(&cf, "add"), &cf, &["delta".to_string()])
+    let body = MethodBody::decompile(method(&cf, "add"), &cf, &["delta".to_owned()])
         .expect("add decompiles");
     assert_eq!(body, ["return this.count + delta;"]);
 }
@@ -53,7 +53,7 @@ fn decompiles_arithmetic_return() {
 #[test]
 fn decompiles_field_storing_constructor() {
     let cf = consts();
-    let body = MethodBody::decompile(method(&cf, "<init>"), &cf, &["start".to_string()])
+    let body = MethodBody::decompile(method(&cf, "<init>"), &cf, &["start".to_owned()])
         .expect("constructor decompiles");
     // The implicit `super()` is omitted; only the field store remains.
     assert_eq!(body, ["this.count = start;"]);
@@ -62,7 +62,7 @@ fn decompiles_field_storing_constructor() {
 #[test]
 fn decompiles_throw_of_a_new_object() {
     let cf = consts();
-    let body = MethodBody::decompile(method(&cf, "risky"), &cf, &["path".to_string()])
+    let body = MethodBody::decompile(method(&cf, "risky"), &cf, &["path".to_owned()])
         .expect("risky decompiles");
     assert_eq!(body, ["throw new java.io.IOException(path);"]);
 }
@@ -85,7 +85,7 @@ fn parameter_count_mismatch_bails() {
 #[test]
 fn structures_a_guard_clause_if() {
     let cf = branchy();
-    let names = ["a".to_string(), "b".to_string()];
+    let names = ["a".to_owned(), "b".to_owned()];
     let body = MethodBody::decompile(method(&cf, "max"), &cf, &names).expect("max decompiles");
     assert_eq!(body, ["if (a > b) {", "    return a;", "}", "return b;"]);
 }
@@ -93,7 +93,7 @@ fn structures_a_guard_clause_if() {
 #[test]
 fn structures_an_if_else_with_a_join() {
     let cf = branchy();
-    let body = MethodBody::decompile(method(&cf, "classify"), &cf, &["n".to_string()])
+    let body = MethodBody::decompile(method(&cf, "classify"), &cf, &["n".to_owned()])
         .expect("classify decompiles");
     assert_eq!(
         body,
@@ -112,7 +112,7 @@ fn structures_an_if_else_with_a_join() {
 fn decompiles_straight_line_locals() {
     // Two temporaries, each hoisted to a typed declaration; the stores become plain assignments.
     let cf = locals();
-    let names = ["n".to_string()];
+    let names = ["n".to_owned()];
     let body =
         MethodBody::decompile(method(&cf, "compute"), &cf, &names).expect("compute decompiles");
     assert_eq!(
@@ -131,7 +131,7 @@ fn decompiles_straight_line_locals() {
 fn hoists_a_local_across_an_if_else() {
     // `x` is written in both branches and read after the join — hoisting keeps it in scope.
     let cf = locals();
-    let body = MethodBody::decompile(method(&cf, "pick"), &cf, &["c".to_string()])
+    let body = MethodBody::decompile(method(&cf, "pick"), &cf, &["c".to_owned()])
         .expect("pick decompiles");
     assert_eq!(
         body,
@@ -150,7 +150,7 @@ fn hoists_a_local_across_an_if_else() {
 #[test]
 fn decompiles_a_reference_typed_local() {
     let cf = locals();
-    let body = MethodBody::decompile(method(&cf, "nameLength"), &cf, &["s".to_string()])
+    let body = MethodBody::decompile(method(&cf, "nameLength"), &cf, &["s".to_owned()])
         .expect("nameLength decompiles");
     assert_eq!(
         body,
@@ -164,7 +164,7 @@ fn structures_a_bottom_test_while() {
     // as `while (i < n)`. The loop counter `i` and accumulator `total` are hoisted locals.
     let cf = loops();
     let body =
-        MethodBody::decompile(method(&cf, "sum"), &cf, &["n".to_string()]).expect("sum decompiles");
+        MethodBody::decompile(method(&cf, "sum"), &cf, &["n".to_owned()]).expect("sum decompiles");
     assert_eq!(
         body,
         [
@@ -186,7 +186,7 @@ fn structures_a_do_while() {
     // The condition is tested at the bottom (a conditional back-branch), recovered as
     // `do { ... } while (c < n);`.
     let cf = loops();
-    let body = MethodBody::decompile(method(&cf, "count"), &cf, &["n".to_string()])
+    let body = MethodBody::decompile(method(&cf, "count"), &cf, &["n".to_owned()])
         .expect("count decompiles");
     assert_eq!(
         body,

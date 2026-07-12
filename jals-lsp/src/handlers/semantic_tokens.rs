@@ -431,7 +431,7 @@ mod tests {
                 len: t.length,
                 ty: legend.token_types[t.token_type as usize]
                     .as_str()
-                    .to_string(),
+                    .to_owned(),
                 mods: t.token_modifiers_bitset,
             });
         }

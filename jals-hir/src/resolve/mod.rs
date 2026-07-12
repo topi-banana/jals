@@ -9,7 +9,8 @@
 mod build;
 pub(crate) mod collect;
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -267,7 +268,7 @@ impl Resolver {
         self.defs.push(Def {
             id,
             kind,
-            name: name_tok.text().to_string(),
+            name: name_tok.text().to_owned(),
             name_range: Collect::byte_range(name_tok),
             scope,
         });
@@ -291,7 +292,7 @@ impl Resolver {
         };
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
-            name: tok.text().to_string(),
+            name: tok.text().to_owned(),
             namespace,
             scope,
             qualified: None,
@@ -316,7 +317,7 @@ impl Resolver {
         let qualified = ty.qualified_text().filter(|q| q.contains('.'));
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
-            name: tok.text().to_string(),
+            name: tok.text().to_owned(),
             namespace: Namespace::Type,
             scope,
             qualified,

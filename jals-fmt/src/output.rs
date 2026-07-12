@@ -1,6 +1,7 @@
 //! The result of formatting: the rendered text plus any warnings.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -22,7 +23,7 @@ impl Warning {
     pub(crate) fn from_syntax_error(err: &SyntaxError) -> Self {
         let range = err.range();
         Self {
-            message: err.message().to_string(),
+            message: err.message().to_owned(),
             range: usize::from(range.start())..usize::from(range.end()),
         }
     }

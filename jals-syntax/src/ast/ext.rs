@@ -5,7 +5,8 @@
 //! text, positional selection among same-typed children, parameterized
 //! queries) lives here. Both halves together form the public `ast` API.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use rowan::ast::support;
@@ -28,7 +29,7 @@ impl QualifiedName {
     /// `*` of an on-demand import is not a segment.
     pub fn segments(&self) -> Vec<String> {
         AstSupport::ident_tokens(&self.syntax)
-            .map(|t| t.text().to_string())
+            .map(|t| t.text().to_owned())
             .collect()
     }
 
@@ -40,7 +41,7 @@ impl QualifiedName {
         }
         AstSupport::ident_tokens(&self.syntax)
             .last()
-            .map(|t| t.text().to_string())
+            .map(|t| t.text().to_owned())
     }
 
     /// The qualifier (package) part: everything before the simple name (`a.b.C` → `a.b`), or the
@@ -121,7 +122,7 @@ impl Type {
 
     /// The text of [`simple_name_token`](Type::simple_name_token): `a.b.C` → `C`.
     pub fn simple_name(&self) -> Option<String> {
-        self.simple_name_token().map(|t| t.text().to_string())
+        self.simple_name_token().map(|t| t.text().to_owned())
     }
 
     /// Whether the type name is qualified, i.e. a dotted reference type (`a.b.C`).
@@ -140,7 +141,7 @@ impl Type {
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| matches!(t.kind(), IDENT | DOT))
-            .map(|t| t.text().to_string())
+            .map(|t| t.text().to_owned())
             .collect();
         (!text.is_empty()).then_some(text)
     }
@@ -167,14 +168,14 @@ impl Literal {
 
     /// The literal text as written.
     pub fn text(&self) -> Option<String> {
-        self.token().map(|t| t.text().to_string())
+        self.token().map(|t| t.text().to_owned())
     }
 }
 
 impl NameRef {
     /// The referenced name text.
     pub fn text(&self) -> Option<String> {
-        AstSupport::first_sig_token(&self.syntax).map(|t| t.text().to_string())
+        AstSupport::first_sig_token(&self.syntax).map(|t| t.text().to_owned())
     }
 }
 
@@ -198,7 +199,7 @@ impl FieldAccess {
             .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| t.kind() == IDENT)
             .last()
-            .map(|t| t.text().to_string())
+            .map(|t| t.text().to_owned())
     }
 }
 
@@ -280,7 +281,7 @@ mod tests {
     }
 
     fn names_of(decl: impl Iterator<Item = crate::language::SyntaxToken>) -> Vec<String> {
-        decl.map(|t| t.text().to_string()).collect()
+        decl.map(|t| t.text().to_owned()).collect()
     }
 
     #[test]
@@ -306,7 +307,7 @@ mod tests {
     fn catch_binding_skips_the_types() {
         let catch: CatchClause = first("class C { void m() { try { } catch (A | B e) { } } }");
         assert_eq!(
-            catch.binding().map(|t| t.text().to_string()).as_deref(),
+            catch.binding().map(|t| t.text().to_owned()).as_deref(),
             Some("e")
         );
     }
@@ -321,7 +322,7 @@ mod tests {
     fn resource_binding_is_the_declared_variable() {
         let resource: Resource = first("class C { void m() { try (var r = open()) { } } }");
         assert_eq!(
-            resource.binding().map(|t| t.text().to_string()).as_deref(),
+            resource.binding().map(|t| t.text().to_owned()).as_deref(),
             Some("r")
         );
     }

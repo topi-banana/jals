@@ -1240,7 +1240,7 @@ mod tests {
     /// project source.
     fn workspace_with_box_sources() -> (Workspace, Url, &'static str, Url, String) {
         workspace_with_box(|dir, _class| {
-            let box_src = "public class Box<T> { public T get() { return null; } }".to_string();
+            let box_src = "public class Box<T> { public T get() { return null; } }".to_owned();
             let lib_dir = dir.join("libsrc");
             std::fs::create_dir_all(&lib_dir).unwrap();
             let box_java = lib_dir.join("Box.java");
@@ -1476,7 +1476,7 @@ mod tests {
         );
 
         // The editor opens a new Foo.java under the source root; the overlay adds it to the index.
-        let doc = Document::new("package a; class Foo { }".to_string(), 1);
+        let doc = Document::new("package a; class Foo { }".to_owned(), 1);
         assert!(ws.set_overlay(&foo_uri, &doc));
         let loc = ws
             .goto_definition(&bar_uri, Position::new(0, use_col))
@@ -1506,7 +1506,7 @@ mod tests {
 
         // Editing Types.java to add a sibling `B` re-extracts just that file; Use.java's reference
         // to `B` now resolves through the reassembled index.
-        let edited = Document::new("package a; class A { } class B { }".to_string(), 2);
+        let edited = Document::new("package a; class A { } class B { }".to_owned(), 2);
         assert!(ws.set_overlay(&types_uri, &edited));
         let loc = ws
             .goto_definition(&use_uri, Position::new(0, use_col))
@@ -1819,11 +1819,11 @@ mod tests {
             .map(|item| item.label)
             .collect();
         assert!(
-            labels.contains(&"Helper".to_string()),
+            labels.contains(&"Helper".to_owned()),
             "cross-file type in {labels:?}"
         );
-        assert!(labels.contains(&"x".to_string()));
-        assert!(labels.contains(&"return".to_string()));
+        assert!(labels.contains(&"x".to_owned()));
+        assert!(labels.contains(&"return".to_owned()));
     }
 
     #[test]

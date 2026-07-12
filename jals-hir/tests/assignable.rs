@@ -31,7 +31,7 @@ fn project_ty(index: &ProjectIndex, sources: &[&str], file: u32, decl_name: &str
         .expect("a project item declared there");
     Ty::Class(ClassTy::Project {
         id,
-        name: decl_name.to_string(),
+        name: decl_name.to_owned(),
         args: Vec::new(),
     })
 }

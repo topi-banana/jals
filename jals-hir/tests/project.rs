@@ -47,8 +47,8 @@ fn render(sources: &[&str]) -> String {
                             let it = index.item(id);
                             format!("project `{}` @file{}", it.fqn, it.file.0)
                         }
-                        TypeResolution::External => "external".to_string(),
-                        TypeResolution::Unresolved => "unresolved".to_string(),
+                        TypeResolution::External => "external".to_owned(),
+                        TypeResolution::Unresolved => "unresolved".to_owned(),
                     }
                 }
             };

@@ -4,9 +4,10 @@
 //! conservatively (any binary sub-expression used as an operand or receiver is wrapped), so the
 //! emitted Java always groups the way the bytecode evaluated — never mis-associating an operator.
 
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A reconstructed Java expression.
@@ -128,7 +129,7 @@ impl Stmt {
         match self {
             Self::Expr(e) => format!("{};", e.render()),
             Self::Declare { ty, name } => format!("{ty} {name};"),
-            Self::Return(None) => "return;".to_string(),
+            Self::Return(None) => "return;".to_owned(),
             Self::Return(Some(e)) => format!("return {};", e.render()),
             Self::Assign { target, value } => {
                 format!("{} = {};", target.render(), value.render())

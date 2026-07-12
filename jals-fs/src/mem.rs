@@ -203,14 +203,14 @@ mod tests {
         assert_eq!(
             fs.read_dir("/proj/src").unwrap(),
             vec![
-                "/proj/src/A.java".to_string(),
-                "/proj/src/notes.txt".to_string(),
-                "/proj/src/sub".to_string(),
+                "/proj/src/A.java".to_owned(),
+                "/proj/src/notes.txt".to_owned(),
+                "/proj/src/sub".to_owned(),
             ]
         );
         assert_eq!(
             fs.read_dir("/proj").unwrap(),
-            vec!["/proj/jalsfmt.toml".to_string(), "/proj/src".to_string()]
+            vec!["/proj/jalsfmt.toml".to_owned(), "/proj/src".to_owned()]
         );
     }
 
@@ -229,8 +229,8 @@ mod tests {
         assert_eq!(
             fs.walk_ext("/proj", "java").unwrap(),
             vec![
-                "/proj/src/A.java".to_string(),
-                "/proj/src/sub/B.java".to_string()
+                "/proj/src/A.java".to_owned(),
+                "/proj/src/sub/B.java".to_owned()
             ]
         );
         assert!(fs.walk_ext("/proj", "class").unwrap().is_empty());

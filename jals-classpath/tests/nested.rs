@@ -144,7 +144,7 @@ fn resolve_project_dependencies_unpacks_a_recursive_jar() {
     // A `recursive = true` jar dependency pointing at the local fat jar (a bare absolute path).
     let manifest = Manifest {
         dependencies: BTreeMap::from([(
-            "fat".to_string(),
+            "fat".to_owned(),
             Dependency::Jar(JarDependency {
                 jar: fat.to_string_lossy().into_owned(),
                 sources: None,
@@ -170,7 +170,7 @@ fn resolve_project_dependencies_unpacks_a_recursive_jar() {
     // Without `recursive`, the bundled jar stays sealed: only the fat jar resolves.
     let plain = Manifest {
         dependencies: BTreeMap::from([(
-            "fat".to_string(),
+            "fat".to_owned(),
             Dependency::Jar(JarDependency {
                 jar: fat.to_string_lossy().into_owned(),
                 sources: None,

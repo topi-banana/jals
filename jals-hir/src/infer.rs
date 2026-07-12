@@ -21,6 +21,7 @@
 //! stay [`Ty::Unknown`]. The pass never panics: every accessor is `Option`/iterator and an
 //! unresolvable form is `Unknown`.
 
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -398,7 +399,7 @@ impl TypeInference {
                 Some((receiver.project_id()?, name))
             }
             ast::Expr::NameRef(n) => {
-                let name = Collect::first_ident_token(n.syntax())?.text().to_string();
+                let name = Collect::first_ident_token(n.syntax())?.text().to_owned();
                 Some((index.enclosing_item(file, call.syntax())?, name))
             }
             _ => None,
@@ -721,7 +722,7 @@ impl<'a> Inferer<'a> {
         let Some(tok) = ty.simple_name_token() else {
             return Ty::Unknown;
         };
-        let name = tok.text().to_string();
+        let name = tok.text().to_owned();
         let args = self.type_args_of(ty);
         if let Some((index, file)) = self.project
             && let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
@@ -770,7 +771,7 @@ impl<'a> Inferer<'a> {
             Some(ast::Expr::FieldAccess(fa)) => self.field_access_member_ty(&fa, Namespace::Method),
             Some(ast::Expr::NameRef(n)) => {
                 let Some(name) =
-                    Collect::first_ident_token(n.syntax()).map(|t| t.text().to_string())
+                    Collect::first_ident_token(n.syntax()).map(|t| t.text().to_owned())
                 else {
                     return Ty::Unknown;
                 };
@@ -1360,7 +1361,7 @@ impl ProjectIndex {
         // Project type names from other files (a sibling type already in scope is deduped away). The
         // simple name completes; the fully-qualified name is the detail.
         for item in self.items() {
-            let name = item.fqn.simple_name().to_string();
+            let name = item.fqn.simple_name().to_owned();
             if seen.insert((name.clone(), Namespace::Type)) {
                 out.push(Completion {
                     label: name,

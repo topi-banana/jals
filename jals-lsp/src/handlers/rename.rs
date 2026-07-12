@@ -178,10 +178,10 @@ mod tests {
         assert_eq!(
             edits,
             [
-                (25, 26, "y".to_string()), // declaration
-                (32, 33, "y".to_string()), // assignment target
-                (36, 37, "y".to_string()), // rhs
-                (45, 46, "y".to_string()), // argument
+                (25, 26, "y".to_owned()), // declaration
+                (32, 33, "y".to_owned()), // assignment target
+                (36, 37, "y".to_owned()), // rhs
+                (45, 46, "y".to_owned()), // argument
             ]
         );
     }
@@ -193,8 +193,8 @@ mod tests {
         assert_eq!(
             edits,
             [
-                (25, 26, "renamed".to_string()),
-                (34, 35, "renamed".to_string()),
+                (25, 26, "renamed".to_owned()),
+                (34, 35, "renamed".to_owned()),
             ]
         );
     }

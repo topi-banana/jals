@@ -68,7 +68,7 @@ fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
-        .map(|t| (t.kind(), t.text().to_string()))
+        .map(|t| (t.kind(), t.text().to_owned()))
         .collect()
 }
 
@@ -566,11 +566,11 @@ fn java_with_hex_literals() -> impl Strategy<Value = String> {
 /// option may change.
 fn canon_hex(kind: SyntaxKind, text: &str) -> String {
     if !matches!(kind, SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL) {
-        return text.to_string();
+        return text.to_owned();
     }
     let bytes = text.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'0' || !matches!(bytes[1], b'x' | b'X') {
-        return text.to_string();
+        return text.to_owned();
     }
     let mantissa_end = match bytes[2..].iter().position(|b| matches!(b, b'p' | b'P')) {
         Some(i) => i + 2,
@@ -657,15 +657,15 @@ fn java_with_float_literals() -> impl Strategy<Value = String> {
 /// left as-is). Used to compare token streams modulo the only thing the option may change.
 fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
     if kind != SyntaxKind::FLOAT_LITERAL {
-        return text.to_string();
+        return text.to_owned();
     }
     let bytes = text.as_bytes();
     // Hex floats are out of scope.
     if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
-        return text.to_string();
+        return text.to_owned();
     }
     let Some(dot) = bytes.iter().position(|&b| b == b'.') else {
-        return text.to_string();
+        return text.to_owned();
     };
     let mut frac_end = dot + 1;
     while frac_end < bytes.len() && (bytes[frac_end].is_ascii_digit() || bytes[frac_end] == b'_') {
@@ -676,7 +676,7 @@ fn canon_float_zero(kind: SyntaxKind, text: &str) -> String {
     if dot > 0 && frac_end > dot + 1 && bytes[dot + 1..frac_end].iter().all(|&b| b == b'0') {
         format!("{}{}", &text[..=dot], &text[frac_end..])
     } else {
-        text.to_string()
+        text.to_owned()
     }
 }
 
@@ -751,7 +751,7 @@ fn java_with_suffix_literals() -> impl Strategy<Value = String> {
 /// token streams modulo the only thing the option may change.
 fn canon_suffix(kind: SyntaxKind, text: &str) -> String {
     let Some(&last) = text.as_bytes().last() else {
-        return text.to_string();
+        return text.to_owned();
     };
     let is_suffix = match kind {
         SyntaxKind::INT_LITERAL => matches!(last, b'l' | b'L'),
@@ -759,7 +759,7 @@ fn canon_suffix(kind: SyntaxKind, text: &str) -> String {
         _ => false,
     };
     if !is_suffix {
-        return text.to_string();
+        return text.to_owned();
     }
     format!(
         "{}{}",

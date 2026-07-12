@@ -29,7 +29,7 @@ impl Reporter {
         if color {
             format!("{code}{text}{RESET}")
         } else {
-            text.to_string()
+            text.to_owned()
         }
     }
 

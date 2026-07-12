@@ -69,7 +69,7 @@ mod tests {
     fn hovers_a_literal() {
         assert_eq!(
             at("class C { void m() { var x = 1; } }", "1"),
-            Some("```java\nint\n```".to_string())
+            Some("```java\nint\n```".to_owned())
         );
     }
 

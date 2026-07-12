@@ -5,8 +5,8 @@
 //! aesthetic rule; [`Ctx::sep`] wraps it in a fusion-safety net so the output never changes which
 //! operators lex together.
 
+use alloc::borrow::ToOwned;
 use alloc::format;
-use alloc::string::ToString;
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
@@ -24,7 +24,7 @@ impl Ctx<'_> {
     /// token's text is emitted verbatim.
     fn token_text(&self, tok: &SyntaxToken) -> Doc {
         match tok.kind() {
-            S::STRING_LITERAL | S::TEXT_BLOCK => Doc::raw(tok.text().to_string()),
+            S::STRING_LITERAL | S::TEXT_BLOCK => Doc::raw(tok.text().to_owned()),
             S::INT_LITERAL | S::FLOAT_LITERAL => {
                 let original = tok.text();
                 Doc::text(
@@ -34,7 +34,7 @@ impl Ctx<'_> {
                         .unwrap_or_else(|| original.into()),
                 )
             }
-            _ => Doc::text(tok.text().to_string()),
+            _ => Doc::text(tok.text().to_owned()),
         }
     }
 

@@ -23,7 +23,8 @@
 mod ext;
 mod generated;
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 
 pub use rowan::ast::{AstChildren, AstNode, AstPtr, SyntaxNodePtr};
 
@@ -50,7 +51,7 @@ impl AstSupport {
         node.descendants_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| !t.kind().is_trivia())
-            .map(|t| t.text().to_string())
+            .map(|t| t.text().to_owned())
             .collect()
     }
 
@@ -59,7 +60,7 @@ impl AstSupport {
         node.children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .find(|t| t.kind() == IDENT)
-            .map(|t| t.text().to_string())
+            .map(|t| t.text().to_owned())
     }
 
     /// The directly-declared name tokens (`IDENT` children) of `node`, in source order. The type of a

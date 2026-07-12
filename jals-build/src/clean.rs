@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn honors_a_custom_classes_dir() {
         let mut m = Manifest::default();
-        m.build.classes_dir = "out".to_string();
+        m.build.classes_dir = "out".to_owned();
         let paths = CleanTargets::paths(&m, Path::new(ROOT));
         assert_eq!(paths, vec![PathBuf::from("/proj/out")]);
     }

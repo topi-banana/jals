@@ -408,7 +408,7 @@ impl RunArgs {
             Some(explicit) => explicit.clone(),
             None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
                 .map_err(|e| anyhow!("{e}"))?
-                .to_string(),
+                .to_owned(),
         };
         let sources = App::discover_sources(&manifest, &root)?;
         // Assemble the compile inputs once: the resolved `[dependencies]` jars go on both the compile
@@ -495,7 +495,7 @@ impl InitArgs {
             absolute
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(std::string::ToString::to_string)
+                .map(str::to_owned)
                 .ok_or_else(|| {
                     anyhow!(
                         "could not infer a project name from {}; pass --name",

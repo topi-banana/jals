@@ -7,7 +7,8 @@
 //! `Default` for `discover`'s "no file found" branch), so a future config language server can drive
 //! them for any schema.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 
 use jals_fs::FileTree;
 use serde::Deserialize;
@@ -73,11 +74,11 @@ pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
     fn load(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
         let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_string(),
+            path: path.to_owned(),
             source,
         })?;
         toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_string(),
+            path: path.to_owned(),
             source,
         })
     }

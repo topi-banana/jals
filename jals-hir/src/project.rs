@@ -20,7 +20,7 @@
 
 use alloc::borrow::ToOwned;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -835,7 +835,7 @@ impl ProjectIndex {
         self.by_fqn.entry(class.fqn.clone()).or_insert(id);
         // Each classpath type gets its own pseudo-file with empty imports: every captured type name is
         // emitted fully-qualified, so it resolves through `resolve_qualified` without an import context.
-        let package = class.fqn.rsplit_once('.').map(|(pkg, _)| pkg.to_string());
+        let package = class.fqn.rsplit_once('.').map(|(pkg, _)| pkg.to_owned());
         self.files.insert(
             file,
             FileMeta {
@@ -1242,7 +1242,7 @@ impl SourceLocations {
             }
             Some(fqn)
         } else {
-            enclosing.map(str::to_string)
+            enclosing.map(str::to_owned)
         };
         for child in node.children() {
             self.collect(file, &child, package, next_enclosing.as_deref());
@@ -1288,7 +1288,7 @@ impl ProjectIndex {
             });
             Some(fqn)
         } else {
-            enclosing.map(str::to_string)
+            enclosing.map(str::to_owned)
         };
         for child in node.children() {
             Self::extract_types(&child, package, next_enclosing.as_deref(), out);
@@ -1320,7 +1320,7 @@ impl ProjectIndex {
         // struct-update) only the fields that apply to its member kind.
         let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
             owner,
-            name: name_tok.text().to_string(),
+            name: name_tok.text().to_owned(),
             kind,
             file,
             name_range: Collect::byte_range(name_tok),
@@ -1368,7 +1368,7 @@ impl ProjectIndex {
                 ENUM_CONSTANT => {
                     if let Some(name) = Collect::first_ident_token(&member) {
                         let ty = MemberType::Named {
-                            name: owner_simple.to_string(),
+                            name: owner_simple.to_owned(),
                             qualified: None,
                             dims: 0,
                             args: Vec::new(),
@@ -1489,7 +1489,7 @@ impl MemberType {
                 // `var`, a bare wildcard (`?`), or a missing keyword: no nameable type.
                 Some("var" | "?") | None => Self::Unknown,
                 Some(k) => Self::Primitive {
-                    keyword: k.to_string(),
+                    keyword: k.to_owned(),
                     dims,
                 },
             }
@@ -1529,7 +1529,7 @@ impl ProjectIndex {
 
     /// Qualifies `simple` with `package` (`Some("a.b")` → `a.b.Simple`; `None` → `Simple`).
     fn qualify(package: Option<&str>, simple: &str) -> String {
-        package.map_or_else(|| simple.to_string(), |p| format!("{p}.{simple}"))
+        package.map_or_else(|| simple.to_owned(), |p| format!("{p}.{simple}"))
     }
 
     /// Whether `name` is a method every type inherits from `java.lang.Object`. A call to one of these

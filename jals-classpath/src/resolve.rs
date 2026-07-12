@@ -264,7 +264,7 @@ impl DepsCache {
                     return candidate;
                 }
             }
-            base.to_string()
+            base.to_owned()
         }
 
         let (specs, errors) = manifest.dependency_source_dirs(Path::new(root));

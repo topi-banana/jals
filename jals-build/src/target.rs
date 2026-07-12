@@ -51,7 +51,7 @@ impl RunTarget {
                 .find(|b| b.name == name)
                 .map(|b| b.main_class.as_str())
                 .ok_or_else(|| ResolveTargetError::UnknownBin {
-                    name: name.to_string(),
+                    name: name.to_owned(),
                     available: bin_names(manifest),
                 });
         }
@@ -134,8 +134,8 @@ mod tests {
 
     fn bin(name: &str, main_class: &str) -> Bin {
         Bin {
-            name: name.to_string(),
-            main_class: main_class.to_string(),
+            name: name.to_owned(),
+            main_class: main_class.to_owned(),
         }
     }
 
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn no_bins_uses_run_main_class() {
         let mut m = Manifest::default();
-        m.run.main_class = Some("com.example.Main".to_string());
+        m.run.main_class = Some("com.example.Main".to_owned());
         assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Main"));
     }
 
@@ -180,7 +180,7 @@ mod tests {
     fn single_bin_wins_over_run_main_class() {
         // Option A: once any `[[bin]]` exists, `[run] main-class` is ignored for selection.
         let mut m = manifest_with_bins(vec![bin("only", "com.example.Only")]);
-        m.run.main_class = Some("com.example.Legacy".to_string());
+        m.run.main_class = Some("com.example.Legacy".to_owned());
         assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Only"));
     }
 
@@ -196,8 +196,8 @@ mod tests {
         assert_eq!(
             RunTarget::resolve(&m, Some("nope")),
             Err(ResolveTargetError::UnknownBin {
-                name: "nope".to_string(),
-                available: vec!["one".to_string(), "two".to_string()],
+                name: "nope".to_owned(),
+                available: vec!["one".to_owned(), "two".to_owned()],
             })
         );
     }
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(
             RunTarget::resolve(&m, None),
             Err(ResolveTargetError::Ambiguous {
-                available: vec!["one".to_string(), "two".to_string()],
+                available: vec!["one".to_owned(), "two".to_owned()],
             })
         );
     }
@@ -216,14 +216,14 @@ mod tests {
     #[test]
     fn default_run_selects_among_many() {
         let mut m = two_bins();
-        m.package.default_run = Some("two".to_string());
+        m.package.default_run = Some("two".to_owned());
         assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Two"));
     }
 
     #[test]
     fn explicit_bin_overrides_default_run() {
         let mut m = two_bins();
-        m.package.default_run = Some("one".to_string());
+        m.package.default_run = Some("one".to_owned());
         assert_eq!(RunTarget::resolve(&m, Some("two")), Ok("com.example.Two"));
     }
 
@@ -237,15 +237,15 @@ mod tests {
         );
         assert!(
             ResolveTargetError::Ambiguous {
-                available: vec!["a".to_string(), "b".to_string()],
+                available: vec!["a".to_owned(), "b".to_owned()],
             }
             .to_string()
             .contains("multiple bins")
         );
         assert!(
             ResolveTargetError::UnknownBin {
-                name: "x".to_string(),
-                available: vec!["a".to_string()],
+                name: "x".to_owned(),
+                available: vec!["a".to_owned()],
             }
             .to_string()
             .contains("no bin named")

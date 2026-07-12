@@ -60,8 +60,8 @@ impl Warning {
     /// by the load (`load.rs`) and resolve (`resolve.rs`) halves of this crate.
     pub(crate) fn new(path: &str, message: &str) -> Self {
         Self {
-            path: path.to_string(),
-            message: message.to_string(),
+            path: path.to_owned(),
+            message: message.to_owned(),
         }
     }
 }

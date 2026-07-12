@@ -482,13 +482,13 @@ mod tests {
         );
         // A single type argument: `List<String>`.
         let list_of_string = Ty::Class(ClassTy::External {
-            name: "List".to_string(),
+            name: "List".to_owned(),
             args: vec![Ty::string()],
         });
         assert_eq!(list_of_string.to_string(), "List<String>");
         // Several arguments, comma-separated, and nesting: `Map<String, List<int>>`.
         let map = Ty::Class(ClassTy::External {
-            name: "Map".to_string(),
+            name: "Map".to_owned(),
             args: vec![Ty::string(), list_of_string],
         });
         assert_eq!(map.to_string(), "Map<String, List<String>>");

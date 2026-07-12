@@ -43,7 +43,7 @@ impl InitOptions {
             .source_dirs
             .first()
             .cloned()
-            .unwrap_or_else(|| "src/main/java".to_string());
+            .unwrap_or_else(|| "src/main/java".to_owned());
 
         vec![
             ScaffoldFile {
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn scaffolds_manifest_source_and_gitignore() {
         let files = (InitOptions {
-            name: "demo".to_string(),
+            name: "demo".to_owned(),
         })
         .scaffold();
 
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn manifest_round_trips_through_the_parser() {
         let files = (InitOptions {
-            name: "demo".to_string(),
+            name: "demo".to_owned(),
         })
         .scaffold();
         let manifest: Manifest = toml::from_str(&find(&files, "jals.toml").contents).unwrap();
@@ -171,17 +171,14 @@ mod tests {
         assert_eq!(manifest.package.version.as_deref(), Some("0.1.0"));
         assert_eq!(manifest.run.main_class.as_deref(), Some("Main"));
         // `[build]` is commented out, so the parsed manifest keeps the Maven defaults.
-        assert_eq!(
-            manifest.build.source_dirs,
-            vec!["src/main/java".to_string()]
-        );
+        assert_eq!(manifest.build.source_dirs, vec!["src/main/java".to_owned()]);
         assert_eq!(manifest.build.classes_dir, "target/classes");
     }
 
     #[test]
     fn special_characters_in_the_name_are_escaped() {
         let files = (InitOptions {
-            name: "a\"b\\c".to_string(),
+            name: "a\"b\\c".to_owned(),
         })
         .scaffold();
         let manifest: Manifest = toml::from_str(&find(&files, "jals.toml").contents).unwrap();
@@ -191,7 +188,7 @@ mod tests {
     #[test]
     fn the_starter_class_matches_the_run_main_class() {
         let files = (InitOptions {
-            name: "demo".to_string(),
+            name: "demo".to_owned(),
         })
         .scaffold();
         let manifest: Manifest = toml::from_str(&find(&files, "jals.toml").contents).unwrap();

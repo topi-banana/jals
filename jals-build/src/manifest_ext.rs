@@ -143,7 +143,7 @@ impl DependencySource {
             return Ok(Self::Path(PathBuf::from(rest)));
         }
         if value.starts_with("https://") || value.starts_with("http://") {
-            return Ok(Self::Url(value.to_string()));
+            return Ok(Self::Url(value.to_owned()));
         }
         // Validated bare path: relative to the manifest directory (mirrors `classpath_entries`).
         Ok(Self::Path(manifest_dir.join(value)))
@@ -220,7 +220,7 @@ impl SourceDependency {
     fn from_git(git: &GitDependency, name: &str) -> Result<Self, DependencyError> {
         if git.git.is_empty() {
             return Err(DependencyError::Empty {
-                name: name.to_string(),
+                name: name.to_owned(),
                 field: "git",
             });
         }
@@ -240,7 +240,7 @@ impl SourceDependency {
     ) -> Result<Self, DependencyError> {
         if path.path.is_empty() {
             return Err(DependencyError::Empty {
-                name: name.to_string(),
+                name: name.to_owned(),
                 field: "path",
             });
         }
@@ -392,7 +392,7 @@ mod tests {
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.
     fn jar_dep(jar: &str) -> Dependency {
         Dependency::Jar(JarDependency {
-            jar: jar.to_string(),
+            jar: jar.to_owned(),
             sources: None,
             recursive: None,
         })
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             DependencySource::from_jar(&dep, "testlib", Path::new("/proj")),
             Some(Ok(DependencySource::Url(
-                "https://example.com/lib.jar".to_string()
+                "https://example.com/lib.jar".to_owned()
             )))
         );
     }
@@ -460,8 +460,8 @@ mod tests {
     fn dependency_sources_separates_ok_and_errors() {
         let m = Manifest {
             dependencies: BTreeMap::from([
-                ("good".to_string(), jar_dep("file:///abs/good.jar")),
-                ("empty".to_string(), jar_dep("")),
+                ("good".to_owned(), jar_dep("file:///abs/good.jar")),
+                ("empty".to_owned(), jar_dep("")),
             ]),
             ..Default::default()
         };
@@ -469,14 +469,14 @@ mod tests {
         assert_eq!(
             sources,
             vec![(
-                "good".to_string(),
+                "good".to_owned(),
                 DependencySource::Path(PathBuf::from("/abs/good.jar"))
             )]
         );
         assert_eq!(
             errors,
             vec![DependencyError::Empty {
-                name: "empty".to_string(),
+                name: "empty".to_owned(),
                 field: "jar",
             }]
         );
@@ -494,20 +494,20 @@ mod tests {
     #[test]
     fn sources_source_classifies_like_jar() {
         let dep = Dependency::Jar(JarDependency {
-            jar: "libs/lib.jar".to_string(),
-            sources: Some("https://example.com/lib-sources.jar".to_string()),
+            jar: "libs/lib.jar".to_owned(),
+            sources: Some("https://example.com/lib-sources.jar".to_owned()),
             recursive: None,
         });
         assert_eq!(
             DependencySource::from_sources(&dep, "lib", Path::new("/proj")),
             Some(Ok(DependencySource::Url(
-                "https://example.com/lib-sources.jar".to_string()
+                "https://example.com/lib-sources.jar".to_owned()
             )))
         );
 
         let local = Dependency::Jar(JarDependency {
-            jar: "libs/lib.jar".to_string(),
-            sources: Some("libs/lib-sources.jar".to_string()),
+            jar: "libs/lib.jar".to_owned(),
+            sources: Some("libs/lib-sources.jar".to_owned()),
             recursive: None,
         });
         assert_eq!(
@@ -523,14 +523,14 @@ mod tests {
         let m = Manifest {
             dependencies: BTreeMap::from([
                 (
-                    "withsrc".to_string(),
+                    "withsrc".to_owned(),
                     Dependency::Jar(JarDependency {
-                        jar: "file:///abs/a.jar".to_string(),
-                        sources: Some("file:///abs/a-sources.jar".to_string()),
+                        jar: "file:///abs/a.jar".to_owned(),
+                        sources: Some("file:///abs/a-sources.jar".to_owned()),
                         recursive: None,
                     }),
                 ),
-                ("nosrc".to_string(), jar_dep("file:///abs/b.jar")),
+                ("nosrc".to_owned(), jar_dep("file:///abs/b.jar")),
             ]),
             ..Default::default()
         };
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(
             sources,
             vec![(
-                "withsrc".to_string(),
+                "withsrc".to_owned(),
                 DependencySource::Path(PathBuf::from("/abs/a-sources.jar"))
             )]
         );
@@ -560,14 +560,14 @@ mod tests {
         );
 
         let path = Dependency::Path(PathDependency {
-            path: "../sibling".to_string(),
-            dir: Some("src".to_string()),
+            path: "../sibling".to_owned(),
+            dir: Some("src".to_owned()),
         });
         assert_eq!(
             SourceDependency::from_dependency(&path, "lib", Path::new("/proj")),
             Some(Ok(SourceDependency::Path(PathSource {
                 root: PathBuf::from("/proj/../sibling"),
-                dir: Some("src".to_string()),
+                dir: Some("src".to_owned()),
             })))
         );
         assert_eq!(
@@ -580,7 +580,7 @@ mod tests {
     fn git_refs_classify() {
         let make = |branch, tag, rev| {
             Dependency::Git(GitDependency {
-                git: "https://example.com/r.git".to_string(),
+                git: "https://example.com/r.git".to_owned(),
                 branch,
                 tag,
                 rev,
@@ -594,16 +594,16 @@ mod tests {
             };
         assert_eq!(git_ref(&make(None, None, None)), GitRef::Default);
         assert_eq!(
-            git_ref(&make(Some("main".to_string()), None, None)),
-            GitRef::Branch("main".to_string())
+            git_ref(&make(Some("main".to_owned()), None, None)),
+            GitRef::Branch("main".to_owned())
         );
         assert_eq!(
-            git_ref(&make(None, Some("v1".to_string()), None)),
-            GitRef::Tag("v1".to_string())
+            git_ref(&make(None, Some("v1".to_owned()), None)),
+            GitRef::Tag("v1".to_owned())
         );
         assert_eq!(
-            git_ref(&make(None, None, Some("abc123".to_string()))),
-            GitRef::Rev("abc123".to_string())
+            git_ref(&make(None, None, Some("abc123".to_owned()))),
+            GitRef::Rev("abc123".to_owned())
         );
     }
 
@@ -611,21 +611,21 @@ mod tests {
     fn dependency_source_dirs_collects_git_and_path_only() {
         let m = Manifest {
             dependencies: BTreeMap::from([
-                ("fromjar".to_string(), jar_dep("libs/lib.jar")),
+                ("fromjar".to_owned(), jar_dep("libs/lib.jar")),
                 (
-                    "fromgit".to_string(),
+                    "fromgit".to_owned(),
                     Dependency::Git(GitDependency {
-                        git: "https://example.com/r.git".to_string(),
+                        git: "https://example.com/r.git".to_owned(),
                         branch: None,
-                        tag: Some("v1".to_string()),
+                        tag: Some("v1".to_owned()),
                         rev: None,
                         dir: None,
                     }),
                 ),
                 (
-                    "frompath".to_string(),
+                    "frompath".to_owned(),
                     Dependency::Path(PathDependency {
-                        path: "../sibling".to_string(),
+                        path: "../sibling".to_owned(),
                         dir: None,
                     }),
                 ),
@@ -638,15 +638,15 @@ mod tests {
             dirs,
             vec![
                 (
-                    "fromgit".to_string(),
+                    "fromgit".to_owned(),
                     SourceDependency::Git(GitSource {
-                        url: "https://example.com/r.git".to_string(),
-                        reference: GitRef::Tag("v1".to_string()),
+                        url: "https://example.com/r.git".to_owned(),
+                        reference: GitRef::Tag("v1".to_owned()),
                         dir: None,
                     })
                 ),
                 (
-                    "frompath".to_string(),
+                    "frompath".to_owned(),
                     SourceDependency::Path(PathSource {
                         root: PathBuf::from("/proj/../sibling"),
                         dir: None,
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(
             jars,
             vec![(
-                "fromjar".to_string(),
+                "fromjar".to_owned(),
                 DependencySource::Path(PathBuf::from("/proj/libs/lib.jar"))
             )]
         );

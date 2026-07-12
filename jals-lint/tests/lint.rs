@@ -260,7 +260,7 @@ fn allow_suppresses_a_rule() {
     let mut config = Config::default();
     config
         .rules
-        .insert("wildcard-import".to_string(), Severity::Allow);
+        .insert("wildcard-import".to_owned(), Severity::Allow);
     let out = LintOutput::lint_source("import java.util.*;", &config);
     assert!(
         out.diagnostics.is_empty(),
@@ -273,7 +273,7 @@ fn severity_is_resolved_from_config() {
     let mut config = Config::default();
     config
         .rules
-        .insert("wildcard-import".to_string(), Severity::Error);
+        .insert("wildcard-import".to_owned(), Severity::Error);
     let out = LintOutput::lint_source("import java.util.*;", &config);
     assert_eq!(out.diagnostics.len(), 1);
     assert_eq!(out.diagnostics[0].severity, Severity::Error);
@@ -364,7 +364,7 @@ fn compact_source_file_respects_allow_config() {
     };
     config
         .rules
-        .insert("compact-source-file".to_string(), Severity::Allow);
+        .insert("compact-source-file".to_owned(), Severity::Allow);
     let out = LintOutput::lint_source("void main() {}", &config);
     assert!(
         out.diagnostics
@@ -413,7 +413,7 @@ fn module_import_respects_allow_config() {
     };
     config
         .rules
-        .insert("module-import".to_string(), Severity::Allow);
+        .insert("module-import".to_owned(), Severity::Allow);
     let out = LintOutput::lint_source("import module java.base;", &config);
     assert!(
         out.diagnostics.iter().all(|d| d.rule != "module-import"),

@@ -26,8 +26,8 @@ impl Diagnostics {
             .map(|err| Diagnostic {
                 range: line_index.range(text, err.range()),
                 severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("jals".to_string()),
-                message: err.message().to_string(),
+                source: Some("jals".to_owned()),
+                message: err.message().to_owned(),
                 ..Default::default()
             })
             .collect()
@@ -55,7 +55,7 @@ impl Diagnostics {
     ) -> Vec<Diagnostic> {
         let mut out = Vec::new();
         for finding in jals_lint::LintOutput::lint_node(&parse.syntax(), config) {
-            let code = NumberOrString::String(finding.rule.to_string());
+            let code = NumberOrString::String(finding.rule.to_owned());
             // A secondary unnecessary range renders as a hint (kept out of the problems list) tagged
             // `Unnecessary` so the editor fades it.
             let hint = finding
@@ -64,7 +64,7 @@ impl Diagnostics {
                     range: line_index.byte_range(text, &range),
                     severity: Some(DiagnosticSeverity::HINT),
                     code: Some(code.clone()),
-                    source: Some("jals".to_string()),
+                    source: Some("jals".to_owned()),
                     message,
                     tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                     ..Default::default()
@@ -73,7 +73,7 @@ impl Diagnostics {
                 range: line_index.byte_range(text, &finding.range),
                 severity: Some(Self::lint_severity(finding.severity)),
                 code: Some(code),
-                source: Some("jals".to_string()),
+                source: Some("jals".to_owned()),
                 message: finding.message,
                 // The finding names code that is itself unnecessary, so the editor fades it in place.
                 tags: finding
@@ -112,8 +112,8 @@ impl Diagnostics {
             .map(|range| Diagnostic {
                 range: line_index.byte_range(text, &range),
                 severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(NumberOrString::String("cannot-resolve".to_string())),
-                source: Some("jals".to_string()),
+                code: Some(NumberOrString::String("cannot-resolve".to_owned())),
+                source: Some("jals".to_owned()),
                 message: format!("cannot resolve symbol `{}`", &text[range]),
                 ..Default::default()
             })
@@ -150,9 +150,9 @@ impl Diagnostics {
                 range: line_index.byte_range(text, &m.range),
                 severity: Some(Self::lint_severity(severity)),
                 code: Some(NumberOrString::String(
-                    jals_lint::TYPE_MISMATCH_RULE.to_string(),
+                    jals_lint::TYPE_MISMATCH_RULE.to_owned(),
                 )),
-                source: Some("jals".to_string()),
+                source: Some("jals".to_owned()),
                 message: m.message(),
                 ..Default::default()
             })
@@ -206,7 +206,7 @@ mod tests {
         );
         let wildcard = diags
             .iter()
-            .find(|d| d.code == Some(NumberOrString::String("wildcard-import".to_string())))
+            .find(|d| d.code == Some(NumberOrString::String("wildcard-import".to_owned())))
             .expect("a wildcard-import diagnostic");
         assert_eq!(wildcard.severity, Some(DiagnosticSeverity::WARNING));
         assert_eq!(wildcard.source.as_deref(), Some("jals"));
@@ -226,7 +226,7 @@ mod tests {
             Diagnostics::compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config);
         let d = diags
             .iter()
-            .find(|d| d.code == Some(NumberOrString::String("compact-source-file".to_string())))
+            .find(|d| d.code == Some(NumberOrString::String("compact-source-file".to_owned())))
             .expect("a compact-source-file diagnostic");
         assert_eq!(d.severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(d.source.as_deref(), Some("jals"));
@@ -236,7 +236,7 @@ mod tests {
         assert!(
             Diagnostics::compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config)
                 .iter()
-                .all(|d| d.code != Some(NumberOrString::String("compact-source-file".to_string())))
+                .all(|d| d.code != Some(NumberOrString::String("compact-source-file".to_owned())))
         );
     }
 
@@ -249,7 +249,7 @@ mod tests {
             &LineIndex::new(text),
             &jals_config::lint::Config::default(),
         );
-        let code = Some(NumberOrString::String(rule.to_string()));
+        let code = Some(NumberOrString::String(rule.to_owned()));
         diags.into_iter().filter(|d| d.code == code).collect()
     }
 
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(
             diags[0].code,
-            Some(NumberOrString::String("cannot-resolve".to_string()))
+            Some(NumberOrString::String("cannot-resolve".to_owned()))
         );
         assert_eq!(diags[0].source.as_deref(), Some("jals"));
     }
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
         assert_eq!(
             diags[0].code,
-            Some(NumberOrString::String("type-mismatch".to_string()))
+            Some(NumberOrString::String("type-mismatch".to_owned()))
         );
         assert_eq!(diags[0].source.as_deref(), Some("jals"));
         assert!(diags[0].message.contains("Base") && diags[0].message.contains("Sub"));
@@ -423,7 +423,7 @@ mod tests {
         let mut config = jals_config::lint::Config::default();
         config
             .rules
-            .insert("type-mismatch".to_string(), jals_config::Severity::Allow);
+            .insert("type-mismatch".to_owned(), jals_config::Severity::Allow);
         let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
         let diags = Diagnostics::compute_type_mismatch_diagnostics(
             &index,

@@ -154,7 +154,7 @@ impl DocumentSymbols {
         let range = idx.range(text, node.text_range());
         #[allow(deprecated)]
         DocumentSymbol {
-            name: name.unwrap_or_else(|| "<anonymous>".to_string()),
+            name: name.unwrap_or_else(|| "<anonymous>".to_owned()),
             detail: None,
             kind,
             tags: None,

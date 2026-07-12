@@ -29,7 +29,7 @@ fn file_url_resolves_to_existing_jar() {
 
     // A `file://`-classified source resolves to a `Path`; resolution confirms it exists and passes
     // it through verbatim (loading it is `load_classpath`'s job).
-    let sources = vec![("dep".to_string(), DependencySource::Path(jar.clone()))];
+    let sources = vec![("dep".to_owned(), DependencySource::Path(jar.clone()))];
     let resolved = DepsCache::resolve_dependencies(&sources, &dir.path().join("cache"));
     assert_eq!(resolved.jars, vec![jar]);
     assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
@@ -39,7 +39,7 @@ fn file_url_resolves_to_existing_jar() {
 fn missing_file_jar_is_a_warning_not_a_failure() {
     let dir = tempfile::tempdir().unwrap();
     let missing = PathBuf::from("/no/such/dep.jar");
-    let sources = vec![("dep".to_string(), DependencySource::Path(missing))];
+    let sources = vec![("dep".to_owned(), DependencySource::Path(missing))];
 
     let resolved = DepsCache::resolve_dependencies(&sources, &dir.path().join("cache"));
     assert!(resolved.jars.is_empty());
@@ -60,7 +60,7 @@ fn cache_hit_skips_download() {
     std::fs::create_dir_all(&cache).unwrap();
     write_jar(&cached);
 
-    let sources = vec![("lib".to_string(), DependencySource::Url(url.to_string()))];
+    let sources = vec![("lib".to_owned(), DependencySource::Url(url.to_owned()))];
     let resolved = DepsCache::resolve_dependencies(&sources, &cache);
     assert_eq!(resolved.jars, vec![cached]);
     assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
@@ -93,7 +93,7 @@ fn downloads_from_localhost() {
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("cache");
     let url = format!("http://{addr}/lib.jar");
-    let sources = vec![("lib".to_string(), DependencySource::Url(url))];
+    let sources = vec![("lib".to_owned(), DependencySource::Url(url))];
 
     let resolved = DepsCache::resolve_dependencies(&sources, &cache);
     handle.join().unwrap();

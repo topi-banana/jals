@@ -2,8 +2,9 @@
 //! (`ConstantValue`) and the bytecode body decompiler (`ldc` / `iconst` / …). Every result parses,
 //! including the awkward cases (NaN / infinity, control characters).
 
+use alloc::borrow::ToOwned;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use core::fmt::Write;
 
 use crate::types::JavaType;
@@ -16,12 +17,12 @@ impl Literal {
     /// infinity map to the `Float` constants).
     pub(crate) fn float_literal(v: f32) -> String {
         if v.is_nan() {
-            "Float.NaN".to_string()
+            "Float.NaN".to_owned()
         } else if v.is_infinite() {
             if v > 0.0 {
-                "Float.POSITIVE_INFINITY".to_string()
+                "Float.POSITIVE_INFINITY".to_owned()
             } else {
-                "Float.NEGATIVE_INFINITY".to_string()
+                "Float.NEGATIVE_INFINITY".to_owned()
             }
         } else {
             format!("{v}f")
@@ -32,12 +33,12 @@ impl Literal {
     /// infinity map to the `Double` constants).
     pub(crate) fn double_literal(v: f64) -> String {
         if v.is_nan() {
-            "Double.NaN".to_string()
+            "Double.NaN".to_owned()
         } else if v.is_infinite() {
             if v > 0.0 {
-                "Double.POSITIVE_INFINITY".to_string()
+                "Double.POSITIVE_INFINITY".to_owned()
             } else {
-                "Double.NEGATIVE_INFINITY".to_string()
+                "Double.NEGATIVE_INFINITY".to_owned()
             }
         } else {
             format!("{v}d")

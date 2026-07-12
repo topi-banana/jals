@@ -224,7 +224,7 @@ impl ServerState {
         let mut rule_config = lint_config.clone();
         if let Some((workspace, _)) = workspace_file {
             rule_config.rules.insert(
-                jals_lint::TYPE_MISMATCH_RULE.to_string(),
+                jals_lint::TYPE_MISMATCH_RULE.to_owned(),
                 jals_config::Severity::Allow,
             );
             rule_config.target_java_version = workspace.target_java_version();
@@ -821,7 +821,7 @@ impl ServerState {
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
             completion_provider: Some(CompletionOptions {
-                trigger_characters: Some(vec![".".to_string()]),
+                trigger_characters: Some(vec![".".to_owned()]),
                 ..CompletionOptions::default()
             }),
             rename_provider: Some(OneOf::Right(RenameOptions {
@@ -830,7 +830,7 @@ impl ServerState {
             })),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             signature_help_provider: Some(SignatureHelpOptions {
-                trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                trigger_characters: Some(vec!["(".to_owned(), ",".to_owned()]),
                 retrigger_characters: None,
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
@@ -1011,7 +1011,7 @@ mod tests {
         let completion = ServerState::server_capabilities()
             .completion_provider
             .expect("completion provider advertised");
-        assert_eq!(completion.trigger_characters, Some(vec![".".to_string()]));
+        assert_eq!(completion.trigger_characters, Some(vec![".".to_owned()]));
     }
 
     #[test]

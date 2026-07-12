@@ -1,6 +1,7 @@
 //! The result of linting: the diagnostics found, plus any parser errors.
 
-use alloc::string::{String, ToString};
+use alloc::borrow::ToOwned;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -54,7 +55,7 @@ impl Diagnostic {
         Self {
             rule: "syntax-error",
             severity: Severity::Error,
-            message: err.message().to_string(),
+            message: err.message().to_owned(),
             range: usize::from(range.start())..usize::from(range.end()),
             unnecessary: false,
             unnecessary_range: None,

@@ -10,8 +10,9 @@
 //! `std::path`-based resolution (classpath / source-root / dependency-source / invocation / scaffold) lives
 //! in `jals-build`'s `ManifestExt`.
 
+use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
@@ -317,8 +318,8 @@ pub struct Bin {
 impl Default for Build {
     fn default() -> Self {
         Self {
-            source_dirs: alloc::vec!["src/main/java".to_string()],
-            classes_dir: "target/classes".to_string(),
+            source_dirs: alloc::vec!["src/main/java".to_owned()],
+            classes_dir: "target/classes".to_owned(),
             release: None,
             source: None,
             target: None,
@@ -346,7 +347,7 @@ impl Dependency {
     ) -> Result<(), DependencyError> {
         if value.is_empty() {
             return Err(DependencyError::Empty {
-                name: name.to_string(),
+                name: name.to_owned(),
                 field,
             });
         }
@@ -358,9 +359,9 @@ impl Dependency {
         }
         if value.contains("://") {
             return Err(DependencyError::UnknownScheme {
-                name: name.to_string(),
+                name: name.to_owned(),
                 field,
-                value: value.to_string(),
+                value: value.to_owned(),
             });
         }
         // No scheme: a bare (manifest-relative) path — always valid at this layer.
@@ -387,7 +388,7 @@ impl Dependency {
             Self::Git(git) => {
                 if git.git.is_empty() {
                     return Err(DependencyError::Empty {
-                        name: name.to_string(),
+                        name: name.to_owned(),
                         field: "git",
                     });
                 }
@@ -396,7 +397,7 @@ impl Dependency {
             Self::Path(path) => {
                 if path.path.is_empty() {
                     return Err(DependencyError::Empty {
-                        name: name.to_string(),
+                        name: name.to_owned(),
                         field: "path",
                     });
                 }
@@ -419,9 +420,9 @@ impl GitDependency {
         // match on a field name to re-derive which kind it is.
         let non_empty = |value: &str, field| {
             (!value.is_empty())
-                .then(|| value.to_string())
+                .then(|| value.to_owned())
                 .ok_or_else(|| DependencyError::Empty {
-                    name: name.to_string(),
+                    name: name.to_owned(),
                     field,
                 })
         };
@@ -435,7 +436,7 @@ impl GitDependency {
             (None, Some(tag), None) => Ok(GitRef::Tag(non_empty(tag, "tag")?)),
             (None, None, Some(rev)) => Ok(GitRef::Rev(non_empty(rev, "rev")?)),
             _ => Err(DependencyError::ConflictingGitRef {
-                name: name.to_string(),
+                name: name.to_owned(),
             }),
         }
     }
@@ -529,13 +530,13 @@ impl FromStr for Manifest {
 
     fn from_str(text: &str) -> Result<Self, ManifestParseError> {
         let manifest: Self = toml::from_str(text).map_err(|source| ManifestParseError::Parse {
-            path: Self::IN_MEMORY_NAME.to_string(),
+            path: Self::IN_MEMORY_NAME.to_owned(),
             source,
         })?;
         manifest
             .validate()
             .map_err(|source| ManifestParseError::Invalid {
-                path: Self::IN_MEMORY_NAME.to_string(),
+                path: Self::IN_MEMORY_NAME.to_owned(),
                 source,
             })?;
         Ok(manifest)
@@ -649,10 +650,7 @@ mod tests {
     #[test]
     fn defaults_to_maven_layout() {
         let m = Manifest::default();
-        assert_eq!(
-            m.build.source_dirs,
-            alloc::vec!["src/main/java".to_string()]
-        );
+        assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.build.release, None);
         assert!(m.build.classpath.is_empty());
@@ -688,12 +686,12 @@ mod tests {
         assert_eq!(m.package.version.as_deref(), Some("0.1.0"));
         assert_eq!(
             m.build.source_dirs,
-            alloc::vec!["src/main/java".to_string(), "generated".to_string()]
+            alloc::vec!["src/main/java".to_owned(), "generated".to_owned()]
         );
         assert_eq!(m.build.classes_dir, "out");
         assert_eq!(m.build.release, Some(21));
-        assert_eq!(m.build.classpath, alloc::vec!["libs/guava.jar".to_string()]);
-        assert_eq!(m.build.javac_flags, alloc::vec!["-Xlint:all".to_string()]);
+        assert_eq!(m.build.classpath, alloc::vec!["libs/guava.jar".to_owned()]);
+        assert_eq!(m.build.javac_flags, alloc::vec!["-Xlint:all".to_owned()]);
         assert_eq!(m.run.main_class.as_deref(), Some("com.example.Main"));
         // No `[[bin]]`: the bin list is empty and selection falls back to `[run] main-class`.
         assert!(m.bin.is_empty());
@@ -727,10 +725,7 @@ mod tests {
         // `default`).
         let m: Manifest = toml::from_str("[package]\nname = \"x\"\n").unwrap();
         assert_eq!(m.package.name.as_deref(), Some("x"));
-        assert_eq!(
-            m.build.source_dirs,
-            alloc::vec!["src/main/java".to_string()]
-        );
+        assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.run.main_class, None);
         assert!(m.bin.is_empty());
@@ -743,10 +738,7 @@ mod tests {
         assert_eq!(m.build.source, Some(17));
         assert_eq!(m.build.target, Some(17));
         // The omitted keys still come from the Maven default.
-        assert_eq!(
-            m.build.source_dirs,
-            alloc::vec!["src/main/java".to_string()]
-        );
+        assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
     }
 
     #[test]
@@ -785,8 +777,8 @@ mod tests {
 
     fn bin(name: &str, main_class: &str) -> Bin {
         Bin {
-            name: name.to_string(),
-            main_class: main_class.to_string(),
+            name: name.to_owned(),
+            main_class: main_class.to_owned(),
         }
     }
 
@@ -801,7 +793,7 @@ mod tests {
     #[test]
     fn validate_accepts_unique_bins_and_valid_default_run() {
         let mut m = manifest_with_bins(alloc::vec![bin("a", "A"), bin("b", "B")]);
-        m.package.default_run = Some("b".to_string());
+        m.package.default_run = Some("b".to_owned());
         assert_eq!(m.validate(), Ok(()));
     }
 
@@ -811,7 +803,7 @@ mod tests {
         assert_eq!(
             m.validate(),
             Err(ValidationError::DuplicateBin {
-                name: "dup".to_string()
+                name: "dup".to_owned()
             })
         );
     }
@@ -819,12 +811,12 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_default_run() {
         let mut m = manifest_with_bins(alloc::vec![bin("a", "A")]);
-        m.package.default_run = Some("ghost".to_string());
+        m.package.default_run = Some("ghost".to_owned());
         assert_eq!(
             m.validate(),
             Err(ValidationError::UnknownDefaultRun {
-                name: "ghost".to_string(),
-                available: alloc::vec!["a".to_string()],
+                name: "ghost".to_owned(),
+                available: alloc::vec!["a".to_owned()],
             })
         );
     }
@@ -849,7 +841,7 @@ mod tests {
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.
     fn jar_dep(jar: &str) -> Dependency {
         Dependency::Jar(JarDependency {
-            jar: jar.to_string(),
+            jar: jar.to_owned(),
             sources: None,
             recursive: None,
         })
@@ -858,7 +850,7 @@ mod tests {
     /// A one-entry `[dependencies]` manifest, for the `validate` tests.
     fn manifest_with_dep(name: &str, dep: Dependency) -> Manifest {
         Manifest {
-            dependencies: BTreeMap::from([(name.to_string(), dep)]),
+            dependencies: BTreeMap::from([(name.to_owned(), dep)]),
             ..Default::default()
         }
     }
@@ -891,7 +883,7 @@ mod tests {
         assert_eq!(
             m.validate(),
             Err(ValidationError::Dependency(DependencyError::Empty {
-                name: "bad".to_string(),
+                name: "bad".to_owned(),
                 field: "jar",
             }))
         );
@@ -904,9 +896,9 @@ mod tests {
             m.validate(),
             Err(ValidationError::Dependency(
                 DependencyError::UnknownScheme {
-                    name: "bad".to_string(),
+                    name: "bad".to_owned(),
                     field: "jar",
-                    value: "ftp://example.com/lib.jar".to_string(),
+                    value: "ftp://example.com/lib.jar".to_owned(),
                 }
             ))
         );
@@ -924,8 +916,8 @@ mod tests {
         assert_eq!(
             m.dependencies.get("testlib"),
             Some(&Dependency::Jar(JarDependency {
-                jar: "libs/lib.jar".to_string(),
-                sources: Some("libs/lib-sources.jar".to_string()),
+                jar: "libs/lib.jar".to_owned(),
+                sources: Some("libs/lib-sources.jar".to_owned()),
                 recursive: None,
             }))
         );
@@ -936,8 +928,8 @@ mod tests {
         let m = manifest_with_dep(
             "bad",
             Dependency::Jar(JarDependency {
-                jar: "libs/lib.jar".to_string(),
-                sources: Some("ftp://example.com/lib-sources.jar".to_string()),
+                jar: "libs/lib.jar".to_owned(),
+                sources: Some("ftp://example.com/lib-sources.jar".to_owned()),
                 recursive: None,
             }),
         );
@@ -945,9 +937,9 @@ mod tests {
             m.validate(),
             Err(ValidationError::Dependency(
                 DependencyError::UnknownScheme {
-                    name: "bad".to_string(),
+                    name: "bad".to_owned(),
                     field: "sources",
-                    value: "ftp://example.com/lib-sources.jar".to_string(),
+                    value: "ftp://example.com/lib-sources.jar".to_owned(),
                 }
             ))
         );
@@ -966,17 +958,17 @@ mod tests {
         assert_eq!(
             m.dependencies.get("fromgit"),
             Some(&Dependency::Git(GitDependency {
-                git: "https://github.com/x/y".to_string(),
+                git: "https://github.com/x/y".to_owned(),
                 branch: None,
-                tag: Some("v1.2".to_string()),
+                tag: Some("v1.2".to_owned()),
                 rev: None,
-                dir: Some("core/src/main/java".to_string()),
+                dir: Some("core/src/main/java".to_owned()),
             }))
         );
         assert_eq!(
             m.dependencies.get("frompath"),
             Some(&Dependency::Path(PathDependency {
-                path: "../sibling".to_string(),
+                path: "../sibling".to_owned(),
                 dir: None,
             }))
         );
@@ -985,7 +977,7 @@ mod tests {
     #[test]
     fn git_refs_classify() {
         let make = |branch, tag, rev| GitDependency {
-            git: "https://example.com/r.git".to_string(),
+            git: "https://example.com/r.git".to_owned(),
             branch,
             tag,
             rev,
@@ -993,22 +985,22 @@ mod tests {
         };
         assert_eq!(make(None, None, None).git_ref("r"), Ok(GitRef::Default));
         assert_eq!(
-            make(Some("main".to_string()), None, None).git_ref("r"),
-            Ok(GitRef::Branch("main".to_string()))
+            make(Some("main".to_owned()), None, None).git_ref("r"),
+            Ok(GitRef::Branch("main".to_owned()))
         );
         assert_eq!(
-            make(None, Some("v1".to_string()), None).git_ref("r"),
-            Ok(GitRef::Tag("v1".to_string()))
+            make(None, Some("v1".to_owned()), None).git_ref("r"),
+            Ok(GitRef::Tag("v1".to_owned()))
         );
         assert_eq!(
-            make(None, None, Some("abc123".to_string())).git_ref("r"),
-            Ok(GitRef::Rev("abc123".to_string()))
+            make(None, None, Some("abc123".to_owned())).git_ref("r"),
+            Ok(GitRef::Rev("abc123".to_owned()))
         );
         // More than one ref set is a conflict.
         assert_eq!(
-            make(Some("m".to_string()), Some("v".to_string()), None).git_ref("r"),
+            make(Some("m".to_owned()), Some("v".to_owned()), None).git_ref("r"),
             Err(DependencyError::ConflictingGitRef {
-                name: "r".to_string()
+                name: "r".to_owned()
             })
         );
     }
@@ -1083,7 +1075,7 @@ mod tests {
         assert_eq!(
             m.dependencies.get("fat"),
             Some(&Dependency::Jar(JarDependency {
-                jar: "libs/fat.jar".to_string(),
+                jar: "libs/fat.jar".to_owned(),
                 sources: None,
                 recursive: Some(true),
             }))
@@ -1095,28 +1087,28 @@ mod tests {
         let m = Manifest {
             dependencies: BTreeMap::from([
                 (
-                    "fat".to_string(),
+                    "fat".to_owned(),
                     Dependency::Jar(JarDependency {
-                        jar: "libs/fat.jar".to_string(),
+                        jar: "libs/fat.jar".to_owned(),
                         sources: None,
                         recursive: Some(true),
                     }),
                 ),
                 // A plain jar (no flag) and an explicit `recursive = false` are both excluded.
-                ("plain".to_string(), jar_dep("libs/plain.jar")),
+                ("plain".to_owned(), jar_dep("libs/plain.jar")),
                 (
-                    "off".to_string(),
+                    "off".to_owned(),
                     Dependency::Jar(JarDependency {
-                        jar: "libs/off.jar".to_string(),
+                        jar: "libs/off.jar".to_owned(),
                         sources: None,
                         recursive: Some(false),
                     }),
                 ),
                 // `git`/`path` forms never carry the flag.
                 (
-                    "src".to_string(),
+                    "src".to_owned(),
                     Dependency::Path(PathDependency {
-                        path: "../sibling".to_string(),
+                        path: "../sibling".to_owned(),
                         dir: None,
                     }),
                 ),
@@ -1137,9 +1129,9 @@ mod tests {
         let m = manifest_with_dep(
             "r",
             Dependency::Git(GitDependency {
-                git: "https://example.com/r.git".to_string(),
-                branch: Some("main".to_string()),
-                tag: Some("v1".to_string()),
+                git: "https://example.com/r.git".to_owned(),
+                branch: Some("main".to_owned()),
+                tag: Some("v1".to_owned()),
                 rev: None,
                 dir: None,
             }),
@@ -1148,7 +1140,7 @@ mod tests {
             m.validate(),
             Err(ValidationError::Dependency(
                 DependencyError::ConflictingGitRef {
-                    name: "r".to_string()
+                    name: "r".to_owned()
                 }
             ))
         );

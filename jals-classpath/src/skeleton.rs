@@ -403,12 +403,12 @@ impl SkeletonGroup<'_> {
     ) -> String {
         let flags = method.access_flags;
         if flags.is_abstract() || flags.contains(MethodAccessFlags::NATIVE) {
-            return ";".to_string();
+            return ";".to_owned();
         }
         if let Some(stmts) = MethodBody::decompile(method, cf, names) {
             return Self::render_body_block(&stmts, pad);
         }
-        Self::safe_body(is_ctor, returns_value).to_string()
+        Self::safe_body(is_ctor, returns_value).to_owned()
     }
 
     /// The safe placeholder body used when a method's real body cannot be decompiled.
@@ -424,7 +424,7 @@ impl SkeletonGroup<'_> {
     /// inline as ` {}`.
     fn render_body_block(stmts: &[String], pad: &str) -> String {
         if stmts.is_empty() {
-            return " {}".to_string();
+            return " {}".to_owned();
         }
         let mut block = String::from(" {\n");
         for stmt in stmts {
@@ -468,7 +468,7 @@ impl SkeletonGroup<'_> {
         {
             return JavaType::render_field_type(&ft);
         }
-        "java.lang.Object".to_string()
+        "java.lang.Object".to_owned()
     }
 
     /// The keyword modifiers of a field, in canonical order.
@@ -591,13 +591,13 @@ impl ClassEntry {
         }
         let internal = cf.constant_pool.class_name(cf.this_class)?;
         let (package, simple_internal) = match internal.rsplit_once('/') {
-            Some((pkg, simple)) => (pkg.replace('/', "."), simple.to_string()),
+            Some((pkg, simple)) => (pkg.replace('/', "."), simple.to_owned()),
             None => (String::new(), internal.into_owned()),
         };
         if simple_internal == "module-info" || simple_internal == "package-info" {
             return None;
         }
-        let nested_path: Vec<String> = simple_internal.split('$').map(str::to_string).collect();
+        let nested_path: Vec<String> = simple_internal.split('$').map(str::to_owned).collect();
         // Skip anonymous / local classes: any `$`-segment after the first that is empty or begins with
         // a digit (`Foo$1`, `Foo$1Local`) is compiler-generated and not a navigable source name.
         if nested_path

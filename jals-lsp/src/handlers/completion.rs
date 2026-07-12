@@ -145,7 +145,7 @@ impl Completions {
     /// The Java keywords as LSP completion items.
     fn keyword_items() -> impl Iterator<Item = CompletionItem> {
         JAVA_KEYWORDS.iter().map(|keyword| CompletionItem {
-            label: (*keyword).to_string(),
+            label: (*keyword).to_owned(),
             kind: Some(CompletionItemKind::KEYWORD),
             ..CompletionItem::default()
         })
@@ -196,9 +196,9 @@ mod tests {
         assert_eq!(
             complete_at(text, "b."),
             [
-                ("area".to_string(), CompletionItemKind::METHOD),
-                ("m".to_string(), CompletionItemKind::METHOD),
-                ("size".to_string(), CompletionItemKind::FIELD),
+                ("area".to_owned(), CompletionItemKind::METHOD),
+                ("m".to_owned(), CompletionItemKind::METHOD),
+                ("size".to_owned(), CompletionItemKind::FIELD),
             ]
         );
     }
@@ -220,8 +220,8 @@ mod tests {
             .into_iter()
             .map(|(l, _)| l)
             .collect();
-        assert!(labels.contains(&"length".to_string()), "got {labels:?}");
-        assert!(labels.contains(&"charAt".to_string()), "got {labels:?}");
+        assert!(labels.contains(&"length".to_owned()), "got {labels:?}");
+        assert!(labels.contains(&"charAt".to_owned()), "got {labels:?}");
     }
 
     #[test]
@@ -230,9 +230,9 @@ mod tests {
         // but no member icons. `return` is a keyword, `x` a variable.
         let text = "class C { void m() { int x = 1; int y = } }";
         let items = complete_at(text, "int y = ");
-        assert!(items.contains(&("x".to_string(), CompletionItemKind::VARIABLE)));
-        assert!(items.contains(&("return".to_string(), CompletionItemKind::KEYWORD)));
-        assert!(items.contains(&("class".to_string(), CompletionItemKind::KEYWORD)));
+        assert!(items.contains(&("x".to_owned(), CompletionItemKind::VARIABLE)));
+        assert!(items.contains(&("return".to_owned(), CompletionItemKind::KEYWORD)));
+        assert!(items.contains(&("class".to_owned(), CompletionItemKind::KEYWORD)));
     }
 
     #[test]
