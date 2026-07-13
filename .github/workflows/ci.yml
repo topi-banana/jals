@@ -180,7 +180,7 @@ jobs:
       - name: Build the jals binary
         run: cargo build --release --target ${{ matrix.target }} --package jals-cli
       - name: Upload the jals binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # The artifact name the extension derives from `zed::current_platform()`; keep the
           # two in sync (`artifact_name` in editors/zed/src/lib.rs).
@@ -237,7 +237,7 @@ jobs:
             -o dist/extension.wasm
           cp editors/zed/extension.toml dist/extension.toml
       - name: Upload the compiled extension
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zed-jals-extension
           # The compiled Zed extension: the component `extension.wasm` + its `extension.toml`.
