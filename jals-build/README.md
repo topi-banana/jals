@@ -7,22 +7,26 @@ A [`jals.toml`](#the-manifest-jalstoml) manifest is the Java analogue of `Cargo.
 where the sources live, where compiled classes go, which Java release to target, and what is on
 the classpath. This crate parses that manifest and turns it (plus already-resolved inputs) into
 a `javac`/`java` command line, the set of paths a clean removes, or the files a fresh project
-needs — all as **pure data**, never spawning a process or touching the filesystem:
+needs — the **core is pure data**, never spawning a process or touching the filesystem:
 
 ```
 jals.toml ───────▶ Manifest ──┐
-                              ├──▶ Invocation::build ─▶ Invocation ──▶ ┐
-discovered .java files ───────┘    Invocation::run   ─▶ Invocation ──▶ ┤  jals-cli
-                                                                       ├▶ spawns javac/java,
-InitOptions ──────────────────────▶ .scaffold()      ─▶ [ScaffoldFile] ┤  writes files,
-                                     CleanTargets::paths ─▶ [PathBuf] ──┘  removes dirs
+                              ├──▶ CompileRequest ─▶ SubprocessToolchain ─▶ ┐
+discovered .java files ───────┘    RunRequest     ─▶  (native feature)      ┤  jals-cli
+                                                       spawns javac/java    ├▶ discovers,
+InitOptions ──────────────────────▶ .scaffold()      ─▶ [ScaffoldFile] ────┤  writes files,
+                                     CleanTargets::paths ─▶ [PathBuf] ──────┘  removes dirs
 ```
 
-`jals-cli` owns every side effect: it discovers the manifest, walks the source tree, spawns the
-JDK tools, writes the scaffold, and deletes the clean paths. Keeping `jals-build` pure makes it
-deterministic, unit-testable with no JDK installed, and **`wasm32`-compatible** (it has no
-`jals-syntax` dependency; its only dependencies are `jals-config`, for the pure `Manifest` model,
-and `toml`, for `ManifestError`'s underlying parse-error type).
+`jals-cli` owns the *other* side effects: it discovers the manifest, walks the source tree, writes
+the scaffold, and deletes the clean paths. Spawning `javac`/`java` (and discovering installed JDKs
+for `[toolchain]`) is the one side effect that lives **here**, in the default-on **`native` feature**
+(`SubprocessToolchain`) — a deliberate exception so a single toolchain abstraction serves both the CLI
+and, later, an in-browser (wasm) backend. The core — the `Manifest` model, the `Invocation` planner,
+and the `Toolchain` trait plus the filesystem-free `ToolResolver` — stays pure: deterministic,
+unit-testable with no JDK installed, and **`wasm32`-compatible** with `--no-default-features` (its
+only dependencies are `jals-config`, for the pure `Manifest` model, and `toml`, for `ManifestError`'s
+underlying parse-error type).
 
 ## What it does today
 
@@ -46,24 +50,27 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
 - **`--dry-run`** prints the exact command(s) (via `Invocation::display_command`, which quotes
   whitespace) and exits without compiling/running/deleting. `-v`/`--verbose` prints the same
   command(s) and then runs them.
-- **JDK tool resolution** — `javac`/`java` are located by honoring `$JAVAC`/`$JAVA` first, then
-  `$JAVA_HOME/bin/<tool>`, and finally the bare name on `PATH`. The platform classpath separator
-  (`:` on Unix, `;` on Windows) is injected, so the invocation builder stays pure.
+- **JDK tool resolution** — the `SubprocessToolchain` (the crate's default-on `native` feature)
+  selects `javac`/`java` per the manifest's [`[toolchain]`](#toolchain): the `$JAVAC`/`$JAVA` override
+  first, then the `[toolchain] compiler`/`runtime` selection (an explicit path, or a
+  distribution/version discovered among the installed JDKs), then `$JAVA_HOME/bin/<tool>`, and finally
+  the bare name on `PATH`. Discovery/spawning live in that feature; the pure planner
+  (`Invocation`/`ToolResolver`) still injects the platform classpath separator (`:` on Unix, `;` on
+  Windows) and touches nothing.
 - **Exit codes** — the JDK tool's exit code propagates; a signal-terminated tool fails with `1`.
 
 ## The manifest (`jals.toml`)
 
 Every key is optional and falls back to its default; keys are kebab-case and grouped into
-`[package]`, `[build]`, `[run]`, the repeatable `[[bin]]`, and `[dependencies]`. The defaults encode
-the Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent) section just
-uses them.
+`[package]`, `[build]`, `[run]`, `[toolchain]`, the repeatable `[[bin]]`, and `[dependencies]`. The
+defaults encode the Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent)
+section just uses them.
 
 ```toml
 [package]
 name = "hello"
 version = "0.1.0"
 # features = ["java25"]            # language features (release presets + individual); gates analysis, not javac
-# java-version = "openjdk"         # Java language system (oraclejdk | openjdk | teavm); reserved
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
 [build]
@@ -74,6 +81,10 @@ release = 21                       # javac --release N
 # target = 17                      # javac --target N  (only when release is unset)
 classpath = ["libs/guava.jar"]    # -classpath entries (jars or dirs)
 javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
+
+# [toolchain]                       # which javac/java to use (defaults to the system tools)
+# compiler = "temurin-21"           # javac: "system" | a JDK path | a distribution-version to discover
+# runtime  = "temurin-17"           # java:   same forms; omit to use the system runtime
 
 [run]
 main-class = "com.example.Main"   # entry point for `jals run` (used only when no [[bin]] exists)
@@ -103,7 +114,6 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
 | `features` | array of feature names | `[]` | the language features the project enables (Cargo's `[features]`, additive-only). A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no feature gate. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. |
-| `java-version` | `"oraclejdk"` \| `"openjdk"` \| `"teavm"` | — | the Java language system (platform implementation) the project targets — the split Cargo makes between `edition` and `rust-version`. Parsed, validated, and threaded through to the assembled project inputs; no analysis consumes it yet (reserved for system-dependent checks, e.g. gating lints on the API subset a TeaVM target supports). An unknown value is a parse error. |
 | `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
 
 ### `[build]`
@@ -123,6 +133,33 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 | Key | Type | Default | Maps to |
 | --- | --- | --- | --- |
 | `main-class` | string | — | the fully-qualified entry point passed to `java`, used **only when no `[[bin]]` is declared**. `jals run` errors if it is unset, no `[[bin]]` exists, and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. |
+
+### `[toolchain]`
+
+Selects **which `javac` compiles** the project and **which `java` runs** it — the two are chosen
+independently, so a project can compile with one JDK and run on another. The rough analogue of
+`rust-toolchain.toml`. Omitting the table (or a field) uses the system tools, so an existing manifest
+is unaffected.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `compiler` | string | system | which `javac` to use (see the forms below) |
+| `runtime` | string | system | which `java` to use (same forms) |
+
+Each value is a single string in one of three forms:
+
+| Form | Example | Meaning |
+| --- | --- | --- |
+| `"system"` | `"system"` | the system tools — identical to omitting the field |
+| a **path** | `"/opt/jdk-21"`, `"./jdk/bin/javac"` | an explicit JDK home directory (the tool is `<path>/bin/<tool>`) or the tool binary itself; a relative path resolves against the manifest dir. Used verbatim — a non-existent path errors rather than silently reverting to `PATH`. |
+| a **distribution/version** | `"temurin-21"`, `"21"`, `"temurin"` | a JDK to **discover** among the installed ones by distribution and/or version |
+
+A tool is resolved in this order: the `$JAVAC`/`$JAVA` environment override (wins unconditionally, for
+CI/back-compat) → the `[toolchain]` selection above → `$JAVA_HOME/bin/<tool>` → the bare name on
+`PATH`. A distribution selector is matched against the JDKs found under the common install locations
+(SDKMAN, IntelliJ `~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle directory) — **discovery
+only**; automatically downloading a missing JDK (rust-toolchain style) is future work, and an
+un-discovered distribution falls back to the system tools.
 
 ### `[[bin]]`
 
@@ -249,10 +286,8 @@ functions (the crate follows the workspace's `no-free-functions` rule):
 
 ```rust
 impl Invocation {
-    pub fn build(manifest: &Manifest, project_root: &Path, sources: &[PathBuf],
-                 extra_sources: &[PathBuf], extra_classpath: &[PathBuf], path_sep: char) -> Self;
-    pub fn run(manifest: &Manifest, project_root: &Path, main_class: &str,
-               program_args: &[String], extra_classpath: &[PathBuf], path_sep: char) -> Self;
+    pub fn build(req: &CompileRequest<'_>, path_sep: char) -> Self;
+    pub fn run(req: &RunRequest<'_>, path_sep: char) -> Self;
 }
 
 impl RunTarget {
@@ -270,10 +305,12 @@ impl InitOptions {
 ```
 
 `Invocation { program, args }` is a resolved command line as pure data; `display_command()`
-renders it for `--dry-run`/`-v`. `Invocation::build` also takes an `extra_sources` list — the
-`git`/`path` source deps' `.java`, appended after `sources` — and both `build`/`run` take an
+renders it for `--dry-run`/`-v`. A `CompileRequest` carries an `extra_sources` list — the
+`git`/`path` source deps' `.java`, appended after `sources` — and both requests carry an
 `extra_classpath` of already-resolved jar paths (the host's resolved `[dependencies]` jars),
-appended after the `[build] classpath` entries on `javac`/`java`'s `-classpath`. `RunTarget::resolve`
+appended after the `[build] classpath` entries on `javac`/`java`'s `-classpath`; the classpath
+separator is supplied by the backend planning the command (the requests stay tool-agnostic).
+`RunTarget::resolve`
 picks the `main-class` `jals run` should execute from `[[bin]]`/`default-run`/`[run] main-class`.
 `InitOptions { name }.scaffold()` (for `jals init`) and `CleanTargets::paths` (for `jals clean`)
 round out the pure planning surface.
@@ -373,6 +410,7 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | --- | --- | --- |
 | `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath, plus an optional `sources` jar for editor go-to-definition), as are the source forms `{ git = "url", branch/tag/rev, dir }` and `{ path = "...", dir }` (cloned/read `.java` folded into the LSP index for analysis + navigation **and** compiled by `jals build`/`run` as extra `javac` sources, not a `lint` input); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
 | `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
+| `[toolchain]` | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, an explicit JDK path, or a `distribution-version` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
 | `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]` | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels) |
 | `[workspace]` / `[[module]]` | `[workspace]` | multi-module builds with a shared lockfile |
