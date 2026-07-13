@@ -42,10 +42,45 @@ pub(crate) enum Expr {
     Cast { ty: String, expr: Box<Self> },
     /// `expr.length` of an array.
     ArrayLength(Box<Self>),
+    /// An array element access `array[index]`.
+    Index { array: Box<Self>, index: Box<Self> },
+    /// An array creation: `new elem`, the leading dimension(s) spelled by `form`, then
+    /// `empty_dims` empty `[]` pairs (`new int[3]`, `new int[n][]`, `new int[a][b]`,
+    /// `new int[]{e0, e1}`).
+    NewArray {
+        elem: String,
+        empty_dims: usize,
+        form: ArrayForm,
+    },
     /// An uninitialized `new` reference on the operand stack (between `new` and its
     /// `invokespecial <init>`). Never rendered — it collapses into [`Expr::New`] once the
     /// constructor runs; if one somehow survives, it renders as a no-arg `new` as a safety net.
     Uninitialized(String),
+    /// A constant-length `newarray`/`anewarray` whose element stores may still be folding into a
+    /// `new T[]{…}` initializer (the `dup; <index>; <value>; Xastore` run). Never rendered —
+    /// consuming it finalizes it into [`Expr::NewArray`] (complete collection → an initializer,
+    /// untouched → a plain sized creation, partial → bail); if one somehow survives, it renders
+    /// as the plain sized creation as a safety net.
+    PendingArray {
+        elem: String,
+        empty_dims: usize,
+        len: usize,
+        elems: Vec<Self>,
+    },
+    /// The `dup`'d reference to the [`Expr::PendingArray`] directly beneath it on the stack (the
+    /// array operand of an initializer element store). Never rendered — only the matching
+    /// `Xastore` consumes it, and every other consumption bails; if one somehow survives, it
+    /// renders as `null` as a safety net.
+    PendingArrayDup,
+}
+
+/// How an [`Expr::NewArray`] spells its leading dimension(s) — the two forms are mutually
+/// exclusive in Java source.
+pub(crate) enum ArrayForm {
+    /// Sized dimensions `[dims[0]][dims[1]]…` (`new int[a][b]`).
+    Sized(Vec<Expr>),
+    /// A folded initializer: one unsized `[]` plus the brace list (`new int[]{e0, e1}`).
+    Init(Vec<Expr>),
 }
 
 /// A reconstructed Java statement.
@@ -166,7 +201,39 @@ impl Expr {
             Self::Unary { op, expr } => format!("{op}{}", expr.operand()),
             Self::Cast { ty, expr } => format!("({ty}) {}", expr.operand()),
             Self::ArrayLength(a) => format!("{}.length", a.receiver()),
+            Self::Index { array, index } => format!("{}[{}]", array.receiver(), index.render()),
+            Self::NewArray {
+                elem,
+                empty_dims,
+                form,
+            } => {
+                let mut out = format!("new {elem}");
+                match form {
+                    ArrayForm::Sized(dims) => {
+                        for d in dims {
+                            out.push('[');
+                            out.push_str(&d.render());
+                            out.push(']');
+                        }
+                        out.push_str(&"[]".repeat(*empty_dims));
+                    }
+                    ArrayForm::Init(elems) => {
+                        out.push_str(&"[]".repeat(*empty_dims + 1));
+                        out.push('{');
+                        out.push_str(&Self::render_args(elems));
+                        out.push('}');
+                    }
+                }
+                out
+            }
             Self::Uninitialized(ty) => format!("new {ty}()"),
+            Self::PendingArray {
+                elem,
+                empty_dims,
+                len,
+                ..
+            } => format!("new {elem}[{len}]{}", "[]".repeat(*empty_dims)),
+            Self::PendingArrayDup => "null".into(),
         }
     }
 
@@ -180,11 +247,17 @@ impl Expr {
         }
     }
 
-    /// Render a receiver of a field access / call / `.length`, wrapping any non-primary expression so
-    /// the postfix access binds to the whole thing (`((Foo) x).bar()`, `(a + b).baz()`).
+    /// Render a receiver of a field access / call / `.length` / indexing, wrapping any non-primary
+    /// expression so the postfix access binds to the whole thing (`((Foo) x).bar()`,
+    /// `(a + b).baz()`). An array creation is wrapped too: indexing one is not grammatical bare
+    /// (`new int[2][0]` parses as a two-dimensional creation), so `(new int[]{7}).length` /
+    /// `(new int[2])[0]`.
     fn receiver(&self) -> String {
         match self {
-            Self::Binary { .. } | Self::Unary { .. } | Self::Cast { .. } => {
+            Self::Binary { .. }
+            | Self::Unary { .. }
+            | Self::Cast { .. }
+            | Self::NewArray { .. } => {
                 format!("({})", self.render())
             }
             _ => self.render(),

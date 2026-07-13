@@ -34,6 +34,17 @@ impl JavaType {
         }
     }
 
+    /// Peel a field-descriptor type to its base (non-array) element rendered as Java plus the
+    /// array dimension count (`[[I` parsed → `("int", 2)`; a non-array type → depth `0`).
+    pub(crate) fn array_base(mut ft: &FieldType) -> (String, usize) {
+        let mut depth = 0;
+        while let FieldType::Array(inner) = ft {
+            ft = inner;
+            depth += 1;
+        }
+        (Self::render_field_type(ft), depth)
+    }
+
     /// Render a generic type signature to Java source
     /// (`Ljava/util/List<Ljava/lang/String;>;` → `java.util.List<java.lang.String>`).
     pub fn render_type_sig(ts: &TypeSignature) -> String {
