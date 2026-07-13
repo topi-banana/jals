@@ -122,11 +122,13 @@ jobs:
             packages: --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-fs --package jals-config
           # jals-classpath's host I/O (reqwest / git / OsFileTree) is behind its default `native`
           # feature; `--no-default-features` builds its wasm-compatible core (the `Fetcher`/`Git`/
-          # `FileTree`-generic resolver), pulling jals-build in for wasm too. It is std-but-wasm (zip
-          # needs `std::io`), so it stays out of the `#![no_std]` set above and builds on its own.
+          # `FileTree`-generic resolver). jals-build's host half (`SubprocessToolchain`, JDK
+          # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core
+          # is built here too — the seam a future in-browser compiler implements. Both are
+          # std-but-wasm, so they stay out of the `#![no_std]` set above and build on their own.
           - name: wasm-classpath
             target: wasm32-unknown-unknown
-            packages: --package jals-classpath --no-default-features
+            packages: --package jals-classpath --package jals-build --no-default-features
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
