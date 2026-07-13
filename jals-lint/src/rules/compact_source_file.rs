@@ -16,13 +16,14 @@ use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, Decl, SourceFile};
 
 use crate::diagnostic::Severity;
-use crate::rules::{Checker, FeatureGate, Finding, RuleMeta};
+use crate::rules::{Checker, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "compact-source-file",
     default: Severity::Error,
     check: Checker::Gated {
         feature: Feature::CompactSourceFiles,
+        subject: "top-level declarations like `main`",
         find: CompactSourceFile::find,
     },
 };
@@ -31,22 +32,18 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct CompactSourceFile;
 
 impl CompactSourceFile {
-    fn find(root: &SyntaxNode) -> Vec<Finding> {
-        // The driver runs this only when `compact-source-files` is disabled, so here we just locate the
-        // syntax (reporting nothing when the root is not a source file).
+    fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
+        // The driver runs this only when `compact-source-files` is disabled and stamps the gate
+        // message, so here we just locate the syntax (nothing when the root is not a source file).
         let Some(file) = SourceFile::cast(root.clone()) else {
             return Vec::new();
         };
-        let message = FeatureGate::preview_message(
-            Feature::CompactSourceFiles,
-            "top-level declarations like `main`",
-        );
         file.decls()
             // A field or method declared directly at the top level is a compact source file's
             // implicit-class member (JEP 512); a type declaration (class/interface/enum/record) is
             // ordinary Java and never flagged.
             .filter(|decl| matches!(decl, Decl::Method(_) | Decl::Field(_)))
-            .map(|decl| Finding::at_node(decl.syntax(), message.clone()))
+            .map(|decl| decl.syntax().clone())
             .collect()
     }
 }

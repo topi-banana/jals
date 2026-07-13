@@ -69,17 +69,18 @@ impl Finding {
 
 /// Shared message builder for the feature-gated ([`Checker::Gated`]) rules. The feature-gating
 /// itself lives in the rule driver ([`crate::LintOutput::lint_node`]), which runs a gated rule's
-/// `find` only when the guarded [`Feature`] is absent from the project's feature set — so a rule
-/// need only carry the detector, not the gate.
+/// `find` only when the guarded [`Feature`] is absent from the project's feature set, and stamps
+/// this message on each flagged node — so a rule need only carry the detector, not the gate or
+/// the message.
 pub(crate) struct FeatureGate;
 
 impl FeatureGate {
     /// The diagnostic message for a use of the gated `feature`: `subject` names the flagged
-    /// construct (a plural noun phrase), the stabilizing release preset comes from
-    /// [`Feature::stabilized_in`] — the single place that fact lives — and the fix names the two
-    /// `[package] features` opt-ins (the whole release preset, or just this feature). Shared by
-    /// the gated rules so they phrase the whole message identically; a rule builds it once per
-    /// file, not per finding.
+    /// construct (a plural noun phrase, [`Checker::Gated`]'s `subject`), the stabilizing release
+    /// preset comes from [`Feature::stabilized_in`] — the single place that fact lives — and the
+    /// fix names the two `[package] features` opt-ins (the whole release preset, or just this
+    /// feature). The driver phrases every gated rule's message identically with this, built once
+    /// per file that has findings.
     pub(crate) fn preview_message(feature: Feature, subject: &str) -> String {
         let name = feature.config_name();
         feature.stabilized_in().map_or_else(
@@ -114,15 +115,19 @@ pub(crate) enum Checker {
     /// falls back to the file-local behavior. The basis for cross-file type checking.
     Indexed(fn(&SyntaxNode, &Resolved, Option<IndexCtx>) -> Vec<Finding>),
     /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
-    /// names the [`Feature`] it guards, and the driver runs `find` only when that feature is **absent**
-    /// from the project's set (threaded from the host via [`Config::features`](crate::Config::features)).
-    /// An empty feature set disables the gate entirely (the rule reports nothing), so a feature-specific
-    /// check never fires for a project that declared no `[package] features`.
+    /// names the [`Feature`] it guards, and the driver runs `find` only when the set does not
+    /// [`permit`](jals_config::FeatureSet::permits) that feature (threaded from the host via
+    /// [`Config::features`](crate::Config::features)) — so an empty set (no `[package] features`
+    /// declared) never fires. The driver builds the shared gate message
+    /// ([`FeatureGate::preview_message`] from `feature` + `subject`) and stamps it on each flagged
+    /// node, so the detector is pure syntax location.
     Gated {
         /// The language feature this rule guards; its findings are reported only when it is disabled.
         feature: Feature,
-        /// The detector, run only when `feature` is disabled.
-        find: fn(&SyntaxNode) -> Vec<Finding>,
+        /// The flagged construct as a plural noun phrase, spliced into the gate message.
+        subject: &'static str,
+        /// The detector: the flagged syntax nodes. Run only when `feature` is disabled.
+        find: fn(&SyntaxNode) -> Vec<SyntaxNode>,
     },
 }
 

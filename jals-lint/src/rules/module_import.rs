@@ -15,13 +15,14 @@ use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, SourceFile};
 
 use crate::diagnostic::Severity;
-use crate::rules::{Checker, FeatureGate, Finding, RuleMeta};
+use crate::rules::{Checker, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "module-import",
     default: Severity::Error,
     check: Checker::Gated {
         feature: Feature::ModuleImports,
+        subject: "module import declarations (`import module …;`)",
         find: ModuleImport::find,
     },
 };
@@ -30,16 +31,12 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct ModuleImport;
 
 impl ModuleImport {
-    fn find(root: &SyntaxNode) -> Vec<Finding> {
-        // The driver runs this only when `module-imports` is disabled, so here we just locate the
-        // syntax (reporting nothing when the root is not a source file).
+    fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
+        // The driver runs this only when `module-imports` is disabled and stamps the gate message,
+        // so here we just locate the syntax (nothing when the root is not a source file).
         let Some(file) = SourceFile::cast(root.clone()) else {
             return Vec::new();
         };
-        let message = FeatureGate::preview_message(
-            Feature::ModuleImports,
-            "module import declarations (`import module …;`)",
-        );
         // Import declarations only appear as direct children of the source file, so iterate them
         // directly (like the sibling `compact-source-file` rule) rather than walking the whole tree.
         // `is_module()` matches `import module M;` (JEP 511), distinct from an ordinary type import
@@ -47,7 +44,7 @@ impl ModuleImport {
         // is false).
         file.imports()
             .filter(jals_syntax::ast::ImportDecl::is_module)
-            .map(|import| Finding::at_node(import.syntax(), message.clone()))
+            .map(|import| import.syntax().clone())
             .collect()
     }
 }
