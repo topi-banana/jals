@@ -233,102 +233,344 @@ pub struct Package {
     /// Which `[[bin]]` `jals run` runs when several exist and `--bin` is not given (Cargo
     /// `[package] default-run`). Must name an existing `[[bin]]`.
     pub default_run: Option<String>,
-    /// The Java language edition the project targets (Cargo's `[package] edition`).
+    /// The language [`Feature`]s the project enables (`[package] features = ["…"]`).
     ///
-    /// Purely a *language-feature gate* for analysis (the linter / LSP): it does not affect
-    /// compilation — the `javac` version knobs remain `[build] release`/`source`/`target`. When
-    /// unset, no edition-gated feature is flagged. See [`Edition`].
-    pub edition: Option<Edition>,
+    /// The Cargo `[features]` analogue, additive-only. A Java **release preset** (`"java25"`, …)
+    /// selects everything that release stabilized — each preset implies the one before it, so
+    /// `java25 ⊇ java24 ⊇ …` holds with nothing else declared — while an **individual feature**
+    /// name (`"module-imports"`, …) turns on a single otherwise-preview construct, the Java
+    /// analogue of one `--enable-preview` flag. Purely an *analysis* gate (the linter / LSP): it
+    /// does not affect compilation — the `javac` version knobs remain
+    /// `[build] release`/`source`/`target`. Resolved (closed under [`Feature::implies`]) by
+    /// [`Manifest::feature_set`]; an unknown name is a TOML parse error (serde unknown variant).
+    /// Empty when omitted, leaving every feature gate off.
+    pub features: Vec<Feature>,
     /// The Java language system (platform implementation) the project targets (Cargo's
     /// `[package] rust-version` slot). See [`JavaVersion`].
     pub java_version: Option<JavaVersion>,
 }
 
-/// The Java language edition a project targets (`[package] edition`).
+/// A single selectable language capability — the unit `[package] features` lists and the analysis
+/// layers query.
 ///
-/// Values are the Java feature releases (`java8`–`java25`) whose syntax `jals` targets. It drives
-/// language-feature gating in the linter (e.g. compact source files with a top-level `main` are a
-/// preview feature in Java 24 but a permanent feature in Java 25); it is *not* passed to `javac`.
+/// A feature is **not** a gate on the *parser* (which always accepts every construct, losslessly and
+/// error-resiliently); it is an *analysis* gate the linter / LSP consult to decide whether a construct
+/// is permitted under the project's declared feature set. Variants come in two kinds:
 ///
-/// The set is a closed enum rather than a free numeric parse so that non-release notations (e.g. a
-/// jals-specific `java25+jals` dialect) can later join as variants with an explicit
-/// `#[serde(rename = "…")]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Edition {
-    /// Java 8.
+/// - **Java release presets** (`Java8`–`Java25`, spelled `"java8"`–`"java25"`): each
+///   [`implies`](Feature::implies) its [`predecessor`](Feature::predecessor) preset plus every
+///   feature that release stabilized, so listing one selects the whole release — Rust-feature style
+///   (`java25 = ["java24", …]`), except the release's feature list is *derived* from each feature's
+///   single [`stabilized_in`](Feature::stabilized_in) introduction point, never enumerated per
+///   release. A preset is an ordinary variant like any other feature; no version number exists in
+///   the model.
+/// - **Individual language features** (`ModuleImports`, `CompactSourceFiles`, …): each records, in
+///   exactly one place ([`Feature::stabilized_in`]), the release preset at which it became a permanent
+///   (non-preview) feature — or `None` for a jals-specific dialect feature that no Java release
+///   stabilizes and that is therefore only ever turned on explicitly.
+///
+/// The set is a closed enum: an unknown name in `[package] features` is a TOML parse error (an
+/// unknown variant); non-release notations (e.g. a jals-specific `java25-jals` dialect preset) can
+/// later join as variants. Set membership lives in [`FeatureSet`], which keys off the typed variant —
+/// no bit index is ever exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// The Java 8 release preset.
     Java8,
-    /// Java 9.
+    /// The Java 9 release preset.
     Java9,
-    /// Java 10.
+    /// The Java 10 release preset.
     Java10,
-    /// Java 11.
+    /// The Java 11 release preset.
     Java11,
-    /// Java 12.
+    /// The Java 12 release preset.
     Java12,
-    /// Java 13.
+    /// The Java 13 release preset.
     Java13,
-    /// Java 14.
+    /// The Java 14 release preset.
     Java14,
-    /// Java 15.
+    /// The Java 15 release preset.
     Java15,
-    /// Java 16.
+    /// The Java 16 release preset.
     Java16,
-    /// Java 17.
+    /// The Java 17 release preset.
     Java17,
-    /// Java 18.
+    /// The Java 18 release preset.
     Java18,
-    /// Java 19.
+    /// The Java 19 release preset.
     Java19,
-    /// Java 20.
+    /// The Java 20 release preset.
     Java20,
-    /// Java 21.
+    /// The Java 21 release preset.
     Java21,
-    /// Java 22.
+    /// The Java 22 release preset.
     Java22,
-    /// Java 23.
+    /// The Java 23 release preset.
     Java23,
-    /// Java 24, where compact source files / instance main methods are still a preview feature.
+    /// The Java 24 release preset, where compact source files / module imports are still previews.
     Java24,
-    /// Java 25, where compact source files / instance main methods are a permanent feature.
+    /// The Java 25 release preset, which stabilizes compact source files and module imports.
     Java25,
+    /// JEP 511: module import declarations (`import module M;`), permanent in Java 25 (a preview
+    /// before). Gated by the linter's `module-import` rule.
+    ModuleImports,
+    /// JEP 512: compact source files and instance `main` methods (top-level members), permanent in
+    /// Java 25 (a preview before). Gated by the linter's `compact-source-file` rule.
+    CompactSourceFiles,
+    // A jals-specific dialect feature would be added here with `stabilized_in` = `None`: on only when
+    // explicitly listed in `[package] features`, never implied by a release preset.
 }
 
-impl Edition {
-    /// The Java feature-release version this edition targets (e.g. `24` for [`Edition::Java24`]).
-    pub const fn feature_version(self) -> u32 {
-        match self {
-            Self::Java8 => 8,
-            Self::Java9 => 9,
-            Self::Java10 => 10,
-            Self::Java11 => 11,
-            Self::Java12 => 12,
-            Self::Java13 => 13,
-            Self::Java14 => 14,
-            Self::Java15 => 15,
-            Self::Java16 => 16,
-            Self::Java17 => 17,
-            Self::Java18 => 18,
-            Self::Java19 => 19,
-            Self::Java20 => 20,
-            Self::Java21 => 21,
-            Self::Java22 => 22,
-            Self::Java23 => 23,
-            Self::Java24 => 24,
-            Self::Java25 => 25,
+impl Feature {
+    /// Every feature, in declaration order (release presets first, in release order). Load-bearing,
+    /// not documentation: deserialization parses a name by looking it up here, so a variant omitted
+    /// from this list cannot appear in any `[package] features` (and the exhaustive `match`es in
+    /// [`predecessor`](Feature::predecessor) / [`stabilized_in`](Feature::stabilized_in) /
+    /// [`config_name`](Feature::config_name) already force a stop for a new variant). The
+    /// declaration-order invariant is const-asserted below.
+    pub const ALL: [Self; 20] = [
+        Self::Java8,
+        Self::Java9,
+        Self::Java10,
+        Self::Java11,
+        Self::Java12,
+        Self::Java13,
+        Self::Java14,
+        Self::Java15,
+        Self::Java16,
+        Self::Java17,
+        Self::Java18,
+        Self::Java19,
+        Self::Java20,
+        Self::Java21,
+        Self::Java22,
+        Self::Java23,
+        Self::Java24,
+        Self::Java25,
+        Self::ModuleImports,
+        Self::CompactSourceFiles,
+    ];
+
+    /// Every feature's [`config_name`](Feature::config_name), parallel to [`ALL`](Feature::ALL) —
+    /// the `expected one of …` list a `[package] features` parse error names.
+    const NAMES: [&'static str; Self::ALL.len()] = {
+        let mut names = [""; Self::ALL.len()];
+        let mut i = 0;
+        while i < names.len() {
+            names[i] = Self::ALL[i].config_name();
+            i += 1;
         }
+        names
+    };
+
+    /// This feature's bit in a [`FeatureSet`] — derived from the declaration order, never stored.
+    const fn bit(self) -> u64 {
+        1 << self as u64
+    }
+
+    /// The release preset immediately before this one (`Java25` → `Java24`), or `None` for the
+    /// oldest preset ([`Java8`](Feature::Java8)) and for an individual language feature.
+    ///
+    /// The single edge each preset contributes to the `java25 ⊇ java24 ⊇ …` chain —
+    /// [`implies`](Feature::implies) follows it, and [`FeatureSet::resolve`]'s closure walks it
+    /// transitively, so no per-release membership list (and no version number) exists anywhere.
+    pub const fn predecessor(self) -> Option<Self> {
+        match self {
+            Self::Java9 => Some(Self::Java8),
+            Self::Java10 => Some(Self::Java9),
+            Self::Java11 => Some(Self::Java10),
+            Self::Java12 => Some(Self::Java11),
+            Self::Java13 => Some(Self::Java12),
+            Self::Java14 => Some(Self::Java13),
+            Self::Java15 => Some(Self::Java14),
+            Self::Java16 => Some(Self::Java15),
+            Self::Java17 => Some(Self::Java16),
+            Self::Java18 => Some(Self::Java17),
+            Self::Java19 => Some(Self::Java18),
+            Self::Java20 => Some(Self::Java19),
+            Self::Java21 => Some(Self::Java20),
+            Self::Java22 => Some(Self::Java21),
+            Self::Java23 => Some(Self::Java22),
+            Self::Java24 => Some(Self::Java23),
+            Self::Java25 => Some(Self::Java24),
+            Self::Java8 | Self::ModuleImports | Self::CompactSourceFiles => None,
+        }
+    }
+
+    /// The release preset at which this language feature became a permanent (non-preview) feature,
+    /// `None` for a release preset itself and for a dialect feature no Java release stabilizes
+    /// (enabled only by listing it in `[package] features`).
+    ///
+    /// This is the **single** place a feature's release fact lives. Adding a [`Feature`] variant
+    /// fails to compile until this `match` is extended, so [`implies`](Feature::implies) — and thus
+    /// the whole release ⊇ chain — can never silently drift out of step with the feature set.
+    pub const fn stabilized_in(self) -> Option<Self> {
+        match self {
+            Self::ModuleImports | Self::CompactSourceFiles => Some(Self::Java25),
+            Self::Java8
+            | Self::Java9
+            | Self::Java10
+            | Self::Java11
+            | Self::Java12
+            | Self::Java13
+            | Self::Java14
+            | Self::Java15
+            | Self::Java16
+            | Self::Java17
+            | Self::Java18
+            | Self::Java19
+            | Self::Java20
+            | Self::Java21
+            | Self::Java22
+            | Self::Java23
+            | Self::Java24
+            | Self::Java25 => None,
+        }
+    }
+
+    /// The features this one directly *implies* — the edges [`FeatureSet::resolve`] closes over.
+    ///
+    /// A release preset implies its [`predecessor`](Feature::predecessor) preset plus every
+    /// feature stabilized in this release (read back off each feature's
+    /// [`stabilized_in`](Feature::stabilized_in)) — exactly Cargo's `java25 = ["java24", …]`,
+    /// except the release's own feature list is *derived* from the per-feature `stabilized_in`
+    /// fact, never enumerated per release. Earlier releases' features arrive transitively through
+    /// the predecessor chain, so the `java25 ⊇ java24 ⊇ …` monotonicity holds **by construction**.
+    /// An individual feature implies nothing today; a feature-to-feature dependency would be added
+    /// here.
+    pub fn implies(self) -> FeatureSet {
+        Self::ALL
+            .into_iter()
+            .filter(|feature| {
+                Some(*feature) == self.predecessor() || feature.stabilized_in() == Some(self)
+            })
+            .fold(FeatureSet::default(), FeatureSet::with)
+    }
+
+    /// The kebab-case name this feature carries in `[package] features` — the **single** name
+    /// table: deserialization parses by it (see the [`Deserialize`] impl below), and the linter
+    /// names the feature in a diagnostic's "enable it with …" hint through it, so the two can
+    /// never disagree.
+    pub const fn config_name(self) -> &'static str {
+        match self {
+            Self::Java8 => "java8",
+            Self::Java9 => "java9",
+            Self::Java10 => "java10",
+            Self::Java11 => "java11",
+            Self::Java12 => "java12",
+            Self::Java13 => "java13",
+            Self::Java14 => "java14",
+            Self::Java15 => "java15",
+            Self::Java16 => "java16",
+            Self::Java17 => "java17",
+            Self::Java18 => "java18",
+            Self::Java19 => "java19",
+            Self::Java20 => "java20",
+            Self::Java21 => "java21",
+            Self::Java22 => "java22",
+            Self::Java23 => "java23",
+            Self::Java24 => "java24",
+            Self::Java25 => "java25",
+            Self::ModuleImports => "module-imports",
+            Self::CompactSourceFiles => "compact-source-files",
+        }
+    }
+}
+
+// [`Feature::ALL`] must list every variant in declaration order: deserialization looks names up in
+// it, and [`Feature::bit`] packs the declaration index into the [`FeatureSet`] word.
+const _: () = {
+    assert!(
+        Feature::ALL.len() <= u64::BITS as usize,
+        "FeatureSet's u64 is full; widen its storage"
+    );
+    let mut i = 0;
+    while i < Feature::ALL.len() {
+        assert!(
+            Feature::ALL[i] as usize == i,
+            "Feature::ALL must be in declaration order"
+        );
+        i += 1;
+    }
+};
+
+// Deserialized by [`Feature::config_name`] lookup over [`Feature::ALL`] rather than a serde derive,
+// so the parsed names and the names the linter's hints print are one table — and a variant omitted
+// from `ALL` fails to parse at all instead of silently dropping out of [`Feature::implies`].
+impl<'de> Deserialize<'de> for Feature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|feature| feature.config_name() == name)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&name, &Self::NAMES))
+    }
+}
+
+/// The resolved set of language [`Feature`]s enabled for a project — the value the analysis layers
+/// query with [`contains`](FeatureSet::contains).
+///
+/// An [`empty`](FeatureSet::is_empty) set (a project that declares no `[package] features`) leaves
+/// every feature gate off.
+///
+/// A small bitset newtype: no integer is exposed, membership is the typed [`Feature`] enum.
+/// Constructed only by [`resolve`](FeatureSet::resolve) — the `[package] features` list closed
+/// under [`Feature::implies`]. `Copy` (one word), so hosts thread it around freely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FeatureSet(u64);
+
+impl FeatureSet {
+    /// Resolve the effective feature set: every listed feature, closed under [`Feature::implies`]
+    /// to a fixpoint — so listing `java25` pulls in `java24`, …, `java8`, and everything those
+    /// releases stabilize.
+    pub fn resolve(features: &[Feature]) -> Self {
+        let mut set = features.iter().copied().fold(Self::default(), Self::with);
+        loop {
+            let closed = Feature::ALL
+                .into_iter()
+                .filter(|feature| set.contains(*feature))
+                .fold(set, |acc, feature| acc.union(feature.implies()));
+            if closed == set {
+                return set;
+            }
+            set = closed;
+        }
+    }
+
+    /// This set with `feature` enabled.
+    const fn with(self, feature: Feature) -> Self {
+        Self(self.0 | feature.bit())
+    }
+
+    /// The union of this set and `other`.
+    const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether `feature` is enabled in this set.
+    pub const fn contains(self, feature: Feature) -> bool {
+        self.0 & feature.bit() != 0
+    }
+
+    /// Whether no feature is enabled — the set of a project that declares no `[package] features`,
+    /// which leaves every feature gate off (the gated lint rules report nothing).
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
     }
 }
 
 /// The Java language system a project targets (`[package] java-version`).
 ///
-/// Which platform implementation the project is written against, next to the syntax version in
-/// [`Package::edition`] — the split Cargo makes between `edition` and `rust-version`.
+/// Which platform implementation the project is written against, next to the language-feature
+/// selection in [`Package::features`] — the split Cargo makes between `edition` and `rust-version`.
 ///
 /// Currently parsed and threaded through to the assembled project inputs only; no analysis behaves
 /// differently yet. It reserves the seam for system-dependent analysis (e.g. gating lints on the
 /// API subset a `teavm` target actually supports). An unknown value is a TOML parse error (serde
-/// unknown variant), like an unknown [`Edition`].
+/// unknown variant), like an unknown [`Feature`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JavaVersion {
@@ -573,12 +815,13 @@ impl Manifest {
         Ok(())
     }
 
-    /// The project's target Java feature version (from `[package] edition`), if declared. The single
-    /// projection of the manifest's [`Edition`] into the bare feature release the analysis layers
-    /// consume — the host feeds it to the edition-gated lint rules (e.g. `compact-source-file`) as
-    /// the lint config's target version; `None` when no edition is declared, leaving those gates off.
-    pub fn target_java_version(&self) -> Option<u32> {
-        self.package.edition.map(Edition::feature_version)
+    /// The project's resolved language [`FeatureSet`] — the `[package] features` list closed under
+    /// [`Feature::implies`] (see [`FeatureSet::resolve`]) — empty when the project declares no
+    /// features, leaving every feature gate off. The single projection the analysis layers consume:
+    /// the host feeds it to the feature-gated lint rules as the lint config's feature set
+    /// (`compact-source-file` / `module-import` fire for a feature the set lacks).
+    pub fn feature_set(&self) -> FeatureSet {
+        FeatureSet::resolve(&self.package.features)
     }
 
     /// The project's declared Java language system (from `[package] java-version`), if any. Threaded
@@ -777,33 +1020,117 @@ mod tests {
         // No `[[bin]]`: the bin list is empty and selection falls back to `[run] main-class`.
         assert!(m.bin.is_empty());
         assert_eq!(m.package.default_run, None);
-        // No `[package] edition`: it is absent, disabling edition-gated feature checks.
-        assert_eq!(m.package.edition, None);
-        // No `[package] java-version` either.
+        // No `[package] features` and no `[package] java-version`: every feature gate stays off.
+        assert!(m.package.features.is_empty());
+        assert!(m.feature_set().is_empty());
         assert_eq!(m.package.java_version, None);
     }
 
     #[test]
-    fn parses_package_edition() {
-        let m: Manifest = toml::from_str("[package]\nedition = \"java8\"\n").unwrap();
-        assert_eq!(m.package.edition, Some(Edition::Java8));
-        assert_eq!(m.package.edition.unwrap().feature_version(), 8);
+    fn parses_package_features() {
+        // `[package] features` lists language features by their kebab-case names — release presets
+        // and individual features side by side.
+        let m: Manifest = toml::from_str(
+            "[package]\nfeatures = [\"module-imports\", \"compact-source-files\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.package.features,
+            alloc::vec![Feature::ModuleImports, Feature::CompactSourceFiles]
+        );
 
-        let m: Manifest = toml::from_str("[package]\nedition = \"java24\"\n").unwrap();
-        assert_eq!(m.package.edition, Some(Edition::Java24));
-        assert_eq!(m.package.edition.unwrap().feature_version(), 24);
-
-        let m: Manifest = toml::from_str("[package]\nedition = \"java25\"\n").unwrap();
-        assert_eq!(m.package.edition, Some(Edition::Java25));
-        assert_eq!(m.package.edition.unwrap().feature_version(), 25);
+        let m: Manifest =
+            toml::from_str("[package]\nfeatures = [\"java8\", \"java25\"]\n").unwrap();
+        assert_eq!(
+            m.package.features,
+            alloc::vec![Feature::Java8, Feature::Java25]
+        );
     }
 
     #[test]
-    fn rejects_unknown_edition() {
-        // An edition outside the modelled set is a TOML parse error (serde unknown variant), so no
-        // dedicated `validate` check is needed.
-        assert!(toml::from_str::<Manifest>("[package]\nedition = \"java7\"\n").is_err());
-        assert!(toml::from_str::<Manifest>("[package]\nedition = \"java26\"\n").is_err());
+    fn rejects_unknown_feature() {
+        // An unknown feature name is a TOML parse error (serde unknown variant), so no dedicated
+        // `validate` check is needed — including releases outside the modelled preset range.
+        assert!(toml::from_str::<Manifest>("[package]\nfeatures = [\"teleportation\"]\n").is_err());
+        assert!(toml::from_str::<Manifest>("[package]\nfeatures = [\"java7\"]\n").is_err());
+        assert!(toml::from_str::<Manifest>("[package]\nfeatures = [\"java26\"]\n").is_err());
+    }
+
+    #[test]
+    fn feature_set_empty_without_features() {
+        // No `[package] features`: the resolved set is empty, so every gate stays off.
+        assert!(Manifest::default().feature_set().is_empty());
+    }
+
+    #[test]
+    fn feature_set_expands_release_presets() {
+        // java24: the two Java-25 features are still previews, so neither is enabled — but the
+        // implied earlier presets are in the set (the java24 ⊇ … ⊇ java8 chain).
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"java24\"]\n").unwrap();
+        let fs = m.feature_set();
+        assert!(!fs.contains(Feature::ModuleImports));
+        assert!(!fs.contains(Feature::CompactSourceFiles));
+        assert!(fs.contains(Feature::Java8));
+
+        // java25 stabilizes both, so the preset pulls them in.
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"java25\"]\n").unwrap();
+        let fs = m.feature_set();
+        assert!(fs.contains(Feature::ModuleImports));
+        assert!(fs.contains(Feature::CompactSourceFiles));
+        assert!(fs.contains(Feature::Java24));
+    }
+
+    #[test]
+    fn feature_set_unions_preset_and_individual_features() {
+        // `java24` plus an explicit `module-imports`: that one feature turns on without moving to
+        // the next release preset, while `compact-source-files` stays off.
+        let m: Manifest =
+            toml::from_str("[package]\nfeatures = [\"java24\", \"module-imports\"]\n").unwrap();
+        let fs = m.feature_set();
+        assert!(fs.contains(Feature::ModuleImports));
+        assert!(!fs.contains(Feature::CompactSourceFiles));
+    }
+
+    #[test]
+    fn feature_set_from_individual_features_without_preset() {
+        // Individual features may be opted into without any release preset at all.
+        let m: Manifest =
+            toml::from_str("[package]\nfeatures = [\"compact-source-files\"]\n").unwrap();
+        let fs = m.feature_set();
+        assert!(fs.contains(Feature::CompactSourceFiles));
+        assert!(!fs.contains(Feature::ModuleImports));
+    }
+
+    #[test]
+    fn release_presets_are_monotonic() {
+        // Each preset's resolved set is a superset of its predecessor's — the `java25 ⊇ java24 ⊇ …`
+        // chain, carried by the single `predecessor` edge in `implies` and the transitive closure
+        // in `resolve`, checked here end to end for every predecessor pair.
+        for feature in Feature::ALL {
+            let Some(previous) = feature.predecessor() else {
+                continue;
+            };
+            let earlier = FeatureSet::resolve(&[previous]);
+            let later = FeatureSet::resolve(&[feature]);
+            assert!(
+                Feature::ALL
+                    .into_iter()
+                    .all(|f| !earlier.contains(f) || later.contains(f)),
+                "{feature:?} must include everything {previous:?} does"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_config_name_matches_serde() {
+        // Every feature parses from its `config_name` — deserialization *is* a `config_name` lookup,
+        // so this is an end-to-end smoke test of the manifest wiring (and pins `ALL` as the complete
+        // parseable set).
+        for feature in Feature::ALL {
+            let toml = alloc::format!("[package]\nfeatures = [\"{}\"]\n", feature.config_name());
+            let m: Manifest = toml::from_str(&toml).unwrap();
+            assert_eq!(m.package.features, alloc::vec![feature]);
+        }
     }
 
     #[test]
@@ -821,7 +1148,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_java_version() {
-        // Like `edition`, an unknown language system is a TOML parse error (serde unknown
+        // Like `features`, an unknown language system is a TOML parse error (serde unknown
         // variant), so no dedicated `validate` check is needed.
         assert!(toml::from_str::<Manifest>("[package]\njava-version = \"graalvm\"\n").is_err());
     }

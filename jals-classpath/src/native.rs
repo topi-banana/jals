@@ -19,7 +19,7 @@ use std::process::Command;
 use futures::executor::block_on;
 use jals_build::{DependencySource, ManifestExt};
 use jals_classfile::ClassFile;
-use jals_config::{GitRef, JavaVersion, Manifest};
+use jals_config::{FeatureSet, GitRef, JavaVersion, Manifest};
 use jals_fs::OsFileTree;
 
 use crate::Warning;
@@ -179,8 +179,8 @@ pub struct ProjectInputs {
     pub library_sources: Vec<PathBuf>,
     /// The `git`/`path` source dependencies' `.java` — an index input and a `javac` source.
     pub source_dep_sources: Vec<PathBuf>,
-    /// The project's target Java feature version from `[package] edition` (edition-rule gate).
-    pub target_java_version: Option<u32>,
+    /// The project's resolved language feature set from `[package] features` (feature-rule gate).
+    pub feature_set: FeatureSet,
     /// The project's declared Java language system from `[package] java-version` (reserved).
     pub java_version: Option<JavaVersion>,
 }
@@ -341,7 +341,7 @@ impl ProjectInputs {
     ///
     /// Resolves `[dependencies]` (downloading remotes with a blocking `reqwest` [`Fetcher`], cloning
     /// `git` deps with a subprocess [`Git`]), loads / synthesizes per `options`, and adds the
-    /// manifest's source roots + edition. The single seam `jals-cli` and `jals-lsp` build their
+    /// manifest's source roots + feature set. The single seam `jals-cli` and `jals-lsp` build their
     /// `ProjectIndex` / compile inputs from. See
     /// [`ProjectInputsIn::assemble_project_inputs_in`] for the pure core.
     ///
@@ -372,7 +372,7 @@ impl ProjectInputs {
             classpath_classes: inputs.classpath_classes,
             library_sources: VPaths::pathbufs(inputs.library_sources),
             source_dep_sources: VPaths::pathbufs(inputs.source_dep_sources),
-            target_java_version: inputs.target_java_version,
+            feature_set: inputs.feature_set,
             java_version: inputs.java_version,
         }
     }

@@ -11,6 +11,7 @@ use jals_fs::FileTree;
 use serde::Deserialize;
 
 pub use crate::loader::ConfigError;
+use crate::manifest::FeatureSet;
 
 /// How serious a lint finding is. Doubles as the per-rule configuration value: a rule set
 /// to [`Allow`](Severity::Allow) is disabled and never runs.
@@ -49,13 +50,15 @@ pub struct Config {
     /// Per-rule severity overrides. Keys are rule names (kebab-case); a missing key means the
     /// rule keeps its built-in default severity.
     pub rules: BTreeMap<String, Severity>,
-    /// The project's target Java version (feature release, e.g. `24`), injected by the host from
-    /// the manifest's `[package] edition` — **not** a `jalslint.toml` key (hence `serde(skip)`).
+    /// The project's resolved language [`FeatureSet`], injected by the host from the manifest's
+    /// `[package] features` (see [`Manifest::feature_set`](crate::Manifest::feature_set)) — **not**
+    /// a `jalslint.toml` key (hence `serde(skip)`).
     ///
-    /// It drives version-gated rules: e.g. compact source files with a top-level `main` are a
-    /// preview feature before Java 25. `None` disables every such gate.
+    /// It drives the feature-gated rules: a construct whose [`Feature`](crate::Feature) is *absent*
+    /// from this set is flagged (e.g. a top-level `main` when `compact-source-files` is not enabled).
+    /// An empty set (the default — no `[package] features` declared) disables every such gate.
     #[serde(skip)]
-    pub target_java_version: Option<u32>,
+    pub features: FeatureSet,
 }
 
 impl Config {

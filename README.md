@@ -44,7 +44,7 @@ manifest.
 | --- | --- |
 | [`jals-syntax`](jals-syntax) | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
-| [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and edition-gated preview-feature checks. |
+| [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks. |
 | [`jals-hir`](jals-hir) | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath. |
 | [`jals-classfile`](jals-classfile) | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4). |
 | [`jals-decompile`](jals-decompile) | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode. |
@@ -167,7 +167,7 @@ jals lint src/
 ```
 
 `jals lint` checks unused locals, type mismatches, unreported checked exceptions, dead
-(constant-condition) branches, and edition-gated preview features, using name resolution and
+(constant-condition) branches, and feature-gated preview features, using name resolution and
 type inference (`jals-hir`) — not just pattern matching over the syntax tree. If a `jals.toml`
 manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so types
 from external libraries are understood too. Configure via `jalslint.toml` (discovered the same

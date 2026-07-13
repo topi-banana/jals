@@ -155,7 +155,7 @@ impl ServerState {
         // dependency's `-sources.jar` `.java` plus a synthesized skeleton per classpath `.class` (the
         // go-to-definition library source, real winning over skeleton), the `git`/`path` source deps'
         // `.java` (folded into the index for analysis + navigation), the manifest's source roots, and
-        // the `[package] edition` (feeding the edition-gated lint rules).
+        // the `[package] features` (feeding the feature-gated lint rules).
         //
         // `assemble_project_inputs` uses `reqwest`'s blocking downloader, which panics inside the
         // Tokio runtime this server uses, so it runs on a dedicated thread (`manifest` moves in),
@@ -180,7 +180,7 @@ impl ServerState {
                 inputs.classpath_classes,
                 inputs.library_sources,
                 inputs.source_dep_sources,
-                inputs.target_java_version,
+                inputs.feature_set,
             ));
     }
 
@@ -220,14 +220,15 @@ impl ServerState {
             .and_then(|ws| Some((ws, ws.file_id(uri)?)));
         // Files in an indexed project get the index-aware `type-mismatch` check below; suppress the
         // file-local lint rule of the same name there so the two never double-report. The workspace
-        // also carries the project's Java edition, which gates rules like `compact-source-file`.
+        // also carries the project's resolved language feature set, which gates rules like
+        // `compact-source-file`.
         let mut rule_config = lint_config.clone();
         if let Some((workspace, _)) = workspace_file {
             rule_config.rules.insert(
                 jals_lint::TYPE_MISMATCH_RULE.to_owned(),
                 jals_config::Severity::Allow,
             );
-            rule_config.target_java_version = workspace.target_java_version();
+            rule_config.features = workspace.feature_set();
         }
         diagnostics.extend(handlers::Diagnostics::compute_lint_diagnostics(
             &doc.parse,

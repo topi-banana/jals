@@ -14,9 +14,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use jals_build::ManifestExt;
-use jals_config::Manifest;
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
+use jals_config::{FeatureSet, Manifest};
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 
 use report::Reporter;
@@ -279,10 +279,10 @@ impl LintArgs {
             let mut cfg = discovery.for_dir(&cwd)?;
             let parse = jals_syntax::Parse::parse(&src);
             // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
-            // so `type-mismatch` sees external library types, and its edition (`[package] edition`) so
-            // the edition-gated rules run — exactly as the multi-file path does.
+            // so `type-mismatch` sees external library types, and its feature set (`[package]
+            // features`) so the feature-gated rules run — exactly as the multi-file path does.
             let ctx = ProjectLintContext::load(&cwd);
-            cfg.target_java_version = ctx.target_java_version;
+            cfg.features = ctx.feature_set;
             let index = ctx.build_index(&[(FileId(0), parse.syntax())]);
             let out = jals_lint::LintOutput::lint_parse_with_index(
                 &parse,
@@ -316,15 +316,15 @@ impl LintArgs {
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
             // Discover the project once: its classpath (folded into the cross-file `type-mismatch`
             // index so a method whose argument type comes from a dependency jar resolves) and its
-            // edition (`[package] edition`, shared across the project's files), from a single manifest
-            // parse.
+            // feature set (`[package] features`, shared across the project's files), from a single
+            // manifest parse.
             let ctx = ProjectLintContext::load(&start_dir);
             let index = ctx.build_index(&inputs);
 
             for (i, (path, src, parse)) in files.iter().enumerate() {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 let mut cfg = discovery.for_dir(parent)?;
-                cfg.target_java_version = ctx.target_java_version;
+                cfg.features = ctx.feature_set;
                 let out = jals_lint::LintOutput::lint_parse_with_index(
                     parse,
                     &cfg,
@@ -541,14 +541,14 @@ impl InitArgs {
 
 /// The project context the linter folds in for the `jals.toml` discovered upward from `start_dir`:
 /// its lowered classpath (so the cross-file `type-mismatch` rule resolves external library types) and
-/// the target Java feature version from `[package] edition` (so edition-gated rules like
+/// the resolved language feature set from `[package] features` (so feature-gated rules like
 /// `compact-source-file` run). Both come from a **single** best-effort assembly of the project's
-/// analysis inputs; a missing or malformed manifest yields an empty classpath and no edition — a
-/// malformed manifest is `jals build`'s business, not lint's.
+/// analysis inputs; a missing or malformed manifest yields an empty classpath and an empty feature
+/// set — a malformed manifest is `jals build`'s business, not lint's.
 #[derive(Default)]
 struct ProjectLintContext {
     classpath: LoweredClasspath,
-    target_java_version: Option<u32>,
+    feature_set: FeatureSet,
 }
 
 impl ProjectLintContext {
@@ -563,8 +563,8 @@ impl ProjectLintContext {
         let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
         // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
-        // `type-mismatch` index) and the `[package] edition`. An unreadable entry / failed download is
-        // reported on stderr and skipped, never an error.
+        // `type-mismatch` index) and the `[package] features`. An unreadable entry / failed download
+        // is reported on stderr and skipped, never an error.
         let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
             &manifest,
             root,
@@ -573,7 +573,7 @@ impl ProjectLintContext {
         );
         Self {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
-            target_java_version: inputs.target_java_version,
+            feature_set: inputs.feature_set,
         }
     }
 

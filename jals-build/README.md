@@ -62,7 +62,7 @@ uses them.
 [package]
 name = "hello"
 version = "0.1.0"
-# edition = "java25"               # Java language edition (java8..java25); gates analysis, not javac
+# features = ["java25"]            # language features (release presets + individual); gates analysis, not javac
 # java-version = "openjdk"         # Java language system (oraclejdk | openjdk | teavm); reserved
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
@@ -102,7 +102,7 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 | --- | --- | --- | --- |
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
-| `edition` | `"java8"` … `"java25"` | — | the Java language edition (syntax / feature version, Cargo's `edition`). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `java24` (or anything below `java25`) flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Unset means no edition gate. The value set is a closed enum so non-release notations (e.g. a `java25+jals` dialect) can join later. |
+| `features` | array of feature names | `[]` | the language features the project enables (Cargo's `[features]`, additive-only). A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no feature gate. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. |
 | `java-version` | `"oraclejdk"` \| `"openjdk"` \| `"teavm"` | — | the Java language system (platform implementation) the project targets — the split Cargo makes between `edition` and `rust-version`. Parsed, validated, and threaded through to the assembled project inputs; no analysis consumes it yet (reserved for system-dependent checks, e.g. gating lints on the API subset a TeaVM target supports). An unknown value is a parse error. |
 | `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
 
@@ -344,8 +344,8 @@ discovered source list is fed in today.
 
 `description`, `authors`, `license`, `repository`, `homepage`, and `keywords`. These become a jar's
 `MANIFEST.MF` / POM metadata on packaging. (`default-run` is already implemented — see
-[`[[bin]]`](#bin); `edition` too, as an analysis-only language-feature gate — see [`[package]`](#package).
-Making `edition` also imply a default `javac --release` is still open.)
+[`[[bin]]`](#bin); `features` too, as an analysis-only language-feature gate — see [`[package]`](#package).
+Making a `features` release preset also imply a default `javac --release` is still open.)
 
 ### `[build]` additions
 

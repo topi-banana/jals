@@ -111,7 +111,16 @@ impl LintOutput {
                     resolved.get_or_init(|| Resolved::resolve_node(root)),
                     index,
                 ),
-                Checker::Versioned(check) => check(root, config.target_java_version),
+                // Run a feature-gated rule's detector only when its guarded feature is *absent* from
+                // the project's set. An empty set (no `[package] features` declared) leaves the gate
+                // off, and an enabled feature means the construct is permitted — both report nothing.
+                Checker::Gated { feature, find } => {
+                    if config.features.is_empty() || config.features.contains(feature) {
+                        Vec::new()
+                    } else {
+                        find(root)
+                    }
+                }
             };
             for finding in findings {
                 diagnostics.push(Diagnostic::new(rule.name, severity, finding));

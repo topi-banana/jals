@@ -29,6 +29,7 @@ pub mod manifest;
 pub use lint::Severity;
 pub use loader::{ConfigError, DiscoverableConfig};
 pub use manifest::{
-    Bin, Build, Dependency, DependencyError, Edition, GitDependency, GitRef, JarDependency,
-    JavaVersion, Manifest, ManifestParseError, Package, PathDependency, Run, ValidationError,
+    Bin, Build, Dependency, DependencyError, Feature, FeatureSet, GitDependency, GitRef,
+    JarDependency, JavaVersion, Manifest, ManifestParseError, Package, PathDependency, Run,
+    ValidationError,
 };

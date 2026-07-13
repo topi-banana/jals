@@ -213,13 +213,14 @@ mod tests {
     }
 
     #[test]
-    fn compact_source_file_flagged_when_edition_is_java24() {
+    fn compact_source_file_flagged_when_features_say_java24() {
         // A top-level `main` is a preview feature before Java 25; the host injects the project's
-        // edition as `target_java_version`, and the rule reports an ERROR for Java 24.
+        // resolved feature set as `features`, and the rule reports an ERROR for a `java24` set
+        // (which lacks `compact-source-files`).
         let text = "void main() {}\n";
         let parse = jals_syntax::Parse::parse(text);
         let mut config = jals_config::lint::Config {
-            target_java_version: Some(24),
+            features: jals_config::FeatureSet::resolve(&[jals_config::Feature::Java24]),
             ..Default::default()
         };
         let diags =
@@ -231,8 +232,8 @@ mod tests {
         assert_eq!(d.severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(d.source.as_deref(), Some("jals"));
 
-        // Java 25 (or no edition) allows the syntax: nothing is reported.
-        config.target_java_version = Some(25);
+        // A `java25` set (or no features at all) allows the syntax: nothing is reported.
+        config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
         assert!(
             Diagnostics::compute_lint_diagnostics(&parse, text, &LineIndex::new(text), &config)
                 .iter()

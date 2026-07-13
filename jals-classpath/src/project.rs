@@ -4,7 +4,7 @@
 //! CLI, LSP, and the browser playground all need the *same* pipeline — resolve `[dependencies]` jars,
 //! optionally each dependency's `-sources.jar` `.java` and `git`/`path` source deps, load the classpath
 //! `.class` files, synthesize skeleton `.java` for jars that ship no source, and read the project's
-//! `[package] edition`. Rather than re-sequence those primitives (and re-invent the warning-formatting,
+//! `[package] features`. Rather than re-sequence those primitives (and re-invent the warning-formatting,
 //! skeleton-append-order, and classpath-fold conventions) in each adapter, this module composes them
 //! once behind one call. Adapters supply the capabilities ([`Fetcher`] / [`Git`] / [`FileTree`]) and a
 //! single `warn` sink, and receive a [`ProjectInputsIn`] with every resolved input.
@@ -23,7 +23,7 @@ use std::path::Path;
 
 use jals_build::ManifestExt;
 use jals_classfile::ClassFile;
-use jals_config::{JavaVersion, Manifest};
+use jals_config::{FeatureSet, JavaVersion, Manifest};
 use jals_fs::FileTree;
 
 use crate::io::{Fetcher, Git};
@@ -69,9 +69,9 @@ pub struct ProjectInputsIn {
     /// The `git`/`path` source dependencies' `.java` (when `source_deps`) — an index input and a
     /// `javac` source.
     pub source_dep_sources: Vec<String>,
-    /// The project's target Java feature version from `[package] edition`, gating the edition-only
-    /// lint rules. `None` when the manifest sets no edition.
-    pub target_java_version: Option<u32>,
+    /// The project's resolved language feature set from `[package] features`, gating the
+    /// feature-gated lint rules. Empty when the manifest declares none.
+    pub feature_set: FeatureSet,
     /// The project's declared Java language system from `[package] java-version`. Carried for
     /// future system-dependent analysis; nothing consumes it yet. `None` when unset.
     pub java_version: Option<JavaVersion>,
@@ -176,7 +176,7 @@ impl ProjectInputsIn {
             classpath_classes,
             library_sources,
             source_dep_sources,
-            target_java_version: manifest.target_java_version(),
+            feature_set: manifest.feature_set(),
             java_version: manifest.java_version(),
         }
     }

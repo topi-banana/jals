@@ -29,7 +29,7 @@ editor ◀── stdio (LSP) ──▶ jals lsp
                                           │
                      Workspace (state.rs): one jals-hir ProjectIndex per open jals.toml
                      project — its source files, [build] classpath, resolved
-                     [dependencies] jars/sources, git/path source deps, and edition
+                     [dependencies] jars/sources, git/path source deps, and features
 ```
 
 ## What it does today
@@ -38,7 +38,7 @@ Server capabilities advertised on `initialize`:
 
 | LSP feature | Method | Source | Notes |
 | --- | --- | --- | --- |
-| Diagnostics | `textDocument/publishDiagnostics` | parser `SyntaxError`s + `jals-lint` + `jals-hir` | Pushed on open/change; cleared on close; `source: "jals"`. Merges parser errors (`ERROR` severity), the enabled `jals-lint` rules (severity from `jalslint.toml`; `unused-local` and a `constant-condition` dead branch fade via `DiagnosticTag::UNNECESSARY`, the latter as an extra HINT diagnostic over the dead range), and — for a file in an indexed `jals.toml` project — cross-file "cannot resolve symbol" and index-aware `type-mismatch` diagnostics (suppressing the file-local `type-mismatch` rule so the two never double-report). The project's `[package] edition` gates `compact-source-file`/`module-import`. |
+| Diagnostics | `textDocument/publishDiagnostics` | parser `SyntaxError`s + `jals-lint` + `jals-hir` | Pushed on open/change; cleared on close; `source: "jals"`. Merges parser errors (`ERROR` severity), the enabled `jals-lint` rules (severity from `jalslint.toml`; `unused-local` and a `constant-condition` dead branch fade via `DiagnosticTag::UNNECESSARY`, the latter as an extra HINT diagnostic over the dead range), and — for a file in an indexed `jals.toml` project — cross-file "cannot resolve symbol" and index-aware `type-mismatch` diagnostics (suppressing the file-local `type-mismatch` rule so the two never double-report). The project's `[package] features` gates `compact-source-file`/`module-import`. |
 | Document symbols | `textDocument/documentSymbol` | typed AST | Hierarchical: types → members (fields, methods, constructors, nested types, enum constants). |
 | Semantic tokens | `textDocument/semanticTokens/full`, `full/delta` | CST + `jals-hir` | Whole-document, plus delta-encoded incremental updates against a cached `result_id` baseline (falls back to a full response when the baseline is stale/evicted). An identifier is classified by its resolved binding kind first — file-locally, and against the project index for a cross-file type when one is loaded — then falls back to a purely syntactic classification (keywords incl. contextual ones like `var`/`record`/`sealed`, literals, comments, annotations) for anything unresolved (external/JDK types, member-access right-hand names). The `range` variant is not implemented. |
 | Code folding | `textDocument/foldingRange` | CST | Folds class/enum/module bodies, blocks (control-flow & lambdas included), switch blocks, array initializers, multi-line block/doc comments, and import groups. The closing brace stays visible; multi-line spans only. |
@@ -71,7 +71,7 @@ manifest) and reused for every other file in the same project. It folds in the p
 extracted `sources` jar `.java` — or, when a jar ships none, a decompiled skeleton `.java` — as
 read-only navigation targets, each `git`/`path` source dependency's `.java` as both an index
 input (its types resolve for analysis) and a navigation target, and the project's `[package]
-edition` (feeding the edition-gated lint rules). Library and source-dependency files are never
+features` (feeding the feature-gated lint rules). Library and source-dependency files are never
 linted, and rename/find-references only ever rewrite the project's own sources. A file that
 belongs to no `jals.toml` project falls back to file-local resolution for every one of these
 features.

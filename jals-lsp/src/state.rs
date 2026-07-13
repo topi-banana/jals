@@ -9,6 +9,7 @@ use async_lsp::lsp_types::{
     DocumentHighlight, Hover, Location, Position, SemanticTokens, SignatureHelp,
     TextDocumentContentChangeEvent, TextEdit, Url, WorkspaceEdit,
 };
+use jals_config::FeatureSet;
 use jals_config::fmt::Config;
 use jals_fs::{FileTree, OsFileTree};
 use jals_hir::{
@@ -222,10 +223,10 @@ pub(crate) struct Workspace<F: FileTree = OsFileTree> {
     /// indexed once at construction (the sources of a fixed dependency do not change) and folded into
     /// every rebuild so a classpath item gets a real-source go-to-definition target.
     source_locations: SourceLocations,
-    /// The project's target Java feature version, from the manifest's `[package] edition`. Fed to the
-    /// edition-gated lint rules (e.g. `compact-source-file`); `None` when the manifest declares no
-    /// edition (or could not be parsed), disabling those gates.
-    target_java_version: Option<u32>,
+    /// The project's resolved language feature set, from the manifest's `[package] features`. Fed
+    /// to the feature-gated lint rules (e.g. `compact-source-file`); empty when the manifest
+    /// declares none (or could not be parsed), disabling those gates.
+    feature_set: FeatureSet,
     /// The embedded `java.lang` stub facts, extracted once at construction and reused on every rebuild
     /// (they never change), so the stubs are never re-parsed per edit. Their reserved [`FileId`]s are
     /// disjoint from the project / library id-spaces.
@@ -304,7 +305,7 @@ impl Workspace<OsFileTree> {
             classfiles,
             Vec::new(),
             Vec::new(),
-            None,
+            FeatureSet::default(),
         )
     }
 
@@ -319,15 +320,15 @@ impl Workspace<OsFileTree> {
     ///
     /// Both are read and parsed once here; neither is ever linted (they are not project files).
     ///
-    /// `target_java_version` is the project's Java feature version (from `[package] edition`), used by
-    /// the edition-gated lint rules; `None` leaves those gates off.
+    /// `feature_set` is the project's resolved language feature set (from `[package] features`),
+    /// used by the feature-gated lint rules; an empty set leaves those gates off.
     pub(crate) fn load_with_classpath_and_sources(
         project_root: PathBuf,
         source_roots: Vec<PathBuf>,
         classfiles: Vec<jals_classfile::ClassFile>,
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
-        target_java_version: Option<u32>,
+        feature_set: FeatureSet,
     ) -> Self {
         Self::load_in(
             OsFileTree,
@@ -336,7 +337,7 @@ impl Workspace<OsFileTree> {
             classfiles,
             library_sources,
             source_dep_sources,
-            target_java_version,
+            feature_set,
         )
     }
 }
@@ -351,7 +352,7 @@ impl<F: FileTree> Workspace<F> {
     /// (host-supplied); their UTF-8 form is the `/`-separated virtual path fed to `fs`, and the file
     /// identity stays a `file://` [`Url`] derived from it. See
     /// [`load_with_classpath_and_sources`](Workspace::load_with_classpath_and_sources) for the roles
-    /// of `library_sources` / `source_dep_sources` / `target_java_version`.
+    /// of `library_sources` / `source_dep_sources` / `feature_set`.
     // The load chain moves owned inputs through a uniform signature; `classfiles` is only read (to
     // lower the classpath) before being dropped, but keeping it owned matches the rest of the chain.
     #[allow(clippy::needless_pass_by_value)]
@@ -362,7 +363,7 @@ impl<F: FileTree> Workspace<F> {
         classfiles: Vec<jals_classfile::ClassFile>,
         library_sources: Vec<PathBuf>,
         source_dep_sources: Vec<PathBuf>,
-        target_java_version: Option<u32>,
+        feature_set: FeatureSet,
     ) -> Self {
         let mut paths: Vec<String> = source_roots
             .iter()
@@ -395,7 +396,7 @@ impl<F: FileTree> Workspace<F> {
             index: ProjectIndex::builder(&[]).with_stdlib().build(),
             classpath: ProjectIndex::lower_classpath(&classfiles),
             source_locations: ProjectIndex::index_source_locations(&library_inputs),
-            target_java_version,
+            feature_set,
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts(),
         };
@@ -468,10 +469,10 @@ impl<F: FileTree> Workspace<F> {
         &self.index
     }
 
-    /// The project's target Java feature version (from `[package] edition`), if declared. Feeds the
-    /// edition-gated lint rules.
-    pub(crate) const fn target_java_version(&self) -> Option<u32> {
-        self.target_java_version
+    /// The project's resolved language feature set (from `[package] features`), empty when none is
+    /// declared. Feeds the feature-gated lint rules.
+    pub(crate) const fn feature_set(&self) -> FeatureSet {
+        self.feature_set
     }
 
     /// The id of the file at `uri`, if it is part of this workspace.
@@ -1225,7 +1226,7 @@ mod tests {
             vec![box_class],
             vec![box_java.clone()],
             Vec::new(),
-            None,
+            FeatureSet::default(),
         );
         let main_uri = Url::from_file_path(src_dir.join("Main.java")).unwrap();
         let box_uri = Url::from_file_path(&box_java).unwrap();
@@ -1343,7 +1344,7 @@ mod tests {
             Vec::new(),             // no classpath `.class`
             Vec::new(),             // no `-sources.jar` overlay
             vec![box_java.clone()], // the source dependency's `.java`
-            None,
+            FeatureSet::default(),
         );
         let main_uri = Url::from_file_path(src_dir.join("Main.java")).unwrap();
         let box_uri = Url::from_file_path(&box_java).unwrap();
@@ -1434,7 +1435,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            None,
+            FeatureSet::default(),
         );
 
         let bar_uri = Url::from_file_path("/proj/src/Bar.java").unwrap();
