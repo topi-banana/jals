@@ -71,10 +71,25 @@ impl Server {
                 .service(Router::from_language_server(ServerState::new(client)))
         });
 
-        // Truly asynchronous piped stdin/stdout (unix). stdout is the LSP transport, so all
-        // logging must go to stderr.
-        let stdin = async_lsp::stdio::PipeStdin::lock_tokio()?;
-        let stdout = async_lsp::stdio::PipeStdout::lock_tokio()?;
+        // stdout is the LSP transport, so all logging must go to stderr.
+        //
+        // On unix, use truly asynchronous piped stdin/stdout (no blocking tasks). async-lsp's
+        // `stdio` module is unix-only — `PipeStdin`/`PipeStdout` set the fd non-blocking — so on
+        // other platforms (Windows) fall back to tokio's stdin/stdout, which delegate reads/writes
+        // to blocking threads, wrapped into futures' `AsyncRead`/`AsyncWrite` via tokio-util.
+        #[cfg(unix)]
+        let (stdin, stdout) = (
+            async_lsp::stdio::PipeStdin::lock_tokio()?,
+            async_lsp::stdio::PipeStdout::lock_tokio()?,
+        );
+        #[cfg(not(unix))]
+        let (stdin, stdout) = {
+            use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+            (
+                tokio::io::stdin().compat(),
+                tokio::io::stdout().compat_write(),
+            )
+        };
         server.run_buffered(stdin, stdout).await?;
         Ok(())
     }
