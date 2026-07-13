@@ -12,7 +12,7 @@ Compiled with the JDK pinned for this repo (`javac 25`, class-file major version
 
 ```sh
 # Consts (M0 enrichments) / Branchy (M2 control flow) / Locals (M3 local variables) /
-# Loops (M4 loops) — need -parameters + -g:
+# Loops (M4 loops) / Arrays (M5 array operations) — need -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Consts.java
 cp out/demo/Consts.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Branchy.java
@@ -21,6 +21,8 @@ javac -parameters -g -d out jals-classpath/tests/fixtures/src/Locals.java
 cp out/demo/Locals.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Loops.java
 cp out/demo/Loops.class jals-classpath/tests/fixtures/
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/Arrays.java
+cp out/demo/Arrays.class jals-classpath/tests/fixtures/
 
 # Outer + its nested types (grouping), compiled without debug info (so parameters stay `argN`):
 javac -d out jals-classpath/tests/fixtures/Outer.java
@@ -39,6 +41,7 @@ package, no debug info) and its source is not committed.
 | `Branchy.class` | `src/Branchy.java` | M2 `if` / `if-else` structuring: a guard-clause return, an `if-else` with a join, a null-guarded field store, and a chained `if` |
 | `Locals.class` | `src/Locals.java` | M3 local variables: straight-line temporaries, a local written in both `if`/`else` branches and read after the join (hoisting), and a reference-typed local |
 | `Loops.class` | `src/Loops.java` | M4 loop structuring: a bottom-test `while` with an `iinc` counter and a `do`-`while` |
+| `Arrays.class` | `src/Arrays.java` | M5 array operations: element reads/writes, `newarray`/`anewarray`/`multianewarray` creation, folded `new T[]{…}` initializers (int/String/long/boolean, nested), an array-typed `checkcast`, `arraylength`, and a compound element store (`xs[i]++`, `dup2`) that must bail |
 | `Outer.class` | `Outer.java` | a top-level class with a nested static class and a nested enum (nested-type grouping) |
 | `Outer$Inner.class` | `Outer.java` | a nested static class |
 | `Outer$Color.class` | `Outer.java` | a nested enum with constants |
