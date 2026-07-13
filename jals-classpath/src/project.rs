@@ -23,7 +23,7 @@ use std::path::Path;
 
 use jals_build::ManifestExt;
 use jals_classfile::ClassFile;
-use jals_config::{FeatureSet, JavaVersion, Manifest};
+use jals_config::{FeatureSet, Manifest};
 use jals_fs::FileTree;
 
 use crate::io::{Fetcher, Git};
@@ -72,9 +72,6 @@ pub struct ProjectInputsIn {
     /// The project's resolved language feature set from `[package] features`, gating the
     /// feature-gated lint rules. Empty when the manifest declares none.
     pub feature_set: FeatureSet,
-    /// The project's declared Java language system from `[package] java-version`. Carried for
-    /// future system-dependent analysis; nothing consumes it yet. `None` when unset.
-    pub java_version: Option<JavaVersion>,
 }
 
 impl ProjectInputsIn {
@@ -177,7 +174,6 @@ impl ProjectInputsIn {
             library_sources,
             source_dep_sources,
             feature_set: manifest.feature_set(),
-            java_version: manifest.java_version(),
         }
     }
 }

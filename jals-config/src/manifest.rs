@@ -3,7 +3,7 @@
 //! A `jals.toml` describes a Java project the way `Cargo.toml` describes a Rust crate. Every key is
 //! optional; omitted keys fall back to [`Manifest::default`], which encodes the Maven-style
 //! `src/main/java` -> `target/classes` layout. Keys are kebab-case and grouped into `[package]`,
-//! `[build]`, and `[run]` sections.
+//! `[build]`, `[run]`, and `[toolchain]` sections.
 //!
 //! This module owns the pure, `no_std` half: the serde model, structural [`validate`](Manifest::validate),
 //! the [`FromStr`] parse-from-text entry point, and the pure classified type [`GitRef`]. The host-only,
@@ -19,6 +19,8 @@ use core::fmt;
 use core::str::FromStr;
 
 use serde::Deserialize;
+
+use crate::toolchain::Toolchain;
 
 /// A parsed `jals.toml` project manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -42,6 +44,11 @@ pub struct Manifest {
     /// source into the editor index; this crate only models and validates the specs, staying pure
     /// (`jals-build`'s `ManifestExt` classifies them into host-facing path sources).
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
+    /// it, chosen independently (see [`Toolchain`]). Defaults to the system tools when omitted, so an
+    /// existing manifest is unaffected. This crate only models the selection; `jals-build`'s `native`
+    /// feature resolves each [`ToolSpec`](crate::ToolSpec) to a program path (JDK discovery / `PATH`).
+    pub toolchain: Toolchain,
 }
 
 /// A single `[dependencies]` entry, in exactly one of three forms.
@@ -245,9 +252,6 @@ pub struct Package {
     /// [`Manifest::feature_set`]; an unknown name is a TOML parse error (serde unknown variant).
     /// Empty when omitted, leaving every feature gate off.
     pub features: Vec<Feature>,
-    /// The Java language system (platform implementation) the project targets (Cargo's
-    /// `[package] rust-version` slot). See [`JavaVersion`].
-    pub java_version: Option<JavaVersion>,
 }
 
 /// A single selectable language capability — the unit `[package] features` lists and the analysis
@@ -560,26 +564,14 @@ impl FeatureSet {
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
-}
 
-/// The Java language system a project targets (`[package] java-version`).
-///
-/// Which platform implementation the project is written against, next to the language-feature
-/// selection in [`Package::features`] — the split Cargo makes between `edition` and `rust-version`.
-///
-/// Currently parsed and threaded through to the assembled project inputs only; no analysis behaves
-/// differently yet. It reserves the seam for system-dependent analysis (e.g. gating lints on the
-/// API subset a `teavm` target actually supports). An unknown value is a TOML parse error (serde
-/// unknown variant), like an unknown [`Feature`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JavaVersion {
-    /// The Oracle JDK.
-    OracleJdk,
-    /// `OpenJDK`.
-    OpenJdk,
-    /// `TeaVM` (Java compiled to JavaScript / `WebAssembly`).
-    TeaVm,
+    /// Whether a use of `feature` is permitted: an [`empty`](FeatureSet::is_empty) set permits
+    /// everything (a project that declares no `[package] features` opts out of feature gating),
+    /// otherwise the feature must be enabled. The single owner of the empty-set exemption every
+    /// feature-gate consumer (the gated lint rules) relies on.
+    pub const fn permits(self, feature: Feature) -> bool {
+        self.is_empty() || self.contains(feature)
+    }
 }
 
 /// Compilation settings (`[build]`).
@@ -824,12 +816,6 @@ impl Manifest {
         FeatureSet::resolve(&self.package.features)
     }
 
-    /// The project's declared Java language system (from `[package] java-version`), if any. Threaded
-    /// through to the assembled project inputs; no analysis consumes it yet (see [`JavaVersion`]).
-    pub const fn java_version(&self) -> Option<JavaVersion> {
-        self.package.java_version
-    }
-
     /// The names of every `jar` `[dependencies]` entry that opted into recursive **bundled-jar**
     /// unpacking (`recursive = true`). The host pairs these names with the resolved jars to decide
     /// which jars to scan for nested `*.jar` members. Pure — no I/O; only the `jar` form carries
@@ -1020,10 +1006,9 @@ mod tests {
         // No `[[bin]]`: the bin list is empty and selection falls back to `[run] main-class`.
         assert!(m.bin.is_empty());
         assert_eq!(m.package.default_run, None);
-        // No `[package] features` and no `[package] java-version`: every feature gate stays off.
+        // No `[package] features`: every feature gate stays off.
         assert!(m.package.features.is_empty());
         assert!(m.feature_set().is_empty());
-        assert_eq!(m.package.java_version, None);
     }
 
     #[test]
@@ -1134,23 +1119,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_package_java_version() {
-        let m: Manifest = toml::from_str("[package]\njava-version = \"oraclejdk\"\n").unwrap();
-        assert_eq!(m.package.java_version, Some(JavaVersion::OracleJdk));
+    fn parses_toolchain_section() {
+        use crate::toolchain::ToolSpec;
 
-        let m: Manifest = toml::from_str("[package]\njava-version = \"openjdk\"\n").unwrap();
-        assert_eq!(m.package.java_version, Some(JavaVersion::OpenJdk));
-        assert_eq!(m.java_version(), Some(JavaVersion::OpenJdk));
+        let m: Manifest = toml::from_str(
+            "[toolchain]\ncompiler = \"temurin-21\"\nruntime = \"/opt/jdk-17/bin/java\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.toolchain.compiler,
+            Some(ToolSpec::Distribution {
+                distribution: Some("temurin".into()),
+                version: Some(21),
+            })
+        );
+        assert_eq!(
+            m.toolchain.runtime,
+            Some(ToolSpec::Path("/opt/jdk-17/bin/java".into()))
+        );
 
-        let m: Manifest = toml::from_str("[package]\njava-version = \"teavm\"\n").unwrap();
-        assert_eq!(m.package.java_version, Some(JavaVersion::TeaVm));
-    }
-
-    #[test]
-    fn rejects_unknown_java_version() {
-        // Like `features`, an unknown language system is a TOML parse error (serde unknown
-        // variant), so no dedicated `validate` check is needed.
-        assert!(toml::from_str::<Manifest>("[package]\njava-version = \"graalvm\"\n").is_err());
+        // No [toolchain] table: both selections default to "system" (None).
+        let m = Manifest::default();
+        assert_eq!(m.toolchain.compiler, None);
+        assert_eq!(m.toolchain.runtime, None);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use jals_classpath::{ProjectInputOptions, ProjectInputs};
-use jals_config::{Feature, FeatureSet, JavaVersion, Manifest};
+use jals_config::{Feature, FeatureSet, Manifest};
 
 /// `Box.class` (the same fixture the load tests / `jals-hir`'s classpath bridge use).
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
@@ -36,10 +36,7 @@ fn analysis_loads_the_classpath_and_reads_features() {
     let dir = tempfile::tempdir().unwrap();
     let jar = dir.path().join("box.jar");
     write_jar(&jar);
-    let manifest = manifest_with_jar(
-        &jar,
-        "features = [\"java25\"]\njava-version = \"openjdk\"\n",
-    );
+    let manifest = manifest_with_jar(&jar, "features = [\"java25\"]\n");
 
     let inputs = ProjectInputs::assemble_project_inputs(
         &manifest,
@@ -55,10 +52,8 @@ fn analysis_loads_the_classpath_and_reads_features() {
     assert!(inputs.library_sources.is_empty());
     assert!(inputs.source_dep_sources.is_empty());
     // `[package] features = ["java25"]` threads through as the resolved feature set for the
-    // feature-gated lint rules, and `[package] java-version = "openjdk"` rides along for future
-    // system-dependent analysis.
+    // feature-gated lint rules.
     assert_eq!(inputs.feature_set, FeatureSet::resolve(&[Feature::Java25]));
-    assert_eq!(inputs.java_version, Some(JavaVersion::OpenJdk));
 }
 
 #[test]
@@ -82,5 +77,4 @@ fn compile_resolves_jars_without_loading_classes() {
     // No `git`/`path` source dependencies in this manifest.
     assert!(inputs.source_dep_sources.is_empty());
     assert!(inputs.feature_set.is_empty());
-    assert_eq!(inputs.java_version, None);
 }
