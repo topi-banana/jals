@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-use jals_build::ManifestExt;
+use jals_build::{ManifestExt, Toolchain};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_config::{FeatureSet, Manifest};
@@ -375,25 +375,20 @@ impl BuildArgs {
             jals_classpath::ProjectInputOptions::Compile,
             |message| eprintln!("warning: {message}"),
         );
-        let invocation = jals_build::Invocation::build(
-            &manifest,
-            &root,
-            &sources,
-            &inputs.source_dep_sources,
-            &inputs.dependency_jars,
-            App::path_sep(),
-        );
+        let request = App::compile_request(&manifest, &root, &sources, &inputs);
+        // The toolchain selects `javac` from `[toolchain] compiler` (env override → discovered JDK →
+        // `$JAVA_HOME` → `PATH`) and spawns it.
+        let toolchain = jals_build::SubprocessToolchain::from_manifest(&manifest);
 
         if self.dry_run || self.verbose {
-            println!("{}", invocation.display_command());
+            println!("{}", toolchain.describe_compile(&request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
-        let javac = App::jdk_tool("JAVAC", "javac");
-        let status = App::spawn_tool(&javac, &invocation.args)?;
-        Ok(App::to_exit_code(status))
+        let outcome = toolchain.compile(&request).map_err(|e| anyhow!("{e}"))?;
+        Ok(App::outcome_exit_code(outcome))
     }
 }
 
@@ -421,41 +416,35 @@ impl RunArgs {
             jals_classpath::ProjectInputOptions::Compile,
             |message| eprintln!("warning: {message}"),
         );
-        let sep = App::path_sep();
-        let build_inv = jals_build::Invocation::build(
-            &manifest,
-            &root,
-            &sources,
-            &inputs.source_dep_sources,
-            &inputs.dependency_jars,
-            sep,
-        );
-        let run_inv = jals_build::Invocation::run(
-            &manifest,
-            &root,
-            &main_class,
-            &self.args,
-            &inputs.dependency_jars,
-            sep,
-        );
+        let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
+        let run_request = jals_build::RunRequest {
+            manifest: &manifest,
+            project_root: &root,
+            main_class: &main_class,
+            program_args: &self.args,
+            extra_classpath: &inputs.dependency_jars,
+        };
+        // One toolchain drives both steps: `javac` from `[toolchain] compiler`, `java` from
+        // `[toolchain] runtime` (each: env override → discovered JDK → `$JAVA_HOME` → `PATH`).
+        let toolchain = jals_build::SubprocessToolchain::from_manifest(&manifest);
 
         if self.dry_run || self.verbose {
-            println!("{}", build_inv.display_command());
-            println!("{}", run_inv.display_command());
+            println!("{}", toolchain.describe_compile(&compile_request));
+            println!("{}", toolchain.describe_run(&run_request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
         // Compile first; only run when compilation succeeds.
-        let javac = App::jdk_tool("JAVAC", "javac");
-        let build_status = App::spawn_tool(&javac, &build_inv.args)?;
-        if !build_status.success() {
-            return Ok(App::to_exit_code(build_status));
+        let build_outcome = toolchain
+            .compile(&compile_request)
+            .map_err(|e| anyhow!("{e}"))?;
+        if !build_outcome.success() {
+            return Ok(App::outcome_exit_code(build_outcome));
         }
-        let java = App::jdk_tool("JAVA", "java");
-        let run_status = App::spawn_tool(&java, &run_inv.args)?;
-        Ok(App::to_exit_code(run_status))
+        let run_outcome = toolchain.run(&run_request).map_err(|e| anyhow!("{e}"))?;
+        Ok(App::outcome_exit_code(run_outcome))
     }
 }
 
@@ -633,43 +622,29 @@ impl App {
         Ok(sources)
     }
 
-    /// The platform classpath separator.
-    const fn path_sep() -> char {
-        if cfg!(windows) { ';' } else { ':' }
-    }
-
-    /// Resolves a JDK tool (`javac`/`java`): honor `$<env>` first, then `$JAVA_HOME/bin/<tool>`, and
-    /// finally fall back to the bare tool name on `PATH`.
-    fn jdk_tool(env: &str, tool: &str) -> PathBuf {
-        if let Some(explicit) = std::env::var_os(env) {
-            return PathBuf::from(explicit);
+    /// The compile inputs shared by `jals build` and `jals run`: the manifest plus its discovered
+    /// sources, with the resolved dependency jars on the classpath and the `git`/`path` source
+    /// dependencies' `.java` compiled alongside — one place that wires `ProjectInputs` into a
+    /// [`CompileRequest`](jals_build::CompileRequest).
+    fn compile_request<'a>(
+        manifest: &'a Manifest,
+        project_root: &'a Path,
+        sources: &'a [PathBuf],
+        inputs: &'a jals_classpath::ProjectInputs,
+    ) -> jals_build::CompileRequest<'a> {
+        jals_build::CompileRequest {
+            manifest,
+            project_root,
+            sources,
+            extra_sources: &inputs.source_dep_sources,
+            extra_classpath: &inputs.dependency_jars,
         }
-        if let Some(home) = std::env::var_os("JAVA_HOME") {
-            let candidate = Path::new(&home).join("bin").join(tool);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-        PathBuf::from(tool)
     }
 
-    /// Spawns `program` with `args`, inheriting stdio so the tool's diagnostics pass straight through.
-    fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatus> {
-        std::process::Command::new(program)
-            .args(args)
-            .status()
-            .with_context(|| {
-                format!(
-                    "failed to spawn `{}` (is a JDK installed and on PATH?)",
-                    program.display()
-                )
-            })
-    }
-
-    /// Maps a process exit status to a CLI [`ExitCode`]: 0 succeeds, any other code propagates, and a
-    /// signal-terminated process fails with code 1.
-    fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
-        match status.code() {
+    /// Maps a toolchain [`BuildOutcome`](jals_build::BuildOutcome) to a CLI [`ExitCode`]: 0 succeeds,
+    /// any other code propagates, and a signal-terminated process (no code) fails with code 1.
+    fn outcome_exit_code(outcome: jals_build::BuildOutcome) -> ExitCode {
+        match outcome.code {
             Some(0) => ExitCode::SUCCESS,
             // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails
             // as 1.
