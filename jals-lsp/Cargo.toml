@@ -21,6 +21,12 @@ text-size.workspace = true
 tokio.workspace = true
 tower.workspace = true
 
+# async-lsp's asynchronous `stdio` pipe helpers are unix-only; elsewhere the server loop drives
+# tokio's stdin/stdout (which need `io-std`) adapted to futures' IO traits via tokio-util.
+[target.'cfg(not(unix))'.dependencies]
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 

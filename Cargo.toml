@@ -17,6 +17,9 @@ members = [
   "jals-tests",
   "xtask",
 ]
+# The Zed extension (`editors/zed`) is a `wasm32-wasip1` `cdylib` with its own workspace root; it
+# is not a member and must not inherit the workspace lints or be built by `--workspace`.
+exclude = ["editors/zed"]
 
 [workspace.package]
 version = "0.1.0"
@@ -62,6 +65,9 @@ serde_json = { version = "1.0" }
 similar = { version = "3" }
 text-size = { version = "1.1.1" }
 tokio = { version = "1", features = ["net", "rt"] }
+# Non-unix only: adapts tokio's stdin/stdout into futures' `Async{Read,Write}` for the LSP loop
+# (async-lsp's `stdio` pipe helpers are unix-only). See jals-lsp/src/server.rs.
+tokio-util = { version = "0.7", features = ["compat"] }
 toml = { version = "1.1.2" }
 tower = { version = "0.5" }
 ungrammar = { version = "1.16" }
