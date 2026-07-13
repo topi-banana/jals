@@ -6,39 +6,50 @@
 use jals_classfile::{ClassFile, MethodInfo};
 use jals_decompile::MethodBody;
 
+fn fixture(bytes: &[u8]) -> ClassFile {
+    ClassFile::read(bytes).expect("parse fixture class")
+}
+
 fn consts() -> ClassFile {
-    ClassFile::read(include_bytes!(
+    fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Consts.class"
     ))
-    .expect("parse Consts.class")
 }
 
 fn branchy() -> ClassFile {
-    ClassFile::read(include_bytes!(
+    fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Branchy.class"
     ))
-    .expect("parse Branchy.class")
 }
 
 fn locals() -> ClassFile {
-    ClassFile::read(include_bytes!(
+    fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Locals.class"
     ))
-    .expect("parse Locals.class")
 }
 
 fn loops() -> ClassFile {
-    ClassFile::read(include_bytes!(
+    fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Loops.class"
     ))
-    .expect("parse Loops.class")
 }
 
 fn arrays() -> ClassFile {
-    ClassFile::read(include_bytes!(
+    fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Arrays.class"
     ))
-    .expect("parse Arrays.class")
+}
+
+fn concat() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Concat.class"
+    ))
+}
+
+fn sb() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Sb.class"
+    ))
 }
 
 /// The first method named `name`.
@@ -350,4 +361,166 @@ fn compound_element_store_bails() {
     let cf = arrays();
     let names = ["xs".to_owned(), "i".to_owned()];
     assert!(MethodBody::decompile(method(&cf, "bump"), &cf, &names).is_none());
+}
+
+// --- invokedynamic makeConcatWithConstants (javac's default string-concat lowering) ---
+
+#[test]
+fn folds_indy_concat_with_chunks() {
+    // Recipe "Hello, \u{1}!" — literal chunks around one dynamic String operand.
+    let cf = concat();
+    let body = MethodBody::decompile(method(&cf, "greet"), &cf, &["name".to_owned()])
+        .expect("greet decompiles");
+    assert_eq!(body, ["return \"Hello, \" + name + \"!\";"]);
+}
+
+#[test]
+fn folds_indy_concat_of_an_int() {
+    let cf = concat();
+    let body = MethodBody::decompile(method(&cf, "label"), &cf, &["n".to_owned()])
+        .expect("label decompiles");
+    assert_eq!(body, ["return \"n = \" + n;"]);
+}
+
+#[test]
+fn string_typed_operand_anchors_the_chain() {
+    // Recipe "\u{1}\u{1}" with a String first operand — no seed needed.
+    let cf = concat();
+    let names = ["a".to_owned(), "b".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "pair"), &cf, &names).expect("pair decompiles");
+    assert_eq!(body, ["return a + b;"]);
+}
+
+#[test]
+fn seeds_a_concat_with_no_string_operand() {
+    // `a + "" + b` — the empty constant vanishes from the recipe, leaving two int operands;
+    // rendering `a + b` would be integer addition, so the fold reintroduces the `""`.
+    let cf = concat();
+    let names = ["a".to_owned(), "b".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "bare"), &cf, &names).expect("bare decompiles");
+    assert_eq!(body, ["return \"\" + a + b;"]);
+}
+
+#[test]
+fn resolves_a_bootstrap_argument_constant() {
+    // The "\u{1}" constant collides with the recipe's operand marker, so javac passes it as a
+    // trailing bootstrap argument behind a "\u{2}" marker.
+    let cf = concat();
+    let body = MethodBody::decompile(method(&cf, "tagged"), &cf, &["n".to_owned()])
+        .expect("tagged decompiles");
+    assert_eq!(body, ["return \"\\u0001\" + n;"]);
+}
+
+#[test]
+fn folds_indy_concat_of_a_char() {
+    let cf = concat();
+    let names = ["s".to_owned(), "c".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "glue"), &cf, &names).expect("glue decompiles");
+    assert_eq!(body, ["return s + c;"]);
+}
+
+#[test]
+fn folds_indy_concat_of_mixed_primitives() {
+    let cf = concat();
+    let names = ["d".to_owned(), "f".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "mix"), &cf, &names).expect("mix decompiles");
+    assert_eq!(body, ["return d + \" & \" + f;"]);
+}
+
+#[test]
+fn non_concat_invokedynamic_bails() {
+    // A LambdaMetafactory call site is not modelled — the method must fall back.
+    let cf = concat();
+    assert!(MethodBody::decompile(method(&cf, "lazy"), &cf, &[]).is_none());
+}
+
+#[test]
+fn discarded_object_creation_is_a_statement() {
+    // `new Concat();` — the popped creation must survive as an expression statement.
+    let cf = concat();
+    let body = MethodBody::decompile(method(&cf, "ping"), &cf, &[]).expect("ping decompiles");
+    assert_eq!(body, ["new demo.Concat();"]);
+}
+
+// --- StringBuilder append chains (javac -XDstringConcat=inline, and hand-written) ---
+
+#[test]
+fn folds_builder_chain_with_chunks() {
+    let cf = sb();
+    let body = MethodBody::decompile(method(&cf, "greet"), &cf, &["name".to_owned()])
+        .expect("greet decompiles");
+    assert_eq!(body, ["return \"Hello, \" + name + \"!\";"]);
+}
+
+#[test]
+fn folds_builder_chain_of_an_int() {
+    let cf = sb();
+    let body = MethodBody::decompile(method(&cf, "label"), &cf, &["n".to_owned()])
+        .expect("label decompiles");
+    assert_eq!(body, ["return \"n = \" + n;"]);
+}
+
+#[test]
+fn rerenders_an_appended_char_constant() {
+    // `s + '!'` compiles to `bipush 33; append(C)` — the int constant must come back as a char.
+    let cf = sb();
+    let body = MethodBody::decompile(method(&cf, "excl"), &cf, &["s".to_owned()])
+        .expect("excl decompiles");
+    assert_eq!(body, ["return s + '!';"]);
+}
+
+#[test]
+fn folds_builder_chain_of_a_boolean() {
+    let cf = sb();
+    let names = ["s".to_owned(), "b".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "flag"), &cf, &names).expect("flag decompiles");
+    assert_eq!(body, ["return s + b;"]);
+}
+
+#[test]
+fn empty_string_operand_survives_the_fold() {
+    // `a + "" + b` — the appended `""` is the only String operand; dropping it would change the
+    // chain to integer addition, so it must survive verbatim.
+    let cf = sb();
+    let names = ["a".to_owned(), "b".to_owned()];
+    let body =
+        MethodBody::decompile(method(&cf, "seeded"), &cf, &names).expect("seeded decompiles");
+    assert_eq!(body, ["return a + \"\" + b;"]);
+}
+
+#[test]
+fn unfinished_builder_chain_stays_calls() {
+    // No toString() — the collecting chain re-renders as the original calls.
+    let cf = sb();
+    let body = MethodBody::decompile(method(&cf, "chain"), &cf, &["s".to_owned()])
+        .expect("chain decompiles");
+    assert_eq!(body, ["return new java.lang.StringBuilder().append(s);"]);
+}
+
+#[test]
+fn builder_chain_consumed_by_another_call_stays_calls() {
+    let cf = sb();
+    let body =
+        MethodBody::decompile(method(&cf, "len"), &cf, &["s".to_owned()]).expect("len decompiles");
+    assert_eq!(
+        body,
+        ["return new java.lang.StringBuilder().append(s).length();"]
+    );
+}
+
+#[test]
+fn discarded_builder_chain_is_a_statement() {
+    let cf = sb();
+    let body = MethodBody::decompile(method(&cf, "drop"), &cf, &["s".to_owned()])
+        .expect("drop decompiles");
+    assert_eq!(body, ["new java.lang.StringBuilder().append(s);"]);
+}
+
+#[test]
+fn append_on_a_parameter_stays_calls() {
+    // The receiver is not a fresh `new StringBuilder()`, so nothing folds — including toString().
+    let cf = sb();
+    let body = MethodBody::decompile(method(&cf, "manual"), &cf, &["sb".to_owned()])
+        .expect("manual decompiles");
+    assert_eq!(body, ["return sb.append(\"x\").toString();"]);
 }
