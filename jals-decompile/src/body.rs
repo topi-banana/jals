@@ -6,9 +6,10 @@
 //! Java from it — a straight-line method is one block, forward conditional branches become
 //! `if` / `if`-`else`, and back-edges become `while` / `do`-`while` loops. Both layers are
 //! deliberately conservative: anything not modelled (a `switch`, a `try`/`catch`, a
-//! `break`/`continue` or nested/irreducible loop, `invokedynamic`, an exotic stack shuffle, or a
-//! control-flow shape that is not a clean tree) makes the whole method fall back to the caller's
-//! safe body — so the output is always valid Java, never a half-built or mis-structured body.
+//! `break`/`continue` or nested/irreducible loop, a non-string-concat `invokedynamic`, an exotic
+//! stack shuffle, or a control-flow shape that is not a clean tree) makes the whole method fall
+//! back to the caller's safe body — so the output is always valid Java, never a half-built or
+//! mis-structured body.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -18,13 +19,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use jals_classfile::{
-    AttributeBody, BaseType, ClassFile, CodeAttribute, ConstantPool, ConstantPoolEntry, FieldType,
-    Instruction, MethodDescriptor, MethodInfo, ReturnType, WideInstruction,
+    AttributeBody, BaseType, BootstrapMethod, ClassFile, CodeAttribute, ConstantPool,
+    ConstantPoolEntry, FieldType, Instruction, MethodDescriptor, MethodInfo, ReturnType,
+    WideInstruction,
 };
 
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
-use crate::expr::{ArrayForm, Expr, Stmt};
+use crate::expr::{ArrayForm, ConcatPart, Expr, Stmt};
 use crate::literal::Literal;
 use crate::types::JavaType;
 
@@ -60,6 +62,16 @@ impl MethodBody {
         }
         let owner = pool.class_name(cf.this_class)?.into_owned();
         let is_static = method.access_flags.is_static();
+        // The class-level `BootstrapMethods` table, which an `invokedynamic` string-concat call
+        // site resolves its recipe through (absent when the class has no dynamic call sites).
+        let bootstrap = cf
+            .attributes
+            .iter()
+            .find_map(|a| match &a.body {
+                AttributeBody::BootstrapMethods(b) => Some(b.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[]);
         let mut locals = Self::local_slots(method, pool, is_static, param_names)?;
         // Hoist a typed declaration for every non-parameter local the method stores into, registering
         // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
@@ -70,6 +82,7 @@ impl MethodBody {
             code: &code.code,
             cfg: &cfg,
             pool,
+            bootstrap,
             owner,
             is_static,
             locals,
@@ -189,6 +202,8 @@ impl MethodBody {
 /// The straight-line symbolic-execution state for one basic block.
 struct Sim<'a> {
     pool: &'a ConstantPool,
+    /// The class's `BootstrapMethods` entries (empty when absent), resolving `invokedynamic`.
+    bootstrap: &'a [BootstrapMethod],
     /// Internal binary name of the class being decompiled (for `this`-call vs object-creation).
     owner: &'a str,
     is_static: bool,
@@ -204,12 +219,15 @@ impl Sim<'_> {
 
     /// Finalize a value leaving the stack: a collecting array creation becomes its final form —
     /// untouched → a plain sized creation, completely filled → a `new T[]{…}` initializer — and a
-    /// partial collection or a leaked initializer-store marker bails. The single gate that keeps
-    /// the folding sentinels ([`Expr::PendingArray`] / [`Expr::PendingArrayDup`]) out of rendered
-    /// output: every consumption funnels through here (via [`Sim::pop`] or the block-end sweep).
+    /// partial collection or a leaked initializer-store marker bails; a collecting `StringBuilder`
+    /// chain consumed by anything but its `toString()` becomes the original append call chain
+    /// again. The single gate that keeps the folding sentinels ([`Expr::PendingArray`] /
+    /// [`Expr::PendingArrayDup`] / [`Expr::PendingBuilder`]) out of rendered output: every
+    /// consumption funnels through here (via [`Sim::pop`] or the block-end sweep).
     fn finalize(expr: Expr) -> Option<Expr> {
         match expr {
             Expr::PendingArrayDup => None,
+            Expr::PendingBuilder(parts) => Some(Expr::builder_chain(parts)),
             Expr::PendingArray {
                 elem,
                 empty_dims,
@@ -322,6 +340,9 @@ impl Sim<'_> {
     fn invoke(&mut self, index: u16, is_static: bool) -> Option<()> {
         let (owner, name, descriptor) = self.method_ref(index)?;
         let md = MethodDescriptor::parse(&descriptor).ok()?;
+        if !is_static && owner == "java/lang/StringBuilder" && self.fold_builder(&name, &md)? {
+            return Some(());
+        }
         let args = self.pop_args(md.params.len())?;
         let recv = if is_static {
             Box::new(Expr::Type(JavaType::internal_to_java(&owner)))
@@ -372,7 +393,16 @@ impl Sim<'_> {
                 if matches!(self.stack.last(), Some(Expr::Uninitialized(t)) if *t == ty) {
                     self.stack.pop();
                 }
-                self.stack.push(Expr::New { ty, args });
+                // A fresh no-arg `StringBuilder` is recognized here, where the internal name is
+                // authoritative, and pushed as the collecting sentinel: its concat-safe `append`
+                // chain may fold into a `+` concatenation, and any other consumption finalizes it
+                // back into the original calls ([`Sim::finalize`]), so an unfolded one renders
+                // exactly as the `new` it was.
+                if owner == "java/lang/StringBuilder" && args.is_empty() {
+                    self.stack.push(Expr::PendingBuilder(Vec::new()));
+                } else {
+                    self.stack.push(Expr::New { ty, args });
+                }
             }
             _ => return None,
         }
@@ -385,6 +415,226 @@ impl Sim<'_> {
             self.stmts.push(Stmt::Expr(call));
         } else {
             self.stack.push(call);
+        }
+    }
+
+    /// Try to fold a `StringBuilder` call into a collecting concatenation: an `append` of a
+    /// concat-safe operand onto a collecting chain (the [`Expr::PendingBuilder`] a fresh
+    /// `new StringBuilder()` pushes) extends it, and a `toString()` on a non-empty chain
+    /// finalizes it into the `+` concatenation. Returns `Some(false)` when the call is not part
+    /// of that pattern, so the caller renders it as an ordinary call — a chain consumed any
+    /// other way re-renders as the original `new StringBuilder().append(…)` calls via
+    /// [`Sim::finalize`].
+    fn fold_builder(&mut self, name: &str, md: &MethodDescriptor) -> Option<bool> {
+        match name {
+            "toString" if md.params.is_empty() => match self.stack.last_mut() {
+                // An empty chain stays an ordinary `new StringBuilder().toString()` call.
+                Some(Expr::PendingBuilder(parts)) if !parts.is_empty() => {
+                    let parts = core::mem::take(parts);
+                    self.stack.pop();
+                    self.stack.push(Expr::concat(parts));
+                    Some(true)
+                }
+                _ => Some(false),
+            },
+            "append" if md.params.len() == 1 && Self::concat_safe(&md.params[0]) => {
+                // The stack is `[…, receiver, operand]` — commit only when the receiver is a
+                // collecting chain (a builder that came from a local, parameter, or field keeps
+                // its real `append` calls).
+                let receiver = self.stack.len().checked_sub(2).map(|i| &self.stack[i]);
+                if !matches!(receiver, Some(Expr::PendingBuilder(_))) {
+                    return Some(false);
+                }
+                let arg = self.pop()?;
+                let part = ConcatPart {
+                    expr: Self::coerce(arg, &md.params[0])?,
+                    stringy: Self::is_string(&md.params[0]),
+                };
+                let Some(Expr::PendingBuilder(parts)) = self.stack.last_mut() else {
+                    return None;
+                };
+                parts.push(part);
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    }
+
+    /// Whether a `StringBuilder.append` overload of this operand type appends exactly the
+    /// operand's *string conversion* — the condition under which the append equals one `+`
+    /// operand. Every primitive and `String`/`Object`/`CharSequence` qualify; `char[]` does not
+    /// (it appends the array's *characters*, where `+` would render its `toString`), so it and
+    /// anything else stay unfolded.
+    fn concat_safe(param: &FieldType) -> bool {
+        match param {
+            FieldType::Base(_) => true,
+            FieldType::Object(internal) => matches!(
+                internal.as_str(),
+                "java/lang/String" | "java/lang/Object" | "java/lang/CharSequence"
+            ),
+            FieldType::Array(_) => false,
+        }
+    }
+
+    /// Whether a descriptor type is exactly `java.lang.String` (the operand type that anchors a
+    /// rendered `+` chain in string context).
+    fn is_string(ft: &FieldType) -> bool {
+        matches!(ft, FieldType::Object(internal) if internal == "java/lang/String")
+    }
+
+    /// Coerce a raw stack operand to the declared type of the slot consuming it: the JVM models
+    /// `boolean` and `char` values as `int`s, so a constant flowing into a boolean/char-typed
+    /// concatenation operand must be re-rendered (`1` → `true`, `33` → `'!'`) for the source to
+    /// mean what the bytecode computed. A non-literal operand is already typed by its own source
+    /// expression and passes through, as does every other operand type.
+    fn coerce(expr: Expr, param: &FieldType) -> Option<Expr> {
+        let FieldType::Base(base @ (BaseType::Boolean | BaseType::Char)) = param else {
+            return Some(expr);
+        };
+        if !matches!(expr, Expr::Literal(_)) {
+            return Some(expr);
+        }
+        // A literal here must be an `int` constant (the JVM models `boolean`/`char` as `int`);
+        // any other literal spelling means we mis-read the operand, so bail.
+        let value = expr.as_int_const()?;
+        if matches!(base, BaseType::Boolean) {
+            return match value {
+                0 => Some(Expr::lit("false")),
+                1 => Some(Expr::lit("true")),
+                _ => None,
+            };
+        }
+        let value = u32::try_from(value).ok()?;
+        if value > 0xFFFF {
+            return None;
+        }
+        // A lone surrogate code unit has no literal spelling; a cast keeps the value exact.
+        Some(char::from_u32(value).map_or_else(
+            || Expr::Cast {
+                ty: "char".into(),
+                expr: Box::new(expr),
+            },
+            |c| Expr::lit(Literal::char_literal(c)),
+        ))
+    }
+
+    /// `invokedynamic`: only the two `java.lang.invoke.StringConcatFactory` bootstraps `javac`
+    /// compiles string concatenation to are modelled — `makeConcatWithConstants`, whose recipe
+    /// interleaves literal chunks with the stacked operands (`\u{1}`) and trailing constants
+    /// (`\u{2}`), and the recipe-free `makeConcat`. The call site folds back into the `+`
+    /// concatenation it came from; any other bootstrap (a lambda, a method reference, …) bails.
+    fn invoke_dynamic(&mut self, index: u16) -> Option<()> {
+        let ConstantPoolEntry::InvokeDynamic {
+            bootstrap_method_attr_index,
+            name_and_type_index,
+        } = self.pool.get(index)?
+        else {
+            return None;
+        };
+        let (_, descriptor) = self.name_and_type(*name_and_type_index)?;
+        let md = MethodDescriptor::parse(&descriptor).ok()?;
+        // A string concatenation always produces a `String`; anything else is a foreign bootstrap.
+        if !matches!(&md.return_type, ReturnType::Type(ft) if Self::is_string(ft)) {
+            return None;
+        }
+        let bsm = self
+            .bootstrap
+            .get(usize::from(*bootstrap_method_attr_index))?;
+        let (recipe, consts) = self.concat_shape(bsm, md.params.len())?;
+        let mut args = self.pop_args(md.params.len())?.into_iter();
+        let mut params = md.params.iter();
+        let mut consts = consts.into_iter();
+        let mut parts: Vec<ConcatPart> = Vec::new();
+        let mut chunk = String::new();
+        let flush = |chunk: &mut String, parts: &mut Vec<ConcatPart>| {
+            if !chunk.is_empty() {
+                parts.push(ConcatPart {
+                    expr: Expr::lit(Literal::string_literal(chunk)),
+                    stringy: true,
+                });
+                chunk.clear();
+            }
+        };
+        for c in recipe.chars() {
+            match c {
+                '\u{1}' => {
+                    flush(&mut chunk, &mut parts);
+                    let (arg, param) = (args.next()?, params.next()?);
+                    parts.push(ConcatPart {
+                        expr: Self::coerce(arg, param)?,
+                        stringy: Self::is_string(param),
+                    });
+                }
+                '\u{2}' => {
+                    flush(&mut chunk, &mut parts);
+                    parts.push(consts.next()?);
+                }
+                c => chunk.push(c),
+            }
+        }
+        flush(&mut chunk, &mut parts);
+        // Every stacked operand and constant must be placed by the recipe, or a value would be
+        // silently dropped from the rendered concatenation.
+        if args.next().is_some() || consts.next().is_some() {
+            return None;
+        }
+        self.stack.push(Expr::concat(parts));
+        Some(())
+    }
+
+    /// Resolve an `invokedynamic` bootstrap to the string-concat shape it encodes: the recipe
+    /// (each `\u{1}` a stacked operand, each `\u{2}` a constant, anything else a literal chunk)
+    /// and the rendered `\u{2}` constants, or `None` when the bootstrap is not one of
+    /// `StringConcatFactory`'s two factories.
+    fn concat_shape(
+        &self,
+        bsm: &BootstrapMethod,
+        argc: usize,
+    ) -> Option<(String, Vec<ConcatPart>)> {
+        let ConstantPoolEntry::MethodHandle {
+            reference_kind,
+            reference_index,
+        } = self.pool.get(bsm.bootstrap_method_ref)?
+        else {
+            return None;
+        };
+        // Both concat factories are `REF_invokeStatic` bootstraps (JVMS Table 5.4.3.5-A).
+        if *reference_kind != 6 {
+            return None;
+        }
+        let (owner, name, _) = self.method_ref(*reference_index)?;
+        if owner != "java/lang/invoke/StringConcatFactory" {
+            return None;
+        }
+        match name.as_str() {
+            // No recipe: the concatenation is exactly the stacked operands, in order.
+            "makeConcat" if bsm.bootstrap_arguments.is_empty() => {
+                Some(("\u{1}".repeat(argc), Vec::new()))
+            }
+            "makeConcatWithConstants" => {
+                let (recipe_index, rest) = bsm.bootstrap_arguments.split_first()?;
+                let ConstantPoolEntry::String { string_index } = self.pool.get(*recipe_index)?
+                else {
+                    return None;
+                };
+                let recipe = self.pool.utf8(*string_index)?.into_owned();
+                // The trailing constants a `\u{2}` marker pulls in: `javac` only ever passes
+                // strings (a constant whose text contains a marker char); anything else bails.
+                let consts = rest
+                    .iter()
+                    .map(|&i| match self.pool.get(i)? {
+                        ConstantPoolEntry::String { string_index } => Some(ConcatPart {
+                            expr: Expr::lit(Literal::string_literal(
+                                &self.pool.utf8(*string_index)?,
+                            )),
+                            stringy: true,
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some((recipe, consts))
+            }
+            _ => None,
         }
     }
 
@@ -422,32 +672,13 @@ impl Sim<'_> {
         Some(())
     }
 
-    /// The element type of a `newarray` atype operand (JVMS Table 6.5.newarray-A), or `None` for
-    /// an invalid code. Rendering stays with [`BaseType::keyword`].
-    const fn newarray_elem(atype: u8) -> Option<BaseType> {
-        Some(match atype {
-            4 => BaseType::Boolean,
-            5 => BaseType::Char,
-            6 => BaseType::Float,
-            7 => BaseType::Double,
-            8 => BaseType::Byte,
-            9 => BaseType::Short,
-            10 => BaseType::Int,
-            11 => BaseType::Long,
-            _ => return None,
-        })
-    }
-
     /// Push a one-sized-dimension array creation (`newarray` / `anewarray`), popping its length.
     /// A constant length starts a collecting [`Expr::PendingArray`] (a following `dup; <index>;
     /// <value>; Xastore` run folds into a `new T[]{…}` initializer; consumption finalizes it) — a
     /// dynamic length can never take an initializer in source, so it is final immediately.
     fn new_array(&mut self, elem: String, empty_dims: usize) -> Option<()> {
         let len = self.pop()?;
-        let constant_len = match &len {
-            Expr::Literal(text) => text.parse::<usize>().ok(),
-            _ => None,
-        };
+        let constant_len = len.as_int_const().and_then(|v| usize::try_from(v).ok());
         self.stack.push(match constant_len {
             Some(len) => Expr::PendingArray {
                 elem,
@@ -511,7 +742,7 @@ impl Sim<'_> {
         // The array operand is popped raw: the initializer-store marker must reach `push_elem`,
         // not the finalizing `pop` (which rejects it).
         match self.stack.pop()? {
-            Expr::PendingArrayDup => self.push_elem(index, value),
+            Expr::PendingArrayDup => self.push_elem(&index, value),
             array => {
                 let array = Self::finalize(array)?;
                 self.stmts.push(Stmt::Assign {
@@ -531,7 +762,7 @@ impl Sim<'_> {
     /// folds — the index must be the next sequential constant from 0 and in bounds — so a partial
     /// or out-of-order fill (a default-skipping compiler) can never render a wrong-length
     /// `new T[]{…}`; anything else bails.
-    fn push_elem(&mut self, index: Expr, value: Expr) -> Option<()> {
+    fn push_elem(&mut self, index: &Expr, value: Expr) -> Option<()> {
         let Some(Expr::PendingArray {
             elem,
             empty_dims,
@@ -541,23 +772,15 @@ impl Sim<'_> {
         else {
             return None;
         };
-        let position = match index {
-            Expr::Literal(text) => text.parse::<usize>().ok()?,
-            _ => return None,
-        };
+        let position = usize::try_from(index.as_int_const()?).ok()?;
         if position != elems.len() || position >= *len {
             return None;
         }
         // `bastore` serves both `byte[]` and `boolean[]`; the collecting creation's element type
-        // pins which, so map the int constants back to boolean literals (and bail on any other
-        // constant — a non-literal, e.g. a boolean-typed local or call, passes through as-is).
+        // pins which, so re-coerce the int constants back to boolean literals (a non-literal,
+        // e.g. a boolean-typed local or call, passes through as-is).
         let value = if elem == "boolean" && *empty_dims == 0 {
-            match value {
-                Expr::Literal(text) if text == "0" => Expr::lit("false"),
-                Expr::Literal(text) if text == "1" => Expr::lit("true"),
-                Expr::Literal(_) => return None,
-                v => v,
-            }
+            Self::coerce(value, &FieldType::Base(BaseType::Boolean))?
         } else {
             value
         };
@@ -651,6 +874,7 @@ impl Sim<'_> {
             I::InvokeVirtual(i) | I::InvokeInterface { index: i, .. } => self.invoke(*i, false)?,
             I::InvokeStatic(i) => self.invoke(*i, true)?,
             I::InvokeSpecial(i) => self.invoke_special(*i)?,
+            I::InvokeDynamic { index } => self.invoke_dynamic(*index)?,
 
             // Object creation.
             I::New(i) => {
@@ -696,7 +920,7 @@ impl Sim<'_> {
             | I::Castore
             | I::Sastore => self.array_store()?,
             I::NewArray(atype) => {
-                let elem = Self::newarray_elem(*atype)?;
+                let elem = BaseType::from_atype(*atype)?;
                 self.new_array(elem.keyword().into(), 0)?;
             }
             I::ANewArray(i) => self.anew_array(*i)?,
@@ -715,9 +939,10 @@ impl Sim<'_> {
                 self.stmts.push(Stmt::Throw(value));
             }
 
-            // Discard: a call whose result is unused becomes an expression statement.
+            // Discard: a call (or a discarded object creation / builder chain) whose result is
+            // unused becomes an expression statement.
             I::Pop => match self.stack.last() {
-                Some(Expr::Call { .. }) => {
+                Some(Expr::Call { .. } | Expr::New { .. } | Expr::PendingBuilder(_)) => {
                     let call = self.pop()?;
                     self.stmts.push(Stmt::Expr(call));
                 }
@@ -727,9 +952,9 @@ impl Sim<'_> {
             },
 
             // Everything else — branches, switches, `jsr`/`ret`, comparisons, monitors,
-            // `invokedynamic`, `wide` loads, exotic stack shuffles (`dup2`/`dup_x*`/`swap`, so
-            // compound element assignment like `arr[i]++`) — is not yet modelled. Bail so the
-            // caller keeps its safe body.
+            // `wide` loads, exotic stack shuffles (`dup2`/`dup_x*`/`swap`, so compound element
+            // assignment like `arr[i]++`) — is not yet modelled. Bail so the caller keeps its
+            // safe body. (A non-string-concat `invokedynamic` bails inside `invoke_dynamic`.)
             _ => return None,
         }
         Some(())
@@ -826,6 +1051,7 @@ struct Structurer<'a> {
     code: &'a [Instruction],
     cfg: &'a Cfg,
     pool: &'a ConstantPool,
+    bootstrap: &'a [BootstrapMethod],
     owner: String,
     is_static: bool,
     locals: BTreeMap<u16, String>,
@@ -935,6 +1161,7 @@ impl Structurer<'_> {
     fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<Expr>)> {
         let mut sim = Sim {
             pool: self.pool,
+            bootstrap: self.bootstrap,
             owner: &self.owner,
             is_static: self.is_static,
             locals: &self.locals,

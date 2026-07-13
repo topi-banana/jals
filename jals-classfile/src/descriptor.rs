@@ -48,6 +48,22 @@ impl BaseType {
         })
     }
 
+    /// The primitive a `newarray` instruction's `atype` operand denotes (JVMS Table
+    /// 6.5.newarray-A), or `None` for an invalid code.
+    pub const fn from_atype(atype: u8) -> Option<Self> {
+        Some(match atype {
+            4 => Self::Boolean,
+            5 => Self::Char,
+            6 => Self::Float,
+            7 => Self::Double,
+            8 => Self::Byte,
+            9 => Self::Short,
+            10 => Self::Int,
+            11 => Self::Long,
+            _ => return None,
+        })
+    }
+
     /// The single descriptor character (`Int` → `'I'`).
     pub const fn as_char(self) -> char {
         match self {
