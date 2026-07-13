@@ -45,27 +45,49 @@ impl Literal {
         }
     }
 
+    /// Render a `char` constant as an escaped Java character literal (quotes included).
+    pub(crate) fn char_literal(c: char) -> String {
+        let mut out = String::from("'");
+        if c == '\'' {
+            out.push_str("\\'");
+        } else {
+            Self::push_escaped(c, &mut out);
+        }
+        out.push('\'');
+        out
+    }
+
     /// Render a `String` constant as an escaped Java string literal (quotes included).
     pub(crate) fn string_literal(s: &str) -> String {
         let mut out = String::with_capacity(s.len() + 2);
         out.push('"');
         for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                '\u{08}' => out.push_str("\\b"),
-                '\u{0c}' => out.push_str("\\f"),
-                c if (c as u32) < 0x20 => {
-                    let _ = write!(out, "\\u{:04x}", c as u32);
-                }
-                c => out.push(c),
+            if c == '"' {
+                out.push_str("\\\"");
+            } else {
+                Self::push_escaped(c, &mut out);
             }
         }
         out.push('"');
         out
+    }
+
+    /// Push one character of a `char` / `String` literal body, applying the escapes the two kinds
+    /// share (`\\`, `\n`, `\r`, `\t`, `\b`, `\f`, and `\uXXXX` for any other control character).
+    /// The delimiting quote character each kind must additionally escape is the caller's job.
+    fn push_escaped(c: char, out: &mut String) {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
     }
 
     /// Render a `Class` constant (internal name) as a Java class literal (`java/lang/String` →

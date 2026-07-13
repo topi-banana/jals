@@ -47,6 +47,8 @@ fn all_fixture_classes() -> Vec<ClassFile> {
         include_bytes!("fixtures/Locals.class"),
         include_bytes!("fixtures/Loops.class"),
         include_bytes!("fixtures/Arrays.class"),
+        include_bytes!("fixtures/Concat.class"),
+        include_bytes!("fixtures/Sb.class"),
         include_bytes!("fixtures/Outer.class"),
         include_bytes!("fixtures/Outer$Inner.class"),
         include_bytes!("fixtures/Outer$Color.class"),

@@ -108,7 +108,9 @@ constructor chaining), integer/long/float/double arithmetic and bitwise ops, num
 casts), `checkcast` (including array types), `arraylength`, array element reads/writes (`arr[i]` /
 `arr[i] = v`), array creation (`newarray` / `anewarray` / `multianewarray` → `new int[n]`,
 `new int[a][b]`, `new int[n][]`) with `javac`'s element-store runs folded back into `new T[]{…}`
-initializers, `return` / `athrow`, and a discarded call result (`pop` →
+initializers, string concatenation (both the `invokedynamic` `StringConcatFactory` call sites and
+`StringBuilder` append chains, folded back to `a + b + …`), `return` / `athrow`, and a discarded
+call / object creation result (`pop` →
 statement). Local variables are recovered by hoisting: every non-parameter slot a method stores into
 gets one typed declaration (name + type from the `LocalVariableTable`) at the method-body top, and
 each store becomes a plain assignment — so a local written inside a branch and read after the join
@@ -255,13 +257,47 @@ public boolean[] flags() {
 }
 ```
 
+### M6 — string concatenation &nbsp;✅ done
+
+Folds both lowerings of a source string concatenation back into the `a + b + …` it came from:
+
+- **`invokedynamic`** (javac's default since 9): an `InvokeDynamic` call site whose bootstrap is
+  `java.lang.invoke.StringConcatFactory.makeConcatWithConstants` (or the recipe-free `makeConcat`)
+  resolves its recipe through the class's `BootstrapMethods` attribute, then interleaves the
+  recipe's literal chunks with the stacked dynamic operands (each `\u0001`) and any trailing
+  bootstrap-argument constants (each `\u0002` — how javac passes a constant that itself contains a
+  marker char). Any other bootstrap (a lambda / method reference) still bails.
+- **`StringBuilder` chains** (javac `-XDstringConcat=inline`, older compilers, hand-written code):
+  a concat-safe `append` run on a *fresh* `new StringBuilder()` collects like an array initializer
+  and folds when its `toString()` is consumed. Only appends whose operand type string-converts
+  exactly like a `+` operand fold (primitives, `String`, `Object`, `CharSequence` — *not*
+  `char[]`, which appends characters); a chain consumed any other way (no `toString()`, `.length()`,
+  discarded, or built on a local/parameter receiver) re-renders as the original calls.
+
+Faithfulness guards: the rendered chain is only a *string* concatenation if a `String`-typed operand
+anchors its first `+`, so a fold with no such anchor is seeded with `""` (recovering `a + "" + b`,
+whose empty constant vanishes from the recipe), and a `boolean`/`char` operand that reaches the
+concat as an int constant is re-rendered as `true`/`'x'`.
+
+```java
+public java.lang.String greet(java.lang.String name) {
+    return "Hello, " + name + "!";
+}
+public java.lang.String bare(int a, int b) {
+    return "" + a + b;
+}
+public java.lang.String excl(java.lang.String s) {
+    return s + '!';
+}
+```
+
 Still falling back to the M0 placeholder (see roadmap): `switch`, `try`/`catch`.
 
 ## Supported vs. not (yet)
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
-| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), `invokedynamic` (string concat, lambdas, method refs), `monitor*` (`synchronized`), `lcmp`/`fcmp`/`dcmp`, `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
+| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), `lcmp`/`fcmp`/`dcmp`, `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
 | Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, null checks, `< 0` vs zero, boolean) | `break` / `continue`, nested / irreducible loops, a side-effecting loop header, `switch`, `try`/`catch`/`finally`, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
@@ -277,17 +313,16 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - **`try` / `catch` / `finally`** — structure the exception table.
 - **Richer loops** — `break` / `continue` (labeled), nested loops, and `for`-loop recovery (folding
   the init / update back into a `for` header instead of rendering as `while`).
-- **Expression polish** — string concatenation (`invokedynamic` `makeConcat*` / `StringBuilder`),
-  ternary (`?:`) and short-circuit (`&&` / `||`) from small diamonds, enhanced-`for`, `instanceof`,
-  `i++` / `i += n` / `arr[i]++` sugar (the `dup2` stack shuffles), and long/float/double comparisons
-  in conditions.
+- **Expression polish** — ternary (`?:`) and short-circuit (`&&` / `||`) from small diamonds
+  (string concatenation shipped as M6), enhanced-`for`, `instanceof`, `i++` / `i += n` / `arr[i]++`
+  sugar (the `dup2` stack shuffles), and long/float/double comparisons in conditions.
 
 ## Testing
 
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
-  `Loops.class`, `Arrays.class`) and assert the recovered statements.
+  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`) and assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
   `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton (across this crate's
   fixtures plus `jals-classfile`'s round-trip corpus) and asserts zero syntax errors.

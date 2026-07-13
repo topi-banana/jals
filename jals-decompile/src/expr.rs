@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A reconstructed Java expression.
+#[derive(Clone)]
 pub(crate) enum Expr {
     /// The receiver `this`.
     This,
@@ -36,6 +37,12 @@ pub(crate) enum Expr {
         lhs: Box<Self>,
         rhs: Box<Self>,
     },
+    /// A string concatenation `p0 + p1 + …`, folded back from an `invokedynamic`
+    /// `StringConcatFactory` call site or a `StringBuilder` append chain. Built only through
+    /// [`Expr::concat`], which guarantees the leading `+` is a *string* concatenation (seeding a
+    /// `""` when no `String`-typed operand anchors it), so the rendered chain always means what
+    /// the bytecode computed.
+    Concat(Vec<Self>),
     /// A prefix unary operation `op expr` (`-`, `~`).
     Unary { op: &'static str, expr: Box<Self> },
     /// A cast `(ty) expr`.
@@ -72,10 +79,25 @@ pub(crate) enum Expr {
     /// `Xastore` consumes it, and every other consumption bails; if one somehow survives, it
     /// renders as `null` as a safety net.
     PendingArrayDup,
+    /// A fresh `new StringBuilder()` whose concat-safe `append` chain may still fold into a
+    /// string concatenation (`a + "x" + …`) when a `toString()` consumes it. Never rendered —
+    /// any other consumption finalizes it back into the original `new
+    /// java.lang.StringBuilder().append(…)` call chain ([`Expr::builder_chain`]); if one somehow
+    /// survives, it renders as that chain as a safety net.
+    PendingBuilder(Vec<ConcatPart>),
+}
+
+/// One collected operand of a string concatenation: the expression plus whether its static type is
+/// `java.lang.String` (a `String`-typed operand anchors the `+` chain in string context).
+#[derive(Clone)]
+pub(crate) struct ConcatPart {
+    pub expr: Expr,
+    pub stringy: bool,
 }
 
 /// How an [`Expr::NewArray`] spells its leading dimension(s) — the two forms are mutually
 /// exclusive in Java source.
+#[derive(Clone)]
 pub(crate) enum ArrayForm {
     /// Sized dimensions `[dims[0]][dims[1]]…` (`new int[a][b]`).
     Sized(Vec<Expr>),
@@ -185,6 +207,54 @@ impl Expr {
         Self::Literal(text.into())
     }
 
+    /// Fold collected concatenation operands into the `+` chain they came from. The chain
+    /// associates left, so it is a *string* concatenation from the start iff one of the first two
+    /// operands is `String`-typed; otherwise a `""` seed is prepended — recovering e.g.
+    /// `a + "" + b`, whose empty constant vanishes from an `invokedynamic` recipe, and keeping a
+    /// lone operand (`"" + n`) a concatenation at all.
+    pub(crate) fn concat(parts: Vec<ConcatPart>) -> Self {
+        let anchored = parts.len() >= 2 && parts.iter().take(2).any(|p| p.stringy);
+        let mut exprs = Vec::with_capacity(parts.len() + 1);
+        if !anchored {
+            exprs.push(Self::lit("\"\""));
+        }
+        exprs.extend(parts.into_iter().map(|p| p.expr));
+        if exprs.len() == 1 {
+            return exprs.pop().unwrap_or_else(|| Self::lit("\"\""));
+        }
+        Self::Concat(exprs)
+    }
+
+    /// The value of an `int`-typed constant operand, or `None` for any other expression. The one
+    /// place that ties the simulator's literal *text* back to its *value*: every `int` constant
+    /// pushed on the stack (`iconst_*`, `bipush`/`sipush`, an `ldc` `Integer`) renders as bare
+    /// decimal, so a plain parse is exact — and every other literal spelling (a suffixed `1L`, a
+    /// quoted `"s"`, `null`) fails it.
+    pub(crate) fn as_int_const(&self) -> Option<i64> {
+        match self {
+            Self::Literal(text) => text.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Rebuild the original `new java.lang.StringBuilder().append(p0).append(p1)…` call chain a
+    /// [`Expr::PendingBuilder`] collected — the finalized form when anything but a `toString()`
+    /// consumes the builder, so an unfolded chain re-renders exactly as the calls it was.
+    pub(crate) fn builder_chain(parts: Vec<ConcatPart>) -> Self {
+        let mut chain = Self::New {
+            ty: "java.lang.StringBuilder".to_owned(),
+            args: Vec::new(),
+        };
+        for part in parts {
+            chain = Self::Call {
+                recv: Some(Box::new(chain)),
+                name: "append".to_owned(),
+                args: alloc::vec![part.expr],
+            };
+        }
+        chain
+    }
+
     /// Render an expression to Java source.
     pub(crate) fn render(&self) -> String {
         match self {
@@ -198,6 +268,11 @@ impl Expr {
             ),
             Self::New { ty, args } => format!("new {ty}({})", Self::render_args(args)),
             Self::Binary { op, lhs, rhs } => format!("{} {op} {}", lhs.operand(), rhs.operand()),
+            Self::Concat(parts) => parts
+                .iter()
+                .map(Self::operand)
+                .collect::<Vec<_>>()
+                .join(" + "),
             Self::Unary { op, expr } => format!("{op}{}", expr.operand()),
             Self::Cast { ty, expr } => format!("({ty}) {}", expr.operand()),
             Self::ArrayLength(a) => format!("{}.length", a.receiver()),
@@ -234,6 +309,7 @@ impl Expr {
                 ..
             } => format!("new {elem}[{len}]{}", "[]".repeat(*empty_dims)),
             Self::PendingArrayDup => "null".into(),
+            Self::PendingBuilder(parts) => Self::builder_chain(parts.clone()).render(),
         }
     }
 
@@ -242,7 +318,7 @@ impl Expr {
     /// none).
     fn operand(&self) -> String {
         match self {
-            Self::Binary { .. } => format!("({})", self.render()),
+            Self::Binary { .. } | Self::Concat(_) => format!("({})", self.render()),
             _ => self.render(),
         }
     }
@@ -255,6 +331,7 @@ impl Expr {
     fn receiver(&self) -> String {
         match self {
             Self::Binary { .. }
+            | Self::Concat(_)
             | Self::Unary { .. }
             | Self::Cast { .. }
             | Self::NewArray { .. } => {
