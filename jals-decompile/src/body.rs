@@ -3,10 +3,11 @@
 //! Two layers. The value layer ([`Sim`]) is a per-block symbolic execution: the operand stack is
 //! simulated as a stack of [`Expr`] trees, and each instruction either rewrites the stack or emits a
 //! [`Stmt`]. The control layer ([`Structurer`]) builds a CFG ([`crate::cfg`]) and recovers structured
-//! Java from it — a straight-line method is one block, and forward conditional branches become
-//! `if` / `if`-`else`. Both layers are deliberately conservative: anything not modelled (a loop /
-//! back-edge, `switch`, a `try`/`catch`, a local store, `invokedynamic`, an exotic stack shuffle, or
-//! a control-flow shape that is not a clean tree) makes the whole method fall back to the caller's
+//! Java from it — a straight-line method is one block, forward conditional branches become
+//! `if` / `if`-`else`, and back-edges become `while` / `do`-`while` loops. Both layers are
+//! deliberately conservative: anything not modelled (a `switch`, a `try`/`catch`, a
+//! `break`/`continue` or nested/irreducible loop, `invokedynamic`, an exotic stack shuffle, or a
+//! control-flow shape that is not a clean tree) makes the whole method fall back to the caller's
 //! safe body — so the output is always valid Java, never a half-built or mis-structured body.
 
 use alloc::boxed::Box;
@@ -17,13 +18,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use jals_classfile::{
-    AttributeBody, ClassFile, CodeAttribute, ConstantPool, ConstantPoolEntry, Instruction,
-    MethodDescriptor, MethodInfo, ReturnType, WideInstruction,
+    AttributeBody, BaseType, ClassFile, CodeAttribute, ConstantPool, ConstantPoolEntry, FieldType,
+    Instruction, MethodDescriptor, MethodInfo, ReturnType, WideInstruction,
 };
 
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
-use crate::expr::{Expr, Stmt};
+use crate::expr::{ArrayForm, Expr, Stmt};
 use crate::literal::Literal;
 use crate::types::JavaType;
 
@@ -198,7 +199,43 @@ struct Sim<'a> {
 
 impl Sim<'_> {
     fn pop(&mut self) -> Option<Expr> {
-        self.stack.pop()
+        Self::finalize(self.stack.pop()?)
+    }
+
+    /// Finalize a value leaving the stack: a collecting array creation becomes its final form —
+    /// untouched → a plain sized creation, completely filled → a `new T[]{…}` initializer — and a
+    /// partial collection or a leaked initializer-store marker bails. The single gate that keeps
+    /// the folding sentinels ([`Expr::PendingArray`] / [`Expr::PendingArrayDup`]) out of rendered
+    /// output: every consumption funnels through here (via [`Sim::pop`] or the block-end sweep).
+    fn finalize(expr: Expr) -> Option<Expr> {
+        match expr {
+            Expr::PendingArrayDup => None,
+            Expr::PendingArray {
+                elem,
+                empty_dims,
+                len,
+                elems,
+            } => {
+                if elems.is_empty() {
+                    Some(Expr::NewArray {
+                        elem,
+                        empty_dims,
+                        form: ArrayForm::Sized(vec![Expr::lit(len.to_string())]),
+                    })
+                } else if elems.len() == len {
+                    Some(Expr::NewArray {
+                        elem,
+                        empty_dims,
+                        form: ArrayForm::Init(elems),
+                    })
+                } else {
+                    // A partial fill (a compiler that skips default-valued element stores, e.g.
+                    // ECJ) — rendering `{…}` would change the array's length, so bail.
+                    None
+                }
+            }
+            e => Some(e),
+        }
     }
 
     /// Pop `n` operands and return them in source (left-to-right) order.
@@ -385,6 +422,149 @@ impl Sim<'_> {
         Some(())
     }
 
+    /// The element type of a `newarray` atype operand (JVMS Table 6.5.newarray-A), or `None` for
+    /// an invalid code. Rendering stays with [`BaseType::keyword`].
+    const fn newarray_elem(atype: u8) -> Option<BaseType> {
+        Some(match atype {
+            4 => BaseType::Boolean,
+            5 => BaseType::Char,
+            6 => BaseType::Float,
+            7 => BaseType::Double,
+            8 => BaseType::Byte,
+            9 => BaseType::Short,
+            10 => BaseType::Int,
+            11 => BaseType::Long,
+            _ => return None,
+        })
+    }
+
+    /// Push a one-sized-dimension array creation (`newarray` / `anewarray`), popping its length.
+    /// A constant length starts a collecting [`Expr::PendingArray`] (a following `dup; <index>;
+    /// <value>; Xastore` run folds into a `new T[]{…}` initializer; consumption finalizes it) — a
+    /// dynamic length can never take an initializer in source, so it is final immediately.
+    fn new_array(&mut self, elem: String, empty_dims: usize) -> Option<()> {
+        let len = self.pop()?;
+        let constant_len = match &len {
+            Expr::Literal(text) => text.parse::<usize>().ok(),
+            _ => None,
+        };
+        self.stack.push(match constant_len {
+            Some(len) => Expr::PendingArray {
+                elem,
+                empty_dims,
+                len,
+                elems: Vec::new(),
+            },
+            None => Expr::NewArray {
+                elem,
+                empty_dims,
+                form: ArrayForm::Sized(vec![len]),
+            },
+        });
+        Some(())
+    }
+
+    /// `anewarray`: the pool entry names the *element* class — itself an array type (`[I`) for a
+    /// `new int[n][]`-shaped creation.
+    fn anew_array(&mut self, index: u16) -> Option<()> {
+        let (elem, empty_dims) = JavaType::array_base(&self.class_ref_type(index)?);
+        self.new_array(elem, empty_dims)
+    }
+
+    /// `multianewarray`: the pool entry is the full array descriptor (`[[I`); `dimensions` counts
+    /// are popped as the sized dimensions, any remaining depth rendering as empty `[]` pairs
+    /// (`new int[a][b]`, `new int[a][b][]`). Never collecting — no compiler runs the initializer
+    /// store pattern on one (a following `dup` bails).
+    fn multi_new_array(&mut self, index: u16, dimensions: u8) -> Option<()> {
+        let (elem, depth) = JavaType::array_base(&self.class_ref_type(index)?);
+        let dimensions = usize::from(dimensions);
+        if dimensions == 0 || dimensions > depth {
+            return None;
+        }
+        let dims = self.pop_args(dimensions)?;
+        self.stack.push(Expr::NewArray {
+            elem,
+            empty_dims: depth - dimensions,
+            form: ArrayForm::Sized(dims),
+        });
+        Some(())
+    }
+
+    /// An array element read (`*aload`, all eight flavors): `array[index]`. The element type never
+    /// changes the rendered text, so the flavors are uniform.
+    fn array_load(&mut self) -> Option<()> {
+        let index = self.pop()?;
+        let array = self.pop()?;
+        self.stack.push(Expr::Index {
+            array: Box::new(array),
+            index: Box::new(index),
+        });
+        Some(())
+    }
+
+    /// An array element write (`*astore`, all eight flavors): fold into a collecting array
+    /// initializer when the array operand is the `dup`'d creation marker, else a plain
+    /// `array[index] = value;` (mirroring [`Sim::field_store`]).
+    fn array_store(&mut self) -> Option<()> {
+        let value = self.pop()?;
+        let index = self.pop()?;
+        // The array operand is popped raw: the initializer-store marker must reach `push_elem`,
+        // not the finalizing `pop` (which rejects it).
+        match self.stack.pop()? {
+            Expr::PendingArrayDup => self.push_elem(index, value),
+            array => {
+                let array = Self::finalize(array)?;
+                self.stmts.push(Stmt::Assign {
+                    target: Expr::Index {
+                        array: Box::new(array),
+                        index: Box::new(index),
+                    },
+                    value,
+                });
+                Some(())
+            }
+        }
+    }
+
+    /// Fold one `dup; <index>; <value>; Xastore` element store into the collecting
+    /// [`Expr::PendingArray`] beneath the popped marker. Only the exact `javac` initializer shape
+    /// folds — the index must be the next sequential constant from 0 and in bounds — so a partial
+    /// or out-of-order fill (a default-skipping compiler) can never render a wrong-length
+    /// `new T[]{…}`; anything else bails.
+    fn push_elem(&mut self, index: Expr, value: Expr) -> Option<()> {
+        let Some(Expr::PendingArray {
+            elem,
+            empty_dims,
+            len,
+            elems,
+        }) = self.stack.last_mut()
+        else {
+            return None;
+        };
+        let position = match index {
+            Expr::Literal(text) => text.parse::<usize>().ok()?,
+            _ => return None,
+        };
+        if position != elems.len() || position >= *len {
+            return None;
+        }
+        // `bastore` serves both `byte[]` and `boolean[]`; the collecting creation's element type
+        // pins which, so map the int constants back to boolean literals (and bail on any other
+        // constant — a non-literal, e.g. a boolean-typed local or call, passes through as-is).
+        let value = if elem == "boolean" && *empty_dims == 0 {
+            match value {
+                Expr::Literal(text) if text == "0" => Expr::lit("false"),
+                Expr::Literal(text) if text == "1" => Expr::lit("true"),
+                Expr::Literal(_) => return None,
+                v => v,
+            }
+        } else {
+            value
+        };
+        elems.push(value);
+        Some(())
+    }
+
     fn step(&mut self, ins: &Instruction) -> Option<()> {
         use Instruction as I;
         // Local stores (all forms) — the opcode set lives in `store_slot`, shared with declaration
@@ -478,25 +658,50 @@ impl Sim<'_> {
                 self.stack.push(Expr::Uninitialized(ty));
             }
             I::Dup => match self.stack.last() {
-                // Only the object-creation `new; dup; …; invokespecial` shape is modelled; a `dup`
-                // of any real value would duplicate a side effect, so bail.
+                // Only two shapes are modelled — the object-creation `new; dup; …; invokespecial`
+                // and the array-initializer `newarray/anewarray; (dup; <index>; <value>;
+                // Xastore)*` — since a `dup` of any real value would duplicate a side effect;
+                // everything else bails.
                 Some(Expr::Uninitialized(ty)) => {
                     let ty = ty.clone();
                     self.stack.push(Expr::Uninitialized(ty));
                 }
+                Some(Expr::PendingArray { .. }) => self.stack.push(Expr::PendingArrayDup),
                 _ => return None,
             },
             I::CheckCast(i) => {
-                let internal = self.class_ref(*i)?;
-                // An array-typed cast (`[L…;`) is not a plain name — leave it to a later milestone.
-                if internal.starts_with('[') {
-                    return None;
-                }
-                self.cast(JavaType::internal_to_java(&internal))?;
+                let ty = JavaType::render_field_type(&self.class_ref_type(*i)?);
+                self.cast(ty)?;
             }
             I::ArrayLength => {
                 let array = self.pop()?;
                 self.stack.push(Expr::ArrayLength(Box::new(array)));
+            }
+
+            // Arrays: element reads / writes and creation.
+            I::Iaload
+            | I::Laload
+            | I::Faload
+            | I::Daload
+            | I::Aaload
+            | I::Baload
+            | I::Caload
+            | I::Saload => self.array_load()?,
+            I::Iastore
+            | I::Lastore
+            | I::Fastore
+            | I::Dastore
+            | I::Aastore
+            | I::Bastore
+            | I::Castore
+            | I::Sastore => self.array_store()?,
+            I::NewArray(atype) => {
+                let elem = Self::newarray_elem(*atype)?;
+                self.new_array(elem.keyword().into(), 0)?;
+            }
+            I::ANewArray(i) => self.anew_array(*i)?,
+            I::MultiANewArray { index, dimensions } => {
+                self.multi_new_array(*index, *dimensions)?;
             }
 
             // Returns and throw.
@@ -521,8 +726,9 @@ impl Sim<'_> {
                 }
             },
 
-            // Everything else — branches, switches, `jsr`/`ret`, array ops, comparisons, monitors,
-            // `invokedynamic`, `wide` loads, exotic stack shuffles — is not yet modelled. Bail so the
+            // Everything else — branches, switches, `jsr`/`ret`, comparisons, monitors,
+            // `invokedynamic`, `wide` loads, exotic stack shuffles (`dup2`/`dup_x*`/`swap`, so
+            // compound element assignment like `arr[i]++`) — is not yet modelled. Bail so the
             // caller keeps its safe body.
             _ => return None,
         }
@@ -598,6 +804,19 @@ impl Sim<'_> {
         self.pool
             .class_name(index)
             .map(alloc::borrow::Cow::into_owned)
+    }
+
+    /// The type a `Class` entry points to, as a [`FieldType`]: an array class entry holds the full
+    /// field descriptor (`[I`, `[Ljava/lang/String;`), any other a plain internal name (JVMS
+    /// §4.4.1) — the ambiguity is resolved once here for every instruction that takes a class
+    /// operand (`checkcast`, `anewarray`, `multianewarray`).
+    fn class_ref_type(&self, index: u16) -> Option<FieldType> {
+        let internal = self.class_ref(index)?;
+        if internal.starts_with('[') {
+            FieldType::parse(&internal).ok()
+        } else {
+            Some(FieldType::Object(internal))
+        }
     }
 }
 
@@ -725,7 +944,15 @@ impl Structurer<'_> {
         for ins in &self.code[self.cfg.blocks[b].body()] {
             sim.step(ins)?;
         }
-        Some((sim.stmts, sim.stack))
+        // Finalize anything left on the stack — a still-collecting array initializer or a leaked
+        // fold marker (e.g. an initializer whose element expression spans blocks) must never
+        // escape the block, and the leftover condition operands must be renderable.
+        let stack = sim
+            .stack
+            .into_iter()
+            .map(Sim::finalize)
+            .collect::<Option<Vec<_>>>()?;
+        Some((sim.stmts, stack))
     }
 
     /// If block `header` is the target of exactly one back-edge — a `goto` / conditional branch from a
