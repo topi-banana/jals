@@ -19,7 +19,7 @@ use std::process::Command;
 use futures::executor::block_on;
 use jals_build::{DependencySource, ManifestExt};
 use jals_classfile::ClassFile;
-use jals_config::{GitRef, Manifest};
+use jals_config::{GitRef, JavaVersion, Manifest};
 use jals_fs::OsFileTree;
 
 use crate::Warning;
@@ -181,6 +181,8 @@ pub struct ProjectInputs {
     pub source_dep_sources: Vec<PathBuf>,
     /// The project's target Java feature version from `[package] edition` (edition-rule gate).
     pub target_java_version: Option<u32>,
+    /// The project's declared Java language system from `[package] java-version` (reserved).
+    pub java_version: Option<JavaVersion>,
 }
 
 // ---- Path helpers ---------------------------------------------------------------------------
@@ -371,6 +373,7 @@ impl ProjectInputs {
             library_sources: VPaths::pathbufs(inputs.library_sources),
             source_dep_sources: VPaths::pathbufs(inputs.source_dep_sources),
             target_java_version: inputs.target_java_version,
+            java_version: inputs.java_version,
         }
     }
 }

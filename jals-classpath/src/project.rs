@@ -23,7 +23,7 @@ use std::path::Path;
 
 use jals_build::ManifestExt;
 use jals_classfile::ClassFile;
-use jals_config::Manifest;
+use jals_config::{JavaVersion, Manifest};
 use jals_fs::FileTree;
 
 use crate::io::{Fetcher, Git};
@@ -72,6 +72,9 @@ pub struct ProjectInputsIn {
     /// The project's target Java feature version from `[package] edition`, gating the edition-only
     /// lint rules. `None` when the manifest sets no edition.
     pub target_java_version: Option<u32>,
+    /// The project's declared Java language system from `[package] java-version`. Carried for
+    /// future system-dependent analysis; nothing consumes it yet. `None` when unset.
+    pub java_version: Option<JavaVersion>,
 }
 
 impl ProjectInputsIn {
@@ -174,6 +177,7 @@ impl ProjectInputsIn {
             library_sources,
             source_dep_sources,
             target_java_version: manifest.target_java_version(),
+            java_version: manifest.java_version(),
         }
     }
 }

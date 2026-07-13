@@ -239,16 +239,55 @@ pub struct Package {
     /// compilation — the `javac` version knobs remain `[build] release`/`source`/`target`. When
     /// unset, no edition-gated feature is flagged. See [`Edition`].
     pub edition: Option<Edition>,
+    /// The Java language system (platform implementation) the project targets (Cargo's
+    /// `[package] rust-version` slot). See [`JavaVersion`].
+    pub java_version: Option<JavaVersion>,
 }
 
 /// The Java language edition a project targets (`[package] edition`).
 ///
-/// Values are the Java feature releases whose language differences `jals` models. It drives
+/// Values are the Java feature releases (`java8`–`java25`) whose syntax `jals` targets. It drives
 /// language-feature gating in the linter (e.g. compact source files with a top-level `main` are a
 /// preview feature in Java 24 but a permanent feature in Java 25); it is *not* passed to `javac`.
+///
+/// The set is a closed enum rather than a free numeric parse so that non-release notations (e.g. a
+/// jals-specific `java25+jals` dialect) can later join as variants with an explicit
+/// `#[serde(rename = "…")]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Edition {
+    /// Java 8.
+    Java8,
+    /// Java 9.
+    Java9,
+    /// Java 10.
+    Java10,
+    /// Java 11.
+    Java11,
+    /// Java 12.
+    Java12,
+    /// Java 13.
+    Java13,
+    /// Java 14.
+    Java14,
+    /// Java 15.
+    Java15,
+    /// Java 16.
+    Java16,
+    /// Java 17.
+    Java17,
+    /// Java 18.
+    Java18,
+    /// Java 19.
+    Java19,
+    /// Java 20.
+    Java20,
+    /// Java 21.
+    Java21,
+    /// Java 22.
+    Java22,
+    /// Java 23.
+    Java23,
     /// Java 24, where compact source files / instance main methods are still a preview feature.
     Java24,
     /// Java 25, where compact source files / instance main methods are a permanent feature.
@@ -259,10 +298,46 @@ impl Edition {
     /// The Java feature-release version this edition targets (e.g. `24` for [`Edition::Java24`]).
     pub const fn feature_version(self) -> u32 {
         match self {
+            Self::Java8 => 8,
+            Self::Java9 => 9,
+            Self::Java10 => 10,
+            Self::Java11 => 11,
+            Self::Java12 => 12,
+            Self::Java13 => 13,
+            Self::Java14 => 14,
+            Self::Java15 => 15,
+            Self::Java16 => 16,
+            Self::Java17 => 17,
+            Self::Java18 => 18,
+            Self::Java19 => 19,
+            Self::Java20 => 20,
+            Self::Java21 => 21,
+            Self::Java22 => 22,
+            Self::Java23 => 23,
             Self::Java24 => 24,
             Self::Java25 => 25,
         }
     }
+}
+
+/// The Java language system a project targets (`[package] java-version`).
+///
+/// Which platform implementation the project is written against, next to the syntax version in
+/// [`Package::edition`] — the split Cargo makes between `edition` and `rust-version`.
+///
+/// Currently parsed and threaded through to the assembled project inputs only; no analysis behaves
+/// differently yet. It reserves the seam for system-dependent analysis (e.g. gating lints on the
+/// API subset a `teavm` target actually supports). An unknown value is a TOML parse error (serde
+/// unknown variant), like an unknown [`Edition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JavaVersion {
+    /// The Oracle JDK.
+    OracleJdk,
+    /// `OpenJDK`.
+    OpenJdk,
+    /// `TeaVM` (Java compiled to JavaScript / `WebAssembly`).
+    TeaVm,
 }
 
 /// Compilation settings (`[build]`).
@@ -506,6 +581,12 @@ impl Manifest {
         self.package.edition.map(Edition::feature_version)
     }
 
+    /// The project's declared Java language system (from `[package] java-version`), if any. Threaded
+    /// through to the assembled project inputs; no analysis consumes it yet (see [`JavaVersion`]).
+    pub const fn java_version(&self) -> Option<JavaVersion> {
+        self.package.java_version
+    }
+
     /// The names of every `jar` `[dependencies]` entry that opted into recursive **bundled-jar**
     /// unpacking (`recursive = true`). The host pairs these names with the resolved jars to decide
     /// which jars to scan for nested `*.jar` members. Pure — no I/O; only the `jar` form carries
@@ -698,10 +779,16 @@ mod tests {
         assert_eq!(m.package.default_run, None);
         // No `[package] edition`: it is absent, disabling edition-gated feature checks.
         assert_eq!(m.package.edition, None);
+        // No `[package] java-version` either.
+        assert_eq!(m.package.java_version, None);
     }
 
     #[test]
     fn parses_package_edition() {
+        let m: Manifest = toml::from_str("[package]\nedition = \"java8\"\n").unwrap();
+        assert_eq!(m.package.edition, Some(Edition::Java8));
+        assert_eq!(m.package.edition.unwrap().feature_version(), 8);
+
         let m: Manifest = toml::from_str("[package]\nedition = \"java24\"\n").unwrap();
         assert_eq!(m.package.edition, Some(Edition::Java24));
         assert_eq!(m.package.edition.unwrap().feature_version(), 24);
@@ -715,7 +802,28 @@ mod tests {
     fn rejects_unknown_edition() {
         // An edition outside the modelled set is a TOML parse error (serde unknown variant), so no
         // dedicated `validate` check is needed.
-        assert!(toml::from_str::<Manifest>("[package]\nedition = \"java23\"\n").is_err());
+        assert!(toml::from_str::<Manifest>("[package]\nedition = \"java7\"\n").is_err());
+        assert!(toml::from_str::<Manifest>("[package]\nedition = \"java26\"\n").is_err());
+    }
+
+    #[test]
+    fn parses_package_java_version() {
+        let m: Manifest = toml::from_str("[package]\njava-version = \"oraclejdk\"\n").unwrap();
+        assert_eq!(m.package.java_version, Some(JavaVersion::OracleJdk));
+
+        let m: Manifest = toml::from_str("[package]\njava-version = \"openjdk\"\n").unwrap();
+        assert_eq!(m.package.java_version, Some(JavaVersion::OpenJdk));
+        assert_eq!(m.java_version(), Some(JavaVersion::OpenJdk));
+
+        let m: Manifest = toml::from_str("[package]\njava-version = \"teavm\"\n").unwrap();
+        assert_eq!(m.package.java_version, Some(JavaVersion::TeaVm));
+    }
+
+    #[test]
+    fn rejects_unknown_java_version() {
+        // Like `edition`, an unknown language system is a TOML parse error (serde unknown
+        // variant), so no dedicated `validate` check is needed.
+        assert!(toml::from_str::<Manifest>("[package]\njava-version = \"graalvm\"\n").is_err());
     }
 
     #[test]

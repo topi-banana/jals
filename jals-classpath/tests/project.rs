@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use jals_classpath::{ProjectInputOptions, ProjectInputs};
-use jals_config::Manifest;
+use jals_config::{JavaVersion, Manifest};
 
 /// `Box.class` (the same fixture the load tests / `jals-hir`'s classpath bridge use).
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
@@ -22,13 +22,16 @@ fn write_jar(path: &Path) {
 }
 
 /// A manifest with a single local-jar `[dependencies]` entry pointing at `jar`, optionally declaring
-/// a `[package] edition`.
-fn manifest_with_jar(jar: &Path, edition: Option<&str>) -> Manifest {
+/// a `[package] edition` and/or `[package] java-version`.
+fn manifest_with_jar(jar: &Path, edition: Option<&str>, java_version: Option<&str>) -> Manifest {
     let edition_line = edition
         .map(|e| format!("edition = \"{e}\"\n"))
         .unwrap_or_default();
+    let java_version_line = java_version
+        .map(|v| format!("java-version = \"{v}\"\n"))
+        .unwrap_or_default();
     let text = format!(
-        "[package]\nname = \"demo\"\n{edition_line}\n[dependencies]\nbox = {{ jar = \"{}\" }}\n",
+        "[package]\nname = \"demo\"\n{edition_line}{java_version_line}\n[dependencies]\nbox = {{ jar = \"{}\" }}\n",
         jar.display()
     );
     text.parse::<Manifest>().expect("parse manifest")
@@ -39,7 +42,7 @@ fn analysis_loads_the_classpath_and_reads_edition() {
     let dir = tempfile::tempdir().unwrap();
     let jar = dir.path().join("box.jar");
     write_jar(&jar);
-    let manifest = manifest_with_jar(&jar, Some("java25"));
+    let manifest = manifest_with_jar(&jar, Some("java25"), Some("openjdk"));
 
     let inputs = ProjectInputs::assemble_project_inputs(
         &manifest,
@@ -54,8 +57,10 @@ fn analysis_loads_the_classpath_and_reads_edition() {
     // Analysis pulls no navigation source and no git/path source deps.
     assert!(inputs.library_sources.is_empty());
     assert!(inputs.source_dep_sources.is_empty());
-    // `[package] edition = "java25"` threads through for the edition-gated lint rules.
+    // `[package] edition = "java25"` threads through for the edition-gated lint rules, and
+    // `[package] java-version = "openjdk"` rides along for future system-dependent analysis.
     assert_eq!(inputs.target_java_version, Some(25));
+    assert_eq!(inputs.java_version, Some(JavaVersion::OpenJdk));
 }
 
 #[test]
@@ -63,7 +68,7 @@ fn compile_resolves_jars_without_loading_classes() {
     let dir = tempfile::tempdir().unwrap();
     let jar = dir.path().join("box.jar");
     write_jar(&jar);
-    let manifest = manifest_with_jar(&jar, None);
+    let manifest = manifest_with_jar(&jar, None, None);
 
     let inputs = ProjectInputs::assemble_project_inputs(
         &manifest,
@@ -79,4 +84,5 @@ fn compile_resolves_jars_without_loading_classes() {
     // No `git`/`path` source dependencies in this manifest.
     assert!(inputs.source_dep_sources.is_empty());
     assert_eq!(inputs.target_java_version, None);
+    assert_eq!(inputs.java_version, None);
 }

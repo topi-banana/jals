@@ -62,7 +62,8 @@ uses them.
 [package]
 name = "hello"
 version = "0.1.0"
-# edition = "java25"               # Java language edition (java24 | java25); gates analysis, not javac
+# edition = "java25"               # Java language edition (java8..java25); gates analysis, not javac
+# java-version = "openjdk"         # Java language system (oraclejdk | openjdk | teavm); reserved
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
 [build]
@@ -101,7 +102,8 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 | --- | --- | --- | --- |
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
-| `edition` | `"java24"` \| `"java25"` | — | the Java language edition. A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `java24` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Unset means no edition gate. |
+| `edition` | `"java8"` … `"java25"` | — | the Java language edition (syntax / feature version, Cargo's `edition`). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `java24` (or anything below `java25`) flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Unset means no edition gate. The value set is a closed enum so non-release notations (e.g. a `java25+jals` dialect) can join later. |
+| `java-version` | `"oraclejdk"` \| `"openjdk"` \| `"teavm"` | — | the Java language system (platform implementation) the project targets — the split Cargo makes between `edition` and `rust-version`. Parsed, validated, and threaded through to the assembled project inputs; no analysis consumes it yet (reserved for system-dependent checks, e.g. gating lints on the API subset a TeaVM target supports). An unknown value is a parse error. |
 | `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
 
 ### `[build]`
