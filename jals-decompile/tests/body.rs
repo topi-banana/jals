@@ -52,6 +52,12 @@ fn sb() -> ClassFile {
     ))
 }
 
+fn cmp() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Cmp.class"
+    ))
+}
+
 /// The first method named `name`.
 fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
     cf.methods
@@ -523,4 +529,111 @@ fn append_on_a_parameter_stays_calls() {
     let body = MethodBody::decompile(method(&cf, "manual"), &cf, &["sb".to_owned()])
         .expect("manual decompiles");
     assert_eq!(body, ["return sb.append(\"x\").toString();"]);
+}
+
+#[test]
+fn recovers_a_long_comparison() {
+    // `lcmp; ifle` — the fall-through of the fused pair reads back as `a > b`.
+    let cf = cmp();
+    let names = ["a".to_owned(), "b".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "max"), &cf, &names).expect("max decompiles");
+    assert_eq!(body, ["if (a > b) {", "    return a;", "}", "return b;"]);
+}
+
+#[test]
+fn recovers_a_float_comparison_against_zero() {
+    // `fcmpg; ifge` — NaN falls to the else side, so `<` is exact.
+    let cf = cmp();
+    let body = MethodBody::decompile(method(&cf, "floor"), &cf, &["f".to_owned()])
+        .expect("floor decompiles");
+    assert_eq!(body, ["if (f < 0f) {", "    return 0f;", "}", "return f;"]);
+}
+
+#[test]
+fn recovers_a_cmpl_flavored_ge() {
+    // `fcmpl; iflt` — the `*cmpl` flavor keeps `>=` exact on NaN.
+    let cf = cmp();
+    let body = MethodBody::decompile(method(&cf, "atLeast"), &cf, &["f".to_owned()])
+        .expect("atLeast decompiles");
+    assert_eq!(body, ["if (f >= 1f) {", "    return f;", "}", "return 1f;"]);
+}
+
+#[test]
+fn recovers_a_double_le_comparison() {
+    // `dcmpg; ifgt` — the fall-through reads back as `<=`.
+    let cf = cmp();
+    let body =
+        MethodBody::decompile(method(&cf, "cap"), &cf, &["d".to_owned()]).expect("cap decompiles");
+    assert_eq!(body, ["if (d <= 0d) {", "    return 0d;", "}", "return d;"]);
+}
+
+#[test]
+fn recovers_double_equality() {
+    // `dcmpl; ifne` — `==` is exact under either flavor (NaN's ±1 is never 0).
+    let cf = cmp();
+    let names = ["a".to_owned(), "b".to_owned()];
+    let body = MethodBody::decompile(method(&cf, "same"), &cf, &names).expect("same decompiles");
+    assert_eq!(
+        body,
+        ["if (a == b) {", "    return \"eq\";", "}", "return \"ne\";"]
+    );
+}
+
+#[test]
+fn recovers_float_inequality() {
+    // `fcmpl; ifeq` — the fall-through reads back as `!=`.
+    let cf = cmp();
+    let names = ["a".to_owned(), "b".to_owned()];
+    let body =
+        MethodBody::decompile(method(&cf, "differ"), &cf, &names).expect("differ decompiles");
+    assert_eq!(
+        body,
+        ["if (a != b) {", "    return \"ne\";", "}", "return \"eq\";"]
+    );
+}
+
+#[test]
+fn recovers_a_double_comparison_in_a_while() {
+    // The loop header's `dcmpl; ifle` exit reads back as the `while (d > 1d)` condition.
+    let cf = cmp();
+    let body = MethodBody::decompile(method(&cf, "halve"), &cf, &["d".to_owned()])
+        .expect("halve decompiles");
+    assert_eq!(
+        body,
+        ["while (d > 1d) {", "    d = d / 2d;", "}", "return d;"]
+    );
+}
+
+#[test]
+fn recovers_a_float_comparison_in_a_do_while() {
+    // The latch's `fcmpg; iflt` back-edge is the taken side: `while (f < 100f)`.
+    let cf = cmp();
+    let body = MethodBody::decompile(method(&cf, "grow"), &cf, &["f".to_owned()])
+        .expect("grow decompiles");
+    assert_eq!(
+        body,
+        [
+            "do {",
+            "    f = f * 2f;",
+            "} while (f < 100f);",
+            "return f;"
+        ]
+    );
+}
+
+#[test]
+fn nan_inexact_flavor_bails() {
+    // `if (!(f < g))` compiles to `fcmpg; iflt`, whose fall-through is true on NaN — no single
+    // comparison operator renders it exactly, so the NaN guard bails the method.
+    let cf = cmp();
+    let names = ["f".to_owned(), "g".to_owned()];
+    assert!(MethodBody::decompile(method(&cf, "pickGuard"), &cf, &names).is_none());
+}
+
+#[test]
+fn cmp_feeding_a_ternary_still_bails() {
+    // `a < b ? a : b` merges its value at the join with a leftover stack — not yet modelled.
+    let cf = cmp();
+    let names = ["a".to_owned(), "b".to_owned()];
+    assert!(MethodBody::decompile(method(&cf, "least"), &cf, &names).is_none());
 }
