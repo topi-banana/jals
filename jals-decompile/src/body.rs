@@ -951,10 +951,12 @@ impl Sim<'_> {
                 }
             },
 
-            // Everything else — branches, switches, `jsr`/`ret`, comparisons, monitors,
-            // `wide` loads, exotic stack shuffles (`dup2`/`dup_x*`/`swap`, so compound element
-            // assignment like `arr[i]++`) — is not yet modelled. Bail so the caller keeps its
-            // safe body. (A non-string-concat `invokedynamic` bails inside `invoke_dynamic`.)
+            // Everything else — branches, switches, `jsr`/`ret`, monitors, `wide` loads, a
+            // `*cmp` not fused into its block's conditional branch (the fused form is read by
+            // `Structurer::branch_condition`, never stepped), exotic stack shuffles
+            // (`dup2`/`dup_x*`/`swap`, so compound element assignment like `arr[i]++`) — is not
+            // yet modelled. Bail so the caller keeps its safe body. (A non-string-concat
+            // `invokedynamic` bails inside `invoke_dynamic`.)
             _ => return None,
         }
         Some(())
@@ -1045,6 +1047,46 @@ impl Sim<'_> {
     }
 }
 
+/// A `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` fused into the following `if<cond>` branch: the pair
+/// pushes -1/0/1 and immediately tests it against 0, reading back a source-level `long`/`float`/
+/// `double` comparison. The flavor records what either operand being NaN pushes (`*cmpl` -1,
+/// `*cmpg` +1; `lcmp` compares totally), which decides whether a rendered operator is faithful.
+#[derive(Clone, Copy)]
+enum Cmp {
+    /// `lcmp` — a total order, every operator is exact.
+    Total,
+    /// `fcmpl` / `dcmpl` — NaN pushes -1.
+    NanNeg,
+    /// `fcmpg` / `dcmpg` — NaN pushes +1.
+    NanPos,
+}
+
+impl Cmp {
+    /// Classify a comparison instruction, or `None` for any other instruction.
+    const fn of(ins: &Instruction) -> Option<Self> {
+        match ins {
+            Instruction::Lcmp => Some(Self::Total),
+            Instruction::Fcmpl | Instruction::Dcmpl => Some(Self::NanNeg),
+            Instruction::Fcmpg | Instruction::Dcmpg => Some(Self::NanPos),
+            _ => None,
+        }
+    }
+
+    /// Whether rendering the fused pair as `lhs <op> rhs` is exact — equivalent to the branch's
+    /// `cmp(lhs, rhs) <op> 0` for *every* input, NaN included. `==`/`!=` are exact under either
+    /// flavor (NaN's ±1 is never 0), but an ordering operator whose true side would capture NaN
+    /// is not: `javac` always picks the flavor that drops NaN on the false side (`<`/`<=` compile
+    /// to `*cmpg`, `>`/`>=` to `*cmpl`), so its output passes; the mismatched pairings (e.g.
+    /// `!(a < b)`, which is *true* on NaN and has no single-operator rendering) must bail.
+    fn exact(self, op: &str) -> bool {
+        match self {
+            Self::Total => true,
+            Self::NanNeg => !matches!(op, "<" | "<="),
+            Self::NanPos => !matches!(op, ">" | ">="),
+        }
+    }
+}
+
 /// Recovers structured statements from a method's [`Cfg`], running each block through [`Sim`] and
 /// folding forward conditional branches into `if` / `if`-`else`.
 struct Structurer<'a> {
@@ -1096,7 +1138,7 @@ impl Structurer<'_> {
                 continue;
             }
             visited[b] = true;
-            let (mut stmts, cond_stack) = self.run_block(b)?;
+            let (mut stmts, cond_stack, cmp) = self.run_block(b)?;
             out.append(&mut stmts);
             // Only a conditional-branch block may leave operands (its condition) on the stack; a
             // leftover on any other terminator means we mis-read the block, so bail.
@@ -1129,7 +1171,7 @@ impl Structurer<'_> {
                     fallthrough,
                 } => {
                     let (instr, taken, fallthrough) = (*instr, *taken, *fallthrough);
-                    let cond = Self::branch_condition(&self.code[instr], true, cond_stack)?;
+                    let cond = Self::branch_condition(&self.code[instr], true, cmp, cond_stack)?;
                     // Acyclic only: the fall-through is the next block and the taken edge is forward
                     // and within this region. A back-edge (loop) or a jump out is not yet structured.
                     if fallthrough != b + 1 || taken <= b || taken > hi {
@@ -1156,9 +1198,11 @@ impl Structurer<'_> {
         Some(out)
     }
 
-    /// Replay one block's value-level effects, returning its statements and any operand(s) left on the
-    /// stack (the condition of a conditional-branch block; empty for every other block).
-    fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<Expr>)> {
+    /// Replay one block's value-level effects, returning its statements, any operand(s) left on the
+    /// stack (the condition of a conditional-branch block; empty for every other block), and the
+    /// flavor of a trailing `*cmp` fused into the block's conditional branch (its two operands are
+    /// then the leftover stack, for [`Self::branch_condition`] to read back).
+    fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<Expr>, Option<Cmp>)> {
         let mut sim = Sim {
             pool: self.pool,
             bootstrap: self.bootstrap,
@@ -1168,7 +1212,18 @@ impl Structurer<'_> {
             stack: Vec::new(),
             stmts: Vec::new(),
         };
-        for ins in &self.code[self.cfg.blocks[b].body()] {
+        // A `*cmp` directly feeding the block's conditional branch is interpreted alongside that
+        // branch (`Sim` has no encoding for its -1/0/1 result), so leave it — and its two operands,
+        // which stay on the stack — to `branch_condition`.
+        let mut body = self.cfg.blocks[b].body();
+        let cmp = match self.cfg.blocks[b].term {
+            Term::Branch { .. } if !body.is_empty() => Cmp::of(&self.code[body.end - 1]),
+            _ => None,
+        };
+        if cmp.is_some() {
+            body.end -= 1;
+        }
+        for ins in &self.code[body] {
             sim.step(ins)?;
         }
         // Finalize anything left on the stack — a still-collecting array initializer or a leaked
@@ -1179,7 +1234,7 @@ impl Structurer<'_> {
             .into_iter()
             .map(Sim::finalize)
             .collect::<Option<Vec<_>>>()?;
-        Some((sim.stmts, stack))
+        Some((sim.stmts, stack, cmp))
     }
 
     /// If block `header` is the target of exactly one back-edge — a `goto` / conditional branch from a
@@ -1232,9 +1287,9 @@ impl Structurer<'_> {
                 // latch's own statements finish the body (its leftover operands are the condition).
                 let mut body = self.emit_region(header, latch, latch, visited)?;
                 Self::claim(visited, latch)?;
-                let (mut tail, cond_stack) = self.run_block(latch)?;
+                let (mut tail, cond_stack, cmp) = self.run_block(latch)?;
                 body.append(&mut tail);
-                let cond = Self::branch_condition(&self.code[instr], false, cond_stack)?;
+                let cond = Self::branch_condition(&self.code[instr], false, cmp, cond_stack)?;
                 Some((Stmt::DoWhile { body, cond }, exit))
             }
             // while (top-test): the latch's `goto` is the back-edge; the header's branch exits.
@@ -1253,11 +1308,11 @@ impl Structurer<'_> {
                 }
                 Self::claim(visited, header)?;
                 // The header carries only the loop condition — a side effect there would repeat.
-                let (head_stmts, cond_stack) = self.run_block(header)?;
+                let (head_stmts, cond_stack, cmp) = self.run_block(header)?;
                 if !head_stmts.is_empty() {
                     return None;
                 }
-                let cond = Self::branch_condition(&self.code[instr], true, cond_stack)?;
+                let cond = Self::branch_condition(&self.code[instr], true, cmp, cond_stack)?;
                 // The body `[body_start, latch]` exits back to the header (the latch's goto-back).
                 let body = self.emit_region(body_start, latch + 1, header, visited)?;
                 Some((Stmt::While { cond, body }, exit))
@@ -1281,41 +1336,75 @@ impl Structurer<'_> {
     /// control falls through under the negation of its jump test (a forward `if`, or a top-test
     /// `while` whose branch exits the loop). Without it the branch's own (positive) jump test is
     /// returned — the branch is taken to *continue* the loop (the `while (cond)` of a `do`-`while`).
-    fn branch_condition(branch: &Instruction, negate: bool, mut stack: Vec<Expr>) -> Option<Expr> {
+    /// With `cmp` the branch tests a fused `*cmp` result against 0 and the two operands are the
+    /// stack: `lhs <op> rhs` reads back the source `long`/`float`/`double` comparison.
+    fn branch_condition(
+        branch: &Instruction,
+        negate: bool,
+        cmp: Option<Cmp>,
+        mut stack: Vec<Expr>,
+    ) -> Option<Expr> {
         use Instruction as I;
         // Pick the branch-taken operator, or its negation for the fall-through condition.
         let op = |taken, negated| if negate { negated } else { taken };
-        let cond = match branch {
-            I::IfIcmpeq(_) | I::IfAcmpeq(_) => Self::compare(op("==", "!="), &mut stack)?,
-            I::IfIcmpne(_) | I::IfAcmpne(_) => Self::compare(op("!=", "=="), &mut stack)?,
-            I::IfIcmplt(_) => Self::compare(op("<", ">="), &mut stack)?,
-            I::IfIcmpge(_) => Self::compare(op(">=", "<"), &mut stack)?,
-            I::IfIcmpgt(_) => Self::compare(op(">", "<="), &mut stack)?,
-            I::IfIcmple(_) => Self::compare(op("<=", ">"), &mut stack)?,
-            I::Iflt(_) => Self::compare_lit(op("<", ">="), "0", &mut stack)?,
-            I::Ifge(_) => Self::compare_lit(op(">=", "<"), "0", &mut stack)?,
-            I::Ifgt(_) => Self::compare_lit(op(">", "<="), "0", &mut stack)?,
-            I::Ifle(_) => Self::compare_lit(op("<=", ">"), "0", &mut stack)?,
-            I::IfNull(_) => Self::compare_lit(op("==", "!="), "null", &mut stack)?,
-            I::IfNonNull(_) => Self::compare_lit(op("!=", "=="), "null", &mut stack)?,
-            // A bare `ifne` is taken when the value is truthy, `ifeq` when it is falsy; negating the
-            // taken test gives the fall-through condition.
-            I::Ifne(_) | I::Ifeq(_) => {
-                let value = stack.pop()?;
-                if matches!(branch, I::Ifne(_)) == negate {
-                    Expr::Unary {
-                        op: "!",
-                        expr: Box::new(value),
-                    }
-                } else {
-                    value
-                }
+        let cond = if let Some(cmp) = cmp {
+            // Only the six int-zero tests can follow a fused `*cmp`, and the rendered operator
+            // must agree with the flavor on NaN (see `Cmp::exact`).
+            let (taken, negated) = Self::zero_test(branch)?;
+            let operator = op(taken, negated);
+            if !cmp.exact(operator) {
+                return None;
             }
-            _ => return None,
+            Self::compare(operator, &mut stack)?
+        } else {
+            match branch {
+                I::IfIcmpeq(_) | I::IfAcmpeq(_) => Self::compare(op("==", "!="), &mut stack)?,
+                I::IfIcmpne(_) | I::IfAcmpne(_) => Self::compare(op("!=", "=="), &mut stack)?,
+                I::IfIcmplt(_) => Self::compare(op("<", ">="), &mut stack)?,
+                I::IfIcmpge(_) => Self::compare(op(">=", "<"), &mut stack)?,
+                I::IfIcmpgt(_) => Self::compare(op(">", "<="), &mut stack)?,
+                I::IfIcmple(_) => Self::compare(op("<=", ">"), &mut stack)?,
+                I::Iflt(_) | I::Ifge(_) | I::Ifgt(_) | I::Ifle(_) => {
+                    let (taken, negated) = Self::zero_test(branch)?;
+                    Self::compare_lit(op(taken, negated), "0", &mut stack)?
+                }
+                I::IfNull(_) => Self::compare_lit(op("==", "!="), "null", &mut stack)?,
+                I::IfNonNull(_) => Self::compare_lit(op("!=", "=="), "null", &mut stack)?,
+                // A bare `ifne` is taken when the value is truthy, `ifeq` when it is falsy;
+                // negating the taken test gives the fall-through condition.
+                I::Ifne(_) | I::Ifeq(_) => {
+                    let value = stack.pop()?;
+                    if matches!(branch, I::Ifne(_)) == negate {
+                        Expr::Unary {
+                            op: "!",
+                            expr: Box::new(value),
+                        }
+                    } else {
+                        value
+                    }
+                }
+                _ => return None,
+            }
         };
         // The condition must consume exactly the operands the block left; a leftover means we
         // mis-read it.
         if stack.is_empty() { Some(cond) } else { None }
+    }
+
+    /// The `(taken, negated)` source operator of an `if<cond>` integer zero test — one table
+    /// shared by the plain `x <op> 0` rendering and a fused `*cmp` comparison (whose -1/0/1
+    /// result the branch tests against 0).
+    const fn zero_test(branch: &Instruction) -> Option<(&'static str, &'static str)> {
+        use Instruction as I;
+        Some(match branch {
+            I::Ifeq(_) => ("==", "!="),
+            I::Ifne(_) => ("!=", "=="),
+            I::Iflt(_) => ("<", ">="),
+            I::Ifge(_) => (">=", "<"),
+            I::Ifgt(_) => (">", "<="),
+            I::Ifle(_) => ("<=", ">"),
+            _ => return None,
+        })
     }
 
     /// Pop two operands into `lhs op rhs`.
@@ -1337,5 +1426,26 @@ impl Structurer<'_> {
             lhs: Box::new(lhs),
             rhs: Box::new(Expr::lit(literal)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cmp;
+
+    // The fixtures only cover the flavor/operator pairings `javac` emits, so the full NaN
+    // faithfulness table is asserted here: an ordering operator whose true side would capture
+    // NaN (the flavor's sign) is inexact, everything else — and all of `lcmp` — is exact.
+    #[test]
+    fn cmp_exactness_table() {
+        for (cmp, expected) in [
+            (Cmp::Total, [true, true, true, true, true, true]),
+            (Cmp::NanNeg, [true, true, false, false, true, true]),
+            (Cmp::NanPos, [true, true, true, true, false, false]),
+        ] {
+            for (op, exact) in ["==", "!=", "<", "<=", ">", ">="].into_iter().zip(expected) {
+                assert_eq!(cmp.exact(op), exact, "{op}");
+            }
+        }
     }
 }
