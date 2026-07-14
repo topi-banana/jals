@@ -17,11 +17,16 @@
 //!
 //! The one exception is the default-on **`native` feature**, which supplies the host
 //! `SubprocessToolchain` — the only piece that spawns `javac`/`java` and probes the filesystem to
-//! discover installed JDKs. The pure core (a [`Toolchain`] trait plus the [`CompileRequest`] /
-//! [`RunRequest`] inputs and the filesystem-free [`ToolResolver`] policy) is what a future wasm
-//! compiler would implement instead; build the crate with `--no-default-features` for that
-//! `wasm32`-only core.
+//! discover installed JDKs — plus the `<dyn Compiler>::select` / `<dyn Runtime>::select` factories
+//! that match a manifest's `[toolchain]` enums to the right boxed backend, one per step. The pure
+//! core (the [`Compiler`] / [`Runtime`] traits plus the [`CompileRequest`] / [`RunRequest`] inputs,
+//! the filesystem-free [`ToolResolver`] policy, and the [`BuiltinToolchain`] in-process backend
+//! implementing both traits — today a dummy that copies sources through a `jals_fs::FileTree`
+//! instead of compiling, the seam a real embedded compiler fills) is what a future wasm compiler
+//! would implement instead; build the crate with `--no-default-features` for that `wasm32`-only
+//! core.
 
+mod builtin;
 mod clean;
 mod init;
 mod invocation;
@@ -33,6 +38,7 @@ mod toolchain;
 #[cfg(feature = "native")]
 mod native;
 
+pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
 pub use init::{InitOptions, ScaffoldFile};
 pub use invocation::Invocation;
@@ -42,7 +48,7 @@ pub use manifest_ext::{
 pub use request::{CompileRequest, RunRequest};
 pub use target::{ResolveTargetError, RunTarget};
 pub use toolchain::{
-    BuildOutcome, Candidates, JdkInstall, Tool, ToolResolver, Toolchain, ToolchainError,
+    BuildOutcome, Candidates, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
 };
 
 #[cfg(feature = "native")]

@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-use jals_build::{ManifestExt, Toolchain};
+use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_config::{FeatureSet, Manifest};
@@ -376,18 +376,18 @@ impl BuildArgs {
             |message| eprintln!("warning: {message}"),
         );
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
-        // The toolchain selects `javac` from `[toolchain] compiler` (env override → discovered JDK →
-        // `$JAVA_HOME` → `PATH`) and spawns it.
-        let toolchain = jals_build::SubprocessToolchain::from_manifest(&manifest);
+        // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
+        // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
+        let compiler = <dyn Compiler>::select(&manifest);
 
         if self.dry_run || self.verbose {
-            println!("{}", toolchain.describe_compile(&request));
+            println!("{}", compiler.describe_compile(&request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
-        let outcome = toolchain.compile(&request).map_err(|e| anyhow!("{e}"))?;
+        let outcome = compiler.compile(&request).map_err(|e| anyhow!("{e}"))?;
         Ok(App::outcome_exit_code(outcome))
     }
 }
@@ -424,26 +424,28 @@ impl RunArgs {
             program_args: &self.args,
             extra_classpath: &inputs.dependency_jars,
         };
-        // One toolchain drives both steps: `javac` from `[toolchain] compiler`, `java` from
-        // `[toolchain] runtime` (each: env override → discovered JDK → `$JAVA_HOME` → `PATH`).
-        let toolchain = jals_build::SubprocessToolchain::from_manifest(&manifest);
+        // Each step's backend is selected independently from its own `[toolchain]` enum:
+        // `"builtin"` is the in-process dummy; anything else spawns `javac`/`java` per
+        // `compiler`/`runtime` (each: env override → discovered JDK → `$JAVA_HOME` → `PATH`).
+        let compiler = <dyn Compiler>::select(&manifest);
+        let runtime = <dyn Runtime>::select(&manifest);
 
         if self.dry_run || self.verbose {
-            println!("{}", toolchain.describe_compile(&compile_request));
-            println!("{}", toolchain.describe_run(&run_request));
+            println!("{}", compiler.describe_compile(&compile_request));
+            println!("{}", runtime.describe_run(&run_request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
         // Compile first; only run when compilation succeeds.
-        let build_outcome = toolchain
+        let build_outcome = compiler
             .compile(&compile_request)
             .map_err(|e| anyhow!("{e}"))?;
         if !build_outcome.success() {
             return Ok(App::outcome_exit_code(build_outcome));
         }
-        let run_outcome = toolchain.run(&run_request).map_err(|e| anyhow!("{e}"))?;
+        let run_outcome = runtime.run(&run_request).map_err(|e| anyhow!("{e}"))?;
         Ok(App::outcome_exit_code(run_outcome))
     }
 }

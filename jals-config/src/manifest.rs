@@ -45,9 +45,11 @@ pub struct Manifest {
     /// (`jals-build`'s `ManifestExt` classifies them into host-facing path sources).
     pub dependencies: BTreeMap<String, Dependency>,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
-    /// it, chosen independently (see [`Toolchain`]). Defaults to the system tools when omitted, so an
-    /// existing manifest is unaffected. This crate only models the selection; `jals-build`'s `native`
-    /// feature resolves each [`ToolSpec`](crate::ToolSpec) to a program path (JDK discovery / `PATH`).
+    /// it, chosen independently (see [`Toolchain`] and its [`Compiler`](crate::Compiler) /
+    /// [`Runtime`](crate::Runtime) enums). Defaults to the system tools when omitted, so an existing
+    /// manifest is unaffected. This crate only models the selection; `jals-build` matches each enum
+    /// to a backend, and its `native` feature resolves the [`ToolSpec`](crate::ToolSpec) view of a
+    /// program-selecting variant to a program path (JDK discovery / `PATH`).
     pub toolchain: Toolchain,
 }
 
@@ -1120,28 +1122,30 @@ mod tests {
 
     #[test]
     fn parses_toolchain_section() {
-        use crate::toolchain::ToolSpec;
+        use crate::toolchain::{Compiler, Distribution, Runtime};
 
         let m: Manifest = toml::from_str(
-            "[toolchain]\ncompiler = \"temurin-21\"\nruntime = \"/opt/jdk-17/bin/java\"\n",
+            "[toolchain]\n\
+             compiler = { distribution = { name = \"temurin\", version = 21 } }\n\
+             runtime = { path = \"/opt/jdk-17/bin/java\" }\n",
         )
         .unwrap();
         assert_eq!(
             m.toolchain.compiler,
-            Some(ToolSpec::Distribution {
-                distribution: Some("temurin".into()),
+            Compiler::Distribution(Distribution {
+                name: Some("temurin".into()),
                 version: Some(21),
             })
         );
         assert_eq!(
             m.toolchain.runtime,
-            Some(ToolSpec::Path("/opt/jdk-17/bin/java".into()))
+            Runtime::Path("/opt/jdk-17/bin/java".into())
         );
 
-        // No [toolchain] table: both selections default to "system" (None).
+        // No [toolchain] table: both selections default to the system tools.
         let m = Manifest::default();
-        assert_eq!(m.toolchain.compiler, None);
-        assert_eq!(m.toolchain.runtime, None);
+        assert_eq!(m.toolchain.compiler, Compiler::System);
+        assert_eq!(m.toolchain.runtime, Runtime::System);
     }
 
     #[test]

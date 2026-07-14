@@ -33,4 +33,4 @@ pub use manifest::{
     Bin, Build, Dependency, DependencyError, Feature, FeatureSet, GitDependency, GitRef,
     JarDependency, Manifest, ManifestParseError, Package, PathDependency, Run, ValidationError,
 };
-pub use toolchain::{ToolSpec, Toolchain};
+pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

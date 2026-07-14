@@ -1,33 +1,77 @@
 //! The host toolchain: discover installed JDKs and spawn `javac`/`java`.
 //!
 //! [`SubprocessToolchain`] is the default (`native` feature) implementation of the pure
-//! [`Toolchain`] trait. It is the one place in `jals-build` that touches the filesystem or spawns a
-//! process, so the rest of the crate stays pure/`wasm32`-buildable. Selection is entirely the pure
-//! [`ToolResolver`] policy — an `$JAVAC`/`$JAVA` env override wins, then the manifest's
-//! `[toolchain]` [`ToolSpec`](jals_config::ToolSpec), then `$JAVA_HOME`, then the bare name on
-//! `PATH` — this module only reads the env vars, scans the common install locations (SDKMAN,
-//! `~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle directory) when a distribution
-//! selector needs them, probes which candidate exists, and spawns. Downloading a missing JDK is
-//! future work.
+//! [`Compiler`] and [`Runtime`] traits. It is the one place in `jals-build` that touches the
+//! filesystem or spawns a process, so the rest of the crate stays pure/`wasm32`-buildable.
+//! Selection is entirely the pure [`ToolResolver`] policy — an `$JAVAC`/`$JAVA` env override wins,
+//! then the manifest's `[toolchain]` selection (its [`ToolSpec`](jals_config::ToolSpec) view),
+//! then `$JAVA_HOME`, then the bare name on `PATH` — this module only reads the env vars, scans
+//! the common install
+//! locations (SDKMAN, `~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle directory) when a
+//! distribution selector needs them, probes which candidate exists, and spawns. Downloading a
+//! missing JDK is future work.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jals_config::{Manifest, ToolSpec};
+use jals_config::{Compiler as CompilerSpec, Manifest, Runtime as RuntimeSpec, ToolSpec};
+use jals_fs::OsFileTree;
 
+use crate::builtin::BuiltinToolchain;
 use crate::invocation::Invocation;
 use crate::request::{CompileRequest, RunRequest};
-use crate::toolchain::{BuildOutcome, JdkInstall, Tool, ToolResolver, Toolchain, ToolchainError};
+use crate::toolchain::{
+    BuildOutcome, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
+};
 
-/// A [`Toolchain`] that spawns the host's `javac`/`java`, selected per the manifest's `[toolchain]`.
+impl dyn Compiler {
+    /// Select the backend the manifest's `[toolchain] compiler` names, as one boxed [`Compiler`]:
+    /// matching the [`jals_config::Compiler`] variant routes `"builtin"` to the in-process
+    /// [`BuiltinToolchain`] (over the host filesystem) and every `javac` selector to the host
+    /// [`SubprocessToolchain`] — so a host drives one `&dyn Compiler`, whatever the manifest
+    /// selects.
+    pub fn select(manifest: &Manifest) -> Box<dyn Compiler> {
+        match &manifest.toolchain.compiler {
+            CompilerSpec::Builtin => Box::new(BuiltinToolchain::host()),
+            CompilerSpec::System | CompilerSpec::Path(_) | CompilerSpec::Distribution(_) => {
+                Box::new(SubprocessToolchain::from_manifest(manifest))
+            }
+        }
+    }
+}
+
+impl dyn Runtime {
+    /// Select the backend the manifest's `[toolchain] runtime` names, as one boxed [`Runtime`] —
+    /// the run-step mirror of `<dyn Compiler>::select`, matching [`jals_config::Runtime`]. The two
+    /// selections are independent, so a builtin compile can pair with a real `java` run (and vice
+    /// versa) with no routing composite in between.
+    pub fn select(manifest: &Manifest) -> Box<dyn Runtime> {
+        match &manifest.toolchain.runtime {
+            RuntimeSpec::Builtin => Box::new(BuiltinToolchain::host()),
+            RuntimeSpec::System | RuntimeSpec::Path(_) | RuntimeSpec::Distribution(_) => {
+                Box::new(SubprocessToolchain::from_manifest(manifest))
+            }
+        }
+    }
+}
+
+impl BuiltinToolchain {
+    /// The builtin backend over the host filesystem.
+    fn host() -> Self {
+        Self::new(Box::new(OsFileTree::new()))
+    }
+}
+
+/// A [`Compiler`] + [`Runtime`] backend that spawns the host's `javac`/`java`, selected per the
+/// manifest's `[toolchain]`.
 ///
 /// Built with [`from_manifest`](SubprocessToolchain::from_manifest); the discovered JDK installs are
 /// cached (and skipped entirely unless a distribution selector needs them).
 pub struct SubprocessToolchain {
-    /// The `javac` selection (`[toolchain] compiler`), or `None` for the system compiler.
-    compiler: Option<ToolSpec>,
-    /// The `java` selection (`[toolchain] runtime`), or `None` for the system runtime.
-    runtime: Option<ToolSpec>,
+    /// The `javac` selection (`[toolchain] compiler`).
+    compiler: CompilerSpec,
+    /// The `java` selection (`[toolchain] runtime`).
+    runtime: RuntimeSpec,
     /// The installed JDKs discovered on this host (empty when no distribution selector needs them).
     installs: Vec<JdkInstall>,
     /// The platform classpath separator (`:` on Unix, `;` on Windows) — a command-line encoding
@@ -42,8 +86,8 @@ impl SubprocessToolchain {
     /// common no-`[toolchain]` project pays no discovery cost).
     pub fn from_manifest(manifest: &Manifest) -> Self {
         let tc = &manifest.toolchain;
-        let needs_discovery = matches!(tc.compiler, Some(ToolSpec::Distribution { .. }))
-            || matches!(tc.runtime, Some(ToolSpec::Distribution { .. }));
+        let needs_discovery = matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
+            || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }));
         Self {
             compiler: tc.compiler.clone(),
             runtime: tc.runtime.clone(),
@@ -56,11 +100,13 @@ impl SubprocessToolchain {
         }
     }
 
-    /// The [`ToolSpec`] governing `tool`.
-    const fn spec(&self, tool: Tool) -> Option<&ToolSpec> {
+    /// The [`ToolSpec`] view governing `tool`, or `None` when that half of the manifest selects
+    /// the in-process backend (normally routed away by the `select` factories before any resolver
+    /// runs; the resolver answers `None` with the system tools).
+    fn spec(&self, tool: Tool) -> Option<ToolSpec<'_>> {
         match tool {
-            Tool::Javac => self.compiler.as_ref(),
-            Tool::Java => self.runtime.as_ref(),
+            Tool::Javac => self.compiler.spec(),
+            Tool::Java => self.runtime.spec(),
         }
     }
 
@@ -156,17 +202,19 @@ impl SubprocessToolchain {
     }
 }
 
-impl Toolchain for SubprocessToolchain {
+impl Compiler for SubprocessToolchain {
     fn compile(&self, req: &CompileRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
         Self::spawn(&self.plan_compile(req))
     }
 
-    fn run(&self, req: &RunRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
-        Self::spawn(&self.plan_run(req))
-    }
-
     fn describe_compile(&self, req: &CompileRequest<'_>) -> String {
         self.plan_compile(req).display_command()
+    }
+}
+
+impl Runtime for SubprocessToolchain {
+    fn run(&self, req: &RunRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
+        Self::spawn(&self.plan_run(req))
     }
 
     fn describe_run(&self, req: &RunRequest<'_>) -> String {
@@ -177,6 +225,72 @@ impl Toolchain for SubprocessToolchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_routes_each_tool_to_its_backend() {
+        let root = Path::new("/proj");
+        let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
+
+        // compiler = "builtin", runtime unset: the dummy compile plan next to a real `java`
+        // command — each factory matches its own enum, so the two selections are independent.
+        let manifest: Manifest = "[toolchain]\ncompiler = \"builtin\"\n".parse().unwrap();
+        let compile_req = CompileRequest {
+            manifest: &manifest,
+            project_root: root,
+            sources: &sources,
+            extra_sources: &[],
+            extra_classpath: &[],
+        };
+        let run_req = RunRequest {
+            manifest: &manifest,
+            project_root: root,
+            main_class: "Main",
+            program_args: &[],
+            extra_classpath: &[],
+        };
+        let compiler = <dyn Compiler>::select(&manifest);
+        assert!(
+            compiler
+                .describe_compile(&compile_req)
+                .starts_with("builtin:")
+        );
+        let run_description = <dyn Runtime>::select(&manifest).describe_run(&run_req);
+        assert!(run_description.contains("java"));
+        assert!(!run_description.starts_with("builtin:"));
+
+        // No [toolchain]: the subprocess backend for both steps.
+        let manifest = Manifest::default();
+        let compile_req = CompileRequest {
+            manifest: &manifest,
+            project_root: root,
+            sources: &sources,
+            extra_sources: &[],
+            extra_classpath: &[],
+        };
+        let compiler = <dyn Compiler>::select(&manifest);
+        assert!(compiler.describe_compile(&compile_req).contains("javac"));
+
+        // runtime = "builtin" alone: the dummy run next to a real `javac` compile.
+        let manifest: Manifest = "[toolchain]\nruntime = \"builtin\"\n".parse().unwrap();
+        let run_req = RunRequest {
+            manifest: &manifest,
+            project_root: root,
+            main_class: "Main",
+            program_args: &[],
+            extra_classpath: &[],
+        };
+        let runtime = <dyn Runtime>::select(&manifest);
+        assert!(runtime.describe_run(&run_req).starts_with("builtin:"));
+        let compile_req = CompileRequest {
+            manifest: &manifest,
+            project_root: root,
+            sources: &sources,
+            extra_sources: &[],
+            extra_classpath: &[],
+        };
+        let compiler = <dyn Compiler>::select(&manifest);
+        assert!(compiler.describe_compile(&compile_req).contains("javac"));
+    }
 
     #[test]
     fn default_manifest_plans_bare_tools() {

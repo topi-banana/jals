@@ -1,9 +1,13 @@
 //! The toolchain abstraction: how a project's `javac`/`java` are selected and driven.
 //!
-//! A [`Toolchain`] turns a [`CompileRequest`]/[`RunRequest`] into an actual build or run. The one
-//! implementation today is the host's `SubprocessToolchain` (behind the `native` feature), which
-//! spawns `javac`/`java`; the trait is the seam a future in-browser (wasm) compiler slots into, so
-//! `jals-cli`/the playground can drive a build without knowing which backend realizes it.
+//! The seam is a pair of object-safe traits mirroring the manifest's two selectors: a [`Compiler`]
+//! turns a [`CompileRequest`] into an actual build, a [`Runtime`] turns a [`RunRequest`] into an
+//! actual run. The host's `SubprocessToolchain` (behind the `native` feature) implements both by
+//! spawning `javac`/`java`, and the in-process `BuiltinToolchain` implements both without a
+//! subprocess; matching a manifest's [`Compiler`](jals_config::Compiler) /
+//! [`Runtime`](jals_config::Runtime) selector picks the backend, passed on as a `&dyn Compiler` /
+//! `&dyn Runtime` — so `jals-cli`/the playground drive a build without knowing which backend
+//! realizes each step.
 //!
 //! Selecting *which* JDK tool to spawn is split into a **pure policy** ([`ToolResolver`], here — no
 //! filesystem or environment access) and the **host mechanism** (`native`: discovering installed
@@ -53,8 +57,8 @@ impl Tool {
     }
 }
 
-/// One installed JDK the host discovered, described enough for [`ToolResolver::resolve`] to match a
-/// [`ToolSpec::Distribution`] against it.
+/// One installed JDK the host discovered, described enough for [`ToolResolver::resolve`] to match
+/// a [`ToolSpec::Distribution`] selector against it.
 ///
 /// The `native` feature builds these by scanning common install locations and classifying each
 /// directory name via [`from_install_name`](JdkInstall::from_install_name); the pure resolver only
@@ -184,7 +188,8 @@ impl Candidates {
     }
 }
 
-/// The pure policy that turns a [`ToolSpec`] into the ordered [`Candidates`] for a tool.
+/// The pure policy that turns a [`ToolSpec`] view (see `jals_config::Compiler::spec` /
+/// `jals_config::Runtime::spec`) into the ordered [`Candidates`] for a tool.
 ///
 /// Holds the host environment as plain data, so the *complete* selection precedence — including
 /// the `$JAVAC`/`$JAVA` override and `~` expansion — lives (and is tested) here; the host only
@@ -221,7 +226,7 @@ impl ToolResolver<'_> {
     pub fn resolve(
         &self,
         tool: Tool,
-        spec: Option<&ToolSpec>,
+        spec: Option<ToolSpec<'_>>,
         env_override: Option<PathBuf>,
     ) -> Candidates {
         if let Some(explicit) = env_override {
@@ -251,14 +256,11 @@ impl ToolResolver<'_> {
                     }
                 }
             }
-            Some(ToolSpec::Distribution {
-                distribution,
-                version,
-            }) => {
+            Some(ToolSpec::Distribution { name, version }) => {
                 let mut preferred: Vec<PathBuf> = self
                     .installs
                     .iter()
-                    .filter(|install| install.matches(distribution.as_deref(), *version))
+                    .filter(|install| install.matches(name, version))
                     .map(|install| tool.path_in(&install.home))
                     .collect();
                 preferred.extend(self.java_home_bin(tool));
@@ -267,6 +269,10 @@ impl ToolResolver<'_> {
                     fallback: PathBuf::from(bin),
                 }
             }
+            // `None` is a caller with no program selector — the in-process `builtin` backend
+            // (which never resolves a program and is routed away by the selection factories
+            // before any resolver runs), or a host with no selection at all. The system reading
+            // is the conservative answer for both.
             Some(ToolSpec::System) | None => Candidates {
                 preferred: self.java_home_bin(tool).into_iter().collect(),
                 fallback: PathBuf::from(bin),
@@ -326,6 +332,9 @@ pub enum ToolchainError {
     },
     /// This backend does not support the requested step (e.g. a wasm compiler asked to *run*).
     Unsupported(&'static str),
+    /// A filesystem step of an in-process backend failed (e.g. the builtin dummy compiler reading
+    /// a source or writing its copy). The [`FsError`](jals_fs::FsError) names the path.
+    Fs(jals_fs::FsError),
 }
 
 impl std::fmt::Display for ToolchainError {
@@ -338,6 +347,7 @@ impl std::fmt::Display for ToolchainError {
                 )
             }
             Self::Unsupported(what) => write!(f, "toolchain does not support {what}"),
+            Self::Fs(source) => write!(f, "builtin toolchain I/O failed: {source}"),
         }
     }
 }
@@ -347,28 +357,42 @@ impl std::error::Error for ToolchainError {
         match self {
             Self::Spawn { source, .. } => Some(source),
             Self::Unsupported(_) => None,
+            Self::Fs(source) => Some(source),
         }
     }
 }
 
-/// A backend that can compile and run a project.
+/// A backend that can compile a project — the trait behind `[toolchain] compiler`.
 ///
-/// The native implementation spawns `javac`/`java`; a future wasm backend would drive an in-process
-/// compiler. `compile`/`run` perform the work and report a [`BuildOutcome`]; `describe_*` render the
-/// planned action for `--dry-run`/`-v` output without performing it. A backend that cannot perform a
-/// step returns [`ToolchainError::Unsupported`].
-pub trait Toolchain {
+/// The native implementation (`SubprocessToolchain`) spawns `javac`; the in-process
+/// [`BuiltinToolchain`](crate::BuiltinToolchain) is today a dummy stand-in and the seam a real
+/// embedded compiler fills. [`compile`](Compiler::compile) performs the work and reports a
+/// [`BuildOutcome`]; [`describe_compile`](Compiler::describe_compile) renders the planned action
+/// for `--dry-run`/`-v` output without performing it. A backend that cannot compile returns
+/// [`ToolchainError::Unsupported`]. The trait is object-safe: a host matches the manifest's
+/// [`Compiler`](jals_config::Compiler) selector to a backend and drives it as a `&dyn Compiler`
+/// (see `<dyn Compiler>::select` under the `native` feature).
+pub trait Compiler {
     /// Compile the project described by `req`.
     fn compile(&self, req: &CompileRequest<'_>) -> Result<BuildOutcome, ToolchainError>;
 
+    /// A human-readable description of what [`compile`](Compiler::compile) would do (for
+    /// `--dry-run`/`-v`).
+    fn describe_compile(&self, req: &CompileRequest<'_>) -> String;
+}
+
+/// A backend that can run a project's main class — the trait behind `[toolchain] runtime`.
+///
+/// The exact mirror of [`Compiler`] for the run step, selected independently of it (the manifest's
+/// two selectors may name *different* backends — a builtin dummy compile checked with the real
+/// `java`, or a real `javac` compile whose run is stubbed out — and each `select` factory matches
+/// its own enum, so no routing composite is needed). Implemented by the same two backends; driven
+/// as a `&dyn Runtime` (see `<dyn Runtime>::select` under the `native` feature).
+pub trait Runtime {
     /// Run the project's main class described by `req`.
     fn run(&self, req: &RunRequest<'_>) -> Result<BuildOutcome, ToolchainError>;
 
-    /// A human-readable description of what [`compile`](Toolchain::compile) would do (for
-    /// `--dry-run`/`-v`).
-    fn describe_compile(&self, req: &CompileRequest<'_>) -> String;
-
-    /// A human-readable description of what [`run`](Toolchain::run) would do (for `--dry-run`/`-v`).
+    /// A human-readable description of what [`run`](Runtime::run) would do (for `--dry-run`/`-v`).
     fn describe_run(&self, req: &RunRequest<'_>) -> String;
 }
 
@@ -398,7 +422,7 @@ mod tests {
         let installs = [install("/jvm/temurin-21", Some("temurin"), Some(21))];
         let out = resolver(&installs, Some(Path::new("/sys/jdk"))).resolve(
             Tool::Javac,
-            Some(&ToolSpec::System),
+            Some(ToolSpec::System),
             Some(PathBuf::from("/ci/javac")),
         );
         // Used verbatim: nothing to probe, nothing to fall past.
@@ -410,7 +434,7 @@ mod tests {
     fn system_spec_uses_java_home_then_bare_name() {
         let out = resolver(&[], Some(Path::new("/opt/java-home"))).resolve(
             Tool::Javac,
-            Some(&ToolSpec::System),
+            Some(ToolSpec::System),
             None,
         );
         assert_eq!(
@@ -434,7 +458,7 @@ mod tests {
         // reverting to PATH.
         let out = resolver(&[], Some(Path::new("/sys/jdk"))).resolve(
             Tool::Javac,
-            Some(&ToolSpec::Path("/opt/jdk-21".into())),
+            Some(ToolSpec::Path("/opt/jdk-21")),
             None,
         );
         assert_eq!(out.preferred, vec![PathBuf::from("/opt/jdk-21")]);
@@ -447,7 +471,7 @@ mod tests {
         // explicit binary is spawned verbatim (and fails naming it).
         let out = resolver(&[], None).resolve(
             Tool::Javac,
-            Some(&ToolSpec::Path("/opt/jdk/bin/javac".into())),
+            Some(ToolSpec::Path("/opt/jdk/bin/javac")),
             None,
         );
         assert!(out.preferred.is_empty());
@@ -457,11 +481,8 @@ mod tests {
     #[test]
     fn relative_path_resolves_against_project_root() {
         // "jdk/bin/javac" ends in the tool name → the binary itself, resolved against the root.
-        let out = resolver(&[], None).resolve(
-            Tool::Javac,
-            Some(&ToolSpec::Path("jdk/bin/javac".into())),
-            None,
-        );
+        let out =
+            resolver(&[], None).resolve(Tool::Javac, Some(ToolSpec::Path("jdk/bin/javac")), None);
         assert!(out.preferred.is_empty());
         assert_eq!(out.fallback, PathBuf::from("/proj/jdk/bin/javac"));
     }
@@ -475,7 +496,7 @@ mod tests {
             home: Some(Path::new("/home/dev")),
             project_root: Path::new("/proj"),
         };
-        let out = resolver.resolve(Tool::Javac, Some(&ToolSpec::Path("~/jdks/21".into())), None);
+        let out = resolver.resolve(Tool::Javac, Some(ToolSpec::Path("~/jdks/21")), None);
         assert_eq!(out.preferred, vec![PathBuf::from("/home/dev/jdks/21")]);
         assert_eq!(out.fallback, PathBuf::from("/home/dev/jdks/21/bin/javac"));
     }
@@ -483,11 +504,7 @@ mod tests {
     #[test]
     fn tilde_path_without_home_is_verbatim() {
         // No `$HOME` known: the `~` path is used verbatim (never joined onto the project root).
-        let out = resolver(&[], None).resolve(
-            Tool::Javac,
-            Some(&ToolSpec::Path("~/jdks/21".into())),
-            None,
-        );
+        let out = resolver(&[], None).resolve(Tool::Javac, Some(ToolSpec::Path("~/jdks/21")), None);
         assert_eq!(out.preferred, vec![PathBuf::from("~/jdks/21")]);
     }
 
@@ -499,8 +516,8 @@ mod tests {
         ];
         let out = resolver(&installs, None).resolve(
             Tool::Javac,
-            Some(&ToolSpec::Distribution {
-                distribution: Some("temurin".into()),
+            Some(ToolSpec::Distribution {
+                name: Some("temurin"),
                 version: Some(21),
             }),
             None,
@@ -521,8 +538,8 @@ mod tests {
         ];
         let out = resolver(&installs, None).resolve(
             Tool::Java,
-            Some(&ToolSpec::Distribution {
-                distribution: None,
+            Some(ToolSpec::Distribution {
+                name: None,
                 version: Some(17),
             }),
             None,
@@ -542,8 +559,8 @@ mod tests {
         let installs = vec![install("/jvm/openjdk-17", Some("openjdk"), Some(17))];
         let out = resolver(&installs, Some(Path::new("/sys/jdk"))).resolve(
             Tool::Javac,
-            Some(&ToolSpec::Distribution {
-                distribution: Some("temurin".into()),
+            Some(ToolSpec::Distribution {
+                name: Some("temurin"),
                 version: Some(21),
             }),
             None,

@@ -1014,6 +1014,7 @@ name = "jals-build"
 version = "0.1.0"
 dependencies = [
  "jals-config",
+ "jals-fs",
  "toml",
 ]
 
