@@ -95,7 +95,9 @@ impl JavaType {
    natural loops (a block targeted by a back-edge) into `while` / `do`-`while`. A forward `if`
    condition is the *negation* of the branch's jump test (the branch skips the `then` body); a
    top-test `while` condition is likewise the negation of its exit branch, while a `do`-`while`
-   condition is the branch's own (positive) test (it jumps back to repeat). A block reached more than
+   condition is the branch's own (positive) test (it jumps back to repeat). A
+   `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` ending a conditional-branch block is read together with
+   that branch as one source `long`/`float`/`double` comparison (see M7). A block reached more than
    once, a `break`/`continue` edge, or any other non-tree/irreducible shape bails. A final check
    requires **every block to be emitted exactly once** — a strong guard that the recovered tree
    matches the real control flow.
@@ -291,14 +293,46 @@ public java.lang.String excl(java.lang.String s) {
 }
 ```
 
+### M7 — numeric comparison conditions &nbsp;✅ done
+
+Recovers `long`/`float`/`double` comparisons in conditions. The JVM lowers `a < b` on these types to
+a two-instruction pair — `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` pushes -1/0/1, and the following
+`if<cond>` tests it against zero — so the structurer reads the pair back as one source comparison:
+the `*cmp`'s two operands become `lhs <op> rhs` with the operator taken from the branch (negated for
+a fall-through condition, exactly like the int comparisons), in `if` / `if`-`else` and `while` /
+`do`-`while` conditions alike.
+
+Faithfulness guard: the two float/double flavors differ only in what either operand being NaN pushes
+(`*cmpl` -1, `*cmpg` +1), so a rendered ordering operator whose true side would capture NaN is not
+what the bytecode computes. `javac` always drops NaN on the false side (`<`/`<=` compile to `*cmpg`,
+`>`/`>=` to `*cmpl`), which reads back exactly; a mismatched pairing — e.g. `!(a < b)`, which is
+*true* on NaN and compiles to `fcmpg` + `iflt` — has no single-operator rendering and bails. A `*cmp`
+whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored
+comparison) also still bails.
+
+```java
+public long max(long a, long b) {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+public double halve(double d) {
+    while (d > 1d) {
+        d = d / 2d;
+    }
+    return d;
+}
+```
+
 Still falling back to the M0 placeholder (see roadmap): `switch`, `try`/`catch`.
 
 ## Supported vs. not (yet)
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
-| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), `lcmp`/`fcmp`/`dcmp`, `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
-| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, null checks, `< 0` vs zero, boolean) | `break` / `continue`, nested / irreducible loops, a side-effecting loop header, `switch`, `try`/`catch`/`finally`, any other non-tree shape |
+| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored comparison), `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
+| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean) | `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a NaN-inexact fused `*cmp` (`!(a < b)`), `switch`, `try`/`catch`/`finally`, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
 Java, just not (yet) a real body.
@@ -314,15 +348,16 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - **Richer loops** — `break` / `continue` (labeled), nested loops, and `for`-loop recovery (folding
   the init / update back into a `for` header instead of rendering as `while`).
 - **Expression polish** — ternary (`?:`) and short-circuit (`&&` / `||`) from small diamonds
-  (string concatenation shipped as M6), enhanced-`for`, `instanceof`, `i++` / `i += n` / `arr[i]++`
-  sugar (the `dup2` stack shuffles), and long/float/double comparisons in conditions.
+  (string concatenation shipped as M6, long/float/double comparisons in conditions as M7),
+  enhanced-`for`, `instanceof`, and `i++` / `i += n` / `arr[i]++` sugar (the `dup2` stack shuffles).
 
 ## Testing
 
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
-  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`) and assert the recovered statements.
+  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`) and assert the recovered
+  statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
   `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton (across this crate's
   fixtures plus `jals-classfile`'s round-trip corpus) and asserts zero syntax errors.
