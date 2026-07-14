@@ -12,6 +12,9 @@ Nd = "Nd"
 # `fo` is a placeholder for a partially-typed member name in completion docs
 # (e.g. `receiver.fo`), not a misspelling of "for"/"of".
 fo = "fo"
+# `nam` is a deliberately misspelled field name in a `deny_unknown_fields` test
+# (jals-config `Distribution`), asserting the typo is rejected; not our typo.
+nam = "nam"
 # `ifle` is the JVM bytecode opcode "if less than or equal" (JVMS §6),
 # modelled as the `Ifle` instruction variant; not a misspelling of "file".
 ifle = "ifle"
