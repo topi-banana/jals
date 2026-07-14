@@ -1,6 +1,7 @@
 //! Integration tests driving the built `jals` binary.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
@@ -175,6 +176,18 @@ fn javac_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Whether a dry-run compile command names `javac` as its program. The `[toolchain]` selector
+/// resolves the tool to either the bare `javac` (found on `PATH`) or an absolute path into a
+/// discovered JDK (`$JAVA_HOME/bin/javac`, `javac.exe` on Windows), so assert on the program's
+/// file name rather than the raw first token.
+fn names_javac(cmd_line: &str) -> bool {
+    cmd_line
+        .split_whitespace()
+        .next()
+        .and_then(|prog| Path::new(prog).file_stem())
+        .is_some_and(|stem| stem == "javac")
+}
+
 #[test]
 fn build_dry_run_prints_javac_command() {
     let dir = project("[package]\nname = \"hello\"\n[build]\nrelease = 21\n");
@@ -186,7 +199,7 @@ fn build_dry_run_prints_javac_command() {
         manifest.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
-    assert!(stdout.starts_with("javac "), "got: {stdout}");
+    assert!(names_javac(&stdout), "got: {stdout}");
     assert!(stdout.contains("-d "), "got: {stdout}");
     assert!(stdout.contains("target/classes"), "got: {stdout}");
     assert!(stdout.contains("--release 21"), "got: {stdout}");
@@ -402,7 +415,7 @@ fn build_known_bin_still_compiles_all_sources() {
         manifest.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
-    assert!(stdout.starts_with("javac "), "got: {stdout}");
+    assert!(names_javac(&stdout), "got: {stdout}");
     assert!(stdout.contains("Main.java"), "got: {stdout}");
 }
 
