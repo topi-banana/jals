@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use jals_config::fmt::Config;
-use jals_config::{Dependency, ManifestParseError, Severity};
+use jals_config::{Dependency, FeatureSet, ManifestParseError, Severity};
 use jals_fs::InMemoryFileTree;
 use jals_hir::{LoweredClasspath, ProjectIndex};
 use wasm_bindgen::JsValue;
@@ -154,9 +154,9 @@ pub enum Msg {
     ModelOpened(String),
     /// The CORS proxy changed (typed in the header); stored for the next dependency resolve.
     SetProxy(String),
-    /// The async dependency resolution finished: the lowered classpath + the target Java version
-    /// (from `[package] edition`) + a status line, or an error.
-    ClasspathResolved(Result<(LoweredClasspath, Option<u32>, String), String>),
+    /// The async dependency resolution finished: the lowered classpath + the resolved feature set
+    /// (from `[package] features`) + a status line, or an error.
+    ClasspathResolved(Result<(LoweredClasspath, FeatureSet, String), String>),
 }
 
 /// The playground's root component. Owns every piece of state; the children are presentational.
@@ -178,11 +178,11 @@ pub struct App {
     deps_cache: Rc<RefCell<InMemoryFileTree>>,
     /// The last dependency-resolution status line shown in the [`Header`], if any.
     deps_status: Option<String>,
-    /// The project's target Java feature version from the last resolved `jals.toml`'s
-    /// `[package] edition`, threaded into the lint [`Config`] so the edition-gated rules
-    /// (`compact-source-file`, `module-import`) fire in the browser. `None` until a manifest with an
-    /// `edition` resolves.
-    target_java_version: Option<u32>,
+    /// The project's resolved language feature set from the last resolved `jals.toml`'s
+    /// `[package] features`, threaded into the lint [`Config`] so the feature-gated rules
+    /// (`compact-source-file`, `module-import`) fire in the browser. Empty until a manifest
+    /// declaring features resolves.
+    feature_set: FeatureSet,
     /// The `jals.toml` editor buffer. Held here (not in the workspace's Java file tree) so it is
     /// never analysed/indexed; its `[dependencies]` are re-resolved on edit.
     manifest_src: String,
@@ -204,10 +204,10 @@ impl App {
     /// workspace already maps each range to Monaco's UTF-16 coordinates, so this only marshals
     /// through [`monaco::Marker::set_diagnostics`].
     fn refresh_markers(&self) {
-        // Fold the resolved `[package] edition` into the lint config so the edition-gated rules
+        // Fold the resolved `[package] features` into the lint config so the feature-gated rules
         // (`compact-source-file`, `module-import`) fire; every other key stays at its default.
         let config = jals_config::lint::Config {
-            target_java_version: self.target_java_version,
+            features: self.feature_set,
             ..Default::default()
         };
         let diags = self.workspace.borrow().analyze_active(&config);
@@ -391,7 +391,7 @@ impl App {
     /// Assemble a parsed `manifest`'s analysis inputs into a lowered classpath, in the browser:
     /// download each remote `[dependencies]` jar with a [`BrowserFetcher`] into the in-memory `cache`,
     /// load the `.class` files, and lower them for the project index. Returns the classpath, the
-    /// target Java version from `[package] edition` (for the edition-gated lint rules), and a
+    /// resolved feature set from `[package] features` (for the feature-gated lint rules), and a
     /// human-readable status line (class/jar counts plus any warnings), or an error message.
     ///
     /// The whole resolution runs against a *snapshot clone* of `cache` so no `RefCell` borrow is held
@@ -401,7 +401,7 @@ impl App {
         manifest: jals_config::Manifest,
         proxy: String,
         cache: Rc<RefCell<InMemoryFileTree>>,
-    ) -> Result<(LoweredClasspath, Option<u32>, String), String> {
+    ) -> Result<(LoweredClasspath, FeatureSet, String), String> {
         let fetcher = BrowserFetcher::new(proxy);
         let mut snapshot = cache.borrow().clone();
         let mut warnings = Vec::new();
@@ -433,7 +433,7 @@ impl App {
                 warnings.join("; ")
             ));
         }
-        Ok((classpath, inputs.target_java_version, status))
+        Ok((classpath, inputs.feature_set, status))
     }
 }
 
@@ -448,7 +448,7 @@ impl Component for App {
             syntax_dump: None,
             deps_cache: Rc::new(RefCell::new(InMemoryFileTree::new())),
             deps_status: None,
-            target_java_version: None,
+            feature_set: FeatureSet::default(),
             manifest_src: ConfigKind::Manifest.seed().to_string(),
             fmt_src: ConfigKind::Fmt.seed().to_string(),
             active_config: None,
@@ -558,9 +558,9 @@ impl Component for App {
             }
             Msg::ClasspathResolved(result) => {
                 match result {
-                    Ok((classpath, target_java_version, status)) => {
+                    Ok((classpath, feature_set, status)) => {
                         self.workspace.borrow_mut().set_classpath(Some(classpath));
-                        self.target_java_version = target_java_version;
+                        self.feature_set = feature_set;
                         self.deps_status = Some(status);
                         // Re-analyse the active file with the external types now in the index — but
                         // only when a Java file is showing, so we never paint Java markers on a

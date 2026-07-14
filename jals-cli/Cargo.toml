@@ -30,7 +30,9 @@ pkg-fmt = "zip"
 anyhow.workspace = true
 ariadne.workspace = true
 clap.workspace = true
-jals-build.workspace = true
+# `native` for the host toolchain (`SubprocessToolchain`): the CLI is the consumer that actually
+# spawns `javac`/`java`. The workspace default is the pure core (`default-features = false`).
+jals-build = { workspace = true, features = ["native"] }
 jals-classpath.workspace = true
 jals-config.workspace = true
 jals-fmt.workspace = true

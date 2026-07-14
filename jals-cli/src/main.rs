@@ -13,10 +13,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-use jals_build::ManifestExt;
-use jals_config::Manifest;
+use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
+use jals_config::{FeatureSet, Manifest};
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 
 use report::Reporter;
@@ -279,10 +279,10 @@ impl LintArgs {
             let mut cfg = discovery.for_dir(&cwd)?;
             let parse = jals_syntax::Parse::parse(&src);
             // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
-            // so `type-mismatch` sees external library types, and its edition (`[package] edition`) so
-            // the edition-gated rules run — exactly as the multi-file path does.
+            // so `type-mismatch` sees external library types, and its feature set (`[package]
+            // features`) so the feature-gated rules run — exactly as the multi-file path does.
             let ctx = ProjectLintContext::load(&cwd);
-            cfg.target_java_version = ctx.target_java_version;
+            cfg.features = ctx.feature_set;
             let index = ctx.build_index(&[(FileId(0), parse.syntax())]);
             let out = jals_lint::LintOutput::lint_parse_with_index(
                 &parse,
@@ -316,15 +316,15 @@ impl LintArgs {
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
             // Discover the project once: its classpath (folded into the cross-file `type-mismatch`
             // index so a method whose argument type comes from a dependency jar resolves) and its
-            // edition (`[package] edition`, shared across the project's files), from a single manifest
-            // parse.
+            // feature set (`[package] features`, shared across the project's files), from a single
+            // manifest parse.
             let ctx = ProjectLintContext::load(&start_dir);
             let index = ctx.build_index(&inputs);
 
             for (i, (path, src, parse)) in files.iter().enumerate() {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 let mut cfg = discovery.for_dir(parent)?;
-                cfg.target_java_version = ctx.target_java_version;
+                cfg.features = ctx.feature_set;
                 let out = jals_lint::LintOutput::lint_parse_with_index(
                     parse,
                     &cfg,
@@ -375,25 +375,20 @@ impl BuildArgs {
             jals_classpath::ProjectInputOptions::Compile,
             |message| eprintln!("warning: {message}"),
         );
-        let invocation = jals_build::Invocation::build(
-            &manifest,
-            &root,
-            &sources,
-            &inputs.source_dep_sources,
-            &inputs.dependency_jars,
-            App::path_sep(),
-        );
+        let request = App::compile_request(&manifest, &root, &sources, &inputs);
+        // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
+        // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
+        let compiler = <dyn Compiler>::select(&manifest);
 
         if self.dry_run || self.verbose {
-            println!("{}", invocation.display_command());
+            println!("{}", compiler.describe_compile(&request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
-        let javac = App::jdk_tool("JAVAC", "javac");
-        let status = App::spawn_tool(&javac, &invocation.args)?;
-        Ok(App::to_exit_code(status))
+        let outcome = compiler.compile(&request).map_err(|e| anyhow!("{e}"))?;
+        Ok(App::outcome_exit_code(outcome))
     }
 }
 
@@ -421,41 +416,37 @@ impl RunArgs {
             jals_classpath::ProjectInputOptions::Compile,
             |message| eprintln!("warning: {message}"),
         );
-        let sep = App::path_sep();
-        let build_inv = jals_build::Invocation::build(
-            &manifest,
-            &root,
-            &sources,
-            &inputs.source_dep_sources,
-            &inputs.dependency_jars,
-            sep,
-        );
-        let run_inv = jals_build::Invocation::run(
-            &manifest,
-            &root,
-            &main_class,
-            &self.args,
-            &inputs.dependency_jars,
-            sep,
-        );
+        let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
+        let run_request = jals_build::RunRequest {
+            manifest: &manifest,
+            project_root: &root,
+            main_class: &main_class,
+            program_args: &self.args,
+            extra_classpath: &inputs.dependency_jars,
+        };
+        // Each step's backend is selected independently from its own `[toolchain]` enum:
+        // `"builtin"` is the in-process dummy; anything else spawns `javac`/`java` per
+        // `compiler`/`runtime` (each: env override → discovered JDK → `$JAVA_HOME` → `PATH`).
+        let compiler = <dyn Compiler>::select(&manifest);
+        let runtime = <dyn Runtime>::select(&manifest);
 
         if self.dry_run || self.verbose {
-            println!("{}", build_inv.display_command());
-            println!("{}", run_inv.display_command());
+            println!("{}", compiler.describe_compile(&compile_request));
+            println!("{}", runtime.describe_run(&run_request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
         // Compile first; only run when compilation succeeds.
-        let javac = App::jdk_tool("JAVAC", "javac");
-        let build_status = App::spawn_tool(&javac, &build_inv.args)?;
-        if !build_status.success() {
-            return Ok(App::to_exit_code(build_status));
+        let build_outcome = compiler
+            .compile(&compile_request)
+            .map_err(|e| anyhow!("{e}"))?;
+        if !build_outcome.success() {
+            return Ok(App::outcome_exit_code(build_outcome));
         }
-        let java = App::jdk_tool("JAVA", "java");
-        let run_status = App::spawn_tool(&java, &run_inv.args)?;
-        Ok(App::to_exit_code(run_status))
+        let run_outcome = runtime.run(&run_request).map_err(|e| anyhow!("{e}"))?;
+        Ok(App::outcome_exit_code(run_outcome))
     }
 }
 
@@ -541,14 +532,14 @@ impl InitArgs {
 
 /// The project context the linter folds in for the `jals.toml` discovered upward from `start_dir`:
 /// its lowered classpath (so the cross-file `type-mismatch` rule resolves external library types) and
-/// the target Java feature version from `[package] edition` (so edition-gated rules like
+/// the resolved language feature set from `[package] features` (so feature-gated rules like
 /// `compact-source-file` run). Both come from a **single** best-effort assembly of the project's
-/// analysis inputs; a missing or malformed manifest yields an empty classpath and no edition — a
-/// malformed manifest is `jals build`'s business, not lint's.
+/// analysis inputs; a missing or malformed manifest yields an empty classpath and an empty feature
+/// set — a malformed manifest is `jals build`'s business, not lint's.
 #[derive(Default)]
 struct ProjectLintContext {
     classpath: LoweredClasspath,
-    target_java_version: Option<u32>,
+    feature_set: FeatureSet,
 }
 
 impl ProjectLintContext {
@@ -563,8 +554,8 @@ impl ProjectLintContext {
         let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
         // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
-        // `type-mismatch` index) and the `[package] edition`. An unreadable entry / failed download is
-        // reported on stderr and skipped, never an error.
+        // `type-mismatch` index) and the `[package] features`. An unreadable entry / failed download
+        // is reported on stderr and skipped, never an error.
         let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
             &manifest,
             root,
@@ -573,7 +564,7 @@ impl ProjectLintContext {
         );
         Self {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
-            target_java_version: inputs.target_java_version,
+            feature_set: inputs.feature_set,
         }
     }
 
@@ -633,43 +624,29 @@ impl App {
         Ok(sources)
     }
 
-    /// The platform classpath separator.
-    const fn path_sep() -> char {
-        if cfg!(windows) { ';' } else { ':' }
-    }
-
-    /// Resolves a JDK tool (`javac`/`java`): honor `$<env>` first, then `$JAVA_HOME/bin/<tool>`, and
-    /// finally fall back to the bare tool name on `PATH`.
-    fn jdk_tool(env: &str, tool: &str) -> PathBuf {
-        if let Some(explicit) = std::env::var_os(env) {
-            return PathBuf::from(explicit);
+    /// The compile inputs shared by `jals build` and `jals run`: the manifest plus its discovered
+    /// sources, with the resolved dependency jars on the classpath and the `git`/`path` source
+    /// dependencies' `.java` compiled alongside — one place that wires `ProjectInputs` into a
+    /// [`CompileRequest`](jals_build::CompileRequest).
+    fn compile_request<'a>(
+        manifest: &'a Manifest,
+        project_root: &'a Path,
+        sources: &'a [PathBuf],
+        inputs: &'a jals_classpath::ProjectInputs,
+    ) -> jals_build::CompileRequest<'a> {
+        jals_build::CompileRequest {
+            manifest,
+            project_root,
+            sources,
+            extra_sources: &inputs.source_dep_sources,
+            extra_classpath: &inputs.dependency_jars,
         }
-        if let Some(home) = std::env::var_os("JAVA_HOME") {
-            let candidate = Path::new(&home).join("bin").join(tool);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-        PathBuf::from(tool)
     }
 
-    /// Spawns `program` with `args`, inheriting stdio so the tool's diagnostics pass straight through.
-    fn spawn_tool(program: &Path, args: &[String]) -> Result<std::process::ExitStatus> {
-        std::process::Command::new(program)
-            .args(args)
-            .status()
-            .with_context(|| {
-                format!(
-                    "failed to spawn `{}` (is a JDK installed and on PATH?)",
-                    program.display()
-                )
-            })
-    }
-
-    /// Maps a process exit status to a CLI [`ExitCode`]: 0 succeeds, any other code propagates, and a
-    /// signal-terminated process fails with code 1.
-    fn to_exit_code(status: std::process::ExitStatus) -> ExitCode {
-        match status.code() {
+    /// Maps a toolchain [`BuildOutcome`](jals_build::BuildOutcome) to a CLI [`ExitCode`]: 0 succeeds,
+    /// any other code propagates, and a signal-terminated process (no code) fails with code 1.
+    fn outcome_exit_code(outcome: jals_build::BuildOutcome) -> ExitCode {
+        match outcome.code {
             Some(0) => ExitCode::SUCCESS,
             // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails
             // as 1.

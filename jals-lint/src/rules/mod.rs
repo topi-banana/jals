@@ -5,12 +5,13 @@
 //! parsed CST, runs every enabled rule, and stamps each [`Finding`] with the rule name and the
 //! severity resolved from configuration. Rules never mutate the tree and never panic.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use jals_config::Feature;
 use jals_hir::Resolved;
-use jals_syntax::ast::{AstNode, SourceFile};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::IndexCtx;
@@ -66,25 +67,37 @@ impl Finding {
     }
 }
 
-/// The version gate shared by the edition-gated ([`Checker::Versioned`]) rules.
-pub(crate) struct VersionGate;
+/// Shared message builder for the feature-gated ([`Checker::Gated`]) rules. The feature-gating
+/// itself lives in the rule driver ([`crate::LintOutput::lint_node`]), which runs a gated rule's
+/// `find` only when the guarded [`Feature`] is absent from the project's feature set, and stamps
+/// this message on each flagged node — so a rule need only carry the detector, not the gate or
+/// the message.
+pub(crate) struct FeatureGate;
 
-impl VersionGate {
-    /// The shared preamble of an edition-gated ([`Checker::Versioned`]) rule: gate on the project's
-    /// target Java version, then cast the root to a [`SourceFile`]. Returns `Some((version, file))`
-    /// — the target feature version to name in the diagnostic and the file to scan — only when a
-    /// feature that stabilized in `stable_in` is still a *preview* at the target
-    /// (`target_java_version` is declared and *below* `stable_in`). Returns `None` (so the rule
-    /// reports nothing) when no edition is declared, the target is already at/above `stable_in`, or
-    /// the root is not a source file.
-    pub(crate) fn source_file(
-        target_java_version: Option<u32>,
-        stable_in: u32,
-        root: &SyntaxNode,
-    ) -> Option<(u32, SourceFile)> {
-        let version = target_java_version.filter(|&v| v < stable_in)?;
-        let file = SourceFile::cast(root.clone())?;
-        Some((version, file))
+impl FeatureGate {
+    /// The diagnostic message for a use of the gated `feature`: `subject` names the flagged
+    /// construct (a plural noun phrase, [`Checker::Gated`]'s `subject`), the stabilizing release
+    /// preset comes from [`Feature::stabilized_in`] — the single place that fact lives — and the
+    /// fix names the two `[package] features` opt-ins (the whole release preset, or just this
+    /// feature). The driver phrases every gated rule's message identically with this, built once
+    /// per file that has findings.
+    pub(crate) fn preview_message(feature: Feature, subject: &str) -> String {
+        let name = feature.config_name();
+        feature.stabilized_in().map_or_else(
+            || {
+                format!(
+                    "{subject} are a jals dialect feature; to use them, add `\"{name}\"` to \
+                     `[package] features`"
+                )
+            },
+            |preset| {
+                let preset = preset.config_name();
+                format!(
+                    "{subject} are a preview feature before `{preset}`; to use them, add \
+                     `\"{preset}\"` or `\"{name}\"` to `[package] features`"
+                )
+            },
+        )
     }
 }
 
@@ -101,11 +114,21 @@ pub(crate) enum Checker {
     /// project-wide symbol index when the caller supplies one ([`IndexCtx`]); with no index it
     /// falls back to the file-local behavior. The basis for cross-file type checking.
     Indexed(fn(&SyntaxNode, &Resolved, Option<IndexCtx>) -> Vec<Finding>),
-    /// A syntactic rule gated on the project's target Java version (feature release), threaded from
-    /// the host via [`Config::target_java_version`](crate::Config::target_java_version). `None`
-    /// disables the gate (the rule reports nothing), so an edition-specific check never fires for a
-    /// project that did not declare its edition.
-    Versioned(fn(&SyntaxNode, Option<u32>) -> Vec<Finding>),
+    /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
+    /// names the [`Feature`] it guards, and the driver runs `find` only when the set does not
+    /// [`permit`](jals_config::FeatureSet::permits) that feature (threaded from the host via
+    /// [`Config::features`](crate::Config::features)) — so an empty set (no `[package] features`
+    /// declared) never fires. The driver builds the shared gate message
+    /// ([`FeatureGate::preview_message`] from `feature` + `subject`) and stamps it on each flagged
+    /// node, so the detector is pure syntax location.
+    Gated {
+        /// The language feature this rule guards; its findings are reported only when it is disabled.
+        feature: Feature,
+        /// The flagged construct as a plural noun phrase, spliced into the gate message.
+        subject: &'static str,
+        /// The detector: the flagged syntax nodes. Run only when `feature` is disabled.
+        find: fn(&SyntaxNode) -> Vec<SyntaxNode>,
+    },
 }
 
 /// A rule: its identity and its checker.

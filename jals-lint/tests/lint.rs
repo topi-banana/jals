@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_config::Severity;
 use jals_config::lint::Config;
+use jals_config::{Feature, FeatureSet, Severity};
 use jals_lint::LintOutput;
 
 /// Render the diagnostics (then parser errors) of a default-config lint run as one line each:
@@ -311,11 +311,12 @@ fn type_mismatch_return_flagged() {
 
 // ===== compact-source-file =====
 
-/// Lint `src` with the project's target Java version set to `version` (the host injects this from
-/// `[package] edition`), rendered like [`lint`].
-fn lint_edition(src: &str, version: Option<u32>) -> String {
+/// Lint `src` with the project's feature set resolved from the given `[package] features` list
+/// (the host injects this from the manifest), rendered like [`lint`]. An empty list models a
+/// manifest that declares no features, which leaves every gate off.
+fn lint_with_features(src: &str, features: &[Feature]) -> String {
     let config = Config {
-        target_java_version: version,
+        features: FeatureSet::resolve(features),
         ..Default::default()
     };
     render(&LintOutput::lint_source(src, &config))
@@ -325,41 +326,56 @@ fn lint_edition(src: &str, version: Option<u32>) -> String {
 fn compact_source_file_top_level_main_flagged_on_java24() {
     // A top-level `main` (JEP 512) is only a preview feature before Java 25.
     expect![[r#"
-        compact-source-file:0..14: top-level declarations like `main` are a preview feature before Java 25; this project targets Java 24, so declare it inside a class or set `edition = "java25"`
+        compact-source-file:0..14: top-level declarations like `main` are a preview feature before `java25`; to use them, add `"java25"` or `"compact-source-files"` to `[package] features`
     "#]]
-    .assert_eq(&lint_edition("void main() {}", Some(24)));
+    .assert_eq(&lint_with_features("void main() {}", &[Feature::Java24]));
 }
 
 #[test]
 fn compact_source_file_top_level_field_flagged_on_java24() {
     // Any top-level member — not just `main` — is an implicit-class declaration.
     expect![[r#"
-        compact-source-file:0..14: top-level declarations like `main` are a preview feature before Java 25; this project targets Java 24, so declare it inside a class or set `edition = "java25"`
+        compact-source-file:0..14: top-level declarations like `main` are a preview feature before `java25`; to use them, add `"java25"` or `"compact-source-files"` to `[package] features`
     "#]]
-    .assert_eq(&lint_edition("int count = 0;", Some(24)));
+    .assert_eq(&lint_with_features("int count = 0;", &[Feature::Java24]));
 }
 
 #[test]
 fn compact_source_file_allowed_on_java25() {
-    assert_eq!(lint_edition("void main() {}", Some(25)), "");
+    assert_eq!(lint_with_features("void main() {}", &[Feature::Java25]), "");
 }
 
 #[test]
-fn compact_source_file_not_gated_without_edition() {
-    // No declared edition (the common case): the syntax is not flagged.
-    assert_eq!(lint_edition("void main() {}", None), "");
+fn compact_source_file_allowed_with_individual_feature() {
+    // The single-feature opt-in works without moving to the java25 preset.
+    assert_eq!(
+        lint_with_features(
+            "void main() {}",
+            &[Feature::Java24, Feature::CompactSourceFiles]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn compact_source_file_not_gated_without_features() {
+    // No declared features (the common case): the syntax is not flagged.
+    assert_eq!(lint_with_features("void main() {}", &[]), "");
 }
 
 #[test]
 fn compact_source_file_class_member_main_ok_on_java24() {
     // A `main` inside a class is ordinary Java, never a compact source file.
-    assert_eq!(lint_edition("class C { void main() {} }", Some(24)), "");
+    assert_eq!(
+        lint_with_features("class C { void main() {} }", &[Feature::Java24]),
+        ""
+    );
 }
 
 #[test]
 fn compact_source_file_respects_allow_config() {
     let mut config = Config {
-        target_java_version: Some(24),
+        features: FeatureSet::resolve(&[Feature::Java24]),
         ..Default::default()
     };
     config
@@ -381,34 +397,46 @@ fn compact_source_file_respects_allow_config() {
 fn module_import_flagged_on_java24() {
     // `import module M;` (JEP 511) is only a preview feature before Java 25.
     expect![[r#"
-        module-import:0..24: module import declarations (`import module …;`) are a preview feature before Java 25; this project targets Java 24, so import the individual types or set `edition = "java25"`
+        module-import:0..24: module import declarations (`import module …;`) are a preview feature before `java25`; to use them, add `"java25"` or `"module-imports"` to `[package] features`
     "#]]
-    .assert_eq(&lint_edition("import module java.base;", Some(24)));
+    .assert_eq(&lint_with_features(
+        "import module java.base;",
+        &[Feature::Java24],
+    ));
 }
 
 #[test]
 fn module_import_allowed_on_java25() {
-    assert_eq!(lint_edition("import module java.base;", Some(25)), "");
+    assert_eq!(
+        lint_with_features("import module java.base;", &[Feature::Java25]),
+        ""
+    );
 }
 
 #[test]
-fn module_import_not_gated_without_edition() {
-    // No declared edition (the common case): the syntax is not flagged.
-    assert_eq!(lint_edition("import module java.base;", None), "");
+fn module_import_not_gated_without_features() {
+    // No declared features (the common case): the syntax is not flagged.
+    assert_eq!(lint_with_features("import module java.base;", &[]), "");
 }
 
 #[test]
 fn ordinary_import_not_flagged_on_java24() {
     // An ordinary type import — including one of a package/type literally named `module` — is not
     // a module import declaration (`is_module()` stays false), so it is never flagged.
-    assert_eq!(lint_edition("import java.util.List;", Some(24)), "");
-    assert_eq!(lint_edition("import module.foo.Bar;", Some(24)), "");
+    assert_eq!(
+        lint_with_features("import java.util.List;", &[Feature::Java24]),
+        ""
+    );
+    assert_eq!(
+        lint_with_features("import module.foo.Bar;", &[Feature::Java24]),
+        ""
+    );
 }
 
 #[test]
 fn module_import_respects_allow_config() {
     let mut config = Config {
-        target_java_version: Some(24),
+        features: FeatureSet::resolve(&[Feature::Java24]),
         ..Default::default()
     };
     config

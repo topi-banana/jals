@@ -23,7 +23,7 @@ use jals_config::lint::Config;
 use jals_hir::{FileId, ProjectIndex, Resolved};
 use jals_syntax::{Parse, SyntaxNode};
 
-use rules::Checker;
+use rules::{Checker, FeatureGate, Finding};
 
 pub use diagnostic::{Diagnostic, LintOutput};
 
@@ -111,7 +111,24 @@ impl LintOutput {
                     resolved.get_or_init(|| Resolved::resolve_node(root)),
                     index,
                 ),
-                Checker::Versioned(check) => check(root, config.target_java_version),
+                // Run a feature-gated rule's detector only when the project's set does not permit
+                // its guarded feature (`FeatureSet::permits` owns the empty-set exemption),
+                // stamping the shared gate message on each node the detector located.
+                Checker::Gated {
+                    feature,
+                    subject,
+                    find,
+                } => {
+                    if config.features.permits(feature) {
+                        Vec::new()
+                    } else {
+                        let message = FeatureGate::preview_message(feature, subject);
+                        find(root)
+                            .iter()
+                            .map(|node| Finding::at_node(node, message.clone()))
+                            .collect()
+                    }
+                }
             };
             for finding in findings {
                 diagnostics.push(Diagnostic::new(rule.name, severity, finding));

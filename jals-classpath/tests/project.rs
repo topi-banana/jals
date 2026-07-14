@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 
 use jals_classpath::{ProjectInputOptions, ProjectInputs};
-use jals_config::Manifest;
+use jals_config::{Feature, FeatureSet, Manifest};
 
 /// `Box.class` (the same fixture the load tests / `jals-hir`'s classpath bridge use).
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
@@ -21,25 +21,22 @@ fn write_jar(path: &Path) {
     zip.finish().unwrap();
 }
 
-/// A manifest with a single local-jar `[dependencies]` entry pointing at `jar`, optionally declaring
-/// a `[package] edition`.
-fn manifest_with_jar(jar: &Path, edition: Option<&str>) -> Manifest {
-    let edition_line = edition
-        .map(|e| format!("edition = \"{e}\"\n"))
-        .unwrap_or_default();
+/// A manifest with a single local-jar `[dependencies]` entry pointing at `jar`; `package_extra` is
+/// spliced verbatim into `[package]` (e.g. a `features = […]` line), `""` for none.
+fn manifest_with_jar(jar: &Path, package_extra: &str) -> Manifest {
     let text = format!(
-        "[package]\nname = \"demo\"\n{edition_line}\n[dependencies]\nbox = {{ jar = \"{}\" }}\n",
+        "[package]\nname = \"demo\"\n{package_extra}\n[dependencies]\nbox = {{ jar = \"{}\" }}\n",
         jar.display()
     );
     text.parse::<Manifest>().expect("parse manifest")
 }
 
 #[test]
-fn analysis_loads_the_classpath_and_reads_edition() {
+fn analysis_loads_the_classpath_and_reads_features() {
     let dir = tempfile::tempdir().unwrap();
     let jar = dir.path().join("box.jar");
     write_jar(&jar);
-    let manifest = manifest_with_jar(&jar, Some("java25"));
+    let manifest = manifest_with_jar(&jar, "features = [\"java25\"]\n");
 
     let inputs = ProjectInputs::assemble_project_inputs(
         &manifest,
@@ -54,8 +51,9 @@ fn analysis_loads_the_classpath_and_reads_edition() {
     // Analysis pulls no navigation source and no git/path source deps.
     assert!(inputs.library_sources.is_empty());
     assert!(inputs.source_dep_sources.is_empty());
-    // `[package] edition = "java25"` threads through for the edition-gated lint rules.
-    assert_eq!(inputs.target_java_version, Some(25));
+    // `[package] features = ["java25"]` threads through as the resolved feature set for the
+    // feature-gated lint rules.
+    assert_eq!(inputs.feature_set, FeatureSet::resolve(&[Feature::Java25]));
 }
 
 #[test]
@@ -63,7 +61,7 @@ fn compile_resolves_jars_without_loading_classes() {
     let dir = tempfile::tempdir().unwrap();
     let jar = dir.path().join("box.jar");
     write_jar(&jar);
-    let manifest = manifest_with_jar(&jar, None);
+    let manifest = manifest_with_jar(&jar, "");
 
     let inputs = ProjectInputs::assemble_project_inputs(
         &manifest,
@@ -78,5 +76,5 @@ fn compile_resolves_jars_without_loading_classes() {
     assert!(inputs.classpath_classes.is_empty());
     // No `git`/`path` source dependencies in this manifest.
     assert!(inputs.source_dep_sources.is_empty());
-    assert_eq!(inputs.target_java_version, None);
+    assert!(inputs.feature_set.is_empty());
 }
