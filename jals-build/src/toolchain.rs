@@ -399,6 +399,7 @@ pub trait Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
 
     fn install(home: &str, dist: Option<&str>, version: Option<u32>) -> JdkInstall {
         JdkInstall {
@@ -415,6 +416,12 @@ mod tests {
             home: None,
             project_root: Path::new("/proj"),
         }
+    }
+
+    #[test]
+    fn tools_use_their_distinct_environment_overrides() {
+        assert_eq!(Tool::Javac.env_var(), "JAVAC");
+        assert_eq!(Tool::Java.env_var(), "JAVA");
     }
 
     #[test]
@@ -531,6 +538,25 @@ mod tests {
     }
 
     #[test]
+    fn distribution_requires_both_name_and_version_to_match() {
+        let installs = vec![
+            install("/jvm/temurin-17", Some("temurin"), Some(17)),
+            install("/jvm/openjdk-21", Some("openjdk"), Some(21)),
+        ];
+        let out = resolver(&installs, None).resolve(
+            Tool::Java,
+            Some(ToolSpec::Distribution {
+                name: Some("temurin"),
+                version: Some(21),
+            }),
+            None,
+        );
+
+        assert!(out.preferred.is_empty());
+        assert_eq!(out.fallback, PathBuf::from("java"));
+    }
+
+    #[test]
     fn bare_version_matches_any_distribution() {
         let installs = vec![
             install("/jvm/openjdk-17", Some("openjdk"), Some(17)),
@@ -588,6 +614,26 @@ mod tests {
         assert!(BuildOutcome { code: Some(0) }.success());
         assert!(!BuildOutcome { code: Some(1) }.success());
         assert!(!BuildOutcome { code: None }.success());
+    }
+
+    #[test]
+    fn toolchain_errors_display_context_and_expose_their_source() {
+        let error = ToolchainError::Spawn {
+            program: "/missing/javac".to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not installed"),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("failed to spawn `/missing/javac`"));
+        assert!(message.contains("JDK installed"));
+        assert_eq!(error.source().unwrap().to_string(), "not installed");
+
+        let unsupported = ToolchainError::Unsupported("running Java");
+        assert_eq!(
+            unsupported.to_string(),
+            "toolchain does not support running Java"
+        );
+        assert!(unsupported.source().is_none());
     }
 
     #[test]
