@@ -39,3 +39,27 @@ impl fmt::Display for FsError {
 }
 
 impl core::error::Error for FsError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    #[test]
+    fn display_renders_each_variant() {
+        assert_eq!(
+            FsError::NotFound("/x".into()).to_string(),
+            "no such file or directory: /x"
+        );
+        assert_eq!(
+            FsError::NotADirectory("/x".into()).to_string(),
+            "not a directory: /x"
+        );
+        assert_eq!(FsError::NotAFile("/x".into()).to_string(), "not a file: /x");
+        assert_eq!(
+            FsError::InvalidUtf8("/x".into()).to_string(),
+            "file is not valid UTF-8: /x"
+        );
+        assert_eq!(FsError::Io("boom".into()).to_string(), "I/O error: boom");
+    }
+}

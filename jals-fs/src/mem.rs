@@ -198,6 +198,16 @@ mod tests {
     }
 
     #[test]
+    fn root_is_a_directory_and_lists_top_level() {
+        let fs = sample();
+        // The root of an absolute tree is always a directory (`is_root`).
+        assert!(fs.is_dir("/"));
+        // `normalize("/")` keeps the bare root key, so its prefix is `/` and the top-level entries
+        // are listed (a lost root key would strip the leading slash and match nothing).
+        assert_eq!(fs.read_dir("/").unwrap(), vec!["/proj".to_owned()]);
+    }
+
+    #[test]
     fn read_dir_lists_sorted_full_paths_incl_subdirs() {
         let fs = sample();
         assert_eq!(

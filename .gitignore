@@ -1,5 +1,8 @@
 /target
 /jals-playground/dist
+# cargo-mutants output (mutation testing runs — regenerated locally / in CI).
+/mutants.out
+/mutants.out.old
 # Generated golden corpus (derivatives of GPL'd OpenJDK sources — do not commit).
 /jals-tests/sources/openjdk-gjf
 # Scratch dirs the golden generator swaps from (same fs as the corpus, for atomic rename).
