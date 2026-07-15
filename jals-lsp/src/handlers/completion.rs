@@ -1,94 +1,20 @@
 //! Completion (`textDocument/completion`).
 //!
-//! Two contexts, dispatched on [`jals_hir::ProjectIndex::at_member_access`]:
-//!
-//! - **Member access** (`receiver.` / a partial `receiver.fo`): the fields and methods reachable on
-//!   the receiver's type ([`jals_hir::ProjectIndex::member_completions`]). No keywords.
-//! - **Bare identifier** (anywhere else): the in-scope bindings and project type names
-//!   ([`jals_hir::ProjectIndex::scope_completions`]), plus the Java keywords (added here, the only non-semantic
-//!   part).
-//!
-//! Both semantic halves need the project member model. The cross-file path lives on the workspace
-//! ([`Workspace::completions`](crate::state::Workspace::completions)), which holds the index; this
-//! module holds the shared dispatch ([`Completions::completions`]), the **file-local** fallback
-//! ([`Completions::completions_local`], which builds a single-file index so the document's own types
-//! complete), and [`Completions::completions_to_lsp`] — the mapping from `jals-hir`'s pure shape to
-//! the LSP payload.
+//! [`jals_editor::ProjectQueries`] owns the member/bare dispatch, semantic candidates, and Java
+//! keywords. This adapter maps its protocol-neutral completion categories to LSP kinds. Documents
+//! outside a workspace use the same query interface over a stdlib-aware one-file project.
 
 use async_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
-use jals_hir::{Completion, DefKind, FileId, ProjectIndex, Resolved};
-use jals_syntax::{Parse, SyntaxNode};
+use jals_editor::{Completion, CompletionKind};
+use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
-
-/// The Java reserved words, literals, and restricted keywords offered at a bare identifier position.
-/// A flat list — the editor filters by the typed prefix; positions are not gated.
-const JAVA_KEYWORDS: &[&str] = &[
-    "abstract",
-    "assert",
-    "boolean",
-    "break",
-    "byte",
-    "case",
-    "catch",
-    "char",
-    "class",
-    "const",
-    "continue",
-    "default",
-    "do",
-    "double",
-    "else",
-    "enum",
-    "extends",
-    "final",
-    "finally",
-    "float",
-    "for",
-    "goto",
-    "if",
-    "implements",
-    "import",
-    "instanceof",
-    "int",
-    "interface",
-    "long",
-    "native",
-    "new",
-    "package",
-    "private",
-    "protected",
-    "public",
-    "return",
-    "short",
-    "static",
-    "strictfp",
-    "super",
-    "switch",
-    "synchronized",
-    "this",
-    "throw",
-    "throws",
-    "transient",
-    "try",
-    "void",
-    "volatile",
-    "while",
-    "true",
-    "false",
-    "null",
-    "var",
-    "yield",
-    "record",
-    "sealed",
-    "permits",
-];
 
 /// Completion (`textDocument/completion`).
 pub(crate) struct Completions;
 
 impl Completions {
-    /// Maps `jals-hir`'s pure completions to LSP `CompletionItem`s: the name is the label, its kind
+    /// Maps shared completions to LSP `CompletionItem`s: the name is the label, its kind
     /// drives the item icon, and its rendered type / signature (when any) is the detail shown beside it.
     pub(crate) fn completions_to_lsp(completions: Vec<Completion>) -> Vec<CompletionItem> {
         completions
@@ -102,53 +28,22 @@ impl Completions {
             .collect()
     }
 
-    /// The LSP completion-item kind for a completion's [`DefKind`] — the icon the editor shows.
-    const fn item_kind(kind: DefKind) -> CompletionItemKind {
-        use DefKind::{
-            AnnotationType, CatchParam, Class, Constructor, Enum, EnumConstant, Field, Interface,
-            LambdaParam, Local, Method, Param, PatternVar, Record, Resource, TypeParam,
+    /// The LSP completion-item kind for a protocol-neutral completion category.
+    const fn item_kind(kind: CompletionKind) -> CompletionItemKind {
+        use CompletionKind::{
+            Class, Enum, EnumMember, Field, Interface, Keyword, Method, TypeParameter, Variable,
         };
         match kind {
-            Method | Constructor => CompletionItemKind::METHOD,
+            Method => CompletionItemKind::METHOD,
             Field => CompletionItemKind::FIELD,
-            EnumConstant => CompletionItemKind::ENUM_MEMBER,
-            Local | Param | LambdaParam | CatchParam | Resource | PatternVar => {
-                CompletionItemKind::VARIABLE
-            }
-            TypeParam => CompletionItemKind::TYPE_PARAMETER,
-            Class | Record => CompletionItemKind::CLASS,
-            Interface | AnnotationType => CompletionItemKind::INTERFACE,
+            EnumMember => CompletionItemKind::ENUM_MEMBER,
+            Variable => CompletionItemKind::VARIABLE,
+            TypeParameter => CompletionItemKind::TYPE_PARAMETER,
+            Class => CompletionItemKind::CLASS,
+            Interface => CompletionItemKind::INTERFACE,
             Enum => CompletionItemKind::ENUM,
+            Keyword => CompletionItemKind::KEYWORD,
         }
-    }
-
-    /// The completions at byte `offset`, dispatched on context: members after a `.`, otherwise the
-    /// in-scope bindings and project types plus the Java keywords. The shared core of the workspace and
-    /// file-local entry points.
-    pub(crate) fn completions(
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        index: &ProjectIndex,
-        file: FileId,
-        offset: usize,
-    ) -> Vec<CompletionItem> {
-        if jals_hir::ProjectIndex::at_member_access(root, offset) {
-            Self::completions_to_lsp(index.member_completions(root, resolved, file, offset))
-        } else {
-            let mut items =
-                Self::completions_to_lsp(index.scope_completions(root, resolved, file, offset));
-            items.extend(Self::keyword_items());
-            items
-        }
-    }
-
-    /// The Java keywords as LSP completion items.
-    fn keyword_items() -> impl Iterator<Item = CompletionItem> {
-        JAVA_KEYWORDS.iter().map(|keyword| CompletionItem {
-            label: (*keyword).to_owned(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            ..CompletionItem::default()
-        })
     }
 
     /// The completions at `position`, computed over this one file by building a single-file project
@@ -161,13 +56,9 @@ impl Completions {
         line_index: &LineIndex,
         position: Position,
     ) -> Vec<CompletionItem> {
-        let root = parse.syntax();
         let offset = u32::from(line_index.offset(text, position)) as usize;
-        let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
-            .build();
-        let resolved = jals_hir::Resolved::resolve_node(&root);
-        Self::completions(&root, &resolved, &index, FileId(0), offset)
+        let project = super::OneFileQueries::new(parse);
+        Self::completions_to_lsp(project.queries().completions(offset))
     }
 }
 

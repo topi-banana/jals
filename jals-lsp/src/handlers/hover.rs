@@ -1,10 +1,8 @@
 //! Hover (`textDocument/hover`): show the inferred type of the expression under the cursor.
 //!
-//! Type inference resolves reference type names against the project, so the cross-file path lives on
-//! the workspace ([`Workspace::hover`](crate::state::Workspace::hover)), which holds the index. This
-//! module holds the **file-local** fallback ([`hover_local`]) for a document outside any indexed
-//! project, plus [`type_hover`] — the shared formatting both paths use to render a [`Ty`] as a
-//! Markdown hover.
+//! [`jals_editor::ProjectQueries`] owns inference and unknown suppression. This adapter renders its
+//! [`Ty`] as LSP Markdown; the fallback uses the same query interface over a stdlib-aware one-file
+//! project.
 
 use async_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 use jals_hir::Ty;
@@ -39,11 +37,9 @@ impl Hovers {
         line_index: &LineIndex,
         position: Position,
     ) -> Option<Hover> {
-        let root = parse.syntax();
-        let resolved = jals_hir::Resolved::resolve_node(&root);
-        let inference = jals_hir::TypeInference::infer_node(&root, &resolved);
         let offset = u32::from(line_index.offset(text, position)) as usize;
-        Self::type_hover(inference.type_at(offset)?)
+        let project = super::OneFileQueries::new(parse);
+        Self::type_hover(&project.queries().hover(offset)?)
     }
 }
 

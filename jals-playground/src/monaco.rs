@@ -6,6 +6,7 @@
 //! switching files, applying a format, repainting diagnostics — through these functions.
 
 use jals_config::Severity;
+use jals_editor::CompletionKind;
 use jals_hir::DefKind;
 use wasm_bindgen::prelude::*;
 
@@ -152,27 +153,32 @@ extern "C" {
 /// The Monaco numeric kinds a `jals-hir` [`DefKind`] maps to — the icon vocabularies the
 /// completion and document-symbol providers marshal with.
 pub trait DefKindExt {
-    /// The Monaco `CompletionItemKind` (the item icon) for a completion's [`DefKind`].
-    fn completion_kind(self) -> u32;
     /// The Monaco `SymbolKind` (the outline icon) for a document symbol's [`DefKind`].
     fn symbol_kind(self) -> u32;
 }
 
-impl DefKindExt for DefKind {
+/// Monaco mapping for the shared protocol-neutral completion categories.
+pub trait CompletionKindExt {
+    fn completion_kind(self) -> u32;
+}
+
+impl CompletionKindExt for CompletionKind {
     fn completion_kind(self) -> u32 {
-        use DefKind::*;
         match self {
-            Method | Constructor => 0, // Method
-            Field => 3,                // Field
-            EnumConstant => 16,        // EnumMember
-            Local | Param | LambdaParam | CatchParam | Resource | PatternVar => 4, // Variable
-            TypeParam => 24,           // TypeParameter
-            Class | Record => 5,       // Class
-            Interface | AnnotationType => 7, // Interface
-            Enum => 15,                // Enum
+            CompletionKind::Method => 0,
+            CompletionKind::Field => 3,
+            CompletionKind::EnumMember => 16,
+            CompletionKind::Variable => 4,
+            CompletionKind::TypeParameter => 24,
+            CompletionKind::Class => 5,
+            CompletionKind::Interface => 7,
+            CompletionKind::Enum => 15,
+            CompletionKind::Keyword => COMPLETION_KIND_KEYWORD,
         }
     }
+}
 
+impl DefKindExt for DefKind {
     fn symbol_kind(self) -> u32 {
         use DefKind::*;
         match self {

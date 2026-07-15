@@ -1,10 +1,16 @@
 #![no_std]
-//! Editor-independent conversion between UTF-8 byte offsets and UTF-16 positions.
+//! Editor-independent coordinates and semantic project queries.
 //!
 //! Parsers in the `jals` workspace use UTF-8 byte offsets, while editor protocols commonly use
 //! line and UTF-16 code-unit coordinates. This crate owns that shared conversion without depending
 //! on an editor protocol or coordinate base. Protocol adapters are responsible for mapping
 //! [`Utf16Position`] to their own position types and applying any one-based coordinates.
+
+mod queries;
+
+pub use queries::{
+    Completion, CompletionKind, FileRange, Highlight, HighlightKind, ProjectQueries, QueryFile,
+};
 
 use alloc::{vec, vec::Vec};
 

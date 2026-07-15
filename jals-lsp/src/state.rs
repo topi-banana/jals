@@ -11,13 +11,13 @@ use async_lsp::lsp_types::{
 };
 use jals_config::FeatureSet;
 use jals_config::fmt::Config;
+use jals_editor::{FileRange, ProjectQueries, QueryFile};
 use jals_fs::{FileTree, OsFileTree};
 use jals_hir::{
-    FileFacts, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved,
-    SourceLocations, TypeResolution,
+    FileFacts, FileId, LoweredClasspath, Namespace, ProjectIndex, Resolved, SourceLocations,
+    TypeResolution,
 };
-use jals_syntax::ast::{self, AstNode};
-use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
+use jals_syntax::Parse;
 
 use crate::file_id::WorkspaceFileId;
 use crate::line_index::LineIndex;
@@ -464,6 +464,21 @@ impl<F: FileTree> Workspace<F> {
         }
     }
 
+    /// Shared semantic query module for one project file. Creating it does not resolve any other
+    /// file; project-wide references receive their lazy iterator separately.
+    fn queries(&self, file: FileId) -> ProjectQueries<'_> {
+        let source = &self.files[file.0 as usize];
+        ProjectQueries::new(
+            &self.index,
+            QueryFile::new(file, source.parse.syntax(), source.resolved()),
+        )
+    }
+
+    /// Map a protocol-neutral target to an LSP location, suppressing source-less targets.
+    fn location(&self, target: &FileRange) -> Option<Location> {
+        Some(self.ws_file(target.file)?.location(&target.range))
+    }
+
     /// The project symbol index.
     pub(crate) const fn index(&self) -> &ProjectIndex {
         &self.index
@@ -531,64 +546,9 @@ impl<F: FileTree> Workspace<F> {
     pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let root = source.parse.syntax();
-        let offset = source.line_index.offset(&source.text, position);
-        let resolved = source.resolved();
-        // A file-local binding, or the project type a reference names.
-        if let Some((target_file, range)) =
-            self.index
-                .definition_at(file, resolved, usize::from(offset))
-        {
-            return Some(self.ws_file(target_file)?.location(&range));
-        }
-        // A member access (`obj.field` / `recv.method()`): infer the receiver and resolve the member.
-        let (target_file, range) = self.member_definition(file, &root, resolved, offset)?;
-        Some(self.ws_file(target_file)?.location(&range))
-    }
-
-    /// Go-to-definition for the member access under `offset`: when the cursor is on the name of a
-    /// `receiver.field` / `receiver.method()`, infer the receiver's type and, if it is a project
-    /// type, resolve the member on it (through its project-internal supertypes). Returns the member
-    /// declaration's file and name range.
-    fn member_definition(
-        &self,
-        file: FileId,
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        offset: text_size::TextSize,
-    ) -> Option<(FileId, Range<usize>)> {
-        // The member-name identifier sits directly under a `FIELD_ACCESS` node — both for a plain
-        // `obj.field` and for the `recv.method` callee of a call.
-        let token = crate::handlers::Cursor::ident_at(root, offset)?;
-        let field_access = token
-            .parent()
-            .filter(|p| p.kind() == SyntaxKind::FIELD_ACCESS)?;
-        let access = ast::FieldAccess::cast(field_access.clone())?;
-        let name = access.field()?;
-        let receiver = access.receiver()?;
-        // A field-access used as a call's callee names a method; otherwise a field.
-        let namespace = if field_access.parent().map(|p| p.kind()) == Some(SyntaxKind::CALL_EXPR) {
-            Namespace::Method
-        } else {
-            Namespace::Value
-        };
-        let inference = jals_hir::TypeInference::infer(root, resolved, &self.index, file);
-        let span = receiver.syntax().text_range();
-        let owner = inference
-            .type_of_expr(usize::from(span.start())..usize::from(span.end()))?
-            .project_id()?;
-        let member = self
-            .index
-            .member(self.index.resolve_member(owner, &name, namespace)?);
-        // Prefer the library-source location (a classpath member with sources); otherwise the
-        // member's own declaration (a project member). A classpath member without sources keeps a
-        // reserved id `ws_file` will reject, so navigation simply yields nothing.
-        Some(
-            member
-                .source_location
-                .clone()
-                .unwrap_or_else(|| (member.file, member.name_range.clone())),
-        )
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        let target = self.queries(file).definition(offset)?;
+        self.location(&target)
     }
 
     /// The hover for the cursor at `position` in `uri`: the inferred type of the expression there,
@@ -597,11 +557,8 @@ impl<F: FileTree> Workspace<F> {
     pub(crate) fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let root = source.parse.syntax();
-        let resolved = source.resolved();
-        let inference = jals_hir::TypeInference::infer(&root, resolved, &self.index, file);
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        crate::handlers::Hovers::type_hover(inference.type_at(offset)?)
+        crate::handlers::Hovers::type_hover(&self.queries(file).hover(offset)?)
     }
 
     /// The signature help for the call at `position` in `uri`, with cross-file type resolution (so a
@@ -610,11 +567,8 @@ impl<F: FileTree> Workspace<F> {
     pub(crate) fn signature_help(&self, uri: &Url, position: Position) -> Option<SignatureHelp> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let root = source.parse.syntax();
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        let help = self
-            .index
-            .signature_help(&root, source.resolved(), file, offset)?;
+        let help = self.queries(file).signature_help(offset)?;
         Some(crate::handlers::SignatureHelpHandler::signature_help_to_lsp(&help))
     }
 
@@ -628,14 +582,9 @@ impl<F: FileTree> Workspace<F> {
     ) -> Option<Vec<async_lsp::lsp_types::CompletionItem>> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let root = source.parse.syntax();
         let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
-        Some(crate::handlers::Completions::completions(
-            &root,
-            source.resolved(),
-            &self.index,
-            file,
-            offset,
+        Some(crate::handlers::Completions::completions_to_lsp(
+            self.queries(file).completions(offset),
         ))
     }
 
@@ -649,12 +598,11 @@ impl<F: FileTree> Workspace<F> {
     ) -> Option<Vec<DocumentHighlight>> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        Some(crate::handlers::DocumentHighlights::document_highlight(
-            &source.parse,
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        Some(crate::handlers::DocumentHighlights::highlights_to_lsp(
+            self.queries(file).highlights(offset),
             &source.text,
             &source.line_index,
-            position,
-            Some((&self.index, file)),
         ))
     }
 
@@ -685,92 +633,21 @@ impl<F: FileTree> Workspace<F> {
     ) -> Option<Vec<Location>> {
         let file = self.file_id(uri)?;
         let source = &self.files[file.0 as usize];
-        let root = source.parse.syntax();
-        let resolved = source.resolved();
-        // Anchor on the identifier under the cursor (boundary-aware), as the find-references handler
-        // does, then ask name resolution for the binding it denotes.
-        let Some(ident) = crate::handlers::Cursor::ident_at(
-            &root,
-            source.line_index.offset(&source.text, position),
-        ) else {
-            return Some(Vec::new());
-        };
-        let anchor = usize::from(ident.text_range().start());
-
-        // The cursor denotes a file-local binding.
-        if let Some(def_id) = resolved.symbol_at(anchor) {
-            // A binding that is also a project type: gather references across every file.
-            if let Some(item) = self
-                .index
-                .item_by_decl(file, resolved.def(def_id).name_range.start)
-            {
-                return Some(self.item_references(item, include_declaration));
-            }
-            // Otherwise a local/parameter/field/method/type-parameter: occurrences within this file.
-            let locations = resolved
-                .occurrences(def_id, include_declaration)
-                .into_iter()
-                .map(|range| source.location(&range))
-                .collect();
-            return Some(locations);
-        }
-
-        // The cursor is on a cross-file type reference (one the file-local pass left unresolved).
-        if let Some(reference) = resolved.reference_at(anchor)
-            && reference.namespace == Namespace::Type
-            && let TypeResolution::Project(item) = self.index.resolve_reference(file, reference)
-        {
-            return Some(self.item_references(item, include_declaration));
-        }
-        Some(Vec::new())
-    }
-
-    /// Every reference to the project type `item` across all workspace files (plus its declaration
-    /// when `include_declaration`), as `Location`s sorted by file then position. A same-file type
-    /// reference resolves file-locally to the declaration, so it is matched through
-    /// [`ProjectIndex::item_by_decl`]; references in other files resolve through the project index.
-    fn item_references(&self, item: ItemId, include_declaration: bool) -> Vec<Location> {
-        let mut locations = Vec::new();
-        for (i, source) in self.files.iter().enumerate() {
-            let file = WorkspaceFileId::Project(i as u32).to_raw();
-            let resolved = source.resolved();
-            for reference in &resolved.references {
-                if reference.namespace != Namespace::Type {
-                    continue;
-                }
-                let hit = match reference.resolution {
-                    Resolution::Def(id) => {
-                        self.index
-                            .item_by_decl(file, resolved.def(id).name_range.start)
-                            == Some(item)
-                    }
-                    Resolution::Unresolved => matches!(
-                        self.index.resolve_reference(file, reference),
-                        TypeResolution::Project(target) if target == item
-                    ),
-                };
-                if hit {
-                    locations.push(source.location(&reference.range));
-                }
-            }
-        }
-        if include_declaration {
-            let decl = self.index.item(item);
-            // Route through `ws_file`, not a raw `self.files` index: a `Source`-origin (library) type's
-            // declaration lives in `source_dep_files`, and a stub / source-less classpath type has a
-            // reserved id that is no real file — both of which a raw index would panic on.
-            if let Some(decl_source) = self.ws_file(decl.file) {
-                locations.push(decl_source.location(&decl.name_range));
-            }
-        }
-        locations.sort_by(|a, b| {
-            a.uri
-                .as_str()
-                .cmp(b.uri.as_str())
-                .then(a.range.start.line.cmp(&b.range.start.line))
-                .then(a.range.start.character.cmp(&b.range.start.character))
+        let offset = u32::from(source.line_index.offset(&source.text, position)) as usize;
+        let files = self.files.iter().enumerate().map(|(index, source)| {
+            QueryFile::new(
+                WorkspaceFileId::Project(index as u32).to_raw(),
+                source.parse.syntax(),
+                source.resolved(),
+            )
         });
-        locations
+        Some(
+            self.queries(file)
+                .references(offset, include_declaration, files)
+                .into_iter()
+                .filter_map(|target| self.location(&target))
+                .collect(),
+        )
     }
 
     /// Whether the symbol anchored at byte `anchor` in `file` may be renamed soundly. A file-local

@@ -25,12 +25,10 @@
 //! contextual ones like `var`, remapped at parse time), literals, trivia, and `_` yield no
 //! highlights.
 
-use std::ops::Range;
-
 use async_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
-use jals_hir::{FileId, ItemId, Namespace, ProjectIndex, Resolution, Resolved};
-use jals_syntax::{Parse, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
-use text_size::TextSize;
+use jals_editor::{Highlight, HighlightKind, ProjectQueries, QueryFile};
+use jals_hir::{FileId, ProjectIndex, Resolved};
+use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
 
@@ -49,158 +47,34 @@ impl DocumentHighlights {
         position: Position,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> Vec<DocumentHighlight> {
-        let root = parse.syntax();
-        // `offset` is clamped into `[0, len]`, so `token_at_offset`'s precondition holds. At a
-        // boundary between two tokens it yields both; preferring the `IDENT` side keeps a cursor at
-        // the end of a word highlighting it (standard editor UX).
-        let Some(target) = super::Cursor::ident_at(&root, line_index.offset(text, position)) else {
-            return Vec::new();
+        let offset = u32::from(line_index.offset(text, position)) as usize;
+        let highlights = if let Some((index, file)) = project {
+            let root = parse.syntax();
+            let resolved = Resolved::resolve_node(&root);
+            ProjectQueries::new(index, QueryFile::new(file, root, &resolved)).highlights(offset)
+        } else {
+            super::OneFileQueries::new(parse)
+                .queries()
+                .highlights(offset)
         };
+        Self::highlights_to_lsp(highlights, text, line_index)
+    }
 
-        let resolved = jals_hir::Resolved::resolve_node(&root);
-        let anchor = usize::from(target.text_range().start());
-        if let Some(id) = resolved.symbol_at(anchor) {
-            // The identifier names a file-local binding: highlight that binding's declaration and every
-            // reference to it — and nothing of the same spelling that means something else. Name
-            // resolution yields bare byte ranges, so each token is re-found to read its Read/Write role.
-            return resolved
-                .occurrences(id, true)
-                .into_iter()
-                .map(|range| Self::highlight_at(&root, line_index, text, range))
-                .collect();
-        }
-        // No file-local binding, but a project index may bind the cursor to a cross-file type; if so,
-        // highlight just the references in this file that resolve to that same declaration.
-        if let Some((index, file)) = project
-            && let Some(item) = Self::cross_file_type_at(index, file, &resolved, anchor)
-        {
-            return Self::cross_file_type_highlights(
-                &root,
-                line_index,
-                text,
-                (index, file),
-                &resolved,
-                item,
-                target.text(),
-            );
-        }
-        // Fall back to every same-text `IDENT` token. Preorder traversal keeps them in document order,
-        // and each token is classified directly — no re-lookup, we already hold it.
-        root.descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .filter(|t| t.kind() == SyntaxKind::IDENT && t.text() == target.text())
-            .map(|t| DocumentHighlight {
-                range: line_index.range(text, t.text_range()),
-                kind: Some(Self::classify(&t)),
+    pub(crate) fn highlights_to_lsp(
+        highlights: Vec<Highlight>,
+        text: &str,
+        line_index: &LineIndex,
+    ) -> Vec<DocumentHighlight> {
+        highlights
+            .into_iter()
+            .map(|highlight| DocumentHighlight {
+                range: line_index.byte_range(text, &highlight.range),
+                kind: Some(match highlight.kind {
+                    HighlightKind::Read => DocumentHighlightKind::READ,
+                    HighlightKind::Write => DocumentHighlightKind::WRITE,
+                }),
             })
             .collect()
-    }
-
-    /// The project type the cursor at `anchor` denotes when the file-local pass left it unresolved: a
-    /// type-name reference there that the index binds to a project declaration. `None` otherwise.
-    fn cross_file_type_at(
-        index: &ProjectIndex,
-        file: FileId,
-        resolved: &Resolved,
-        anchor: usize,
-    ) -> Option<ItemId> {
-        let reference = resolved.reference_at(anchor)?;
-        if reference.namespace != Namespace::Type {
-            return None;
-        }
-        index.resolve_reference(file, reference).project_id()
-    }
-
-    /// Every type reference in this file that resolves to the project type `item`, as highlights in
-    /// document order. A cross-file type is declared in another file, so only its (file-local unresolved)
-    /// references are here — references are kept sorted by start, so document order is preserved.
-    fn cross_file_type_highlights(
-        root: &SyntaxNode,
-        line_index: &LineIndex,
-        text: &str,
-        project: (&ProjectIndex, FileId),
-        resolved: &Resolved,
-        item: ItemId,
-        name: &str,
-    ) -> Vec<DocumentHighlight> {
-        let (index, file) = project;
-        resolved
-            .references
-            .iter()
-            .filter(|r| r.namespace == Namespace::Type && r.resolution == Resolution::Unresolved)
-            // A reference can only resolve to `item` if it spells `item`'s simple name, so a cheap
-            // string compare rejects the mismatches before the allocation-heavy index resolve.
-            .filter(|r| r.name == name)
-            .filter(|r| index.resolve_reference(file, r).project_id() == Some(item))
-            .map(|r| Self::highlight_at(root, line_index, text, r.range.clone()))
-            .collect()
-    }
-
-    /// The highlight for the occurrence at byte `range`, classifying the token there. A binding's
-    /// occurrence ranges arrive from name resolution as bare byte ranges, so the token is re-found to
-    /// read its syntactic role.
-    fn highlight_at(
-        root: &SyntaxNode,
-        line_index: &LineIndex,
-        text: &str,
-        range: Range<usize>,
-    ) -> DocumentHighlight {
-        let kind = super::Cursor::ident_at(root, TextSize::from(range.start as u32))
-            .map_or(DocumentHighlightKind::READ, |token| Self::classify(&token));
-        DocumentHighlight {
-            range: line_index.byte_range(text, &range),
-            kind: Some(kind),
-        }
-    }
-
-    /// Write for declaration/binding names and mutating uses; Read for everything else.
-    fn classify(token: &SyntaxToken) -> DocumentHighlightKind {
-        use SyntaxKind::{
-            ANNOTATION_TYPE_DECL, CATCH_CLAUSE, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_CONSTANT,
-            ENUM_DECL, FIELD_DECL, FOR_EACH_STMT, INTERFACE_DECL, LOCAL_VAR_DECL, METHOD_DECL,
-            NAME_REF, PARAM, RECORD_COMPONENT, RECORD_DECL, RESOURCE, TYPE_PARAM, TYPE_PATTERN,
-        };
-        let Some(parent) = token.parent() else {
-            return DocumentHighlightKind::READ;
-        };
-        match parent.kind() {
-            // Declaration / binding names. Types live under `TYPE` nodes and initializers under
-            // expression nodes, so every *direct* `IDENT` child of these kinds names a declared
-            // entity — including each declarator of a flat multi-declarator `FIELD_DECL` /
-            // `LOCAL_VAR_DECL` (`int a = 1, b;`).
-            CLASS_DECL | RECORD_DECL | INTERFACE_DECL | ANNOTATION_TYPE_DECL | ENUM_DECL
-            | METHOD_DECL | CONSTRUCTOR_DECL | TYPE_PARAM | PARAM | RECORD_COMPONENT
-            | ENUM_CONSTANT | FIELD_DECL | LOCAL_VAR_DECL | RESOURCE | CATCH_CLAUSE
-            | TYPE_PATTERN | FOR_EACH_STMT => DocumentHighlightKind::WRITE,
-            NAME_REF => Self::classify_name_ref(&parent),
-            _ => DocumentHighlightKind::READ,
-        }
-    }
-
-    /// A simple name reference is a write when it is the target of an assignment or the operand
-    /// of `++`/`--`. Only simple names count: `o.f = 1` keeps `f` (under `FIELD_ACCESS`) a read.
-    fn classify_name_ref(name_ref: &SyntaxNode) -> DocumentHighlightKind {
-        use SyntaxKind::{ASSIGNMENT_EXPR, MINUS_MINUS, PLUS_PLUS, POSTFIX_EXPR, UNARY_EXPR};
-        let is_write = match name_ref.parent() {
-            // The target is the first child *node* of `ASSIGNMENT_EXPR` (the operator is a
-            // token), matching `AssignmentExpr::target()`.
-            Some(p) if p.kind() == ASSIGNMENT_EXPR => {
-                p.children().next().as_ref() == Some(name_ref)
-            }
-            // `POSTFIX_EXPR` is only `x++` / `x--`.
-            Some(p) if p.kind() == POSTFIX_EXPR => true,
-            // `UNARY_EXPR` also covers `!x`, `-x`, ...; only `++`/`--` mutate.
-            Some(p) if p.kind() == UNARY_EXPR => p
-                .children_with_tokens()
-                .filter_map(SyntaxElement::into_token)
-                .any(|t| matches!(t.kind(), PLUS_PLUS | MINUS_MINUS)),
-            _ => false,
-        };
-        if is_write {
-            DocumentHighlightKind::WRITE
-        } else {
-            DocumentHighlightKind::READ
-        }
     }
 }
 

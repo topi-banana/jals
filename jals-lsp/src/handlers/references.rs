@@ -1,10 +1,8 @@
 //! Find references (`textDocument/references`).
 //!
-//! File-local: resolve the symbol under the cursor (a binding, or a reference to one) and return
-//! every reference to it within the same file, optionally including the declaration. References
-//! that span files — a project type used from another source file — are not covered yet; that needs
-//! a reverse index on the project layer ([`jals_hir::ProjectIndex`]), a later phase. So this gathers
-//! the uses visible in the open document alone.
+//! [`jals_editor::ProjectQueries`] owns symbol anchoring, declaration policy, and project scanning.
+//! This adapter maps its byte ranges to LSP locations; the fallback supplies a stdlib-aware one-file
+//! project through the same interface.
 
 use async_lsp::lsp_types::{Location, Position, Url};
 use jals_syntax::Parse;
@@ -26,24 +24,15 @@ impl References {
         position: Position,
         include_declaration: bool,
     ) -> Vec<Location> {
-        let root = parse.syntax();
-        // Anchor on the identifier under the cursor (boundary-aware, so a cursor at the end of a word
-        // still counts), then ask name resolution for the binding it denotes — whether the cursor sits
-        // on a use or on the declaration itself.
-        let Some(ident) = super::Cursor::ident_at(&root, line_index.offset(text, position)) else {
-            return Vec::new();
-        };
-        let resolved = jals_hir::Resolved::resolve_node(&root);
-        let Some(id) = resolved.symbol_at(usize::from(ident.text_range().start())) else {
-            return Vec::new();
-        };
-
-        resolved
-            .occurrences(id, include_declaration)
+        let offset = u32::from(line_index.offset(text, position)) as usize;
+        let project = super::OneFileQueries::new(parse);
+        project
+            .queries()
+            .references(offset, include_declaration, [project.file()])
             .into_iter()
-            .map(|range| Location {
+            .map(|target| Location {
                 uri: uri.clone(),
-                range: line_index.byte_range(text, &range),
+                range: line_index.byte_range(text, &target.range),
             })
             .collect()
     }
@@ -110,11 +99,12 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_name_yields_nothing() {
-        // An undeclared name (and an external type) has no file-local binding to gather.
+    fn unresolved_name_yields_nothing_but_stdlib_uses_are_findable() {
+        // An undeclared name has no binding to gather. The one-file fallback includes stdlib, so a
+        // source-less stdlib type still returns its use (but no declaration target).
         let text = "class C { void m() { use(nope); } }";
         assert!(at(text, "nope", true).is_empty());
-        assert!(at("class C { String s; }", "String", true).is_empty());
+        assert_eq!(at("class C { String s; }", "String", true), [(0, 10, 16)]);
     }
 
     #[test]

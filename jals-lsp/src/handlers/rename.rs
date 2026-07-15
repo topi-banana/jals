@@ -107,12 +107,15 @@ impl Rename {
         position: Position,
         new_name: &str,
     ) -> Option<WorkspaceEdit> {
-        let (id, _, resolved) = Self::renamable_binding_at(parse, text, line_index, position)?;
-        let edits: Vec<TextEdit> = resolved
-            .occurrences(id, true)
+        Self::renamable_binding_at(parse, text, line_index, position)?;
+        let offset = u32::from(line_index.offset(text, position)) as usize;
+        let project = super::OneFileQueries::new(parse);
+        let edits: Vec<TextEdit> = project
+            .queries()
+            .references(offset, true, [project.file()])
             .into_iter()
-            .map(|range| TextEdit {
-                range: line_index.byte_range(text, &range),
+            .map(|target| TextEdit {
+                range: line_index.byte_range(text, &target.range),
                 new_text: new_name.to_owned(),
             })
             .collect();

@@ -11,15 +11,13 @@ use core::ops::Range;
 use jals_config::Severity;
 use jals_config::fmt::Config as FmtConfig;
 use jals_config::lint::Config as LintConfig;
+use jals_editor::{CompletionKind, FileRange, ProjectQueries, QueryFile};
 use jals_fmt::FormatOutput;
 use jals_fs::{FileTree, InMemoryFileTree};
-use jals_hir::{
-    DefKind, FileId, ItemId, LoweredClasspath, Namespace, ProjectIndex, Resolution, Resolved, Ty,
-    TypeResolution,
-};
+use jals_hir::{DefKind, FileId, LoweredClasspath, ProjectIndex, Resolved};
 use jals_syntax::ast::{self, AstNode};
-use jals_syntax::{Parse, SyntaxKind, SyntaxNode, SyntaxToken};
-use text_size::{TextRange, TextSize};
+use jals_syntax::{Parse, SyntaxNode};
+use text_size::TextRange;
 
 use crate::line_index::LineIndex;
 
@@ -76,9 +74,8 @@ pub struct Highlight {
 /// binding.
 pub struct CompletionEntry {
     pub label: String,
-    pub kind: DefKind,
+    pub kind: CompletionKind,
     pub detail: String,
-    pub keyword: bool,
 }
 
 /// One signature in signature help: its rendered label and, per parameter, the `(start, end)`
@@ -365,14 +362,7 @@ impl Workspace {
     /// resolved against the project. `None` if the expression has no useful inferred type.
     pub fn hover(&self, active_text: &str, line: u32, col: u32) -> Option<String> {
         let (ctx, offset) = self.context_at(active_text, line, col);
-        let root = ctx.parse.syntax();
-        let inference =
-            jals_hir::TypeInference::infer(&root, &ctx.resolved, &ctx.index, ctx.active_id);
-        let ty = inference.type_at(offset)?;
-        // Nothing useful to show for an un-inferable type.
-        if matches!(ty, Ty::Unknown) {
-            return None;
-        }
+        let ty = ctx.queries().hover(offset)?;
         Some(format!("```java\n{ty}\n```"))
     }
 
@@ -380,28 +370,11 @@ impl Workspace {
     /// otherwise the in-scope bindings and project types plus the Java keywords.
     pub fn completions(&self, active_text: &str, line: u32, col: u32) -> Vec<CompletionEntry> {
         let (ctx, offset) = self.context_at(active_text, line, col);
-        let root = ctx.parse.syntax();
-        if ProjectIndex::at_member_access(&root, offset) {
-            ctx.index
-                .member_completions(&root, &ctx.resolved, ctx.active_id, offset)
-                .into_iter()
-                .map(CompletionEntry::from_completion)
-                .collect()
-        } else {
-            let mut entries: Vec<CompletionEntry> = ctx
-                .index
-                .scope_completions(&root, &ctx.resolved, ctx.active_id, offset)
-                .into_iter()
-                .map(CompletionEntry::from_completion)
-                .collect();
-            entries.extend(JAVA_KEYWORDS.iter().map(|kw| CompletionEntry {
-                label: (*kw).to_string(),
-                kind: DefKind::Local,
-                detail: String::new(),
-                keyword: true,
-            }));
-            entries
-        }
+        ctx.queries()
+            .completions(offset)
+            .into_iter()
+            .map(CompletionEntry::from_completion)
+            .collect()
     }
 
     /// Signature help for the call at `(line, col)` in the active file, with cross-file type
@@ -412,10 +385,7 @@ impl Workspace {
             s.encode_utf16().count() as u32
         }
         let (ctx, offset) = self.context_at(active_text, line, col);
-        let root = ctx.parse.syntax();
-        let help = ctx
-            .index
-            .signature_help(&root, &ctx.resolved, ctx.active_id, offset)?;
+        let help = ctx.queries().signature_help(offset)?;
         let signatures = help
             .signatures
             .iter()
@@ -458,48 +428,14 @@ impl Workspace {
     /// lexical fallback over same-text identifiers. Empty if the cursor is not on an identifier.
     pub fn document_highlight(&self, active_text: &str, line: u32, col: u32) -> Vec<Highlight> {
         let ctx = self.active_context(active_text);
-        let root = ctx.parse.syntax();
         let mapper = RangeMapper::new(&ctx.source);
         let offset = mapper.offset(line, col);
-        let Some(target) = Cst::ident_at(&root, offset) else {
-            return Vec::new();
-        };
-        let anchor = usize::from(target.text_range().start());
-
-        // A file-local binding: highlight its declaration and every reference to it.
-        if let Some(id) = ctx.resolved.symbol_at(anchor) {
-            return ctx
-                .resolved
-                .occurrences(id, true)
-                .into_iter()
-                .map(|range| Highlight::at(&root, &mapper, range))
-                .collect();
-        }
-        // No file-local binding, but the index may bind the cursor to a cross-file type: highlight
-        // just the references in this file that resolve to that same declaration.
-        if let Some(item) = ctx.cross_file_type_at(anchor) {
-            let name = target.text();
-            return ctx
-                .resolved
-                .references
-                .iter()
-                .filter(|r| {
-                    r.namespace == Namespace::Type && r.resolution == Resolution::Unresolved
-                })
-                .filter(|r| r.name == name)
-                .filter(|r| {
-                    ctx.index.resolve_reference(ctx.active_id, r).project_id() == Some(item)
-                })
-                .map(|r| Highlight::at(&root, &mapper, r.range.clone()))
-                .collect();
-        }
-        // Lexical fallback: every same-text `IDENT` token, in document order.
-        root.descendants_with_tokens()
-            .filter_map(|element| element.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT && t.text() == target.text())
-            .map(|t| Highlight {
-                range: mapper.range(&Cst::to_std_range(t.text_range())),
-                write: Highlight::is_write(&t),
+        ctx.queries()
+            .highlights(offset)
+            .into_iter()
+            .map(|highlight| Highlight {
+                range: mapper.range(&highlight.range),
+                write: highlight.kind == jals_editor::HighlightKind::Write,
             })
             .collect()
     }
@@ -509,56 +445,12 @@ impl Workspace {
     /// type declares. `None` if nothing resolves.
     pub fn goto_definition(&self, active_text: &str, line: u32, col: u32) -> Option<Target> {
         let (ctx, offset) = self.context_at(active_text, line, col);
-        let root = ctx.parse.syntax();
-
-        // A file-local binding, or the project type a reference names.
-        let (target_file, range) = ctx
-            .index
-            .definition_at(ctx.active_id, &ctx.resolved, offset)
-            .or_else(|| self.member_definition(&ctx, &root, offset))?;
-        let (path, text) = self.path_text(target_file, &ctx)?;
+        let target = ctx.queries().definition(offset)?;
+        let (path, text) = self.path_text(target.file, &ctx)?;
         Some(Target {
             path,
-            range: RangeMapper::new(&text).range(&range),
+            range: RangeMapper::new(&text).range(&target.range),
         })
-    }
-
-    /// Go-to-definition for the member access under `offset`: infer the receiver's type and, if it
-    /// is a project type, resolve the member on it. Returns the member declaration's file and name
-    /// range. Mirrors `jals-lsp`'s `Workspace::member_definition`.
-    fn member_definition(
-        &self,
-        ctx: &ActiveContext,
-        root: &SyntaxNode,
-        offset: usize,
-    ) -> Option<(FileId, Range<usize>)> {
-        let token = Cst::ident_at(root, offset)?;
-        let field_access = token
-            .parent()
-            .filter(|p| p.kind() == SyntaxKind::FIELD_ACCESS)?;
-        let access = ast::FieldAccess::cast(field_access.clone())?;
-        let name = access.field()?;
-        let receiver = access.receiver()?;
-        // A field-access used as a call's callee names a method; otherwise a field.
-        let namespace = if field_access.parent().map(|p| p.kind()) == Some(SyntaxKind::CALL_EXPR) {
-            Namespace::Method
-        } else {
-            Namespace::Value
-        };
-        let inference =
-            jals_hir::TypeInference::infer(root, &ctx.resolved, &ctx.index, ctx.active_id);
-        let owner = inference
-            .type_of_expr(Cst::to_std_range(receiver.syntax().text_range()))?
-            .project_id()?;
-        let member = ctx
-            .index
-            .member(ctx.index.resolve_member(owner, &name, namespace)?);
-        Some(
-            member
-                .source_location
-                .clone()
-                .unwrap_or_else(|| (member.file, member.name_range.clone())),
-        )
     }
 
     /// Find-references for the cursor at `(line, col)` in the active file: every occurrence of the
@@ -573,103 +465,44 @@ impl Workspace {
         include_declaration: bool,
     ) -> Vec<Target> {
         let ctx = self.active_context(active_text);
-        let root = ctx.parse.syntax();
         let mapper = RangeMapper::new(&ctx.source);
         let offset = mapper.offset(line, col);
-        let Some(ident) = Cst::ident_at(&root, offset) else {
-            return Vec::new();
-        };
-        let anchor = usize::from(ident.text_range().start());
-
-        // The cursor denotes a file-local binding.
-        if let Some(def_id) = ctx.resolved.symbol_at(anchor) {
-            // A binding that is also a project type: gather references across every file.
-            if let Some(item) = ctx
-                .index
-                .item_by_decl(ctx.active_id, ctx.resolved.def(def_id).name_range.start)
-            {
-                return self.item_references(&ctx, item, include_declaration);
-            }
-            // Otherwise a local/parameter/field/method: occurrences within this file.
-            return ctx
-                .resolved
-                .occurrences(def_id, include_declaration)
-                .into_iter()
-                .map(|range| Target {
-                    path: self.active.clone(),
-                    range: mapper.range(&range),
-                })
-                .collect();
-        }
-
-        // The cursor is on a cross-file type reference the file-local pass left unresolved.
-        if let Some(item) = ctx.cross_file_type_at(anchor) {
-            return self.item_references(&ctx, item, include_declaration);
-        }
-        Vec::new()
+        // References are the sole project-wide query, so resolve the remaining files only here.
+        let analyzed: Vec<_> = ctx
+            .paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let file = FileId(index as u32);
+                let (root, resolved) = if file == ctx.active_id {
+                    (ctx.parse.syntax(), ctx.resolved.clone())
+                } else {
+                    let root = Parse::parse(&self.read(path)).syntax();
+                    let resolved = Resolved::resolve_node(&root);
+                    (root, resolved)
+                };
+                (file, root, resolved)
+            })
+            .collect();
+        ctx.queries()
+            .references(
+                offset,
+                include_declaration,
+                analyzed
+                    .iter()
+                    .map(|(file, root, resolved)| QueryFile::new(*file, root.clone(), resolved)),
+            )
+            .into_iter()
+            .filter_map(|target| self.target(&ctx, target))
+            .collect()
     }
 
-    /// Every reference to the project type `item` across all workspace files (plus its declaration
-    /// when `include_declaration`), as [`Target`]s sorted by path then position. Mirrors
-    /// `jals-lsp`'s `Workspace::item_references`, re-parsing/resolving each file (the active one from
-    /// its live buffer).
-    fn item_references(
-        &self,
-        ctx: &ActiveContext,
-        item: ItemId,
-        include_declaration: bool,
-    ) -> Vec<Target> {
-        let mut targets = Vec::new();
-        for (i, path) in ctx.paths.iter().enumerate() {
-            let file = FileId(i as u32);
-            // Reuse the active file's already-resolved context; read the rest from the tree.
-            let (text, resolved) = if file == ctx.active_id {
-                (ctx.source.clone(), ctx.resolved.clone())
-            } else {
-                let text = self.read(path);
-                let resolved = Resolved::resolve_node(&jals_syntax::Parse::parse(&text).syntax());
-                (text, resolved)
-            };
-            let mapper = RangeMapper::new(&text);
-            for reference in &resolved.references {
-                if reference.namespace != Namespace::Type {
-                    continue;
-                }
-                let hit = match reference.resolution {
-                    Resolution::Def(id) => {
-                        ctx.index
-                            .item_by_decl(file, resolved.def(id).name_range.start)
-                            == Some(item)
-                    }
-                    Resolution::Unresolved => matches!(
-                        ctx.index.resolve_reference(file, reference),
-                        TypeResolution::Project(target) if target == item
-                    ),
-                };
-                if hit {
-                    targets.push(Target {
-                        path: path.clone(),
-                        range: mapper.range(&reference.range),
-                    });
-                }
-            }
-        }
-        if include_declaration {
-            let decl = ctx.index.item(item);
-            if let Some((path, text)) = self.path_text(decl.file, ctx) {
-                targets.push(Target {
-                    path,
-                    range: RangeMapper::new(&text).range(&decl.name_range),
-                });
-            }
-        }
-        targets.sort_by(|a, b| {
-            a.path
-                .cmp(&b.path)
-                .then(a.range.start_line.cmp(&b.range.start_line))
-                .then(a.range.start_col.cmp(&b.range.start_col))
-        });
-        targets
+    fn target(&self, ctx: &ActiveContext, target: FileRange) -> Option<Target> {
+        let (path, text) = self.path_text(target.file, ctx)?;
+        Some(Target {
+            path,
+            range: RangeMapper::new(&text).range(&target.range),
+        })
     }
 }
 
@@ -678,13 +511,6 @@ impl Workspace {
 struct Cst;
 
 impl Cst {
-    /// The `IDENT` token at byte `offset`, preferring it at a token boundary (so a cursor at the end
-    /// of a word still anchors to it). Mirrors `jals-lsp`'s `handlers::ident_at`.
-    fn ident_at(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
-        root.token_at_offset(TextSize::from(offset as u32))
-            .find(|token| token.kind() == SyntaxKind::IDENT)
-    }
-
     /// A `text_size::TextRange` as a plain `Range<usize>` of byte offsets.
     fn to_std_range(range: TextRange) -> Range<usize> {
         usize::from(range.start())..usize::from(range.end())
@@ -725,81 +551,22 @@ impl<'a> RangeMapper<'a> {
 }
 
 impl CompletionEntry {
-    /// Map a `jals-hir` completion to the playground's neutral [`CompletionEntry`] (a semantic
-    /// binding, never a keyword).
-    fn from_completion(completion: jals_hir::Completion) -> Self {
+    /// Map a shared completion to the playground payload.
+    fn from_completion(completion: jals_editor::Completion) -> Self {
         Self {
             label: completion.label,
             kind: completion.kind,
             detail: completion.detail,
-            keyword: false,
         }
     }
 }
 
 impl ActiveContext {
-    /// The project type the cursor at `anchor` denotes when the file-local pass left it unresolved: a
-    /// type-name reference the index binds to a project declaration. Shared by
-    /// [`Workspace::document_highlight`] and [`Workspace::references`].
-    fn cross_file_type_at(&self, anchor: usize) -> Option<ItemId> {
-        let reference = self.resolved.reference_at(anchor)?;
-        if reference.namespace != Namespace::Type {
-            return None;
-        }
-        self.index
-            .resolve_reference(self.active_id, reference)
-            .project_id()
-    }
-}
-
-impl Highlight {
-    /// The highlight for the occurrence at byte `range`, re-finding the token there to read its
-    /// Read/Write role (name resolution yields bare byte ranges).
-    fn at(root: &SyntaxNode, mapper: &RangeMapper<'_>, range: Range<usize>) -> Self {
-        let write = Cst::ident_at(root, range.start)
-            .map(|t| Self::is_write(&t))
-            .unwrap_or(false);
-        Self {
-            range: mapper.range(&range),
-            write,
-        }
-    }
-
-    /// Whether an occurrence token is a write: a declaration/binding name, or a mutating simple-name
-    /// use (`=` target, `++`/`--`). Mirrors `document_highlight`'s `classify` collapsed to a bool.
-    fn is_write(token: &SyntaxToken) -> bool {
-        use SyntaxKind::*;
-
-        /// A simple name reference is a write when it is an assignment target or the operand of
-        /// `++`/`--`.
-        fn is_write_name_ref(name_ref: &SyntaxNode) -> bool {
-            use SyntaxKind::*;
-            match name_ref.parent() {
-                // The target is the first child *node* of `ASSIGNMENT_EXPR` (the operator is a
-                // token).
-                Some(p) if p.kind() == ASSIGNMENT_EXPR => {
-                    p.children().next().as_ref() == Some(name_ref)
-                }
-                Some(p) if p.kind() == POSTFIX_EXPR => true,
-                Some(p) if p.kind() == UNARY_EXPR => p
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|t| matches!(t.kind(), PLUS_PLUS | MINUS_MINUS)),
-                _ => false,
-            }
-        }
-
-        let Some(parent) = token.parent() else {
-            return false;
-        };
-        match parent.kind() {
-            CLASS_DECL | RECORD_DECL | INTERFACE_DECL | ANNOTATION_TYPE_DECL | ENUM_DECL
-            | METHOD_DECL | CONSTRUCTOR_DECL | TYPE_PARAM | PARAM | RECORD_COMPONENT
-            | ENUM_CONSTANT | FIELD_DECL | LOCAL_VAR_DECL | RESOURCE | CATCH_CLAUSE
-            | TYPE_PATTERN | FOR_EACH_STMT => true,
-            NAME_REF => is_write_name_ref(&parent),
-            _ => false,
-        }
+    fn queries(&self) -> ProjectQueries<'_> {
+        ProjectQueries::new(
+            &self.index,
+            QueryFile::new(self.active_id, self.parse.syntax(), &self.resolved),
+        )
     }
 }
 
@@ -920,69 +687,6 @@ impl SymbolNode {
         }
     }
 }
-
-/// The Java reserved words, literals, and restricted keywords offered at a bare identifier position.
-/// A flat list — the editor filters by the typed prefix. Copied from `jals-lsp`'s completion handler.
-const JAVA_KEYWORDS: &[&str] = &[
-    "abstract",
-    "assert",
-    "boolean",
-    "break",
-    "byte",
-    "case",
-    "catch",
-    "char",
-    "class",
-    "const",
-    "continue",
-    "default",
-    "do",
-    "double",
-    "else",
-    "enum",
-    "extends",
-    "final",
-    "finally",
-    "float",
-    "for",
-    "goto",
-    "if",
-    "implements",
-    "import",
-    "instanceof",
-    "int",
-    "interface",
-    "long",
-    "native",
-    "new",
-    "package",
-    "private",
-    "protected",
-    "public",
-    "return",
-    "short",
-    "static",
-    "strictfp",
-    "super",
-    "switch",
-    "synchronized",
-    "this",
-    "throw",
-    "throws",
-    "transient",
-    "try",
-    "void",
-    "volatile",
-    "while",
-    "true",
-    "false",
-    "null",
-    "var",
-    "yield",
-    "record",
-    "sealed",
-    "permits",
-];
 
 #[cfg(test)]
 mod tests {
@@ -1150,9 +854,13 @@ mod tests {
         let byte = src.find("g.greet").unwrap() + 2;
         let (line, col) = monaco_pos(&src, byte);
         let entries = ws.completions(&src, line, col);
-        assert!(entries.iter().any(|e| e.label == "greet" && !e.keyword));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.label == "greet" && e.kind != CompletionKind::Keyword)
+        );
         // A member-access context never offers keywords.
-        assert!(entries.iter().all(|e| !e.keyword));
+        assert!(entries.iter().all(|e| e.kind != CompletionKind::Keyword));
     }
 
     #[test]
@@ -1166,8 +874,16 @@ mod tests {
         let byte = src.find("int y = ").unwrap() + "int y = ".len();
         let (line, col) = monaco_pos(&src, byte);
         let entries = ws.completions(&src, line, col);
-        assert!(entries.iter().any(|e| e.keyword && e.label == "return"));
-        assert!(entries.iter().any(|e| !e.keyword && e.label == "x"));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind == CompletionKind::Keyword && e.label == "return")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.kind != CompletionKind::Keyword && e.label == "x")
+        );
     }
 
     #[test]
