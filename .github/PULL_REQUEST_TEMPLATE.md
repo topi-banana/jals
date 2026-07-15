@@ -51,3 +51,19 @@
   and what they cover. Mention any manual / end-to-end checks (e.g. an stdio
   smoke test for jals-lsp, or a langtools-corpus run for jals-syntax).
 -->
+
+<!--
+  If AI generated or substantially assisted with this PR, replace this comment
+  with an attribution at the very end of the PR description. Name both the tool
+  and the exact model used, for example:
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+  Model: Fable 5
+
+  or:
+
+  🤖 Generated with [Codex](https://openai.com/codex)
+  Model: GPT-5.6 sol
+
+  Delete this comment if no AI tool was used.
+-->
