@@ -391,3 +391,135 @@ impl TargetInfo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytes::{Reader, Writer};
+
+    fn roundtrip_element_value(value: &ElementValue) {
+        let mut w = Writer::new();
+        value.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(&ElementValue::read(&mut r).unwrap(), value);
+        assert_eq!(r.remaining(), 0, "element_value left trailing bytes");
+    }
+
+    fn roundtrip_target_info(target: &TargetInfo) {
+        let mut w = Writer::new();
+        target.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(&TargetInfo::read(&mut r).unwrap(), target);
+        assert_eq!(r.remaining(), 0, "target_info left trailing bytes");
+    }
+
+    #[test]
+    fn every_constant_element_value_tag_round_trips() {
+        for tag in *b"BCDFIJSZs" {
+            roundtrip_element_value(&ElementValue::Const {
+                tag,
+                const_value_index: 7,
+            });
+        }
+    }
+
+    #[test]
+    fn each_element_value_shape_round_trips() {
+        roundtrip_element_value(&ElementValue::Enum {
+            type_name_index: 1,
+            const_name_index: 2,
+        });
+        roundtrip_element_value(&ElementValue::Class {
+            class_info_index: 3,
+        });
+        roundtrip_element_value(&ElementValue::Annotation(Annotation {
+            type_index: 4,
+            element_value_pairs: Vec::new(),
+        }));
+        roundtrip_element_value(&ElementValue::Array(vec![
+            ElementValue::Const {
+                tag: b'Z',
+                const_value_index: 5,
+            },
+            ElementValue::Class {
+                class_info_index: 6,
+            },
+        ]));
+    }
+
+    #[test]
+    fn an_unknown_element_value_tag_is_rejected() {
+        let mut r = Reader::new(&[b'?', 0x00, 0x00]);
+        assert!(ElementValue::read(&mut r).is_err());
+    }
+
+    #[test]
+    fn every_target_info_shape_round_trips() {
+        for target_type in [0x00, 0x01] {
+            roundtrip_target_info(&TargetInfo::TypeParameter {
+                target_type,
+                type_parameter_index: 1,
+            });
+        }
+        roundtrip_target_info(&TargetInfo::Supertype {
+            supertype_index: 0xFFFF,
+        });
+        for target_type in [0x11, 0x12] {
+            roundtrip_target_info(&TargetInfo::TypeParameterBound {
+                target_type,
+                type_parameter_index: 2,
+                bound_index: 3,
+            });
+        }
+        for target_type in [0x13, 0x14, 0x15] {
+            roundtrip_target_info(&TargetInfo::Empty { target_type });
+        }
+        roundtrip_target_info(&TargetInfo::FormalParameter {
+            formal_parameter_index: 4,
+        });
+        roundtrip_target_info(&TargetInfo::Throws {
+            throws_type_index: 5,
+        });
+        for target_type in [0x40, 0x41] {
+            roundtrip_target_info(&TargetInfo::LocalVar {
+                target_type,
+                table: vec![
+                    LocalVarTargetEntry {
+                        start_pc: 1,
+                        length: 2,
+                        index: 3,
+                    },
+                    LocalVarTargetEntry {
+                        start_pc: 4,
+                        length: 5,
+                        index: 6,
+                    },
+                ],
+            });
+        }
+        roundtrip_target_info(&TargetInfo::Catch {
+            exception_table_index: 6,
+        });
+        for target_type in [0x43, 0x44, 0x45, 0x46] {
+            roundtrip_target_info(&TargetInfo::Offset {
+                target_type,
+                offset: 7,
+            });
+        }
+        for target_type in [0x47, 0x48, 0x49, 0x4A, 0x4B] {
+            roundtrip_target_info(&TargetInfo::TypeArgument {
+                target_type,
+                offset: 8,
+                type_argument_index: 9,
+            });
+        }
+    }
+
+    #[test]
+    fn an_unknown_target_type_is_rejected() {
+        let mut r = Reader::new(&[0x7F, 0x00, 0x00]);
+        assert!(TargetInfo::read(&mut r).is_err());
+    }
+}

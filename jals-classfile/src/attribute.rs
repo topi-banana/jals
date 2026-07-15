@@ -756,3 +756,171 @@ impl ModuleProvide {
         w.u16_list(&self.provides_with_index);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::annotation::Annotation;
+
+    /// A pool with only the sentinel — enough for every body that does not resolve a name (all the
+    /// ones exercised here parse straight from bytes).
+    fn empty_pool() -> ConstantPool {
+        ConstantPool::read(&mut Reader::new(&[0x00, 0x01])).expect("empty pool")
+    }
+
+    /// `write` a body, then `parse` it back under its attribute name: the name must select the right
+    /// variant (so a dropped match arm is caught) and the bytes must survive the round-trip (so a
+    /// dropped `write` is caught).
+    fn roundtrip_body(name: &str, body: &AttributeBody) {
+        let pool = empty_pool();
+        let mut w = Writer::new();
+        body.write(&mut w);
+        let bytes = w.into_vec();
+        assert_eq!(
+            AttributeBody::parse(name, &bytes, &pool).as_ref(),
+            Some(body),
+            "{name} did not round-trip"
+        );
+    }
+
+    #[test]
+    fn each_attribute_name_selects_and_round_trips_its_body() {
+        roundtrip_body(
+            "Exceptions",
+            &AttributeBody::Exceptions {
+                exception_index_table: vec![3, 5],
+            },
+        );
+        roundtrip_body(
+            "EnclosingMethod",
+            &AttributeBody::EnclosingMethod {
+                class_index: 5,
+                method_index: 7,
+            },
+        );
+        roundtrip_body("Synthetic", &AttributeBody::Synthetic);
+        roundtrip_body(
+            "SourceDebugExtension",
+            &AttributeBody::SourceDebugExtension(vec![1, 2, 3]),
+        );
+        roundtrip_body(
+            "LocalVariableTable",
+            &AttributeBody::LocalVariableTable(vec![LocalVariableEntry {
+                start_pc: 1,
+                length: 2,
+                name_index: 3,
+                descriptor_index: 4,
+                index: 5,
+            }]),
+        );
+        roundtrip_body(
+            "LocalVariableTypeTable",
+            &AttributeBody::LocalVariableTypeTable(vec![LocalVariableTypeEntry {
+                start_pc: 1,
+                length: 2,
+                name_index: 3,
+                signature_index: 4,
+                index: 5,
+            }]),
+        );
+        roundtrip_body(
+            "RuntimeInvisibleAnnotations",
+            &AttributeBody::RuntimeInvisibleAnnotations(vec![Annotation {
+                type_index: 9,
+                element_value_pairs: Vec::new(),
+            }]),
+        );
+        roundtrip_body(
+            "RuntimeVisibleParameterAnnotations",
+            &AttributeBody::RuntimeVisibleParameterAnnotations(vec![
+                vec![Annotation {
+                    type_index: 9,
+                    element_value_pairs: Vec::new(),
+                }],
+                Vec::new(),
+            ]),
+        );
+        roundtrip_body(
+            "RuntimeInvisibleParameterAnnotations",
+            &AttributeBody::RuntimeInvisibleParameterAnnotations(vec![vec![Annotation {
+                type_index: 9,
+                element_value_pairs: Vec::new(),
+            }]]),
+        );
+        roundtrip_body(
+            "AnnotationDefault",
+            &AttributeBody::AnnotationDefault(ElementValue::Const {
+                tag: b'I',
+                const_value_index: 1,
+            }),
+        );
+        roundtrip_body(
+            "ModulePackages",
+            &AttributeBody::ModulePackages {
+                package_index: vec![2, 4],
+            },
+        );
+        roundtrip_body(
+            "ModuleMainClass",
+            &AttributeBody::ModuleMainClass {
+                main_class_index: 3,
+            },
+        );
+        roundtrip_body(
+            "PermittedSubclasses",
+            &AttributeBody::PermittedSubclasses {
+                classes: vec![4, 6],
+            },
+        );
+    }
+
+    #[test]
+    fn an_unmodelled_attribute_name_is_not_parsed() {
+        assert_eq!(
+            AttributeBody::parse("NotAnAttribute", &[], &empty_pool()),
+            None
+        );
+    }
+
+    #[test]
+    fn exception_table_entry_round_trips() {
+        let entry = ExceptionTableEntry {
+            start_pc: 1,
+            end_pc: 2,
+            handler_pc: 3,
+            catch_type: 4,
+        };
+        let mut w = Writer::new();
+        entry.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(ExceptionTableEntry::read(&mut r).unwrap(), entry);
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn module_open_and_provide_round_trip() {
+        let open = ModuleOpen {
+            opens_index: 1,
+            opens_flags: 2,
+            opens_to_index: vec![3, 4],
+        };
+        let mut w = Writer::new();
+        open.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(ModuleOpen::read(&mut r).unwrap(), open);
+        assert_eq!(r.remaining(), 0);
+
+        let provide = ModuleProvide {
+            provides_index: 5,
+            provides_with_index: vec![6, 7],
+        };
+        let mut w = Writer::new();
+        provide.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(ModuleProvide::read(&mut r).unwrap(), provide);
+        assert_eq!(r.remaining(), 0);
+    }
+}

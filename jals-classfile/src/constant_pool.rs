@@ -194,26 +194,30 @@ impl ConstantPool {
                 && bytes[i + 4] & 0xF0 == 0xB0
             {
                 // Six-byte supplementary form: a surrogate pair, each surrogate as a 3-byte sequence.
+                // The masked fields occupy disjoint bit ranges, so summing them assembles the code
+                // point exactly as OR-ing would (written as `+` so each term is independent).
                 let b1 = u32::from(bytes[i + 1]);
                 let b2 = u32::from(bytes[i + 2]);
                 let b4 = u32::from(bytes[i + 4]);
                 let b5 = u32::from(bytes[i + 5]);
                 let c = 0x10000
-                    + (((b1 & 0x0F) << 16)
-                        | ((b2 & 0x3F) << 10)
-                        | ((b4 & 0x0F) << 6)
-                        | (b5 & 0x3F));
+                    + ((b1 & 0x0F) << 16)
+                    + ((b2 & 0x3F) << 10)
+                    + ((b4 & 0x0F) << 6)
+                    + (b5 & 0x3F);
                 out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
                 i += 6;
             } else if b0 & 0xE0 == 0xC0 && i + 1 < bytes.len() {
                 let b1 = u32::from(bytes[i + 1]);
-                let c = ((u32::from(b0) & 0x1F) << 6) | (b1 & 0x3F);
+                // Disjoint bit ranges — `+` assembles the code point just as `|` would.
+                let c = ((u32::from(b0) & 0x1F) << 6) + (b1 & 0x3F);
                 out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
                 i += 2;
             } else if b0 & 0xF0 == 0xE0 && i + 2 < bytes.len() {
                 let b1 = u32::from(bytes[i + 1]);
                 let b2 = u32::from(bytes[i + 2]);
-                let c = ((u32::from(b0) & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+                // Disjoint bit ranges — `+` assembles the code point just as `|` would.
+                let c = ((u32::from(b0) & 0x0F) << 12) + ((b1 & 0x3F) << 6) + (b2 & 0x3F);
                 out.push(char::from_u32(c).unwrap_or('\u{FFFD}'));
                 i += 3;
             } else {
@@ -392,5 +396,188 @@ impl ConstantPoolEntry {
                 w.u16(*name_index);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytes::Reader;
+
+    fn decode(bytes: &[u8]) -> String {
+        ConstantPool::decode_modified_utf8(bytes).into_owned()
+    }
+
+    /// An independently-written reference encoder for JVM *modified* UTF-8 (JVMS §4.4.7): NUL as
+    /// `0xC0 0x80`, the BMP two-/three-byte forms, and supplementary code points as a surrogate pair
+    /// of 3-byte sequences. Kept deliberately separate from the decoder so a single-operator mutation
+    /// in the decoder makes the two disagree.
+    fn encode_modified_utf8(s: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for ch in s.chars() {
+            let c = ch as u32;
+            if c == 0 {
+                out.extend_from_slice(&[0xC0, 0x80]);
+            } else if c < 0x80 {
+                out.push(c as u8);
+            } else if c < 0x800 {
+                out.push(0xC0 | (c >> 6) as u8);
+                out.push(0x80 | (c & 0x3F) as u8);
+            } else if c < 0x1_0000 {
+                out.push(0xE0 | (c >> 12) as u8);
+                out.push(0x80 | ((c >> 6) & 0x3F) as u8);
+                out.push(0x80 | (c & 0x3F) as u8);
+            } else {
+                let v = c - 0x1_0000;
+                for surrogate in [0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF)] {
+                    out.push(0xE0 | (surrogate >> 12) as u8);
+                    out.push(0x80 | ((surrogate >> 6) & 0x3F) as u8);
+                    out.push(0x80 | (surrogate & 0x3F) as u8);
+                }
+            }
+        }
+        out
+    }
+
+    fn is_surrogate(c: u32) -> bool {
+        (0xD800..=0xDFFF).contains(&c)
+    }
+
+    #[test]
+    fn ascii_is_borrowed_verbatim() {
+        assert_eq!(decode(b"java/lang/Object"), "java/lang/Object");
+        assert!(matches!(
+            ConstantPool::decode_modified_utf8(b"plain"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn nul_uses_the_two_byte_form() {
+        assert_eq!(decode(&[0xC0, 0x80]), "\0");
+    }
+
+    #[test]
+    fn decode_round_trips_every_two_byte_code_point() {
+        // Exhaustive over the whole two-byte range — every mask/shift/add in the two-byte decoder is
+        // exercised against a known value.
+        for c in 0x80u32..0x800 {
+            let ch = char::from_u32(c).unwrap();
+            let s = ch.to_string();
+            assert_eq!(decode(&encode_modified_utf8(&s)), s, "U+{c:04X}");
+        }
+    }
+
+    #[test]
+    fn decode_round_trips_three_byte_and_supplementary_samples() {
+        let three_byte = (0x800u32..0x1_0000)
+            .step_by(97)
+            .filter(|&c| !is_surrogate(c));
+        let supplementary = (0x1_0000u32..0x11_0000).step_by(331);
+        // Boundary values that the strides would otherwise miss.
+        let boundaries = [0x7Fu32, 0x80, 0x7FF, 0x800, 0xFFFF, 0x1_0000, 0x10_FFFF];
+        for c in three_byte.chain(supplementary).chain(boundaries) {
+            if is_surrogate(c) {
+                continue;
+            }
+            let ch = char::from_u32(c).unwrap();
+            let s = ch.to_string();
+            assert_eq!(decode(&encode_modified_utf8(&s)), s, "U+{c:04X}");
+        }
+    }
+
+    #[test]
+    fn decode_round_trips_with_leading_ascii_so_the_loop_index_is_nonzero() {
+        // A non-zero loop index makes every `i + n` byte offset in the decoder observable (an `i * n`
+        // or `i - n` mutation reads the wrong byte / panics). Several prefix lengths cover each form.
+        let samples = [
+            '\u{E9}',
+            '\u{20AC}',
+            '\u{1_0000}',
+            '\u{1F600}',
+            '\u{10_FFFF}',
+        ];
+        for prefix in ["", "A", "AB", "ABC", "ABCD"] {
+            for ch in samples {
+                let s = format!("{prefix}{ch}");
+                assert_eq!(
+                    decode(&encode_modified_utf8(&s)),
+                    s,
+                    "{prefix:?} + U+{:04X}",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_multibyte_sequences_never_read_past_the_end() {
+        // Each is a lead byte whose continuation bytes are missing; the length guards must stop the
+        // decoder before it indexes out of bounds (a `<` → `<=` mutation would panic here).
+        assert_eq!(decode(&[0xC3]), "\u{FFFD}");
+        assert_eq!(decode(&[0xE2, 0x82]), "\u{FFFD}\u{FFFD}");
+        assert_eq!(
+            decode(&[0xED, 0xA0, 0xBD, 0xED, 0xB8]),
+            "\u{FFFD}\u{FFFD}\u{FFFD}"
+        );
+    }
+
+    #[test]
+    fn malformed_supplementary_conditions_fall_back_without_reading_past_the_end() {
+        // A `0xED` lead whose surrogate-pair shape is broken must NOT be decoded as supplementary.
+        // These pin the exact per-sub-condition behaviour of the six-byte guard: relaxing any `&&`
+        // to `||` either changes the output or reads out of bounds.
+        assert_eq!(decode(&[0xED]), "\u{FFFD}");
+        assert_eq!(decode(&[0xED, 0x00]), "\u{FFFD}\0");
+        assert_eq!(decode(&[0xED, 0xA0, 0x00]), "\u{FFFD}");
+        // A valid six-byte surrogate shape that does NOT start with 0xED: only if the leading
+        // `b0 == 0xED` guard is (wrongly) OR-ed in does this decode as a supplementary char.
+        assert_eq!(
+            decode(&[0xEE, 0xA0, 0xBD, 0xED, 0xB0, 0x80]),
+            "\u{E83D}\u{FFFD}"
+        );
+    }
+
+    #[test]
+    fn a_stray_continuation_byte_is_replaced_not_pushed() {
+        // 0x80 is never a valid lead byte: the `b0 < 0x80` fast path must not claim it (a `<` → `<=`
+        // mutation would push U+0080 instead of the replacement character).
+        assert_eq!(decode(&[0xC3, 0xA9, 0x80]), "\u{E9}\u{FFFD}");
+    }
+
+    #[test]
+    fn read_keeps_long_entries_two_slots_wide() {
+        // Two back-to-back `long`s: index 1 and index 3 hold the values, 2 and 4 are the unusable
+        // gap slots. The `i += 2` slot accounting is what keeps the second long at index 3 — a `-=`
+        // underflows and a `*=` mis-counts into an out-of-bytes read.
+        let mut bytes = vec![0x00, 0x05]; // constant_pool_count = 5
+        bytes.extend_from_slice(&[0x05, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // Long #1
+        bytes.extend_from_slice(&[0x05, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]); // Long #2
+        let pool = ConstantPool::read(&mut Reader::new(&bytes)).expect("read pool");
+
+        assert_eq!(
+            pool.get(1),
+            Some(&ConstantPoolEntry::Long(0x0102_0304_0506_0708))
+        );
+        assert_eq!(pool.get(2), None, "the slot after a long is a gap");
+        assert_eq!(
+            pool.get(3),
+            Some(&ConstantPoolEntry::Long(0x1112_1314_1516_1718))
+        );
+        assert_eq!(pool.get(4), None, "the slot after a long is a gap");
+    }
+
+    #[test]
+    fn class_name_follows_the_name_index_to_its_utf8() {
+        let mut bytes = vec![0x00, 0x03]; // constant_pool_count = 3
+        bytes.extend_from_slice(&[0x07, 0x00, 0x02]); // #1 Class -> #2
+        bytes.extend_from_slice(&[0x01, 0x00, 0x03, b'A', b'/', b'B']); // #2 Utf8 "A/B"
+        let pool = ConstantPool::read(&mut Reader::new(&bytes)).expect("read pool");
+
+        assert_eq!(pool.class_name(1).as_deref(), Some("A/B"));
+        assert_eq!(pool.utf8(2).as_deref(), Some("A/B"));
+        // A non-Class index has no class name.
+        assert_eq!(pool.class_name(2), None);
+        assert_eq!(pool.class_name(0), None);
     }
 }

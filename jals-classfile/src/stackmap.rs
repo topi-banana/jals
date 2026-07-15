@@ -232,3 +232,91 @@ impl VerificationType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip_frame(frame: &StackMapFrame) {
+        let mut w = Writer::new();
+        frame.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(&StackMapFrame::read(&mut r).unwrap(), frame);
+        assert_eq!(r.remaining(), 0, "frame left trailing bytes");
+    }
+
+    fn roundtrip_verification_type(ty: &VerificationType) {
+        let mut w = Writer::new();
+        ty.write(&mut w);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(&VerificationType::read(&mut r).unwrap(), ty);
+        assert_eq!(r.remaining(), 0, "verification_type left trailing bytes");
+    }
+
+    #[test]
+    fn every_frame_kind_round_trips() {
+        // Non-zero, distinct deltas so the `frame_type ± N` slot arithmetic (which folds the delta or
+        // a count into the type byte) is observable in the decoded value.
+        roundtrip_frame(&StackMapFrame::Same { offset_delta: 30 });
+        roundtrip_frame(&StackMapFrame::SameLocals1StackItem {
+            offset_delta: 10,
+            stack: VerificationType::Integer,
+        });
+        roundtrip_frame(&StackMapFrame::SameLocals1StackItemExtended {
+            offset_delta: 300,
+            stack: VerificationType::Float,
+        });
+        for count in 1..=3 {
+            roundtrip_frame(&StackMapFrame::Chop {
+                count,
+                offset_delta: 5,
+            });
+        }
+        roundtrip_frame(&StackMapFrame::SameFrameExtended { offset_delta: 7 });
+        roundtrip_frame(&StackMapFrame::Append {
+            offset_delta: 9,
+            locals: vec![
+                VerificationType::Integer,
+                VerificationType::Float,
+                VerificationType::Long,
+            ],
+        });
+        roundtrip_frame(&StackMapFrame::Full {
+            offset_delta: 11,
+            locals: vec![VerificationType::Integer],
+            stack: vec![VerificationType::Float, VerificationType::Double],
+        });
+    }
+
+    #[test]
+    fn an_unknown_frame_type_is_rejected() {
+        // 128 is in the reserved gap between the tag-encoded ranges.
+        let mut r = Reader::new(&[128]);
+        assert!(StackMapFrame::read(&mut r).is_err());
+    }
+
+    #[test]
+    fn every_verification_type_round_trips() {
+        for ty in [
+            VerificationType::Top,
+            VerificationType::Integer,
+            VerificationType::Float,
+            VerificationType::Double,
+            VerificationType::Long,
+            VerificationType::Null,
+            VerificationType::UninitializedThis,
+            VerificationType::Object { cpool_index: 42 },
+            VerificationType::Uninitialized { offset: 7 },
+        ] {
+            roundtrip_verification_type(&ty);
+        }
+    }
+
+    #[test]
+    fn an_unknown_verification_type_tag_is_rejected() {
+        let mut r = Reader::new(&[9]);
+        assert!(VerificationType::read(&mut r).is_err());
+    }
+}
