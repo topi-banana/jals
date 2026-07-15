@@ -1,0 +1,15 @@
+id: no-extern-crate-core
+
+valid:
+  - |
+      extern crate alloc;
+
+  - |
+      use core::mem;
+
+invalid:
+  - |
+      extern crate core;
+
+  - |
+      extern crate core as core_crate;

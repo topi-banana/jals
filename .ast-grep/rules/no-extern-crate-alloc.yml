@@ -1,0 +1,27 @@
+id: no-extern-crate-alloc
+language: Rust
+severity: error
+message: Do not declare `alloc` with `extern crate` outside an approved no_std crate root.
+note: |
+  Import alloc types and macros with `use alloc::...`; the crate root already makes
+  `alloc` available to its modules.
+
+rule:
+  kind: extern_crate_declaration
+  has:
+    field: name
+    regex: '^alloc$'
+    stopBy: end
+
+# These no_std crate roots must link the sysroot alloc crate explicitly. Keeping the
+# allowlist here makes every additional `extern crate alloc` declaration deliberate.
+ignores:
+  - 'jals-classfile/src/lib.rs'
+  - 'jals-config/src/lib.rs'
+  - 'jals-decompile/src/lib.rs'
+  - 'jals-fmt/src/lib.rs'
+  - 'jals-fs/src/lib.rs'
+  - 'jals-hir/src/lib.rs'
+  - 'jals-lint/src/lib.rs'
+  - 'jals-syntax/src/lib.rs'
+  - '**/target/**'
