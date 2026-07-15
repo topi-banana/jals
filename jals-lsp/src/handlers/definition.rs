@@ -26,7 +26,13 @@ impl Definition {
         let offset = u32::from(line_index.offset(text, position)) as usize;
         let project = super::OneFileQueries::new(parse);
         let target = project.queries().definition(offset)?;
-        Some(line_index.byte_range(text, &target.range))
+        // This fallback can only navigate within the open document, so its byte range is meaningful
+        // only for a target in this file. A member resolved on a source-less library type (a stdlib
+        // stub) targets a reserved stub file whose range would map onto arbitrary text here, so
+        // reject anything outside this file rather than jump to a bogus location. The workspace path
+        // makes the same guard through `ws_file`.
+        (target.file == super::OneFileQueries::FILE)
+            .then(|| line_index.byte_range(text, &target.range))
     }
 }
 
@@ -73,6 +79,23 @@ mod tests {
     fn unresolved_cursor_yields_none() {
         let text = "class C { void m() { use(nope); } }";
         assert_eq!(at(text, "nope"), None);
+    }
+
+    #[test]
+    fn same_file_member_still_navigates() {
+        // A member on a *same-file* type stays navigable: `c.width` jumps to the `int width` field
+        // declaration in this document. The out-of-file guard must not suppress an in-file target.
+        let text = "class C { int width; void m(C c) { use(c.width); } }";
+        assert_eq!(at(text, "width)"), Some((0, 14, 0, 19)));
+    }
+
+    #[test]
+    fn source_less_library_member_yields_none() {
+        // `s.length()` resolves `length` on the `String` stdlib stub, whose declaration lives in a
+        // reserved stub file — not openable in this document. The fallback must yield nothing rather
+        // than map the stub's byte range onto this file and jump to a bogus location.
+        let text = "class C { void m(String s) { use(s.length()); } }";
+        assert_eq!(at(text, "length"), None);
     }
 
     #[test]
