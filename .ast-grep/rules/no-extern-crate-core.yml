@@ -11,6 +11,3 @@ rule:
     field: name
     regex: '^core$'
     stopBy: end
-
-ignores:
-  - '**/target/**'

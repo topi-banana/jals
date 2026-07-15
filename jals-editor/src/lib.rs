@@ -6,8 +6,6 @@
 //! on an editor protocol or coordinate base. Protocol adapters are responsible for mapping
 //! [`Utf16Position`] to their own position types and applying any one-based coordinates.
 
-extern crate alloc;
-
 use alloc::{vec, vec::Vec};
 
 /// A zero-based line and UTF-16 code-unit coordinate.

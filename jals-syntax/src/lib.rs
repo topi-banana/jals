@@ -27,8 +27,6 @@
 //! assert_eq!(class.syntax().text().to_string(), "class Foo { }");
 //! ```
 
-extern crate alloc;
-
 pub mod ast;
 pub mod language;
 pub mod lexer;

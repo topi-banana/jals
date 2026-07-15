@@ -15,8 +15,6 @@
 //! path *is* the OS path string (`Path::new(s)`); free helpers in [`path`] navigate them the way
 //! `std::path::Path` navigates real paths.
 
-extern crate alloc;
-
 use alloc::string::String;
 use alloc::vec::Vec;
 

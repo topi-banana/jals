@@ -18,8 +18,6 @@
 //! `ManifestExt` (`std::path`-based classpath / invocation / scaffold resolution) extends
 //! [`Manifest`].
 
-extern crate alloc;
-
 mod loader;
 
 pub mod fmt;
