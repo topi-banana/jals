@@ -1148,12 +1148,10 @@ impl Structurer<'_> {
             match &self.cfg.blocks[b].term {
                 Term::Fall(next) => {
                     let next = *next;
-                    if next == b + 1 && next < hi {
-                        b = next;
-                    } else if next == exit {
-                        break;
-                    } else {
-                        return None;
+                    match (next.cmp(&hi), next == b + 1, next == exit) {
+                        (_, _, true) => break,
+                        (core::cmp::Ordering::Less, true, false) => b = next,
+                        _ => return None,
                     }
                 }
                 Term::Ret | Term::Throw => {
@@ -1180,7 +1178,9 @@ impl Structurer<'_> {
                     // If the block just before `taken` jumps forward past it, that is the `else`'s
                     // trailing skip: `taken..e` is the `else` and `e` the join; otherwise no `else`.
                     let (then, els, join) = match self.cfg.blocks[taken - 1].term {
-                        Term::Goto(e) if e > taken && e <= hi => {
+                        // `e == taken` merely produces an empty else and renders as a plain if, so
+                        // accepting the full closed range makes the actual safety bound explicit.
+                        Term::Goto(e) if (taken..=hi).contains(&e) => {
                             let then = self.emit_region(fallthrough, taken, e, visited)?;
                             let els = self.emit_region(taken, e, e, visited)?;
                             (then, els, e)
@@ -1293,7 +1293,9 @@ impl Structurer<'_> {
                 Some((Stmt::DoWhile { body, cond }, exit))
             }
             // while (top-test): the latch's `goto` is the back-edge; the header's branch exits.
-            Term::Goto(t) if *t == header => {
+            // `emit_region` below independently requires the latch's target to equal `header`.
+            // Matching every `goto` here keeps that single validation authoritative.
+            Term::Goto(_) => {
                 let (instr, exit, body_start) = match &self.cfg.blocks[header].term {
                     Term::Branch {
                         instr,
@@ -1431,7 +1433,88 @@ impl Structurer<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::Cmp;
+    use alloc::collections::BTreeMap;
+    use alloc::vec;
+
+    use jals_classfile::{ClassFile, ConstantPoolEntry, Instruction as I};
+
+    use super::*;
+
+    fn consts() -> ClassFile {
+        ClassFile::read(include_bytes!(
+            "../../jals-classpath/tests/fixtures/Consts.class"
+        ))
+        .expect("parse Consts fixture")
+    }
+
+    fn sim<'a>(pool: &'a ConstantPool, locals: &'a BTreeMap<u16, String>) -> Sim<'a> {
+        Sim {
+            pool,
+            bootstrap: &[],
+            owner: "demo/Owner",
+            is_static: true,
+            locals,
+            stack: Vec::new(),
+            stmts: Vec::new(),
+        }
+    }
+
+    fn pool_index(pool: &ConstantPool, predicate: impl Fn(&ConstantPoolEntry) -> bool) -> u16 {
+        (1..1024)
+            .find(|&index| pool.get(index).is_some_and(&predicate))
+            .expect("matching constant-pool entry")
+    }
+
+    fn synthetic_concat_class() -> ClassFile {
+        fn u16(bytes: &mut Vec<u8>, value: u16) {
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        fn utf8(bytes: &mut Vec<u8>, value: &str) {
+            bytes.push(1);
+            u16(
+                bytes,
+                u16::try_from(value.len()).expect("short test constant"),
+            );
+            bytes.extend_from_slice(value.as_bytes());
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xCAFE_BABE_u32.to_be_bytes());
+        u16(&mut bytes, 0);
+        u16(&mut bytes, 61);
+        u16(&mut bytes, 22);
+        utf8(&mut bytes, "Test"); // 1
+        bytes.extend_from_slice(&[7, 0, 1]); // 2 Class Test
+        utf8(&mut bytes, "java/lang/Object"); // 3
+        bytes.extend_from_slice(&[7, 0, 3]); // 4 Class Object
+        utf8(&mut bytes, "java/lang/invoke/StringConcatFactory"); // 5
+        bytes.extend_from_slice(&[7, 0, 5]); // 6 Class StringConcatFactory
+        utf8(&mut bytes, "makeConcat"); // 7
+        utf8(&mut bytes, "()V"); // 8
+        bytes.extend_from_slice(&[12, 0, 7, 0, 8]); // 9 NameAndType
+        bytes.extend_from_slice(&[10, 0, 6, 0, 9]); // 10 MethodRef
+        bytes.extend_from_slice(&[15, 6, 0, 10]); // 11 MethodHandle
+        utf8(&mut bytes, "call"); // 12
+        utf8(&mut bytes, "(I)Ljava/lang/String;"); // 13
+        bytes.extend_from_slice(&[12, 0, 12, 0, 13]); // 14 NameAndType
+        bytes.extend_from_slice(&[18, 0, 0, 0, 14]); // 15 InvokeDynamic
+        utf8(&mut bytes, "x"); // 16
+        bytes.extend_from_slice(&[8, 0, 16]); // 17 String "x"
+        utf8(&mut bytes, "makeConcatWithConstants"); // 18
+        bytes.extend_from_slice(&[12, 0, 18, 0, 8]); // 19 NameAndType
+        bytes.extend_from_slice(&[10, 0, 6, 0, 19]); // 20 MethodRef
+        bytes.extend_from_slice(&[15, 6, 0, 20]); // 21 MethodHandle
+        bytes.extend_from_slice(&[
+            0, 0x21, // access_flags
+            0, 2, // this_class
+            0, 4, // super_class
+            0, 0, // interfaces_count
+            0, 0, // fields_count
+            0, 0, // methods_count
+            0, 0, // attributes_count
+        ]);
+        ClassFile::read(&bytes).expect("parse synthetic concat class")
+    }
 
     // The fixtures only cover the flavor/operator pairings `javac` emits, so the full NaN
     // faithfulness table is asserted here: an ordering operator whose true side would capture
@@ -1446,6 +1529,735 @@ mod tests {
             for (op, exact) in ["==", "!=", "<", "<=", ">", ">="].into_iter().zip(expected) {
                 assert_eq!(cmp.exact(op), exact, "{op}");
             }
+        }
+    }
+
+    #[test]
+    fn recognizes_all_local_store_encodings() {
+        for (instruction, expected) in [
+            (I::Istore(7), 7),
+            (I::Lstore(7), 7),
+            (I::Fstore(7), 7),
+            (I::Dstore(7), 7),
+            (I::Astore(7), 7),
+            (I::Istore0, 0),
+            (I::Lstore1, 1),
+            (I::Fstore2, 2),
+            (I::Dstore3, 3),
+            (I::Astore0, 0),
+            (I::Wide(WideInstruction::Istore(300)), 300),
+            (I::Wide(WideInstruction::Lstore(301)), 301),
+            (I::Wide(WideInstruction::Fstore(302)), 302),
+            (I::Wide(WideInstruction::Dstore(303)), 303),
+            (I::Wide(WideInstruction::Astore(304)), 304),
+        ] {
+            assert_eq!(MethodBody::store_slot(&instruction), Some(expected));
+            assert_eq!(MethodBody::stored_slot(&instruction), Some(expected));
+        }
+        assert_eq!(
+            MethodBody::stored_slot(&I::Iinc { index: 9, value: 1 }),
+            Some(9)
+        );
+        assert_eq!(
+            MethodBody::stored_slot(&I::Wide(WideInstruction::Iinc {
+                index: 400,
+                value: -2,
+            })),
+            Some(400)
+        );
+        assert_eq!(MethodBody::stored_slot(&I::Nop), None);
+    }
+
+    #[test]
+    fn instance_slot_zero_is_not_hoisted_as_a_local() {
+        let cf = consts();
+        let code = CodeAttribute {
+            max_stack: 1,
+            max_locals: 1,
+            code: vec![I::Iconst0, I::Istore0, I::Return],
+            exception_table: Vec::new(),
+            attributes: Vec::new(),
+        };
+        let mut locals = BTreeMap::new();
+        assert!(
+            MethodBody::local_declarations(&code, &cf.constant_pool, false, &mut locals)
+                .is_some_and(|decls| decls.is_empty())
+        );
+        assert!(
+            MethodBody::local_declarations(&code, &cf.constant_pool, true, &mut locals).is_none()
+        );
+    }
+
+    #[test]
+    fn simulator_covers_constants_loads_arithmetic_and_conversions() {
+        let cf = consts();
+        let locals = BTreeMap::from([(7, "x".to_owned())]);
+        let mut sim = sim(&cf.constant_pool, &locals);
+        assert_eq!(sim.unary("-"), None);
+        assert_eq!(sim.step(&I::Nop), Some(()));
+        for instruction in [
+            I::AconstNull,
+            I::Pop,
+            I::Iload(7),
+            I::Pop,
+            I::Iconst5,
+            I::Sipush(9),
+            I::Isub,
+            I::Ineg,
+            I::Pop,
+            I::Lconst0,
+            I::Lconst1,
+            I::Lsub,
+            I::Pop,
+        ] {
+            assert_eq!(sim.step(&instruction), Some(()), "{instruction:?}");
+        }
+
+        let cases = [
+            (I::Irem, "%"),
+            (I::Ishl, "<<"),
+            (I::Ishr, ">>"),
+            (I::Iushr, ">>>"),
+            (I::Iand, "&"),
+            (I::Ior, "|"),
+            (I::Ixor, "^"),
+        ];
+        for (instruction, operator) in cases {
+            sim.stack.extend([Expr::lit("8"), Expr::lit("2")]);
+            assert_eq!(sim.step(&instruction), Some(()));
+            assert_eq!(
+                sim.pop().map(|e| e.render()),
+                Some(format!("8 {operator} 2"))
+            );
+        }
+
+        for (instruction, expected) in [
+            (I::I2l, "(long) 1"),
+            (I::I2f, "(float) 1"),
+            (I::I2d, "(double) 1"),
+            (I::L2i, "(int) 1"),
+            (I::I2b, "(byte) 1"),
+            (I::I2c, "(char) 1"),
+            (I::I2s, "(short) 1"),
+        ] {
+            sim.stack.push(Expr::lit("1"));
+            assert_eq!(sim.step(&instruction), Some(()));
+            assert_eq!(sim.pop().map(|e| e.render()).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn iinc_handles_negative_zero_positive_and_wide_forms() {
+        let cf = consts();
+        let locals = BTreeMap::from([(7, "x".to_owned()), (400, "wide".to_owned())]);
+        let mut sim = sim(&cf.constant_pool, &locals);
+        for instruction in [
+            I::Iinc {
+                index: 7,
+                value: -2,
+            },
+            I::Iinc { index: 7, value: 0 },
+            I::Iinc { index: 7, value: 3 },
+            I::Wide(WideInstruction::Iinc {
+                index: 400,
+                value: -4,
+            }),
+        ] {
+            assert_eq!(sim.step(&instruction), Some(()));
+        }
+        assert_eq!(
+            Stmt::render_block(&sim.stmts),
+            ["x = x - 2;", "x = x + 0;", "x = x + 3;", "wide = wide - 4;"]
+        );
+        assert_eq!(sim.iinc(999, 1), None);
+    }
+
+    #[test]
+    fn simulator_executes_generic_numbered_and_wide_stores() {
+        let cf = consts();
+        let locals = BTreeMap::from([
+            (0, "zero".to_owned()),
+            (7, "seven".to_owned()),
+            (300, "wide".to_owned()),
+        ]);
+        let mut sim = sim(&cf.constant_pool, &locals);
+        for instruction in [
+            I::Iconst1,
+            I::Istore(7),
+            I::Iconst2,
+            I::Istore0,
+            I::Iconst3,
+            I::Wide(WideInstruction::Istore(300)),
+        ] {
+            assert_eq!(sim.step(&instruction), Some(()));
+        }
+        assert_eq!(
+            Stmt::render_block(&sim.stmts),
+            ["seven = 1;", "zero = 2;", "wide = 3;"]
+        );
+    }
+
+    #[test]
+    fn resolves_each_ldc_constant_kind() {
+        let cf = consts();
+        let locals = BTreeMap::new();
+        let sim = sim(&cf.constant_pool, &locals);
+        for (predicate, expected) in [
+            (
+                (|entry: &ConstantPoolEntry| matches!(entry, ConstantPoolEntry::Integer(_)))
+                    as fn(&ConstantPoolEntry) -> bool,
+                "42",
+            ),
+            (
+                (|entry: &ConstantPoolEntry| matches!(entry, ConstantPoolEntry::Long(_)))
+                    as fn(&ConstantPoolEntry) -> bool,
+                "9000000000L",
+            ),
+            (
+                (|entry: &ConstantPoolEntry| matches!(entry, ConstantPoolEntry::Float(_)))
+                    as fn(&ConstantPoolEntry) -> bool,
+                "0.25f",
+            ),
+            (
+                (|entry: &ConstantPoolEntry| matches!(entry, ConstantPoolEntry::Double(_)))
+                    as fn(&ConstantPoolEntry) -> bool,
+                "1.5d",
+            ),
+            (
+                (|entry: &ConstantPoolEntry| matches!(entry, ConstantPoolEntry::String { .. }))
+                    as fn(&ConstantPoolEntry) -> bool,
+                "\"jals\"",
+            ),
+            (
+                (|entry: &ConstantPoolEntry| matches!(entry, ConstantPoolEntry::Class { .. }))
+                    as fn(&ConstantPoolEntry) -> bool,
+                "java.lang.Object.class",
+            ),
+        ] {
+            let index = pool_index(&cf.constant_pool, predicate);
+            assert_eq!(
+                sim.constant(index).map(|e| e.render()).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn static_field_and_method_instructions_are_observable() {
+        let cf = consts();
+        let locals = BTreeMap::new();
+        let field_ref = pool_index(&cf.constant_pool, |entry| {
+            matches!(entry, ConstantPoolEntry::FieldRef { .. })
+        });
+        let method_ref = pool_index(&cf.constant_pool, |entry| {
+            let ConstantPoolEntry::MethodRef {
+                name_and_type_index,
+                ..
+            } = entry
+            else {
+                return false;
+            };
+            let Some(ConstantPoolEntry::NameAndType {
+                descriptor_index, ..
+            }) = cf.constant_pool.get(*name_and_type_index)
+            else {
+                return false;
+            };
+            cf.constant_pool.utf8(*descriptor_index).as_deref() == Some("()V")
+        });
+
+        let mut sim = sim(&cf.constant_pool, &locals);
+        assert_eq!(sim.step(&I::GetStatic(field_ref)), Some(()));
+        assert!(sim.pop().is_some_and(|e| e.render().contains('.')));
+        sim.stack.push(Expr::lit("1"));
+        assert_eq!(sim.step(&I::PutStatic(field_ref)), Some(()));
+        assert_eq!(sim.step(&I::InvokeStatic(method_ref)), Some(()));
+        assert_eq!(sim.stmts.len(), 2);
+    }
+
+    #[test]
+    fn builder_guards_and_coercions_cover_boundary_cases() {
+        let cf = consts();
+        let locals = BTreeMap::new();
+        let mut sim = sim(&cf.constant_pool, &locals);
+        let no_args = MethodDescriptor::parse("()Ljava/lang/String;").expect("descriptor");
+        sim.stack.push(Expr::PendingBuilder(Vec::new()));
+        assert_eq!(sim.fold_builder("toString", &no_args), Some(false));
+        let Some(Expr::PendingBuilder(parts)) = sim.stack.last_mut() else {
+            panic!("builder")
+        };
+        parts.push(ConcatPart {
+            expr: Expr::lit("1"),
+            stringy: false,
+        });
+        assert_eq!(sim.fold_builder("toString", &no_args), Some(true));
+        assert_eq!(sim.pop().map(|e| e.render()).as_deref(), Some("\"\" + 1"));
+
+        let one_arg = MethodDescriptor::parse("(I)Ljava/lang/String;").expect("descriptor");
+        sim.stack.push(Expr::PendingBuilder(vec![ConcatPart {
+            expr: Expr::lit("1"),
+            stringy: false,
+        }]));
+        sim.stack.push(Expr::lit("2"));
+        assert_eq!(sim.fold_builder("toString", &one_arg), Some(false));
+        assert_eq!(sim.stack.len(), 2);
+        sim.stack.clear();
+        sim.stack.push(Expr::PendingBuilder(vec![ConcatPart {
+            expr: Expr::lit("1"),
+            stringy: false,
+        }]));
+        assert_eq!(sim.fold_builder("toString", &one_arg), Some(false));
+        assert!(matches!(sim.stack.as_slice(), [Expr::PendingBuilder(_)]));
+        let two_args =
+            MethodDescriptor::parse("(II)Ljava/lang/StringBuilder;").expect("descriptor");
+        assert_eq!(sim.fold_builder("append", &no_args), Some(false));
+        sim.stack.push(Expr::lit("2"));
+        assert_eq!(sim.fold_builder("append", &two_args), Some(false));
+        assert_eq!(sim.stack.len(), 2);
+
+        assert!(Sim::concat_safe(&FieldType::Base(BaseType::Int)));
+        assert!(Sim::concat_safe(&FieldType::Object(
+            "java/lang/CharSequence".to_owned()
+        )));
+        assert!(!Sim::concat_safe(&FieldType::Object(
+            "pkg/Other".to_owned()
+        )));
+        assert!(!Sim::concat_safe(&FieldType::Array(Box::new(
+            FieldType::Base(BaseType::Char)
+        ))));
+
+        for (value, ty, expected) in [
+            ("0", BaseType::Boolean, Some("false")),
+            ("1", BaseType::Boolean, Some("true")),
+            ("2", BaseType::Boolean, None),
+            ("65", BaseType::Char, Some("'A'")),
+            ("55296", BaseType::Char, Some("(char) 55296")),
+            ("65535", BaseType::Char, Some("'\u{ffff}'")),
+            ("65536", BaseType::Char, None),
+        ] {
+            assert_eq!(
+                Sim::coerce(Expr::lit(value), &FieldType::Base(ty))
+                    .map(|e| e.render())
+                    .as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn concat_bootstrap_guards_and_recipe_consumption_are_exact() {
+        let cf = synthetic_concat_class();
+        let locals = BTreeMap::new();
+        let empty = BootstrapMethod {
+            bootstrap_method_ref: 11,
+            bootstrap_arguments: Vec::new(),
+        };
+        let nonempty = BootstrapMethod {
+            bootstrap_method_ref: 11,
+            bootstrap_arguments: vec![17],
+        };
+        let sim = sim(&cf.constant_pool, &locals);
+        assert_eq!(
+            sim.concat_shape(&empty, 2)
+                .map(|(recipe, constants)| (recipe, constants.len())),
+            Some(("\u{1}\u{1}".to_owned(), 0))
+        );
+        assert!(sim.concat_shape(&nonempty, 2).is_none());
+
+        let mismatched = BootstrapMethod {
+            bootstrap_method_ref: 21,
+            bootstrap_arguments: vec![17],
+        };
+        let bootstraps = [mismatched];
+        let mut sim = Sim {
+            pool: &cf.constant_pool,
+            bootstrap: &bootstraps,
+            owner: "Test",
+            is_static: true,
+            locals: &locals,
+            stack: vec![Expr::lit("1")],
+            stmts: Vec::new(),
+        };
+        assert_eq!(sim.invoke_dynamic(15), None);
+    }
+
+    #[test]
+    fn multi_array_and_initializer_bounds_bail() {
+        let cf = ClassFile::read(include_bytes!(
+            "../../jals-classpath/tests/fixtures/Arrays.class"
+        ))
+        .expect("parse Arrays fixture");
+        let locals = BTreeMap::new();
+        let array_class = pool_index(&cf.constant_pool, |entry| {
+            let ConstantPoolEntry::Class { name_index } = entry else {
+                return false;
+            };
+            cf.constant_pool
+                .utf8(*name_index)
+                .is_some_and(|name| name.starts_with("[["))
+        });
+        let mut sim = sim(&cf.constant_pool, &locals);
+        sim.stack
+            .extend([Expr::lit("1"), Expr::lit("2"), Expr::lit("3")]);
+        assert_eq!(sim.multi_new_array(array_class, 0), None);
+        assert_eq!(sim.multi_new_array(array_class, 3), None);
+
+        sim.stack.push(Expr::PendingArray {
+            elem: "int".to_owned(),
+            empty_dims: 0,
+            len: 1,
+            elems: Vec::new(),
+        });
+        assert_eq!(sim.push_elem(&Expr::lit("1"), Expr::lit("7")), None);
+        assert_eq!(sim.push_elem(&Expr::lit("0"), Expr::lit("7")), Some(()));
+        assert_eq!(sim.push_elem(&Expr::lit("1"), Expr::lit("8")), None);
+    }
+
+    #[test]
+    fn every_reference_and_integer_branch_operator_is_rendered() {
+        let pairs = [
+            (I::IfIcmpeq(0), "a == b"),
+            (I::IfAcmpeq(0), "a == b"),
+            (I::IfIcmpne(0), "a != b"),
+            (I::IfAcmpne(0), "a != b"),
+            (I::IfIcmpgt(0), "a > b"),
+        ];
+        for (branch, expected) in pairs {
+            let expr = Structurer::branch_condition(
+                &branch,
+                false,
+                None,
+                vec![Expr::lit("a"), Expr::lit("b")],
+            )
+            .expect("condition");
+            assert_eq!(expr.render(), expected);
+        }
+        for (branch, expected) in [(I::IfNull(0), "a == null"), (I::IfNonNull(0), "a != null")] {
+            let expr = Structurer::branch_condition(&branch, false, None, vec![Expr::lit("a")])
+                .expect("condition");
+            assert_eq!(expr.render(), expected);
+        }
+    }
+
+    fn structurer<'a>(
+        code: &'a [Instruction],
+        cfg: &'a Cfg,
+        pool: &'a ConstantPool,
+    ) -> Structurer<'a> {
+        Structurer {
+            code,
+            cfg,
+            pool,
+            bootstrap: &[],
+            owner: "demo/Owner".to_owned(),
+            is_static: true,
+            locals: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn emit_region_accepts_boundaries_and_rejects_each_bad_branch_edge() {
+        let cf = consts();
+        let code = [I::Iconst1, I::Ifeq(0), I::Return];
+        let valid = Cfg {
+            blocks: vec![
+                crate::cfg::Block {
+                    start: 0,
+                    end: 2,
+                    term: Term::Branch {
+                        instr: 1,
+                        taken: 2,
+                        fallthrough: 1,
+                    },
+                },
+                crate::cfg::Block {
+                    start: 2,
+                    end: 3,
+                    term: Term::Ret,
+                },
+            ],
+        };
+        let mut visited = vec![false; 2];
+        let stmts = structurer(&code, &valid, &cf.constant_pool)
+            .emit_region(0, 2, 2, &mut visited)
+            .expect("taken == hi is a valid no-else join");
+        assert_eq!(Stmt::render_block(&stmts), ["if (1) {", "    return;", "}"]);
+
+        let leftover = Cfg {
+            blocks: vec![crate::cfg::Block {
+                start: 0,
+                end: 1,
+                term: Term::Ret,
+            }],
+        };
+        let mut visited = vec![false];
+        assert!(
+            structurer(&[I::Iconst1], &leftover, &cf.constant_pool)
+                .emit_region(0, 1, 1, &mut visited)
+                .is_none()
+        );
+
+        for (taken, fallthrough) in [(2, 0), (3, 1)] {
+            let malformed = Cfg {
+                blocks: vec![
+                    crate::cfg::Block {
+                        start: 0,
+                        end: 2,
+                        term: Term::Branch {
+                            instr: 1,
+                            taken,
+                            fallthrough,
+                        },
+                    },
+                    crate::cfg::Block {
+                        start: 2,
+                        end: 3,
+                        term: Term::Ret,
+                    },
+                ],
+            };
+            let mut visited = vec![false; 2];
+            assert!(
+                structurer(&code, &malformed, &cf.constant_pool)
+                    .emit_region(0, 2, 2, &mut visited)
+                    .is_none(),
+                "taken={taken}, fallthrough={fallthrough}"
+            );
+        }
+
+        let backward_code = [I::Nop, I::Iconst1, I::Ifeq(0), I::Return];
+        let backward = Cfg {
+            blocks: vec![
+                crate::cfg::Block {
+                    start: 0,
+                    end: 1,
+                    term: Term::Fall(1),
+                },
+                crate::cfg::Block {
+                    start: 1,
+                    end: 3,
+                    term: Term::Branch {
+                        instr: 2,
+                        taken: 0,
+                        fallthrough: 2,
+                    },
+                },
+                crate::cfg::Block {
+                    start: 3,
+                    end: 4,
+                    term: Term::Ret,
+                },
+            ],
+        };
+        let mut visited = vec![false; 3];
+        assert!(
+            structurer(&backward_code, &backward, &cf.constant_pool)
+                .emit_region(1, 3, 3, &mut visited)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn emit_region_recovers_an_else_whose_join_is_region_end() {
+        let cf = consts();
+        let code = [I::Iconst1, I::Ifeq(0), I::Goto(0), I::Return];
+        let cfg = Cfg {
+            blocks: vec![
+                crate::cfg::Block {
+                    start: 0,
+                    end: 2,
+                    term: Term::Branch {
+                        instr: 1,
+                        taken: 2,
+                        fallthrough: 1,
+                    },
+                },
+                crate::cfg::Block {
+                    start: 2,
+                    end: 3,
+                    term: Term::Goto(3),
+                },
+                crate::cfg::Block {
+                    start: 3,
+                    end: 4,
+                    term: Term::Ret,
+                },
+            ],
+        };
+        let mut visited = vec![false; 3];
+        let stmts = structurer(&code, &cfg, &cf.constant_pool)
+            .emit_region(0, 3, 3, &mut visited)
+            .expect("valid if-else");
+        assert_eq!(
+            Stmt::render_block(&stmts),
+            ["if (1) {", "} else {", "    return;", "}"]
+        );
+    }
+
+    #[test]
+    fn emit_region_rejects_skipped_fallthrough_and_else_join_past_region() {
+        let cf = consts();
+        let skipped = Cfg {
+            blocks: vec![
+                crate::cfg::Block {
+                    start: 0,
+                    end: 1,
+                    term: Term::Fall(2),
+                },
+                crate::cfg::Block {
+                    start: 1,
+                    end: 2,
+                    term: Term::Ret,
+                },
+                crate::cfg::Block {
+                    start: 2,
+                    end: 3,
+                    term: Term::Ret,
+                },
+            ],
+        };
+        let mut visited = vec![false; 3];
+        assert!(
+            structurer(&[I::Nop, I::Return, I::Return], &skipped, &cf.constant_pool)
+                .emit_region(0, 3, 3, &mut visited)
+                .is_none()
+        );
+
+        let code = [I::Iconst1, I::Ifeq(0), I::Goto(0), I::Return];
+        let past_end = Cfg {
+            blocks: vec![
+                crate::cfg::Block {
+                    start: 0,
+                    end: 2,
+                    term: Term::Branch {
+                        instr: 1,
+                        taken: 2,
+                        fallthrough: 1,
+                    },
+                },
+                crate::cfg::Block {
+                    start: 2,
+                    end: 3,
+                    term: Term::Goto(4),
+                },
+                crate::cfg::Block {
+                    start: 3,
+                    end: 4,
+                    term: Term::Ret,
+                },
+                crate::cfg::Block {
+                    start: 3,
+                    end: 4,
+                    term: Term::Ret,
+                },
+            ],
+        };
+        let mut visited = vec![false; 4];
+        assert!(
+            structurer(&code, &past_end, &cf.constant_pool)
+                .emit_region(0, 3, 3, &mut visited)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_branch_body_is_not_treated_as_a_comparison() {
+        let cf = consts();
+        let code = [I::Ifeq(0)];
+        let cfg = Cfg {
+            blocks: vec![crate::cfg::Block {
+                start: 0,
+                end: 1,
+                term: Term::Branch {
+                    instr: 0,
+                    taken: 0,
+                    fallthrough: 0,
+                },
+            }],
+        };
+        let result = structurer(&code, &cfg, &cf.constant_pool)
+            .run_block(0)
+            .expect("empty branch body");
+        assert!(result.0.is_empty());
+        assert!(result.1.is_empty());
+        assert!(result.2.is_none());
+    }
+
+    #[test]
+    fn do_while_validates_taken_edge_and_exit_boundaries() {
+        let cf = consts();
+        let code = [I::Iconst1, I::Ifne(0)];
+        let make_cfg = |taken, fallthrough| Cfg {
+            blocks: vec![crate::cfg::Block {
+                start: 0,
+                end: 2,
+                term: Term::Branch {
+                    instr: 1,
+                    taken,
+                    fallthrough,
+                },
+            }],
+        };
+
+        let valid = make_cfg(0, 1);
+        let mut visited = vec![false];
+        assert!(
+            structurer(&code, &valid, &cf.constant_pool)
+                .structure_loop(0, 0, 1, &mut visited)
+                .is_some()
+        );
+
+        for (taken, fallthrough, hi) in [(1, 1, 1), (0, 0, 1), (0, 1, 0)] {
+            let cfg = make_cfg(taken, fallthrough);
+            let mut visited = vec![false];
+            assert!(
+                structurer(&code, &cfg, &cf.constant_pool)
+                    .structure_loop(0, 0, hi, &mut visited)
+                    .is_none(),
+                "taken={taken}, fallthrough={fallthrough}, hi={hi}"
+            );
+        }
+    }
+
+    #[test]
+    fn while_validates_body_start_and_exit_boundaries() {
+        let cf = consts();
+        let code = [I::Iconst1, I::Ifeq(0), I::Goto(0)];
+        let make_cfg = |taken, fallthrough| Cfg {
+            blocks: vec![
+                crate::cfg::Block {
+                    start: 0,
+                    end: 2,
+                    term: Term::Branch {
+                        instr: 1,
+                        taken,
+                        fallthrough,
+                    },
+                },
+                crate::cfg::Block {
+                    start: 2,
+                    end: 3,
+                    term: Term::Goto(0),
+                },
+            ],
+        };
+        let valid = make_cfg(2, 1);
+        let mut visited = vec![false; 2];
+        assert!(
+            structurer(&code, &valid, &cf.constant_pool)
+                .structure_loop(0, 1, 2, &mut visited)
+                .is_some()
+        );
+
+        for (taken, fallthrough, hi) in [(2, 2, 2), (1, 1, 2), (3, 1, 2)] {
+            let cfg = make_cfg(taken, fallthrough);
+            let mut visited = vec![false; 2];
+            assert!(
+                structurer(&code, &cfg, &cf.constant_pool)
+                    .structure_loop(0, 1, hi, &mut visited)
+                    .is_none(),
+                "taken={taken}, fallthrough={fallthrough}, hi={hi}"
+            );
         }
     }
 }

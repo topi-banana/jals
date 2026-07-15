@@ -346,3 +346,29 @@ impl Expr {
         args.iter().map(Self::render).collect::<Vec<_>>().join(", ")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+    use alloc::vec;
+
+    use super::*;
+
+    fn binary(lhs: &str, op: &'static str, rhs: &str) -> Expr {
+        Expr::Binary {
+            op,
+            lhs: Box::new(Expr::lit(lhs)),
+            rhs: Box::new(Expr::lit(rhs)),
+        }
+    }
+
+    #[test]
+    fn binary_and_concat_operands_preserve_grouping() {
+        let nested = Expr::Binary {
+            op: "*",
+            lhs: Box::new(binary("a", "+", "b")),
+            rhs: Box::new(Expr::Concat(vec![Expr::lit("\"x\""), Expr::lit("c")])),
+        };
+        assert_eq!(nested.render(), "(a + b) * (\"x\" + c)");
+    }
+}
