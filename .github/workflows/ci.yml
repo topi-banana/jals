@@ -119,7 +119,7 @@ jobs:
           # jals-fmt / jals-lint stay off and `#![no_std]` is enforced for the whole set.
           - name: wasm
             target: wasm32-unknown-unknown
-            packages: --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-fs --package jals-config
+            packages: --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-fs --package jals-config
           # jals-classpath's host I/O (reqwest / git / OsFileTree) is behind its default `native`
           # feature; `--no-default-features` builds its wasm-compatible core (the `Fetcher`/`Git`/
           # `FileTree`-generic resolver). jals-build's host half (`SubprocessToolchain`, JDK

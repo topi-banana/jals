@@ -31,17 +31,19 @@ manifest.
   drives `jals build` / `run` / `clean` / `init`, a thin, pure `javac`/`java` wrapper that
   plans commands as data and never touches the JDK itself until the CLI runs them.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
-  (`jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`, `jals-decompile`,
-  `jals-fs`, `jals-config`) are `no_std` and build for `wasm32-unknown-unknown`, and
+  (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
+  `jals-decompile`, `jals-fs`, `jals-config`) are `no_std` and build for
+  `wasm32-unknown-unknown`, and
   `jals-classpath`'s resolution core does too (host I/O sits behind a `native` feature) — so
   the browser playground runs the same analysis stack client-side.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of thirteen crates plus a browser playground:
+`jals` is a Cargo workspace of fourteen product crates, including a browser playground:
 
 | Crate | Description |
 | --- | --- |
+| [`jals-editor`](jals-editor) | Editor-independent conversion between UTF-8 byte offsets and zero-based UTF-16 positions, shared by the LSP and browser playground. |
 | [`jals-syntax`](jals-syntax) | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
 | [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks. |
@@ -62,6 +64,7 @@ fidelity against real-world Java) and `xtask` (the `cargo xtask codegen` AST gen
 
 ```
 jals/
+├── jals-editor/      # UTF-8 byte <-> UTF-16 coordinates  (wasm-compatible)
 ├── jals-syntax/      # lexer + CST parser + typed AST      (wasm-compatible)
 ├── jals-fmt/         # formatter (CST -> Doc IR -> text)   (wasm-compatible)
 ├── jals-lint/        # linter (rules over CST + jals-hir)  (wasm-compatible)
@@ -377,7 +380,7 @@ ast-grep scan --error                                         # structural lints
 
 # wasm: the pure `no_std` crate set (built as one package set so their `std` features stay off) …
 cargo build --release --target wasm32-unknown-unknown \
-  -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
+  -p jals-editor -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
   -p jals-fmt -p jals-lint -p jals-fs -p jals-config
 # … plus jals-classpath's wasm-compatible core (host I/O is behind its default `native` feature)
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
@@ -406,8 +409,9 @@ for any change to the syntax or formatting layers:
 - The parser always returns a tree and never panics.
 - The formatter preserves the significant-token sequence, never drops or reorders comments,
   and is idempotent.
-- `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`, `jals-decompile`,
-  `jals-fs`, and `jals-config` build for `wasm32-unknown-unknown` as `no_std` crates;
+- `jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
+  `jals-decompile`, `jals-fs`, and `jals-config` build for `wasm32-unknown-unknown` as
+  `no_std` crates;
   `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`).
 
 ## Status
