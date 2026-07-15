@@ -4,6 +4,7 @@ use super::*;
 fn defaults() {
     let c = Config::default();
     assert_eq!(c.indent_width, 4);
+    assert_eq!(c.indent_cols(), 4);
     // Continuation indent is unset by default and falls back to `indent-width`.
     assert_eq!(c.continuation_indent, None);
     assert_eq!(c.continuation_cols(), 4);
@@ -419,4 +420,17 @@ fn space_indent_unit() {
         ..Config::default()
     };
     assert_eq!(c.indent_unit(), "  ");
+}
+
+#[test]
+fn loads_and_discovers_config_files() {
+    let fs = jals_fs::InMemoryFileTree::new()
+        .with_file("/direct.toml", "indent-width = 2\n")
+        .with_file("/workspace/jalsfmt.toml", "indent-width = 3\n");
+
+    let direct = Config::from_file(&fs, "/direct.toml").unwrap();
+    assert_eq!(direct.indent_width, 2);
+
+    let discovered = Config::discover(&fs, "/workspace/project/src").unwrap();
+    assert_eq!(discovered.indent_width, 3);
 }

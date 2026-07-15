@@ -105,3 +105,39 @@ pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
         Ok(Self::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+    use core::error::Error as _;
+
+    use jals_fs::InMemoryFileTree;
+
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct TestConfig;
+
+    impl DiscoverableConfig for TestConfig {
+        const FILE_NAME: &'static str = "test.toml";
+    }
+
+    #[test]
+    fn config_errors_render_and_expose_their_sources() {
+        let fs = InMemoryFileTree::new().with_file("/invalid.toml", "not = = toml");
+
+        let io = TestConfig::load(&fs, "/missing.toml").unwrap_err();
+        assert_eq!(
+            io.to_string(),
+            "failed to read config /missing.toml: no such file or directory: /missing.toml"
+        );
+        assert!(io.source().is_some());
+
+        let parse = TestConfig::load(&fs, "/invalid.toml").unwrap_err();
+        let source_message = parse.source().unwrap().to_string();
+        assert_eq!(
+            parse.to_string(),
+            alloc::format!("failed to parse config /invalid.toml: {source_message}")
+        );
+    }
+}
