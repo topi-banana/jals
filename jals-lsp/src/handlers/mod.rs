@@ -4,6 +4,9 @@
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::TextSize;
 
+use jals_editor::{ProjectQueries, QueryFile};
+use jals_hir::{FileId, ProjectIndex, Resolved};
+
 mod completion;
 mod definition;
 mod diagnostics;
@@ -42,5 +45,36 @@ impl Cursor {
     pub(crate) fn ident_at(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
         root.token_at_offset(offset)
             .find(|token| token.kind() == SyntaxKind::IDENT)
+    }
+}
+
+/// Owns the semantic inputs for a document outside any indexed workspace. All fallback requests
+/// use this same one-file, stdlib-aware project model.
+pub(crate) struct OneFileQueries {
+    root: SyntaxNode,
+    resolved: Resolved,
+    index: ProjectIndex,
+}
+
+impl OneFileQueries {
+    pub(crate) fn new(parse: &jals_syntax::Parse) -> Self {
+        let root = parse.syntax();
+        let resolved = Resolved::resolve_node(&root);
+        let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
+            .with_stdlib()
+            .build();
+        Self {
+            root,
+            resolved,
+            index,
+        }
+    }
+
+    pub(crate) fn queries(&self) -> ProjectQueries<'_> {
+        ProjectQueries::new(&self.index, self.file())
+    }
+
+    pub(crate) fn file(&self) -> QueryFile<'_> {
+        QueryFile::new(FileId(0), self.root.clone(), &self.resolved)
     }
 }

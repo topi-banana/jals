@@ -23,10 +23,10 @@ impl Definition {
         line_index: &LineIndex,
         position: Position,
     ) -> Option<Range> {
-        let resolved = jals_hir::Resolved::resolve_node(&parse.syntax());
         let offset = u32::from(line_index.offset(text, position)) as usize;
-        let def = resolved.definition_at(offset)?;
-        Some(line_index.byte_range(text, &def.name_range))
+        let project = super::OneFileQueries::new(parse);
+        let target = project.queries().definition(offset)?;
+        Some(line_index.byte_range(text, &target.range))
     }
 }
 

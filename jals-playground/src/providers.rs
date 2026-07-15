@@ -9,10 +9,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
-
-use crate::monaco::{self, DefKindExt};
+use crate::monaco::{self, CompletionKindExt, DefKindExt};
 use crate::workspace::{SymbolNode, Target, Workspace};
+use wasm_bindgen::prelude::*;
 
 /// The Monaco language-feature providers, registered once against the shared [`Workspace`].
 pub struct Providers;
@@ -85,11 +84,7 @@ impl Providers {
             |ws, text, line, col| {
                 let items = js_sys::Array::new();
                 for entry in ws.completions(text, line, col) {
-                    let kind = if entry.keyword {
-                        monaco::COMPLETION_KIND_KEYWORD
-                    } else {
-                        entry.kind.completion_kind()
-                    };
+                    let kind = entry.kind.completion_kind();
                     items.push(&monaco::completion_item(&entry.label, kind, &entry.detail));
                 }
                 items.into()

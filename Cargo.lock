@@ -1083,6 +1083,11 @@ dependencies = [
 [[package]]
 name = "jals-editor"
 version = "0.1.0"
+dependencies = [
+ "jals-hir",
+ "jals-syntax",
+ "text-size",
+]
 
 [[package]]
 name = "jals-fmt"

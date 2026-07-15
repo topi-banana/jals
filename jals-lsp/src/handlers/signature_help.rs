@@ -1,18 +1,13 @@
 //! Signature help (`textDocument/signatureHelp`): show the overloads of the method being called and
 //! highlight the argument the cursor is on.
 //!
-//! The semantic work — finding the call, resolving its overloads, rendering each signature — is
-//! [`jals_hir::ProjectIndex::signature_help`], which needs the project member model. The cross-file path lives on
-//! the workspace ([`Workspace::signature_help`](crate::state::Workspace::signature_help)), which
-//! holds the index; this module holds the **file-local** fallback ([`signature_help_local`], which
-//! builds a single-file index so the document's own methods are visible) and
-//! [`SignatureHelpHandler::signature_help_to_lsp`]
-//! — the mapping from `jals-hir`'s pure shape to the LSP payload that both paths share.
+//! [`jals_editor::ProjectQueries`] owns call and overload resolution. This adapter converts byte
+//! offsets within signature labels to LSP UTF-16 offsets; the fallback uses the same query interface
+//! over a stdlib-aware one-file project.
 
 use async_lsp::lsp_types::{
     ParameterInformation, ParameterLabel, Position, SignatureHelp, SignatureInformation,
 };
-use jals_hir::{FileId, ProjectIndex};
 use jals_syntax::Parse;
 
 use crate::line_index::LineIndex;
@@ -66,13 +61,9 @@ impl SignatureHelpHandler {
         line_index: &LineIndex,
         position: Position,
     ) -> Option<SignatureHelp> {
-        let root = parse.syntax();
         let offset = u32::from(line_index.offset(text, position)) as usize;
-        let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
-            .build();
-        let resolved = jals_hir::Resolved::resolve_node(&root);
-        let help = index.signature_help(&root, &resolved, FileId(0), offset)?;
+        let project = super::OneFileQueries::new(parse);
+        let help = project.queries().signature_help(offset)?;
         Some(Self::signature_help_to_lsp(&help))
     }
 }

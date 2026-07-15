@@ -3,5 +3,10 @@ name = "jals-editor"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+jals-hir.workspace = true
+jals-syntax.workspace = true
+text-size.workspace = true
+
 [lints]
 workspace = true

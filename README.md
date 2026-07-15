@@ -43,7 +43,7 @@ manifest.
 
 | Crate | Description |
 | --- | --- |
-| [`jals-editor`](jals-editor) | Editor-independent conversion between UTF-8 byte offsets and zero-based UTF-16 positions, shared by the LSP and browser playground. |
+| [`jals-editor`](jals-editor) | Protocol-neutral editor semantics (definition, references, hover, completion, signature help, and highlights) plus UTF-8 byte/UTF-16 coordinate conversion, shared by the LSP and browser playground. |
 | [`jals-syntax`](jals-syntax) | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
 | [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
 | [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks. |
@@ -64,7 +64,7 @@ fidelity against real-world Java) and `xtask` (the `cargo xtask codegen` AST gen
 
 ```
 jals/
-├── jals-editor/      # UTF-8 byte <-> UTF-16 coordinates  (wasm-compatible)
+├── jals-editor/      # editor queries + byte/UTF-16 coordinates (wasm-compatible)
 ├── jals-syntax/      # lexer + CST parser + typed AST      (wasm-compatible)
 ├── jals-fmt/         # formatter (CST -> Doc IR -> text)   (wasm-compatible)
 ├── jals-lint/        # linter (rules over CST + jals-hir)  (wasm-compatible)
