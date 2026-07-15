@@ -1,0 +1,24 @@
+id: no-extern-crate-core
+snapshots:
+  ? |
+    extern crate core as core_crate;
+  : labels:
+    - source: extern crate core as core_crate;
+      style: primary
+      start: 0
+      end: 32
+    - source: core
+      style: secondary
+      start: 13
+      end: 17
+  ? |
+    extern crate core;
+  : labels:
+    - source: extern crate core;
+      style: primary
+      start: 0
+      end: 18
+    - source: core
+      style: secondary
+      start: 13
+      end: 17

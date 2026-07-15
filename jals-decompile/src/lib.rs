@@ -11,8 +11,6 @@
 //! accepts, the function reports that (`None` / empty) so the host emits a safe fallback and the
 //! output stays valid Java. The host owns all I/O (reading `.class` bytes, writing `.java`).
 
-extern crate alloc;
-
 mod attrs;
 mod body;
 mod cfg;

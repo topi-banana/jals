@@ -1,0 +1,13 @@
+id: no-extern-crate-core
+language: Rust
+severity: error
+message: Do not declare `core` with `extern crate`.
+note: |
+  The core crate is available automatically. Import its items with `use core::...`.
+
+rule:
+  kind: extern_crate_declaration
+  has:
+    field: name
+    regex: '^core$'
+    stopBy: end

@@ -1,0 +1,14 @@
+id: no-extern-crate-alloc
+language: Rust
+severity: error
+message: Do not declare `alloc` with `extern crate`.
+note: |
+  Import alloc types and macros with `use alloc::...`; Cargo makes the sysroot
+  `alloc` crate available to the workspace.
+
+rule:
+  kind: extern_crate_declaration
+  has:
+    field: name
+    regex: '^alloc$'
+    stopBy: end

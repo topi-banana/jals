@@ -1,0 +1,15 @@
+id: no-extern-crate-alloc
+
+valid:
+  - |
+      extern crate proc_macro;
+
+  - |
+      use alloc::vec::Vec;
+
+invalid:
+  - |
+      extern crate alloc;
+
+  - |
+      extern crate alloc as allocator;

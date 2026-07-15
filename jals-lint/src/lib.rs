@@ -10,8 +10,6 @@
 //! override any rule's severity, including `allow` to disable it. Rules are read-only and never
 //! modify the source.
 
-extern crate alloc;
-
 mod diagnostic;
 mod rules;
 

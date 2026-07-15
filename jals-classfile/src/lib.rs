@@ -33,8 +33,6 @@
 //! assert_eq!(class.write(), bytes); // byte-exact round-trip
 //! ```
 
-extern crate alloc;
-
 mod annotation;
 mod attribute;
 mod bytes;
