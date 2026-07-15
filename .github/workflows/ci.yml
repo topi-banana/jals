@@ -20,10 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall ast-grep --no-confirm
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: ast-grep
       - name: Run ast-grep rule tests
         run: ast-grep test --skip-snapshot-tests
       # `--error` is required to gate CI: a plain `ast-grep scan` exits 0 even when it
@@ -70,7 +69,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+      - uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: nextest
+      - run: cargo nextest run --workspace --all-features
+      # nextest does not run doctests, so keep them covered with a separate `cargo test --doc`.
+      - run: cargo test --workspace --all-features --doc
 
   taplo:
     name: taplo fmt
@@ -85,10 +89,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall cargo-machete --no-confirm
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: cargo-machete
       - run: cargo machete
 
   typos:
@@ -96,10 +99,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall typos-cli --no-confirm
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: typos
       - run: typos
 
   build:
@@ -214,15 +216,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: editors/zed
-      - uses: cargo-bins/cargo-binstall@main
-      # `--force`: the `rust-cache` step above restores cargo's install metadata
-      # (`.crates.toml`) marking wasm-tools as "already installed" while *not* restoring the
-      # `~/.cargo/bin/wasm-tools` binary itself, so a plain `binstall` skips the install and the
-      # component-encode step below fails with `wasm-tools: command not found`. Forcing the
-      # (re)install ignores that stale metadata and always places the binary.
-      - run: cargo binstall wasm-tools --no-confirm --force
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Installs the wasm-tools binary directly into the tool dir each run, so (unlike a
+      # `cargo binstall` keyed off `.crates.toml`) the `rust-cache` step's restored install
+      # metadata can't make it skip placing the binary the component-encode step needs.
+      - uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: wasm-tools
       - name: Build the extension (wasm32-wasip1 core module)
         run: cargo build --release --locked --target wasm32-wasip1 --manifest-path editors/zed/Cargo.toml
       - name: Download the wasi-preview1 reactor adapter

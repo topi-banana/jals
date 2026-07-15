@@ -105,7 +105,7 @@ Before considering a change done, run the **exact CI checks** (see
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo nextest run --workspace --all-features                 # doctests: cargo test --workspace --all-features --doc
 taplo fmt --check --diff
 cargo machete                                                # no unused deps
 cargo build --release --target wasm32-unknown-unknown -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile -p jals-fmt -p jals-lint -p jals-fs -p jals-config
