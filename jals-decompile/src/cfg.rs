@@ -171,3 +171,77 @@ impl Cfg {
         Some(Self { blocks })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    #[test]
+    fn builds_wide_goto_and_splits_after_exits() {
+        let cfg = Cfg::build(&[Instruction::GotoW(5), Instruction::Return])
+            .expect("wide goto target is an instruction boundary");
+        assert_eq!(cfg.blocks.len(), 2);
+        assert!(matches!(cfg.blocks[0].term, Term::Goto(1)));
+        assert!(matches!(cfg.blocks[1].term, Term::Ret));
+
+        let cfg = Cfg::build(&[Instruction::Return, Instruction::Athrow])
+            .expect("unreachable code after an exit is still split into blocks");
+        assert_eq!(cfg.blocks.len(), 2);
+        assert!(matches!(cfg.blocks[0].term, Term::Ret));
+        assert!(matches!(cfg.blocks[1].term, Term::Throw));
+    }
+
+    #[test]
+    fn builds_conditional_fallthrough_and_target() {
+        let cfg = Cfg::build(&[
+            Instruction::Iconst0,
+            Instruction::Ifeq(4),
+            Instruction::Return,
+            Instruction::Return,
+        ])
+        .expect("valid conditional graph");
+        assert_eq!(cfg.blocks.len(), 3);
+        assert!(matches!(
+            cfg.blocks[0].term,
+            Term::Branch {
+                instr: 1,
+                taken: 2,
+                fallthrough: 1
+            }
+        ));
+        assert_eq!(cfg.blocks[0].body(), 0..1);
+    }
+
+    #[test]
+    fn rejects_every_unsupported_control_flow_family() {
+        let unsupported = vec![
+            Instruction::TableSwitch {
+                default: 0,
+                low: 0,
+                high: -1,
+                offsets: Vec::new(),
+            },
+            Instruction::LookupSwitch {
+                default: 0,
+                pairs: Vec::new(),
+            },
+            Instruction::Jsr(0),
+            Instruction::JsrW(0),
+            Instruction::Ret(0),
+            Instruction::Wide(WideInstruction::Ret(0)),
+        ];
+        for instruction in unsupported {
+            assert!(Cfg::build(&[instruction, Instruction::Return]).is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_empty_code_and_non_instruction_targets() {
+        assert!(Cfg::build(&[]).is_none());
+        assert!(Cfg::build(&[Instruction::Goto(1), Instruction::Return]).is_none());
+        assert!(Cfg::build(&[Instruction::Ifeq(0)]).is_none());
+        assert!(Cfg::build(&[Instruction::Nop, Instruction::Nop, Instruction::Ifeq(0)]).is_none());
+    }
+}

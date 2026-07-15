@@ -160,8 +160,11 @@ mod tests {
             fs.read_to_string(a.to_str().unwrap()).unwrap(),
             "class A {}"
         );
+        assert_eq!(fs.read(a.to_str().unwrap()).unwrap(), b"class A {}");
         assert!(fs.is_file(a.to_str().unwrap()));
         assert!(fs.is_dir(dir.path().join("src").to_str().unwrap()));
+        // A regular file is not a directory.
+        assert!(!fs.is_dir(a.to_str().unwrap()));
         assert_eq!(
             fs.read_to_string("/definitely/not/here").unwrap_err(),
             FsError::NotFound("/definitely/not/here".into())

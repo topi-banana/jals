@@ -481,24 +481,29 @@ impl Feature {
             Self::CompactSourceFiles => "compact-source-files",
         }
     }
+
+    // [`Feature::ALL`] must list every variant in declaration order: deserialization looks names up
+    // in it, and [`Feature::bit`] packs the declaration index into the [`FeatureSet`] word. The
+    // mutation config excludes this function because removing a compile-time assertion is
+    // behaviorally equivalent while `ALL` is valid and therefore cannot be distinguished by a
+    // runtime test.
+    const fn assert_feature_order() {
+        assert!(
+            Self::ALL.len() <= u64::BITS as usize,
+            "FeatureSet's u64 is full; widen its storage"
+        );
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            assert!(
+                Self::ALL[i] as usize == i,
+                "Feature::ALL must be in declaration order"
+            );
+            i += 1;
+        }
+    }
 }
 
-// [`Feature::ALL`] must list every variant in declaration order: deserialization looks names up in
-// it, and [`Feature::bit`] packs the declaration index into the [`FeatureSet`] word.
-const _: () = {
-    assert!(
-        Feature::ALL.len() <= u64::BITS as usize,
-        "FeatureSet's u64 is full; widen its storage"
-    );
-    let mut i = 0;
-    while i < Feature::ALL.len() {
-        assert!(
-            Feature::ALL[i] as usize == i,
-            "Feature::ALL must be in declaration order"
-        );
-        i += 1;
-    }
-};
+const _: () = Feature::assert_feature_order();
 
 // Deserialized by [`Feature::config_name`] lookup over [`Feature::ALL`] rather than a serde derive,
 // so the parsed names and the names the linter's hints print are one table — and a variant omitted
@@ -1044,6 +1049,15 @@ mod tests {
     }
 
     #[test]
+    fn unknown_feature_error_lists_the_supported_names() {
+        let error = toml::from_str::<Manifest>("[package]\nfeatures = [\"teleportation\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("java8"));
+        assert!(error.contains("compact-source-files"));
+    }
+
+    #[test]
     fn feature_set_empty_without_features() {
         // No `[package] features`: the resolved set is empty, so every gate stays off.
         assert!(Manifest::default().feature_set().is_empty());
@@ -1086,6 +1100,19 @@ mod tests {
         let fs = m.feature_set();
         assert!(fs.contains(Feature::CompactSourceFiles));
         assert!(!fs.contains(Feature::ModuleImports));
+    }
+
+    #[test]
+    fn feature_set_handles_duplicates_and_permission_checks() {
+        let empty = FeatureSet::default();
+        assert!(empty.is_empty());
+        assert!(empty.permits(Feature::ModuleImports));
+
+        let fs = FeatureSet::resolve(&[Feature::ModuleImports, Feature::ModuleImports]);
+        assert!(!fs.is_empty());
+        assert!(fs.contains(Feature::ModuleImports));
+        assert!(fs.permits(Feature::ModuleImports));
+        assert!(!fs.permits(Feature::CompactSourceFiles));
     }
 
     #[test]
@@ -1436,6 +1463,34 @@ mod tests {
     }
 
     #[test]
+    fn git_refs_expose_checkout_arguments() {
+        assert_eq!(GitRef::Default.checkout_arg(), None);
+        assert_eq!(
+            GitRef::Branch("main".to_owned()).checkout_arg(),
+            Some("main")
+        );
+        assert_eq!(GitRef::Tag("v1".to_owned()).checkout_arg(), Some("v1"));
+        assert_eq!(
+            GitRef::Rev("abc123".to_owned()).checkout_arg(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn accepted_jar_location_schemes_validate() {
+        for location in [
+            "file:///tmp/lib.jar",
+            "https://example.com/lib.jar",
+            "http://example.com/lib.jar",
+        ] {
+            assert_eq!(
+                Dependency::validate_jar_location(location, "lib", "jar"),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
     fn parse_rejects_multiple_forms() {
         // Co-occurring primary forms match no untagged variant (each `deny_unknown_fields`), so the
         // manifest fails to *parse* — the unification's structural guarantee.
@@ -1601,5 +1656,93 @@ mod tests {
 
         let bad_toml = "not = = toml".parse::<Manifest>();
         assert!(matches!(bad_toml, Err(ManifestParseError::Parse { .. })));
+    }
+
+    #[test]
+    fn dependency_errors_render() {
+        assert_eq!(
+            DependencyError::Empty {
+                name: "lib".to_owned(),
+                field: "jar",
+            }
+            .to_string(),
+            "dependency `lib` has an empty `jar`"
+        );
+        assert_eq!(
+            DependencyError::UnknownScheme {
+                name: "lib".to_owned(),
+                field: "jar",
+                value: "ftp://example.com/lib.jar".to_owned(),
+            }
+            .to_string(),
+            "dependency `lib` has an unsupported `jar` URL scheme `ftp://example.com/lib.jar` \
+             (expected `https://`, `http://`, `file://`, or a path)"
+        );
+        assert_eq!(
+            DependencyError::ConflictingGitRef {
+                name: "lib".to_owned(),
+            }
+            .to_string(),
+            "git dependency `lib` specifies more than one of `branch`, `tag`, `rev` \
+             (use at most one)"
+        );
+    }
+
+    #[test]
+    fn validation_errors_render_and_expose_dependency_sources() {
+        assert_eq!(
+            ValidationError::DuplicateBin {
+                name: "app".to_owned(),
+            }
+            .to_string(),
+            "duplicate `[[bin]]` name `app`"
+        );
+        assert_eq!(
+            ValidationError::UnknownDefaultRun {
+                name: "missing".to_owned(),
+                available: alloc::vec!["app".to_owned(), "tool".to_owned()],
+            }
+            .to_string(),
+            "`[package] default-run` is `missing`, which is not a declared bin (available: app, tool)"
+        );
+        assert_eq!(
+            ValidationError::EmptyBinField { field: "name" }.to_string(),
+            "a `[[bin]]` has an empty `name`"
+        );
+
+        let dependency = ValidationError::Dependency(DependencyError::Empty {
+            name: "lib".to_owned(),
+            field: "jar",
+        });
+        assert_eq!(
+            dependency.to_string(),
+            "dependency `lib` has an empty `jar`"
+        );
+        assert!(dependency.source().unwrap().is::<DependencyError>());
+        assert!(
+            ValidationError::EmptyBinField { field: "name" }
+                .source()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn manifest_parse_errors_render_and_expose_sources() {
+        let parse = "not = = toml".parse::<Manifest>().unwrap_err();
+        let parse_source = parse.source().unwrap().to_string();
+        assert_eq!(
+            parse.to_string(),
+            alloc::format!("failed to parse manifest jals.toml: {parse_source}")
+        );
+        assert!(parse.source().unwrap().is::<toml::de::Error>());
+
+        let invalid = "[[bin]]\nname = \"\"\nmain-class = \"X\"\n"
+            .parse::<Manifest>()
+            .unwrap_err();
+        assert_eq!(
+            invalid.to_string(),
+            "invalid manifest jals.toml: a `[[bin]]` has an empty `name`"
+        );
+        assert!(invalid.source().unwrap().is::<ValidationError>());
     }
 }

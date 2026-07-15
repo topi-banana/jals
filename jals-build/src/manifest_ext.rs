@@ -388,6 +388,33 @@ mod tests {
     use super::*;
     use jals_config::{GitDependency, JarDependency, PathDependency};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(test_name: &str) -> Self {
+            let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "jals-build-{test_name}-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.
     fn jar_dep(jar: &str) -> Dependency {
@@ -415,6 +442,73 @@ mod tests {
                 .classpath_entries(Path::new("/proj"))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn from_file_loads_a_non_default_manifest() {
+        let dir = TempDir::new("from-file");
+        let path = dir.path().join("jals.toml");
+        std::fs::write(
+            &path,
+            "[build]\nsource-dirs = [\"generated/java\", \"src/java\"]\n",
+        )
+        .unwrap();
+
+        let manifest = Manifest::from_file(&path).unwrap();
+
+        assert_eq!(
+            manifest.build.source_dirs,
+            vec!["generated/java".to_owned(), "src/java".to_owned()]
+        );
+    }
+
+    #[test]
+    fn manifest_errors_display_the_path_and_expose_their_source() {
+        let path = PathBuf::from("/missing/project/jals.toml");
+        let error = ManifestError::Io {
+            path: path.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not here"),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("failed to read manifest"));
+        assert!(message.contains(path.to_str().unwrap()));
+        assert!(message.contains("not here"));
+        assert_eq!(error.source().unwrap().to_string(), "not here");
+    }
+
+    #[test]
+    fn from_file_preserves_parse_and_validation_errors() {
+        let dir = TempDir::new("from-file-errors");
+        let parse_path = dir.path().join("parse.toml");
+        std::fs::write(&parse_path, "[build\n").unwrap();
+        let parse_error = Manifest::from_file(&parse_path).unwrap_err();
+        assert!(matches!(parse_error, ManifestError::Parse { .. }));
+        assert!(parse_error.source().is_some());
+        assert!(parse_error.to_string().contains("failed to parse manifest"));
+
+        let invalid_path = dir.path().join("invalid.toml");
+        std::fs::write(
+            &invalid_path,
+            "[[bin]]\nname = \"same\"\nmain-class = \"One\"\n\
+             [[bin]]\nname = \"same\"\nmain-class = \"Two\"\n",
+        )
+        .unwrap();
+        let invalid_error = Manifest::from_file(&invalid_path).unwrap_err();
+        assert!(matches!(invalid_error, ManifestError::Invalid { .. }));
+        assert!(invalid_error.source().is_some());
+        assert!(invalid_error.to_string().contains("invalid manifest"));
+    }
+
+    #[test]
+    fn discover_path_finds_a_manifest_in_an_ancestor() {
+        let dir = TempDir::new("discover-path");
+        let nested = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        let manifest_path = dir.path().join("jals.toml");
+        std::fs::write(&manifest_path, "").unwrap();
+
+        assert_eq!(Manifest::discover_path(&nested), Some(manifest_path));
     }
 
     #[test]

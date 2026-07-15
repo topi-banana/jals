@@ -98,3 +98,80 @@ impl JavaType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+    use alloc::vec;
+
+    use jals_classfile::{BaseType, SimpleClassTypeSignature};
+
+    use super::*;
+
+    fn class(name: &str) -> TypeSignature {
+        TypeSignature::Class(ClassTypeSignature {
+            name: name.to_owned(),
+            type_arguments: Vec::new(),
+            suffixes: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn renders_every_type_signature_shape() {
+        assert_eq!(
+            JavaType::render_type_sig(&TypeSignature::Base(BaseType::Int)),
+            "int"
+        );
+        assert_eq!(
+            JavaType::render_type_sig(&TypeSignature::TypeVariable("T".to_owned())),
+            "T"
+        );
+        assert_eq!(
+            JavaType::render_type_sig(&TypeSignature::Array(Box::new(class("java/lang/String")))),
+            "java.lang.String[]"
+        );
+        assert_eq!(
+            JavaType::render_type_sig(&class("a/b/Outer$Inner")),
+            "a.b.Outer.Inner"
+        );
+    }
+
+    #[test]
+    fn renders_inner_class_arguments_and_all_wildcards() {
+        let ty = ClassTypeSignature {
+            name: "pkg/Outer".to_owned(),
+            type_arguments: vec![TypeArgument::Exact(class("java/lang/Number"))],
+            suffixes: vec![SimpleClassTypeSignature {
+                name: "Inner".to_owned(),
+                type_arguments: vec![
+                    TypeArgument::Any,
+                    TypeArgument::Exact(TypeSignature::TypeVariable("T".to_owned())),
+                    TypeArgument::Extends(class("java/lang/Number")),
+                    TypeArgument::Super(class("java/lang/String")),
+                ],
+            }],
+        };
+        assert_eq!(
+            JavaType::render_class_type_sig(&ty),
+            "pkg.Outer.Inner<?, T, ? extends java.lang.Number, ? super java.lang.String>"
+        );
+        assert_eq!(JavaType::render_type_args(&[]), "");
+    }
+
+    #[test]
+    fn renders_both_throws_signature_shapes() {
+        let class = ClassTypeSignature {
+            name: "java/io/IOException".to_owned(),
+            type_arguments: Vec::new(),
+            suffixes: Vec::new(),
+        };
+        assert_eq!(
+            JavaType::render_throws(&ThrowsSignature::Class(class)),
+            "java.io.IOException"
+        );
+        assert_eq!(
+            JavaType::render_throws(&ThrowsSignature::TypeVariable("E".to_owned())),
+            "E"
+        );
+    }
+}

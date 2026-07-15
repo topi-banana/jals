@@ -86,18 +86,23 @@ impl SubprocessToolchain {
     /// common no-`[toolchain]` project pays no discovery cost).
     pub fn from_manifest(manifest: &Manifest) -> Self {
         let tc = &manifest.toolchain;
-        let needs_discovery = matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
-            || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }));
         Self {
             compiler: tc.compiler.clone(),
             runtime: tc.runtime.clone(),
-            installs: if needs_discovery {
-                Self::discover_installs()
+            installs: if Self::needs_discovery(manifest) {
+                Self::discover_installs_in(Self::install_roots())
             } else {
                 Vec::new()
             },
             path_sep: if cfg!(windows) { ';' } else { ':' },
         }
+    }
+
+    /// Whether either half of the manifest needs installed-JDK discovery.
+    fn needs_discovery(manifest: &Manifest) -> bool {
+        let tc = &manifest.toolchain;
+        matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
+            || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }))
     }
 
     /// The [`ToolSpec`] view governing `tool`, or `None` when that half of the manifest selects
@@ -155,9 +160,9 @@ impl SubprocessToolchain {
     }
 
     /// Scan the common JDK install locations and describe each install for [`ToolResolver`].
-    fn discover_installs() -> Vec<JdkInstall> {
+    fn discover_installs_in(roots: impl IntoIterator<Item = PathBuf>) -> Vec<JdkInstall> {
         let mut installs = Vec::new();
-        for root in Self::install_roots() {
+        for root in roots {
             let Ok(entries) = std::fs::read_dir(&root) else {
                 continue;
             };
@@ -225,6 +230,107 @@ impl Runtime for SubprocessToolchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(test_name: &str) -> Self {
+            let id = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "jals-build-native-{test_name}-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn discovers_when_either_tool_uses_a_distribution() {
+        let compiler_only: Manifest =
+            "[toolchain]\ncompiler = { distribution = { version = 21 } }\n"
+                .parse()
+                .unwrap();
+        let runtime_only: Manifest =
+            "[toolchain]\nruntime = { distribution = { name = \"temurin\" } }\n"
+                .parse()
+                .unwrap();
+
+        assert!(SubprocessToolchain::needs_discovery(&compiler_only));
+        assert!(SubprocessToolchain::needs_discovery(&runtime_only));
+        assert!(!SubprocessToolchain::needs_discovery(&Manifest::default()));
+    }
+
+    #[test]
+    fn spec_uses_the_selector_for_the_requested_tool() {
+        let toolchain = SubprocessToolchain {
+            compiler: CompilerSpec::Path("/opt/compiler".to_owned()),
+            runtime: RuntimeSpec::Builtin,
+            installs: Vec::new(),
+            path_sep: ':',
+        };
+
+        assert_eq!(
+            toolchain.spec(Tool::Javac),
+            Some(ToolSpec::Path("/opt/compiler"))
+        );
+        assert_eq!(toolchain.spec(Tool::Java), None);
+    }
+
+    #[test]
+    fn discovers_direct_and_macos_bundle_jdk_layouts() {
+        let root = TempDir::new("discover-installs");
+        let direct = root.path().join("temurin-21");
+        std::fs::create_dir_all(direct.join("bin")).unwrap();
+        let bundle = root.path().join("zulu-17.jdk");
+        std::fs::create_dir_all(bundle.join("Contents/Home/bin")).unwrap();
+        std::fs::create_dir_all(root.path().join("not-a-jdk")).unwrap();
+        std::fs::write(root.path().join("README"), "not a directory").unwrap();
+
+        let mut installs = SubprocessToolchain::discover_installs_in(vec![
+            root.path().to_path_buf(),
+            root.path().join("missing"),
+        ]);
+        installs.sort_by(|left, right| left.home.cmp(&right.home));
+
+        let mut expected = vec![
+            JdkInstall::from_install_name(direct, "temurin-21"),
+            JdkInstall::from_install_name(bundle.join("Contents/Home"), "zulu-17.jdk"),
+        ];
+        expected.sort_by(|left, right| left.home.cmp(&right.home));
+        assert_eq!(installs, expected);
+    }
+
+    #[test]
+    fn install_roots_include_configured_and_platform_locations() {
+        let mut expected = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            expected.push(home.join(".sdkman/candidates/java"));
+            expected.push(home.join(".jdks"));
+            expected.push(home.join(".jdk"));
+        }
+        if let Some(sdkman) = std::env::var_os("SDKMAN_CANDIDATES_DIR") {
+            expected.push(PathBuf::from(sdkman).join("java"));
+        }
+        expected.push(PathBuf::from("/usr/lib/jvm"));
+        expected.push(PathBuf::from("/Library/Java/JavaVirtualMachines"));
+
+        assert_eq!(SubprocessToolchain::install_roots(), expected);
+    }
 
     #[test]
     fn select_routes_each_tool_to_its_backend() {

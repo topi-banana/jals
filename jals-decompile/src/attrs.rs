@@ -245,7 +245,41 @@ impl Attrs {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
+    use jals_classfile::{ClassFile, MethodParameterEntry};
+
     use super::*;
+
+    fn fixture(bytes: &[u8]) -> ClassFile {
+        ClassFile::read(bytes).expect("parse fixture")
+    }
+
+    fn consts() -> ClassFile {
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/Consts.class"
+        ))
+    }
+
+    fn field<'a>(cf: &'a ClassFile, name: &str) -> &'a FieldInfo {
+        cf.fields
+            .iter()
+            .find(|f| cf.constant_pool.utf8(f.name_index).as_deref() == Some(name))
+            .expect("field present")
+    }
+
+    fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
+        cf.methods
+            .iter()
+            .find(|m| cf.constant_pool.utf8(m.name_index).as_deref() == Some(name))
+            .expect("method present")
+    }
+
+    fn utf8_index(pool: &ConstantPool, text: &str) -> u16 {
+        (1..1024)
+            .find(|&i| pool.utf8(i).as_deref() == Some(text))
+            .expect("utf8 entry present")
+    }
 
     #[test]
     fn identifier_check_rejects_non_identifiers() {
@@ -255,5 +289,235 @@ mod tests {
         assert!(!Attrs::is_java_identifier(""));
         assert!(!Attrs::is_java_identifier("1x"));
         assert!(!Attrs::is_java_identifier("a-b"));
+        assert!(Attrs::is_java_identifier("a_$9"));
+        assert!(Attrs::is_java_identifier("名2"));
+    }
+
+    #[test]
+    fn renders_every_constant_value_kind_and_absence() {
+        let cf = consts();
+        for (name, expected) in [
+            ("MAX", "42"),
+            ("BIG", "9000000000L"),
+            ("RATE", "1.5d"),
+            ("RATIO", "0.25f"),
+            ("ENABLED", "true"),
+            ("NAME", "\"jals\""),
+        ] {
+            assert_eq!(
+                Attrs::constant_value_initializer(field(&cf, name), &cf.constant_pool).as_deref(),
+                Some(expected),
+                "{name}"
+            );
+        }
+
+        let mut no_value = field(&cf, "MAX").clone();
+        no_value.attributes.clear();
+        assert_eq!(
+            Attrs::constant_value_initializer(&no_value, &cf.constant_pool),
+            None
+        );
+
+        let mut wrong_kind = field(&cf, "MAX").clone();
+        let AttributeBody::ConstantValue {
+            constantvalue_index,
+        } = &mut wrong_kind.attributes[0].body
+        else {
+            panic!("constant value attribute")
+        };
+        *constantvalue_index = wrong_kind.descriptor_index;
+        assert_eq!(
+            Attrs::constant_value_initializer(&wrong_kind, &cf.constant_pool),
+            None
+        );
+    }
+
+    #[test]
+    fn reads_signature_and_declared_exceptions() {
+        let box_cf = fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/Box.class"
+        ));
+        assert_eq!(
+            Attrs::signature_string(&box_cf.attributes, &box_cf.constant_pool).as_deref(),
+            Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+        );
+        assert_eq!(Attrs::signature_string(&[], &box_cf.constant_pool), None);
+
+        let cf = consts();
+        assert_eq!(
+            Attrs::declared_throws(method(&cf, "risky"), &cf.constant_pool),
+            ["java.io.IOException"]
+        );
+        assert!(Attrs::declared_throws(method(&cf, "add"), &cf.constant_pool).is_empty());
+    }
+
+    #[test]
+    fn recovers_parameter_names_from_both_attributes() {
+        let cf = consts();
+        let add = method(&cf, "add");
+        assert_eq!(
+            Attrs::parameter_names(add, &cf.constant_pool, false, 1),
+            Some(vec!["delta".to_owned()])
+        );
+        assert_eq!(
+            Attrs::params_from_method_parameters(add, &cf.constant_pool, 1),
+            Some(vec!["delta".to_owned()])
+        );
+        assert_eq!(
+            Attrs::parameter_names(method(&cf, "reset"), &cf.constant_pool, false, 0),
+            Some(Vec::new())
+        );
+
+        let mut lvt_only = add.clone();
+        lvt_only
+            .attributes
+            .retain(|a| !matches!(a.body, AttributeBody::MethodParameters(_)));
+        assert_eq!(
+            Attrs::parameter_names(&lvt_only, &cf.constant_pool, false, 1),
+            Some(vec!["delta".to_owned()])
+        );
+        assert_eq!(
+            Attrs::parameter_names(&lvt_only, &cf.constant_pool, false, 2),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_invalid_method_parameters() {
+        let cf = consts();
+        let mut method = method(&cf, "add").clone();
+        let parameter_attr = |method: &mut MethodInfo, body| {
+            method
+                .attributes
+                .iter_mut()
+                .find(|a| matches!(a.body, AttributeBody::MethodParameters(_)))
+                .expect("method parameters")
+                .body = body;
+        };
+
+        parameter_attr(&mut method, AttributeBody::MethodParameters(Vec::new()));
+        assert_eq!(
+            Attrs::params_from_method_parameters(&method, &cf.constant_pool, 1),
+            None
+        );
+        parameter_attr(
+            &mut method,
+            AttributeBody::MethodParameters(vec![MethodParameterEntry {
+                name_index: 0,
+                access_flags: 0,
+            }]),
+        );
+        assert_eq!(
+            Attrs::params_from_method_parameters(&method, &cf.constant_pool, 1),
+            None
+        );
+        let descriptor_index = method.descriptor_index;
+        parameter_attr(
+            &mut method,
+            AttributeBody::MethodParameters(vec![MethodParameterEntry {
+                name_index: descriptor_index,
+                access_flags: 0,
+            }]),
+        );
+        assert_eq!(
+            Attrs::params_from_method_parameters(&method, &cf.constant_pool, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn local_variable_table_requires_the_parameter_entry_at_method_start() {
+        let cf = consts();
+        let mut method = method(&cf, "add").clone();
+        method
+            .attributes
+            .retain(|a| !matches!(a.body, AttributeBody::MethodParameters(_)));
+        let edit_parameter = |method: &mut MethodInfo, edit: fn(&mut LocalVariableEntry)| {
+            let table = method
+                .attributes
+                .iter_mut()
+                .find_map(|a| match &mut a.body {
+                    AttributeBody::Code(code) => Some(code),
+                    _ => None,
+                })
+                .expect("code")
+                .attributes
+                .iter_mut()
+                .find_map(|a| match &mut a.body {
+                    AttributeBody::LocalVariableTable(table) => Some(table),
+                    _ => None,
+                })
+                .expect("local variable table");
+            edit(
+                table
+                    .iter_mut()
+                    .find(|entry| entry.index == 1)
+                    .expect("delta entry"),
+            );
+        };
+        edit_parameter(&mut method, |parameter| parameter.start_pc = 1);
+        assert_eq!(
+            Attrs::params_from_local_variable_table(&method, &cf.constant_pool, false, 1),
+            None
+        );
+        edit_parameter(&mut method, |parameter| {
+            parameter.start_pc = 0;
+            parameter.index = 2;
+        });
+        assert_eq!(
+            Attrs::params_from_local_variable_table(&method, &cf.constant_pool, false, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn local_variable_resolution_rejects_slot_reuse() {
+        let cf = consts();
+        let code = method(&cf, "add")
+            .attributes
+            .iter()
+            .find_map(|a| match &a.body {
+                AttributeBody::Code(code) => Some(code),
+                _ => None,
+            })
+            .expect("code");
+        let table = Attrs::local_variable_table(code).expect("table");
+        assert_eq!(
+            Attrs::local_variable(table, &cf.constant_pool, 1),
+            Some(("delta".to_owned(), "int".to_owned()))
+        );
+
+        let mut reused = table.to_vec();
+        let mut second = reused
+            .iter()
+            .find(|entry| entry.index == 1)
+            .expect("delta")
+            .clone();
+        second.name_index = utf8_index(&cf.constant_pool, "count");
+        reused.push(second);
+        assert_eq!(Attrs::local_variable(&reused, &cf.constant_pool, 1), None);
+        assert_eq!(Attrs::local_variable(&reused, &cf.constant_pool, 99), None);
+    }
+
+    #[test]
+    fn parameter_slots_account_for_receiver_and_wide_values() {
+        let params = [
+            FieldType::Base(BaseType::Int),
+            FieldType::Base(BaseType::Long),
+            FieldType::Base(BaseType::Double),
+            FieldType::Object("java/lang/String".to_owned()),
+        ];
+        assert_eq!(
+            Attrs::parameter_slots(&params, false)
+                .map(|(slot, _)| slot)
+                .collect::<Vec<_>>(),
+            [1, 2, 4, 6]
+        );
+        assert_eq!(
+            Attrs::parameter_slots(&params, true)
+                .map(|(slot, _)| slot)
+                .collect::<Vec<_>>(),
+            [0, 1, 3, 5]
+        );
     }
 }

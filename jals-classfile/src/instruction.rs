@@ -963,11 +963,12 @@ impl Instruction {
     /// two can never drift: a scratch encode is primed to `pc`'s 4-byte alignment (all a switch's
     /// padding depends on), and the length is how far past that priming `write` advances.
     pub fn encoded_len(&self, pc: usize) -> usize {
+        // A switch is padded to at most a 4-byte boundary, so priming needs 0..=3 zero bytes. Slicing
+        // a fixed 3-byte buffer pins that bound: `align` outside `0..=3` is a bug and panics here
+        // rather than silently mis-measuring.
         let align = pc % 4;
         let mut w = Writer::new();
-        for _ in 0..align {
-            w.u8(0);
-        }
+        w.bytes(&[0u8; 3][..align]);
         self.write(&mut w);
         w.len() - align
     }
@@ -1112,6 +1113,14 @@ mod tests {
                 low: 0,
                 high: 2,
                 offsets: vec![1, 2, 3],
+            },
+            // A non-zero `low`, so the offset count is `high - low + 1` rather than `high + 1`: a
+            // sign error in that arithmetic would read the wrong number of jump offsets.
+            Instruction::TableSwitch {
+                default: 11,
+                low: 1,
+                high: 3,
+                offsets: vec![4, 5, 6],
             },
             Instruction::LookupSwitch {
                 default: 4,

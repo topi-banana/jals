@@ -61,3 +61,45 @@ impl fmt::Display for ClassfileError {
 }
 
 impl core::error::Error for ClassfileError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    #[test]
+    fn every_variant_renders_a_descriptive_message() {
+        let cases = [
+            (
+                ClassfileError::UnexpectedEof {
+                    offset: 12,
+                    needed: 4,
+                },
+                "unexpected end of input at byte 12: needed 4 more byte(s)",
+            ),
+            (
+                ClassfileError::BadMagic(0x1234_5678),
+                "bad magic: expected 0xCAFEBABE, found 0x12345678",
+            ),
+            (
+                ClassfileError::TrailingBytes { remaining: 3 },
+                "3 trailing byte(s) after a complete class file",
+            ),
+            (
+                ClassfileError::InvalidConstantTag(99),
+                "invalid constant-pool tag: 99",
+            ),
+            (
+                ClassfileError::InvalidOpcode(0xEF),
+                "invalid bytecode opcode: 0xEF",
+            ),
+            (
+                ClassfileError::Malformed("boom"),
+                "malformed class file: boom",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+}

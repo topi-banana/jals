@@ -19,7 +19,7 @@ impl Literal {
         if v.is_nan() {
             "Float.NaN".to_owned()
         } else if v.is_infinite() {
-            if v > 0.0 {
+            if v.is_sign_positive() {
                 "Float.POSITIVE_INFINITY".to_owned()
             } else {
                 "Float.NEGATIVE_INFINITY".to_owned()
@@ -35,7 +35,7 @@ impl Literal {
         if v.is_nan() {
             "Double.NaN".to_owned()
         } else if v.is_infinite() {
-            if v > 0.0 {
+            if v.is_sign_positive() {
                 "Double.POSITIVE_INFINITY".to_owned()
             } else {
                 "Double.NEGATIVE_INFINITY".to_owned()
@@ -114,6 +114,10 @@ mod tests {
         assert_eq!(
             Literal::double_literal(f64::NEG_INFINITY),
             "Double.NEGATIVE_INFINITY"
+        );
+        assert_eq!(
+            Literal::double_literal(f64::INFINITY),
+            "Double.POSITIVE_INFINITY"
         );
     }
 

@@ -543,4 +543,38 @@ mod tests {
         assert!(TypeSignature::parse("Q").is_err());
         assert!(MethodSignature::parse("Ljava/lang/Object;").is_err());
     }
+
+    #[test]
+    fn is_java_lang_object_only_for_the_raw_object_type() {
+        assert!(
+            TypeSignature::parse("Ljava/lang/Object;")
+                .unwrap()
+                .is_java_lang_object()
+        );
+
+        // A different class, a parameterised `Object`, a nested class, and a type variable are all
+        // distinct from the raw `java.lang.Object` bound.
+        for s in [
+            "Ljava/lang/String;",
+            "Ljava/util/List<Ljava/lang/Object;>;",
+            "Ljava/lang/Object<TT;>;",
+            "Ljava/lang/Object.Inner;",
+            "TT;",
+        ] {
+            assert!(
+                !TypeSignature::parse(s).unwrap().is_java_lang_object(),
+                "{s} should not be java.lang.Object"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_characters_are_rejected() {
+        // The grammar is complete before the extra byte, so only the final end-of-input check can
+        // reject these. (A `ClassSignature` is intentionally omitted: its superinterface loop reads
+        // to end-of-input, so trailing bytes are consumed as another interface rather than reaching
+        // `expect_eof`.)
+        assert!(TypeSignature::parse("Ljava/lang/Object;X").is_err());
+        assert!(MethodSignature::parse("()VX").is_err());
+    }
 }

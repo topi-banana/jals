@@ -324,4 +324,50 @@ mod tests {
             assert_eq!(MethodDescriptor::parse(s).unwrap().to_string(), s);
         }
     }
+
+    /// The eight primitive descriptor letters, their `newarray` atype codes, and their Java keywords,
+    /// paired so each `BaseType` mapping is checked in every direction.
+    const PRIMITIVES: &[(BaseType, u8, u8, &str)] = &[
+        (BaseType::Byte, b'B', 8, "byte"),
+        (BaseType::Char, b'C', 5, "char"),
+        (BaseType::Double, b'D', 7, "double"),
+        (BaseType::Float, b'F', 6, "float"),
+        (BaseType::Int, b'I', 10, "int"),
+        (BaseType::Long, b'J', 11, "long"),
+        (BaseType::Short, b'S', 9, "short"),
+        (BaseType::Boolean, b'Z', 4, "boolean"),
+    ];
+
+    #[test]
+    fn from_byte_maps_every_primitive_letter() {
+        for &(base, letter, _, _) in PRIMITIVES {
+            assert_eq!(
+                BaseType::from_byte(letter),
+                Some(base),
+                "letter {}",
+                letter as char
+            );
+            assert_eq!(base.as_char() as u8, letter);
+        }
+        assert_eq!(BaseType::from_byte(b'V'), None);
+        assert_eq!(BaseType::from_byte(b'L'), None);
+    }
+
+    #[test]
+    fn from_atype_maps_every_newarray_code() {
+        for &(base, _, atype, _) in PRIMITIVES {
+            assert_eq!(BaseType::from_atype(atype), Some(base), "atype {atype}");
+        }
+        // The valid codes are 4..=11; everything else is rejected.
+        assert_eq!(BaseType::from_atype(3), None);
+        assert_eq!(BaseType::from_atype(12), None);
+        assert_eq!(BaseType::from_atype(0), None);
+    }
+
+    #[test]
+    fn keyword_names_every_primitive() {
+        for &(base, _, _, keyword) in PRIMITIVES {
+            assert_eq!(base.keyword(), keyword);
+        }
+    }
 }

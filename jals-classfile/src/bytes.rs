@@ -172,3 +172,37 @@ impl Writer {
         self.buf
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u64_round_trips_a_distinct_value() {
+        // A value that is neither 0 nor 1 and whose every byte differs, so a codec that drops the
+        // write or hard-codes the read is caught.
+        let value = 0x0123_4567_89AB_CDEFu64;
+        let mut w = Writer::new();
+        w.u64(value);
+        let bytes = w.into_vec();
+        assert_eq!(
+            bytes,
+            value.to_be_bytes(),
+            "u64 must emit 8 big-endian bytes"
+        );
+
+        let mut r = Reader::new(&bytes);
+        assert_eq!(
+            r.u64().unwrap(),
+            value,
+            "u64 must read back the written value"
+        );
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn u64_reads_are_big_endian() {
+        let mut r = Reader::new(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]);
+        assert_eq!(r.u64().unwrap(), 2);
+    }
+}

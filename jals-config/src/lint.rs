@@ -128,4 +128,38 @@ mod tests {
             Severity::Warn
         );
     }
+
+    #[test]
+    fn severities_have_stable_names_and_display() {
+        for (severity, expected) in [
+            (Severity::Allow, "allow"),
+            (Severity::Warn, "warn"),
+            (Severity::Error, "error"),
+        ] {
+            assert_eq!(severity.as_str(), expected);
+            assert_eq!(alloc::format!("{severity}"), expected);
+        }
+    }
+
+    #[test]
+    fn loads_and_discovers_config_files() {
+        let fs = jals_fs::InMemoryFileTree::new()
+            .with_file("/direct.toml", "[rules]\nempty-catch = \"error\"\n")
+            .with_file(
+                "/workspace/jalslint.toml",
+                "[rules]\nwildcard-import = \"allow\"\n",
+            );
+
+        let direct = Config::from_file(&fs, "/direct.toml").unwrap();
+        assert_eq!(
+            direct.severity("empty-catch", Severity::Warn),
+            Severity::Error
+        );
+
+        let discovered = Config::discover(&fs, "/workspace/project/src").unwrap();
+        assert_eq!(
+            discovered.severity("wildcard-import", Severity::Warn),
+            Severity::Allow
+        );
+    }
 }
