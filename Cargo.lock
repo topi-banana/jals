@@ -1081,6 +1081,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jals-editor"
+version = "0.1.0"
+
+[[package]]
 name = "jals-fmt"
 version = "0.1.0"
 dependencies = [
@@ -1132,6 +1136,7 @@ dependencies = [
  "jals-classfile",
  "jals-classpath",
  "jals-config",
+ "jals-editor",
  "jals-fmt",
  "jals-fs",
  "jals-hir",
@@ -1152,6 +1157,7 @@ dependencies = [
  "gloo-net",
  "jals-classpath",
  "jals-config",
+ "jals-editor",
  "jals-fmt",
  "jals-fs",
  "jals-hir",

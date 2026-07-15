@@ -10,6 +10,7 @@ yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }
 # feature — Cargo forbids a workspace-inherited dep from overriding the workspace's default-features.
 jals-classpath = { path = "../jals-classpath", default-features = false }
 jals-config = { workspace = true }
+jals-editor = { workspace = true }
 jals-fmt = { workspace = true }
 jals-fs = { workspace = true }
 jals-hir = { workspace = true }
