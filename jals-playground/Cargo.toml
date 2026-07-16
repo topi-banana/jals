@@ -14,12 +14,10 @@ jals-editor = { workspace = true }
 jals-fmt = { workspace = true }
 jals-fs = { workspace = true }
 jals-hir = { workspace = true }
-jals-lint = { workspace = true }
 jals-syntax = { workspace = true }
 # Browser `fetch` for downloading dependency jars (already in the tree via yew's `gloo`).
 gloo-net = { version = "0.7", default-features = false, features = ["http"] }
 js-sys = "0.3"
-text-size = { workspace = true }
 # Parses the `jalsfmt.toml` editor buffer into `jals_config::fmt::Config` (the `jals.toml` buffer
 # goes through `Manifest::from_str`, which already pulls in `toml`).
 toml = { workspace = true }

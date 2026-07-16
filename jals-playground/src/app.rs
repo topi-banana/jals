@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use jals_config::fmt::Config;
-use jals_config::{Dependency, FeatureSet, ManifestParseError, Severity};
+use jals_config::{Dependency, FeatureSet, ManifestParseError};
 use jals_fs::InMemoryFileTree;
 use jals_hir::{LoweredClasspath, ProjectIndex};
 use wasm_bindgen::JsValue;
@@ -25,7 +25,7 @@ use yew::prelude::*;
 
 use crate::components::{EditorPane, FileTree, Header, SyntaxPane, TreeEntry};
 use crate::fetcher::BrowserFetcher;
-use crate::line_index::LineIndex;
+use crate::host::MonacoRange;
 use crate::workspace::Workspace;
 use crate::{monaco, providers};
 
@@ -178,11 +178,6 @@ pub struct App {
     deps_cache: Rc<RefCell<InMemoryFileTree>>,
     /// The last dependency-resolution status line shown in the [`Header`], if any.
     deps_status: Option<String>,
-    /// The project's resolved language feature set from the last resolved `jals.toml`'s
-    /// `[package] features`, threaded into the lint [`Config`] so the feature-gated rules
-    /// (`compact-source-file`, `module-import`) fire in the browser. Empty until a manifest
-    /// declaring features resolves.
-    feature_set: FeatureSet,
     /// The `jals.toml` editor buffer. Held here (not in the workspace's Java file tree) so it is
     /// never analysed/indexed; its `[dependencies]` are re-resolved on edit.
     manifest_src: String,
@@ -204,13 +199,12 @@ impl App {
     /// workspace already maps each range to Monaco's UTF-16 coordinates, so this only marshals
     /// through [`monaco::Marker::set_diagnostics`].
     fn refresh_markers(&self) {
-        // Fold the resolved `[package] features` into the lint config so the feature-gated rules
-        // (`compact-source-file`, `module-import`) fire; every other key stays at its default.
-        let config = jals_config::lint::Config {
-            features: self.feature_set,
-            ..Default::default()
-        };
-        let diags = self.workspace.borrow().analyze_active(&config);
+        // The editor core owns the project's resolved `[package] features` (set on classpath
+        // resolve) and folds them into every diagnostics run, so a default config is enough.
+        let diags = self
+            .workspace
+            .borrow()
+            .analyze_active(&jals_config::lint::Config::default());
         monaco::Marker::set_diagnostics(diags.iter().map(|d| monaco::Marker {
             start_line: d.range.start_line,
             start_col: d.range.start_col,
@@ -278,15 +272,20 @@ impl App {
             let range = span.clone().unwrap_or_else(|| 0..first_line_len(text));
             // Built only when there is an error to place — a clean parse (the common keystroke) skips
             // the whole-buffer scan.
-            let index = LineIndex::new(text);
-            let (start_line, start_col, end_line, end_col) = index.to_monaco(text, &range);
+            let index = jals_editor::LineIndex::new(text);
+            let MonacoRange {
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+            } = MonacoRange::of(&index, text, &range);
             monaco::Marker {
                 start_line,
                 start_col,
                 end_line,
                 end_col,
                 message: message.as_str(),
-                severity: Severity::Error,
+                severity: jals_editor::DiagnosticSeverity::Error,
             }
         });
         // `Option<Marker>` is an iterator of zero or one marker; either paints the error or clears.
@@ -448,7 +447,6 @@ impl Component for App {
             syntax_dump: None,
             deps_cache: Rc::new(RefCell::new(InMemoryFileTree::new())),
             deps_status: None,
-            feature_set: FeatureSet::default(),
             manifest_src: ConfigKind::Manifest.seed().to_string(),
             fmt_src: ConfigKind::Fmt.seed().to_string(),
             active_config: None,
@@ -559,8 +557,13 @@ impl Component for App {
             Msg::ClasspathResolved(result) => {
                 match result {
                     Ok((classpath, feature_set, status)) => {
-                        self.workspace.borrow_mut().set_classpath(Some(classpath));
-                        self.feature_set = feature_set;
+                        {
+                            // Both settle in the editor core: the classpath rebuilds the index and
+                            // the feature set folds into every later diagnostics run.
+                            let mut workspace = self.workspace.borrow_mut();
+                            workspace.set_classpath(Some(classpath));
+                            workspace.set_feature_set(feature_set);
+                        }
                         self.deps_status = Some(status);
                         // Re-analyse the active file with the external types now in the index — but
                         // only when a Java file is showing, so we never paint Java markers on a

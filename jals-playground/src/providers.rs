@@ -1,16 +1,20 @@
 //! Wires each Monaco language-feature provider to the in-browser [`Workspace`] analysis.
 //!
 //! Every provider is a synchronous Rust closure (mirroring the formatter): it receives the model's
-//! live text and cursor position from JS, runs the corresponding [`Workspace`] query, and marshals
-//! the neutral result into a plain Monaco payload via the [`crate::monaco`] factories. The closures
-//! capture a shared `Rc<RefCell<Workspace>>` (borrowed immutably — never `borrow_mut`, so there is
-//! no clash with `App::update`) and are `forget`ted, kept alive for the app's single editor.
+//! live text and cursor position from JS, reflects the text into the workspace overlay
+//! ([`Workspace::sync_active`] — a no-op when unchanged, so a query storm never re-analyzes), runs
+//! the corresponding [`Workspace`] query, and marshals the Monaco payload into a plain `JsValue`
+//! via the [`crate::monaco`] factories. The closures capture a shared `Rc<RefCell<Workspace>>`;
+//! the mutable sync borrow is always released before the immutable query borrow (and neither is
+//! ever held across a call into `monaco::*`), so there is no clash with `App::update`. Each
+//! closure is `forget`ted, kept alive for the app's single editor.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::host::{SymbolNode, Target};
 use crate::monaco::{self, CompletionKindExt, DefKindExt};
-use crate::workspace::{SymbolNode, Target, Workspace};
+use crate::workspace::Workspace;
 use wasm_bindgen::prelude::*;
 
 /// The Monaco language-feature providers, registered once against the shared [`Workspace`].
@@ -40,17 +44,21 @@ impl Providers {
         closure.forget();
     }
 
-    /// Install a position provider: a `(&Workspace, text, line, col) -> JsValue` body backed by
-    /// `ws`, wired to its matching `monaco::register_*`. Folds the shared `Closure` construction,
-    /// immutable `borrow`, and `register`/`forget` that the five position-based installers would
-    /// otherwise repeat.
+    /// Install a position provider: a `(&Workspace, line, col) -> JsValue` body backed by `ws`,
+    /// wired to its matching `monaco::register_*`. Folds the shared `Closure` construction, the
+    /// sync-then-query borrow discipline, and `register`/`forget` that the five position-based
+    /// installers would otherwise repeat.
     fn install_pos(
         ws: Rc<RefCell<Workspace>>,
-        body: impl Fn(&Workspace, &str, u32, u32) -> JsValue + 'static,
+        body: impl Fn(&Workspace, u32, u32) -> JsValue + 'static,
         register_with: impl FnOnce(&js_sys::Function),
     ) {
         let closure = Closure::<dyn FnMut(String, u32, u32) -> JsValue>::new(
-            move |text: String, line: u32, col: u32| body(&ws.borrow(), &text, line, col),
+            move |text: String, line: u32, col: u32| {
+                // Reflect the live buffer first; the mutable borrow ends with the statement.
+                ws.borrow_mut().sync_active(&text);
+                body(&ws.borrow(), line, col)
+            },
         );
         Self::register(closure, register_with);
     }
@@ -70,7 +78,7 @@ impl Providers {
     fn install_hover(ws: Rc<RefCell<Workspace>>) {
         Self::install_pos(
             ws,
-            |ws, text, line, col| match ws.hover(text, line, col) {
+            |ws, line, col| match ws.hover(line, col) {
                 Some(markdown) => monaco::hover_result(&markdown),
                 None => JsValue::NULL,
             },
@@ -81,9 +89,9 @@ impl Providers {
     fn install_completion(ws: Rc<RefCell<Workspace>>) {
         Self::install_pos(
             ws,
-            |ws, text, line, col| {
+            |ws, line, col| {
                 let items = js_sys::Array::new();
-                for entry in ws.completions(text, line, col) {
+                for entry in ws.completions(line, col) {
                     let kind = entry.kind.completion_kind();
                     items.push(&monaco::completion_item(&entry.label, kind, &entry.detail));
                 }
@@ -96,7 +104,7 @@ impl Providers {
     fn install_signature_help(ws: Rc<RefCell<Workspace>>) {
         Self::install_pos(
             ws,
-            |ws, text, line, col| match ws.signature_help(text, line, col) {
+            |ws, line, col| match ws.signature_help(line, col) {
                 Some(help) => {
                     let signatures = js_sys::Array::new();
                     for sig in &help.signatures {
@@ -120,7 +128,8 @@ impl Providers {
 
     fn install_document_symbols(ws: Rc<RefCell<Workspace>>) {
         let closure = Closure::<dyn FnMut(String) -> JsValue>::new(move |text: String| {
-            let symbols = ws.borrow().document_symbols(&text);
+            ws.borrow_mut().sync_active(&text);
+            let symbols = ws.borrow().document_symbols();
             Self::symbols_to_js(&symbols).into()
         });
         Self::register(closure, monaco::register_document_symbols);
@@ -147,9 +156,9 @@ impl Providers {
     fn install_document_highlight(ws: Rc<RefCell<Workspace>>) {
         Self::install_pos(
             ws,
-            |ws, text, line, col| {
+            |ws, line, col| {
                 let array = js_sys::Array::new();
-                for h in ws.document_highlight(text, line, col) {
+                for h in ws.document_highlight(line, col) {
                     array.push(&monaco::highlight_result(
                         h.range.start_line,
                         h.range.start_col,
@@ -167,7 +176,7 @@ impl Providers {
     fn install_definition(ws: Rc<RefCell<Workspace>>) {
         Self::install_pos(
             ws,
-            |ws, text, line, col| match ws.goto_definition(text, line, col) {
+            |ws, line, col| match ws.goto_definition(line, col) {
                 Some(target) => Self::location(&target),
                 None => JsValue::NULL,
             },
@@ -178,7 +187,8 @@ impl Providers {
     fn install_references(ws: Rc<RefCell<Workspace>>) {
         let closure = Closure::<dyn FnMut(String, u32, u32, bool) -> JsValue>::new(
             move |text: String, line: u32, col: u32, include_decl: bool| {
-                let targets = ws.borrow().references(&text, line, col, include_decl);
+                ws.borrow_mut().sync_active(&text);
+                let targets = ws.borrow().references(line, col, include_decl);
                 let array = js_sys::Array::new();
                 for target in targets {
                     array.push(&Self::location(&target));

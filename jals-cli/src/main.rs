@@ -6,7 +6,6 @@
 
 mod report;
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -16,7 +15,7 @@ use clap::{Args, Parser, Subcommand};
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
-use jals_config::{FeatureSet, Manifest};
+use jals_config::{ConfigResolver, DiscoverableConfig, FeatureSet, Manifest};
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 
 use report::Reporter;
@@ -198,7 +197,7 @@ impl FmtArgs {
         // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
         let show_diff = self.check || self.diff;
 
-        let mut discovery = Discovery::new(explicit_config);
+        let mut discovery = ConfigResolver::new(explicit_config);
         let mut any_changed = false;
         let mut any_warning = false;
 
@@ -208,8 +207,10 @@ impl FmtArgs {
             std::io::stdin()
                 .read_to_string(&mut src)
                 .context("reading stdin")?;
-            let cfg =
-                discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
+            let cfg = App::config_for_dir(
+                &mut discovery,
+                &std::env::current_dir().context("getting current dir")?,
+            )?;
             let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
             let changed = out.formatted != src;
             any_changed |= changed;
@@ -227,7 +228,7 @@ impl FmtArgs {
                 let src = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                let cfg = discovery.for_dir(parent)?;
+                let cfg = App::config_for_dir(&mut discovery, parent)?;
                 let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
                 let changed = out.formatted != src;
                 any_changed |= changed;
@@ -264,7 +265,7 @@ impl LintArgs {
             })
             .transpose()?;
 
-        let mut discovery = LintDiscovery::new(explicit_config);
+        let mut discovery = ConfigResolver::new(explicit_config);
         let mut any_finding = false;
 
         if self.paths.is_empty() {
@@ -276,7 +277,7 @@ impl LintArgs {
                 .read_to_string(&mut src)
                 .context("reading stdin")?;
             let cwd = std::env::current_dir().context("getting current dir")?;
-            let mut cfg = discovery.for_dir(&cwd)?;
+            let mut cfg = App::config_for_dir(&mut discovery, &cwd)?;
             let parse = jals_syntax::Parse::parse(&src);
             // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
             // so `type-mismatch` sees external library types, and its feature set (`[package]
@@ -323,7 +324,7 @@ impl LintArgs {
 
             for (i, (path, src, parse)) in files.iter().enumerate() {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                let mut cfg = discovery.for_dir(parent)?;
+                let mut cfg = App::config_for_dir(&mut discovery, parent)?;
                 cfg.features = ctx.feature_set;
                 let out = jals_lint::LintOutput::lint_parse_with_index(
                     parse,
@@ -691,63 +692,16 @@ impl App {
         path.to_str()
             .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", path.display()))
     }
-}
 
-/// Resolves the config for a directory, either from an explicit `--config` (used for all
-/// files) or by discovering `jalsfmt.toml`, memoized per directory.
-struct Discovery {
-    explicit: Option<Config>,
-    cache: HashMap<PathBuf, Config>,
-}
-
-impl Discovery {
-    fn new(explicit: Option<Config>) -> Self {
-        Self {
-            explicit,
-            cache: HashMap::new(),
-        }
-    }
-
-    fn for_dir(&mut self, dir: &Path) -> Result<Config> {
-        if let Some(cfg) = &self.explicit {
-            return Ok(cfg.clone());
-        }
-        if let Some(cfg) = self.cache.get(dir) {
-            return Ok(cfg.clone());
-        }
-        let cfg = Config::discover(&jals_fs::OsFileTree, App::path_str(dir)?)
-            .with_context(|| format!("discovering config from {}", dir.display()))?;
-        self.cache.insert(dir.to_path_buf(), cfg.clone());
-        Ok(cfg)
-    }
-}
-
-/// Resolves the lint config for a directory, mirroring [`Discovery`] for [`jals_lint::Config`]:
-/// either from an explicit `--config` (used for all files) or by discovering `jalslint.toml`,
-/// memoized per directory.
-struct LintDiscovery {
-    explicit: Option<LintConfig>,
-    cache: HashMap<PathBuf, LintConfig>,
-}
-
-impl LintDiscovery {
-    fn new(explicit: Option<LintConfig>) -> Self {
-        Self {
-            explicit,
-            cache: HashMap::new(),
-        }
-    }
-
-    fn for_dir(&mut self, dir: &Path) -> Result<LintConfig> {
-        if let Some(cfg) = &self.explicit {
-            return Ok(cfg.clone());
-        }
-        if let Some(cfg) = self.cache.get(dir) {
-            return Ok(cfg.clone());
-        }
-        let cfg = LintConfig::discover(&jals_fs::OsFileTree, App::path_str(dir)?)
-            .with_context(|| format!("discovering config from {}", dir.display()))?;
-        self.cache.insert(dir.to_path_buf(), cfg.clone());
-        Ok(cfg)
+    /// The config governing `dir`, resolved through the shared per-directory
+    /// [`ConfigResolver`] cache (explicit `--config` override, else discovery) over the host
+    /// filesystem.
+    fn config_for_dir<C: DiscoverableConfig + Clone + Default>(
+        resolver: &mut ConfigResolver<C>,
+        dir: &Path,
+    ) -> Result<C> {
+        resolver
+            .for_dir(&jals_fs::OsFileTree, Self::path_str(dir)?)
+            .with_context(|| format!("discovering config from {}", dir.display()))
     }
 }

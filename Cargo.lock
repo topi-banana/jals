@@ -1084,7 +1084,11 @@ dependencies = [
 name = "jals-editor"
 version = "0.1.0"
 dependencies = [
+ "jals-classfile",
+ "jals-config",
+ "jals-fs",
  "jals-hir",
+ "jals-lint",
  "jals-syntax",
  "text-size",
 ]
@@ -1145,11 +1149,8 @@ dependencies = [
  "jals-fmt",
  "jals-fs",
  "jals-hir",
- "jals-lint",
- "jals-syntax",
  "serde_json",
  "tempfile",
- "text-size",
  "tokio",
  "tokio-util",
  "tower",
@@ -1166,10 +1167,8 @@ dependencies = [
  "jals-fmt",
  "jals-fs",
  "jals-hir",
- "jals-lint",
  "jals-syntax",
  "js-sys",
- "text-size",
  "toml",
  "wasm-bindgen",
  "wasm-bindgen-futures",

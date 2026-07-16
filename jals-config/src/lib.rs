@@ -26,7 +26,7 @@ pub mod manifest;
 pub mod toolchain;
 
 pub use lint::Severity;
-pub use loader::{ConfigError, DiscoverableConfig};
+pub use loader::{ConfigError, ConfigResolver, DiscoverableConfig};
 pub use manifest::{
     Bin, Build, Dependency, DependencyError, Feature, FeatureSet, GitDependency, GitRef,
     JarDependency, Manifest, ManifestParseError, Package, PathDependency, Run, ValidationError,
