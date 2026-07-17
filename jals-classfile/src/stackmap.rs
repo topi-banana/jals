@@ -93,33 +93,33 @@ pub enum VerificationType {
 }
 
 impl StackMapFrame {
-    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let frame_type = r.u8()?;
+    pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let frame_type = r.u8().await?;
         Ok(match frame_type {
             0..=63 => Self::Same {
                 offset_delta: u16::from(frame_type),
             },
             64..=127 => Self::SameLocals1StackItem {
                 offset_delta: u16::from(frame_type - 64),
-                stack: VerificationType::read(r)?,
+                stack: VerificationType::read(r).await?,
             },
             247 => Self::SameLocals1StackItemExtended {
-                offset_delta: r.u16()?,
-                stack: VerificationType::read(r)?,
+                offset_delta: r.u16().await?,
+                stack: VerificationType::read(r).await?,
             },
             248..=250 => Self::Chop {
                 count: 251 - frame_type,
-                offset_delta: r.u16()?,
+                offset_delta: r.u16().await?,
             },
             251 => Self::SameFrameExtended {
-                offset_delta: r.u16()?,
+                offset_delta: r.u16().await?,
             },
             252..=254 => {
                 let count = frame_type - 251;
-                let offset_delta = r.u16()?;
+                let offset_delta = r.u16().await?;
                 let mut locals = Vec::with_capacity(count as usize);
                 for _ in 0..count {
-                    locals.push(VerificationType::read(r)?);
+                    locals.push(VerificationType::read(r).await?);
                 }
                 Self::Append {
                     offset_delta,
@@ -127,9 +127,9 @@ impl StackMapFrame {
                 }
             }
             255 => {
-                let offset_delta = r.u16()?;
-                let locals = r.list(VerificationType::read)?;
-                let stack = r.list(VerificationType::read)?;
+                let offset_delta = r.u16().await?;
+                let locals = r.list(VerificationType::read).await?;
+                let stack = r.list(VerificationType::read).await?;
                 Self::Full {
                     offset_delta,
                     locals,
@@ -194,8 +194,8 @@ impl StackMapFrame {
 }
 
 impl VerificationType {
-    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let tag = r.u8()?;
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let tag = r.u8().await?;
         Ok(match tag {
             0 => Self::Top,
             1 => Self::Integer,
@@ -205,9 +205,11 @@ impl VerificationType {
             5 => Self::Null,
             6 => Self::UninitializedThis,
             7 => Self::Object {
-                cpool_index: r.u16()?,
+                cpool_index: r.u16().await?,
             },
-            8 => Self::Uninitialized { offset: r.u16()? },
+            8 => Self::Uninitialized {
+                offset: r.u16().await?,
+            },
             _ => return Err(ClassfileError::Malformed("verification_type_info tag")),
         })
     }

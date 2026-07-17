@@ -125,13 +125,13 @@ pub enum ConstantPoolEntry {
 }
 
 impl ConstantPool {
-    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let count = r.u16()?;
+    pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let count = r.u16().await?;
         let mut entries = Vec::with_capacity(count as usize);
         entries.push(ConstantSlot::Sentinel);
         let mut i = 1u16;
         while i < count {
-            let entry = ConstantPoolEntry::read(r)?;
+            let entry = ConstantPoolEntry::read(r).await?;
             let wide = matches!(
                 entry,
                 ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_)
@@ -234,59 +234,59 @@ impl ConstantPool {
 }
 
 impl ConstantPoolEntry {
-    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let tag = r.u8()?;
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let tag = r.u8().await?;
         Ok(match tag {
             1 => {
-                let len = r.u16()? as usize;
-                Self::Utf8(r.bytes(len)?)
+                let len = r.u16().await? as usize;
+                Self::Utf8(r.bytes(len).await?)
             }
-            3 => Self::Integer(r.u32()? as i32),
-            4 => Self::Float(f32::from_bits(r.u32()?)),
-            5 => Self::Long(r.u64()? as i64),
-            6 => Self::Double(f64::from_bits(r.u64()?)),
+            3 => Self::Integer(r.u32().await? as i32),
+            4 => Self::Float(f32::from_bits(r.u32().await?)),
+            5 => Self::Long(r.u64().await? as i64),
+            6 => Self::Double(f64::from_bits(r.u64().await?)),
             7 => Self::Class {
-                name_index: r.u16()?,
+                name_index: r.u16().await?,
             },
             8 => Self::String {
-                string_index: r.u16()?,
+                string_index: r.u16().await?,
             },
             9 => Self::FieldRef {
-                class_index: r.u16()?,
-                name_and_type_index: r.u16()?,
+                class_index: r.u16().await?,
+                name_and_type_index: r.u16().await?,
             },
             10 => Self::MethodRef {
-                class_index: r.u16()?,
-                name_and_type_index: r.u16()?,
+                class_index: r.u16().await?,
+                name_and_type_index: r.u16().await?,
             },
             11 => Self::InterfaceMethodRef {
-                class_index: r.u16()?,
-                name_and_type_index: r.u16()?,
+                class_index: r.u16().await?,
+                name_and_type_index: r.u16().await?,
             },
             12 => Self::NameAndType {
-                name_index: r.u16()?,
-                descriptor_index: r.u16()?,
+                name_index: r.u16().await?,
+                descriptor_index: r.u16().await?,
             },
             15 => Self::MethodHandle {
-                reference_kind: r.u8()?,
-                reference_index: r.u16()?,
+                reference_kind: r.u8().await?,
+                reference_index: r.u16().await?,
             },
             16 => Self::MethodType {
-                descriptor_index: r.u16()?,
+                descriptor_index: r.u16().await?,
             },
             17 => Self::Dynamic {
-                bootstrap_method_attr_index: r.u16()?,
-                name_and_type_index: r.u16()?,
+                bootstrap_method_attr_index: r.u16().await?,
+                name_and_type_index: r.u16().await?,
             },
             18 => Self::InvokeDynamic {
-                bootstrap_method_attr_index: r.u16()?,
-                name_and_type_index: r.u16()?,
+                bootstrap_method_attr_index: r.u16().await?,
+                name_and_type_index: r.u16().await?,
             },
             19 => Self::Module {
-                name_index: r.u16()?,
+                name_index: r.u16().await?,
             },
             20 => Self::Package {
-                name_index: r.u16()?,
+                name_index: r.u16().await?,
             },
             other => return Err(ClassfileError::InvalidConstantTag(other)),
         })

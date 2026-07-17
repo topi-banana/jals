@@ -1,6 +1,7 @@
 //! Annotation structures shared by the `Runtime[In]Visible[Parameter|Type]Annotations` and
 //! `AnnotationDefault` attributes (JVMS §4.7.16–§4.7.22).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -160,10 +161,10 @@ pub struct TypePathEntry {
 }
 
 impl ElementValuePair {
-    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            element_name_index: r.u16()?,
-            value: ElementValue::read(r)?,
+            element_name_index: r.u16().await?,
+            value: ElementValue::read(r).await?,
         })
     }
 
@@ -174,9 +175,9 @@ impl ElementValuePair {
 }
 
 impl Annotation {
-    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let type_index = r.u16()?;
-        let element_value_pairs = r.list(ElementValuePair::read)?;
+    pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let type_index = r.u16().await?;
+        let element_value_pairs = r.list(ElementValuePair::read).await?;
         Ok(Self {
             type_index,
             element_value_pairs,
@@ -190,22 +191,24 @@ impl Annotation {
 }
 
 impl ElementValue {
-    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let tag = r.u8()?;
+    /// The `@` and `[` arms recurse (annotation-in-value, value-in-value), so those calls are
+    /// `Box::pin`ned to keep this future finite.
+    pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let tag = r.u8().await?;
         Ok(match tag {
             b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b's' => Self::Const {
                 tag,
-                const_value_index: r.u16()?,
+                const_value_index: r.u16().await?,
             },
             b'e' => Self::Enum {
-                type_name_index: r.u16()?,
-                const_name_index: r.u16()?,
+                type_name_index: r.u16().await?,
+                const_name_index: r.u16().await?,
             },
             b'c' => Self::Class {
-                class_info_index: r.u16()?,
+                class_info_index: r.u16().await?,
             },
-            b'@' => Self::Annotation(Annotation::read(r)?),
-            b'[' => Self::Array(r.list(Self::read)?),
+            b'@' => Self::Annotation(Box::pin(Annotation::read(r)).await?),
+            b'[' => Self::Array(r.list(async |r| Box::pin(Self::read(r)).await).await?),
             _ => return Err(ClassfileError::Malformed("element_value tag")),
         })
     }
@@ -244,18 +247,18 @@ impl ElementValue {
 }
 
 impl TypeAnnotation {
-    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let target_info = TargetInfo::read(r)?;
-        let path_length = r.u8()?;
+    pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let target_info = TargetInfo::read(r).await?;
+        let path_length = r.u8().await?;
         let mut target_path = Vec::with_capacity(path_length as usize);
         for _ in 0..path_length {
             target_path.push(TypePathEntry {
-                type_path_kind: r.u8()?,
-                type_argument_index: r.u8()?,
+                type_path_kind: r.u8().await?,
+                type_argument_index: r.u8().await?,
             });
         }
-        let type_index = r.u16()?;
-        let element_value_pairs = r.list(ElementValuePair::read)?;
+        let type_index = r.u16().await?;
+        let element_value_pairs = r.list(ElementValuePair::read).await?;
         Ok(Self {
             target_info,
             target_path,
@@ -277,49 +280,51 @@ impl TypeAnnotation {
 }
 
 impl TargetInfo {
-    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
-        let target_type = r.u8()?;
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let target_type = r.u8().await?;
         Ok(match target_type {
             0x00 | 0x01 => Self::TypeParameter {
                 target_type,
-                type_parameter_index: r.u8()?,
+                type_parameter_index: r.u8().await?,
             },
             0x10 => Self::Supertype {
-                supertype_index: r.u16()?,
+                supertype_index: r.u16().await?,
             },
             0x11 | 0x12 => Self::TypeParameterBound {
                 target_type,
-                type_parameter_index: r.u8()?,
-                bound_index: r.u8()?,
+                type_parameter_index: r.u8().await?,
+                bound_index: r.u8().await?,
             },
             0x13..=0x15 => Self::Empty { target_type },
             0x16 => Self::FormalParameter {
-                formal_parameter_index: r.u8()?,
+                formal_parameter_index: r.u8().await?,
             },
             0x17 => Self::Throws {
-                throws_type_index: r.u16()?,
+                throws_type_index: r.u16().await?,
             },
             0x40 | 0x41 => Self::LocalVar {
                 target_type,
-                table: r.list(|r| {
-                    Ok(LocalVarTargetEntry {
-                        start_pc: r.u16()?,
-                        length: r.u16()?,
-                        index: r.u16()?,
+                table: r
+                    .list(async |r| {
+                        Ok(LocalVarTargetEntry {
+                            start_pc: r.u16().await?,
+                            length: r.u16().await?,
+                            index: r.u16().await?,
+                        })
                     })
-                })?,
+                    .await?,
             },
             0x42 => Self::Catch {
-                exception_table_index: r.u16()?,
+                exception_table_index: r.u16().await?,
             },
             0x43..=0x46 => Self::Offset {
                 target_type,
-                offset: r.u16()?,
+                offset: r.u16().await?,
             },
             0x47..=0x4B => Self::TypeArgument {
                 target_type,
-                offset: r.u16()?,
-                type_argument_index: r.u8()?,
+                offset: r.u16().await?,
+                type_argument_index: r.u8().await?,
             },
             _ => return Err(ClassfileError::Malformed("type_annotation target_type")),
         })

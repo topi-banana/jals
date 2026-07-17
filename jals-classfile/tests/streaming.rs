@@ -5,7 +5,14 @@ use std::fs::File;
 use std::io::BufReader;
 
 use jals_classfile::{ClassFile, ClassfileError};
+use jals_exec::block_on_inline;
 use jals_storage::io::{IoError, Read, StdReader};
+
+/// Drive the async parse to completion on the calling thread; only the source ever suspends,
+/// and every source here completes inline.
+fn parse<R: Read>(source: R) -> jals_classfile::Result<ClassFile> {
+    block_on_inline(ClassFile::read(source))
+}
 
 fn fixture_paths() -> Vec<std::path::PathBuf> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
@@ -23,10 +30,10 @@ fn buffered_file_reads_match_slice_reads() {
     for path in fixture_paths() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let bytes = std::fs::read(&path).expect("read fixture");
-        let from_slice = ClassFile::read(bytes.as_slice())
-            .unwrap_or_else(|error| panic!("slice parse {name}: {error}"));
+        let from_slice =
+            parse(bytes.as_slice()).unwrap_or_else(|error| panic!("slice parse {name}: {error}"));
         let file = File::open(&path).expect("open fixture");
-        let from_stream = ClassFile::read(StdReader(BufReader::new(file)))
+        let from_stream = parse(StdReader(BufReader::new(file)))
             .unwrap_or_else(|error| panic!("stream parse {name}: {error}"));
         assert_eq!(
             from_slice, from_stream,
@@ -42,7 +49,7 @@ fn truncation_reports_unexpected_eof() {
     for len in [0, 3, 8, bytes.len() / 2, bytes.len() - 1] {
         assert!(
             matches!(
-                ClassFile::read(&bytes[..len]),
+                parse(&bytes[..len]),
                 Err(ClassfileError::UnexpectedEof { .. })
             ),
             "no EOF error at prefix length {len}"
@@ -56,7 +63,7 @@ fn appended_garbage_reports_trailing_bytes() {
     let mut bytes = std::fs::read(path).expect("read fixture");
     bytes.push(0);
     assert!(matches!(
-        ClassFile::read(bytes.as_slice()),
+        parse(bytes.as_slice()),
         Err(ClassfileError::TrailingBytes)
     ));
 }
@@ -68,7 +75,7 @@ struct FailAfter {
 }
 
 impl Read for FailAfter {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         if self.prefix.is_empty() {
             return Err(IoError::Failed(String::from("simulated source failure")));
         }
@@ -87,7 +94,7 @@ fn source_failure_is_not_reported_as_malformed_input() {
         prefix: bytes[..bytes.len() / 2].to_vec(),
     };
     assert!(matches!(
-        ClassFile::read(source),
+        parse(source),
         Err(ClassfileError::Source(IoError::Failed(_)))
     ));
 }
@@ -109,7 +116,7 @@ fn huge_declared_attribute_length_fails_without_a_huge_allocation() {
     bytes.extend_from_slice(&1u16.to_be_bytes()); // ...whose name index is arbitrary
     bytes.extend_from_slice(&u32::MAX.to_be_bytes()); // ...declaring 4 GiB of body
     assert!(matches!(
-        ClassFile::read(bytes.as_slice()),
+        parse(bytes.as_slice()),
         Err(ClassfileError::UnexpectedEof { .. })
     ));
 }

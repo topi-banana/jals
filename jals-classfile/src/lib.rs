@@ -16,22 +16,25 @@
 //! the model can be carried through a self-describing format (e.g. `serde_json`) — serde is the
 //! struct⇄JSON medium, never the binary codec.
 //!
-//! The codec round-trips byte-for-byte: for any class file `b`,
-//! `ClassFile::read(b.as_slice()).unwrap().write() == b`. Unrecognised attributes are preserved
-//! verbatim, and counts / byte-length fields are derived from the contents on write rather than
-//! stored, so the invariant holds even after the model is edited.
+//! The codec round-trips byte-for-byte: for any class file `b`, awaiting
+//! `ClassFile::read(b.as_slice())` and calling `.write()` reproduces `b` exactly. Unrecognised
+//! attributes are preserved verbatim, and counts / byte-length fields are derived from the
+//! contents on write rather than stored, so the invariant holds even after the model is edited.
 //!
-//! Pure and `wasm32`-compatible: [`ClassFile::read`] parses from any portable byte source
-//! ([`jals_storage::io::Read`]) — a `&[u8]` slice, or a host reader bridged through
-//! `jals_storage::io::StdReader` (e.g. a `BufReader` over a file, or a decompressing JAR member
-//! stream). Opening files or archives remains the host's job (the CLI / LSP).
+//! Pure and `wasm32`-compatible: [`ClassFile::read`] is an `async fn` parsing from any portable
+//! byte source ([`jals_storage::io::Read`]) — a `&[u8]` slice (always ready), or a host reader
+//! bridged through `jals_storage::io::StdReader` (e.g. a `BufReader` over a file, or a
+//! decompressing JAR member stream). The parse yields cooperatively inside its bulk loops;
+//! [`ClassFile::write`] is pure in-memory `Vec` construction and stays synchronous. Opening
+//! files or archives remains the host's job (the CLI / LSP).
 //!
 //! # Example
 //!
 //! ```no_run
 //! # fn load() -> Vec<u8> { Vec::new() }
 //! let bytes = load(); // e.g. read a `.class` from disk (host side)
-//! let class = jals_classfile::ClassFile::read(bytes.as_slice()).expect("valid class file");
+//! let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(bytes.as_slice()))
+//!     .expect("valid class file");
 //! assert_eq!(class.write(), bytes); // byte-exact round-trip
 //! ```
 

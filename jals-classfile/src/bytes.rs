@@ -2,11 +2,15 @@
 //!
 //! The sole primitive codec layer. The reader pulls from any portable byte source
 //! ([`jals_storage::io::Read`]), so the crate stays `wasm32`-pure while hosts stream class files
-//! straight from buffered files or archive members. Every read is checked against the stream and
-//! returns [`Result`] rather than panicking.
+//! straight from buffered files or archive members. Reads are `async` to match the portable
+//! source (slice-backed readers are always ready) and cooperate through [`jals_exec::Yielder`]
+//! in the bulk loops ([`Reader::bytes`], [`Reader::list`]). Every read is checked against the
+//! stream and returns [`Result`] rather than panicking. The [`Writer`] is pure in-memory `Vec`
+//! construction and stays synchronous.
 
 use alloc::vec::Vec;
 
+use jals_exec::Yielder;
 use jals_storage::io::IoError;
 pub(crate) use jals_storage::io::Read as Input;
 
@@ -36,8 +40,8 @@ impl<R: Input> Reader<R> {
     }
 
     /// Fill `out` from the source, or fail without advancing the tracked offset.
-    fn fill(&mut self, out: &mut [u8]) -> Result<()> {
-        match self.src.read_exact(out) {
+    async fn fill(&mut self, out: &mut [u8]) -> Result<()> {
+        match self.src.read_exact(out).await {
             Ok(()) => {
                 self.pos += out.len();
                 Ok(())
@@ -50,66 +54,75 @@ impl<R: Input> Reader<R> {
         }
     }
 
-    pub(crate) fn u8(&mut self) -> Result<u8> {
+    pub(crate) async fn u8(&mut self) -> Result<u8> {
         let mut b = [0; 1];
-        self.fill(&mut b)?;
+        self.fill(&mut b).await?;
         Ok(b[0])
     }
 
-    pub(crate) fn u16(&mut self) -> Result<u16> {
+    pub(crate) async fn u16(&mut self) -> Result<u16> {
         let mut b = [0; 2];
-        self.fill(&mut b)?;
+        self.fill(&mut b).await?;
         Ok(u16::from_be_bytes(b))
     }
 
-    pub(crate) fn u32(&mut self) -> Result<u32> {
+    pub(crate) async fn u32(&mut self) -> Result<u32> {
         let mut b = [0; 4];
-        self.fill(&mut b)?;
+        self.fill(&mut b).await?;
         Ok(u32::from_be_bytes(b))
     }
 
-    pub(crate) fn u64(&mut self) -> Result<u64> {
+    pub(crate) async fn u64(&mut self) -> Result<u64> {
         let mut b = [0; 8];
-        self.fill(&mut b)?;
+        self.fill(&mut b).await?;
         Ok(u64::from_be_bytes(b))
     }
 
-    /// Read and own the next `n` bytes verbatim.
-    pub(crate) fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+    /// Read and own the next `n` bytes verbatim, ticking a [`Yielder`] once per allocation chunk
+    /// so a large body cannot hog the executor.
+    pub(crate) async fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        let mut yielder = Yielder::new();
         let mut out = Vec::new();
         while out.len() < n {
+            yielder.tick().await;
             let start = out.len();
             let chunk = (n - start).min(ALLOCATION_CHUNK);
             out.resize(start + chunk, 0);
-            self.fill(&mut out[start..])?;
+            self.fill(&mut out[start..]).await?;
         }
         Ok(out)
     }
 
-    /// Read a `u16`-counted run of items, each parsed by `read_one`.
-    pub(crate) fn list<T>(&mut self, read_one: impl Fn(&mut Self) -> Result<T>) -> Result<Vec<T>> {
-        let count = self.u16()?;
+    /// Read a `u16`-counted run of items, each parsed by `read_one`, ticking a [`Yielder`] once
+    /// per item.
+    pub(crate) async fn list<T>(
+        &mut self,
+        mut read_one: impl AsyncFnMut(&mut Self) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let count = self.u16().await?;
+        let mut yielder = Yielder::new();
         let mut v = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            v.push(read_one(self)?);
+            yielder.tick().await;
+            v.push(read_one(self).await?);
         }
         Ok(v)
     }
 
     /// Read a `u16`-counted run of raw `u16` indices.
-    pub(crate) fn u16_list(&mut self) -> Result<Vec<u16>> {
-        let count = self.u16()?;
+    pub(crate) async fn u16_list(&mut self) -> Result<Vec<u16>> {
+        let count = self.u16().await?;
         let mut v = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            v.push(self.u16()?);
+            v.push(self.u16().await?);
         }
         Ok(v)
     }
 
     /// Require end of input — the top-level "no trailing bytes" check.
-    pub(crate) fn expect_eof(&mut self) -> Result<()> {
+    pub(crate) async fn expect_eof(&mut self) -> Result<()> {
         let mut probe = [0u8; 1];
-        match self.src.read(&mut probe) {
+        match self.src.read(&mut probe).await {
             Ok(0) | Err(IoError::UnexpectedEof) => Ok(()),
             Ok(_) => Err(ClassfileError::TrailingBytes),
             Err(error) => Err(ClassfileError::Source(error)),
