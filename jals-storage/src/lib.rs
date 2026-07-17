@@ -1,4 +1,4 @@
-#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![cfg_attr(not(any(feature = "std", feature = "std-io", test)), no_std)]
 //! Deterministic, revisioned project storage.
 //!
 //! The portable Interface contains only validated project-relative keys and immutable snapshots.
@@ -6,6 +6,7 @@
 
 mod cache;
 mod error;
+pub mod io;
 #[cfg(any(feature = "std", test))]
 mod native;
 mod storage;
@@ -17,7 +18,7 @@ pub use cache::{
 };
 pub use error::{CacheError, Diagnostic, Error, NameError, PathError, Result, TreeError};
 #[cfg(any(feature = "std", test))]
-pub use native::{NativeCache, NativeScope, NativeSource};
+pub use native::{NativeArtifactReader, NativeCache, NativeScope, NativeSource};
 pub use storage::{
     Change, MemorySource, ProjectStorage, ProjectView, RefreshOutcome, SourceBackend, Transaction,
 };

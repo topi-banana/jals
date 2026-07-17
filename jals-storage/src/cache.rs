@@ -1,11 +1,14 @@
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
 use sha2::{Digest, Sha256};
 
 use crate::error::CacheError;
+use crate::io::{self, IoError, Seek as _};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentDigest([u8; 32]);
@@ -13,6 +16,18 @@ pub struct ContentDigest([u8; 32]);
 impl ContentDigest {
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
+    }
+
+    /// Digest an entire reader by streaming fixed-size chunks, never materializing the content.
+    pub fn of_reader<R: io::Read>(reader: &mut R) -> core::result::Result<Self, IoError> {
+        let mut hasher = Sha256::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut chunk)? {
+                0 => return Ok(Self(hasher.finalize().into())),
+                n => hasher.update(&chunk[..n]),
+            }
+        }
     }
 
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -117,6 +132,13 @@ pub(crate) mod private {
 /// `Sync` is part of the sealed contract: a content-addressed, read-mostly cache is shareable
 /// across threads by nature, so verified `lookup`s can fan out to concurrent readers.
 pub trait CacheBackend: private::Sealed + Sync {
+    /// Owning, cheap-to-clone reader over one stored artifact. Every clone reads at an
+    /// independent position: the parallel archive walkers clone one open archive per worker
+    /// and interleave reads.
+    #[doc(hidden)]
+    type Reader: io::Read + io::Seek + Clone + Send + Sync;
+    #[doc(hidden)]
+    fn open(&self, key: &CacheKey) -> core::result::Result<Option<Self::Reader>, CacheError>;
     #[doc(hidden)]
     fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError>;
     #[doc(hidden)]
@@ -142,15 +164,24 @@ pub trait CacheBackend: private::Sealed + Sync {
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryCache {
-    entries: BTreeMap<CacheKey, Vec<u8>>,
+    entries: BTreeMap<CacheKey, Arc<[u8]>>,
     index: BTreeMap<(CacheNamespace, ContentDigest), ContentDigest>,
 }
 
 impl private::Sealed for MemoryCache {}
 
 impl CacheBackend for MemoryCache {
+    type Reader = io::Cursor<Arc<[u8]>>;
+
+    fn open(&self, key: &CacheKey) -> core::result::Result<Option<Self::Reader>, CacheError> {
+        Ok(self
+            .entries
+            .get(key)
+            .map(|bytes| io::Cursor::new(Arc::clone(bytes))))
+    }
+
     fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError> {
-        Ok(self.entries.get(key).cloned())
+        Ok(self.entries.get(key).map(|bytes| bytes.to_vec()))
     }
 
     fn publish_once(
@@ -159,10 +190,10 @@ impl CacheBackend for MemoryCache {
         bytes: &[u8],
     ) -> core::result::Result<(), CacheError> {
         match self.entries.get(key) {
-            Some(existing) if existing == bytes => Ok(()),
+            Some(existing) if existing[..] == *bytes => Ok(()),
             Some(_) => Err(CacheError::Conflict),
             None => {
-                self.entries.insert(key.clone(), bytes.to_vec());
+                self.entries.insert(key.clone(), Arc::from(bytes));
                 Ok(())
             }
         }
@@ -205,6 +236,31 @@ impl<C: CacheBackend> ArtifactCache<C> {
             return Err(CacheError::Corrupt);
         }
         Ok(Some(bytes))
+    }
+
+    /// Reader-based verified lookup: stream the stored bytes through one digest pass, rewind,
+    /// and hand the reader out — the artifact is never materialized in memory. `Ok(None)` is a
+    /// miss; a digest mismatch is [`CacheError::Corrupt`]; a source failure is
+    /// [`CacheError::Io`], never conflated with a miss. Verification pins the opened backend
+    /// resource, so a post-verification swap of the stored location cannot redirect reads.
+    pub fn open_verified(
+        &self,
+        key: &CacheKey,
+    ) -> core::result::Result<Option<C::Reader>, CacheError> {
+        fn io_failure(error: &IoError) -> CacheError {
+            CacheError::Io(error.to_string())
+        }
+        let Some(mut reader) = self.backend.open(key)? else {
+            return Ok(None);
+        };
+        let digest = ContentDigest::of_reader(&mut reader).map_err(|error| io_failure(&error))?;
+        if digest != key.content {
+            return Err(CacheError::Corrupt);
+        }
+        reader
+            .seek(io::SeekFrom::Start(0))
+            .map_err(|error| io_failure(&error))?;
+        Ok(Some(reader))
     }
 
     pub fn publish(
@@ -288,6 +344,43 @@ mod tests {
         assert_eq!(
             cache.publish(&key(b"missing"), b"other"),
             Err(CacheError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn open_verified_returns_a_rewound_reader() {
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let artifact_key = key(b"jar-bytes");
+        cache.publish(&artifact_key, b"jar-bytes").unwrap();
+        let mut reader = cache.open_verified(&artifact_key).unwrap().unwrap();
+        let mut out = alloc::vec![0u8; 9];
+        io::Read::read_exact(&mut reader, &mut out).unwrap();
+        assert_eq!(out, b"jar-bytes");
+        assert!(cache.open_verified(&key(b"missing")).unwrap().is_none());
+    }
+
+    #[test]
+    fn open_verified_rejects_corrupt_entries_structurally() {
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let artifact_key = key(b"jar-bytes");
+        cache.publish(&artifact_key, b"jar-bytes").unwrap();
+        cache
+            .backend
+            .entries
+            .insert(artifact_key.clone(), Arc::from(&b"tampered"[..]));
+        assert!(matches!(
+            cache.open_verified(&artifact_key),
+            Err(CacheError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn of_reader_matches_of_for_multi_chunk_input() {
+        let bytes = alloc::vec![7u8; 200 * 1024];
+        let mut reader = io::Cursor::new(bytes.as_slice());
+        assert_eq!(
+            ContentDigest::of_reader(&mut reader).unwrap(),
+            ContentDigest::of(&bytes)
         );
     }
 }

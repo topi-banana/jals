@@ -5,7 +5,9 @@ edition.workspace = true
 
 [features]
 default = []
-std = []
+# `std::io` bridge adapters for the portable `io` module only — no host paths; wasm-safe.
+std-io = []
+std = ["std-io"]
 
 [dependencies]
 sha2.workspace = true

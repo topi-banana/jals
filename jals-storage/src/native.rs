@@ -1,15 +1,17 @@
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::cache::{self, ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest};
 use crate::error::{CacheError, Diagnostic, Error, Result};
+use crate::io::{self, IoError, SeekFrom};
 use crate::storage::{self, Change, SourceBackend, SourceSnapshot};
 use crate::{CodeTree, DirKey, Entry, FileKey, Name, ProjectStorage, RelativePath};
 
@@ -795,9 +797,167 @@ impl ArtifactCache<NativeCache> {
     }
 }
 
+/// Buffered, cloneable, positioned reader over one opened cache artifact.
+///
+/// Clones share the open file — content stays pinned to the opened inode, so a
+/// post-verification path swap cannot redirect reads — but keep independent positions and
+/// read-ahead buffers, which the parallel archive walkers require. `File::try_clone` is
+/// unsuitable here: duplicated descriptors share one offset.
+#[derive(Debug)]
+pub struct NativeArtifactReader {
+    file: Arc<ArtifactHandle>,
+    /// Captured at open. Artifacts are write-once, so the length is stable and serves
+    /// `SeekFrom::End` without a metadata call per seek.
+    len: u64,
+    pos: u64,
+    buf: Box<[u8]>,
+    buf_start: u64,
+    buf_len: usize,
+}
+
+#[cfg(any(unix, windows))]
+type ArtifactHandle = File;
+/// Targets without positioned reads fall back to seek+read under a lock.
+#[cfg(not(any(unix, windows)))]
+type ArtifactHandle = std::sync::Mutex<File>;
+
+impl NativeArtifactReader {
+    fn new(file: File, len: u64) -> Self {
+        #[cfg(any(unix, windows))]
+        let handle = file;
+        #[cfg(not(any(unix, windows)))]
+        let handle = std::sync::Mutex::new(file);
+        Self {
+            file: Arc::new(handle),
+            len,
+            pos: 0,
+            buf: vec![0; crate::io::BUFFER_CAPACITY].into_boxed_slice(),
+            buf_start: 0,
+            buf_len: 0,
+        }
+    }
+}
+
+impl Clone for NativeArtifactReader {
+    fn clone(&self) -> Self {
+        Self {
+            file: Arc::clone(&self.file),
+            len: self.len,
+            pos: self.pos,
+            // A fresh empty buffer: clones must never alias buffered state.
+            buf: vec![0; self.buf.len()].into_boxed_slice(),
+            buf_start: 0,
+            buf_len: 0,
+        }
+    }
+}
+
+impl io::Read for NativeArtifactReader {
+    fn read(&mut self, buf: &mut [u8]) -> core::result::Result<usize, IoError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let buffered_end = self.buf_start + self.buf_len as u64;
+        if self.pos >= self.buf_start && self.pos < buffered_end {
+            let offset = usize::try_from(self.pos - self.buf_start)
+                .expect("buffered window is bounded by the buffer length");
+            let mut pending = &self.buf[offset..self.buf_len];
+            let n = io::Read::read(&mut pending, buf)?;
+            self.pos += n as u64;
+            return Ok(n);
+        }
+        // Requests at least as large as the buffer are positioned-read straight into the
+        // caller, so the verification digest pass never double-copies.
+        if buf.len() >= self.buf.len() {
+            let n = Self::read_at(&self.file, buf, self.pos)?;
+            self.pos += n as u64;
+            return Ok(n);
+        }
+        self.buf_start = self.pos;
+        self.buf_len = 0;
+        self.buf_len = Self::read_at(&self.file, &mut self.buf, self.pos)?;
+        if self.buf_len == 0 {
+            return Ok(0);
+        }
+        let n = self.buf_len.min(buf.len());
+        buf[..n].copy_from_slice(&self.buf[..n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl io::Seek for NativeArtifactReader {
+    fn seek(&mut self, pos: SeekFrom) -> core::result::Result<u64, IoError> {
+        self.pos = pos.resolve(self.len, self.pos)?;
+        Ok(self.pos)
+    }
+}
+
+impl NativeArtifactReader {
+    #[cfg(unix)]
+    fn read_at(
+        file: &ArtifactHandle,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> core::result::Result<usize, IoError> {
+        use std::os::unix::fs::FileExt;
+        loop {
+            match file.read_at(buf, offset) {
+                Ok(n) => return Ok(n),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(IoError::Failed(error.to_string())),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn read_at(
+        file: &ArtifactHandle,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> core::result::Result<usize, IoError> {
+        // `seek_read` moves the descriptor's file pointer, but every clone reads exclusively
+        // through explicit offsets, so the shared pointer is never observed.
+        use std::os::windows::fs::FileExt;
+        file.seek_read(buf, offset)
+            .map_err(|error| IoError::Failed(error.to_string()))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn read_at(
+        file: &ArtifactHandle,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> core::result::Result<usize, IoError> {
+        use std::io::{Read, Seek};
+        let mut file = file
+            .lock()
+            .map_err(|_| IoError::Failed("poisoned artifact reader lock".to_string()))?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .and_then(|_| file.read(buf))
+            .map_err(|error| IoError::Failed(error.to_string()))
+    }
+}
+
 impl cache::private::Sealed for NativeCache {}
 
 impl CacheBackend for NativeCache {
+    type Reader = NativeArtifactReader;
+
+    fn open(&self, key: &CacheKey) -> core::result::Result<Option<Self::Reader>, CacheError> {
+        let path = self.artifact_path(key);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CacheError::Io(format!("{}: {error}", path.display()))),
+        };
+        let len = file
+            .metadata()
+            .map_err(|error| CacheError::Io(format!("{}: {error}", path.display())))?
+            .len();
+        Ok(Some(NativeArtifactReader::new(file, len)))
+    }
+
     fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError> {
         let path = self.artifact_path(key);
         match fs::read(&path) {
@@ -1343,5 +1503,83 @@ mod tests {
                 .iter()
                 .any(|diagnostic| matches!(diagnostic, Diagnostic::NonUtf8Entry(_)))
         );
+    }
+
+    fn artifact_key(bytes: &[u8]) -> CacheKey {
+        CacheKey::new(
+            CacheNamespace::DependencyJar,
+            ContentDigest::of(b"origin"),
+            ContentDigest::of(bytes),
+        )
+    }
+
+    #[test]
+    fn native_open_verified_streams_a_multi_buffer_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = ArtifactCache::new(NativeCache::new(dir.path().to_path_buf()));
+        let bytes: Vec<u8> = (0..200 * 1024)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let key = artifact_key(&bytes);
+        cache.publish(&key, &bytes).unwrap();
+
+        let mut reader = cache.open_verified(&key).unwrap().unwrap();
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 1000];
+        loop {
+            match io::Read::read(&mut reader, &mut chunk).unwrap() {
+                0 => break,
+                n => out.extend_from_slice(&chunk[..n]),
+            }
+        }
+        assert_eq!(out, bytes);
+        assert!(
+            cache
+                .open_verified(&artifact_key(b"missing"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_open_verified_rejects_on_disk_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = ArtifactCache::new(NativeCache::new(dir.path().to_path_buf()));
+        let key = artifact_key(b"artifact");
+        cache.publish(&key, b"artifact").unwrap();
+        fs::write(cache.backend().artifact_path(&key), b"tampered").unwrap();
+        assert!(matches!(
+            cache.open_verified(&key),
+            Err(CacheError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn native_reader_clones_keep_independent_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = ArtifactCache::new(NativeCache::new(dir.path().to_path_buf()));
+        let bytes: Vec<u8> = (0..100_000)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let key = artifact_key(&bytes);
+        cache.publish(&key, &bytes).unwrap();
+
+        let mut first = cache.open_verified(&key).unwrap().unwrap();
+        let mut second = first.clone();
+        io::Seek::seek(&mut second, SeekFrom::Start(50_000)).unwrap();
+        let mut a = [0u8; 16];
+        let mut b = [0u8; 16];
+        io::Read::read_exact(&mut first, &mut a).unwrap();
+        io::Read::read_exact(&mut second, &mut b).unwrap();
+        assert_eq!(a[..], bytes[..16]);
+        assert_eq!(b[..], bytes[50_000..50_016]);
+        io::Read::read_exact(&mut first, &mut a).unwrap();
+        assert_eq!(a[..], bytes[16..32]);
+        assert_eq!(
+            io::Seek::seek(&mut first, SeekFrom::End(-4)).unwrap(),
+            bytes.len() as u64 - 4
+        );
+        io::Read::read_exact(&mut first, &mut a[..4]).unwrap();
+        assert_eq!(a[..4], bytes[bytes.len() - 4..]);
     }
 }
