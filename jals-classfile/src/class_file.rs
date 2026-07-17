@@ -46,10 +46,12 @@ pub struct ClassFile {
 }
 
 impl ClassFile {
-    /// Parse a class file from its raw bytes. Returns an [`Err`] (never panics) on any structural
-    /// problem, including a bad magic or trailing bytes.
-    pub fn read(bytes: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(bytes);
+    /// Parse a class file from any portable byte source ([`jals_storage::io::Read`]) — a
+    /// `&[u8]` slice, or a host-side reader bridged through `jals_storage::io::StdReader`.
+    /// Returns an [`Err`] (never panics) on any structural problem, including a bad magic or
+    /// trailing bytes.
+    pub fn read<R: jals_storage::io::Read>(source: R) -> Result<Self> {
+        let mut r = Reader::new(source);
         let magic = r.u32()?;
         if magic != MAGIC {
             return Err(ClassfileError::BadMagic(magic));
@@ -64,11 +66,7 @@ impl ClassFile {
         let fields = r.list(|r| FieldInfo::read(r, &constant_pool))?;
         let methods = r.list(|r| MethodInfo::read(r, &constant_pool))?;
         let attributes = Attribute::read_all(&mut r, &constant_pool)?;
-        if r.remaining() != 0 {
-            return Err(ClassfileError::TrailingBytes {
-                remaining: r.remaining(),
-            });
-        }
+        r.expect_eof()?;
         Ok(Self {
             minor_version,
             major_version,

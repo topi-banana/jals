@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Portable byte-source traits only (`jals_storage::io`); the workspace dependency is
+# `default-features = false`, so no host adapters reach this crate.
+jals-storage = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
 expect-test = "1.5"
+# `std-io` for the File/BufReader streaming tests.
+jals-storage = { workspace = true, features = ["std-io"] }
 proptest = "1"
 serde_json = { workspace = true }
 

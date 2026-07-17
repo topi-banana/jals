@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// A single decoded bytecode instruction. Operands carry constant-pool indices, local-variable slot
@@ -355,7 +355,7 @@ impl Instruction {
         w.into_vec()
     }
 
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let opcode = r.u8()?;
         Ok(match opcode {
             0x00 => Self::Nop,
@@ -579,7 +579,7 @@ impl Instruction {
         })
     }
 
-    fn read_table_switch(r: &mut Reader<'_>) -> Result<Self> {
+    fn read_table_switch<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Self::skip_switch_padding(r)?;
         let default = r.u32()? as i32;
         let low = r.u32()? as i32;
@@ -600,7 +600,7 @@ impl Instruction {
         })
     }
 
-    fn read_lookup_switch(r: &mut Reader<'_>) -> Result<Self> {
+    fn read_lookup_switch<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Self::skip_switch_padding(r)?;
         let default = r.u32()? as i32;
         let npairs = r.u32()?;
@@ -974,7 +974,7 @@ impl Instruction {
 }
 
 impl WideInstruction {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let opcode = r.u8()?;
         Ok(match opcode {
             0x15 => Self::Iload(r.u16()?),
@@ -1060,7 +1060,7 @@ impl Instruction {
 
     /// Skip the 0–3 alignment-padding bytes after a `tableswitch` / `lookupswitch` opcode. The
     /// reader's position is the code-array offset, so the padded position lands on a 4-byte boundary.
-    fn skip_switch_padding(r: &mut Reader<'_>) -> Result<()> {
+    fn skip_switch_padding<R: Input>(r: &mut Reader<R>) -> Result<()> {
         let pad = (4 - (r.pos() % 4)) % 4;
         r.bytes(pad)?;
         Ok(())
@@ -1120,7 +1120,7 @@ mod tests {
             Instruction::Return,
         ];
         let bytes = Instruction::encode_code(&code);
-        let mut r = Reader::new(&bytes);
+        let mut r = Reader::new(bytes.as_slice());
         let mut pc = 0usize;
         for ins in &code {
             assert_eq!(r.pos(), pc, "reader drifted before {ins:?}");

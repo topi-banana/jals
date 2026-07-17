@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// One `stack_map_frame` (JVMS §4.7.4).
@@ -93,7 +93,7 @@ pub enum VerificationType {
 }
 
 impl StackMapFrame {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
+    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let frame_type = r.u8()?;
         Ok(match frame_type {
             0..=63 => Self::Same {
@@ -194,7 +194,7 @@ impl StackMapFrame {
 }
 
 impl VerificationType {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
             0 => Self::Top,

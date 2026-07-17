@@ -797,10 +797,13 @@ mod tests {
             "class Main { void run() { Box b = new Box(); use(b); } }",
         )
         .unwrap();
-        let box_class = jals_classfile::ClassFile::read(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/Box.class"
-        )))
+        let box_class = jals_classfile::ClassFile::read(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/Box.class"
+            ))
+            .as_slice(),
+        )
         .expect("parse Box.class");
 
         let ws = ProjectWorkspace::load(

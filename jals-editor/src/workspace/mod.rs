@@ -868,10 +868,13 @@ mod tests {
     fn classpath_types_fold_into_the_index() {
         // A project whose classpath carries a compiled `Box.class`: the workspace folds it into
         // the index as a `Classpath`-origin type, so external library types resolve here.
-        let class = jals_classfile::ClassFile::read(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/Box.class"
-        )))
+        let class = jals_classfile::ClassFile::read(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/Box.class"
+            ))
+            .as_slice(),
+        )
         .expect("parse Box.class");
         let storage = memory(&[(
             "src/Main.java",

@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::annotation::{Annotation, ElementValue, TypeAnnotation};
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::constant_pool::ConstantPool;
 use crate::error::Result;
 use crate::instruction::Instruction;
@@ -302,14 +302,14 @@ pub struct ModuleProvide {
 }
 
 impl Attribute {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
         let name_index = r.u16()?;
         let length = r.u32()? as usize;
         let body_bytes = r.bytes(length)?;
         let body = pool
             .utf8(name_index)
-            .and_then(|name| AttributeBody::parse(&name, body_bytes, pool))
-            .unwrap_or_else(|| AttributeBody::Unknown(body_bytes.to_vec()));
+            .and_then(|name| AttributeBody::parse(&name, &body_bytes, pool))
+            .unwrap_or(AttributeBody::Unknown(body_bytes));
         Ok(Self { name_index, body })
     }
 
@@ -321,7 +321,7 @@ impl Attribute {
     }
 
     /// Read an `attributes_count`-prefixed run of attributes, dispatching each by name.
-    pub(crate) fn read_all(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<Self>> {
+    pub(crate) fn read_all<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Vec<Self>> {
         r.list(|r| Self::read(r, pool))
     }
 
@@ -338,7 +338,7 @@ impl AttributeBody {
     fn parse(name: &str, bytes: &[u8], pool: &ConstantPool) -> Option<Self> {
         /// Read the per-parameter annotation lists of a `Runtime*ParameterAnnotations` attribute (a
         /// `u8` parameter count, then a `u16`-counted annotation list per parameter).
-        fn read_parameter_annotations(r: &mut Reader<'_>) -> Result<Vec<Vec<Annotation>>> {
+        fn read_parameter_annotations<R: Input>(r: &mut Reader<R>) -> Result<Vec<Vec<Annotation>>> {
             let count = r.u8()?;
             let mut params = Vec::with_capacity(count as usize);
             for _ in 0..count {
@@ -371,7 +371,7 @@ impl AttributeBody {
             },
             "SourceDebugExtension" => {
                 let n = r.remaining();
-                Self::SourceDebugExtension(r.bytes(n).ok()?.to_vec())
+                Self::SourceDebugExtension(r.bytes(n).ok()?)
             }
             "LineNumberTable" => Self::LineNumberTable(r.list(LineNumberEntry::read).ok()?),
             "LocalVariableTable" => {
@@ -500,11 +500,11 @@ impl AttributeBody {
 }
 
 impl CodeAttribute {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
         let max_stack = r.u16()?;
         let max_locals = r.u16()?;
         let code_length = r.u32()? as usize;
-        let code = Instruction::decode_code(r.bytes(code_length)?)?;
+        let code = Instruction::decode_code(&r.bytes(code_length)?)?;
         let exception_table = r.list(ExceptionTableEntry::read)?;
         let attributes = Attribute::read_all(r, pool)?;
         Ok(Self {
@@ -528,7 +528,7 @@ impl CodeAttribute {
 }
 
 impl ExceptionTableEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16()?,
             end_pc: r.u16()?,
@@ -546,7 +546,7 @@ impl ExceptionTableEntry {
 }
 
 impl InnerClassEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             inner_class_info_index: r.u16()?,
             outer_class_info_index: r.u16()?,
@@ -564,7 +564,7 @@ impl InnerClassEntry {
 }
 
 impl LineNumberEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16()?,
             line_number: r.u16()?,
@@ -578,7 +578,7 @@ impl LineNumberEntry {
 }
 
 impl LocalVariableEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16()?,
             length: r.u16()?,
@@ -598,7 +598,7 @@ impl LocalVariableEntry {
 }
 
 impl LocalVariableTypeEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16()?,
             length: r.u16()?,
@@ -618,7 +618,7 @@ impl LocalVariableTypeEntry {
 }
 
 impl BootstrapMethod {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             bootstrap_method_ref: r.u16()?,
             bootstrap_arguments: r.u16_list()?,
@@ -632,7 +632,7 @@ impl BootstrapMethod {
 }
 
 impl MethodParameterEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             name_index: r.u16()?,
             access_flags: r.u16()?,
@@ -646,7 +646,7 @@ impl MethodParameterEntry {
 }
 
 impl RecordComponentInfo {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
         Ok(Self {
             name_index: r.u16()?,
             descriptor_index: r.u16()?,
@@ -662,7 +662,7 @@ impl RecordComponentInfo {
 }
 
 impl ModuleAttribute {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let module_name_index = r.u16()?;
         let module_flags = r.u16()?;
         let module_version_index = r.u16()?;
@@ -696,7 +696,7 @@ impl ModuleAttribute {
 }
 
 impl ModuleRequire {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             requires_index: r.u16()?,
             requires_flags: r.u16()?,
@@ -712,7 +712,7 @@ impl ModuleRequire {
 }
 
 impl ModuleExport {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             exports_index: r.u16()?,
             exports_flags: r.u16()?,
@@ -728,7 +728,7 @@ impl ModuleExport {
 }
 
 impl ModuleOpen {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             opens_index: r.u16()?,
             opens_flags: r.u16()?,
@@ -744,7 +744,7 @@ impl ModuleOpen {
 }
 
 impl ModuleProvide {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             provides_index: r.u16()?,
             provides_with_index: r.u16_list()?,

@@ -24,7 +24,7 @@ fn load(name: &str) -> ClassFile {
         .join("tests/fixtures")
         .join(name);
     let bytes = std::fs::read(path).expect("read fixture");
-    ClassFile::read(&bytes).expect("parse fixture")
+    ClassFile::read(bytes.as_slice()).expect("parse fixture")
 }
 
 fn signature(cf: &ClassFile, attrs: &[Attribute]) -> Option<String> {

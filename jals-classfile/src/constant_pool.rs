@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// A class file's constant pool. Indices are 1-based, matching the on-disk encoding.
@@ -125,7 +125,7 @@ pub enum ConstantPoolEntry {
 }
 
 impl ConstantPool {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
+    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let count = r.u16()?;
         let mut entries = Vec::with_capacity(count as usize);
         entries.push(ConstantSlot::Sentinel);
@@ -234,12 +234,12 @@ impl ConstantPool {
 }
 
 impl ConstantPoolEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
             1 => {
                 let len = r.u16()? as usize;
-                Self::Utf8(r.bytes(len)?.to_vec())
+                Self::Utf8(r.bytes(len)?)
             }
             3 => Self::Integer(r.u32()? as i32),
             4 => Self::Float(f32::from_bits(r.u32()?)),

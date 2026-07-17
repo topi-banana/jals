@@ -11,7 +11,8 @@ use jals_syntax::ast::{self, AstNode};
 /// `Box<T>` (generic, with `T get()` / `void set(T)`), compiled from `tests/fixtures/Box.java`.
 fn box_classfile() -> ClassFile {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Box.class");
-    ClassFile::read(&std::fs::read(path).expect("read Box.class")).expect("parse Box.class")
+    ClassFile::read(std::fs::read(path).expect("read Box.class").as_slice())
+        .expect("parse Box.class")
 }
 
 /// The `Box.java` source `Box.class` was compiled from — used as a library-sources overlay.

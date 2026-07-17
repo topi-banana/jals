@@ -1072,6 +1072,7 @@ name = "jals-classfile"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-storage",
  "proptest",
  "serde",
  "serde_json",

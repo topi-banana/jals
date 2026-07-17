@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// A single `annotation` (JVMS §4.7.16).
@@ -160,7 +160,7 @@ pub struct TypePathEntry {
 }
 
 impl ElementValuePair {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             element_name_index: r.u16()?,
             value: ElementValue::read(r)?,
@@ -174,7 +174,7 @@ impl ElementValuePair {
 }
 
 impl Annotation {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
+    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let type_index = r.u16()?;
         let element_value_pairs = r.list(ElementValuePair::read)?;
         Ok(Self {
@@ -190,7 +190,7 @@ impl Annotation {
 }
 
 impl ElementValue {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
+    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let tag = r.u8()?;
         Ok(match tag {
             b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b's' => Self::Const {
@@ -244,7 +244,7 @@ impl ElementValue {
 }
 
 impl TypeAnnotation {
-    pub(crate) fn read(r: &mut Reader<'_>) -> Result<Self> {
+    pub(crate) fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let target_info = TargetInfo::read(r)?;
         let path_length = r.u8()?;
         let mut target_path = Vec::with_capacity(path_length as usize);
@@ -277,7 +277,7 @@ impl TypeAnnotation {
 }
 
 impl TargetInfo {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let target_type = r.u8()?;
         Ok(match target_type {
             0x00 | 0x01 => Self::TypeParameter {

@@ -34,7 +34,8 @@ fn roundtrip_is_byte_exact() {
     let fixtures = fixtures();
     assert!(!fixtures.is_empty(), "no .class fixtures found");
     for (name, bytes) in fixtures {
-        let class = ClassFile::read(&bytes).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let class =
+            ClassFile::read(bytes.as_slice()).unwrap_or_else(|e| panic!("read {name}: {e}"));
         assert_eq!(class.write(), bytes, "round-trip mismatch for {name}");
     }
 }
@@ -42,7 +43,8 @@ fn roundtrip_is_byte_exact() {
 #[test]
 fn serde_json_roundtrip_preserves_the_model() {
     for (name, bytes) in fixtures() {
-        let class = ClassFile::read(&bytes).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let class =
+            ClassFile::read(bytes.as_slice()).unwrap_or_else(|e| panic!("read {name}: {e}"));
         let json = serde_json::to_string(&class).expect("serialize");
         let back: ClassFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, class, "model changed across serde for {name}");
