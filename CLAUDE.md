@@ -19,10 +19,16 @@ Project data is owned by `jals-storage`. It is not a generic VFS:
   remain unchanged.
 - Mutations use `transaction(expected_revision)` or overlay operations. A stale revision is an
   error, and a failed persistence operation must not publish a logical revision.
-- `ArtifactCache` uses SHA-256 `ContentDigest` and typed `CacheKey` namespaces. Use verified
-  `lookup` and write-once `publish`; never implement `contains` followed by `write`. The advisory
-  locator index (`indexed_key`/`record_index`, last-writer-wins) only recovers the content half of
-  a key from its provenance; bytes are still read through verified `lookup`.
+- `ArtifactCache` uses SHA-256 `ContentDigest` and typed `CacheKey` namespaces. Use the verified
+  reads — whole-buffer `lookup` or streaming `open_verified` (one digest pass over the backend
+  reader, rewind, then hand it out; native readers are buffered, pin the opened file, and every
+  clone reads at an independent position) — and write-once `publish`; never implement `contains`
+  followed by `write`. The advisory locator index (`indexed_key`/`record_index`,
+  last-writer-wins) only recovers the content half of a key from its provenance; bytes are still
+  read through the verified reads.
+- `jals_storage::io` is the portable byte-stream seam (`Read`/`Seek`/`Cursor`/`Buffered`, `std-io`
+  bridges `StdReader`/`ToStd`). `jals-classfile` parses through it; never blanket-impl its traits
+  over `std::io` types (coherence with the slice/cursor impls) — bridge with the newtypes.
 
 Do not reintroduce `jals-fs`, `FileTree`, arbitrary string paths, path predicates, or live
 filesystem reads into portable interfaces.
@@ -54,10 +60,12 @@ adapter ignore only when OS identity is genuinely required.
 Portable crates use `core + alloc`. Do not add source-level `extern crate alloc`; the workspace
 supplies it through `.cargo/config.toml`.
 
-- `jals-storage --no-default-features` is `no_std + alloc`.
-- `jals-classpath --no-default-features` is `no_std + alloc`; `archive` introduces only `std::io`,
-  `parallel` layers rayon fan-out over `archive` (same entry-ordered results), and `native`
-  introduces HTTP plus `jals-storage/std`.
+- `jals-storage --no-default-features` is `no_std + alloc`; `std-io` adds only the `std::io`
+  bridge adapters (wasm-safe, no host paths), and `std` adds the native adapters and implies
+  `std-io`.
+- `jals-classpath --no-default-features` is `no_std + alloc`; `archive` introduces only `std::io`
+  (via `jals-storage/std-io`), `parallel` layers rayon fan-out over `archive` (same entry-ordered
+  results), and `native` introduces HTTP plus `jals-storage/std`.
 - `jals-build --no-default-features` must remain a genuine portable core.
 - `serde` stays `default-features = false, features = ["derive", "alloc"]`.
 - `toml` stays `default-features = false, features = ["parse", "serde"]`.
