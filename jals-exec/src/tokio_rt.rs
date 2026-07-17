@@ -29,6 +29,23 @@ impl Exec {
     }
 }
 
+/// Run a blocking host closure off the executor.
+///
+/// On the tokio runtime the closure moves to the blocking pool so the current-thread executor
+/// keeps serving tasks; without a runtime (inline-executor tests, fan-out worker threads, which
+/// are blocking-legal by design) it runs on the calling thread. Native adapters use this for
+/// every blocking syscall batch.
+pub async fn on_blocking_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => match handle.spawn_blocking(f).await {
+            Ok(value) => value,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("blocking host task failed: {error}"),
+        },
+        Err(_) => f(),
+    }
+}
+
 /// Builds a current-thread tokio runtime and a `LocalSet`, hands the program an [`Exec`], and
 /// blocks until the returned future completes.
 pub fn run<T, F, Fut>(f: F) -> std::io::Result<T>

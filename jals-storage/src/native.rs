@@ -19,21 +19,7 @@ use crate::{CodeTree, DirKey, Entry, FileKey, Name, ProjectStorage, RelativePath
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Run a blocking host-filesystem closure off the executor.
-///
-/// On the tokio runtime the closure moves to the blocking pool so the current-thread executor
-/// keeps serving tasks; without a runtime (tests on the inline executor, fan-out worker
-/// threads, which are blocking-legal by design) it runs on the calling thread.
-async fn on_blocking_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => match handle.spawn_blocking(f).await {
-            Ok(value) => value,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("blocking host I/O task failed: {error}"),
-        },
-        Err(_) => f(),
-    }
-}
+use jals_exec::tokio_rt::on_blocking_pool;
 
 #[derive(Debug, Clone)]
 pub struct NativeSource {

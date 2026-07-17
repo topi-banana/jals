@@ -58,6 +58,7 @@ pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub use toolchain::{
     BuildOutcome, Candidates, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
+    ToolchainFuture,
 };
 
 #[cfg(feature = "native")]

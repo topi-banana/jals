@@ -1074,6 +1074,7 @@ name = "jals-build"
 version = "0.1.0"
 dependencies = [
  "jals-config",
+ "jals-exec",
  "jals-storage",
  "tempfile",
  "toml",
@@ -1084,6 +1085,7 @@ name = "jals-classfile"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-exec",
  "jals-storage",
  "proptest",
  "serde",
@@ -1256,6 +1258,7 @@ name = "jals-syntax"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "jals-exec",
  "num-derive",
  "num-traits",
  "proptest",

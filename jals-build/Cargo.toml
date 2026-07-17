@@ -9,18 +9,21 @@ edition.workspace = true
 # Portable target/scaffold planning stays filesystem/process-free, so `--no-default-features` builds a
 # `wasm32`-compatible core a future in-browser compiler can implement.
 default = ["native"]
-native = ["jals-storage/std"]
+native = ["jals-storage/std", "jals-exec/tokio"]
 
 [dependencies]
 # The pure `jals.toml` model (`Manifest` and friends) lives in `jals-config`; `jals-build` adds the
 # host-only `std::path`-based resolution (`ManifestExt`) on top. `toml` remains for `ManifestError`'s
 # `toml::de::Error` field type. `jals-storage` supplies typed project keys, revisions, and the
-# memory/native aggregate used by the builtin backend.
+# memory/native aggregate used by the builtin backend. `jals-exec` supplies the execution context
+# handle and the blocking-pool escape the native half runs its syscalls through.
 jals-config.workspace = true
+jals-exec.workspace = true
 jals-storage.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+jals-exec = { workspace = true, features = ["tokio"] }
 tempfile = "3"
 
 [lints]

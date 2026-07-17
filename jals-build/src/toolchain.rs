@@ -16,11 +16,20 @@
 //! discovered installs, `$JAVAC`/`$JAVA`, `$JAVA_HOME`, `$HOME`, the project root), the pure policy
 //! computes the ordered [`Candidates`], and the host picks the first that exists.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use jals_config::ToolSpec;
 
 use crate::request::{CompileRequest, RunRequest};
+
+/// The boxed future shape of a toolchain step.
+///
+/// `!Send` (the workspace execution model) and object-safe, so a host keeps driving
+/// `&dyn Compiler` / `&dyn Runtime` while the steps await subprocesses and storage.
+pub type ToolchainFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BuildOutcome, ToolchainError>> + 'a>>;
 
 /// Which JDK tool a request needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +194,17 @@ impl Candidates {
             .into_iter()
             .find(|candidate| exists(candidate))
             .unwrap_or(self.fallback)
+    }
+
+    /// [`pick`](Self::pick) with an async existence probe, so the host can keep its filesystem
+    /// touches off the executor. Same rule, one place: first existing preferred, else fallback.
+    pub async fn pick_async(self, exists: impl AsyncFn(&Path) -> bool) -> PathBuf {
+        for candidate in self.preferred {
+            if exists(&candidate).await {
+                return candidate;
+            }
+        }
+        self.fallback
     }
 }
 
@@ -374,10 +394,10 @@ impl std::error::Error for ToolchainError {
 /// (see `<dyn Compiler>::select` under the `native` feature).
 pub trait Compiler {
     /// Compile the project described by `req`.
-    fn compile(&self, req: &CompileRequest<'_>) -> Result<BuildOutcome, ToolchainError>;
+    fn compile<'a>(&'a self, req: &'a CompileRequest<'_>) -> ToolchainFuture<'a>;
 
     /// A human-readable description of what [`compile`](Compiler::compile) would do (for
-    /// `--dry-run`/`-v`).
+    /// `--dry-run`/`-v`). Stays synchronous: rendering a plan is display-only and bounded.
     fn describe_compile(&self, req: &CompileRequest<'_>) -> String;
 }
 
@@ -390,7 +410,7 @@ pub trait Compiler {
 /// as a `&dyn Runtime` (see `<dyn Runtime>::select` under the `native` feature).
 pub trait Runtime {
     /// Run the project's main class described by `req`.
-    fn run(&self, req: &RunRequest<'_>) -> Result<BuildOutcome, ToolchainError>;
+    fn run<'a>(&'a self, req: &'a RunRequest<'_>) -> ToolchainFuture<'a>;
 
     /// A human-readable description of what [`run`](Runtime::run) would do (for `--dry-run`/`-v`).
     fn describe_run(&self, req: &RunRequest<'_>) -> String;
