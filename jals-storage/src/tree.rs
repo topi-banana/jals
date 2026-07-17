@@ -141,6 +141,13 @@ impl CodeTree {
         self.files.values()
     }
 
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn directories_under(&self, key: &DirKey) -> impl Iterator<Item = &DirKey> {
+        self.directories
+            .range((Bound::Included(key), Bound::Unbounded))
+            .take_while(move |dir| dir.path().starts_with(key.path()))
+    }
+
     pub(crate) fn insert_directory_with_parents(
         &mut self,
         key: &DirKey,

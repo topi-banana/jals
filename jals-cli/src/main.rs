@@ -6,7 +6,7 @@
 
 mod report;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -18,7 +18,7 @@ use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_config::{DiscoverableConfig, FeatureSet, Manifest};
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
-use jals_storage::{FileKey, NativeStorage, RelativePath};
+use jals_storage::{FileKey, NativeScope, NativeStorage, RelativePath};
 
 use report::Reporter;
 
@@ -221,12 +221,9 @@ impl FmtArgs {
                     .context("writing stdout")?;
             }
         } else {
-            // One aggregate per sweep target (a directory snapshots its tree once; bare files
-            // share their parent's), with every rewrite staged into one transaction per
-            // aggregate — a directory sweep neither re-snapshots nested subtrees per file nor
-            // commits per file.
-            let mut current: Option<(PathBuf, NativeStorage)> = None;
-            let mut edits: Vec<(FileKey, Vec<u8>)> = Vec::new();
+            // Discover paths before opening storage, then snapshot exactly those files. Overlapping
+            // targets are deduplicated and files sharing a root commit in one transaction.
+            let mut groups: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
             for target in &self.paths {
                 let root = if target.is_dir() {
                     target.clone()
@@ -236,23 +233,35 @@ impl FmtArgs {
                         .unwrap_or_else(|| Path::new("."))
                         .to_path_buf()
                 };
-                if current.as_ref().is_none_or(|(open, _)| *open != root) {
-                    if let Some((_, mut storage)) = current.take() {
-                        Self::commit_edits(&mut storage, &mut edits)?;
-                    }
-                    current = Some((root.clone(), NativeStorage::for_project(&root)?));
-                }
-                let (_, storage) = current.as_mut().expect("aggregate opened above");
-                for path in App::collect_java_files(std::slice::from_ref(target))? {
-                    let key = RelativePath::from_host_path(&root, &path)
-                        .and_then(|relative| FileKey::new(relative).ok())
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "source path is not addressable under {}: {}",
-                                root.display(),
-                                path.display()
-                            )
-                        })?;
+                groups
+                    .entry(root)
+                    .or_default()
+                    .extend(App::collect_java_files(std::slice::from_ref(target))?);
+            }
+            for (root, mut paths) in groups {
+                paths.sort();
+                paths.dedup();
+                let keyed: Vec<_> = paths
+                    .into_iter()
+                    .map(|path| {
+                        let key = RelativePath::from_host_path(&root, &path)
+                            .and_then(|relative| FileKey::new(relative).ok())
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "source path is not addressable under {}: {}",
+                                    root.display(),
+                                    path.display()
+                                )
+                            })?;
+                        Ok::<_, anyhow::Error>((path, key))
+                    })
+                    .collect::<Result<_>>()?;
+                let scopes = keyed
+                    .iter()
+                    .map(|(_, key)| NativeScope::all(key.path().clone()));
+                let mut storage = NativeStorage::for_project_scoped(&root, scopes)?;
+                let mut edits = Vec::new();
+                for (path, key) in keyed {
                     let src = storage
                         .view()
                         .file(&key)?
@@ -273,8 +282,6 @@ impl FmtArgs {
                         edits.push((key, out.formatted.into_bytes()));
                     }
                 }
-            }
-            if let Some((_, mut storage)) = current.take() {
                 Self::commit_edits(&mut storage, &mut edits)?;
             }
         }
@@ -552,18 +559,20 @@ impl InitArgs {
             None => std::env::current_dir().context("getting current dir")?,
         };
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let mut storage = NativeStorage::for_project(&dir)?;
-        let manifest_key = FileKey::parse("jals.toml").expect("static key is valid");
-        if storage.view().tree().lookup_file(&manifest_key).is_some() {
-            return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
-        }
-
         let name = match self.name {
             Some(n) => n,
             None => project_name_from_dir(&dir)?,
         };
 
         let files = jals_build::InitOptions { name: name.clone() }.scaffold();
+        let scopes = files
+            .iter()
+            .map(|file| NativeScope::all(file.path.path().clone()));
+        let mut storage = NativeStorage::for_project_scoped(&dir, scopes)?;
+        let manifest_key = FileKey::parse("jals.toml").expect("static key is valid");
+        if storage.view().tree().lookup_file(&manifest_key).is_some() {
+            return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
+        }
         for file in &files {
             let dest = dir.join(file.path.to_string());
             if storage.view().tree().lookup_file(&file.path).is_some() {
@@ -649,7 +658,8 @@ impl App {
         root: &Path,
         options: jals_classpath::ProjectInputOptions,
     ) -> HostProjectInputs {
-        let Ok(mut storage) = NativeStorage::for_project(root) else {
+        let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
+        let Ok(mut storage) = NativeStorage::for_project_scoped(root, scopes) else {
             eprintln!("warning: project storage could not be opened");
             return HostProjectInputs::default();
         };

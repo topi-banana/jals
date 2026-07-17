@@ -17,7 +17,7 @@ pub use cache::{
 };
 pub use error::{CacheError, Diagnostic, Error, NameError, PathError, Result, TreeError};
 #[cfg(any(feature = "std", test))]
-pub use native::{NativeCache, NativeSource};
+pub use native::{NativeCache, NativeScope, NativeSource};
 pub use storage::{
     Change, MemorySource, ProjectStorage, ProjectView, RefreshOutcome, SourceBackend, Transaction,
 };

@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use alloc::string::ToString;
+use alloc::collections::BTreeSet;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::cache::{self, ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest};
@@ -18,6 +19,48 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct NativeSource {
     root: PathBuf,
     excluded: Vec<RelativePath>,
+    scopes: Vec<NativeScope>,
+    restricted: bool,
+}
+
+/// A subtree selected for a native snapshot.
+///
+/// An optional extension limits file contents while directories are still traversed, so a Java
+/// source root can observe additions/removals without ingesting binaries beside the sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeScope {
+    root: RelativePath,
+    extension: Option<String>,
+}
+
+impl NativeScope {
+    /// Include every file at or below `root`.
+    pub const fn all(root: RelativePath) -> Self {
+        Self {
+            root,
+            extension: None,
+        }
+    }
+
+    /// Include only files with `extension` at or below `root` (ASCII case-insensitive).
+    pub fn extension(root: RelativePath, extension: impl Into<String>) -> Self {
+        Self {
+            root,
+            extension: Some(extension.into()),
+        }
+    }
+
+    fn visits_directory(&self, path: &RelativePath) -> bool {
+        path.starts_with(&self.root) || self.root.starts_with(path)
+    }
+
+    fn includes_file(&self, key: &FileKey) -> bool {
+        key.path().starts_with(&self.root)
+            && self.extension.as_deref().is_none_or(|extension| {
+                key.extension()
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(extension))
+            })
+    }
 }
 
 impl NativeSource {
@@ -39,6 +82,8 @@ impl NativeSource {
         Ok(Self {
             root,
             excluded: Vec::new(),
+            scopes: Vec::new(),
+            restricted: false,
         })
     }
 
@@ -54,6 +99,15 @@ impl NativeSource {
         if !path.is_root() {
             self.excluded.push(path);
         }
+        self
+    }
+
+    /// Restrict snapshots to the supplied scopes. An empty scope list produces an empty project
+    /// tree; callers that explicitly need a complete filesystem mirror omit this method.
+    #[must_use]
+    pub fn scoped(mut self, scopes: impl IntoIterator<Item = NativeScope>) -> Self {
+        self.scopes.extend(scopes);
+        self.restricted = true;
         self
     }
 
@@ -96,20 +150,26 @@ impl SourceBackend for NativeSource {
             entries: &mut entries,
             diagnostics: &mut diagnostics,
             excluded: &self.excluded,
+            scopes: &self.scopes,
+            restricted: self.restricted,
         };
         NativeFs::scan_directory(&self.root, &DirKey::ROOT, &mut scan, true)?;
         let tree = CodeTree::new(entries)?;
         Ok(SourceSnapshot { tree, diagnostics })
     }
 
-    fn apply(&mut self, changes: &[Change]) -> Result<()> {
+    fn apply(&mut self, changes: &[Change], base: &CodeTree) -> Result<()> {
         let canonical_root =
             fs::canonicalize(&self.root).map_err(|error| NativeFs::io_error(&self.root, &error))?;
+        self.require_preconditions(changes, base, &canonical_root)?;
         let mut journal = ApplyJournal::default();
+        let mut expected = base.clone();
         for change in changes {
-            if let Err(error) = self.apply_change(change, &canonical_root, &mut journal) {
+            if let Err(error) = self.apply_change(change, &expected, &canonical_root, &mut journal)
+            {
                 return Err(journal.roll_back(error));
             }
+            expected.apply_changes(core::slice::from_ref(change))?;
         }
         journal.discard();
         Ok(())
@@ -117,9 +177,45 @@ impl SourceBackend for NativeSource {
 }
 
 impl NativeSource {
+    /// Validate the complete write set before the first mutation. The per-change checks in
+    /// `apply_change` run again immediately before publication to narrow the residual host-FS
+    /// check/write window; this pass guarantees a known-stale later entry never causes an earlier
+    /// entry to be written and rolled back.
+    fn require_preconditions(
+        &self,
+        changes: &[Change],
+        base: &CodeTree,
+        canonical_root: &Path,
+    ) -> Result<()> {
+        let mut checked = BTreeSet::new();
+        for change in changes {
+            let path = match change {
+                Change::CreateFile(key, _)
+                | Change::ReplaceFile(key, _)
+                | Change::RemoveFile(key) => key.path(),
+                Change::CreateDirectory(key) | Change::RemoveDirectory(key) => key.path(),
+            };
+            if checked.insert(path.clone()) {
+                match change {
+                    Change::ReplaceFile(key, _) | Change::RemoveFile(key) => {
+                        let host = self.confined_path(canonical_root, key.path())?;
+                        Self::require_unchanged(base, key, &host)?;
+                    }
+                    Change::RemoveDirectory(key) => {
+                        let host = self.confined_path(canonical_root, key.path())?;
+                        Self::require_directory_unchanged(base, key, &host, &[])?;
+                    }
+                    Change::CreateFile(_, _) | Change::CreateDirectory(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn apply_change(
         &self,
         change: &Change,
+        base: &CodeTree,
         canonical_root: &Path,
         journal: &mut ApplyJournal,
     ) -> Result<()> {
@@ -138,11 +234,17 @@ impl NativeSource {
                 if !path.is_file() {
                     return Err(Error::NotFoundFile(key.clone()));
                 }
+                // The transaction observed this file as `base` at snapshot time; if the bytes on
+                // disk no longer match, an external editor saved after the read. Refuse rather than
+                // silently overwrite the newer content. (A residual TOCTOU window remains between
+                // this check and the write, which only OS-level locking could close.)
+                Self::require_unchanged(base, key, &path)?;
                 journal.back_up_file(&path)?;
                 NativeFs::atomic_write(&path, bytes, WriteMode::Replace)?;
             }
             Change::RemoveFile(key) => {
                 let path = self.confined_path(canonical_root, key.path())?;
+                Self::require_unchanged(base, key, &path)?;
                 journal.remove_file(&path)?;
             }
             Change::CreateDirectory(key) => {
@@ -151,8 +253,60 @@ impl NativeSource {
             }
             Change::RemoveDirectory(key) => {
                 let path = self.confined_path(canonical_root, key.path())?;
+                let ignored: Vec<_> = journal.backup_paths().cloned().collect();
+                Self::require_directory_unchanged(base, key, &path, &ignored)?;
                 journal.remove_directory(&path)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Refuse a replacement whose target's on-disk bytes no longer match the base snapshot the
+    /// transaction was planned against. A key absent from `base` (e.g. a file this same batch
+    /// created) carries no precondition and is left to the batch's own structural checks.
+    fn require_unchanged(base: &CodeTree, key: &FileKey, path: &Path) -> Result<()> {
+        let Some(expected) = base.file(key) else {
+            return Ok(());
+        };
+        let actual = fs::read(path).map_err(|error| NativeFs::io_error(path, &error))?;
+        if actual == expected.bytes() {
+            Ok(())
+        } else {
+            Err(Error::ExternalConflict(key.clone()))
+        }
+    }
+
+    fn require_directory_unchanged(
+        base: &CodeTree,
+        key: &DirKey,
+        path: &Path,
+        ignored: &[PathBuf],
+    ) -> Result<()> {
+        if base.directory(key).is_none() {
+            return Ok(());
+        }
+        let mut source = Self::new(path.to_path_buf())?;
+        for ignored in ignored {
+            if let Some(relative) = RelativePath::from_host_path(path, ignored) {
+                source = source.excluding(relative);
+            }
+        }
+        let live = source.snapshot()?.tree;
+        let live_files: Vec<_> = live.files().collect();
+        if base.files_under(key).count() != live_files.len()
+            || live_files.iter().any(|file| {
+                let original = FileKey::new(key.path().concat(file.key().path()))
+                    .expect("a directory plus a file path is a file path");
+                base.file(&original)
+                    .is_none_or(|expected| expected.bytes() != file.bytes())
+            })
+        {
+            return Err(Error::ExternalDirectoryConflict(key.clone()));
+        }
+        let expected_directories = base.directories_under(key).count();
+        let live_directories = live.directories_under(&DirKey::ROOT).count();
+        if expected_directories != live_directories {
+            return Err(Error::ExternalDirectoryConflict(key.clone()));
         }
         Ok(())
     }
@@ -213,6 +367,13 @@ enum Undo {
 impl ApplyJournal {
     fn record(&mut self, undo: Undo) {
         self.undo.push(undo);
+    }
+
+    fn backup_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.undo.iter().filter_map(|undo| match undo {
+            Undo::RestoreFile { backup, .. } | Undo::RestoreDir { backup, .. } => Some(backup),
+            Undo::RemoveCreatedFile(_) | Undo::RemoveCreatedDir(_) => None,
+        })
     }
 
     /// Create every missing ancestor of `path` plus `path` itself, recording each directory
@@ -339,6 +500,8 @@ struct NativeScan<'a> {
     entries: &'a mut Vec<Entry>,
     diagnostics: &'a mut Vec<Diagnostic>,
     excluded: &'a [RelativePath],
+    scopes: &'a [NativeScope],
+    restricted: bool,
 }
 
 impl NativeFs {
@@ -431,13 +594,24 @@ impl NativeFs {
                 }
                 match fs::metadata(&canonical) {
                     Ok(metadata) if metadata.is_dir() => {
+                        if !Self::visits_directory(logical_dir.path(), scan.scopes, scan.restricted)
+                        {
+                            continue;
+                        }
                         scan.entries.push(Entry::Directory(logical_dir.clone()));
                         scan.stack.push(canonical.clone());
                         Self::scan_directory(&canonical, &logical_dir, scan, false)?;
                         scan.stack.pop();
                     }
                     Ok(metadata) if metadata.is_file() => {
-                        Self::read_file(&canonical, logical_file, scan.entries, scan.diagnostics);
+                        if Self::includes_file(&logical_file, scan.scopes, scan.restricted) {
+                            Self::read_file(
+                                &canonical,
+                                logical_file,
+                                scan.entries,
+                                scan.diagnostics,
+                            );
+                        }
                     }
                     Ok(_) => {}
                     Err(error) => scan.diagnostics.push(Diagnostic::UnreadableEntry(format!(
@@ -446,6 +620,9 @@ impl NativeFs {
                     ))),
                 }
             } else if file_type.is_dir() {
+                if !Self::visits_directory(logical_dir.path(), scan.scopes, scan.restricted) {
+                    continue;
+                }
                 scan.entries.push(Entry::Directory(logical_dir.clone()));
                 let canonical = match fs::canonicalize(&path) {
                     Ok(canonical) => canonical,
@@ -460,7 +637,9 @@ impl NativeFs {
                 scan.stack.push(canonical);
                 Self::scan_directory(&path, &logical_dir, scan, false)?;
                 scan.stack.pop();
-            } else if file_type.is_file() {
+            } else if file_type.is_file()
+                && Self::includes_file(&logical_file, scan.scopes, scan.restricted)
+            {
                 Self::read_file(&path, logical_file, scan.entries, scan.diagnostics);
             }
         }
@@ -484,6 +663,14 @@ impl NativeFs {
 
     fn is_excluded(path: &RelativePath, excluded: &[RelativePath]) -> bool {
         excluded.iter().any(|prefix| path.starts_with(prefix))
+    }
+
+    fn visits_directory(path: &RelativePath, scopes: &[NativeScope], restricted: bool) -> bool {
+        !restricted || scopes.iter().any(|scope| scope.visits_directory(path))
+    }
+
+    fn includes_file(key: &FileKey, scopes: &[NativeScope], restricted: bool) -> bool {
+        !restricted || scopes.iter().any(|scope| scope.includes_file(key))
     }
 
     #[cfg(unix)]
@@ -661,13 +848,17 @@ impl ProjectStorage<NativeSource, NativeCache> {
     /// The conventional per-project cache location, shared by every host.
     pub const PROJECT_CACHE_DIR: &'static str = "target/jals/cache";
 
-    /// Open a project laid out under `root` with the conventional cache root
-    /// ([`PROJECT_CACHE_DIR`](Self::PROJECT_CACHE_DIR)), keeping `.git` metadata out of snapshots.
-    pub fn for_project(root: impl AsRef<Path>) -> Result<Self> {
+    /// Open a native project snapshot restricted to declared inputs. Directory scopes continue to
+    /// observe matching files added after opening while never reading unrelated file contents.
+    pub fn for_project_scoped(
+        root: impl AsRef<Path>,
+        scopes: impl IntoIterator<Item = NativeScope>,
+    ) -> Result<Self> {
         let root = root.as_ref();
         let cache_root = root.join(Self::PROJECT_CACHE_DIR);
         let source = Self::source_excluding_cache(root, &cache_root)?
-            .excluding(RelativePath::parse(".git").expect(".git is a portable path"));
+            .excluding(RelativePath::parse(".git").expect(".git is a portable path"))
+            .scoped(scopes);
         Self::open(source, NativeCache::new(cache_root))
     }
 
@@ -720,6 +911,73 @@ mod tests {
                 .bytes(),
             b"one"
         );
+    }
+
+    #[test]
+    fn native_snapshot_scopes_file_contents_by_root_and_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::create_dir_all(dir.path().join("target")).unwrap();
+        fs::write(dir.path().join("src/A.java"), b"class A {}").unwrap();
+        fs::write(dir.path().join("src/blob.bin"), vec![0; 1024]).unwrap();
+        fs::write(dir.path().join("target/unrelated.bin"), vec![0; 1024]).unwrap();
+        let source = NativeSource::new(dir.path().to_path_buf())
+            .unwrap()
+            .scoped([NativeScope::extension(
+                RelativePath::parse("src").unwrap(),
+                "java",
+            )]);
+        let mut storage = ProjectStorage::open(source, crate::MemoryCache::default()).unwrap();
+
+        assert!(
+            storage
+                .view()
+                .tree()
+                .file(&FileKey::parse("src/A.java").unwrap())
+                .is_some()
+        );
+        assert!(
+            storage
+                .view()
+                .tree()
+                .file(&FileKey::parse("src/blob.bin").unwrap())
+                .is_none()
+        );
+        assert!(
+            storage
+                .view()
+                .tree()
+                .file(&FileKey::parse("target/unrelated.bin").unwrap())
+                .is_none()
+        );
+
+        fs::write(dir.path().join("src/nested/B.java"), b"class B {}").unwrap();
+        fs::write(dir.path().join("src/nested/ignored.txt"), b"ignored").unwrap();
+        storage.refresh().unwrap();
+        assert!(
+            storage
+                .view()
+                .tree()
+                .file(&FileKey::parse("src/nested/B.java").unwrap())
+                .is_some()
+        );
+        assert!(
+            storage
+                .view()
+                .tree()
+                .file(&FileKey::parse("src/nested/ignored.txt").unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn explicitly_empty_native_scope_reads_no_project_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("unrelated.bin"), b"bytes").unwrap();
+        let storage =
+            ProjectStorage::for_project_scoped(dir.path(), core::iter::empty::<NativeScope>())
+                .unwrap();
+        assert!(storage.view().tree().files().next().is_none());
     }
 
     #[test]
@@ -859,6 +1117,107 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("pkg/Kept.java")).unwrap(), b"kept");
         assert_eq!(fs::read(dir.path().join("New.java")).unwrap(), b"external");
         assert_eq!(storage.revision(), revision);
+    }
+
+    #[test]
+    fn native_replace_refuses_to_clobber_concurrent_external_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("A.java"), b"old").unwrap();
+        let mut storage = ProjectStorage::native(dir.path(), dir.path().join(".cache")).unwrap();
+        let revision = storage.revision();
+        let mut transaction = storage.transaction(revision).unwrap();
+        transaction
+            .replace_file(FileKey::parse("A.java").unwrap(), b"formatted".to_vec())
+            .unwrap();
+        // Another editor saves A.java after it was snapshotted/read but before the commit.
+        fs::write(dir.path().join("A.java"), b"external-edit").unwrap();
+        assert!(matches!(
+            transaction.commit(),
+            Err(Error::ExternalConflict(_))
+        ));
+        // The concurrent edit survives untouched and the revision never advanced.
+        assert_eq!(
+            fs::read(dir.path().join("A.java")).unwrap(),
+            b"external-edit"
+        );
+        assert_eq!(storage.revision(), revision);
+    }
+
+    #[test]
+    fn native_batch_checks_every_target_before_writing_any_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("A.java"), b"a-old").unwrap();
+        fs::write(dir.path().join("B.java"), b"b-old").unwrap();
+        let mut storage = ProjectStorage::native(dir.path(), dir.path().join(".cache")).unwrap();
+        let mut transaction = storage.transaction(storage.revision()).unwrap();
+        transaction
+            .replace_file(FileKey::parse("A.java").unwrap(), b"a-new".to_vec())
+            .unwrap()
+            .replace_file(FileKey::parse("B.java").unwrap(), b"b-new".to_vec())
+            .unwrap();
+        fs::write(dir.path().join("B.java"), b"external").unwrap();
+
+        assert!(matches!(
+            transaction.commit(),
+            Err(Error::ExternalConflict(_))
+        ));
+        assert_eq!(fs::read(dir.path().join("A.java")).unwrap(), b"a-old");
+        assert_eq!(fs::read(dir.path().join("B.java")).unwrap(), b"external");
+    }
+
+    #[test]
+    fn native_removals_refuse_external_file_and_directory_changes() {
+        let file_dir = tempfile::tempdir().unwrap();
+        fs::write(file_dir.path().join("A.java"), b"old").unwrap();
+        let mut file_storage =
+            ProjectStorage::native(file_dir.path(), file_dir.path().join(".cache")).unwrap();
+        let mut file_transaction = file_storage.transaction(file_storage.revision()).unwrap();
+        file_transaction
+            .remove_file(FileKey::parse("A.java").unwrap())
+            .unwrap();
+        fs::write(file_dir.path().join("A.java"), b"external").unwrap();
+        assert!(matches!(
+            file_transaction.commit(),
+            Err(Error::ExternalConflict(_))
+        ));
+        assert_eq!(
+            fs::read(file_dir.path().join("A.java")).unwrap(),
+            b"external"
+        );
+
+        let tree_dir = tempfile::tempdir().unwrap();
+        fs::create_dir(tree_dir.path().join("pkg")).unwrap();
+        fs::write(tree_dir.path().join("pkg/A.java"), b"old").unwrap();
+        let mut tree_storage =
+            ProjectStorage::native(tree_dir.path(), tree_dir.path().join(".cache")).unwrap();
+        let mut tree_transaction = tree_storage.transaction(tree_storage.revision()).unwrap();
+        tree_transaction
+            .remove_directory(DirKey::parse("pkg").unwrap())
+            .unwrap();
+        fs::write(tree_dir.path().join("pkg/B.java"), b"external").unwrap();
+        assert!(matches!(
+            tree_transaction.commit(),
+            Err(Error::ExternalDirectoryConflict(_))
+        ));
+        assert!(tree_dir.path().join("pkg/A.java").is_file());
+        assert!(tree_dir.path().join("pkg/B.java").is_file());
+    }
+
+    #[test]
+    fn native_preflight_compares_a_later_directory_removal_to_the_original_base() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("pkg")).unwrap();
+        fs::write(dir.path().join("pkg/A.java"), b"old").unwrap();
+        let mut storage = ProjectStorage::native(dir.path(), dir.path().join(".cache")).unwrap();
+        let mut transaction = storage.transaction(storage.revision()).unwrap();
+        transaction
+            .replace_file(FileKey::parse("pkg/A.java").unwrap(), b"new".to_vec())
+            .unwrap()
+            .remove_directory(DirKey::parse("pkg").unwrap())
+            .unwrap();
+
+        transaction.commit().unwrap();
+        assert!(!dir.path().join("pkg").exists());
     }
 
     #[test]

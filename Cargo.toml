@@ -62,7 +62,10 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
 ] }
 rowan = { version = "0.16.1" }
-serde = { version = "1.0.219", default-features = false, features = ["derive", "alloc"] }
+serde = { version = "1.0.219", default-features = false, features = [
+  "derive",
+  "alloc",
+] }
 serde_json = { version = "1.0" }
 similar = { version = "3" }
 text-size = { version = "1.1.1" }
@@ -70,7 +73,10 @@ tokio = { version = "1", features = ["net", "rt"] }
 # Non-unix only: adapts tokio's stdin/stdout into futures' `Async{Read,Write}` for the LSP loop
 # (async-lsp's `stdio` pipe helpers are unix-only). See jals-lsp/src/server.rs.
 tokio-util = { version = "0.7", features = ["compat"] }
-toml = { version = "1.1.2", default-features = false, features = ["parse", "serde"] }
+toml = { version = "1.1.2", default-features = false, features = [
+  "parse",
+  "serde",
+] }
 sha2 = { version = "0.10.9", default-features = false }
 tower = { version = "0.5" }
 ungrammar = { version = "1.16" }

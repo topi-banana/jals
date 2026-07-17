@@ -31,8 +31,11 @@ pub(crate) mod private {
 pub trait SourceBackend: private::Sealed {
     #[doc(hidden)]
     fn snapshot(&self) -> Result<SourceSnapshot>;
+    /// Persist `changes`. `base` is the tree the changes were planned against, so a backend whose
+    /// storage can change underneath it (the native filesystem) can refuse to overwrite content
+    /// that no longer matches the snapshot instead of clobbering a concurrent external edit.
     #[doc(hidden)]
-    fn apply(&mut self, changes: &[Change]) -> Result<()>;
+    fn apply(&mut self, changes: &[Change], base: &CodeTree) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +59,9 @@ impl SourceBackend for MemorySource {
         })
     }
 
-    fn apply(&mut self, changes: &[Change]) -> Result<()> {
+    fn apply(&mut self, changes: &[Change], _base: &CodeTree) -> Result<()> {
+        // In-memory storage cannot change underneath the aggregate, so the base snapshot carries
+        // no extra precondition beyond the tree's own structural checks.
         let mut next = self.tree.clone();
         next.apply_changes(changes)?;
         self.tree = next;
@@ -182,11 +187,14 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
             }
         }
         let changed = snapshot.tree != self.base;
-        self.base = snapshot.tree;
-        self.diagnostics.clone_from(&diagnostics);
         if changed {
+            let current = Self::build_current(&snapshot.tree, &self.overlay)?;
+            self.base = snapshot.tree;
+            self.current = Arc::new(current);
+            self.diagnostics.clone_from(&diagnostics);
             self.revision = self.revision.next();
-            self.rebuild_current()?;
+        } else {
+            self.diagnostics.clone_from(&diagnostics);
         }
         Ok(RefreshOutcome {
             revision: self.revision,
@@ -206,24 +214,33 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
     }
 
     /// Set unsaved editor content for a batch of files under a single revision bump and rebuild.
+    ///
+    /// The batch is staged onto a *clone* of the overlay and rebuilt into a candidate tree before
+    /// anything is published: a rejected entry (a file/ancestor collision surfacing only once the
+    /// whole batch is applied) leaves the overlay, current tree, and revision untouched, so a
+    /// failed call can never poison later ones or advance the revision past a stale tree.
     pub fn set_overlays(
         &mut self,
         expected: Revision,
         entries: impl IntoIterator<Item = (FileKey, Vec<u8>)>,
     ) -> Result<Revision> {
         self.check_revision(expected)?;
+        let mut overlay = self.overlay.clone();
         let mut staged = false;
         for (key, bytes) in entries {
             if matches!(self.current.lookup_file(&key), Some(EntryRef::Directory(_))) {
                 return Err(Error::ExpectedFile(DirKey::new(key.path().clone())));
             }
-            self.overlay.insert(key, Arc::from(bytes));
+            overlay.insert(key, Arc::from(bytes));
             staged = true;
         }
-        if staged {
-            self.revision = self.revision.next();
-            self.rebuild_current()?;
+        if !staged {
+            return Ok(self.revision);
         }
+        let tree = Self::build_current(&self.base, &overlay)?;
+        self.overlay = overlay;
+        self.current = Arc::new(tree);
+        self.revision = self.revision.next();
         Ok(self.revision)
     }
 
@@ -249,15 +266,22 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
     }
 
     fn rebuild_current(&mut self) -> Result<()> {
-        let mut tree = self.base.clone();
-        for (key, bytes) in &self.overlay {
+        self.current = Arc::new(Self::build_current(&self.base, &self.overlay)?);
+        Ok(())
+    }
+
+    /// Build the current tree from `base` with `overlay` applied on top (overlay content wins over
+    /// external content). Total and side-effect-free: the caller publishes the result only on
+    /// success, so a collision never mutates published state.
+    fn build_current(base: &CodeTree, overlay: &BTreeMap<FileKey, Arc<[u8]>>) -> Result<CodeTree> {
+        let mut tree = base.clone();
+        for (key, bytes) in overlay {
             let collision = DirKey::new(key.path().clone());
             tree.remove_directory(&collision);
             tree.remove_file(key);
             tree.insert_file_with_parents(key.clone(), Arc::clone(bytes))?;
         }
-        self.current = Arc::new(tree);
-        Ok(())
+        Ok(tree)
     }
 }
 
@@ -313,7 +337,10 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
         }
         let mut next_base = self.storage.base.clone();
         next_base.apply_changes(&self.staged)?;
-        self.storage.source.apply(&self.staged)?;
+        // Persist against the base the changes were planned on, so a native backend can detect a
+        // file that was externally rewritten after the snapshot and refuse rather than clobber it.
+        let storage = &mut *self.storage;
+        storage.source.apply(&self.staged, &storage.base)?;
         for change in &self.staged {
             match change {
                 Change::CreateFile(key, _)
@@ -487,7 +514,7 @@ mod tests {
                 diagnostics: Vec::new(),
             })
         }
-        fn apply(&mut self, _changes: &[Change]) -> Result<()> {
+        fn apply(&mut self, _changes: &[Change], _base: &CodeTree) -> Result<()> {
             Err(Error::Io("injected persistence failure".into()))
         }
     }
@@ -519,6 +546,83 @@ mod tests {
     }
 
     #[test]
+    fn failed_overlay_batch_leaves_storage_consistent() {
+        let mut storage = storage();
+        let revision = storage.revision();
+        // Staging `A.java` and then `A.java/B.java` passes the per-entry directory check against
+        // the unchanged current tree, but rebuilding collides (a file cannot have a file ancestor).
+        let batch = [
+            (FileKey::parse("A.java").unwrap(), b"edit".to_vec()),
+            (FileKey::parse("A.java/B.java").unwrap(), b"nested".to_vec()),
+        ];
+        assert!(matches!(
+            storage.set_overlays(revision, batch),
+            Err(Error::InvalidTree(crate::TreeError::FileAncestor(_)))
+        ));
+        // Revision, overlay, and current tree are all untouched: the rejected batch neither
+        // advanced the revision nor poisoned later operations.
+        assert_eq!(storage.revision(), revision);
+        assert_eq!(
+            storage
+                .view()
+                .file(&FileKey::parse("A.java").unwrap())
+                .unwrap()
+                .bytes(),
+            b"old"
+        );
+        // A subsequent valid overlay still succeeds against the unchanged revision.
+        let next = storage
+            .set_overlay(
+                revision,
+                FileKey::parse("A.java").unwrap(),
+                b"edit".to_vec(),
+            )
+            .unwrap();
+        assert_eq!(next.get(), revision.get() + 1);
+        assert_eq!(
+            storage
+                .view()
+                .file(&FileKey::parse("A.java").unwrap())
+                .unwrap()
+                .bytes(),
+            b"edit"
+        );
+    }
+
+    #[test]
+    fn single_overlay_onto_a_file_ancestor_is_rejected_without_poisoning() {
+        let mut storage = storage();
+        let revision = storage.revision();
+        // `A.java` is a file, so overlaying `A.java/Nested.java` cannot rebuild.
+        assert!(
+            storage
+                .set_overlay(
+                    revision,
+                    FileKey::parse("A.java/Nested.java").unwrap(),
+                    b"x".to_vec(),
+                )
+                .is_err()
+        );
+        assert_eq!(storage.revision(), revision);
+        // The overlay was not retained: a later rebuild (via a fresh valid overlay) succeeds.
+        storage
+            .set_overlay(
+                revision,
+                FileKey::parse("A.java").unwrap(),
+                b"edit".to_vec(),
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .view()
+                .file(&FileKey::parse("A.java").unwrap())
+                .unwrap()
+                .bytes(),
+            b"edit"
+        );
+    }
+
+    #[test]
     fn external_change_is_shadowed_by_overlay() {
         let mut storage = storage();
         let key = FileKey::parse("A.java").unwrap();
@@ -538,5 +642,39 @@ mod tests {
                 .contains(&Diagnostic::ExternalChangeShadowed(key.clone()))
         );
         assert_eq!(storage.view().file(&key).unwrap().bytes(), b"local");
+    }
+
+    #[test]
+    fn failed_refresh_does_not_publish_base_or_revision() {
+        let mut storage = ProjectStorage::memory(
+            CodeTree::new([Entry::File(
+                FileKey::parse("A/B.java").unwrap(),
+                b"old".to_vec(),
+            )])
+            .unwrap(),
+        );
+        let revision = storage.revision();
+        storage
+            .set_overlay(
+                revision,
+                FileKey::parse("A/B.java").unwrap(),
+                b"edit".to_vec(),
+            )
+            .unwrap();
+        let overlay_revision = storage.revision();
+        let published = storage.view();
+        storage.source.tree = CodeTree::new([Entry::File(
+            FileKey::parse("A").unwrap(),
+            b"external".to_vec(),
+        )])
+        .unwrap();
+
+        assert!(matches!(
+            storage.refresh(),
+            Err(Error::InvalidTree(crate::TreeError::FileAncestor(_)))
+        ));
+        assert_eq!(storage.revision(), overlay_revision);
+        assert_eq!(storage.view().tree(), published.tree());
+        assert!(storage.base.file(&FileKey::parse("A").unwrap()).is_none());
     }
 }

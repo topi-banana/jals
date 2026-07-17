@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use jals_config::{Dependency, GitDependency, GitRef, Manifest, PathDependency};
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
-    NativeSource, NativeStorage, ProjectStorage, ProjectView, RelativePath,
+    NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, RelativePath,
 };
 
 use crate::{
@@ -89,6 +89,8 @@ pub struct NativeProjectPlan {
     /// `path` dependencies outside the project root, resolved against the host filesystem by
     /// [`materialize_path_sources`](Self::materialize_path_sources).
     path_dependencies: Vec<(Name, PathDependency)>,
+    external_source_roots: Vec<PathBuf>,
+    external_classpath: Vec<PathBuf>,
 }
 
 impl NativeProjectPlan {
@@ -103,7 +105,9 @@ impl NativeProjectPlan {
         storage: &mut NativeStorage,
         options: ProjectInputOptions,
     ) -> (ProjectInputs, Vec<DirKey>) {
-        let mut native = Self::from_manifest(manifest, &storage.view());
+        let mut native = Self::from_manifest(manifest, project_root, &storage.view());
+        native.materialize_external_sources(storage, options);
+        native.materialize_external_classpath(storage, options);
         native.materialize_git_sources(project_root, storage, options);
         native.materialize_path_sources(project_root, storage, options);
         let fetcher = ReqwestFetcher::for_project(project_root.to_path_buf());
@@ -118,7 +122,7 @@ impl NativeProjectPlan {
         (inputs, native.source_roots)
     }
 
-    pub fn from_manifest(manifest: &Manifest, view: &ProjectView) -> Self {
+    pub fn from_manifest(manifest: &Manifest, project_root: &Path, view: &ProjectView) -> Self {
         let mut result = Self {
             plan: ProjectInputPlan {
                 feature_set: manifest.feature_set(),
@@ -128,26 +132,23 @@ impl NativeProjectPlan {
             warnings: Vec::new(),
             git_dependencies: Vec::new(),
             path_dependencies: Vec::new(),
+            external_source_roots: Vec::new(),
+            external_classpath: Vec::new(),
         };
 
         for source in &manifest.build.source_dirs {
-            match Self::project_relative(source) {
+            match Self::project_relative(project_root, source) {
                 Some(path) => result.source_roots.push(DirKey::new(path)),
-                None => {
-                    result.warn_path(
-                        source,
-                        "invalid source directory: outside the project or not a portable path"
-                            .to_owned(),
-                    );
-                }
+                None => result
+                    .external_source_roots
+                    .push(Self::resolve_host_path(project_root, source)),
             }
         }
         for classpath in &manifest.build.classpath {
-            let Some(path) = Self::project_relative(classpath) else {
-                result.warn_path(
-                    classpath,
-                    "classpath entry is missing or invalid".to_owned(),
-                );
+            let Some(path) = Self::project_relative(project_root, classpath) else {
+                result
+                    .external_classpath
+                    .push(Self::resolve_host_path(project_root, classpath));
                 continue;
             };
             if let Ok(file) = FileKey::new(path.clone())
@@ -176,9 +177,11 @@ impl NativeProjectPlan {
             );
         }
 
-        result
-            .plan
-            .add_jar_dependencies(manifest, Self::classify, &mut result.warnings);
+        result.plan.add_jar_dependencies(
+            manifest,
+            |locator| Self::classify(project_root, locator),
+            &mut result.warnings,
+        );
         for (raw_name, dependency) in &manifest.dependencies {
             if matches!(dependency, Dependency::Jar(_)) {
                 continue;
@@ -196,7 +199,7 @@ impl NativeProjectPlan {
             match dependency {
                 // Lowered by `add_jar_dependencies` above.
                 Dependency::Jar(_) => {}
-                Dependency::Path(path) => match Self::project_path_root(path, view) {
+                Dependency::Path(path) => match Self::project_path_root(path, project_root, view) {
                     Ok(Some(key)) => result.plan.source_dependency_roots.push(key),
                     // Outside the project root: scanned from the host filesystem by
                     // `materialize_path_sources`.
@@ -209,6 +212,154 @@ impl NativeProjectPlan {
         result.source_roots.sort();
         result.source_roots.dedup();
         result
+    }
+
+    /// Native snapshot scopes required to lower this manifest. Source and dependency directories
+    /// retain only Java bytes, classpath directories retain only class bytes, and explicit files
+    /// are included exactly. External paths are handled through the artifact adapter instead.
+    pub fn snapshot_scopes(manifest: &Manifest, project_root: &Path) -> Vec<NativeScope> {
+        let mut scopes = Vec::new();
+        for source in &manifest.build.source_dirs {
+            if let Some(path) = Self::project_relative(project_root, source) {
+                scopes.push(NativeScope::extension(path, "java"));
+            }
+        }
+        for classpath in &manifest.build.classpath {
+            if let Some(path) = Self::project_relative(project_root, classpath) {
+                let host = path.to_host_path(project_root);
+                scopes.push(if host.is_dir() {
+                    NativeScope::extension(path, "class")
+                } else {
+                    NativeScope::all(path)
+                });
+            }
+        }
+        for dependency in manifest.dependencies.values() {
+            match dependency {
+                Dependency::Jar(jar) => {
+                    for locator in core::iter::once(&jar.jar).chain(jar.sources.iter()) {
+                        if !ExternalLocator::is_url(locator)
+                            && let Some(path) = Self::project_relative(project_root, locator)
+                        {
+                            scopes.push(NativeScope::all(path));
+                        }
+                    }
+                }
+                Dependency::Path(path) => {
+                    let base = Self::resolve_host_path(project_root, &path.path);
+                    if let Ok(source) = Self::host_source_root(&base, path.dir.as_deref())
+                        && let Some(relative) = Self::relative_to_project(project_root, &source)
+                    {
+                        scopes.push(NativeScope::extension(relative, "java"));
+                    }
+                }
+                Dependency::Git(_) => {}
+            }
+        }
+        scopes
+    }
+
+    fn materialize_external_sources(
+        &mut self,
+        storage: &mut NativeStorage,
+        options: ProjectInputOptions,
+    ) {
+        if !matches!(options, ProjectInputOptions::Editor) {
+            return;
+        }
+        for (index, source_root) in self.external_source_roots.clone().into_iter().enumerate() {
+            let name = Name::new(format!("external-source-{index}"))
+                .expect("generated external source name is portable");
+            match Self::publish_source_tree(
+                storage,
+                &name,
+                CacheNamespace::PathSource,
+                &format!("build-source\0{}", source_root.display()),
+                &source_root,
+            ) {
+                Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
+                Err(message) => self.warnings.push(Warning::new(
+                    WarningOrigin::External(ExternalLocator::new(
+                        source_root.display().to_string(),
+                    )),
+                    message,
+                )),
+            }
+        }
+    }
+
+    fn materialize_external_classpath(
+        &mut self,
+        storage: &mut NativeStorage,
+        options: ProjectInputOptions,
+    ) {
+        if matches!(options, ProjectInputOptions::Compile) {
+            return;
+        }
+        for path in self.external_classpath.clone() {
+            if let Err(message) = Self::publish_classpath_path(storage, &path, &mut self.plan) {
+                self.warnings.push(Warning::new(
+                    WarningOrigin::External(ExternalLocator::new(path.display().to_string())),
+                    message,
+                ));
+            }
+        }
+    }
+
+    fn publish_classpath_path(
+        storage: &mut NativeStorage,
+        path: &Path,
+        plan: &mut ProjectInputPlan,
+    ) -> Result<(), String> {
+        if path.is_file() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    format!("classpath file name is not portable: {}", path.display())
+                })?;
+            let logical = RelativePath::new([Name::new(name)
+                .map_err(|error| format!("invalid classpath file name: {error:?}"))?]);
+            let entry = Self::publish_classpath_file(storage, path, logical)?;
+            plan.classpath.push(entry);
+            return Ok(());
+        }
+        if !path.is_dir() {
+            return Err(format!("classpath entry is missing: {}", path.display()));
+        }
+        let source = NativeSource::new(path.to_path_buf())
+            .map_err(|error| error.to_string())?
+            .scoped([NativeScope::extension(RelativePath::ROOT, "class")]);
+        let snapshot = ProjectStorage::open(source, MemoryCache::default())
+            .map_err(|error| error.to_string())?;
+        for file in snapshot.view().tree().files() {
+            plan.classpath.push(Self::publish_classpath_file(
+                storage,
+                &file.key().path().to_host_path(path),
+                file.key().path().clone(),
+            )?);
+        }
+        Ok(())
+    }
+
+    fn publish_classpath_file(
+        storage: &mut NativeStorage,
+        host: &Path,
+        logical: RelativePath,
+    ) -> Result<ClasspathEntry, String> {
+        let bytes = fs::read(host)
+            .map_err(|error| format!("reading classpath file {}: {error}", host.display()))?;
+        let provenance = ContentDigest::of(host.display().to_string().as_bytes());
+        let key = CacheKey::new(
+            CacheNamespace::ExternalClasspath,
+            provenance,
+            ContentDigest::of(&bytes),
+        );
+        storage
+            .artifacts_mut()
+            .publish(&key, &bytes)
+            .map_err(|error| format!("publishing classpath file {}: {error:?}", host.display()))?;
+        Ok(ClasspathEntry::ArtifactFile { path: logical, key })
     }
 
     /// Clone native Git dependencies, scan their selected source roots through the same safe native
@@ -409,7 +560,7 @@ impl NativeProjectPlan {
         name: &Name,
         dependency: &PathDependency,
     ) -> Result<Vec<LibrarySource>, String> {
-        let base = fs::canonicalize(project_root.join(&dependency.path))
+        let base = fs::canonicalize(Self::resolve_host_path(project_root, &dependency.path))
             .map_err(|error| format!("path dependency `{}`: {error}", dependency.path))?;
         let source_root = Self::host_source_root(&base, dependency.dir.as_deref())?;
         Self::publish_source_tree(
@@ -425,9 +576,12 @@ impl NativeProjectPlan {
     /// auto-detected conventional layout (see [`conventional_source_root`](Self::conventional_source_root)).
     fn host_source_root(root: &Path, configured: Option<&str>) -> Result<PathBuf, String> {
         if let Some(configured) = configured {
-            let relative = RelativePath::parse(configured)
-                .map_err(|error| format!("invalid source directory `{configured}`: {error:?}"))?;
-            let selected = relative.to_host_path(root);
+            let selected = Self::resolve_host_path(root, configured);
+            if !selected.starts_with(Self::normalize_host_path(root)) {
+                return Err(format!(
+                    "source directory `{configured}` escapes its dependency root"
+                ));
+            }
             return selected
                 .is_dir()
                 .then_some(selected)
@@ -464,7 +618,8 @@ impl NativeProjectPlan {
     ) -> Result<Vec<LibrarySource>, String> {
         let source = NativeSource::new(source_root.to_path_buf())
             .map_err(|error| error.to_string())?
-            .excluding(RelativePath::parse(".git").expect(".git is a portable segment"));
+            .excluding(RelativePath::parse(".git").expect(".git is a portable segment"))
+            .scoped([NativeScope::extension(RelativePath::ROOT, "java")]);
         let checkout = ProjectStorage::open(source, MemoryCache::default())
             .map_err(|error| error.to_string())?;
         let view = checkout.view();
@@ -503,10 +658,10 @@ impl NativeProjectPlan {
     /// How a jar locator's bytes are obtained: a URL-shaped locator is external; anything else
     /// that normalizes to a portable in-project key is read from the project revision, else left
     /// external for the fetcher's host path policy.
-    fn classify(locator: &str) -> DependencyLocation {
+    fn classify(project_root: &Path, locator: &str) -> DependencyLocation {
         if !ExternalLocator::is_url(locator)
-            && let Some(file) =
-                Self::project_relative(locator).and_then(|path| FileKey::new(path).ok())
+            && let Some(file) = Self::project_relative(project_root, locator)
+                .and_then(|path| FileKey::new(path).ok())
         {
             return DependencyLocation::Project(file);
         }
@@ -516,13 +671,48 @@ impl NativeProjectPlan {
         }
     }
 
-    /// Lower one manifest host-path string to a portable in-project path. Host spellings such
-    /// as `.`, `./src`, a trailing slash, or redundant separators normalize away; `None` when
-    /// the path leaves the project root (absolute, a drive, `..`) or a component is not a
-    /// portable name.
-    fn project_relative(raw: &str) -> Option<RelativePath> {
+    /// Lexically normalize a host path without requiring it to exist. This preserves a leading
+    /// root/prefix, removes `.` and redundant separators, and resolves `..` without allowing it to
+    /// pop an absolute root.
+    fn normalize_host_path(path: &Path) -> PathBuf {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if normalized
+                        .components()
+                        .next_back()
+                        .is_some_and(|last| matches!(last, Component::Normal(_)))
+                    {
+                        normalized.pop();
+                    } else if !normalized.has_root() {
+                        normalized.push(component.as_os_str());
+                    }
+                }
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+        normalized
+    }
+
+    fn resolve_host_path(root: &Path, raw: &str) -> PathBuf {
+        let raw = Path::new(raw);
+        if raw.is_absolute() {
+            Self::normalize_host_path(raw)
+        } else {
+            Self::normalize_host_path(&root.join(raw))
+        }
+    }
+
+    fn relative_to_project(project_root: &Path, path: &Path) -> Option<RelativePath> {
+        let root = Self::normalize_host_path(project_root);
+        let path = Self::normalize_host_path(path);
+        let relative = path.strip_prefix(root).ok()?;
         let mut segments = Vec::new();
-        for component in Path::new(raw).components() {
+        for component in relative.components() {
             match component {
                 Component::CurDir => {}
                 Component::Normal(name) => segments.push(Name::new(name.to_str()?).ok()?),
@@ -532,22 +722,34 @@ impl NativeProjectPlan {
         Some(RelativePath::new(segments))
     }
 
+    /// Resolve a manifest host-path spelling against the manifest directory and retain it as a
+    /// typed key only when the normalized result lies inside the project.
+    fn project_relative(project_root: &Path, raw: &str) -> Option<RelativePath> {
+        Self::relative_to_project(project_root, &Self::resolve_host_path(project_root, raw))
+    }
+
     /// The in-project source root of a `path` dependency: the configured `dir` under it, or the
     /// auto-detected conventional layout (`src/main/java` → `src` → the directory itself).
     /// `Ok(None)` when the dependency lies outside the project root — the native
     /// materialization step scans those from the host filesystem instead.
     fn project_path_root(
         dependency: &PathDependency,
+        project_root: &Path,
         view: &ProjectView,
     ) -> Result<Option<DirKey>, String> {
-        let Some(base) = Self::project_relative(&dependency.path) else {
+        let base_host = Self::resolve_host_path(project_root, &dependency.path);
+        let Some(base) = Self::relative_to_project(project_root, &base_host) else {
             return Ok(None);
         };
         let root = if let Some(dir) = &dependency.dir {
-            let Some(sub) = Self::project_relative(dir) else {
-                return Err(format!("invalid source directory `{dir}`"));
-            };
-            base.concat(&sub)
+            let selected = Self::resolve_host_path(&base_host, dir);
+            if !selected.starts_with(Self::normalize_host_path(&base_host)) {
+                return Err(format!(
+                    "source directory `{dir}` escapes its dependency root"
+                ));
+            }
+            Self::relative_to_project(project_root, &selected)
+                .ok_or_else(|| format!("source directory `{dir}` leaves the project"))?
         } else {
             let conventional = Self::conventional_source_root(|candidate| {
                 view.directory(&DirKey::new(base.concat(candidate))).is_ok()

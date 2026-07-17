@@ -8,7 +8,9 @@ yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }
 # The wasm-compatible core (no `native`): the browser supplies its own `Fetcher` + `MemoryStorage`.
 # A direct path (not `workspace = true`) so `default-features = false` can turn off the host `native`
 # feature — Cargo forbids a workspace-inherited dep from overriding the workspace's default-features.
-jals-classpath = { path = "../jals-classpath", default-features = false, features = ["archive"] }
+jals-classpath = { path = "../jals-classpath", default-features = false, features = [
+  "archive",
+] }
 jals-config = { workspace = true }
 jals-editor = { workspace = true }
 jals-fmt = { workspace = true }

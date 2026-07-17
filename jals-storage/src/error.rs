@@ -66,6 +66,13 @@ pub enum Error {
     AlreadyExistsFile(FileKey),
     AlreadyExistsDirectory(DirKey),
     InvalidUtf8(FileKey),
+    /// A native mutation would overwrite a file whose on-disk content no longer matches the base
+    /// snapshot it was planned against — an external write landed between snapshot and commit.
+    /// Refused so the concurrent edit is not silently lost.
+    ExternalConflict(FileKey),
+    /// A native directory removal observed files or directories that differ from the transaction's
+    /// base snapshot.
+    ExternalDirectoryConflict(DirKey),
     Io(String),
 }
 

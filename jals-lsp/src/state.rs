@@ -11,7 +11,9 @@ use async_lsp::lsp_types::{
 use jals_config::FeatureSet;
 use jals_editor::{Editor, ProjectLayout, Utf16Position};
 use jals_hir::ProjectIndex;
-use jals_storage::{DirKey, FileKey, NativeCache, NativeSource, NativeStorage, RelativePath};
+use jals_storage::{
+    DirKey, FileKey, NativeCache, NativeScope, NativeSource, NativeStorage, RelativePath,
+};
 
 use crate::host::LspHost;
 
@@ -148,7 +150,11 @@ impl ProjectWorkspace {
         source_dep_sources: &[PathBuf],
         feature_set: FeatureSet,
     ) -> Self {
-        let storage = NativeStorage::for_project(&project_root)
+        let scopes = source_roots.iter().filter_map(|path| {
+            RelativePath::from_host_path(&project_root, path)
+                .map(|relative| NativeScope::extension(relative, "java"))
+        });
+        let storage = NativeStorage::for_project_scoped(&project_root, scopes)
             .expect("a discovered project root must be readable");
         let source_roots = source_roots
             .iter()

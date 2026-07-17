@@ -15,7 +15,9 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use jals_storage::{CacheBackend, FileKey, MemoryStorage, ProjectStorage, SourceBackend};
+use jals_storage::{
+    CacheBackend, Error, FileKey, MemoryStorage, ProjectStorage, ProjectView, SourceBackend,
+};
 
 use crate::manifest_ext::ManifestExt;
 use crate::request::{CompileRequest, RunRequest};
@@ -85,6 +87,26 @@ impl BuiltinToolchain {
             )
     }
 
+    /// Read a planned source's bytes: from the immutable project view when it is a project file,
+    /// else straight from its host path. Source-dependency (`extra_sources`) files are materialized
+    /// under the project cache, which the project view deliberately excludes, so a project-view
+    /// lookup misses them and they are read from disk instead.
+    fn read_source(
+        view: &ProjectView,
+        key: Option<&FileKey>,
+        host: &Path,
+    ) -> Result<Vec<u8>, ToolchainError> {
+        if let Some(key) = key {
+            match view.file(key) {
+                Ok(file) => return Ok(file.bytes().to_vec()),
+                Err(Error::NotFoundFile(_)) => {}
+                Err(error) => return Err(ToolchainError::Fs(error)),
+            }
+        }
+        std::fs::read(host)
+            .map_err(|error| ToolchainError::Fs(Error::Io(format!("{}: {error}", host.display()))))
+    }
+
     fn key(path: &Path, project_root: &Path) -> Result<FileKey, ToolchainError> {
         jals_storage::RelativePath::from_host_path(project_root, path)
             .and_then(|relative| FileKey::new(relative).ok())
@@ -108,13 +130,10 @@ impl BuiltinToolchain {
             let view = storage.view();
             read_revision = view.revision();
             for (src, dest) in Self::plan_copies(req) {
-                let source = Self::key(&src, req.project_root)?;
+                let source = jals_storage::RelativePath::from_host_path(req.project_root, &src)
+                    .and_then(|relative| FileKey::new(relative).ok());
                 let destination = Self::key(&dest, req.project_root)?;
-                let contents = view
-                    .file(&source)
-                    .map_err(ToolchainError::Fs)?
-                    .bytes()
-                    .to_vec();
+                let contents = Self::read_source(&view, source.as_ref(), &src)?;
                 let exists = view.tree().file(&destination).is_some();
                 copies.push((destination, contents, exists));
             }
@@ -147,8 +166,23 @@ impl Compiler for BuiltinToolchain {
             BuiltinBackend::Memory(storage) => Self::compile_in(&mut storage.borrow_mut(), req)?,
             #[cfg(feature = "native")]
             BuiltinBackend::Native => {
-                let mut storage = jals_storage::NativeStorage::for_project(req.project_root)
-                    .map_err(ToolchainError::Fs)?;
+                let scopes =
+                    Self::plan_copies(req)
+                        .into_iter()
+                        .flat_map(|(source, destination)| {
+                            core::iter::once(source)
+                                .chain(core::iter::once(destination))
+                                .filter_map(|path| {
+                                    jals_storage::RelativePath::from_host_path(
+                                        req.project_root,
+                                        &path,
+                                    )
+                                    .map(jals_storage::NativeScope::all)
+                                })
+                        });
+                let mut storage =
+                    jals_storage::NativeStorage::for_project_scoped(req.project_root, scopes)
+                        .map_err(ToolchainError::Fs)?;
                 Self::compile_in(&mut storage, req)?;
             }
         }
@@ -314,5 +348,34 @@ mod tests {
             "builtin: copy 1 source file(s) into /proj/target/classes (dummy compiler; nothing is compiled)"
         ));
         assert!(description.contains("/proj/src/main/java/A.java -> /proj/target/classes/A.java"));
+    }
+
+    #[test]
+    fn native_builtin_reads_a_source_materialized_under_the_excluded_cache() {
+        let project = tempfile::tempdir().unwrap();
+        let source = project
+            .path()
+            .join("target/jals/cache/source-view/provenance/content/pkg/Lib.java");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"package pkg; class Lib {}").unwrap();
+        let manifest = Manifest::default();
+        let sources = [source];
+        let request = CompileRequest {
+            manifest: &manifest,
+            project_root: project.path(),
+            sources: &[],
+            extra_sources: &sources,
+            extra_classpath: &[],
+        };
+        let destination = BuiltinToolchain::plan_copies(&request).pop().unwrap().1;
+        let toolchain = BuiltinToolchain {
+            backend: BuiltinBackend::Native,
+        };
+
+        assert!(toolchain.compile(&request).unwrap().success());
+        assert_eq!(
+            std::fs::read(destination).unwrap(),
+            b"package pkg; class Lib {}"
+        );
     }
 }

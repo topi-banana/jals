@@ -178,8 +178,9 @@ impl ServerState {
         // once per project. stderr is safe to log on: the LSP protocol owns stdout, not stderr.
         let deps_root = root.clone();
         let assembled = std::thread::spawn(move || {
-            let mut storage =
-                NativeStorage::for_project(&deps_root).map_err(|error| error.to_string())?;
+            let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(&manifest, &deps_root);
+            let mut storage = NativeStorage::for_project_scoped(&deps_root, scopes)
+                .map_err(|error| error.to_string())?;
             let (inputs, source_roots) = jals_classpath::NativeProjectPlan::assemble_blocking(
                 &manifest,
                 &deps_root,

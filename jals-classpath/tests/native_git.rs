@@ -70,7 +70,7 @@ fixture = {{ git = "{locator}" }}
     let project = tempfile::tempdir().unwrap();
     let mut storage =
         NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
     plan.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 
@@ -127,7 +127,7 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
     let mut storage =
         NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
 
-    let mut first = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let mut first = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
     first.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
     assert!(first.warnings.is_empty(), "{:?}", first.warnings);
     assert_eq!(first.plan.source_dependency_artifacts.len(), 1);
@@ -135,7 +135,7 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
     // The repository is gone; only the published cache can satisfy the second assembly.
     drop(repository);
 
-    let mut second = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let mut second = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
     second.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
     assert!(second.warnings.is_empty(), "{:?}", second.warnings);
     assert_eq!(

@@ -25,6 +25,12 @@ pub enum ClasspathEntry {
     ProjectFile(FileKey),
     ProjectDirectory(DirKey),
     Artifact(CacheKey),
+    /// A host classpath file published into the verified cache by the native adapter. Its logical
+    /// path retains the extension needed to distinguish `.class` from archive bytes.
+    ArtifactFile {
+        path: RelativePath,
+        key: CacheKey,
+    },
 }
 
 /// Parsed class files plus non-fatal per-entry diagnostics.
@@ -59,9 +65,36 @@ impl ClasspathLoad {
                         &format!("classpath artifact is invalid: {error:?}"),
                     ),
                 },
+                ClasspathEntry::ArtifactFile { path, key } => match cache.lookup(key) {
+                    Ok(Some(bytes)) => load.load_cached_file(path, key, &bytes),
+                    Ok(None) => load.warn(
+                        WarningOrigin::Artifact(key.clone()),
+                        "classpath file artifact is not cached",
+                    ),
+                    Err(error) => load.warn(
+                        WarningOrigin::Artifact(key.clone()),
+                        &format!("classpath file artifact is invalid: {error:?}"),
+                    ),
+                },
             }
         }
         load
+    }
+
+    fn load_cached_file(&mut self, path: &RelativePath, key: &CacheKey, bytes: &[u8]) {
+        let origin = WarningOrigin::Artifact(key.clone());
+        match path.name().and_then(|name| name.as_str().rsplit_once('.')) {
+            Some((_, ext)) if ext.eq_ignore_ascii_case("class") => self.parse_into(origin, bytes),
+            Some((_, ext))
+                if ext.eq_ignore_ascii_case("jar") || ext.eq_ignore_ascii_case("zip") =>
+            {
+                self.load_jar_bytes(&origin, bytes);
+            }
+            _ => self.warn(
+                origin,
+                "unrecognized cached classpath file (expected `.class`, `.jar`, or `.zip`)",
+            ),
+        }
     }
 
     fn load_project_file(&mut self, view: &ProjectView, key: &FileKey) {

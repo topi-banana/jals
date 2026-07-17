@@ -60,6 +60,7 @@ pub enum CacheNamespace {
     Skeleton,
     GitCheckout,
     PathSource,
+    ExternalClasspath,
 }
 
 impl CacheNamespace {
@@ -72,6 +73,7 @@ impl CacheNamespace {
             Self::Skeleton => "skeleton",
             Self::GitCheckout => "git-checkout",
             Self::PathSource => "path-source",
+            Self::ExternalClasspath => "external-classpath",
         }
     }
 }

@@ -8,7 +8,13 @@ edition.workspace = true
 # Native adds the HTTP adapter; project and cache access remains entirely in `jals-storage`.
 default = ["native"]
 archive = ["dep:zip"]
-native = ["archive", "dep:reqwest", "dep:tempfile", "dep:futures", "jals-storage/std"]
+native = [
+  "archive",
+  "dep:reqwest",
+  "dep:tempfile",
+  "dep:futures",
+  "jals-storage/std",
+]
 
 [dependencies]
 jals-classfile.workspace = true

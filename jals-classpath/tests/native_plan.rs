@@ -40,7 +40,7 @@ source-dirs = [".", "./src", "src/"]
 classpath = ["./libs/dep.jar"]
 "#,
     );
-    let plan = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     assert_eq!(
         plan.source_roots,
@@ -68,7 +68,7 @@ fn in_project_path_dependency_auto_detects_conventional_source_root() {
         NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
 
     let manifest = manifest("[dependencies]\nlib = { path = \"./lib\" }\n");
-    let plan = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     assert_eq!(
         plan.plan.source_dependency_roots,
@@ -90,7 +90,7 @@ fn sibling_path_dependency_is_scanned_and_published() {
 
     let mut storage = NativeStorage::native(&project, project.join("target/jals/cache")).unwrap();
     let manifest = manifest("[dependencies]\nsibling = { path = \"../sibling\" }\n");
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
     assert!(plan.plan.source_dependency_roots.is_empty());
     plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile);
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
@@ -121,8 +121,75 @@ fn missing_path_dependency_is_a_warning_not_a_panic() {
     let mut storage =
         NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
     let manifest = manifest("[dependencies]\ngone = { path = \"../does-not-exist\" }\n");
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, &storage.view());
+    let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
     plan.materialize_path_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
     assert_eq!(plan.warnings.len(), 1);
     assert!(plan.plan.source_dependency_artifacts.is_empty());
+}
+
+#[test]
+fn external_dependency_subdirectories_accept_normal_host_spellings() {
+    let base = tempfile::tempdir().unwrap();
+    let project = base.path().join("project");
+    let sibling = base.path().join("sibling");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(sibling.join("src")).unwrap();
+    fs::write(sibling.join("src/Lib.java"), b"class Lib {}").unwrap();
+    let manifest = manifest(
+        r#"
+[dependencies]
+dot = { path = "../sibling", dir = "." }
+cur = { path = "../sibling", dir = "./src" }
+trailing = { path = "../sibling", dir = "src/" }
+"#,
+    );
+    let mut storage = NativeStorage::native(&project, project.join("target/jals/cache")).unwrap();
+    let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
+    plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile);
+
+    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    assert_eq!(plan.plan.source_dependency_artifacts.len(), 3);
+}
+
+#[test]
+fn sibling_and_absolute_build_inputs_are_adapted_without_being_dropped() {
+    let base = tempfile::tempdir().unwrap();
+    let project = base.path().join("project");
+    let sibling_source = base.path().join("sibling-source");
+    let absolute_source = base.path().join("absolute-source");
+    let sibling_classes = base.path().join("sibling-classes");
+    let absolute_class = base.path().join("absolute/Box.class");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&sibling_source).unwrap();
+    fs::create_dir_all(&absolute_source).unwrap();
+    fs::create_dir_all(&sibling_classes).unwrap();
+    fs::create_dir_all(absolute_class.parent().unwrap()).unwrap();
+    fs::write(sibling_source.join("Sibling.java"), b"class Sibling {}").unwrap();
+    fs::write(absolute_source.join("Absolute.java"), b"class Absolute {}").unwrap();
+    let box_class = include_bytes!("fixtures/Box.class");
+    fs::write(sibling_classes.join("Box.class"), box_class).unwrap();
+    fs::write(&absolute_class, box_class).unwrap();
+
+    let absolute_source = absolute_source.to_string_lossy().replace('\\', "\\\\");
+    let absolute_class = absolute_class.to_string_lossy().replace('\\', "\\\\");
+    let manifest = manifest(&format!(
+        r#"
+[build]
+source-dirs = ["../sibling-source", "{absolute_source}"]
+classpath = ["../sibling-classes", "{absolute_class}"]
+"#
+    ));
+    let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+    let mut storage = NativeStorage::for_project_scoped(&project, scopes).unwrap();
+    let (inputs, source_roots) = NativeProjectPlan::assemble_blocking(
+        &manifest,
+        &project,
+        &mut storage,
+        ProjectInputOptions::Editor,
+    );
+
+    assert!(source_roots.is_empty());
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    assert_eq!(inputs.classpath_classes.len(), 2);
+    assert_eq!(inputs.source_dep_sources.len(), 2);
 }
