@@ -8,6 +8,7 @@ members = [
   "jals-config",
   "jals-decompile",
   "jals-editor",
+  "jals-exec",
   "jals-fmt",
   "jals-storage",
   "jals-hir",
@@ -45,6 +46,7 @@ jals-classpath = { path = "jals-classpath" }
 jals-config = { path = "jals-config" }
 jals-decompile = { path = "jals-decompile" }
 jals-editor = { path = "jals-editor" }
+jals-exec = { path = "jals-exec", default-features = false }
 jals-fmt = { path = "jals-fmt" }
 jals-storage = { path = "jals-storage", default-features = false }
 jals-hir = { path = "jals-hir" }
@@ -125,6 +127,10 @@ todo = "deny"
 unimplemented = "deny"
 
 module_name_repetitions = "allow"
+# The whole workspace is deliberately `!Send`-async: runtimes are current-thread everywhere and
+# multi-core parallelism happens only through `jals-exec`'s fan-out (workers drive `!Send`
+# futures locally). Requiring `Send` futures would contradict the execution model.
+future_not_send = "allow"
 # `pub(crate)` in a private module is a deliberate crate-internal intent marker; the nursery lint
 # that flags it as redundant would erase that signal, so keep it off.
 redundant_pub_crate = "allow"
