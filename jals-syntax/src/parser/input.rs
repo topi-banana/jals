@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 
+use jals_exec::Yielder;
 use text_size::TextRange;
 
 use crate::lexer::{LexedToken, Lexer};
@@ -23,12 +24,14 @@ pub(crate) struct Input<'a> {
 }
 
 impl<'a> Input<'a> {
-    pub(crate) fn new(src: &'a str) -> Self {
-        let all = Lexer::tokenize(src);
+    pub(crate) async fn new(src: &'a str) -> Self {
+        let all = Lexer::tokenize(src).await;
+        let mut yielder = Yielder::new();
         let mut sig_kinds = Vec::new();
         let mut sig_ranges = Vec::new();
         let mut sig_to_all = Vec::new();
         for (i, t) in all.iter().enumerate() {
+            yielder.tick().await;
             if !t.kind.is_trivia() {
                 sig_kinds.push(t.kind);
                 sig_ranges.push(t.range);

@@ -11,7 +11,7 @@
 //! ```
 //! use jals_syntax::{Lexer, SyntaxKind};
 //!
-//! let tokens = Lexer::tokenize("int x = 1;");
+//! let tokens = jals_exec::block_on_inline(Lexer::tokenize("int x = 1;"));
 //! assert_eq!(tokens[0].kind, SyntaxKind::INT_KW);
 //! // Concatenating each token's text reproduces the input (lossless).
 //! let joined: String = tokens.iter().map(|t| t.text).collect();
@@ -21,7 +21,7 @@
 //! ```
 //! use jals_syntax::ast::{AstNode, SourceFile};
 //!
-//! let parse = jals_syntax::Parse::parse("class Foo { }");
+//! let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse("class Foo { }"));
 //! let file = SourceFile::cast(parse.syntax()).unwrap();
 //! let class = file.decls().next().unwrap();
 //! assert_eq!(class.syntax().text().to_string(), "class Foo { }");

@@ -10,6 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 
+use jals_exec::Yielder;
 use rowan::{GreenNode, GreenNodeBuilder, Language};
 use text_size::{TextRange, TextSize};
 
@@ -29,7 +30,10 @@ pub(super) struct Sink<'a> {
 
 impl Sink<'_> {
     /// イベント列を処理して緑木とエラー一覧を得る。
-    pub(super) fn build(input: &Input, mut events: Vec<Event>) -> (GreenNode, Vec<SyntaxError>) {
+    pub(super) async fn build(
+        input: &Input<'_>,
+        mut events: Vec<Event>,
+    ) -> (GreenNode, Vec<SyntaxError>) {
         let mut sink = Sink {
             builder: GreenNodeBuilder::new(),
             all: input.all(),
@@ -38,8 +42,10 @@ impl Sink<'_> {
         };
         let mut depth = 0i32;
         let mut forward_parents: Vec<Option<SyntaxKind>> = Vec::new();
+        let mut yielder = Yielder::new();
 
         for i in 0..events.len() {
+            yielder.tick().await;
             match mem::replace(&mut events[i], Event::tombstone()) {
                 // 墓石(破棄されたノード)は無視する。
                 Event::Start {

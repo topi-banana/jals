@@ -81,7 +81,8 @@ mod tests {
 
     /// Casts the parsed root to a [`SourceFile`].
     fn source_file(src: &str) -> SourceFile {
-        SourceFile::cast(Parse::parse(src).syntax()).expect("root is SOURCE_FILE")
+        SourceFile::cast(jals_exec::block_on_inline(Parse::parse(src)).syntax())
+            .expect("root is SOURCE_FILE")
     }
 
     /// Parses `class C { void m() { <body> } }` and returns the statements of `m`.

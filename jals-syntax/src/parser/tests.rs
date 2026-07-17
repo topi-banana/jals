@@ -1,6 +1,5 @@
 //! Parser snapshot tests: expect-test CST dumps plus lossless spot checks.
 
-use super::*;
 use expect_test::expect;
 use helpers::{assert_lossless, check};
 
@@ -9,6 +8,12 @@ mod helpers {
     use expect_test::Expect;
 
     use crate::parser::Parse;
+
+    /// Drives the now-async parse entry point to completion on the spot (parse futures are
+    /// ready-poll futures, so the inline spin block-on is exact).
+    pub(super) fn parse(src: &str) -> Parse {
+        jals_exec::block_on_inline(Parse::parse(src))
+    }
 
     /// Pretty-prints the parse result's syntax tree with indentation, showing kind and range (for tests).
     /// Tokens also show the text. Trailing errors follow as `error: ...` lines.
@@ -45,7 +50,7 @@ mod helpers {
     /// Confirm that the tree dump matches the snapshot and is lossless.
     #[allow(clippy::needless_pass_by_value)]
     pub(super) fn check(src: &str, expected: Expect) {
-        let parse = Parse::parse(src);
+        let parse = parse(src);
         expected.assert_eq(&debug_tree(&parse));
         assert_eq!(
             parse.syntax().text().to_string(),
@@ -56,7 +61,7 @@ mod helpers {
 
     /// lossless: the syntax tree's text equals the input.
     pub(super) fn assert_lossless(src: &str) {
-        let parse = Parse::parse(src);
+        let parse = parse(src);
         assert_eq!(parse.syntax().text().to_string(), src);
     }
 }
@@ -353,7 +358,7 @@ fn char_literal_escapes_parse_without_errors() {
         "class C { char a = '\\0'; }",
         "class C { char a = '\\n'; }",
     ] {
-        let parse = Parse::parse(src);
+        let parse = helpers::parse(src);
         assert!(
             parse.errors().is_empty(),
             "expected no parse errors for {src:?}, got {:?}",

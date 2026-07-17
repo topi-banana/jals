@@ -163,7 +163,7 @@ const CORPUS: &[&str] = &[
 /// Renders one token per line as `KIND "escaped text"`, asserting along the
 /// way that the tokens tile the input exactly (lossless, contiguous spans).
 fn render(src: &str) -> String {
-    let tokens = Lexer::tokenize(src);
+    let tokens = jals_exec::block_on_inline(Lexer::tokenize(src));
     let joined: String = tokens.iter().map(|t| t.text).collect();
     assert_eq!(joined, src, "lexer is not lossless for {src:?}");
     let mut offset = 0usize;
@@ -198,7 +198,10 @@ fn check(src: &str, expect: Expect) {
 #[test]
 fn corpus_is_lossless() {
     for src in CORPUS {
-        let joined: String = Lexer::tokenize(src).iter().map(|t| t.text).collect();
+        let joined: String = jals_exec::block_on_inline(Lexer::tokenize(src))
+            .iter()
+            .map(|t| t.text)
+            .collect();
         assert_eq!(&joined, src, "lexer is not lossless for {src:?}");
     }
 }
