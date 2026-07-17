@@ -1,9 +1,9 @@
 //! The LSP server: wires the document store and the [`LspHost`] rendering of `jals-editor`'s
 //! queries to async-lsp's `LanguageServer` trait, and runs the stdio event loop.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
@@ -36,11 +36,12 @@ use async_lsp::tracing::TracingLayer;
 use async_lsp::{ClientSocket, ErrorCode, LanguageServer, MainLoop, ResponseError};
 use futures::future::BoxFuture;
 use jals_build::ManifestExt;
-use jals_config::{FeatureSet, Manifest};
+use jals_config::Manifest;
 use jals_editor::{
     EditorHost, FoldingHost, Folds, Ident, Outline, SelectionChains, SelectionHost,
     SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
 };
+use jals_storage::{DirKey, FileKey, NativeStorage};
 use tower::ServiceBuilder;
 
 use crate::formatting::Formatting;
@@ -167,52 +168,143 @@ impl ServerState {
         }
         let Ok(manifest) = Manifest::from_file(&manifest_path) else {
             // An unparsable manifest: index the project root as a lone source root, no classpath.
-            self.workspaces.push(ProjectWorkspace::load(
-                root.clone(),
-                std::slice::from_ref(&root),
-                &[],
-                &[],
-                &[],
-                FeatureSet::default(),
-            ));
+            self.workspaces.push(ProjectWorkspace::bare(&root));
             return;
         };
-        // Assemble the project's full analysis + navigation inputs in one call: the manifest's
-        // `[build] classpath` folded with the resolved `[dependencies]` jars and loaded, each
-        // dependency's `-sources.jar` `.java` plus a synthesized skeleton per classpath `.class` (the
-        // go-to-definition library source, real winning over skeleton), the `git`/`path` source deps'
-        // `.java` (folded into the index for analysis + navigation), the manifest's source roots, and
-        // the `[package] features` (feeding the feature-gated lint rules).
-        //
-        // `assemble_project_inputs` uses `reqwest`'s blocking downloader, which panics inside the
-        // Tokio runtime this server uses, so it runs on a dedicated thread (`manifest` moves in),
-        // joined immediately — blocking workspace load once per project. stderr is safe to log on:
-        // the LSP protocol owns stdout, not stderr.
+        // Assemble the project's full analysis + navigation inputs in one call (see
+        // `NativeProjectPlan::assemble_blocking`). The native fetch adapter uses reqwest's
+        // blocking client, which panics inside the Tokio runtime this server uses, so it runs on
+        // a dedicated thread (`manifest` moves in), joined immediately — blocking workspace load
+        // once per project. stderr is safe to log on: the LSP protocol owns stdout, not stderr.
         let deps_root = root.clone();
-        let inputs = std::thread::spawn(move || {
-            jals_classpath::ProjectInputs::assemble_project_inputs(
+        let assembled = std::thread::spawn(move || {
+            let mut storage =
+                NativeStorage::for_project(&deps_root).map_err(|error| error.to_string())?;
+            let (inputs, source_roots) = jals_classpath::NativeProjectPlan::assemble_blocking(
                 &manifest,
                 &deps_root,
+                &mut storage,
                 jals_classpath::ProjectInputOptions::Editor,
-                |message| eprintln!("jals-lsp: {message}"),
-            )
+            );
+            for warning in &inputs.warnings {
+                eprintln!("jals-lsp: {}", warning.message);
+            }
+
+            // Navigation sources are cache artifacts, not host paths. Mount them as overlay files
+            // in the same aggregate so the editor reads them from this exact revision, and
+            // materialize each one out of the cache so its definition targets are real,
+            // openable files.
+            let mut materialized = BTreeMap::new();
+            let mut mounts = Vec::new();
+            let library_sources: Vec<_> = inputs
+                .library_sources
+                .iter()
+                .filter_map(|source| {
+                    Self::stage_artifact(
+                        &storage,
+                        "library",
+                        source,
+                        &mut mounts,
+                        &mut materialized,
+                    )
+                })
+                .collect();
+            let source_dep_sources: Vec<_> = inputs
+                .source_dep_sources
+                .iter()
+                .filter_map(|source| match source {
+                    jals_classpath::SourceFile::Project(key) => Some(key.clone()),
+                    jals_classpath::SourceFile::Artifact(source) => Self::stage_artifact(
+                        &storage,
+                        "source-dependency",
+                        source,
+                        &mut mounts,
+                        &mut materialized,
+                    ),
+                })
+                .collect();
+            // One revision bump and tree rebuild for the whole batch — mounting the sources one
+            // `set_overlay` at a time rebuilds the merged tree per file, quadratic in mount count.
+            // On failure the mounts are simply absent and the workspace loads without them.
+            let revision = storage.revision();
+            if let Err(error) = storage.set_overlays(revision, mounts) {
+                eprintln!("jals-lsp: mounting dependency sources failed: {error}");
+            }
+            Ok::<_, String>((
+                storage,
+                source_roots,
+                inputs,
+                library_sources,
+                source_dep_sources,
+                materialized,
+            ))
         })
         .join()
         .expect("project input assembly thread panicked");
 
-        self.workspaces.push(ProjectWorkspace::load(
+        let Ok((storage, source_roots, inputs, library_sources, source_dep_sources, materialized)) =
+            assembled
+        else {
+            self.workspaces.push(ProjectWorkspace::bare(&root));
+            return;
+        };
+
+        self.workspaces.push(ProjectWorkspace::load_storage(
             root,
-            &inputs.source_roots,
+            storage,
+            source_roots,
             &inputs.classpath_classes,
-            &inputs.library_sources,
-            &inputs.source_dep_sources,
+            library_sources,
+            source_dep_sources,
+            materialized,
             inputs.feature_set,
         ));
+    }
+
+    /// Stage a cached navigation source for mounting into the aggregate's overlay under
+    /// `.jals/<kind>/…`, returning its overlay key. `None` skips an artifact that is missing
+    /// from the cache or whose path cannot be addressed. The artifact is also materialized to a
+    /// real file under the cache root and recorded in `materialized`, so go-to-definition
+    /// targets resolve to a `file://` URL the client can actually open. The caller commits the
+    /// staged batch with one `set_overlays`.
+    fn stage_artifact(
+        storage: &NativeStorage,
+        kind: &str,
+        source: &jals_classpath::LibrarySource,
+        mounts: &mut Vec<(FileKey, Vec<u8>)>,
+        materialized: &mut BTreeMap<FileKey, PathBuf>,
+    ) -> Option<FileKey> {
+        let bytes = storage.artifacts().lookup(&source.key).ok().flatten()?;
+        let mount_root = DirKey::parse(&format!(".jals/{kind}")).ok()?;
+        let key = mount_root.file_at(&source.path).ok()?;
+        mounts.push((key.clone(), bytes));
+        // Best-effort: a failed materialization keeps the mount (analysis still works), it only
+        // degrades navigation into this one file.
+        if let Ok(target) = storage
+            .artifacts()
+            .materialize_source(&source.key, &source.path)
+        {
+            materialized.insert(key.clone(), target);
+        }
+        Some(key)
     }
 
     /// The loaded workspace that owns `uri`, if any.
     fn workspace_for(&self, uri: &Url) -> Option<&ProjectWorkspace> {
         self.workspaces.iter().find(|ws| ws.owns_uri(uri))
+    }
+
+    /// The shared request dispatch: answer through the workspace that owns `uri`, falling back
+    /// to the one-file project over the open document for files outside any indexed workspace.
+    fn answer<T>(
+        &self,
+        uri: &Url,
+        workspace: impl FnOnce(&ProjectWorkspace) -> Option<T>,
+        fallback: impl FnOnce(&Document) -> Option<T>,
+    ) -> Option<T> {
+        self.workspace_for(uri)
+            .and_then(workspace)
+            .or_else(|| self.store.get(uri).and_then(|doc| fallback(&doc)))
     }
 
     /// Reflect the open document at `uri` into the project index of the workspace that owns it, if
@@ -495,6 +587,21 @@ impl LanguageServer for ServerState {
         {
             self.lint_discovery.clear();
         }
+        // Only the workspaces that can see a changed file re-snapshot; an edit in one project
+        // must not reload every other open project.
+        let changed: Vec<_> = params
+            .changes
+            .iter()
+            .filter_map(|event| event.uri.to_file_path().ok())
+            .collect();
+        for workspace in &mut self.workspaces {
+            if changed
+                .iter()
+                .any(|path| path.starts_with(workspace.project_root()))
+            {
+                workspace.refresh();
+            }
+        }
         ControlFlow::Continue(())
     }
 
@@ -609,14 +716,11 @@ impl LanguageServer for ServerState {
         // A file in the project index highlights cross-file type names precisely through the
         // workspace; any other document falls back to the one-file project over the open document
         // alone (a lexical match for such a name).
-        let highlights = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.document_highlight(&uri, position))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .map(|doc| Self::fallback_highlights(&doc, position))
-            });
+        let highlights = self.answer(
+            &uri,
+            |workspace| workspace.document_highlight(&uri, position),
+            |doc| Some(Self::fallback_highlights(doc, position)),
+        );
         Box::pin(async move { Ok(highlights) })
     }
 
@@ -630,14 +734,11 @@ impl LanguageServer for ServerState {
         // A file in the project index resolves cross-file (and file-locally) through the workspace.
         // `goto_definition` returns `None` for any other document, which then falls back to
         // one-file resolution against the open document alone.
-        let location = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.goto_definition(&uri, position))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .and_then(|doc| Self::fallback_definition(&doc, &uri, position))
-            });
+        let location = self.answer(
+            &uri,
+            |workspace| workspace.goto_definition(&uri, position),
+            |doc| Self::fallback_definition(doc, &uri, position),
+        );
         Box::pin(async move { Ok(location.map(GotoDefinitionResponse::Scalar)) })
     }
 
@@ -651,14 +752,18 @@ impl LanguageServer for ServerState {
         // A file in an indexed project finds references project-wide through the workspace (a project
         // type used from any source file); any other document falls back to one-file references
         // over the open document alone.
-        let locations = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.references(&uri, position, include_declaration))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .map(|doc| Self::fallback_references(&doc, &uri, position, include_declaration))
-            });
+        let locations = self.answer(
+            &uri,
+            |workspace| workspace.references(&uri, position, include_declaration),
+            |doc| {
+                Some(Self::fallback_references(
+                    doc,
+                    &uri,
+                    position,
+                    include_declaration,
+                ))
+            },
+        );
         Box::pin(async move { Ok(locations) })
     }
 
@@ -670,14 +775,11 @@ impl LanguageServer for ServerState {
         let position = params.position;
         // A file in an indexed project validates project types project-wide through the workspace;
         // any other document falls back to one-file renamability over the open document alone.
-        let range = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.prepare_rename(&uri, position))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .and_then(|doc| Self::fallback_prepare_rename(&doc, position))
-            });
+        let range = self.answer(
+            &uri,
+            |workspace| workspace.prepare_rename(&uri, position),
+            |doc| Self::fallback_prepare_rename(doc, position),
+        );
         Box::pin(async move { Ok(range.map(PrepareRenameResponse::Range)) })
     }
 
@@ -700,14 +802,11 @@ impl LanguageServer for ServerState {
         }
         // A file in an indexed project renames project types project-wide through the workspace;
         // any other document falls back to a one-file rename over the open document alone.
-        let edit = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.rename(&uri, position, &new_name))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .and_then(|doc| Self::fallback_rename(&doc, &uri, position, &new_name))
-            });
+        let edit = self.answer(
+            &uri,
+            |workspace| workspace.rename(&uri, position, &new_name),
+            |doc| Self::fallback_rename(doc, &uri, position, &new_name),
+        );
         Box::pin(async move { Ok(edit) })
     }
 
@@ -720,14 +819,11 @@ impl LanguageServer for ServerState {
         let position = pos.position;
         // A file in the project index completes members with cross-file type names through the
         // workspace; any other document falls back to a one-file index of the open document.
-        let items = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.completions(&uri, position))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .map(|doc| Self::fallback_completions(&doc, position))
-            });
+        let items = self.answer(
+            &uri,
+            |workspace| workspace.completions(&uri, position),
+            |doc| Some(Self::fallback_completions(doc, position)),
+        );
         Box::pin(async move { Ok(items.map(CompletionResponse::Array)) })
     }
 
@@ -740,14 +836,11 @@ impl LanguageServer for ServerState {
         let position = pos.position;
         // A file in the project index infers with cross-file type names through the workspace; any
         // other document falls back to one-file inference against the open document alone.
-        let hover = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.hover(&uri, position))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .and_then(|doc| Self::fallback_hover(&doc, position))
-            });
+        let hover = self.answer(
+            &uri,
+            |workspace| workspace.hover(&uri, position),
+            |doc| Self::fallback_hover(doc, position),
+        );
         Box::pin(async move { Ok(hover) })
     }
 
@@ -760,14 +853,11 @@ impl LanguageServer for ServerState {
         let position = pos.position;
         // A file in the project index resolves overloads with cross-file type names through the
         // workspace; any other document falls back to a one-file index of the open document.
-        let help = self
-            .workspace_for(&uri)
-            .and_then(|workspace| workspace.signature_help(&uri, position))
-            .or_else(|| {
-                self.store
-                    .get(&uri)
-                    .and_then(|doc| Self::fallback_signature_help(&doc, position))
-            });
+        let help = self.answer(
+            &uri,
+            |workspace| workspace.signature_help(&uri, position),
+            |doc| Self::fallback_signature_help(doc, position),
+        );
         Box::pin(async move { Ok(help) })
     }
 

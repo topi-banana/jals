@@ -10,10 +10,13 @@
 use jals_config::FeatureSet;
 use jals_config::fmt::Config as FmtConfig;
 use jals_config::lint::Config as LintConfig;
-use jals_editor::{Editor, ProjectSpec};
+use jals_editor::{Editor, ProjectLayout};
 use jals_fmt::FormatOutput;
-use jals_fs::{FileTree, InMemoryFileTree};
 use jals_hir::LoweredClasspath;
+use jals_storage::{
+    ArtifactCache, CodeTree, DirKey, Entry, EntryRef, FileKey, MemoryCache, MemorySource,
+    MemoryStorage,
+};
 use jals_syntax::Parse;
 
 use crate::host::{
@@ -47,29 +50,34 @@ const SAMPLE_FILES: &[(&str, &str)] = &[
 
 /// The shared editor core driven through the [`MonacoHost`], plus the path of the active file.
 ///
-/// The core's [`InMemoryFileTree`] is the single source of truth for the file set — the sidebar
-/// and per-file Monaco models read back through it, so there is no parallel state to keep in sync.
+/// The core's [`MemoryStorage`] is the single source of truth for files, overlays, and artifacts —
+/// the sidebar and Monaco models read the same revision, so there is no parallel state to sync.
 pub struct Workspace {
-    editor: Editor<InMemoryFileTree, MonacoHost>,
+    editor: Editor<MemorySource, MemoryCache, MonacoHost>,
     /// Path of the active file — a key into the core's tree, and the editor's backing store.
-    active: String,
+    active: FileKey,
 }
 
 impl Workspace {
     /// A workspace seeded with the [`SAMPLE_FILES`]; the first (sorted) file is active.
     pub fn new() -> Self {
-        let fs = InMemoryFileTree::from_files(SAMPLE_FILES.iter().copied());
+        let tree = CodeTree::new(SAMPLE_FILES.iter().map(|(path, text)| {
+            Entry::File(
+                FileKey::parse(path).expect("sample path is valid"),
+                text.as_bytes().to_vec(),
+            )
+        }))
+        .expect("sample tree is valid");
+        let storage = MemoryStorage::memory(tree);
         // The whole tree is one source root (the sample files live at its top).
-        let editor = Editor::load(fs, ProjectSpec::new("", vec![String::new()]), MonacoHost);
-        // The first (sorted) Java file is active on load.
+        let editor = Editor::load(storage, ProjectLayout::new(vec![DirKey::ROOT]), MonacoHost);
+        // The first (sorted) indexed file is active on load.
         let active = editor
             .workspace()
-            .fs()
-            .walk_ext("", "java")
-            .unwrap_or_default()
-            .into_iter()
+            .files()
+            .map(|(path, _)| path.clone())
             .next()
-            .unwrap_or_default();
+            .expect("sample contains a Java file");
         Workspace { editor, active }
     }
 
@@ -88,15 +96,30 @@ impl Workspace {
         self.editor.workspace_mut().set_feature_set(feature_set);
     }
 
+    /// Clone one immutable source revision together with its cache for an async dependency task.
+    pub fn storage_snapshot(&self) -> MemoryStorage {
+        self.editor.workspace().storage().clone()
+    }
+
+    /// Merge artifacts produced by a detached dependency task back into the aggregate.
+    pub fn replace_artifacts(&mut self, artifacts: ArtifactCache<MemoryCache>) {
+        self.editor
+            .workspace_mut()
+            .storage_mut()
+            .replace_artifacts(artifacts);
+    }
+
     /// The path of the active file.
-    pub fn active(&self) -> &str {
+    pub fn active(&self) -> &FileKey {
         &self.active
     }
 
     /// Make `path` the active file, if it exists in the tree.
     pub fn set_active(&mut self, path: &str) {
-        if self.editor.workspace().fs().is_file(path) {
-            self.active = path.to_string();
+        if let Ok(key) = FileKey::parse(path)
+            && self.editor.workspace().view().tree().file(&key).is_some()
+        {
+            self.active = key;
         }
     }
 
@@ -114,61 +137,48 @@ impl Workspace {
             .unwrap_or_else(|| self.read(&self.active))
     }
 
-    /// Overwrite the active file's contents (called on every editor keystroke): the tree mirror
-    /// for the sidebar/model reads, plus the analysis overlay so the index reflects the edit.
-    pub fn edit_active(&mut self, text: &str) {
-        let path = self.active.clone();
-        let _ = self
-            .editor
-            .workspace_mut()
-            .fs_mut()
-            .write(&path, text.as_bytes());
-        self.editor.workspace_mut().sync_overlay(&path, text);
-    }
-
     /// Reflect the editor's live buffer into the analysis overlay — a no-op when `text` matches
     /// the cached copy, so a query storm over an unchanged buffer never re-parses or re-indexes.
-    /// The providers call this before every query.
+    /// Called on every keystroke and by the providers before every query.
     pub fn sync_active(&mut self, text: &str) {
-        let path = self.active.clone();
-        self.editor.workspace_mut().sync_overlay(&path, text);
+        let _ = self.editor.workspace_mut().sync_overlay(&self.active, text);
     }
 
-    /// Every Java file as `(path, text)`, sorted — for seeding the editor's per-file Monaco models.
+    /// Every indexed file as `(path, text)`, sorted — for seeding the editor's per-file Monaco
+    /// models. Answered from the core's index, so the set always matches what analysis sees.
     pub fn file_texts(&self) -> Vec<(String, String)> {
         self.editor
             .workspace()
-            .fs()
-            .walk_ext("", "java")
-            .unwrap_or_default()
-            .into_iter()
-            .map(|path| {
-                let text = self.read(&path);
-                (path, text)
+            .files()
+            .map(|(path, doc)| (path.to_string(), doc.text.to_string()))
+            .collect()
+    }
+
+    /// The immediate children of directory `dir` as `(full path, is directory)`, sorted
+    /// (sidebar rendering).
+    pub fn read_dir(&self, dir: &str) -> Vec<(String, bool)> {
+        let Ok(dir) = DirKey::parse(dir) else {
+            return Vec::new();
+        };
+        self.editor
+            .workspace()
+            .view()
+            .tree()
+            .children(&dir)
+            .map(|child| match child {
+                EntryRef::Directory(directory) => (directory.to_string(), true),
+                EntryRef::File(file) => (file.key().to_string(), false),
             })
             .collect()
     }
 
-    /// The immediate children of directory `dir`, as full paths, sorted (sidebar rendering).
-    pub fn read_dir(&self, dir: &str) -> Vec<String> {
+    fn read(&self, path: &FileKey) -> String {
         self.editor
             .workspace()
-            .fs()
-            .read_dir(dir)
+            .view()
+            .file_text(path)
             .unwrap_or_default()
-    }
-
-    /// Whether `path` is a directory in the tree.
-    pub fn is_dir(&self, path: &str) -> bool {
-        self.editor.workspace().fs().is_dir(path)
-    }
-
-    fn read(&self, path: &str) -> String {
-        self.editor
-            .workspace()
-            .fs()
-            .read_to_string(path)
-            .unwrap_or_default()
+            .to_owned()
     }
 
     /// Format the active file (file-local; no project index needed).
@@ -257,19 +267,17 @@ mod tests {
     #[test]
     fn tree_lists_the_package_then_the_files() {
         let ws = Workspace::new();
-        assert_eq!(ws.read_dir(""), vec!["com".to_string()]);
-        assert_eq!(ws.read_dir("com"), vec!["com/example".to_string()]);
+        assert_eq!(ws.read_dir(""), vec![("com".to_string(), true)]);
+        assert_eq!(ws.read_dir("com"), vec![("com/example".to_string(), true)]);
         assert_eq!(
             ws.read_dir("com/example"),
             vec![
-                "com/example/Greeter.java".to_string(),
-                "com/example/Main.java".to_string(),
+                ("com/example/Greeter.java".to_string(), false),
+                ("com/example/Main.java".to_string(), false),
             ]
         );
-        assert!(ws.is_dir("com/example"));
-        assert!(!ws.is_dir("com/example/Main.java"));
         // The first sorted file is active on load.
-        assert_eq!(ws.active(), "com/example/Greeter.java");
+        assert_eq!(ws.active().to_string(), "com/example/Greeter.java");
     }
 
     #[test]
@@ -291,7 +299,7 @@ mod tests {
         let mut ws = Workspace::new();
         ws.set_active("com/example/Main.java");
         // Introduce a reference to a type declared nowhere in the workspace.
-        ws.edit_active(
+        ws.sync_active(
             "package com.example;\npublic class Main { void f(){ Missing m = null; } }\n",
         );
         let src = ws.active_source();
@@ -437,7 +445,7 @@ mod tests {
     fn signature_help_marks_the_active_parameter() {
         let mut ws = Workspace::new();
         ws.set_active("com/example/Main.java");
-        ws.edit_active(
+        ws.sync_active(
             "package com.example;\npublic class C { int area(int w, int h){return 0;} void g(){ area(1, ); } }\n",
         );
         let src = ws.active_source();
@@ -468,16 +476,22 @@ mod tests {
         // A compiled `Box<T>` fed to the same wasm-compatible core the browser uses — loaded off an
         // in-memory tree, then lowered for the index. This is the payoff of external dependencies in
         // the playground: a library type resolves without any of its `.java` in the workspace.
-        let cache = InMemoryFileTree::new().with_file(
-            "deps/Box.class",
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../jals-classpath/tests/fixtures/Box.class"
-            )),
+        let key = FileKey::parse("deps/Box.class").unwrap();
+        let storage = MemoryStorage::memory(
+            CodeTree::new([Entry::File(
+                key.clone(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../jals-classpath/tests/fixtures/Box.class"
+                ))
+                .to_vec(),
+            )])
+            .unwrap(),
         );
-        let load = jals_classpath::ClasspathLoad::load_classpath_in(
-            &cache,
-            &["deps/Box.class".to_string()],
+        let load = jals_classpath::ClasspathLoad::load(
+            &storage.view(),
+            storage.artifacts(),
+            &[jals_classpath::ClasspathEntry::ProjectFile(key)],
         );
         assert!(load.warnings.is_empty(), "{:?}", load.warnings);
         let lowered = jals_hir::ProjectIndex::lower_classpath(&load.classes);
@@ -485,7 +499,7 @@ mod tests {
         let mut ws = Workspace::new();
         ws.set_active("com/example/Main.java");
         // A default-package class using the external `Box` type (the package `Box.class` declares).
-        ws.edit_active("class Uses { void f() { Box<String> b = null; } }\n");
+        ws.sync_active("class Uses { void f() { Box<String> b = null; } }\n");
 
         // Unresolved before folding the classpath: no `Box` declaration exists in the workspace.
         let before = ws.analyze_active(&LintConfig::default());

@@ -121,13 +121,13 @@ jobs:
           # jals-fmt / jals-lint stay off and `#![no_std]` is enforced for the whole set.
           - name: wasm
             target: wasm32-unknown-unknown
-            packages: --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-fs --package jals-config
-          # jals-classpath's host I/O (reqwest / git / OsFileTree) is behind its default `native`
-          # feature; `--no-default-features` builds its wasm-compatible core (the `Fetcher`/`Git`/
-          # `FileTree`-generic resolver). jals-build's host half (`SubprocessToolchain`, JDK
+            packages: --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage --package jals-config
+          # jals-classpath's HTTP/archive adapters are behind features;
+          # `--no-default-features` builds its `no_std + alloc` storage-driven core. jals-build's
+          # host half (`SubprocessToolchain`, JDK
           # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core
           # is built here too — the seam a future in-browser compiler implements. Both are
-          # std-but-wasm, so they stay out of the `#![no_std]` set above and build on their own.
+          # portable cores build together here without host features.
           - name: wasm-classpath
             target: wasm32-unknown-unknown
             packages: --package jals-classpath --package jals-build --no-default-features
@@ -148,6 +148,22 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+
+  portable-core:
+    name: portable core and feature audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p jals-storage --no-default-features
+      - run: cargo check -p jals-classpath --no-default-features
+      - run: cargo check -p jals-build --no-default-features
+      - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
+      - run: cargo tree -e features -p jals-classpath --no-default-features
+      - run: cargo tree -e features -p jals-build --no-default-features
 
   lsp-binary:
     name: lsp binary (${{ matrix.target }})

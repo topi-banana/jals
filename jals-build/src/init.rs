@@ -6,9 +6,13 @@
 //! where to create the project and writes the files. Keeping the logic pure makes it deterministic,
 //! unit-testable, and `wasm32`-compatible.
 
-use std::path::{Path, PathBuf};
-
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use jals_config::Build;
+use jals_storage::FileKey;
 
 /// The simple name of the starter class, and the `[run] main-class` that runs it. The starter lives
 /// in the default (unnamed) package, so the simple name is also the fully-qualified name.
@@ -25,7 +29,7 @@ pub struct InitOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScaffoldFile {
     /// Path relative to the project root.
-    pub path: PathBuf,
+    pub path: FileKey,
     /// The file's full contents.
     pub contents: String,
 }
@@ -47,15 +51,16 @@ impl InitOptions {
 
         vec![
             ScaffoldFile {
-                path: PathBuf::from("jals.toml"),
+                path: FileKey::parse("jals.toml").expect("scaffold path is valid"),
                 contents: ScaffoldFile::manifest_template(&self.name),
             },
             ScaffoldFile {
-                path: PathBuf::from(source_dir).join(format!("{MAIN_CLASS}.java")),
+                path: FileKey::parse(&format!("{source_dir}/{MAIN_CLASS}.java"))
+                    .expect("default source path is valid"),
                 contents: ScaffoldFile::main_java(),
             },
             ScaffoldFile {
-                path: PathBuf::from(".gitignore"),
+                path: FileKey::parse(".gitignore").expect("scaffold path is valid"),
                 contents: ScaffoldFile::gitignore(&build.classes_dir),
             },
         ]
@@ -117,11 +122,7 @@ impl ScaffoldFile {
     /// `classes-dir` (e.g. `target` of `target/classes`), so a custom default still produces a
     /// sensible `.gitignore`.
     fn gitignore(classes_dir: &str) -> String {
-        let root = Path::new(classes_dir)
-            .components()
-            .next()
-            .and_then(|c| c.as_os_str().to_str())
-            .unwrap_or(classes_dir);
+        let root = classes_dir.split('/').next().unwrap_or(classes_dir);
         format!("/{root}\n")
     }
 }
@@ -134,7 +135,7 @@ mod tests {
     fn find<'a>(files: &'a [ScaffoldFile], path: &str) -> &'a ScaffoldFile {
         files
             .iter()
-            .find(|f| f.path == Path::new(path))
+            .find(|f| f.path == FileKey::parse(path).unwrap())
             .unwrap_or_else(|| panic!("scaffold is missing {path}"))
     }
 

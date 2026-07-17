@@ -18,6 +18,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
+use jals_storage::FileKey;
 
 use crate::document::Document;
 use crate::{
@@ -54,7 +55,7 @@ pub trait EditorHost {
     fn range(&self, doc: &Document, range: Range<usize>) -> Self::Range;
     /// Encode a byte range in the file at `path` (whose cached document is `doc`) as a host
     /// cross-file target.
-    fn location(&self, path: &str, doc: &Document, range: Range<usize>) -> Self::Location;
+    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Self::Location;
     /// Render one neutral diagnostic of `doc`.
     fn diagnostic(&self, doc: &Document, diagnostic: FileDiagnostic) -> Self::Diagnostic;
     /// Render one outline node of `doc`, whose children are already rendered.
@@ -64,6 +65,19 @@ pub trait EditorHost {
         node: OutlineNode,
         children: Vec<Self::Symbol>,
     ) -> Self::Symbol;
+    /// Render a whole outline of `doc` bottom-up through [`symbol`](Self::symbol) (each node's
+    /// children first, then the node around them). [`Editor::outline`](crate::Editor::outline)
+    /// drives it for indexed files; a host's fallback path for a document outside any workspace
+    /// renders a raw [`Outline`](crate::Outline) through the same recursion.
+    fn render_outline(&self, doc: &Document, nodes: Vec<OutlineNode>) -> Vec<Self::Symbol> {
+        nodes
+            .into_iter()
+            .map(|mut node| {
+                let children = self.render_outline(doc, core::mem::take(&mut node.children));
+                self.symbol(doc, node, children)
+            })
+            .collect()
+    }
     /// Render one completion candidate.
     fn completion(&self, completion: Completion) -> Self::Completion;
     /// Render one occurrence highlight of `doc`.

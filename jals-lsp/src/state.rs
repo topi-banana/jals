@@ -1,7 +1,7 @@
 //! In-memory server state: open documents, the per-project workspace adapter, and memoized
 //! config discovery.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use async_lsp::lsp_types::{
@@ -9,9 +9,9 @@ use async_lsp::lsp_types::{
     SemanticTokens, SignatureHelp, TextDocumentContentChangeEvent, Url, WorkspaceEdit,
 };
 use jals_config::FeatureSet;
-use jals_editor::{Editor, ProjectSpec, Utf16Position};
-use jals_fs::OsFileTree;
+use jals_editor::{Editor, ProjectLayout, Utf16Position};
 use jals_hir::ProjectIndex;
+use jals_storage::{DirKey, FileKey, NativeCache, NativeSource, NativeStorage, RelativePath};
 
 use crate::host::LspHost;
 
@@ -131,7 +131,7 @@ pub(crate) struct ProjectWorkspace {
     /// a later open in the same project reuses it instead of building a duplicate.
     project_root: PathBuf,
     /// The neutral workspace paired with the LSP rendering; owns all analysis state.
-    editor: Editor<OsFileTree, LspHost>,
+    editor: Editor<NativeSource, NativeCache, LspHost>,
 }
 
 impl ProjectWorkspace {
@@ -148,38 +148,96 @@ impl ProjectWorkspace {
         source_dep_sources: &[PathBuf],
         feature_set: FeatureSet,
     ) -> Self {
-        let spec = ProjectSpec {
-            root: project_root.to_string_lossy().into_owned(),
-            source_roots: Self::vpaths(source_roots),
+        let storage = NativeStorage::for_project(&project_root)
+            .expect("a discovered project root must be readable");
+        let source_roots = source_roots
+            .iter()
+            .filter_map(|path| Self::dir_key(&project_root, path))
+            .collect();
+        let library_sources = library_sources
+            .iter()
+            .filter_map(|path| Self::file_key(&project_root, path))
+            .collect();
+        let source_dep_sources = source_dep_sources
+            .iter()
+            .filter_map(|path| Self::file_key(&project_root, path))
+            .collect();
+        Self::load_storage(
+            project_root,
+            storage,
+            source_roots,
+            classfiles,
+            library_sources,
+            source_dep_sources,
+            BTreeMap::new(),
+            feature_set,
+        )
+    }
+
+    /// A workspace over `root` alone — its own lone source root; no classpath, libraries, or
+    /// features. The fallback when a manifest is missing, unparsable, or its inputs fail to
+    /// assemble.
+    pub(crate) fn bare(root: &Path) -> Self {
+        let root = root.to_path_buf();
+        Self::load(
+            root.clone(),
+            std::slice::from_ref(&root),
+            &[],
+            &[],
+            &[],
+            FeatureSet::default(),
+        )
+    }
+
+    /// Construct from an already-open aggregate after dependency assembly. The same storage owns
+    /// source revision, overlays, and artifact cache for the workspace lifetime. `materialized`
+    /// maps mounted `.jals/…` navigation sources to the real files materialized out of the
+    /// artifact cache, so their locations are rendered as openable `file://` URLs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn load_storage(
+        project_root: PathBuf,
+        storage: NativeStorage,
+        source_roots: Vec<DirKey>,
+        classfiles: &[jals_classfile::ClassFile],
+        library_sources: Vec<FileKey>,
+        source_dep_sources: Vec<FileKey>,
+        materialized: BTreeMap<FileKey, PathBuf>,
+        feature_set: FeatureSet,
+    ) -> Self {
+        let spec = ProjectLayout {
+            source_roots,
             classpath: ProjectIndex::lower_classpath(classfiles),
-            library_sources: Self::vpaths(library_sources),
-            source_dep_sources: Self::vpaths(source_dep_sources),
+            library_sources,
+            source_dep_sources,
             feature_set,
         };
+        let host = LspHost::for_root(project_root.clone()).with_materialized(materialized);
         Self {
             project_root,
-            editor: Editor::load(OsFileTree, spec, LspHost),
+            editor: Editor::load(storage, spec, host),
         }
     }
 
-    /// Host paths as the workspace's `/`-separated virtual paths (their UTF-8 form). A non-UTF-8
-    /// path cannot be addressed through the virtual filesystem and is skipped.
-    fn vpaths(paths: &[PathBuf]) -> Vec<String> {
-        paths
-            .iter()
-            .filter_map(|path| path.to_str().map(str::to_owned))
-            .collect()
+    /// Host paths become the workspace's typed virtual paths through
+    /// [`RelativePath::from_host_path`]; a path outside the root or with a non-portable
+    /// component cannot be addressed and is skipped.
+    fn file_key(root: &Path, path: &Path) -> Option<FileKey> {
+        FileKey::new(RelativePath::from_host_path(root, path)?).ok()
     }
 
-    /// The workspace virtual path of `uri`, when it is a `file://` URL with a UTF-8 path.
-    fn vpath(uri: &Url) -> Option<String> {
-        Some(uri.to_file_path().ok()?.to_str()?.to_owned())
+    fn dir_key(root: &Path, path: &Path) -> Option<DirKey> {
+        Some(DirKey::new(RelativePath::from_host_path(root, path)?))
+    }
+
+    /// The workspace key of `uri`, when it is a file URL inside this project root.
+    fn key(&self, uri: &Url) -> Option<FileKey> {
+        Self::file_key(&self.project_root, &uri.to_file_path().ok()?)
     }
 
     /// The virtual path of `uri` when it addresses an *indexed* file of this workspace, so a
     /// query wrapper can answer `None` (and the server fall back) for anything else.
-    fn indexed_path(&self, uri: &Url) -> Option<String> {
-        let path = Self::vpath(uri)?;
+    fn indexed_path(&self, uri: &Url) -> Option<FileKey> {
+        let path = self.key(uri)?;
         self.editor.workspace().file_id(&path)?;
         Some(path)
     }
@@ -189,36 +247,45 @@ impl ProjectWorkspace {
         &self.project_root
     }
 
+    pub(crate) fn refresh(&mut self) {
+        let _ = self.editor.workspace_mut().refresh();
+    }
+
     /// Whether `uri` belongs to this workspace: a file already indexed, or a path under one of
     /// its source roots (so a project file the editor hasn't opened yet still resolves here).
     pub(crate) fn owns_uri(&self, uri: &Url) -> bool {
-        Self::vpath(uri).is_some_and(|path| self.editor.workspace().owns_path(&path))
+        self.key(uri)
+            .is_some_and(|path| self.editor.workspace().owns_path(&path))
     }
 
     /// Reflect an open document into the index: replace the cached copy of `uri` with the
     /// editor's current text (or add it, if `uri` is a project file created after the initial
     /// load), then rebuild the index. Returns whether `uri` belongs to this workspace.
     pub(crate) fn set_overlay(&mut self, uri: &Url, doc: &Document) -> bool {
-        Self::vpath(uri)
-            .is_some_and(|path| self.editor.workspace_mut().set_overlay(&path, &doc.content))
+        self.key(uri).is_some_and(|path| {
+            self.editor
+                .workspace_mut()
+                .set_overlay(&path, &doc.content)
+                .unwrap_or(false)
+        })
     }
 
     /// Go-to-definition for the cursor at `position` in `uri`. `None` if `uri` is not in the
     /// workspace or nothing resolves.
     pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
-        self.editor.definition(&Self::vpath(uri)?, &position)
+        self.editor.definition(&self.key(uri)?, &position)
     }
 
     /// The hover for the cursor at `position` in `uri`. `None` if `uri` is not in the workspace
     /// or the expression has no inferred type.
     pub(crate) fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
-        self.editor.hover(&Self::vpath(uri)?, &position)
+        self.editor.hover(&self.key(uri)?, &position)
     }
 
     /// The signature help for the call at `position` in `uri`, with cross-file type resolution.
     /// `None` if `uri` is not in the workspace or the cursor is in no resolvable call.
     pub(crate) fn signature_help(&self, uri: &Url, position: Position) -> Option<SignatureHelp> {
-        self.editor.signature_help(&Self::vpath(uri)?, &position)
+        self.editor.signature_help(&self.key(uri)?, &position)
     }
 
     /// Completions for the cursor at `position` in `uri`, resolved against the project. `None` if
@@ -240,7 +307,7 @@ impl ProjectWorkspace {
     /// Semantic tokens for `uri`, resolved against the project so a cross-file type name is
     /// classified by its declared kind. `None` if `uri` is not in the workspace.
     pub(crate) fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
-        self.editor.semantic_tokens(&Self::vpath(uri)?)
+        self.editor.semantic_tokens(&self.key(uri)?)
     }
 
     /// Find-references for the cursor at `position` in `uri` — project-wide for a project type,
@@ -262,7 +329,7 @@ impl ProjectWorkspace {
     /// cursor when it names a renamable symbol, else `None` (an external name, a keyword/literal,
     /// or a withheld member).
     pub(crate) fn prepare_rename(&self, uri: &Url, position: Position) -> Option<Range> {
-        self.editor.prepare_rename(&Self::vpath(uri)?, &position)
+        self.editor.prepare_rename(&self.key(uri)?, &position)
     }
 
     /// Rename the symbol under `position` in `uri` to `new_name`: a [`WorkspaceEdit`] rewriting
@@ -275,7 +342,7 @@ impl ProjectWorkspace {
         position: Position,
         new_name: &str,
     ) -> Option<WorkspaceEdit> {
-        let targets = self.editor.rename_targets(&Self::vpath(uri)?, &position)?;
+        let targets = self.editor.rename_targets(&self.key(uri)?, &position)?;
         LspHost::workspace_edit(targets, new_name)
     }
 
@@ -291,17 +358,18 @@ impl ProjectWorkspace {
     }
 }
 
-/// Resolves a config for a document URI through the shared per-directory
-/// [`jals_config::ConfigResolver`] cache: the URI's parent directory is walked upward for
-/// `C::FILE_NAME`, memoized until [`clear`](Self::clear).
+/// Resolves a config for a document URI: the URI's parent directory is walked upward on the
+/// host filesystem for `C::FILE_NAME`, and the discovered root's config file — that one file,
+/// never a project snapshot — is read and parsed once, memoized per root until
+/// [`clear`](Self::clear).
 ///
-/// This adapter owns only the LSP-side policy — URI → path mapping and the "never fail a
-/// request over a config" fallback to `C::default()` (non-file URIs such as `untitled:`,
-/// non-UTF-8 paths, read/parse errors). The discovery walk and memoization live in
-/// `jals-config`, shared with the CLI.
+/// This adapter owns the LSP-side policy — URI → path mapping and the "never fail a request
+/// over a config" fallback to `C::default()` (non-file URIs such as `untitled:`, non-UTF-8
+/// paths, read/parse errors). The parse and error shape live in `jals-config`
+/// ([`from_text`](jals_config::DiscoverableConfig::from_text)), shared with the CLI.
 #[derive(Default)]
 pub(crate) struct UriConfigs<C> {
-    resolver: jals_config::ConfigResolver<C>,
+    configs: HashMap<PathBuf, C>,
 }
 
 impl<C: jals_config::DiscoverableConfig + Clone + Default> UriConfigs<C> {
@@ -310,16 +378,33 @@ impl<C: jals_config::DiscoverableConfig + Clone + Default> UriConfigs<C> {
         let Ok(path) = uri.to_file_path() else {
             return C::default();
         };
-        let Some(dir) = path.parent().and_then(Path::to_str) else {
+        let Some(start) = path.parent() else {
             return C::default();
         };
-        self.resolver.for_dir(&OsFileTree, dir).unwrap_or_default()
+        let Some(root) = start
+            .ancestors()
+            .find(|dir| dir.join(C::FILE_NAME).is_file())
+        else {
+            return C::default();
+        };
+        if let Some(config) = self.configs.get(root) {
+            return config.clone();
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(C::FILE_NAME)) else {
+            return C::default();
+        };
+        let config = FileKey::parse(C::FILE_NAME)
+            .ok()
+            .and_then(|key| C::from_text(&key, &text).ok())
+            .unwrap_or_default();
+        self.configs.insert(root.to_path_buf(), config.clone());
+        config
     }
 
     /// Forget all memoized configs, e.g. after a config file changes on disk. Discovery
     /// reruns lazily on the next request that needs a config.
     pub(crate) fn clear(&mut self) {
-        self.resolver.clear();
+        self.configs.clear();
     }
 
     /// Whether `uri` refers to a config file named `C::FILE_NAME` (e.g. `jalsfmt.toml`), used
@@ -510,9 +595,9 @@ mod tests {
 
     #[test]
     fn uri_configs_clear_picks_up_config_edits() {
-        // End-to-end over the real filesystem: the URI → directory mapping feeds the shared
-        // `jals_config::ConfigResolver` (whose memoization semantics are tested in `jals-config`),
-        // and `clear` is the LSP's watched-file invalidation hook.
+        // End-to-end over the real filesystem: the URI → directory mapping finds the config root,
+        // its file is parsed through the shared `DiscoverableConfig::from_text`, and `clear` is
+        // the LSP's watched-file invalidation hook.
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("jalsfmt.toml");
         let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();

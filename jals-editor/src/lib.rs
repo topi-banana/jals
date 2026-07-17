@@ -29,7 +29,7 @@ pub use queries::{
 };
 pub use selection::SelectionChains;
 pub use semantic::{SemanticToken, SemanticTokenKind, SemanticTokens};
-pub use workspace::{ProjectSpec, SingleFileProject, Workspace};
+pub use workspace::{ProjectLayout, SingleFileProject, Workspace};
 
 use alloc::{vec, vec::Vec};
 

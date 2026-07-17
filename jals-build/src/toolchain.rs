@@ -332,9 +332,9 @@ pub enum ToolchainError {
     },
     /// This backend does not support the requested step (e.g. a wasm compiler asked to *run*).
     Unsupported(&'static str),
-    /// A filesystem step of an in-process backend failed (e.g. the builtin dummy compiler reading
-    /// a source or writing its copy). The [`FsError`](jals_fs::FsError) names the path.
-    Fs(jals_fs::FsError),
+    /// A project-storage step of an in-process backend failed (for example reading a source or
+    /// committing generated output).
+    Fs(jals_storage::Error),
 }
 
 impl std::fmt::Display for ToolchainError {

@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use jals_config::{Compiler as CompilerSpec, Manifest, Runtime as RuntimeSpec, ToolSpec};
-use jals_fs::OsFileTree;
 
 use crate::builtin::BuiltinToolchain;
 use crate::invocation::Invocation;
@@ -57,8 +56,10 @@ impl dyn Runtime {
 
 impl BuiltinToolchain {
     /// The builtin backend over the host filesystem.
-    fn host() -> Self {
-        Self::new(Box::new(OsFileTree::new()))
+    const fn host() -> Self {
+        Self {
+            backend: super::builtin::BuiltinBackend::Native,
+        }
     }
 }
 

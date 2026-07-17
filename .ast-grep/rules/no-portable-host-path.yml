@@ -1,0 +1,34 @@
+id: no-portable-host-path
+language: Rust
+severity: error
+message: Host filesystem paths are only allowed in native, host, test, and tool adapters.
+note: |
+  Lower the value to FileKey, DirKey, RelativePath, or a typed external locator at the adapter
+  boundary. Add a narrow ignore only when the file is itself an OS adapter.
+
+rule:
+  any:
+    - kind: scoped_identifier
+      regex: '^std::(path|fs)(::|$)'
+    - kind: type_identifier
+      regex: '^PathBuf$'
+
+ignores:
+  - '**/target/**'
+  - '**/build.rs'
+  - '**/tests/**/*.rs'
+  - '**/benches/**/*.rs'
+  - '**/examples/**/*.rs'
+  - 'jals-storage/src/native.rs'
+  - 'jals-classpath/src/native.rs'
+  - 'jals-build/src/native.rs'
+  - 'jals-build/src/manifest_ext.rs'
+  - 'jals-build/src/request.rs'
+  - 'jals-build/src/invocation.rs'
+  - 'jals-build/src/toolchain.rs'
+  - 'jals-build/src/builtin.rs'
+  - 'jals-cli/src/**/*.rs'
+  - 'jals-lsp/src/**/*.rs'
+  - 'jals-tests/src/**/*.rs'
+  - 'xtask/src/**/*.rs'
+  - 'editors/zed/src/**/*.rs'

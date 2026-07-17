@@ -6,57 +6,51 @@
 //! front-ends differ only in the [`EditorHost`] implementation they pass in.
 
 use alloc::vec::Vec;
-use core::mem;
 
-use jals_fs::FileTree;
 use jals_hir::FileId;
+use jals_storage::{CacheBackend, FileKey, ProjectStorage, SourceBackend};
 
 use crate::document::Document;
-use crate::host::{EditorHost, FoldingHost, SelectionHost, SemanticTokensHost};
-use crate::workspace::{ProjectSpec, Workspace};
-use crate::{FileRange, OutlineNode, SignatureHelpUtf16};
+use crate::host::{EditorHost, SemanticTokensHost};
+use crate::workspace::{ProjectLayout, Workspace};
+use crate::{FileRange, SignatureHelpUtf16};
 
 /// One project's [`Workspace`] driven through a host's protocol vocabulary.
-pub struct Editor<F: FileTree, H: EditorHost> {
-    workspace: Workspace<F>,
+pub struct Editor<S: SourceBackend, C: CacheBackend, H: EditorHost> {
+    workspace: Workspace<S, C>,
     host: H,
 }
 
-impl<F: FileTree, H: EditorHost> Editor<F, H> {
+impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
     /// Pair an already-loaded workspace with its host.
-    pub const fn new(workspace: Workspace<F>, host: H) -> Self {
+    pub const fn new(workspace: Workspace<S, C>, host: H) -> Self {
         Self { workspace, host }
     }
 
     /// Load a workspace over `fs` (see [`Workspace::load`]) and pair it with `host`.
-    pub fn load(fs: F, spec: ProjectSpec, host: H) -> Self {
-        Self::new(Workspace::load(fs, spec), host)
+    pub fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout, host: H) -> Self {
+        Self::new(Workspace::load(storage, spec), host)
     }
 
-    /// The underlying workspace: identity/ownership queries (`file_id`, `owns_path`, `root`) and
-    /// the neutral analysis surface.
-    pub const fn workspace(&self) -> &Workspace<F> {
+    /// The underlying workspace: identity/ownership queries (`file_id`, `owns_path`) and the
+    /// neutral analysis surface.
+    pub const fn workspace(&self) -> &Workspace<S, C> {
         &self.workspace
     }
 
     /// Mutable access for lifecycle updates: overlays, classpath, feature set.
-    pub const fn workspace_mut(&mut self) -> &mut Workspace<F> {
+    pub const fn workspace_mut(&mut self) -> &mut Workspace<S, C> {
         &mut self.workspace
     }
 
-    /// The host this editor renders through.
-    pub const fn host(&self) -> &H {
-        &self.host
-    }
-
     /// The file id and cached document of `path`, when it is an indexed project file.
-    fn doc(&self, path: &str) -> Option<(FileId, &Document)> {
+    fn doc(&self, path: &FileKey) -> Option<(FileId, &Document)> {
         let file = self.workspace.file_id(path)?;
         Some((file, self.workspace.document(file)?))
     }
 
     /// Decode a host position in `path` to `(file, byte offset)`.
-    fn offset(&self, path: &str, position: &H::Position) -> Option<(FileId, usize)> {
+    fn offset(&self, path: &FileKey, position: &H::Position) -> Option<(FileId, usize)> {
         let (file, doc) = self.doc(path)?;
         Some((file, self.host.offset(doc, position)))
     }
@@ -73,7 +67,7 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     /// fold in automatically), rendered by the host.
     pub fn diagnostics(
         &self,
-        path: &str,
+        path: &FileKey,
         config: &jals_config::lint::Config,
     ) -> Vec<H::Diagnostic> {
         let Some((file, doc)) = self.doc(path) else {
@@ -87,28 +81,15 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     }
 
     /// The document outline of `path`, rendered by the host.
-    pub fn outline(&self, path: &str) -> Vec<H::Symbol> {
+    pub fn outline(&self, path: &FileKey) -> Vec<H::Symbol> {
         let Some((file, doc)) = self.doc(path) else {
             return Vec::new();
         };
-        self.workspace
-            .outline(file)
-            .into_iter()
-            .map(|node| self.symbol(doc, node))
-            .collect()
-    }
-
-    /// Render one outline node bottom-up (children first, then the node around them).
-    fn symbol(&self, doc: &Document, mut node: OutlineNode) -> H::Symbol {
-        let children = mem::take(&mut node.children)
-            .into_iter()
-            .map(|child| self.symbol(doc, child))
-            .collect();
-        self.host.symbol(doc, node, children)
+        self.host.render_outline(doc, self.workspace.outline(file))
     }
 
     /// Go-to-definition at `position` in `path`.
-    pub fn definition(&self, path: &str, position: &H::Position) -> Option<H::Location> {
+    pub fn definition(&self, path: &FileKey, position: &H::Position) -> Option<H::Location> {
         let (file, offset) = self.offset(path, position)?;
         let target = self.workspace.definition(file, offset)?;
         self.location(&target)
@@ -117,7 +98,7 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     /// Find-references at `position` in `path` (project-wide for a project type).
     pub fn references(
         &self,
-        path: &str,
+        path: &FileKey,
         position: &H::Position,
         include_declaration: bool,
     ) -> Vec<H::Location> {
@@ -132,14 +113,14 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     }
 
     /// The hover at `position` in `path`.
-    pub fn hover(&self, path: &str, position: &H::Position) -> Option<H::Hover> {
+    pub fn hover(&self, path: &FileKey, position: &H::Position) -> Option<H::Hover> {
         let (file, offset) = self.offset(path, position)?;
         let markdown = self.workspace.hover_markdown(file, offset)?;
         Some(self.host.hover(markdown))
     }
 
     /// Completions at `position` in `path`.
-    pub fn completions(&self, path: &str, position: &H::Position) -> Vec<H::Completion> {
+    pub fn completions(&self, path: &FileKey, position: &H::Position) -> Vec<H::Completion> {
         let Some((file, offset)) = self.offset(path, position) else {
             return Vec::new();
         };
@@ -151,14 +132,18 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     }
 
     /// Signature help at `position` in `path`.
-    pub fn signature_help(&self, path: &str, position: &H::Position) -> Option<H::SignatureHelp> {
+    pub fn signature_help(
+        &self,
+        path: &FileKey,
+        position: &H::Position,
+    ) -> Option<H::SignatureHelp> {
         let (file, offset) = self.offset(path, position)?;
         let help = self.workspace.signature_help(file, offset)?;
         Some(self.host.signature_help(SignatureHelpUtf16::of(&help)))
     }
 
     /// Occurrence highlights at `position` in `path`.
-    pub fn highlights(&self, path: &str, position: &H::Position) -> Vec<H::Highlight> {
+    pub fn highlights(&self, path: &FileKey, position: &H::Position) -> Vec<H::Highlight> {
         let Some((file, offset)) = self.offset(path, position) else {
             return Vec::new();
         };
@@ -174,7 +159,7 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
 
     /// prepareRename at `position` in `path`: the identifier's host range when it names a
     /// renamable symbol.
-    pub fn prepare_rename(&self, path: &str, position: &H::Position) -> Option<H::Range> {
+    pub fn prepare_rename(&self, path: &FileKey, position: &H::Position) -> Option<H::Range> {
         let (file, offset) = self.offset(path, position)?;
         let range = self.workspace.prepare_rename(file, offset)?;
         let doc = self.workspace.document(file)?;
@@ -184,7 +169,11 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     /// The locations a rename at `position` in `path` rewrites, or `None` when the symbol is not
     /// renamable / nothing would change. The host validates the new name
     /// ([`crate::Ident::is_valid_java_identifier`]) and shapes the edit.
-    pub fn rename_targets(&self, path: &str, position: &H::Position) -> Option<Vec<H::Location>> {
+    pub fn rename_targets(
+        &self,
+        path: &FileKey,
+        position: &H::Position,
+    ) -> Option<Vec<H::Location>> {
         let (file, offset) = self.offset(path, position)?;
         let targets = self.workspace.rename_targets(file, offset)?;
         Some(
@@ -196,9 +185,9 @@ impl<F: FileTree, H: EditorHost> Editor<F, H> {
     }
 }
 
-impl<F: FileTree, H: SemanticTokensHost> Editor<F, H> {
+impl<S: SourceBackend, C: CacheBackend, H: SemanticTokensHost> Editor<S, C, H> {
     /// The encoded semantic tokens of `path`.
-    pub fn semantic_tokens(&self, path: &str) -> Option<H::SemanticTokens> {
+    pub fn semantic_tokens(&self, path: &FileKey) -> Option<H::SemanticTokens> {
         let (file, doc) = self.doc(path)?;
         Some(
             self.host
@@ -207,54 +196,18 @@ impl<F: FileTree, H: SemanticTokensHost> Editor<F, H> {
     }
 }
 
-impl<F: FileTree, H: FoldingHost> Editor<F, H> {
-    /// The folding ranges of `path`.
-    pub fn folding_ranges(&self, path: &str) -> Vec<H::FoldingRange> {
-        let Some((file, _)) = self.doc(path) else {
-            return Vec::new();
-        };
-        self.workspace
-            .folds(file)
-            .into_iter()
-            .map(|fold| self.host.fold(fold))
-            .collect()
-    }
-}
-
-impl<F: FileTree, H: SelectionHost> Editor<F, H> {
-    /// The selection chains for each requested position in `path`, in request order.
-    pub fn selection_ranges(
-        &self,
-        path: &str,
-        positions: &[H::Position],
-    ) -> Vec<H::SelectionRange> {
-        let Some((file, doc)) = self.doc(path) else {
-            return Vec::new();
-        };
-        positions
-            .iter()
-            .map(|position| {
-                let offset = self.host.offset(doc, position);
-                self.host
-                    .selection(doc, self.workspace.selection_chain(file, offset))
-            })
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use alloc::borrow::ToOwned;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use alloc::vec;
     use alloc::vec::Vec;
     use core::ops::Range;
 
-    use jals_fs::InMemoryFileTree;
+    use jals_storage::{CodeTree, DirKey, Entry, MemoryCache, MemorySource, MemoryStorage};
 
     use super::*;
     use crate::host::EditorHost;
-    use crate::{Completion, FileDiagnostic, Highlight, LineIndex, Utf16Position};
+    use crate::{Completion, FileDiagnostic, Highlight, LineIndex, OutlineNode, Utf16Position};
 
     /// A minimal test host: positions are `(line, character)` UTF-16 pairs, payloads are plain
     /// tuples/strings — enough to pin the facade's sequencing without a real protocol.
@@ -283,8 +236,8 @@ mod tests {
         fn range(&self, _doc: &Document, range: Range<usize>) -> Range<usize> {
             range
         }
-        fn location(&self, path: &str, _doc: &Document, range: Range<usize>) -> Self::Location {
-            (path.to_owned(), range)
+        fn location(&self, path: &FileKey, _doc: &Document, range: Range<usize>) -> Self::Location {
+            (path.to_string(), range)
         }
         fn diagnostic(&self, _doc: &Document, diagnostic: FileDiagnostic) -> String {
             diagnostic.message
@@ -317,19 +270,32 @@ mod tests {
         }
     }
 
-    fn sample_editor() -> Editor<InMemoryFileTree, TupleHost> {
-        let fs = InMemoryFileTree::new()
-            .with_file(
-                "/proj/src/Greeter.java",
+    fn memory(files: &[(&str, &str)]) -> MemoryStorage {
+        MemoryStorage::memory(
+            CodeTree::new(files.iter().map(|(path, text)| {
+                Entry::File(FileKey::parse(path).unwrap(), text.as_bytes().to_vec())
+            }))
+            .unwrap(),
+        )
+    }
+    fn key(path: &str) -> FileKey {
+        FileKey::parse(path).unwrap()
+    }
+
+    fn sample_editor() -> Editor<MemorySource, MemoryCache, TupleHost> {
+        let storage = memory(&[
+            (
+                "src/Greeter.java",
                 "public class Greeter { public String greet(String name) { return name; } }",
-            )
-            .with_file(
-                "/proj/src/Main.java",
+            ),
+            (
+                "src/Main.java",
                 "public class Main { void run() { Greeter g = new Greeter(); } }",
-            );
+            ),
+        ]);
         Editor::load(
-            fs,
-            ProjectSpec::new("/proj", vec!["/proj/src".to_owned()]),
+            storage,
+            ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
             TupleHost,
         )
     }
@@ -348,43 +314,43 @@ mod tests {
 
         // Definition: host position in, host location out, path already mapped.
         let (path, _) = editor
-            .definition("/proj/src/Main.java", &pos_of(main, "Greeter g"))
+            .definition(&key("src/Main.java"), &pos_of(main, "Greeter g"))
             .expect("definition");
-        assert_eq!(path, "/proj/src/Greeter.java");
+        assert_eq!(path, "src/Greeter.java");
 
         // Hover renders through the host.
         let hover = editor
-            .hover("/proj/src/Main.java", &pos_of(main, "new Greeter"))
+            .hover(&key("src/Main.java"), &pos_of(main, "new Greeter"))
             .expect("hover");
         assert!(hover.contains("```java"), "{hover}");
 
         // Outline renders bottom-up with children.
-        let outline = editor.outline("/proj/src/Greeter.java");
+        let outline = editor.outline(&key("src/Greeter.java"));
         assert_eq!(outline[0].0, "Greeter");
         assert_eq!(outline[0].1[0].0, "greet");
 
         // References map every target through the host.
-        let refs = editor.references("/proj/src/Main.java", &pos_of(main, "Greeter g"), true);
-        assert!(refs.iter().any(|(p, _)| p == "/proj/src/Greeter.java"));
+        let refs = editor.references(&key("src/Main.java"), &pos_of(main, "Greeter g"), true);
+        assert!(refs.iter().any(|(p, _)| p == "src/Greeter.java"));
 
         // An unknown path answers empty, never panicking.
-        assert!(editor.outline("/nowhere.java").is_empty());
-        assert!(editor.definition("/nowhere.java", &(0, 0)).is_none());
+        assert!(editor.outline(&key("nowhere.java")).is_empty());
+        assert!(editor.definition(&key("nowhere.java"), &(0, 0)).is_none());
     }
 
     #[test]
     fn diagnostics_render_through_the_host() {
-        let fs = InMemoryFileTree::new().with_file(
-            "/proj/src/Main.java",
+        let storage = memory(&[(
+            "src/Main.java",
             "class Main { void run() { int unused = 1; } }",
-        );
+        )]);
         let editor = Editor::load(
-            fs,
-            ProjectSpec::new("/proj", vec!["/proj/src".to_owned()]),
+            storage,
+            ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
             TupleHost,
         );
         let diags =
-            editor.diagnostics("/proj/src/Main.java", &jals_config::lint::Config::default());
+            editor.diagnostics(&key("src/Main.java"), &jals_config::lint::Config::default());
         assert!(
             diags.iter().any(|message| message.contains("unused")),
             "{diags:?}"
@@ -394,17 +360,17 @@ mod tests {
     #[test]
     fn signature_help_arrives_in_utf16() {
         let text = "class C { void f(int 値, int b) {} void g() { f(1, ); } }";
-        let fs = InMemoryFileTree::new().with_file("/proj/src/C.java", text);
+        let storage = memory(&[("src/C.java", text)]);
         let editor = Editor::load(
-            fs,
-            ProjectSpec::new("/proj", vec!["/proj/src".to_owned()]),
+            storage,
+            ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
             TupleHost,
         );
         let index = LineIndex::new(text);
         let offset = text.find("f(1, ").unwrap() + "f(1, ".len();
         let position = index.position(text, offset);
         let (active_signature, active_parameter) = editor
-            .signature_help("/proj/src/C.java", &(position.line, position.character))
+            .signature_help(&key("src/C.java"), &(position.line, position.character))
             .expect("signature help");
         assert_eq!((active_signature, active_parameter), (0, 1));
     }
@@ -414,14 +380,14 @@ mod tests {
         let editor = sample_editor();
         let main = "public class Main { void run() { Greeter g = new Greeter(); } }";
         let targets = editor
-            .rename_targets("/proj/src/Main.java", &pos_of(main, "Greeter g"))
+            .rename_targets(&key("src/Main.java"), &pos_of(main, "Greeter g"))
             .expect("renamable");
         assert!(targets.len() >= 3, "{targets:?}");
         // `String` is a stdlib name: not renamable.
         let greeter = "public class Greeter { public String greet(String name) { return name; } }";
         assert!(
             editor
-                .rename_targets("/proj/src/Greeter.java", &pos_of(greeter, "String name"))
+                .rename_targets(&key("src/Greeter.java"), &pos_of(greeter, "String name"))
                 .is_none()
         );
     }

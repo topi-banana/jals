@@ -7,20 +7,23 @@
 //! [`jals_decompile`] (`ConstantValue` initializers, declared `throws`, real parameter names, and
 //! straight-line method bodies reconstructed from bytecode; a body that cannot be reconstructed falls
 //! back to a placeholder suited to the method's shape). The host writes these to disk via
-//! [`SkeletonGroup::synthesize_classpath_sources_in`] (the wasm core) or
-//! [`SkeletonGroup::synthesize_classpath_sources`](crate::SkeletonGroup) (the native facade) and
+//! [`SkeletonGroup::synthesize`] and
 //! registers them as navigation files, so the existing source-location overlay points a classpath
 //! type/member at its synthesized declaration and jump-to-definition works even without library
 //! source. The output is always valid Java — an un-reconstructable member falls back to a safe form.
 //!
 //! The rendering is pure (driven entirely off [`jals_classfile`]'s public model); the public entry
-//! point [`SkeletonGroup::synthesize_classpath_sources_in`] adds the skip-if-exists tree writes on top,
-//! through a [`jals_fs::FileTree`]. One file is emitted per **top-level** type; nested types are
+//! point [`SkeletonGroup::synthesize`] publishes verified artifacts. One file is emitted per
+//! **top-level** type; nested types are
 //! inlined into their enclosing type's body so the dotted FQN the overlay keys on (`a.b.Outer.Inner`)
 //! lines up. Anonymous / local / synthetic / module classes are skipped.
 
-use std::collections::BTreeMap;
-use std::fmt::Write;
+use alloc::borrow::{Cow, ToOwned};
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::Write;
 
 use jals_classfile::{
     Attribute, ClassAccessFlags, ClassFile, ClassSignature, ConstantPool, FieldAccessFlags,
@@ -28,15 +31,21 @@ use jals_classfile::{
     ReturnType, TypeParameter, TypeSignature,
 };
 use jals_decompile::{Attrs, JavaType, MethodBody};
-use jals_fs::{FileTree, path};
+use jals_storage::{ArtifactCache, CacheBackend, CacheNamespace, RelativePath};
 
-use crate::resolve::DepsCache;
+use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
+
+/// Skeleton generation is resilient: invalid class names or cache failures are diagnosed and skipped.
+#[derive(Debug, Default)]
+pub struct Skeletons {
+    pub sources: Vec<LibrarySource>,
+    pub warnings: Vec<Warning>,
+}
 
 /// One top-level type's worth of class files, ready to render into a single `.java`.
 ///
-/// Its output path plus the members (the top-level type and its inlined nested types). Splitting the
-/// cheap grouping ([`SkeletonGroup::groups`]) from the body rendering ([`SkeletonGroup::render`]) lets
-/// the host skip rendering a skeleton that is already cached on disk.
+/// Its output path plus the members (the top-level type and its inlined nested types). Grouping and
+/// rendering are separate internal passes so one cache artifact corresponds to one top-level type.
 pub struct SkeletonGroup<'a> {
     /// The package, dotted (`a.b`); empty for the default package.
     package: String,
@@ -47,46 +56,40 @@ pub struct SkeletonGroup<'a> {
 }
 
 impl SkeletonGroup<'_> {
-    /// Synthesize signature-only `.java` **skeletons** for `classes` (already-parsed classpath class
-    /// files) and write them under `<root>/target/jals/deps/decompiled`, reading/writing through `fs`.
-    ///
-    /// Returns the written `.java` paths for the host to register as go-to-definition targets.
-    ///
-    /// Takes the project `root` and derives the cache subdir itself, mirroring the sibling
-    /// `resolve_project_*_in` orchestrators (so the cache layout lives in one place — the core, next to
-    /// [`DepsCache`]).
-    ///
-    /// One `.java` per top-level type (nested types inlined), carrying every member's signature.
-    /// Idempotent (skip-if-exists) and error-resilient — a class that fails to write is reported
-    /// through `warn` and skipped. Pure rendering plus tree writes; no network.
-    pub fn synthesize_classpath_sources_in(
-        fs: &mut dyn FileTree,
+    /// Render and publish one source artifact per top-level type.
+    pub fn synthesize<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
         classes: &[ClassFile],
-        root: &str,
-        mut warn: impl FnMut(String),
-    ) -> Vec<String> {
-        let dest_dir = path::VPath::join(&DepsCache::dir(root), "decompiled");
-        let mut out = Vec::new();
+    ) -> Skeletons {
+        let mut out = Skeletons::default();
         for group in Self::groups(classes) {
             let rel = group.rel_path();
-            let dest = path::VPath::join(&dest_dir, &rel);
-            // Already synthesized (a class file does not change under us): reuse the cached file.
-            if fs.is_file(&dest) {
-                out.push(dest);
+            let Ok(path) = RelativePath::parse(&rel) else {
+                out.warnings.push(Warning::new(
+                    WarningOrigin::Skeleton,
+                    format!("generated source path is not portable: {rel}"),
+                ));
                 continue;
-            }
-            match fs.write(&dest, group.render().as_bytes()) {
-                Ok(()) => out.push(dest),
-                Err(err) => warn(format!("{dest}: {err}")),
+            };
+            let bytes = group.render().into_bytes();
+            let key = DependencyResolver::cache_key(
+                CacheNamespace::Skeleton,
+                b"skeleton\0",
+                path.to_string().as_bytes(),
+                &bytes,
+            );
+            match cache.publish(&key, &bytes) {
+                Ok(()) => out.sources.push(LibrarySource { path, key }),
+                Err(error) => out.warnings.push(Warning::new(
+                    WarningOrigin::Skeleton,
+                    format!("failed to publish generated source `{path}`: {error:?}"),
+                )),
             }
         }
         out
     }
 
-    /// Where to write the file, relative to the decompiled-sources root — the package as `/`-separated
-    /// directories plus `<TopLevel>.java`, so the on-disk layout mirrors the package (`a/b/Outer.java`).
-    /// A virtual `/`-path, so the caller joins it onto a [`jals_fs::FileTree`] dir without a
-    /// `PathBuf` round-trip.
+    /// The typed-artifact display path: package segments plus `<TopLevel>.java`.
     fn rel_path(&self) -> String {
         let mut path = String::new();
         if !self.package.is_empty() {
@@ -105,7 +108,12 @@ impl SkeletonGroup<'_> {
         if !self.package.is_empty() {
             let _ = writeln!(text, "package {};\n", self.package);
         }
-        Self::render_type(&mut text, &self.members, std::slice::from_ref(&self.top), 0);
+        Self::render_type(
+            &mut text,
+            &self.members,
+            core::slice::from_ref(&self.top),
+            0,
+        );
         text
     }
 
@@ -132,7 +140,7 @@ impl SkeletonGroup<'_> {
             // Only keep a group whose top-level type itself is present, so every nested FQN nests under
             // a real declaration (an orphan inner whose outer was not loaded would otherwise get a wrong
             // FQN).
-            .filter(|((_, top), members)| members.contains_key(std::slice::from_ref(top)))
+            .filter(|((_, top), members)| members.contains_key(core::slice::from_ref(top)))
             .map(|((package, top), members)| SkeletonGroup {
                 package,
                 top,
@@ -296,7 +304,7 @@ impl SkeletonGroup<'_> {
                 .fields
                 .iter()
                 .filter(|f| f.access_flags.is_enum())
-                .filter_map(|f| pool.utf8(f.name_index).map(std::borrow::Cow::into_owned))
+                .filter_map(|f| pool.utf8(f.name_index).map(Cow::into_owned))
                 .collect();
             if !constants.is_empty() {
                 let _ = writeln!(out, "{pad}{};", constants.join(", "));
@@ -308,10 +316,7 @@ impl SkeletonGroup<'_> {
             if flags.is_enum() || flags.contains(FieldAccessFlags::SYNTHETIC) {
                 continue;
             }
-            let Some(name) = pool
-                .utf8(field.name_index)
-                .map(std::borrow::Cow::into_owned)
-            else {
+            let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
                 continue;
             };
             let ty = Self::field_type_java(&field.attributes, field.descriptor_index, pool);
@@ -334,10 +339,7 @@ impl SkeletonGroup<'_> {
             {
                 continue;
             }
-            let Some(raw_name) = pool
-                .utf8(method.name_index)
-                .map(std::borrow::Cow::into_owned)
-            else {
+            let Some(raw_name) = pool.utf8(method.name_index).map(Cow::into_owned) else {
                 continue;
             };
             if raw_name == "<clinit>" {

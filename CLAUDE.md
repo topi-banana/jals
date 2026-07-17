@@ -1,246 +1,94 @@
 # CLAUDE.md
 
-Guidance for Claude Code (and other agents) working in this repository.
+Guidance for agents working in this repository.
 
-## What this is
+## Architecture
 
-`jals` is a Rust workspace providing Java tooling built on a **lossless, error-resilient**
-syntax tree. A hand-written lexer and `rowan` CST parser (`jals-syntax`) feed a Wadler/Prettier
-pretty-printer (`jals-fmt`), exposed through the `jals` CLI (`jals-cli`). An LSP server
-(`jals-lsp`, run via `jals lsp`) and a linter (`jals-lint`) are other consumers. Name resolution and
-type analysis (`jals-hir`) are the foundation for semantic tooling — go-to-definition, unused-binding
-lints, and type inference/checking.
+`jals` is a Rust workspace for Java parsing, formatting, linting, semantic analysis, LSP, and a
+Cargo-like build frontend. The lossless `jals-syntax` CST is shared by `jals-fmt`, `jals-hir`,
+`jals-lint`, `jals-editor`, the CLI, the LSP, and the browser playground.
 
-- Edition 2024, resolver 3, workspace version `0.1.0`. Needs Rust 1.85+.
-- Crate graph: `jals-cli` → `{jals-fmt, jals-lint, jals-lsp, jals-build, jals-config, jals-hir, jals-classpath, jals-fs, jals-syntax}`;
-  `jals-lsp` → `{jals-editor, jals-fmt, jals-build, jals-config, jals-hir, jals-classpath, jals-classfile, jals-fs}`;
-  `jals-editor` → `{jals-config, jals-fs, jals-hir, jals-lint, jals-syntax}`;
-  `jals-lint` → `{jals-config, jals-hir, jals-syntax}`; `jals-hir` → `{jals-syntax, jals-classfile, jals-decompile}`;
-  `jals-fmt` → `{jals-config, jals-syntax}`; `jals-build` → `{jals-config, jals-fs}`; `jals-config` → `{jals-fs}`.
-  `jals-editor` is the **protocol-neutral editor core** (pure/`no_std`, wasm32) both editor hosts are
-  thin adapters over: it owns the workspace lifecycle (`Workspace<F: FileTree>` — file identity via
-  three disjoint `FileId` spaces, per-file parse/resolution/facts caches, incremental
-  `ProjectIndex::assemble` rebuilds, classpath/feature folding), the semantic queries
-  (`ProjectQueries`: definition/references/hover/completions/signature help/highlights/rename
-  gating), the canonical diagnostics assembly (`FileDiagnostics` — the one syntax + lint-engine +
-  unresolved-types policy), document outline (`Outline`), semantic-token classification
-  (`SemanticTokens`), folding (`Folds`), selection chains (`SelectionChains`), UTF-8↔UTF-16
-  coordinates (`LineIndex`), and the **`EditorHost` trait family** (`EditorHost` +
-  `SemanticTokensHost`/`FoldingHost`/`SelectionHost`) with the `Editor<F, H>` facade that drives
-  every query in the host's own protocol types — `jals-lsp` implements `LspHost`, the playground
-  `MonacoHost`, and neither re-implements any analysis sequencing.
-  `jals-config` is a **pure/`no_std`** crate that owns the **data model + parsing + discovery + validation**
-  for all three config files (`jals.toml` `Manifest`, `jalsfmt.toml` `fmt::Config`, `jalslint.toml`
-  `lint::Config` + `Severity`), plus the shared `ConfigError`, the generic `load`/`discover` loaders,
-  and the **`ConfigResolver<C>`** per-directory memoized discovery (explicit `--config` override +
-  upward-walk cache; invalidation policy stays host-side — the CLI never clears, the LSP clears on a
-  watched config-file change) every host shares — a
-  single crate a future config-file LSP can build on. `jals-fs` is a leaf (no deps): a `FileTree`
-  virtual-filesystem trait with an `InMemoryFileTree` (pure/`no_std`) and a `std`-gated `OsFileTree`,
-  through which `jals-config`'s config loaders and `jals-lsp`'s source-root walk read files.
-  `jals-build` has no `jals-syntax` dependency (it only orchestrates `javac`/`java`); it depends on
-  `jals-config` for the `Manifest` model and adds the host-only, `std::path`-based `ManifestExt` on top,
-  plus `jals-fs` for the `FileTree` its in-process `BuiltinToolchain` backend copies through (the
-  `std`/`OsFileTree` half only under its `native` feature).
-  `jals-classfile` is a leaf (only `serde`): a complete, byte-exact read/write model of the JVM
-  `.class` format (JVMS ch. 4), feeding `jals-hir`'s classpath bridge.
-  `jals-decompile` is a **pure, `wasm32`-compatible** crate (depends only on `jals-classfile`) that
-  reconstructs readable Java from a parsed `.class`: the shared descriptor/signature → Java type
-  renderer, the attribute readers a skeleton needs (`ConstantValue` initializers, declared `throws`,
-  real parameter names), and (in later phases) method-body decompilation from bytecode. It never
-  panics and is conservative — an un-renderable construct reports itself so the host emits a safe
-  fallback. Consumed by `jals-classpath` (`skeleton.rs`).
-  `jals-classpath` is now a **capability-abstracted** crate whose resolution core is
-  **`wasm32`-compatible** (`jals-build` + `jals-classfile` + `jals-decompile` + `jals-fs` + `zip`): all
-  its filesystem access goes through a `jals_fs::FileTree` (reads/writes `/`-separated virtual paths;
-  jars are unzipped from an in-memory `Cursor`, never a `std::fs::File`; directory walks use
-  `FileTree::walk_ext`, so `walkdir` is gone), and the two host-only capabilities — HTTP download and
-  `git` — are injected behind the **`Fetcher`** (async; the sole async step) and **`Git`** (sync,
-  `Option<&dyn Git>`) traits. The **default `native` feature** supplies the host implementations
-  (`ReqwestFetcher` wrapping `reqwest::blocking`, `SubprocessGit` shelling out to `git`, an
-  `OsFileTree`) and re-exports synchronous, `PathBuf`-based facades with the crate's historic
-  signatures (they `futures::executor::block_on` the async core), so `jals-cli`/`jals-lsp` are
-  unchanged; the browser playground uses the crate with `default-features = false` and drives the core
-  with an `InMemoryFileTree` + a `fetch`-backed `Fetcher`. It reads a project's classpath `.class`
-  files out of jars and directories and parses them, and **resolves `[dependencies]`** (`resolve_dependencies` — local
-  `file://`/path jars, and remote `https://` jars downloaded with `reqwest` into a `target/jals/deps`
-  cache), the I/O half of that bridge; it also **resolves + extracts each dependency's optional
-  `sources` jar** (`resolve_project_sources` → `extract_sources`, the library `.java` for editor
-  go-to-definition) **and resolves the `git`/`path` source forms** (`resolve_project_source_deps` —
-  clones each `git` repo into `target/jals/deps/git`, checks out its `branch`/`tag`/`rev`, reads each
-  `path` in place, and returns the located `.java`) — consumed by `jals-cli` (`jals lint` uses jars
-  only; `jals build`/`run` also compile the `git`/`path` source `.java` as extra `javac` sources) and
-  `jals-lsp` (which also folds the `git`/`path` source `.java` into its index; the `sources` jars are
-  LSP-only).
-  `jals-playground` is a separate
-  Yew/Trunk browser app that runs `jals-fmt`/`jals-syntax` in the browser. It targets `wasm32`
-  but also compiles on the host, so `--workspace` build/clippy/test all include it.
+Project data is owned by `jals-storage`. It is not a generic VFS:
 
-## Architecture map
+- `Name`, `RelativePath`, `FileKey`, and `DirKey` are the only portable logical locations.
+- `CodeTree` is an immutable, ordered snapshot containing directories and file bytes.
+- `ProjectStorage<S, C>` owns the base snapshot, editor overlay, artifact cache, and `Revision`.
+- `MemorySource`/`MemoryCache` and `NativeSource`/`NativeCache` are sealed adapters implementing
+  the same contract. Do not add consumer-defined backends.
+- Native filesystem changes become visible only through `refresh()`. Existing `ProjectView`s must
+  remain unchanged.
+- Mutations use `transaction(expected_revision)` or overlay operations. A stale revision is an
+  error, and a failed persistence operation must not publish a logical revision.
+- `ArtifactCache` uses SHA-256 `ContentDigest` and typed `CacheKey` namespaces. Use verified
+  `lookup` and write-once `publish`; never implement `contains` followed by `write`. The advisory
+  locator index (`indexed_key`/`record_index`, last-writer-wins) only recovers the content half of
+  a key from its provenance; bytes are still read through verified `lookup`.
 
-| Area | Where | Notes |
-| --- | --- | --- |
-| Lexer | `jals-syntax/src/lexer.rs`, `token.rs` | Hand-written, lossless; trivia are real tokens. Context-sensitive keywords lexed as `IDENT`, promoted later. |
-| Token/node kinds | `jals-syntax/src/syntax_kind.rs` | Unified `SyntaxKind` (u16) for `rowan`; `TokenKind` is terminals only. |
-| Parser | `jals-syntax/src/parser/` | Recursive descent. `grammar.rs` is the rules; `mod.rs` the core; `event.rs`/`sink.rs` build the green tree. Error-resilient. |
-| Typed AST | `jals-syntax/java.ungram`, `jals-syntax/src/ast/` | Zero-cost newtype views over the CST. `ast/generated.rs` is rendered from `java.ungram` by `cargo run -p xtask -- codegen` (committed; CI checks drift); bespoke accessors live in `ast/ext.rs`. Accessors return `Option`/iterators, never panic. |
-| Formatter pipeline | `jals-fmt/src/lower.rs` → `doc.rs` → `render.rs` | CST → `Doc` IR → text. |
-| Import layout | `jals-fmt/src/imports.rs` | Pure ordering/grouping of the leading import run (`reorder-imports` / `group-imports`) + its `Doc` emission. |
-| Modifier layout | `jals-fmt/src/modifiers.rs` | Pure canonical reordering of a `MODIFIERS` node's keyword modifiers (`reorder-modifiers`), annotations hoisted to the front, + its `Doc` emission. |
-| Comment attachment | `jals-fmt/src/comments.rs` | Anchors each comment to a significant token exactly once. |
-| Config models | `jals-config/src/` | The **schema + parsing + discovery + validation** for all three config files, in one pure/`no_std` crate (a future config-file LSP builds on it). `fmt::Config` (`jalsfmt.toml`, moved from `jals-fmt`) + its option enums, `lint::Config` (`jalslint.toml`) + the `Severity` value enum, and the `Manifest` (`jals.toml`) serde model + `validate` + `FromStr` + `ManifestParseError` (moved from `jals-build`), including the `[toolchain]` selectors (`toolchain.rs`: the `Toolchain` struct's two fields are the defaulted, **purely serde-derived** enums `Compiler`/`Runtime` — the keyword variants `"system"` (default) / `"builtin"` (the in-process backend) plus the tagged-table forms `{ path = "…" }` / `{ distribution = { name, version } }` (shared `Distribution` struct); no hand-written (de)serialization or string classification anywhere. `spec()` lowers a program-selecting variant to the borrowed, non-serde `ToolSpec<'_>` view `jals-build`'s resolver consumes; matching the enum is how `jals-build` picks a backend). `loader.rs` holds the shared `ConfigError` (wraps `jals_fs::FsError` / `toml::de::Error`) and the generic `load<T>` / `discover<T>` (an upward walk for a filename), backing every config's `from_file`/`discover` — all read through a `jals_fs::FileTree` (`&dyn FileTree`, `/`-separated `&str` paths), no direct `std::fs`. Kebab-case keys, all optional. The consuming crates keep the *behavior*: `jals-fmt` formats with `fmt::Config` (re-aliased internally as `crate::config`), `jals-lint` lints with `lint::Config` and re-exports `Severity` through `diagnostic`, and `jals-build`'s `ManifestExt` adds the host `std::path` resolution. Consumers import config types from `jals_config::` directly (no back-compat re-exports). |
-| Virtual filesystem | `jals-fs/src/` | `FileTree` trait (`read_to_string`/`read`/`is_file`/`is_dir`/`read_dir`/`walk_ext`/`write`) over `/`-separated UTF-8 `&str` virtual paths. `InMemoryFileTree` (pure `core`/`alloc`, `BTreeMap`-backed, `no_std`/`wasm32`) and a `std`-gated `OsFileTree` (synchronous `std::fs`; `write` is **atomic** — a `.part` sibling renamed into place — so "the file exists" implies it is complete, which the classpath cache's skip-if-exists relies on; `InMemoryFileTree::write` is atomic by construction). Object-safe; free path helpers in `path.rs` (`parent`/`file_name`/`extension`/`join`) mirror `std::path::Path`. Consumed by `jals-fmt`/`jals-lint` config loaders and `jals-lsp` (`Workspace<F: FileTree = OsFileTree>` — `load_in` builds the whole workspace off any tree). |
-| Name resolution + types (HIR) | `jals-hir/src/` | Three layers, all pure/wasm-compatible/never-panic. **File-local resolution** (`resolve`/`resolve_node` → `Resolved`: `defs`, `scopes`, `references`): two-pass — `resolve/build.rs` builds scopes and registers defs (recording each reference with its scope), then each reference is looked up its scope chain; value/method/type namespaces, sequential (block/for/resources) vs. hoisting scopes. **Project index** (`ProjectIndex::builder(…).build()` over many `(FileId, SyntaxNode)`, or `.with_stdlib()` to also fold in embedded `java.lang`/`java.util` signature stubs as `ItemOrigin::Stdlib` items — see `stdlib.rs`): cross-file type-name + member resolution. **Type inference/checking** (`infer`/`infer_node` → `TypeInference`; `type_mismatches`): a structural `Ty` per expr/decl and assignment-conversion checks (`Ty::is_assignable_to`, return/initializer/call-argument, overload resolution). Conservative — un-inferable types are `Ty::Unknown` and never flagged. Generics **are** modelled: a class type carries its type arguments and member access substitutes them down the supertype chain (`List<String>.get(0)` → `String`), and assignment enforces same-nominal type-argument invariance (`List<String>` ↛ `List<Object>`). Standard-library types resolve through the stubs (precise for inference/hover) but are treated leniently in type checking — a stub `Ty` is demoted to external for assignability and counted as an incomplete method set — so the deliberately-partial stubs (autoboxing, an omitted supertype) never yield a false mismatch. **Constant-`if` analysis** (`dead_if.rs`, `dead_ifs(root, resolved)` → `Vec<DeadIf>`): a small constant evaluator (boolean/integer literals with Java width semantics, parens, `!`/unary `-`, three-valued `&&`/`||`, integer comparisons, same-file `final` constant variables through `Resolved` with a cycle guard) names each `if` whose condition is provably constant plus its dead branch — conservative, `if`-only; consumed by the linter's `constant-condition`. **Classpath bridge** (`classpath.rs`, `ProjectIndex::builder().with_classpath()`): external-library types can be folded in from their compiled `.class` files — each `jals_classfile::ClassFile` is lowered to an `ItemOrigin::Classpath` item with its members, supertypes, and generic signatures decoded through `jals-classfile`, so e.g. a loaded `java/util/List` resolves `List<String>.get(0)` to `String`. Unlike a stub, a classpath type's member set is complete, so it is treated precisely (not demoted). The host supplies the already-parsed class files (it owns the JAR/file I/O); `jals-classpath` reads them from a project's `[build] classpath` jars/dirs **and from `[dependencies]`** (local `file://` jars and remote `https://` jars it downloads), wired into `jals lint`/`build`/`run` and the LSP. **Source-location overlay** (`SourceLocations`, `index_source_locations`, `.with_source_locations()`): a classpath item/member normally has no host-openable source (reserved `FileId`, `0..0` range), but when a dependency's `sources` jar is available the host feeds the extracted library `.java` trees in, and each `.class`-derived `Item`/`Member` gets a `source_location: Option<(FileId, Range)>` pointing at the matching `.java` declaration (types by FQN, members by `(fqn, name, param-count)` with a name-only fallback). Typing stays authoritative from the `.class` (`file`/`name_range` — the member-resolution context — are untouched); the overlay only adds a real go-to-definition target, so `definition_at` navigates a classpath type into its source (and the LSP navigates members likewise). **Source-dependency folding** (`.with_source_deps()`): the `.java` of a `git`/`path` `[dependencies]` entry is indexed as `ItemOrigin::Source` items — typed from real source (complete member set, treated precisely like a classpath type, *not* leniently like a stub) and navigable at their own `file`/`name_range` (no overlay needed), so the project resolves their types for inference/hover/completion and go-to-definition lands in the real source; on a fully-qualified-name clash a project type wins over a source type wins over a stub. They are external — the host never lints or renames them (`definition_at` treats `Source` like `Project` for navigation; the LSP's rename/find-references are restricted to `Project`-origin items). Still un-modelled: target-typed forms (lambdas/method refs/switch exprs → `Unknown`), type-parameter bounds, wildcard variance, cross-nominal type-argument propagation, generic-method inference, **Maven-coordinate dependency resolution** (`[dependencies]` takes explicit `{ jar }`, `{ git, branch/tag/rev, dir }`, and `{ path, dir }` forms so far — no `group:artifact:version` / transitive resolution / lockfile yet), and **JDK** classpath *discovery* (locating the JDK's `jimage`/`modules` is host-side and not yet wired — the embedded `java.lang`/`java.util` stubs stand in for it; `[build] classpath` jars/dirs and `[dependencies]` jars **are** now loaded, and `git`/`path` source deps folded into the LSP index). |
-| Linter | `jals-lint/src/` | Rule registry (`rules/mod.rs`, `RuleMeta` with a `Checker` per rule — syntactic, resolution-based, index-aware, or **feature-gated** (`Checker::Gated`)) over the CST; `lint_source`/`lint_node` return byte-range `Diagnostic`s. File-local name resolution is computed at most once per lint and shared across rules. `jalslint.toml`, kebab-case keys, all optional. Pure, wasm-compatible. The `unused-local`, `type-mismatch`, `unreported-exception`, and `constant-condition` rules consume `jals-hir`; `lint_parse_with_index` runs `type-mismatch` and `unreported-exception` against a caller-supplied `ProjectIndex` for cross-file checks. `constant-condition` (`Checker::Resolved`, delegates to `jals_hir::dead_ifs`) flags an `if` whose condition folds to a constant — boolean/integer literals, parens, `!`, short-circuit `&&`/`||` (three-valued), integer comparisons, and same-file `final` constant variables (via `Resolved`; cyclic initializers terminate) — conservative, `if`-only (`while (true)` is idiomatic and never flagged); the dead branch rides on the finding as `Diagnostic::unnecessary_range` (a secondary byte range + message every other rule leaves `None`), which the LSP renders as faded code; `unused-local` instead marks its own range `Diagnostic::unnecessary`, so consumers fade it in place. `unreported-exception` (index-aware, `Checker::Indexed`, delegates to `jals_hir::unreported_exceptions`) flags a **checked exception** — a `Throwable` that is not a `RuntimeException`/`Error`, classified via `ProjectIndex::is_subtype` over the stdlib/project exception hierarchy — that a method/constructor body raises (a `throw`, or a call/`new` whose resolved `throws` propagates it) but neither declares in its `throws` clause nor catches with an enclosing `try`/`catch`; conservative (an un-classifiable or possibly-caught raise is never reported). It needs the stdlib stubs (now covering the common `java.lang`/`java.io` exception subclasses) and the new `Member::throws` field (populated from a source `throws` clause and a classpath method's `Exceptions` attribute via `jals-decompile::declared_throws`). The `compact-source-file` and `module-import` rules are feature-gated: the host injects the project's resolved `FeatureSet` as `Config::features` (from `[package] features`, **not** a `jalslint.toml` key — it is `#[serde(skip)]`), and each names the `Feature` it guards (`Checker::Gated`), flagged as an error when that feature is absent from the set — `compact-source-file` a compact source file's top-level members (a top-level `main` / field / method, JEP 512, `Feature::CompactSourceFiles`), `module-import` a module import declaration (`import module …;`, JEP 511, `Feature::ModuleImports`, detected via `ImportDecl::is_module()`); an empty set (no `[package] features`) or an enabling entry (the feature itself, or a release preset ≥ `java25`) never fires. |
-| Classfile (read/write) | `jals-classfile/src/` | A complete, **byte-exact round-trip** model of the JVM `.class` format (JVMS ch. 4): a hand-written big-endian codec (`ClassFile::read`/`write` over `bytes.rs`, no external byte crate) into a full struct/enum model — constant pool (1-based, `Long`/`Double` two-slot quirk absorbed in `constant_pool.rs`), every standard `attribute.rs` attribute (incl. `stackmap.rs`, annotations) with an `Unknown` raw-bytes fallback, and decoded bytecode (`instruction.rs`, all opcodes + `wide` + switch alignment; `Instruction::encoded_len(pc)` gives an instruction's byte length — matching `write` — for reconstructing per-instruction offsets, e.g. resolving branch targets in `jals-decompile`). Counts / byte-lengths are derived on write, never stored. Every type also derives `serde::{Serialize, Deserialize}` (the struct⇄JSON medium; serde is **not** the binary codec). `descriptor.rs` (§4.3) / `signature.rs` (§4.7.9) parse field/method descriptors and generic signatures. Pure, wasm-compatible, never panics on bad bytes (returns `Err`). Consumed by `jals-hir`'s classpath bridge; the host reads `.class` bytes from disk/JARs via `jals-classpath`. |
-| Decompiler | `jals-decompile/src/` | Reconstructs readable Java from a parsed `jals_classfile::ClassFile`. Pure, `wasm32`-compatible, never panics. `types.rs` renders a descriptor / generic signature to a Java type reference (the vocabulary shared with `jals-classpath`'s `skeleton.rs`); `literal.rs` renders constant-pool constants as Java literals; `attrs.rs` reads the attributes a signature skeleton needs but bytecode analysis does not — `constant_value_initializer` (`ConstantValue` → Java initializer, a boolean's `1`→`true`, suffixes/escaping), `declared_throws` (`Exceptions` → dotted `throws`), `parameter_names` (`MethodParameters`, else `LocalVariableTable`, slot-aware). `body.rs` + `expr.rs` + `cfg.rs` are the **method-body decompiler** (`decompile_method_body`): a per-block stack machine (`Sim`) symbolically executes each basic block into an expression/statement IR (loads, local stores/`iinc`, constants, field get/put, invokes, `new`/`dup`/`<init>`, arithmetic/casts, `checkcast` incl. array types, array element reads/writes (`arr[i]` / `arr[i] = v`), array creation (`newarray`/`anewarray`/`multianewarray` → `new int[n]`/`new int[a][b]`/`new int[n][]`) with `javac`'s element-store runs folded into `new T[]{…}` initializers (complete sequential fills only — a partial/out-of-order fill, e.g. ECJ's default-skipping, bails), `return`/`throw`, `super()`/`this()`, string concatenation — an `invokedynamic` `StringConcatFactory.makeConcatWithConstants`/`makeConcat` call site resolves its recipe through `BootstrapMethods` (`\u0001` = stacked operand, `\u0002` = trailing constant), and a concat-safe `StringBuilder` append chain on a fresh `new StringBuilder()` folds at its `toString()` — both back into `a + b + …`, seeded with `""` when no `String`-typed operand anchors the first `+` and re-rendering `boolean`/`char` int constants as `true`/`'x'`; an unfolded builder chain re-renders as its original calls), and a `Structurer` over the `cfg`-built basic blocks (offsets from `Instruction::encoded_len`) recovers structured Java — a straight-line method is one block, **forward conditional branches become `if` / `if`-`else`** (condition recovered as the negation of the branch's jump test), **back-edges become `while` / `do`-`while` loops**, and **a `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` ending a conditional-branch block fuses with that branch into one source `long`/`float`/`double` comparison** (`lhs <op> rhs`, the operator from the `if<cond>`; a rendered ordering operator whose true side would capture NaN — a flavor `javac` never pairs, e.g. `!(a < b)` = `fcmpg`+`iflt` — bails), rendered with conservative parenthesization. Local variables are recovered by **hoisting** — every non-parameter slot a method stores into gets one typed declaration (name/type from the `LocalVariableTable`) at the method-body top, and each store becomes an assignment, so a local written in a branch and read after the join stays in scope. Every step is **conservative**: it returns `None` on anything it cannot model (a `switch`, an exception handler, a compound element store like `arr[i]++` (`dup2`), a non-string-concat `invokedynamic` (a lambda/method ref), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge), a `break`/`continue` or nested/irreducible loop, a local with no usable `LocalVariableTable` entry, a parameter-count mismatch, or a block reached more than once), so the caller falls back to a safe body and the output always parses. Remaining for later milestones: `switch`, `try`/`catch`, richer loops (`break`/`continue`, nested, `for`). |
-| Classpath loading | `jals-classpath/src/{io,load,resolve,native}.rs` | **Capability-abstracted**: the core (`io.rs` traits, `load.rs`, `resolve.rs`) is pure and `wasm32`-compatible — all I/O through a `jals_fs::FileTree` (`*_in` fns over `&dyn FileTree`, `/`-separated `&str` paths; jars unzipped from an in-memory `Cursor`; `Warning.path` is a `String`), with HTTP and `git` injected behind the async `Fetcher` and sync `Git` traits (the only async step is the download). The default `native` feature (`native.rs`) supplies `ReqwestFetcher`/`SubprocessGit`/`OsFileTree` and re-exports the historic `PathBuf`-based facades (`block_on`-ing the async core), so consumers are unchanged. `load_classpath(entries)` (facade over `load_classpath_in`) turns a project's resolved classpath entries (`Manifest::classpath_entries`) into parsed `jals_classfile::ClassFile`s for the HIR bridge: a **directory** is walked for `*.class`, a **jar/zip** has its `*.class` members inflated and read, a bare **`.class`** file is read directly. `resolve_dependencies(sources, cache_dir)` (`resolve.rs`) resolves a manifest's `[dependencies]` (classified purely by `Manifest::dependency_sources`) to local jar paths: a `file://`/path source is confirmed to exist, an `https://`/`http://` source is downloaded with `reqwest`'s **blocking** client into `cache_dir` (`<name>-<url-hash>.jar`, skip-if-exists, atomic `.part`→rename), then the host appends those jars to the classpath fed to `load_classpath`. Error-resilient — an unreadable jar / corrupt class / missing entry / failed download becomes a `Warning` and is skipped, never aborting. `reqwest::blocking` panics inside a Tokio runtime, so `jals-lsp` calls `resolve_dependencies` on a dedicated `std::thread` (`jals-cli` is sync and calls it directly). The pure analysis layers (`jals-hir`) only ever see the already-parsed class files. **Bundled jars** (`recursive = true` on a `jar` dependency): `resolve_project_dependencies` makes a second pass over the `recursive`-flagged jars (`Manifest::recursive_jar_dependencies`), and `extract_nested_jars(jar, dest)` recursively unpacks each one's `*.jar` members — the nested jars a fat jar bundles (e.g. `BOOT-INF/lib/*.jar`) that `load_classpath` would otherwise skip — into `target/jals/deps/nested/<jar>-<hash>/…` (skip-if-exists, atomic write, zip-slip-sanitized, depth-capped), at any depth, and appends them to the classpath, so the bundled libraries are folded into both compile (`jals build`/`run`) and analysis (`jals lint`/LSP) through the shared `resolve_project_dependencies`. **Sources jars** (LSP-only, for go-to-definition into library source): `resolve_project_sources` resolves each dependency's optional `sources` jar the same way (`Manifest::dependency_source_jars` → `resolve_dependencies`), then `extract_sources(jars, dest)` inflates its `*.java` members into `target/jals/deps/sources/<jar>-<hash>/…` (skip-if-exists, atomic write, zip-slip-sanitized), returning the extracted `.java` paths the host registers as navigation files. **Decompiled skeletons** (LSP-only, the fallback when a jar ships *no* `sources`): `synthesize_classpath_sources(classes, root, warn)` writes a `.java` **skeleton** for the loaded classpath `.class` files — `skeleton.rs` is the pure renderer (`skeleton_groups` plans one `SkeletonGroup` per top-level type, each rendered on demand so a skeleton already cached on disk is never re-rendered): one file per top-level type (nested types inlined so dotted FQNs line up), every type/member declaration, driven off `jals_classfile`'s descriptors/signatures/flags (via `jals-decompile`) — into `target/jals/deps/decompiled/<pkg>/<Outer>.java` (skip-if-exists, atomic write); the host appends these to its navigation files **after** the real `-sources.jar` `.java`, so the first-declaration-wins `SourceLocations` overlay keeps real source authoritative and skeletons only fill the gaps, making go-to-definition land somewhere for *any* library type. Members carry increasingly real bodies (an ongoing decompiler in `jals-decompile`, delivered in milestones): **M0** (done) reflects the attributes a signature needs — `ConstantValue` field initializers, declared `throws` (`Exceptions`), real parameter names (`MethodParameters`/`LocalVariableTable`) — and gives every method a placeholder body suited to its shape; **M1** (done) reconstructs the real body of a **straight-line** method (single basic block) from its bytecode via a stack machine (`decompile_method_body`) — getters/setters/field-storing constructors/arithmetic returns/`throw`s become actual Java. **M2** (done) adds CFG-based control-flow structuring (forward conditional branches → `if` / `if`-`else`); **M3** (done) reconstructs local variables (hoisted typed declarations from the `LocalVariableTable`, stores as assignments, `iinc`); **M4** (done) recovers natural loops (`while` / `do`-`while`); **M5** (done) adds array operations (element reads/writes, `newarray`/`anewarray`/`multianewarray` creation, folded `new T[]{…}` initializers, array-typed `checkcast`); **M6** (done) folds string concatenation — `invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes (resolved through `BootstrapMethods`) and `StringBuilder` append chains — back into `a + b + …`; **M7** (done) recovers `long`/`float`/`double` comparison conditions (a `*cmp` fused into the following `if<cond>`, NaN-exact flavors only); `switch`, `try`/`catch`, and richer loops (`break`/`continue`, nested, `for`) still fall back to the M0 placeholder for now. The invariant across all milestones: the output is **always valid Java** (`jals_syntax::parse` clean) — an un-reconstructable method falls back per-method to the safe body rather than emit broken source — and the skeleton stays navigation-only (typing is authoritative from the `.class`, never the parsed skeleton). **Source dependencies** (`git`/`path`): `resolve_project_source_deps` (`resolve.rs`, classified by `Manifest::dependency_source_dirs`) clones each `git` repo (`git clone` + `git checkout <branch/tag/rev>` via `std::process`, into `target/jals/deps/git/<name>-<hash(url,ref)>`, skip-if-exists, `.part`→rename) or reads each `path` in place, locates the `.java` source root (explicit `dir`, else `src/main/java` → `src` → the root), and returns every `*.java` under it. `jals-lsp` folds these into the index as `Source` types (for analysis + navigation), and `jals-cli`'s `jals build`/`run` pass them to `javac` as extra sources (compiled alongside the project into `classes-dir`) — they are **not** a `jals lint` input. `git` is a subprocess (not `reqwest`), so it does not itself need a dedicated thread, but `jals-lsp` resolves it on the same off-Tokio thread as the jar/sources downloads. |
-| Build/compile | `jals-build/src/` | The host-only, `std::path`-based build layer over the `jals_config::Manifest` model (the `jals.toml` serde model, `validate`, and `FromStr` now live in `jals-config`, `no_std`). `manifest_ext.rs`'s **`ManifestExt`** extension trait (impl'd for `jals_config::Manifest`, brought into scope alongside it) is the historic path-based API: `ManifestExt::from_file` (reads the file with `std::fs`, delegates parse+validation to `jals_config`'s `FromStr`, re-stamps errors with the real `PathBuf` into `ManifestError`), `discover_path`, `source_roots`/`classpath_entries`, and the dependency classifiers `dependency_sources`/`dependency_source_jars`/`dependency_source_dirs` (with the `PathBuf`-carrying `DependencySource`/`GitSource`/`PathSource`/`SourceDependency` resolved types). Plus a pure `javac`/`java` invocation builder (`Invocation::build`/`run`, each consuming a request; the `CompileRequest`'s `extra_sources` — the `git`/`path` source deps' `.java` — are appended after the project's own sources), wrapped in a **toolchain abstraction split per step**: the pure object-safe **`Compiler`**/**`Runtime`** traits (mirroring the manifest's two selectors) + tool-agnostic `CompileRequest`/`RunRequest` + `BuildOutcome` + the filesystem-free `ToolResolver` policy (which also owns the `$JAVAC`/`$JAVA` override and `~` expansion as injected data, returning `Candidates` with a structural fallback) live in the core — as does the traits' non-subprocess implementation, **`BuiltinToolchain`** (the in-process backend `[toolchain] compiler/runtime = "builtin"` selects: today a *dummy* whose `compile` copies each source into the `classes-dir` unchanged and whose `run` is a successful no-op, all I/O through a `jals_fs::FileTree` so the same impl drives `OsFileTree` and `InMemoryFileTree`; a real embedded compiler later replaces the copy step behind the same selector) — while the default-on **`native` feature** adds `SubprocessToolchain` (implementing both traits) — the one piece that discovers installed JDKs and spawns `javac`/`java`, selecting each tool from `[toolchain] compiler`/`runtime` (env override → explicit `{ path }` / discovered `{ distribution }` → `$JAVA_HOME` → `PATH`) — and the **`<dyn Compiler>::select` / `<dyn Runtime>::select` factories** the hosts call: each matches its own `jals_config::Compiler`/`Runtime` enum to the backend it names (builtin / subprocess), so `jals-cli` drives one `Box<dyn Compiler>` and (for `jals run`) one `Box<dyn Runtime>`, the two selected independently with no routing composite; the core builds for `wasm32` with `--no-default-features`, the seam a future in-browser compiler implements. Plus run-target resolution (`resolve_run_target`, picking the `main-class` from `[[bin]]`/`default-run`/`[run] main-class`) + the project's language **features** (`[package] features`, the `Feature` enum — the Java **release presets** `java8`…`java25` plus individual features like `module-imports`/`compact-source-files`, one fixed serde-variant set so an unknown name is a TOML parse error, no `validate` check; `Manifest::feature_set` resolves the list into a `FeatureSet` by closing over each preset's `implies` — a preset implies its `Feature::predecessor` preset plus everything its release stabilized (derived from each feature's `stabilized_in`; no version numbers anywhere), so `java25 ⊇ java24 ⊇ …` holds by construction; it is an *analysis-only* language-feature gate consumed by the linter/LSP and is **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`) + clean-path resolution (`clean_paths`, for `jals clean`) + project scaffolding (`scaffold`, for `jals init`) (`source_roots`/`classpath_entries` on `ManifestExt` resolve `[build] source-dirs`/`classpath` against the manifest dir for the host to read) + **`[dependencies]` classification** (`jals_config::Dependency` is *itself* the classification — a `#[serde(untagged)]` enum of `Jar(JarDependency)`/`Git(GitDependency)`/`Path(PathDependency)` variants, each `deny_unknown_fields`, so serde chooses the form at parse time and the structural errors — co-occurring forms `{jar,git}`, no form `{}`, a field misplaced for its form `branch`-without-`git` — fail as a TOML parse error, *not* a `DependencyError`; the value-level checks are `jals_config::Dependency::validate` / `validate_jar_location` (empty value / unknown URL scheme / conflicting git refs, run by `Manifest::validate`). `ManifestExt`'s classifiers map each variant to the host-facing path forms: `dependency_sources` collects the `jar` forms → `DependencySource::{Url, Path}` for the classpath, `dependency_source_jars` the optional companion `sources` jar, and `dependency_source_dirs` the `git`/`path` source forms → `SourceDependency::{Git, Path}`; the `jar` form also carries an optional `recursive` bool — `jals_config::Manifest::recursive_jar_dependencies` names the jars whose **bundled jars** the host unpacks onto the classpath (see Classpath loading) — the host resolves/downloads/clones). The pure `jals.toml` model + `validate`/`FromStr` are `jals-config` (`no_std`/wasm); jals-build is a `std` crate (its `ManifestExt::from_file`/`discover_path` read the filesystem, and the `native` feature's `SubprocessToolchain` discovers JDKs + spawns `javac`/`java`; the rest is pure serde/toml + `std::path`), and `jals-cli` walks sources, drives the toolchain, removes the build output, and writes the scaffold files, while `jals-classpath` does the dependency downloads/clones. `jals-build/README.md` has the full manifest reference and the Cargo-for-Java roadmap. |
-| CLI | `jals-cli/src/main.rs` | `jals fmt`/`jals lint`/`jals lsp`/`jals build`/`jals run`/`jals clean`/`jals init`; config discovery memoized per directory. `jals lint` builds a `ProjectIndex` over the files being linted (the host owns the I/O), folding in the discovered project's `[build] classpath` `.class` files **and resolved `[dependencies]` jars** (via `jals-classpath`, best-effort — a missing manifest/classpath just means source+stdlib only) so external library types resolve, and runs the index-aware `type-mismatch` for cross-file checks. It also reads the discovered project's `[package] features` (`ProjectLintContext::load`, which assembles the project inputs once for both the classpath and the feature set) and sets it on the lint `Config` (`features`) so the feature-gated `compact-source-file` / `module-import` rules run. `jals build`/`run` resolve `[dependencies]` (`resolve_project_dependencies` → downloaded/local jars) and pass them as the `extra_classpath` to `build_invocation`/`run_invocation`, so `javac`/`java` see them too; they also resolve the `git`/`path` **source** deps (`resolve_project_source_deps` → cloned/read `.java`) and pass them as `build_invocation`'s `extra_sources`, so a project that depends on a source dependency compiles (the dep's `.class` land in `classes-dir`, already first on the run classpath). |
-| Editor core | `jals-editor/src/` | The **protocol-neutral editor core** both hosts adapt (pure/`no_std`, wasm32; deps: `jals-hir`/`jals-lint`/`jals-config`/`jals-fs`/`jals-syntax`). **Workspace lifecycle** (`workspace/mod.rs`): `Workspace<F: FileTree>` owns file identity (`workspace/file_id.rs`'s `WorkspaceFileId` — three disjoint `FileId` spaces: `Project`, `Library` ≥ `1<<31` for `-sources.jar` navigation overlays, `SourceDep` ≥ `(1<<31)+(1<<30)` for `git`/`path` source deps that are also index inputs; `jals-hir`'s reserved stub ids decode out-of-range and route to `None`, never panicking), per-file caches (`Document` + `OnceCell<Resolved>`/`OnceCell<FileFacts>`), incremental rebuilds (`ProjectIndex::assemble` re-extracts only the edited file), overlays (`set_overlay` shares an open editor's parsed `Arc`s; `sync_overlay` is a **no-op on unchanged text**, so query storms hit the caches), classpath (`ProjectSpec.classpath`, pre-lowered by the host; `set_classpath` for late browser resolution) and the `[package] features` set (folded into every `diagnostics` run). All I/O behind `jals_fs::FileTree`; files are `/`-separated virtual paths; library/source-dep files are never linted. `SingleFileProject` is the one-file + stdlib fallback model. **Semantic queries** (`queries.rs`): `ProjectQueries` — definition/references (lazy project iterator)/hover(+`hover_markdown`)/completions/signature help (`SignatureHelpUtf16` owns the byte→UTF-16 label conversion)/highlights/`renamable_range` (locals + project types yes, members/stdlib/classpath/source-dep no); `Ident::{is_valid_java_identifier, is_renamable_kind}`. **Canonical diagnostics** (`diagnostics.rs`): `FileDiagnostics::assemble` is the one policy — syntax errors always; one lint-engine pass (index-aware on a clean parse, so `type-mismatch`/`unreported-exception` check cross-file facts with no host-side rule suppression; file-local with `type-mismatch` forced off on a broken parse); `cannot-resolve` errors from the index on a clean parse only; a finding's `unnecessary`/`unnecessary_range` become the in-place flag and an extra Hint diagnostic; output stably sorted by `(start, code)`. **Outline** (`outline.rs`), **semantic-token classification** (`semantic.rs`, resolution-refined + syntactic fallback), **folding** (`folding.rs`, line-based over the shared index), **selection chains** (`selection.rs`), **coordinates** (`LineIndex`/`Utf16Position`, zero-based UTF-16). **Host abstraction** (`host.rs` + `editor.rs`): the `EditorHost` trait (assoc. types + constructors for Position/Range/Location/Diagnostic/Symbol/Completion/Highlight/Hover/SignatureHelp) with opt-in wire-format extensions `SemanticTokensHost`/`FoldingHost`/`SelectionHost`; `Editor<F, H>` drives path-keyed queries end-to-end in the host's own types, so a host request handler is one call. `jals-lsp`'s `LspHost` and the playground's `MonacoHost` are the two implementations; neither re-implements any analysis sequencing. |
-| LSP | `jals-lsp/src/` | `async-lsp` server (`jals lsp`), now a **thin protocol adapter over `jals-editor`** (5 files: `server.rs`, `state.rs`, `host.rs`, `formatting.rs`, `lib.rs`). `host.rs` is `LspHost` — the `EditorHost`(+extensions) implementation owning every LSP mapping: positions/ranges via the core `LineIndex`, `Location` URIs via `Url::from_file_path`, diagnostics (severity map + `DiagnosticTag::UNNECESSARY` from the neutral `unnecessary` flag — `unused-local` fades in place, `constant-condition`'s dead branch arrives as the core's Hint), `DefKind`→`SymbolKind`, completion/highlight/hover/signature-help payloads, and the semantic-tokens wire format (legend, delta encoding, multi-line splitting, `tokens_delta`) plus folding/selection shapes. `state.rs` holds the `DocumentStore` (open docs: `jals_editor::Document` + version; incremental `didChange` splicing) and `ProjectWorkspace` — a `PathBuf` project root + `Editor<OsFileTree, LspHost>`, mapping `Url` ⇄ virtual path and delegating every query to the facade; project loading (`server.rs::ensure_workspace_for`) keeps the host I/O: manifest discovery, `jals-classpath` resolution on a dedicated thread (off the Tokio runtime), `ProjectIndex::lower_classpath`, then a `ProjectSpec`. Files outside any project fall back to the core's `SingleFileProject` (index-aware one-file diagnostics included). `UriConfigs` wraps `jals_config::ConfigResolver` per URI, cleared on watched config-file changes. Host-only (tokio/stdio). |
-| Playground | `jals-playground/` | Yew (CSR) browser app served by Trunk (`Trunk.toml`, tailwind); compiles to `wasm32`. Now a **thin Monaco adapter over `jals-editor`**: `host.rs` is `MonacoHost` — the `EditorHost` implementation owning the one-based UTF-16 coordinate shift and the Monaco payload shapes (`PlaygroundDiagnostic` with a `code:` message prefix, `Target`, `SymbolNode`, `SigHelp`, …) — and `workspace.rs` is `Workspace { editor: Editor<InMemoryFileTree, MonacoHost>, active }`: queries are one facade call over the synced overlay (`sync_active` = the core's `sync_overlay`, a no-op on unchanged text — no more per-query whole-project reparse), edits write the tree and sync, and Monaco providers (`providers.rs`) sync in a tight `borrow_mut` scope then query through `borrow`. **Config files are edited as TOML in the editor**: the left sidebar's `Config` section holds `jals.toml` / `jalsfmt.toml` above the Java workspace files, each selectable into the Monaco editor (a plaintext model, kept off the analysed `.java` tree — the buffers live in `App`, not the workspace). Editing `jalsfmt.toml` parses (`toml::from_str::<jals_config::fmt::Config>`) into the shared formatter `Config`; a TOML error shows as an inline marker. Editing `jals.toml` (`Manifest::from_str`) re-resolves **external `[dependencies]`** on the fly: a `BrowserFetcher` (`fetcher.rs`, `gloo-net` `fetch`, CORS proxy typed in the header) downloads each jar into an `InMemoryFileTree` cache, and `jals_classpath::{resolve_project_dependencies_in,load_classpath_in}` + `ProjectIndex::lower_classpath` feed the workspace's `set_classpath`/`set_feature_set`, so hover/completion/type-check resolve library types (status shown in the header). CORS limits direct fetch to permissive hosts (Maven Central needs the proxy). |
+Do not reintroduce `jals-fs`, `FileTree`, arbitrary string paths, path predicates, or live
+filesystem reads into portable interfaces.
+
+## Crate boundaries
+
+- `jals-storage`: typed keys, immutable revisions, transactions, overlays, cache, memory/native
+  adapters. Only `native.rs` may use `std::path`/`std::fs`.
+- `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`.
+- `jals-classpath`: resolution over project bytes and cache artifacts. ZIP code is isolated behind
+  `archive` and uses only `std::io`; HTTP/local locator lowering is in its native adapter.
+- `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
+  `FileKey`, and source/config invalidation follows storage revisions.
+- `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
+  environment variables, and classpath separators stay in native/host code.
+- `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys.
+- `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`.
+- `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
+  artifacts.
+- `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
+  domain crates; do not add host filesystem APIs.
+- Tests, `xtask`, and `editors/zed` may use host paths for fixtures and tooling.
+
+The `.ast-grep/rules/no-portable-host-path.yml` allowlist enforces the host boundary. Add a narrow
+adapter ignore only when OS identity is genuinely required.
+
+## `no_std` and features
+
+Portable crates use `core + alloc`. Do not add source-level `extern crate alloc`; the workspace
+supplies it through `.cargo/config.toml`.
+
+- `jals-storage --no-default-features` is `no_std + alloc`.
+- `jals-classpath --no-default-features` is `no_std + alloc`; `archive` introduces only `std::io`,
+  and `native` introduces HTTP plus `jals-storage/std`.
+- `jals-build --no-default-features` must remain a genuine portable core.
+- `serde` stays `default-features = false, features = ["derive", "alloc"]`.
+- `toml` stays `default-features = false, features = ["parse", "serde"]`.
+
+## Invariants
+
+- Parsing is lossless and never panics on malformed input.
+- Formatting is idempotent and preserves the significant token sequence unless an explicitly
+  configured text-normalization rule applies.
+- All project and artifact enumeration is deterministic.
+- File/directory collisions, duplicate entries, file ancestors, root escape, unsafe archive
+  members, and cache digest mismatches must be rejected or diagnosed structurally.
+- Permission/I/O failures are not equivalent to missing data.
+- Do not generate fallback file URIs for paths that cannot be represented.
+- Preserve unrelated and untracked user files.
 
 ## Commands
 
 ```sh
-cargo build --workspace
-cargo test  --workspace --all-features
-cargo run -p jals-cli -- fmt <paths>       # or: echo '...' | cargo run -p jals-cli -- fmt
-cargo run -p jals-cli -- init [path]       # scaffold a new jals.toml project (Main.java, .gitignore)
-cargo run -p jals-cli -- build [--dry-run] # compile a jals.toml project with javac (--dry-run prints the command)
-cargo run -p jals-cli -- run               # compile then run the project's [run] main-class with java
-cargo run -p jals-cli -- clean [--dry-run] # remove the project's build output (the classes-dir)
-cargo run -p jals-cli -- lsp               # run the language server over stdio (for editors)
-cargo run -p xtask -- codegen              # regenerate jals-syntax/src/ast/generated.rs from java.ungram
-(cd jals-playground && trunk serve)        # run the browser playground (needs trunk + the wasm32 target)
-```
-
-Before considering a change done, run the **exact CI checks** (see
-`.github/workflows/ci.yml`) — clippy is `-D warnings`, so warnings fail:
-
-```sh
 cargo fmt --all --check
+ast-grep test --skip-snapshot-tests
+ast-grep scan --error
+cargo check --workspace
+cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo nextest run --workspace --all-features                 # doctests: cargo test --workspace --all-features --doc
-taplo fmt --check --diff
-cargo machete                                                # no unused deps
-cargo build --release --target wasm32-unknown-unknown -p jals-editor -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile -p jals-fmt -p jals-lint -p jals-fs -p jals-config
-cargo build --release --target wasm32-unknown-unknown -p jals-classpath -p jals-build --no-default-features  # std-but-wasm cores
-cargo run -p xtask -- codegen --check                        # generated AST is up to date
+
+cargo check -p jals-storage --no-default-features
+cargo check -p jals-classpath --no-default-features
+cargo check -p jals-build --no-default-features
+cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
+cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
-## Invariants — do not break these
-
-These are enforced by unit and `proptest` property tests (`jals-fmt/tests/invariants.rs`,
-plus lexer/parser property tests). A change that violates one is wrong, not the test:
-
-1. **Lossless lexer.** Concatenating every token's text reproduces the input exactly.
-2. **Never panics.** The lexer and parser must not panic on *any* input (including arbitrary
-   Unicode); unmatched bytes become `SyntaxKind::ERROR`. The formatter never panics either.
-3. **Always a tree.** The parser recovers from errors and records `SyntaxError`s rather than
-   aborting.
-4. **Formatter fidelity.** Comments are never dropped, and formatting is idempotent
-   (`format(format(x)) == format(x)`). By default the significant-token *sequence* (non-trivia
-   tokens) is preserved exactly. Seven options, each off by default, relax this:
-   - **`reorder-imports`** may reorder import declarations. The significant-token *multiset* is
-     still preserved (none added, dropped, or altered), and each comment stays glued to its
-     anchoring token (so a comment moves, with its token, when that token is reordered).
-   - **`group-imports`** may reorder import declarations into prefix-defined groups separated by
-     blank lines (it overrides `reorder-imports`). The *multiset* is preserved and each comment
-     stays glued to its import, exactly as for `reorder-imports`.
-   - **`reorder-modifiers`** may reorder a declaration's keyword modifiers into canonical order
-     and hoist its annotations to the front. The *multiset* is preserved and each comment stays
-     glued to its modifier, exactly as for `reorder-imports`.
-   - **`trailing-comma`** (any value other than `preserve`, the default) may add or drop the
-     single trailing comma of an **array initializer** — the only Java list (besides enum
-     constant lists) where that token is legal. No other token is touched, and a dropped comma
-     that carries a comment is kept, so comments are never lost.
-   - **`hex-literal-case`** (any value other than `preserve`, the default) may rewrite the case
-     of the hex digits of an integer / float literal (`0xCafe` → `0xCAFE` / `0xcafe`). The token
-     *kind* sequence is preserved exactly — only a hex literal's *text* changes, and only the
-     mantissa digits (the `0x` prefix, `p` exponent, and `l`/`f`/`d` suffix are untouched).
-   - **`float-literal-trailing-zero`** (any value other than `preserve`, the default) may add or
-     strip the trailing zero of a **decimal** float literal (`1.0` ↔ `1.`). The token *kind*
-     sequence is preserved exactly — only an in-scope decimal float's *text* changes; a non-zero
-     fraction (`1.50`), a leading-dot float (`.5`), a dotless float (`1e10`), a hex float
-     (`0x1.0p3`), and integers are untouched, as are the value, suffix, and exponent.
-   - **`literal-suffix-case`** (any value other than `preserve`, the default) may rewrite the case
-     of a numeric literal's trailing type suffix — the integer `l`/`L` (`123l` ↔ `123L`) or the
-     float `f`/`F`/`d`/`D` (`1.5f` ↔ `1.5F`). The token *kind* sequence is preserved exactly —
-     only that single trailing suffix letter's *text* changes; the value, radix prefix, mantissa,
-     and exponent are untouched, and an integer's trailing `f`/`d` hex *digit* (`0xabcdef`) is
-     never a suffix.
-   Idempotency holds in every case. With all seven at their defaults (`reorder-imports`,
-   `group-imports`, and `reorder-modifiers` off, `trailing-comma = preserve`,
-   `hex-literal-case = preserve`, `float-literal-trailing-zero = preserve`,
-   `literal-suffix-case = preserve`), the exact-sequence guarantee is in full force.
-5. **`no_std` + `wasm32` compatibility.** The nine pure crates — `jals-syntax`, `jals-classfile`,
-   `jals-hir`, `jals-decompile`, `jals-fmt`, `jals-lint`, `jals-fs`, `jals-config`, and
-   `jals-editor` — are **`#![no_std]`** (`alloc` is supplied workspace-wide by
-   `.cargo/config.toml`'s `--extern alloc` rustflags — **no source-level `extern crate alloc`
-   declarations** — so `String`/`Vec`/`Box`/`format!`/`vec!` come from `alloc` and
-   maps use `alloc::collections::BTreeMap` or `hashbrown`, never `std::collections`). Each carries
-   `#![cfg_attr(not(test), no_std)]` (or `#![cfg_attr(not(any(feature = "std", test)), no_std)]` for
-   `jals-fs`, the one with a `std` feature), so unit tests still run with full `std` while the library
-   build is `std`-free. Use `core::`/`alloc::` paths (e.g. `core::mem::take`, `core::ops::Range`,
-   `core::fmt`, `core::error::Error`), never `std::`. Filesystem access in the pure crates goes
-   through the **`jals-fs` `FileTree` abstraction**: `jals-config`'s config loaders
-   (`fmt::Config`/`lint::Config`'s `from_file` / `discover`, and the generic `loader::load`/`discover`)
-   take a `&dyn FileTree` and are themselves `no_std` (their shared `ConfigError` wraps `jals_fs::FsError`);
-   the *real* filesystem lives only in `jals-fs`'s
-   `OsFileTree`, gated behind an off-by-default **`std` feature** the host crates (`jals-cli`,
-   `jals-lsp`) turn on (`jals-fs = { …, features = ["std"] }`), while the wasm build and playground
-   leave it off and use `InMemoryFileTree`. The host-only crates keep `std`: `jals-cli`
-   (filesystem/process), `jals-lsp` (tokio/stdio; its `ProjectWorkspace` drives
-   `jals_editor::Editor<OsFileTree, LspHost>`, so sources are read through the abstraction),
-   `jals-classpath` (`std::fs` + `zip` jar I/O + `reqwest`
-   downloads), and `jals-build` (its `ManifestExt` is built on `std::path::{Path, PathBuf}` — source-root/classpath
-   resolution, `from_file`/`discover_path` via `std::fs`/`.is_file()` — which have no `core`/`alloc` equivalent;
-   the pure `Manifest` model itself is in `jals-config`). Do not
-   add non-wasm-compatible deps or `std::fs`/process/network/IO usage to the nine pure crates (route
-   fs access through `jals-fs`); keep host work in `jals-cli`/`jals-lsp`, `jals-build`, and `jals-classpath`'s
-   `native` feature. CI builds all nine pure crates for `wasm32` in the `build` matrix (as one
-   package set with no host crate, so the `std` features stay off and `#![no_std]` is enforced).
-   **`jals-classpath` and `jals-build` (each with `--no-default-features`) are also `wasm32`-built** in a separate matrix
-   entry: each keeps its host I/O behind a default `native` feature, so the no-`native` core is
-   wasm-compatible — but both are **std, not `no_std`** (`jals-classpath`'s `zip`-based unzip needs
-   `std::io`; `jals-build`'s `ManifestExt` is `std::path`-based), so they stay out of the
-   nine-crate `no_std` set, like `jals-playground`. The workspace declares `jals-build` with
-   `default-features = false` and only `jals-cli` (the one consumer that spawns `javac`/`java`)
-   turns `native` on, so feature unification cannot smuggle the host half into the wasm builds.
-   When editing these crates, keep `std::fs`/`std::process`/`reqwest`/JDK discovery confined to each
-   crate's `native.rs` (behind its `native` feature); `jals-classpath`'s core
-   (`io.rs`/`load.rs`/`resolve.rs`) and `jals-build`'s core must build for `wasm32` with
-   `--no-default-features`.
-
-When touching the lexer, parser, or formatter, prefer adding a snapshot test
-(`expect-test`) and confirm the property tests still pass.
-
-## Conventions
-
-- **Code comments and docs are written in English.** (Some older `jals-syntax` files still
-  carry Japanese comments from earlier work; new and edited code should be English.)
-- Match the surrounding style: `rowan`/rust-analyzer-flavored naming for syntax code,
-  `clippy`-clean, `rustfmt`-clean.
-- Config keys are kebab-case and every key is optional with a default in `Config::default`.
-- Keep `SyntaxKind` variants in sync between the enum, the `From<TokenKind>` mapping, and the
-  parser/AST that construct them.
-- In `jals-playground`, implement every Yew component as a `struct` definition plus an
-  `impl yew::Component` block (struct components) — do not use `#[function_component]` or
-  other function-component styles.
-- **Prefer associated functions over free functions** (`ast-grep scan`'s `no-free-functions`
-  rule). Abstraction is the top priority: it lifts the codebase's overall quality and can
-  meaningfully help performance, so free functions should be avoided wherever possible. An
-  associated function's parent type tells a caller — especially across an external `pub` import —
-  what the function relates to and what it does at a glance, whereas a bare free function reveals
-  neither. Grouping functions on a specific struct also makes near-duplicate functions easy to
-  spot (and so to deduplicate); associated functions dodge both problems. Move a helper into an
-  `impl`/`trait`, or nest it inside its only caller when it is purely local.
-
-## Repository notes
-
-- The untracked `check` file in the repo root is a **local ELF build artifact — never commit
-  it** (and do not add binaries to git generally). Only `/target` is gitignored.
-- Run git operations (commit, push, branch) **only when explicitly asked.**
-- There is no `LICENSE` file yet; do not assume one.
+Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
+AST changes with the grammar change.

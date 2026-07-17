@@ -1,9 +1,9 @@
 //! A browser [`Fetcher`] backed by the Fetch API (via [`gloo_net`]).
 //!
-//! This is the wasm counterpart of `jals-classpath`'s native `ReqwestFetcher`: the same
-//! [`resolve_project_dependencies_in`](jals_classpath::DepsCache::resolve_project_dependencies_in) core runs in
-//! the browser with this as its [`Fetcher`] and an
-//! [`InMemoryFileTree`](jals_fs::InMemoryFileTree) as its cache.
+//! This is the wasm counterpart of `jals-classpath`'s native `ReqwestFetcher`:
+//! [`ProjectInputs::assemble`](jals_classpath::ProjectInputs::assemble) runs in the browser with
+//! this [`Fetcher`] and the editor's detached
+//! [`MemoryStorage`](jals_storage::MemoryStorage) snapshot.
 //!
 //! **CORS caveat.** `fetch` is subject to the browser's same-origin policy, so a jar host that does
 //! not send permissive CORS headers (Maven Central `repo1.maven.org` among them) cannot be fetched

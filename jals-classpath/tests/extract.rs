@@ -1,91 +1,65 @@
-//! Extracting dependency **sources** jars to disk: only `.java` members are inflated (into a per-jar
-//! subdir), extraction is idempotent (a second run reuses the files already on disk), and a corrupt
-//! jar is a warning, not a failure.
+use std::io::{Cursor, Write};
 
-use std::io::Write;
-use std::path::Path;
+use jals_classpath::{JarExtraction, LibrarySource};
+use jals_storage::{ArtifactCache, CacheKey, CacheNamespace, ContentDigest, MemoryCache};
 
-use jals_classpath::SourcesExtraction;
-
-/// Build a tiny but real (deflated) jar at `path` whose members are the given `(name, content)` pairs,
-/// mirroring `write_jar` in `resolve.rs` but for source jars.
-fn write_sources_jar(path: &Path, entries: &[(&str, &str)]) {
-    let file = std::fs::File::create(path).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+fn sources_jar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut bytes = Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut bytes);
     for (name, content) in entries {
-        zip.start_file(*name, options).unwrap();
-        zip.write_all(content.as_bytes()).unwrap();
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(content).unwrap();
     }
     zip.finish().unwrap();
+    bytes.into_inner()
+}
+
+fn publish(cache: &mut ArtifactCache<MemoryCache>, bytes: &[u8]) -> CacheKey {
+    let key = CacheKey::new(
+        CacheNamespace::DependencyJar,
+        ContentDigest::of(b"sources"),
+        ContentDigest::of(bytes),
+    );
+    cache.publish(&key, bytes).unwrap();
+    key
 }
 
 #[test]
-fn extracts_only_java_members_to_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    let jar = dir.path().join("lib-sources.jar");
-    write_sources_jar(
-        &jar,
-        &[
-            (
-                "java/util/List.java",
-                "package java.util; public interface List<E> {}",
-            ),
-            ("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n"),
-            ("java/util/Map.class", "not actually java"),
-        ],
-    );
-
-    let dest = dir.path().join("out");
-    let extraction = SourcesExtraction::extract_sources(std::slice::from_ref(&jar), &dest);
-    assert!(extraction.warnings.is_empty(), "{:?}", extraction.warnings);
-
-    // Only the `.java` member is extracted; the manifest and `.class` are ignored.
-    assert_eq!(extraction.java_files.len(), 1);
-    let extracted = &extraction.java_files[0];
+fn extracts_only_safe_java_members_as_verified_artifacts() {
+    let mut cache = ArtifactCache::new(MemoryCache::default());
+    let bytes = sources_jar(&[
+        ("java/util/List.java", b"interface List {}"),
+        ("META-INF/MANIFEST.MF", b"manifest"),
+        ("../Escape.java", b"bad"),
+    ]);
+    let jar = publish(&mut cache, &bytes);
+    let extraction = JarExtraction::<LibrarySource>::sources(&mut cache, &[jar]);
+    assert_eq!(extraction.artifacts.len(), 1);
     assert!(
-        extracted.ends_with("java/util/List.java"),
-        "unexpected path {}",
-        extracted.display()
+        extraction.artifacts[0]
+            .path
+            .to_string()
+            .ends_with("java/util/List.java")
     );
-    assert!(extracted.starts_with(&dest));
-    let content = std::fs::read_to_string(extracted).unwrap();
-    assert!(content.contains("interface List"));
-}
-
-#[test]
-fn extraction_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let jar = dir.path().join("lib-sources.jar");
-    write_sources_jar(&jar, &[("a/B.java", "class B {}")]);
-    let dest = dir.path().join("out");
-
-    let first = SourcesExtraction::extract_sources(std::slice::from_ref(&jar), &dest);
-    assert_eq!(first.java_files.len(), 1);
-    // A second extraction reuses the file already on disk (skip-if-exists), yielding the same path.
-    let second = SourcesExtraction::extract_sources(std::slice::from_ref(&jar), &dest);
-    assert_eq!(first.java_files, second.java_files);
-    assert!(second.warnings.is_empty(), "{:?}", second.warnings);
     assert_eq!(
-        std::fs::read_to_string(&second.java_files[0]).unwrap(),
-        "class B {}"
+        cache.lookup(&extraction.artifacts[0].key).unwrap().unwrap(),
+        b"interface List {}"
     );
+    assert_eq!(extraction.warnings.len(), 1);
 }
 
 #[test]
-fn corrupt_jar_is_a_warning_not_a_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    let bogus = dir.path().join("bad-sources.jar");
-    std::fs::write(&bogus, b"not a zip archive").unwrap();
+fn extraction_is_idempotent_and_corruption_is_advisory() {
+    let mut cache = ArtifactCache::new(MemoryCache::default());
+    let bytes = sources_jar(&[("a/B.java", b"class B {}")]);
+    let jar = publish(&mut cache, &bytes);
+    let first = JarExtraction::<LibrarySource>::sources(&mut cache, std::slice::from_ref(&jar));
+    let second = JarExtraction::<LibrarySource>::sources(&mut cache, &[jar]);
+    assert_eq!(first.artifacts, second.artifacts);
 
-    let extraction =
-        SourcesExtraction::extract_sources(std::slice::from_ref(&bogus), &dir.path().join("out"));
-    assert!(extraction.java_files.is_empty());
-    assert_eq!(extraction.warnings.len(), 1);
-    assert!(
-        extraction.warnings[0].message.contains("sources jar"),
-        "{:?}",
-        extraction.warnings
-    );
+    let bogus = publish(&mut cache, b"not a zip");
+    let corrupt = JarExtraction::<LibrarySource>::sources(&mut cache, &[bogus]);
+    assert!(corrupt.artifacts.is_empty());
+    assert_eq!(corrupt.warnings.len(), 1);
 }

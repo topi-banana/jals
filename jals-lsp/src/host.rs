@@ -7,8 +7,9 @@
 //! through the shared [`jals_editor::LineIndex`] cached on each [`Document`]; the analysis itself
 //! lives entirely in `jals-editor`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
+use std::path::PathBuf;
 
 use async_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
@@ -25,6 +26,7 @@ use jals_editor::{
     SignatureHelpUtf16, Utf16Position,
 };
 use jals_hir::DefKind;
+use jals_storage::FileKey;
 
 /// Token-type indices into the legend's `token_types`. Kept in sync with [`LspHost::legend`] by
 /// the `legend_indices_match` test.
@@ -52,9 +54,35 @@ const MOD_DECLARATION: u32 = 1 << 0;
 
 /// The LSP rendering of every neutral query payload. Stateless — one shared unit value drives all
 /// requests.
-pub(crate) struct LspHost;
+pub(crate) struct LspHost {
+    root: PathBuf,
+    /// Host locations of navigation sources materialized out of the artifact cache (mounted
+    /// under `.jals/…` in the workspace overlay, where no real file exists). Consulted before
+    /// the root join so their `file://` URLs point at readable files.
+    materialized: BTreeMap<FileKey, PathBuf>,
+}
+
+#[allow(non_upper_case_globals)]
+pub(crate) const LspHost: LspHost = LspHost {
+    root: PathBuf::new(),
+    materialized: BTreeMap::new(),
+};
 
 impl LspHost {
+    pub(crate) const fn for_root(root: PathBuf) -> Self {
+        Self {
+            root,
+            materialized: BTreeMap::new(),
+        }
+    }
+
+    /// Register the host locations of materialized navigation sources (see
+    /// [`materialized`](Self::materialized)).
+    #[must_use]
+    pub(crate) fn with_materialized(mut self, materialized: BTreeMap<FileKey, PathBuf>) -> Self {
+        self.materialized = materialized;
+        self
+    }
     /// Convert a byte offset in `doc` to an LSP position through the document's cached index.
     fn position(doc: &Document, offset: usize) -> Position {
         let position = doc.line_index.position(&doc.text, offset);
@@ -69,14 +97,24 @@ impl LspHost {
         }
     }
 
-    /// The `file://` URL of a workspace virtual path (an absolute host path). The workspace only
-    /// ever stores paths derived from real files, so the conversion cannot realistically fail;
-    /// a best-effort `file://` URL keeps the mapping total without panicking.
-    fn url(path: &str) -> Url {
-        Url::from_file_path(path)
-            .ok()
-            .or_else(|| Url::parse(&format!("file://{path}")).ok())
-            .unwrap_or_else(|| Url::parse("file:///").expect("the static root URL parses"))
+    /// The `file://` URL of a workspace virtual path, resolved against this host's project root.
+    ///
+    /// # Panics
+    /// Panics when the resolved path cannot be encoded as a file URL. A rooted host
+    /// ([`for_root`](Self::for_root)) always resolves to an absolute path, so this only fires if
+    /// a location is ever rendered through the rootless shared const — which must not happen.
+    fn url(&self, key: &FileKey) -> Url {
+        let path = self
+            .materialized
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.path().to_host_path(&self.root));
+        Url::from_file_path(&path).unwrap_or_else(|()| {
+            panic!(
+                "project path cannot be encoded as a file URI: {}",
+                path.display()
+            )
+        })
     }
 
     /// The LSP symbol kind for an outline node's `DefKind`.
@@ -198,18 +236,11 @@ impl LspHost {
         }]
     }
 
-    /// Render a whole outline (each node's children recursively) as LSP document symbols. The
-    /// [`Editor`](jals_editor::Editor) facade drives [`EditorHost::symbol`] itself; this is the
-    /// same recursion for the store-based fallback path, which renders a raw
-    /// [`jals_editor::Outline`].
+    /// Render a whole outline (each node's children recursively) as LSP document symbols — the
+    /// store-based fallback path's counterpart to [`Editor::outline`](jals_editor::Editor),
+    /// sharing the trait's [`render_outline`](EditorHost::render_outline) recursion.
     pub(crate) fn symbols(&self, doc: &Document, nodes: Vec<OutlineNode>) -> Vec<DocumentSymbol> {
-        nodes
-            .into_iter()
-            .map(|mut node| {
-                let children = self.symbols(doc, std::mem::take(&mut node.children));
-                self.symbol(doc, node, children)
-            })
-            .collect()
+        self.render_outline(doc, nodes)
     }
 
     /// Group rename target `locations` into a [`WorkspaceEdit`] rewriting each occurrence to
@@ -260,9 +291,9 @@ impl EditorHost for LspHost {
         Self::byte_range(doc, &range)
     }
 
-    fn location(&self, path: &str, doc: &Document, range: Range<usize>) -> Location {
+    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Location {
         Location {
-            uri: Self::url(path),
+            uri: self.url(path),
             range: Self::byte_range(doc, &range),
         }
     }
@@ -628,12 +659,32 @@ mod tests {
     #[test]
     fn locations_carry_file_urls() {
         let document = doc("class C {}");
-        let location = LspHost.location("/proj/src/C.java", &document, 6..7);
+        let location = LspHost::for_root(PathBuf::from("/proj")).location(
+            &FileKey::parse("src/C.java").unwrap(),
+            &document,
+            6..7,
+        );
         assert_eq!(
             location.uri,
             Url::from_file_path("/proj/src/C.java").unwrap()
         );
         assert_eq!(location.range.start, Position::new(0, 6));
+    }
+
+    /// A mounted `.jals/…` navigation source has no file under the project root; its location
+    /// must point at the file materialized out of the artifact cache instead.
+    #[test]
+    fn materialized_navigation_sources_resolve_to_their_cache_files() {
+        let document = doc("class Lib {}");
+        let key = FileKey::parse(".jals/library/dep/Lib.java").unwrap();
+        let target = PathBuf::from("/proj/target/jals/cache/source-view/aa/bb/dep/Lib.java");
+        let host = LspHost::for_root(PathBuf::from("/proj"))
+            .with_materialized(BTreeMap::from([(key.clone(), target.clone())]));
+        let location = host.location(&key, &document, 6..9);
+        assert_eq!(location.uri, Url::from_file_path(&target).unwrap());
+        // Unmapped keys still resolve against the project root.
+        let plain = host.location(&FileKey::parse("src/C.java").unwrap(), &document, 0..1);
+        assert_eq!(plain.uri, Url::from_file_path("/proj/src/C.java").unwrap());
     }
 
     // ---- Semantic-token encoding ----------------------------------------------------------------

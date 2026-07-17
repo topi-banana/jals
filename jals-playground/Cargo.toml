@@ -5,14 +5,14 @@ edition.workspace = true
 
 [dependencies]
 yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }
-# The wasm-compatible core (no `native`): the browser supplies its own `Fetcher` + `InMemoryFileTree`.
+# The wasm-compatible core (no `native`): the browser supplies its own `Fetcher` + `MemoryStorage`.
 # A direct path (not `workspace = true`) so `default-features = false` can turn off the host `native`
 # feature — Cargo forbids a workspace-inherited dep from overriding the workspace's default-features.
-jals-classpath = { path = "../jals-classpath", default-features = false }
+jals-classpath = { path = "../jals-classpath", default-features = false, features = ["archive"] }
 jals-config = { workspace = true }
 jals-editor = { workspace = true }
 jals-fmt = { workspace = true }
-jals-fs = { workspace = true }
+jals-storage = { workspace = true }
 jals-hir = { workspace = true }
 jals-syntax = { workspace = true }
 # Browser `fetch` for downloading dependency jars (already in the tree via yew's `gloo`).

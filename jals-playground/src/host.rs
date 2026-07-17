@@ -13,6 +13,7 @@ use jals_editor::{
     HighlightKind, OutlineNode, SignatureHelpUtf16, Utf16Position,
 };
 use jals_hir::DefKind;
+use jals_storage::FileKey;
 
 /// One diagnostic over the active file, in Monaco coordinates — marshalled straight into a Monaco
 /// marker by the UI layer. Aggregates syntax errors, lint rule findings (including the cross-file
@@ -128,7 +129,7 @@ impl EditorHost for MonacoHost {
         MonacoRange::of(&doc.line_index, &doc.text, &range)
     }
 
-    fn location(&self, path: &str, doc: &Document, range: Range<usize>) -> Target {
+    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Target {
         Target {
             path: path.to_string(),
             range: self.range(doc, range),

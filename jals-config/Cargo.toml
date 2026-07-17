@@ -5,10 +5,9 @@ edition.workspace = true
 
 [dependencies]
 # The config data models for `jals.toml` / `jalsfmt.toml` / `jalslint.toml`, plus their parsing and
-# discovery. Pure/`no_std`: the loaders read through the `jals-fs` `FileTree` abstraction (the host
-# passes an `OsFileTree`; wasm passes an in-memory tree), so this crate carries no direct filesystem
-# access and stays `wasm32`-compatible.
-jals-fs.workspace = true
+# discovery. Pure/`no_std`: loaders read an immutable `jals-storage` revision, so this crate has no
+# direct filesystem access and stays `wasm32`-compatible.
+jals-storage.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 

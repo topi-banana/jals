@@ -3,10 +3,9 @@
 //! Both editor hosts used to own this lifecycle — file identity, per-file parse/resolution/facts
 //! caches, incremental index assembly, classpath and feature folding — each in its own dialect
 //! (the LSP incrementally, the browser by re-parsing the whole project per query). It lives here
-//! once: a [`Workspace`] is generic over the [`FileTree`] it loads from (an
-//! [`jals_fs::OsFileTree`] on the host, an [`jals_fs::InMemoryFileTree`] in the browser and in
-//! tests), identifies files by `/`-separated virtual paths, and answers every query in neutral
-//! shapes (byte offsets, [`FileRange`]s). Hosts keep only their protocol mapping: URI ↔ path and
+//! once: a [`Workspace`] owns a [`ProjectStorage`] aggregate through sealed source/cache adapters,
+//! identifies files by validated [`FileKey`] values in one immutable revision, and answers every
+//! query in neutral shapes (byte offsets, [`FileRange`]s). Hosts keep only protocol mapping and
 //! coordinate conversion.
 
 mod file_id;
@@ -19,14 +18,14 @@ use core::cell::OnceCell;
 use core::ops::Range;
 
 use jals_config::FeatureSet;
-use jals_fs::FileTree;
 use jals_hir::{FileFacts, FileId, LoweredClasspath, ProjectIndex, Resolved, SourceLocations, Ty};
+use jals_storage::{CacheBackend, DirKey, FileKey, ProjectStorage, ProjectView, SourceBackend};
 use jals_syntax::{Parse, SyntaxNode};
 
 use crate::document::Document;
 use crate::{
-    Completion, FileDiagnostic, FileDiagnostics, Fold, Folds, Highlight, Outline, OutlineNode,
-    ProjectQueries, QueryFile, SelectionChains, SemanticToken, SemanticTokens,
+    Completion, FileDiagnostic, FileDiagnostics, Highlight, Outline, OutlineNode, ProjectQueries,
+    QueryFile, SemanticToken, SemanticTokens,
 };
 use file_id::WorkspaceFileId;
 
@@ -34,7 +33,7 @@ use file_id::WorkspaceFileId;
 /// lazily-computed analysis caches an edit invalidates by replacing the whole struct.
 struct SourceFile {
     /// The `/`-separated virtual path identifying the file within the workspace's tree.
-    path: String,
+    path: FileKey,
     /// The file's text, coordinate map, and parsed CST.
     doc: Document,
     /// The file's name resolution, computed once on first use and cached. A pure function of the
@@ -51,13 +50,13 @@ struct SourceFile {
 }
 
 impl SourceFile {
-    fn new(path: String, text: String) -> Self {
+    fn new(path: FileKey, text: String) -> Self {
         Self::with_document(path, Document::new(text))
     }
 
     /// Wrap an already-parsed [`Document`] (an open-editor overlay), sharing its `Arc`s so the
     /// text is never reparsed, with fresh analysis caches.
-    const fn with_document(path: String, doc: Document) -> Self {
+    const fn with_document(path: FileKey, doc: Document) -> Self {
         Self {
             path,
             doc,
@@ -82,14 +81,14 @@ impl SourceFile {
     /// Read and parse each library `.java` in `paths` through `fs`, skipping unreadable ones and
     /// de-duplicating by path, into [`SourceFile`]s. Shared by both library-source kinds (the
     /// `-sources.jar` overlays and the `git`/`path` source dependencies).
-    fn read_all(fs: &dyn FileTree, paths: &[String]) -> Vec<Self> {
+    fn read_all(view: &ProjectView, paths: &[FileKey]) -> Vec<Self> {
         let mut files = Vec::new();
         let mut seen = BTreeSet::new();
         for path in paths {
-            if let Ok(text) = fs.read_to_string(path)
+            if let Ok(text) = view.file_text(path)
                 && seen.insert(path.clone())
             {
-                files.push(Self::new(path.clone(), text));
+                files.push(Self::new(path.clone(), text.to_owned()));
             }
         }
         files
@@ -127,12 +126,9 @@ impl SourceFile {
 /// struct (which jars to download, which directories to walk for `.class` files); the workspace
 /// owns everything after.
 #[derive(Default)]
-pub struct ProjectSpec {
-    /// The `jals.toml` directory (a `/`-separated virtual path); identifies the workspace so a
-    /// later open in the same project reuses it instead of building a duplicate.
-    pub root: String,
+pub struct ProjectLayout {
     /// The directories walked for `.java` (virtual paths).
-    pub source_roots: Vec<String>,
+    pub source_roots: Vec<DirKey>,
     /// The project's classpath `.class` files, already lowered by the host via
     /// [`ProjectIndex::lower_classpath`] — reused on every index rebuild so external library
     /// types resolve; static for the workspace's lifetime (a dependency jar does not change
@@ -140,20 +136,19 @@ pub struct ProjectSpec {
     pub classpath: LoweredClasspath,
     /// The `.java` of each `[dependencies]` `sources` jar (virtual paths): navigation-only
     /// overlays so go-to-definition can land in a classpath type/member's real source.
-    pub library_sources: Vec<String>,
+    pub library_sources: Vec<FileKey>,
     /// The `.java` of each `git`/`path` `[dependencies]` entry (virtual paths): index inputs
     /// (`Source`-origin types that resolve for analysis) *and* navigation targets.
-    pub source_dep_sources: Vec<String>,
+    pub source_dep_sources: Vec<FileKey>,
     /// The project's resolved language feature set (from `[package] features`); empty when the
     /// manifest declares none, disabling the feature-gated lint rules.
     pub feature_set: FeatureSet,
 }
 
-impl ProjectSpec {
+impl ProjectLayout {
     /// A spec with just a root and its source roots — no classpath, library sources, or features.
-    pub fn new(root: impl Into<String>, source_roots: Vec<String>) -> Self {
+    pub fn new(source_roots: Vec<DirKey>) -> Self {
         Self {
-            root: root.into(),
             source_roots,
             ..Self::default()
         }
@@ -162,21 +157,17 @@ impl ProjectSpec {
 
 /// A single project's symbol index plus the per-file data needed to answer cross-file queries.
 ///
-/// All file I/O goes through the [`FileTree`] `F`, and only during [`load`](Workspace::load) —
+/// All project I/O goes through [`ProjectStorage`], and only during [`load`](Workspace::load) —
 /// queries answer from the cached parsed trees. Open documents are kept current via
 /// [`set_overlay`](Workspace::set_overlay) / [`sync_overlay`](Workspace::sync_overlay), which
 /// swap a file's cached text for the editor's and rebuild the (in-memory, no-I/O) index. The
 /// rebuild re-walks only the changed file's CST but reassembles the whole index — linear in
 /// project size, adequate until an incremental index is needed.
-pub struct Workspace<F: FileTree> {
-    /// The file tree every load reads through. Only used during construction (and kept for the
-    /// host's own browsing needs — see [`fs`](Workspace::fs)).
-    fs: F,
-    /// The project root this workspace was loaded from (see [`ProjectSpec::root`]).
-    root: String,
-    source_roots: Vec<String>,
+pub struct Workspace<S: SourceBackend, C: CacheBackend> {
+    storage: ProjectStorage<S, C>,
+    source_roots: Vec<DirKey>,
     files: Vec<SourceFile>,
-    by_path: BTreeMap<String, FileId>,
+    by_path: BTreeMap<FileKey, FileId>,
     /// Extracted library *source* files (the `.java` of a `[dependencies]` `sources` jar), kept
     /// so a classpath type/member can be navigated into its real source. Addressed by a
     /// [`Library`](WorkspaceFileId::Library) [`FileId`], disjoint from the project files' low
@@ -192,7 +183,7 @@ pub struct Workspace<F: FileTree> {
     /// the project files and [`library_files`](Workspace::library_files). Still never linted —
     /// they are not project files.
     source_dep_files: Vec<SourceFile>,
-    /// The already-lowered classpath (see [`ProjectSpec::classpath`]), reused on every rebuild.
+    /// The already-lowered classpath from [`ProjectLayout`], reused on every rebuild.
     classpath: LoweredClasspath,
     /// Where each library type/member is declared in [`library_files`](Workspace::library_files),
     /// indexed once at construction (the sources of a fixed dependency do not change) and folded
@@ -208,22 +199,16 @@ pub struct Workspace<F: FileTree> {
     index: ProjectIndex,
 }
 
-impl<F: FileTree> Workspace<F> {
+impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// Build a workspace over `fs`: walk the spec's source roots for `.java`, read and parse each
     /// (skipping unreadable ones), register the library / source-dependency `.java`, and build
     /// the symbol index. Paths are visited in sorted order so the index is deterministic.
-    pub fn load(fs: F, spec: ProjectSpec) -> Self {
-        let mut paths: Vec<String> = spec
-            .source_roots
-            .iter()
-            .flat_map(|root| fs.walk_ext(root, "java").unwrap_or_default())
-            .collect();
-        paths.sort();
-        paths.dedup();
+    pub fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
+        let view = storage.view();
 
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
-        let library_files = SourceFile::read_all(&fs, &spec.library_sources);
+        let library_files = SourceFile::read_all(&view, &spec.library_sources);
         let library_inputs =
             SourceFile::file_inputs(&library_files, WorkspaceFileId::Library, |f| {
                 f.doc.parse.syntax()
@@ -231,11 +216,10 @@ impl<F: FileTree> Workspace<F> {
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types
         // on every rebuild (their `FileId`s are assigned in `rebuild_index`).
-        let source_dep_files = SourceFile::read_all(&fs, &spec.source_dep_sources);
+        let source_dep_files = SourceFile::read_all(&view, &spec.source_dep_sources);
 
         let mut ws = Self {
-            fs,
-            root: spec.root,
+            storage,
             source_roots: spec.source_roots,
             files: Vec::new(),
             by_path: BTreeMap::new(),
@@ -248,17 +232,34 @@ impl<F: FileTree> Workspace<F> {
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts(),
         };
-        for path in paths {
-            if let Ok(text) = ws.fs.read_to_string(&path)
-                && !ws.by_path.contains_key(&path)
-            {
-                let id = WorkspaceFileId::of_index(WorkspaceFileId::Project, ws.files.len());
-                ws.by_path.insert(path.clone(), id);
-                ws.files.push(SourceFile::new(path, text));
-            }
-        }
+        ws.reload_project_files(&view);
         ws.rebuild_index();
         ws
+    }
+
+    /// Walk the source roots for `.java`, read each (skipping unreadable ones), and register the
+    /// files in sorted path order — the one place `FileId` assignment happens, so the initial load
+    /// and every refresh stay deterministic and identical.
+    fn reload_project_files(&mut self, view: &ProjectView) {
+        let mut paths: Vec<FileKey> = self
+            .source_roots
+            .iter()
+            .flat_map(|root| view.tree().files_under(root))
+            .filter(|file| file.key().has_extension("java"))
+            .map(|file| file.key().clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        self.files.clear();
+        self.by_path.clear();
+        for path in paths {
+            if let Ok(text) = view.file_text(&path) {
+                let text = text.to_owned();
+                let id = WorkspaceFileId::of_index(WorkspaceFileId::Project, self.files.len());
+                self.by_path.insert(path.clone(), id);
+                self.files.push(SourceFile::new(path, text));
+            }
+        }
     }
 
     /// Rebuild the symbol index from the cached per-file facts, stubs, and classpath. No I/O.
@@ -357,32 +358,52 @@ impl<F: FileTree> Workspace<F> {
         self.rebuild_index();
     }
 
-    /// The project root this workspace was loaded from.
-    pub fn root(&self) -> &str {
-        &self.root
-    }
-
     /// The file tree the workspace was loaded from, for the host's own browsing (the playground's
     /// file sidebar reads directories; its editor writes files back).
-    pub const fn fs(&self) -> &F {
-        &self.fs
+    pub fn view(&self) -> ProjectView {
+        self.storage.view()
     }
 
     /// Mutable access to the file tree. Writing a file does *not* update the index — reflect an
     /// edit with [`set_overlay`](Workspace::set_overlay) / [`sync_overlay`](Workspace::sync_overlay).
-    pub const fn fs_mut(&mut self) -> &mut F {
-        &mut self.fs
+    pub const fn storage(&self) -> &ProjectStorage<S, C> {
+        &self.storage
+    }
+
+    pub const fn storage_mut(&mut self) -> &mut ProjectStorage<S, C> {
+        &mut self.storage
+    }
+
+    /// Publish a fresh backend snapshot and invalidate parse/HIR caches in the same revision.
+    pub fn refresh(&mut self) -> Result<jals_storage::RefreshOutcome, jals_storage::Error> {
+        let outcome = self.storage.refresh()?;
+        if !outcome.changed {
+            return Ok(outcome);
+        }
+        let view = self.storage.view();
+        self.reload_project_files(&view);
+        self.rebuild_index();
+        Ok(outcome)
     }
 
     /// The id of the file at `path`, if it is part of this workspace.
-    pub fn file_id(&self, path: &str) -> Option<FileId> {
+    pub fn file_id(&self, path: &FileKey) -> Option<FileId> {
         self.by_path.get(path).copied()
+    }
+
+    /// Every indexed project file with its cached document, in path order. This is the one
+    /// statement of project membership (source roots + extension, overlays included); hosts
+    /// browse this set instead of re-deriving it from the raw tree.
+    pub fn files(&self) -> impl Iterator<Item = (&FileKey, &Document)> {
+        self.by_path
+            .iter()
+            .filter_map(|(path, id)| Some((path, &self.project_file(*id)?.doc)))
     }
 
     /// The virtual path of the file `id` addresses (any id-space), or `None` for an id that
     /// addresses no real file.
-    pub fn path_of(&self, id: FileId) -> Option<&str> {
-        Some(self.ws_file(id)?.path.as_str())
+    pub fn path_of(&self, id: FileId) -> Option<&FileKey> {
+        Some(&self.ws_file(id)?.path)
     }
 
     /// The cached document of the file `id` addresses (any id-space) — the text/coordinates a
@@ -394,51 +415,61 @@ impl<F: FileTree> Workspace<F> {
 
     /// Whether `path` belongs to this workspace: a file already indexed, or a path under one of
     /// its source roots (so a project file the editor hasn't opened yet still resolves here).
-    pub fn owns_path(&self, path: &str) -> bool {
+    pub fn owns_path(&self, path: &FileKey) -> bool {
         self.by_path.contains_key(path) || self.under_source_root(path)
     }
 
     /// Whether `path` lies under one of this workspace's source roots.
-    fn under_source_root(&self, path: &str) -> bool {
-        self.source_roots.iter().any(|root| {
-            path.strip_prefix(root.as_str())
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || root.ends_with('/'))
-        })
+    fn under_source_root(&self, path: &FileKey) -> bool {
+        self.source_roots.iter().any(|root| Self::under(path, root))
     }
 
     /// Reflect an open document into the index: replace the cached copy of `path` with the
     /// editor's current text (or add it, if `path` is a project file created after the initial
     /// load), then rebuild the index. The document's `Arc`s are shared, so the text is never
     /// reparsed. Returns whether `path` belongs to this workspace.
-    pub fn set_overlay(&mut self, path: &str, doc: &Document) -> bool {
+    pub fn set_overlay(
+        &mut self,
+        path: &FileKey,
+        doc: &Document,
+    ) -> Result<bool, jals_storage::Error> {
         // Fresh analysis caches: this file re-extracts on the next rebuild; every other file
         // reuses its cache, so a keystroke re-walks only the edited file.
-        let file = SourceFile::with_document(path.to_owned(), doc.clone());
+        let file = SourceFile::with_document(path.clone(), doc.clone());
         if let Some(id) = self.by_path.get(path).copied() {
             self.files[id.0 as usize] = file;
         } else {
             if !self.under_source_root(path) {
-                return false;
+                return Ok(false);
             }
             let id = WorkspaceFileId::of_index(WorkspaceFileId::Project, self.files.len());
-            self.by_path.insert(path.to_owned(), id);
+            self.by_path.insert(path.clone(), id);
             self.files.push(file);
         }
+        self.storage.set_overlay(
+            self.storage.revision(),
+            path.clone(),
+            doc.text.as_bytes().to_vec(),
+        )?;
         self.rebuild_index();
-        true
+        Ok(true)
     }
 
     /// Reflect the editor's live text for `path` into the index, parsing and rebuilding **only
     /// when it differs** from the cached copy — so a query storm over an unchanged buffer (hover
     /// after hover) hits the caches instead of re-analyzing per request. Returns whether `path`
     /// belongs to this workspace.
-    pub fn sync_overlay(&mut self, path: &str, text: &str) -> bool {
+    pub fn sync_overlay(
+        &mut self,
+        path: &FileKey,
+        text: &str,
+    ) -> Result<bool, jals_storage::Error> {
         if let Some(source) = self.file_id(path).and_then(|id| self.project_file(id)) {
             if &*source.doc.text == text {
-                return true;
+                return Ok(true);
             }
         } else if !self.under_source_root(path) {
-            return false;
+            return Ok(false);
         }
         self.set_overlay(path, &Document::new(text.to_owned()))
     }
@@ -522,26 +553,6 @@ impl<F: FileTree> Workspace<F> {
             .unwrap_or_default()
     }
 
-    /// The folding ranges of `file`.
-    pub fn folds(&self, file: FileId) -> Vec<Fold> {
-        self.project_file(file)
-            .map(|source| {
-                Folds::of(
-                    &source.doc.parse.syntax(),
-                    &source.doc.text,
-                    &source.doc.line_index,
-                )
-            })
-            .unwrap_or_default()
-    }
-
-    /// The selection-expansion chain at `offset` in `file`, innermost first.
-    pub fn selection_chain(&self, file: FileId, offset: usize) -> Vec<Range<usize>> {
-        self.project_file(file)
-            .map(|source| SelectionChains::at(&source.doc.parse.syntax(), offset))
-            .unwrap_or_default()
-    }
-
     /// The canonical diagnostics of `file` under `config`, with the project's feature set and
     /// index folded in (see [`FileDiagnostics`]).
     pub fn diagnostics(
@@ -577,6 +588,10 @@ impl<F: FileTree> Workspace<F> {
         self.prepare_rename(file, offset)?;
         let targets = self.references(file, offset, true);
         (!targets.is_empty()).then_some(targets)
+    }
+
+    fn under(file: &FileKey, dir: &DirKey) -> bool {
+        file.path().starts_with(dir.path())
     }
 }
 
@@ -644,77 +659,106 @@ impl SingleFileProject {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
     use alloc::vec;
 
-    use jals_fs::InMemoryFileTree;
+    use jals_storage::{CodeTree, Entry, MemoryCache, MemorySource, MemoryStorage};
 
     use super::*;
 
     /// A two-file project: `Main` references `Greeter` across files.
-    fn sample_workspace() -> Workspace<InMemoryFileTree> {
-        let fs = InMemoryFileTree::new()
-            .with_file(
-                "/proj/src/Greeter.java",
+    fn memory(files: &[(&str, &str)]) -> MemoryStorage {
+        MemoryStorage::memory(
+            CodeTree::new(files.iter().map(|(path, text)| {
+                Entry::File(FileKey::parse(path).unwrap(), text.as_bytes().to_vec())
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn key(path: &str) -> FileKey {
+        FileKey::parse(path).unwrap()
+    }
+
+    fn sample_workspace() -> Workspace<MemorySource, MemoryCache> {
+        let storage = memory(&[
+            (
+                "src/Greeter.java",
                 "public class Greeter { public String greet(String name) { return name; } }",
-            )
-            .with_file(
-                "/proj/src/Main.java",
+            ),
+            (
+                "src/Main.java",
                 "public class Main { void run() { Greeter g = new Greeter(); } }",
-            );
-        Workspace::load(fs, ProjectSpec::new("/proj", vec!["/proj/src".to_owned()]))
+            ),
+        ]);
+        Workspace::load(
+            storage,
+            ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+        )
     }
 
     #[test]
     fn load_walks_sorts_and_indexes_the_tree() {
         let ws = sample_workspace();
         // Sorted walk: Greeter before Main.
-        assert_eq!(ws.path_of(FileId(0)), Some("/proj/src/Greeter.java"));
-        assert_eq!(ws.path_of(FileId(1)), Some("/proj/src/Main.java"));
-        assert_eq!(ws.file_id("/proj/src/Main.java"), Some(FileId(1)));
-        assert_eq!(ws.root(), "/proj");
+        assert_eq!(
+            ws.path_of(FileId(0)).map(ToString::to_string),
+            Some("src/Greeter.java".to_owned())
+        );
+        assert_eq!(
+            ws.path_of(FileId(1)).map(ToString::to_string),
+            Some("src/Main.java".to_owned())
+        );
+        assert_eq!(ws.file_id(&key("src/Main.java")), Some(FileId(1)));
         assert!(
-            ws.owns_path("/proj/src/New.java"),
+            ws.owns_path(&key("src/New.java")),
             "unopened but under root"
         );
-        assert!(!ws.owns_path("/elsewhere/X.java"));
+        assert!(!ws.owns_path(&key("elsewhere/X.java")));
     }
 
     #[test]
     fn definition_resolves_across_files() {
         let ws = sample_workspace();
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let text = &*ws.document(main).unwrap().text.clone();
         let offset = text.find("Greeter g").unwrap();
         let target = ws.definition(main, offset).expect("cross-file definition");
-        assert_eq!(ws.path_of(target.file), Some("/proj/src/Greeter.java"));
+        assert_eq!(
+            ws.path_of(target.file).map(ToString::to_string),
+            Some("src/Greeter.java".to_owned())
+        );
     }
 
     #[test]
     fn references_span_the_project_and_include_the_declaration() {
         let ws = sample_workspace();
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let text = &*ws.document(main).unwrap().text.clone();
         let offset = text.find("Greeter g").unwrap();
         let refs = ws.references(main, offset, true);
         let files: BTreeSet<_> = refs
             .iter()
-            .filter_map(|r| ws.path_of(r.file).map(ToOwned::to_owned))
+            .filter_map(|r| ws.path_of(r.file).map(ToString::to_string))
             .collect();
-        assert!(files.contains("/proj/src/Greeter.java"), "{refs:?}");
-        assert!(files.contains("/proj/src/Main.java"), "{refs:?}");
+        assert!(files.contains("src/Greeter.java"), "{refs:?}");
+        assert!(files.contains("src/Main.java"), "{refs:?}");
         assert!(refs.len() >= 3, "two uses + declaration: {refs:?}");
     }
 
     #[test]
     fn set_overlay_updates_the_index_and_new_files_join_under_a_root() {
         let mut ws = sample_workspace();
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
 
         // Renaming `Greeter` in its defining file makes Main's reference unresolvable.
-        assert!(ws.set_overlay(
-            "/proj/src/Greeter.java",
-            &Document::new("public class Renamed { }".to_owned()),
-        ));
+        assert!(
+            ws.set_overlay(
+                &key("src/Greeter.java"),
+                &Document::new("public class Renamed { }".to_owned()),
+            )
+            .unwrap()
+        );
         let diags = ws.diagnostics(main, &jals_config::lint::Config::default());
         assert!(
             diags
@@ -724,27 +768,36 @@ mod tests {
         );
 
         // A brand-new file under a source root joins the project...
-        assert!(ws.set_overlay(
-            "/proj/src/Extra.java",
-            &Document::new("public class Extra { }".to_owned()),
-        ));
-        assert!(ws.file_id("/proj/src/Extra.java").is_some());
+        assert!(
+            ws.set_overlay(
+                &key("src/Extra.java"),
+                &Document::new("public class Extra { }".to_owned()),
+            )
+            .unwrap()
+        );
+        assert!(ws.file_id(&key("src/Extra.java")).is_some());
         // ...but a file outside every root is rejected.
-        assert!(!ws.set_overlay("/elsewhere/X.java", &Document::new(String::new())));
+        assert!(
+            !ws.set_overlay(&key("elsewhere/X.java"), &Document::new(String::new()))
+                .unwrap()
+        );
     }
 
     #[test]
     fn sync_overlay_is_a_no_op_for_unchanged_text() {
         let mut ws = sample_workspace();
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let text = ws.document(main).unwrap().text.clone();
         let parse_before = alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse);
-        assert!(ws.sync_overlay("/proj/src/Main.java", &text));
+        assert!(ws.sync_overlay(&key("src/Main.java"), &text).unwrap());
         let parse_after = alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse);
         assert_eq!(parse_before, parse_after, "unchanged text must not reparse");
 
         // A real edit replaces the document.
-        assert!(ws.sync_overlay("/proj/src/Main.java", "public class Main { }"));
+        assert!(
+            ws.sync_overlay(&key("src/Main.java"), "public class Main { }")
+                .unwrap()
+        );
         assert_ne!(
             alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse),
             parse_after
@@ -754,7 +807,7 @@ mod tests {
     #[test]
     fn hover_completion_and_highlights_answer_from_the_index() {
         let ws = sample_workspace();
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let text = &*ws.document(main).unwrap().text.clone();
 
         // Hover over the `new Greeter()` expression shows the cross-file type.
@@ -776,9 +829,9 @@ mod tests {
     }
 
     #[test]
-    fn semantic_tokens_outline_folds_and_selection_answer_neutrally() {
+    fn semantic_tokens_and_outline_answer_neutrally() {
         let ws = sample_workspace();
-        let greeter = ws.file_id("/proj/src/Greeter.java").unwrap();
+        let greeter = ws.file_id(&key("src/Greeter.java")).unwrap();
         assert!(
             ws.semantic_tokens(greeter)
                 .iter()
@@ -786,15 +839,12 @@ mod tests {
         );
         let outline = ws.outline(greeter);
         assert_eq!(outline[0].name, "Greeter");
-        // The one-line sample folds nothing, but the query is total.
-        let _ = ws.folds(greeter);
-        assert!(!ws.selection_chain(greeter, 5).is_empty());
     }
 
     #[test]
     fn rename_gates_on_project_origin() {
         let ws = sample_workspace();
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let text = &*ws.document(main).unwrap().text.clone();
 
         // A cross-file *use* of a project type is renamable, and its targets span the project.
@@ -804,7 +854,7 @@ mod tests {
         assert!(targets.len() >= 3, "{targets:?}");
 
         // A stdlib type (`String` in Greeter) is not host-editable: not renamable.
-        let greeter = ws.file_id("/proj/src/Greeter.java").unwrap();
+        let greeter = ws.file_id(&key("src/Greeter.java")).unwrap();
         let gtext = &*ws.document(greeter).unwrap().text.clone();
         let string_use = gtext.find("String name").unwrap();
         assert!(ws.prepare_rename(greeter, string_use).is_none());
@@ -823,16 +873,16 @@ mod tests {
             "/tests/fixtures/Box.class"
         )))
         .expect("parse Box.class");
-        let fs = InMemoryFileTree::new().with_file(
-            "/proj/src/Main.java",
+        let storage = memory(&[(
+            "src/Main.java",
             "class Main { void run() { Box b = new Box(); } }",
-        );
-        let spec = ProjectSpec {
+        )]);
+        let spec = ProjectLayout {
             classpath: ProjectIndex::lower_classpath(&[class]),
-            ..ProjectSpec::new("/proj", vec!["/proj/src".to_owned()])
+            ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
         };
-        let ws = Workspace::load(fs, spec);
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let ws = Workspace::load(storage, spec);
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let diags = ws.diagnostics(main, &jals_config::lint::Config::default());
         assert!(
             !diags.iter().any(|d| d.code == Some("cannot-resolve")),
@@ -844,20 +894,24 @@ mod tests {
     fn source_dep_files_are_indexed_and_navigable() {
         // A `git`/`path` source dependency's `.java` resolves for analysis *and* is a
         // go-to-definition target, under the `SourceDep` id-space.
-        let fs = InMemoryFileTree::new()
-            .with_file("/proj/src/Main.java", "class Main { Lib l; }")
-            .with_file("/deps/lib/Lib.java", "public class Lib { }");
-        let spec = ProjectSpec {
-            source_dep_sources: vec!["/deps/lib/Lib.java".to_owned()],
-            ..ProjectSpec::new("/proj", vec!["/proj/src".to_owned()])
+        let storage = memory(&[
+            ("src/Main.java", "class Main { Lib l; }"),
+            ("deps/lib/Lib.java", "public class Lib { }"),
+        ]);
+        let spec = ProjectLayout {
+            source_dep_sources: vec![key("deps/lib/Lib.java")],
+            ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
         };
-        let ws = Workspace::load(fs, spec);
-        let main = ws.file_id("/proj/src/Main.java").unwrap();
+        let ws = Workspace::load(storage, spec);
+        let main = ws.file_id(&key("src/Main.java")).unwrap();
         let text = &*ws.document(main).unwrap().text.clone();
         let target = ws
             .definition(main, text.find("Lib l").unwrap())
             .expect("definition into the source dep");
-        assert_eq!(ws.path_of(target.file), Some("/deps/lib/Lib.java"));
+        assert_eq!(
+            ws.path_of(target.file).map(ToString::to_string),
+            Some("deps/lib/Lib.java".to_owned())
+        );
         // The dep is external: not renamable from the project.
         assert!(
             ws.prepare_rename(main, text.find("Lib l").unwrap())
