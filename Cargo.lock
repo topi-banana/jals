@@ -1245,8 +1245,10 @@ dependencies = [
 name = "jals-storage"
 version = "0.1.0"
 dependencies = [
+ "jals-exec",
  "sha2",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -2,15 +2,19 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use jals_exec::Exec;
+
 use crate::cache::{ArtifactCache, CacheBackend, MemoryCache};
 use crate::error::{Diagnostic, Error, Result};
 use crate::tree::{CodeTree, EntryRef};
 use crate::{DirKey, FileKey, Revision};
 
+/// One staged mutation. File payloads are shared slices so a staged batch can be handed to a
+/// blocking persistence task and re-walked afterwards without copying file contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
-    CreateFile(FileKey, Vec<u8>),
-    ReplaceFile(FileKey, Vec<u8>),
+    CreateFile(FileKey, Arc<[u8]>),
+    ReplaceFile(FileKey, Arc<[u8]>),
     RemoveFile(FileKey),
     CreateDirectory(DirKey),
     RemoveDirectory(DirKey),
@@ -28,14 +32,15 @@ pub(crate) mod private {
 }
 
 /// Closed persistence seam. Only the memory and native Adapters supplied by this crate implement it.
+#[allow(async_fn_in_trait)]
 pub trait SourceBackend: private::Sealed {
     #[doc(hidden)]
-    fn snapshot(&self) -> Result<SourceSnapshot>;
+    async fn snapshot(&self, exec: &Exec) -> Result<SourceSnapshot>;
     /// Persist `changes`. `base` is the tree the changes were planned against, so a backend whose
     /// storage can change underneath it (the native filesystem) can refuse to overwrite content
     /// that no longer matches the snapshot instead of clobbering a concurrent external edit.
     #[doc(hidden)]
-    fn apply(&mut self, changes: &[Change], base: &CodeTree) -> Result<()>;
+    async fn apply(&mut self, changes: Arc<[Change]>, base: &CodeTree, exec: &Exec) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -52,18 +57,23 @@ impl MemorySource {
 impl private::Sealed for MemorySource {}
 
 impl SourceBackend for MemorySource {
-    fn snapshot(&self) -> Result<SourceSnapshot> {
+    async fn snapshot(&self, _exec: &Exec) -> Result<SourceSnapshot> {
         Ok(SourceSnapshot {
             tree: self.tree.clone(),
             diagnostics: Vec::new(),
         })
     }
 
-    fn apply(&mut self, changes: &[Change], _base: &CodeTree) -> Result<()> {
+    async fn apply(
+        &mut self,
+        changes: Arc<[Change]>,
+        _base: &CodeTree,
+        _exec: &Exec,
+    ) -> Result<()> {
         // In-memory storage cannot change underneath the aggregate, so the base snapshot carries
         // no extra precondition beyond the tree's own structural checks.
         let mut next = self.tree.clone();
-        next.apply_changes(changes)?;
+        next.apply_changes(&changes)?;
         self.tree = next;
         Ok(())
     }
@@ -121,6 +131,7 @@ pub struct RefreshOutcome {
 /// Aggregate root for project source, editor overlay, artifact cache, and revision.
 #[derive(Debug, Clone)]
 pub struct ProjectStorage<S: SourceBackend, C: CacheBackend> {
+    exec: Exec,
     source: S,
     base: CodeTree,
     overlay: BTreeMap<FileKey, Arc<[u8]>>,
@@ -131,10 +142,11 @@ pub struct ProjectStorage<S: SourceBackend, C: CacheBackend> {
 }
 
 impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
-    pub fn open(source: S, cache: C) -> Result<Self> {
-        let snapshot = source.snapshot()?;
+    pub async fn open(source: S, cache: C, exec: Exec) -> Result<Self> {
+        let snapshot = source.snapshot(&exec).await?;
         let current = Arc::new(snapshot.tree.clone());
         Ok(Self {
+            exec,
             source,
             base: snapshot.tree,
             overlay: BTreeMap::new(),
@@ -164,6 +176,10 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
     pub const fn artifacts_mut(&mut self) -> &mut ArtifactCache<C> {
         &mut self.cache
     }
+    /// The execution context this storage was opened with.
+    pub const fn exec(&self) -> &Exec {
+        &self.exec
+    }
 
     /// Consume a detached storage snapshot and retain its verified artifact cache.
     pub fn into_artifacts(self) -> ArtifactCache<C> {
@@ -176,8 +192,8 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
         self.cache = cache;
     }
 
-    pub fn refresh(&mut self) -> Result<RefreshOutcome> {
-        let snapshot = self.source.snapshot()?;
+    pub async fn refresh(&mut self) -> Result<RefreshOutcome> {
+        let snapshot = self.source.snapshot(&self.exec).await?;
         let mut diagnostics = snapshot.diagnostics;
         for key in self.overlay.keys() {
             let before = self.base.file(key).map(crate::CodeFile::bytes);
@@ -286,9 +302,20 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
 }
 
 impl ProjectStorage<MemorySource, MemoryCache> {
+    /// Pure in-memory storage. Snapshotting memory is infallible and immediate, so this stays a
+    /// plain constructor.
     pub fn memory(tree: CodeTree) -> Self {
-        Self::open(MemorySource::new(tree), MemoryCache::default())
-            .expect("memory source is infallible")
+        let current = Arc::new(tree.clone());
+        Self {
+            exec: Exec::inline(),
+            source: MemorySource::new(tree.clone()),
+            base: tree,
+            overlay: BTreeMap::new(),
+            cache: ArtifactCache::new(MemoryCache::default()),
+            current,
+            revision: Revision::INITIAL,
+            diagnostics: Vec::new(),
+        }
     }
 }
 
@@ -312,11 +339,11 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
     }
 
     pub fn create_file(&mut self, key: FileKey, bytes: Vec<u8>) -> Result<&mut Self> {
-        self.stage(Change::CreateFile(key, bytes))
+        self.stage(Change::CreateFile(key, bytes.into()))
     }
 
     pub fn replace_file(&mut self, key: FileKey, bytes: Vec<u8>) -> Result<&mut Self> {
-        self.stage(Change::ReplaceFile(key, bytes))
+        self.stage(Change::ReplaceFile(key, bytes.into()))
     }
 
     pub fn create_directory(&mut self, key: DirKey) -> Result<&mut Self> {
@@ -331,35 +358,42 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
         self.stage(Change::RemoveDirectory(key))
     }
 
-    pub fn commit(self) -> Result<Revision> {
-        if self.staged.is_empty() {
-            return Ok(self.storage.revision);
+    pub async fn commit(self) -> Result<Revision> {
+        let Self {
+            storage, staged, ..
+        } = self;
+        if staged.is_empty() {
+            return Ok(storage.revision);
         }
-        let mut next_base = self.storage.base.clone();
-        next_base.apply_changes(&self.staged)?;
+        let mut next_base = storage.base.clone();
+        next_base.apply_changes(&staged)?;
+        let staged: Arc<[Change]> = staged.into();
         // Persist against the base the changes were planned on, so a native backend can detect a
         // file that was externally rewritten after the snapshot and refuse rather than clobber it.
-        let storage = &mut *self.storage;
-        storage.source.apply(&self.staged, &storage.base)?;
-        for change in &self.staged {
+        let exec = storage.exec.clone();
+        storage
+            .source
+            .apply(Arc::clone(&staged), &storage.base, &exec)
+            .await?;
+        for change in staged.iter() {
             match change {
                 Change::CreateFile(key, _)
                 | Change::ReplaceFile(key, _)
                 | Change::RemoveFile(key) => {
-                    self.storage.overlay.remove(key);
+                    storage.overlay.remove(key);
                 }
                 Change::RemoveDirectory(dir) => {
-                    self.storage
+                    storage
                         .overlay
                         .retain(|key, _| !key.path().starts_with(dir.path()));
                 }
                 Change::CreateDirectory(_) => {}
             }
         }
-        self.storage.base = next_base;
-        self.storage.revision = self.storage.revision.next();
-        self.storage.rebuild_current()?;
-        Ok(self.storage.revision)
+        storage.base = next_base;
+        storage.revision = storage.revision.next();
+        storage.rebuild_current()?;
+        Ok(storage.revision)
     }
 }
 
@@ -379,7 +413,7 @@ impl CodeTree {
                         }
                         None => {}
                     }
-                    self.insert_file_with_parents(key.clone(), bytes.clone())?;
+                    self.insert_file_with_parents(key.clone(), Arc::clone(bytes))?;
                 }
                 Change::ReplaceFile(key, bytes) => {
                     match self.lookup_file(key) {
@@ -390,7 +424,7 @@ impl CodeTree {
                         None => return Err(Error::NotFoundFile(key.clone())),
                     }
                     self.remove_file(key);
-                    self.insert_file_with_parents(key.clone(), bytes.clone())?;
+                    self.insert_file_with_parents(key.clone(), Arc::clone(bytes))?;
                 }
                 Change::RemoveFile(key) => match self.lookup_file(key) {
                     Some(EntryRef::File(_)) => {
@@ -439,6 +473,8 @@ impl CodeTree {
 
 #[cfg(test)]
 mod tests {
+    use jals_exec::block_on_inline;
+
     use super::*;
     use crate::Entry;
 
@@ -486,20 +522,22 @@ mod tests {
 
     #[test]
     fn transaction_advances_only_on_commit() {
-        let mut storage = storage();
-        let before = storage.revision();
-        let mut tx = storage.transaction(before).unwrap();
-        tx.create_file(FileKey::parse("B.java").unwrap(), b"b".to_vec())
-            .unwrap();
-        assert_eq!(tx.commit().unwrap().get(), before.get() + 1);
-        assert_eq!(
-            storage
-                .view()
-                .file(&FileKey::parse("B.java").unwrap())
-                .unwrap()
-                .bytes(),
-            b"b"
-        );
+        block_on_inline(async {
+            let mut storage = storage();
+            let before = storage.revision();
+            let mut tx = storage.transaction(before).unwrap();
+            tx.create_file(FileKey::parse("B.java").unwrap(), b"b".to_vec())
+                .unwrap();
+            assert_eq!(tx.commit().await.unwrap().get(), before.get() + 1);
+            assert_eq!(
+                storage
+                    .view()
+                    .file(&FileKey::parse("B.java").unwrap())
+                    .unwrap()
+                    .bytes(),
+                b"b"
+            );
+        });
     }
 
     #[derive(Debug)]
@@ -508,41 +546,53 @@ mod tests {
     }
     impl private::Sealed for FailingSource {}
     impl SourceBackend for FailingSource {
-        fn snapshot(&self) -> Result<SourceSnapshot> {
+        async fn snapshot(&self, _exec: &Exec) -> Result<SourceSnapshot> {
             Ok(SourceSnapshot {
                 tree: self.tree.clone(),
                 diagnostics: Vec::new(),
             })
         }
-        fn apply(&mut self, _changes: &[Change], _base: &CodeTree) -> Result<()> {
+        async fn apply(
+            &mut self,
+            _changes: Arc<[Change]>,
+            _base: &CodeTree,
+            _exec: &Exec,
+        ) -> Result<()> {
             Err(Error::Io("injected persistence failure".into()))
         }
     }
 
     #[test]
     fn persistence_failure_does_not_publish_a_revision() {
-        let tree = CodeTree::new([Entry::File(
-            FileKey::parse("A.java").unwrap(),
-            b"old".to_vec(),
-        )])
-        .unwrap();
-        let mut storage =
-            ProjectStorage::open(FailingSource { tree }, MemoryCache::default()).unwrap();
-        let revision = storage.revision();
-        let mut transaction = storage.transaction(revision).unwrap();
-        transaction
-            .replace_file(FileKey::parse("A.java").unwrap(), b"new".to_vec())
+        block_on_inline(async {
+            let tree = CodeTree::new([Entry::File(
+                FileKey::parse("A.java").unwrap(),
+                b"old".to_vec(),
+            )])
             .unwrap();
-        assert!(transaction.commit().is_err());
-        assert_eq!(storage.revision(), revision);
-        assert_eq!(
-            storage
-                .view()
-                .file(&FileKey::parse("A.java").unwrap())
-                .unwrap()
-                .bytes(),
-            b"old"
-        );
+            let mut storage = ProjectStorage::open(
+                FailingSource { tree },
+                MemoryCache::default(),
+                Exec::inline(),
+            )
+            .await
+            .unwrap();
+            let revision = storage.revision();
+            let mut transaction = storage.transaction(revision).unwrap();
+            transaction
+                .replace_file(FileKey::parse("A.java").unwrap(), b"new".to_vec())
+                .unwrap();
+            assert!(transaction.commit().await.is_err());
+            assert_eq!(storage.revision(), revision);
+            assert_eq!(
+                storage
+                    .view()
+                    .file(&FileKey::parse("A.java").unwrap())
+                    .unwrap()
+                    .bytes(),
+                b"old"
+            );
+        });
     }
 
     #[test]
@@ -624,57 +674,61 @@ mod tests {
 
     #[test]
     fn external_change_is_shadowed_by_overlay() {
-        let mut storage = storage();
-        let key = FileKey::parse("A.java").unwrap();
-        storage
-            .set_overlay(storage.revision(), key.clone(), b"local".to_vec())
-            .unwrap();
-        storage.source.tree.remove_file(&key);
-        storage
-            .source
-            .tree
-            .insert_file_with_parents(key.clone(), b"external".to_vec())
-            .unwrap();
-        let outcome = storage.refresh().unwrap();
-        assert!(
-            outcome
-                .diagnostics
-                .contains(&Diagnostic::ExternalChangeShadowed(key.clone()))
-        );
-        assert_eq!(storage.view().file(&key).unwrap().bytes(), b"local");
+        block_on_inline(async {
+            let mut storage = storage();
+            let key = FileKey::parse("A.java").unwrap();
+            storage
+                .set_overlay(storage.revision(), key.clone(), b"local".to_vec())
+                .unwrap();
+            storage.source.tree.remove_file(&key);
+            storage
+                .source
+                .tree
+                .insert_file_with_parents(key.clone(), b"external".to_vec())
+                .unwrap();
+            let outcome = storage.refresh().await.unwrap();
+            assert!(
+                outcome
+                    .diagnostics
+                    .contains(&Diagnostic::ExternalChangeShadowed(key.clone()))
+            );
+            assert_eq!(storage.view().file(&key).unwrap().bytes(), b"local");
+        });
     }
 
     #[test]
     fn failed_refresh_does_not_publish_base_or_revision() {
-        let mut storage = ProjectStorage::memory(
-            CodeTree::new([Entry::File(
-                FileKey::parse("A/B.java").unwrap(),
-                b"old".to_vec(),
+        block_on_inline(async {
+            let mut storage = ProjectStorage::memory(
+                CodeTree::new([Entry::File(
+                    FileKey::parse("A/B.java").unwrap(),
+                    b"old".to_vec(),
+                )])
+                .unwrap(),
+            );
+            let revision = storage.revision();
+            storage
+                .set_overlay(
+                    revision,
+                    FileKey::parse("A/B.java").unwrap(),
+                    b"edit".to_vec(),
+                )
+                .unwrap();
+            let overlay_revision = storage.revision();
+            let published = storage.view();
+            storage.source.tree = CodeTree::new([Entry::File(
+                FileKey::parse("A").unwrap(),
+                b"external".to_vec(),
             )])
-            .unwrap(),
-        );
-        let revision = storage.revision();
-        storage
-            .set_overlay(
-                revision,
-                FileKey::parse("A/B.java").unwrap(),
-                b"edit".to_vec(),
-            )
             .unwrap();
-        let overlay_revision = storage.revision();
-        let published = storage.view();
-        storage.source.tree = CodeTree::new([Entry::File(
-            FileKey::parse("A").unwrap(),
-            b"external".to_vec(),
-        )])
-        .unwrap();
 
-        assert!(matches!(
-            storage.refresh(),
-            Err(Error::InvalidTree(crate::TreeError::FileAncestor(_)))
-        ));
-        assert_eq!(storage.revision(), overlay_revision);
-        assert_eq!(storage.view().tree(), published.tree());
-        assert!(storage.base.file(&FileKey::parse("A").unwrap()).is_none());
+            assert!(matches!(
+                storage.refresh().await,
+                Err(Error::InvalidTree(crate::TreeError::FileAncestor(_)))
+            ));
+            assert_eq!(storage.revision(), overlay_revision);
+            assert_eq!(storage.view().tree(), published.tree());
+            assert!(storage.base.file(&FileKey::parse("A").unwrap()).is_none());
+        });
     }
 }

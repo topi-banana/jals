@@ -1,10 +1,11 @@
 //! Portable byte-stream reading.
 //!
-//! [`Read`] and [`Seek`] mirror the `std::io` contract on `core + alloc`, so portable consumers
-//! (the class-file codec, the archive walker) can stream bytes without materializing whole
-//! buffers or naming host types. Std interop never uses blanket impls — a blanket over
-//! `std::io::Read` would collide with the slice and [`Cursor`] impls — and is confined to the
-//! `std-io`-gated newtype bridges [`StdReader`] and [`ToStd`].
+//! [`Read`] and [`Seek`] mirror the `std::io` contract on `core + alloc` as `!Send` async
+//! traits, so portable consumers (the class-file codec, the archive walker) can stream bytes
+//! without materializing whole buffers or naming host types. In-memory sources complete every
+//! read immediately; only host-backed readers ever suspend. Std interop never uses blanket
+//! impls — a blanket over `std::io::Read` would collide with the slice and [`Cursor`] impls —
+//! and is confined to the `std-io`-gated newtype bridge [`StdReader`].
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -56,17 +57,19 @@ impl SeekFrom {
     }
 }
 
-/// A blocking byte source.
+/// An async byte source. Completion, not readiness: a resolved read either moved bytes or
+/// failed.
+#[allow(async_fn_in_trait)]
 pub trait Read {
     /// Pull up to `buf.len()` bytes, returning how many arrived. `Ok(0)` means end of input,
     /// never "try again later".
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError>;
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError>;
 
     /// Fill `buf` completely, or fail with [`IoError::UnexpectedEof`].
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), IoError> {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), IoError> {
         let mut filled = 0;
         while filled < buf.len() {
-            match self.read(&mut buf[filled..])? {
+            match self.read(&mut buf[filled..]).await? {
                 0 => return Err(IoError::UnexpectedEof),
                 n => filled += n,
             }
@@ -76,39 +79,45 @@ pub trait Read {
 }
 
 /// A byte source with a movable read position.
+#[allow(async_fn_in_trait)]
 pub trait Seek {
     /// Move the read position, returning the new offset from the start.
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError>;
+    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError>;
 
-    fn stream_position(&mut self) -> Result<u64, IoError> {
-        self.seek(SeekFrom::Current(0))
+    async fn stream_position(&mut self) -> Result<u64, IoError> {
+        self.seek(SeekFrom::Current(0)).await
     }
 }
 
 impl<R: Read + ?Sized> Read for &mut R {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        (**self).read(buf)
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        (**self).read(buf).await
     }
 }
 
 impl<S: Seek + ?Sized> Seek for &mut S {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        (**self).seek(pos)
+    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+        (**self).seek(pos).await
     }
 }
 
-/// Mirrors `std`: a slice reads by consuming itself from the front.
+/// Consumes a slice from the front without suspending, mirroring `std`.
+pub(crate) fn read_from_slice(source: &mut &[u8], buf: &mut [u8]) -> usize {
+    let n = source.len().min(buf.len());
+    let (head, tail) = source.split_at(n);
+    buf[..n].copy_from_slice(head);
+    *source = tail;
+    n
+}
+
+/// Mirrors `std`: a slice reads by consuming itself from the front. Always ready.
 impl Read for &[u8] {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        let n = self.len().min(buf.len());
-        let (head, tail) = self.split_at(n);
-        buf[..n].copy_from_slice(head);
-        *self = tail;
-        Ok(n)
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        Ok(read_from_slice(self, buf))
     }
 }
 
-/// An owned, seekable view over in-memory bytes, mirroring `std::io::Cursor`.
+/// An owned, seekable view over in-memory bytes, mirroring `std::io::Cursor`. Always ready.
 ///
 /// Seeking past the end is allowed; reads there return end of input. Seeking before the start
 /// is an error.
@@ -125,18 +134,18 @@ impl<T> Cursor<T> {
 }
 
 impl<T: AsRef<[u8]>> Read for Cursor<T> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         let data = self.data.as_ref();
         let start = usize::try_from(self.pos).map_or(data.len(), |pos| pos.min(data.len()));
         let mut pending = &data[start..];
-        let n = pending.read(buf)?;
+        let n = read_from_slice(&mut pending, buf);
         self.pos += n as u64;
         Ok(n)
     }
 }
 
 impl<T: AsRef<[u8]>> Seek for Cursor<T> {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
         self.pos = pos.resolve(self.data.as_ref().len() as u64, self.pos)?;
         Ok(self.pos)
     }
@@ -173,21 +182,21 @@ impl<R: Read> Buffered<R> {
 }
 
 impl<R: Read> Read for Buffered<R> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         if self.start == self.filled {
             // Requests at least as large as the buffer bypass it straight to the source.
             if buf.len() >= self.buf.len() {
-                return self.inner.read(buf);
+                return self.inner.read(buf).await;
             }
             self.start = 0;
             self.filled = 0;
-            self.filled = self.inner.read(&mut self.buf)?;
+            self.filled = self.inner.read(&mut self.buf).await?;
             if self.filled == 0 {
                 return Ok(0);
             }
         }
         let mut pending = &self.buf[self.start..self.filled];
-        let n = pending.read(buf)?;
+        let n = read_from_slice(&mut pending, buf);
         self.start += n;
         Ok(n)
     }
@@ -198,12 +207,17 @@ mod bridge {
     use super::{IoError, Read, Seek, SeekFrom};
 
     /// Portable view of a std reader. `ErrorKind::Interrupted` is retried, so `Ok(0)` keeps the
-    /// blocking end-of-input meaning the portable contract requires.
+    /// end-of-input meaning the portable contract requires.
+    ///
+    /// The wrapped reader is driven on the calling thread: this bridge is for sources whose
+    /// reads complete without meaningfully blocking (in-memory std readers, decompressors over
+    /// in-memory input). Host files go through the native artifact reader, which suspends
+    /// properly.
     #[derive(Debug, Clone)]
     pub struct StdReader<R>(pub R);
 
     impl<R: std::io::Read> Read for StdReader<R> {
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
             loop {
                 match self.0.read(buf) {
                     Ok(n) => return Ok(n),
@@ -218,7 +232,7 @@ mod bridge {
     }
 
     impl<S: std::io::Seek> Seek for StdReader<S> {
-        fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
             let pos = match pos {
                 SeekFrom::Start(offset) => std::io::SeekFrom::Start(offset),
                 SeekFrom::End(offset) => std::io::SeekFrom::End(offset),
@@ -229,97 +243,82 @@ mod bridge {
                 .map_err(|error| IoError::Failed(error.to_string()))
         }
     }
-
-    /// Std view of a portable reader — the shape `zip`'s `Read + Seek` contract needs.
-    #[derive(Debug, Clone)]
-    pub struct ToStd<R>(pub R);
-
-    impl<R: Read> std::io::Read for ToStd<R> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.0.read(buf).map_err(std_error)
-        }
-    }
-
-    impl<S: Seek> std::io::Seek for ToStd<S> {
-        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-            let pos = match pos {
-                std::io::SeekFrom::Start(offset) => SeekFrom::Start(offset),
-                std::io::SeekFrom::End(offset) => SeekFrom::End(offset),
-                std::io::SeekFrom::Current(offset) => SeekFrom::Current(offset),
-            };
-            self.0.seek(pos).map_err(std_error)
-        }
-    }
-
-    fn std_error(error: IoError) -> std::io::Error {
-        match error {
-            IoError::UnexpectedEof => std::io::ErrorKind::UnexpectedEof.into(),
-            IoError::Failed(message) => std::io::Error::other(message),
-        }
-    }
 }
 
 #[cfg(any(feature = "std-io", test))]
-pub use bridge::{StdReader, ToStd};
+pub use bridge::StdReader;
 
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
 
+    use jals_exec::block_on_inline;
+
     use super::*;
 
     #[test]
     fn slice_reads_consume_from_the_front() {
-        let mut source: &[u8] = &[1, 2, 3, 4, 5];
-        let mut buf = [0; 2];
-        assert_eq!(source.read(&mut buf), Ok(2));
-        assert_eq!(buf, [1, 2]);
-        assert_eq!(source, &[3, 4, 5]);
-        let mut rest = [0; 8];
-        assert_eq!(source.read(&mut rest), Ok(3));
-        assert_eq!(source.read(&mut rest), Ok(0));
+        block_on_inline(async {
+            let mut source: &[u8] = &[1, 2, 3, 4, 5];
+            let mut buf = [0; 2];
+            assert_eq!(source.read(&mut buf).await, Ok(2));
+            assert_eq!(buf, [1, 2]);
+            assert_eq!(source, &[3, 4, 5]);
+            let mut rest = [0; 8];
+            assert_eq!(source.read(&mut rest).await, Ok(3));
+            assert_eq!(source.read(&mut rest).await, Ok(0));
+        });
     }
 
     #[test]
     fn read_exact_reports_truncation() {
-        let mut source: &[u8] = &[1, 2];
-        let mut buf = [0; 4];
-        assert_eq!(source.read_exact(&mut buf), Err(IoError::UnexpectedEof));
+        block_on_inline(async {
+            let mut source: &[u8] = &[1, 2];
+            let mut buf = [0; 4];
+            assert_eq!(
+                source.read_exact(&mut buf).await,
+                Err(IoError::UnexpectedEof)
+            );
+        });
     }
 
     #[test]
     fn cursor_reads_and_seeks() {
-        let mut cursor = Cursor::new([10u8, 11, 12, 13]);
-        let mut buf = [0; 3];
-        cursor.read_exact(&mut buf).unwrap();
-        assert_eq!(buf, [10, 11, 12]);
-        assert_eq!(cursor.seek(SeekFrom::Start(1)), Ok(1));
-        assert_eq!(cursor.read(&mut buf), Ok(3));
-        assert_eq!(buf, [11, 12, 13]);
-        assert_eq!(cursor.seek(SeekFrom::End(-2)), Ok(2));
-        assert_eq!(cursor.stream_position(), Ok(2));
-        assert_eq!(cursor.seek(SeekFrom::Current(1)), Ok(3));
-        assert_eq!(cursor.read(&mut buf), Ok(1));
-        assert_eq!(buf[0], 13);
+        block_on_inline(async {
+            let mut cursor = Cursor::new([10u8, 11, 12, 13]);
+            let mut buf = [0; 3];
+            cursor.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf, [10, 11, 12]);
+            assert_eq!(cursor.seek(SeekFrom::Start(1)).await, Ok(1));
+            assert_eq!(cursor.read(&mut buf).await, Ok(3));
+            assert_eq!(buf, [11, 12, 13]);
+            assert_eq!(cursor.seek(SeekFrom::End(-2)).await, Ok(2));
+            assert_eq!(cursor.stream_position().await, Ok(2));
+            assert_eq!(cursor.seek(SeekFrom::Current(1)).await, Ok(3));
+            assert_eq!(cursor.read(&mut buf).await, Ok(1));
+            assert_eq!(buf[0], 13);
+        });
     }
 
     #[test]
     fn cursor_allows_seeking_past_the_end_but_not_before_the_start() {
-        let mut cursor = Cursor::new([1u8, 2]);
-        assert_eq!(cursor.seek(SeekFrom::Start(10)), Ok(10));
-        let mut buf = [0; 1];
-        assert_eq!(cursor.read(&mut buf), Ok(0));
-        assert!(matches!(
-            cursor.seek(SeekFrom::Current(-11)),
-            Err(IoError::Failed(_))
-        ));
+        block_on_inline(async {
+            let mut cursor = Cursor::new([1u8, 2]);
+            assert_eq!(cursor.seek(SeekFrom::Start(10)).await, Ok(10));
+            let mut buf = [0; 1];
+            assert_eq!(cursor.read(&mut buf).await, Ok(0));
+            assert!(matches!(
+                cursor.seek(SeekFrom::Current(-11)).await,
+                Err(IoError::Failed(_))
+            ));
+        });
     }
 
     /// Yields one byte per call so buffer refills and short reads are exercised.
     struct OneByteAtATime(Vec<u8>);
 
     impl Read for OneByteAtATime {
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
             if self.0.is_empty() || buf.is_empty() {
                 return Ok(0);
             }
@@ -330,33 +329,37 @@ mod tests {
 
     #[test]
     fn buffered_reads_across_refill_boundaries() {
-        let data: Vec<u8> = (0..=255).collect();
-        let mut buffered = Buffered::with_capacity(7, OneByteAtATime(data.clone()));
-        let mut out = Vec::new();
-        let mut chunk = [0; 5];
-        loop {
-            match buffered.read(&mut chunk).unwrap() {
-                0 => break,
-                n => out.extend_from_slice(&chunk[..n]),
+        block_on_inline(async {
+            let data: Vec<u8> = (0..=255).collect();
+            let mut buffered = Buffered::with_capacity(7, OneByteAtATime(data.clone()));
+            let mut out = Vec::new();
+            let mut chunk = [0; 5];
+            loop {
+                match buffered.read(&mut chunk).await.unwrap() {
+                    0 => break,
+                    n => out.extend_from_slice(&chunk[..n]),
+                }
             }
-        }
-        assert_eq!(out, data);
+            assert_eq!(out, data);
+        });
     }
 
     #[test]
     fn buffered_bypasses_the_buffer_for_large_requests() {
-        let mut buffered = Buffered::with_capacity(2, [1u8, 2, 3, 4].as_slice());
-        let mut buf = [0; 4];
-        // As large as the buffer: served straight from the source in one call.
-        assert_eq!(buffered.read(&mut buf), Ok(4));
-        assert_eq!(buf, [1, 2, 3, 4]);
+        block_on_inline(async {
+            let mut buffered = Buffered::with_capacity(2, [1u8, 2, 3, 4].as_slice());
+            let mut buf = [0; 4];
+            // As large as the buffer: served straight from the source in one call.
+            assert_eq!(buffered.read(&mut buf).await, Ok(4));
+            assert_eq!(buf, [1, 2, 3, 4]);
+        });
     }
 
     #[test]
     fn buffered_error_does_not_leave_stale_bytes() {
         struct FailAfter(usize);
         impl Read for FailAfter {
-            fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+            async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
                 if self.0 == 0 {
                     return Err(IoError::Failed(String::from("boom")));
                 }
@@ -365,30 +368,27 @@ mod tests {
                 Ok(1)
             }
         }
-        let mut buffered = Buffered::with_capacity(4, FailAfter(1));
-        let mut buf = [0; 1];
-        assert_eq!(buffered.read(&mut buf), Ok(1));
-        assert!(buffered.read(&mut buf).is_err());
-        assert!(buffered.read(&mut buf).is_err());
+        block_on_inline(async {
+            let mut buffered = Buffered::with_capacity(4, FailAfter(1));
+            let mut buf = [0; 1];
+            assert_eq!(buffered.read(&mut buf).await, Ok(1));
+            assert!(buffered.read(&mut buf).await.is_err());
+            assert!(buffered.read(&mut buf).await.is_err());
+        });
     }
 
     #[test]
-    fn std_bridges_round_trip() {
-        let bytes = [1u8, 2, 3, 4, 5];
-        let std_reader = std::io::Cursor::new(bytes);
-        let mut portable = StdReader(std_reader);
-        let mut buf = [0; 5];
-        portable.read_exact(&mut buf).unwrap();
-        assert_eq!(buf, bytes);
-        portable.seek(SeekFrom::Start(0)).unwrap();
-
-        let mut back_to_std = ToStd(portable);
-        let mut out = Vec::new();
-        std::io::Read::read_to_end(&mut back_to_std, &mut out).unwrap();
-        assert_eq!(out, bytes);
-        assert_eq!(
-            std::io::Seek::seek(&mut back_to_std, std::io::SeekFrom::End(-1)).unwrap(),
-            4
-        );
+    fn std_bridge_reads_and_seeks() {
+        block_on_inline(async {
+            let bytes = [1u8, 2, 3, 4, 5];
+            let std_reader = std::io::Cursor::new(bytes);
+            let mut portable = StdReader(std_reader);
+            let mut buf = [0; 5];
+            portable.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf, bytes);
+            assert_eq!(portable.seek(SeekFrom::End(-1)).await, Ok(4));
+            assert_eq!(portable.read(&mut buf).await, Ok(1));
+            assert_eq!(buf[0], 5);
+        });
     }
 }
