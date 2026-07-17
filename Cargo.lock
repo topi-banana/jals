@@ -1133,6 +1133,7 @@ dependencies = [
 name = "jals-config"
 version = "0.1.0"
 dependencies = [
+ "jals-exec",
  "jals-storage",
  "serde",
  "toml",

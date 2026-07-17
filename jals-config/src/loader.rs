@@ -88,20 +88,24 @@ pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
     /// Search upward from `start_dir` (a `/`-separated virtual path) for
     /// [`FILE_NAME`](Self::FILE_NAME), read through `fs`.
     ///
-    /// Returns the parsed config if a file is found, otherwise `Self::default()`.
+    /// Returns the parsed config if a file is found, otherwise `Self::default()`. The walk
+    /// cooperates per ancestor step, so deep trees never monopolize the executor.
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    fn discover(view: &ProjectView, start_dir: &DirKey) -> Result<Self, ConfigError>
+    #[allow(async_fn_in_trait)]
+    async fn discover(view: &ProjectView, start_dir: &DirKey) -> Result<Self, ConfigError>
     where
         Self: Default,
     {
         let name = Name::new(Self::FILE_NAME).expect("config file constants are valid names");
+        let mut yielder = jals_exec::Yielder::new();
         for dir in start_dir.ancestors() {
             let candidate = dir.file(name.clone());
             if view.tree().file(&candidate).is_some() {
                 return Self::load(view, &candidate);
             }
+            yielder.tick().await;
         }
         Ok(Self::default())
     }
@@ -128,13 +132,17 @@ mod tests {
             ("q/A.java", "class A {}"),
         ]);
         assert_eq!(
-            Config::discover(&fs.view(), &DirKey::parse("p/src/deep").unwrap())
-                .unwrap()
-                .indent_width,
+            jals_exec::block_on_inline(Config::discover(
+                &fs.view(),
+                &DirKey::parse("p/src/deep").unwrap()
+            ))
+            .unwrap()
+            .indent_width,
             7
         );
         assert_eq!(
-            Config::discover(&fs.view(), &DirKey::parse("q").unwrap()).unwrap(),
+            jals_exec::block_on_inline(Config::discover(&fs.view(), &DirKey::parse("q").unwrap()))
+                .unwrap(),
             Config::default(),
             "no config anywhere upward falls back to the default"
         );
@@ -144,7 +152,7 @@ mod tests {
     fn discover_propagates_a_parse_error() {
         let fs = storage(&[("p/jalsfmt.toml", "indent-width = ")]);
         assert!(matches!(
-            Config::discover(&fs.view(), &DirKey::parse("p").unwrap()),
+            jals_exec::block_on_inline(Config::discover(&fs.view(), &DirKey::parse("p").unwrap())),
             Err(ConfigError::Parse { .. })
         ));
     }
