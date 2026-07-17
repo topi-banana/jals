@@ -9,7 +9,9 @@ edition.workspace = true
 # separate layer so the wasm32 playground keeps the inline walker. Native adds the HTTP adapter;
 # project and cache access remains entirely in `jals-storage`.
 default = ["native"]
-archive = ["dep:zip"]
+# `jals-storage/std-io` supplies only the portable↔std reader bridges (wasm-safe) that feed
+# cache readers to `zip`; the native storage adapters stay behind `native`.
+archive = ["dep:zip", "jals-storage/std-io"]
 parallel = ["archive", "dep:rayon"]
 native = [
   "archive",

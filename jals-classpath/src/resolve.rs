@@ -148,7 +148,7 @@ impl DependencyResolver {
                         locator.as_str().as_bytes(),
                         *content,
                     );
-                    match cache.lookup(&key) {
+                    match cache.open_verified(&key) {
                         Ok(Some(_)) => return Ok(key),
                         Ok(None) => {}
                         Err(error) => {
@@ -170,7 +170,7 @@ impl DependencyResolver {
                         Self::provenance_digest(b"external\0", locator.as_str().as_bytes());
                     if let Ok(Some(key)) =
                         cache.indexed_key(CacheNamespace::DependencyJar, provenance)
-                        && matches!(cache.lookup(&key), Ok(Some(_)))
+                        && matches!(cache.open_verified(&key), Ok(Some(_)))
                     {
                         return Ok(key);
                     }

@@ -121,3 +121,93 @@ fn loads_verified_cached_jar_and_warns_on_missing_artifact() {
     assert_eq!(load.classes.len(), 1);
     assert_eq!(load.warnings.len(), 1);
 }
+
+/// The disk-backed cache path streams jars through `open_verified` readers; it must yield the
+/// same classes in the same order as the in-memory path (with `parallel`, one reader clone per
+/// worker).
+#[cfg(feature = "native")]
+#[test]
+fn native_cached_jar_streams_and_matches_the_memory_path() {
+    use jals_storage::NativeStorage;
+
+    let (a, b, c) = (
+        class_with_minor(4),
+        class_with_minor(5),
+        class_with_minor(6),
+    );
+    let bytes = jar(&[
+        ("pkg/A.class", &a),
+        ("pkg/B.class", &b),
+        ("sub/C.class", &c),
+    ]);
+    let key = CacheKey::new(
+        CacheNamespace::DependencyJar,
+        ContentDigest::of(b"native-fixture"),
+        ContentDigest::of(&bytes),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut native = NativeStorage::native(dir.path(), dir.path().join(".cache")).unwrap();
+    native.artifacts_mut().publish(&key, &bytes).unwrap();
+    let native_load = ClasspathLoad::load(
+        &native.view(),
+        native.artifacts(),
+        &[ClasspathEntry::Artifact(key.clone())],
+    );
+
+    let mut memory = MemoryStorage::memory(CodeTree::default());
+    memory.artifacts_mut().publish(&key, &bytes).unwrap();
+    let memory_load = ClasspathLoad::load(
+        &memory.view(),
+        memory.artifacts(),
+        &[ClasspathEntry::Artifact(key)],
+    );
+
+    let minors = |load: &ClasspathLoad| {
+        load.classes
+            .iter()
+            .map(|class| class.minor_version)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(minors(&native_load), [4, 5, 6]);
+    assert_eq!(minors(&native_load), minors(&memory_load));
+    assert!(
+        native_load.warnings.is_empty(),
+        "{:?}",
+        native_load.warnings
+    );
+}
+
+/// On-disk tampering after publish must surface as a per-entry `Corrupt` warning through the
+/// verified reader — never as parsed classes, never as a panic.
+#[cfg(feature = "native")]
+#[test]
+fn native_cached_jar_tampered_on_disk_is_a_warning() {
+    use jals_storage::NativeStorage;
+
+    let bytes = jar(&[("pkg/Box.class", BOX_CLASS)]);
+    let key = CacheKey::new(
+        CacheNamespace::DependencyJar,
+        ContentDigest::of(b"tampered-fixture"),
+        ContentDigest::of(&bytes),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut native = NativeStorage::native(dir.path(), dir.path().join(".cache")).unwrap();
+    native.artifacts_mut().publish(&key, &bytes).unwrap();
+
+    let artifact = native.artifacts().backend().artifact_path(&key);
+    std::fs::write(&artifact, jar(&[("pkg/Other.class", BOX_CLASS)])).unwrap();
+
+    let load = ClasspathLoad::load(
+        &native.view(),
+        native.artifacts(),
+        &[ClasspathEntry::Artifact(key)],
+    );
+    assert!(load.classes.is_empty());
+    assert_eq!(load.warnings.len(), 1);
+    assert!(
+        load.warnings[0].message.contains("Corrupt"),
+        "{:?}",
+        load.warnings[0]
+    );
+}

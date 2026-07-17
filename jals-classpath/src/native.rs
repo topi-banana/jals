@@ -499,7 +499,7 @@ impl NativeProjectPlan {
                 ContentDigest::of(format!("{identity}\0{file}").as_bytes()),
                 content,
             );
-            if !matches!(storage.artifacts().lookup(&key), Ok(Some(_))) {
+            if !matches!(storage.artifacts().open_verified(&key), Ok(Some(_))) {
                 return None;
             }
             sources.push(LibrarySource {

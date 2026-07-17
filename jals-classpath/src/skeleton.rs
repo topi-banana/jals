@@ -681,10 +681,13 @@ mod tests {
     use super::*;
 
     fn box_class() -> ClassFile {
-        jals_classfile::ClassFile::read(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/Box.class"
-        )))
+        jals_classfile::ClassFile::read(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/Box.class"
+            ))
+            .as_slice(),
+        )
         .expect("parse Box.class")
     }
 
