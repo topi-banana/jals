@@ -19,6 +19,54 @@ use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
 
 const MAX_NESTED_JAR_DEPTH: usize = 64;
 
+/// Order-preserving execution seam: with the `parallel` feature the maps fan out on the rayon
+/// pool, without it they run inline. Both yield results in input order, so loads stay
+/// deterministic either way.
+mod exec {
+    use alloc::vec::Vec;
+
+    #[cfg(feature = "parallel")]
+    pub(super) fn map<I: Sync, T: Send>(items: &[I], f: impl Fn(&I) -> T + Send + Sync) -> Vec<T> {
+        use rayon::prelude::*;
+        items.par_iter().map(f).collect()
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    pub(super) fn map<I, T>(items: &[I], f: impl Fn(&I) -> T) -> Vec<T> {
+        items.iter().map(f).collect()
+    }
+
+    /// Map over `0..len` with a scratch value cloned from `state`: one clone per worker under
+    /// `parallel`, one for the whole loop inline.
+    #[cfg(feature = "parallel")]
+    pub(super) fn map_with<S: Clone + Sync, T: Send>(
+        len: usize,
+        state: &S,
+        f: impl Fn(&mut S, usize) -> T + Send + Sync,
+    ) -> Vec<T> {
+        use rayon::prelude::*;
+        (0..len)
+            .into_par_iter()
+            .map_init(|| state.clone(), f)
+            .collect()
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    pub(super) fn map_with<S: Clone, T>(
+        len: usize,
+        state: &S,
+        f: impl Fn(&mut S, usize) -> T,
+    ) -> Vec<T> {
+        let mut state = state.clone();
+        (0..len).map(|index| f(&mut state, index)).collect()
+    }
+}
+
+/// Parse class-file bytes, tagging a parse failure with the shared diagnostic message.
+fn read_class(bytes: &[u8]) -> Result<ClassFile, String> {
+    ClassFile::read(bytes).map_err(|error| format!("failed to parse class file: {error}"))
+}
+
 /// A typed classpath input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClasspathEntry {
@@ -42,41 +90,58 @@ pub struct ClasspathLoad {
 
 impl ClasspathLoad {
     /// Load from exactly one immutable project revision and a verified artifact cache.
+    ///
+    /// With the `parallel` feature, entries and archive members are decoded on the rayon pool;
+    /// classes and warnings are still merged in entry order, so the result is identical to the
+    /// inline walk.
     pub fn load<C: CacheBackend>(
         view: &ProjectView,
         cache: &ArtifactCache<C>,
         entries: &[ClasspathEntry],
     ) -> Self {
+        exec::map(entries, |entry| Self::load_entry(view, cache, entry))
+            .into_iter()
+            .reduce(|mut load, entry_load| {
+                load.classes.extend(entry_load.classes);
+                load.warnings.extend(entry_load.warnings);
+                load
+            })
+            .unwrap_or_default()
+    }
+
+    fn load_entry<C: CacheBackend>(
+        view: &ProjectView,
+        cache: &ArtifactCache<C>,
+        entry: &ClasspathEntry,
+    ) -> Self {
         let mut load = Self::default();
-        for entry in entries {
-            match entry {
-                ClasspathEntry::ProjectFile(key) => load.load_project_file(view, key),
-                ClasspathEntry::ProjectDirectory(key) => load.load_project_dir(view, key),
-                ClasspathEntry::Artifact(key) => match cache.lookup(key) {
-                    Ok(Some(bytes)) => {
-                        load.load_jar_bytes(&WarningOrigin::Artifact(key.clone()), &bytes);
-                    }
-                    Ok(None) => load.warn(
-                        WarningOrigin::Artifact(key.clone()),
-                        "classpath artifact is not cached",
-                    ),
-                    Err(error) => load.warn(
-                        WarningOrigin::Artifact(key.clone()),
-                        &format!("classpath artifact is invalid: {error:?}"),
-                    ),
-                },
-                ClasspathEntry::ArtifactFile { path, key } => match cache.lookup(key) {
-                    Ok(Some(bytes)) => load.load_cached_file(path, key, &bytes),
-                    Ok(None) => load.warn(
-                        WarningOrigin::Artifact(key.clone()),
-                        "classpath file artifact is not cached",
-                    ),
-                    Err(error) => load.warn(
-                        WarningOrigin::Artifact(key.clone()),
-                        &format!("classpath file artifact is invalid: {error:?}"),
-                    ),
-                },
-            }
+        match entry {
+            ClasspathEntry::ProjectFile(key) => load.load_project_file(view, key),
+            ClasspathEntry::ProjectDirectory(key) => load.load_project_dir(view, key),
+            ClasspathEntry::Artifact(key) => match cache.lookup(key) {
+                Ok(Some(bytes)) => {
+                    load.load_jar_bytes(&WarningOrigin::Artifact(key.clone()), &bytes);
+                }
+                Ok(None) => load.warn(
+                    WarningOrigin::Artifact(key.clone()),
+                    "classpath artifact is not cached",
+                ),
+                Err(error) => load.warn(
+                    WarningOrigin::Artifact(key.clone()),
+                    &format!("classpath artifact is invalid: {error:?}"),
+                ),
+            },
+            ClasspathEntry::ArtifactFile { path, key } => match cache.lookup(key) {
+                Ok(Some(bytes)) => load.load_cached_file(path, key, &bytes),
+                Ok(None) => load.warn(
+                    WarningOrigin::Artifact(key.clone()),
+                    "classpath file artifact is not cached",
+                ),
+                Err(error) => load.warn(
+                    WarningOrigin::Artifact(key.clone()),
+                    &format!("classpath file artifact is invalid: {error:?}"),
+                ),
+            },
         }
         load
     }
@@ -127,34 +192,49 @@ impl ClasspathLoad {
             );
             return;
         }
-        for file in view.tree().files_under(key) {
-            if file.key().has_extension("class") {
-                self.parse_into(WarningOrigin::ProjectFile(file.key().clone()), file.bytes());
+        let files: Vec<_> = view
+            .tree()
+            .files_under(key)
+            .filter(|file| file.key().has_extension("class"))
+            .collect();
+        let parsed = exec::map(&files, |file| read_class(file.bytes()));
+        for (file, outcome) in files.into_iter().zip(parsed) {
+            match outcome {
+                Ok(class) => self.classes.push(class),
+                Err(message) => {
+                    self.warn(WarningOrigin::ProjectFile(file.key().clone()), &message);
+                }
             }
         }
     }
 
     fn load_jar_bytes(&mut self, origin: &WarningOrigin, bytes: &[u8]) {
-        let classes = &mut self.classes;
-        Archive::walk_members(
-            bytes,
-            origin,
-            |name| Archive::extension(name).is_some_and(|ext| ext.eq_ignore_ascii_case("class")),
-            |_, bytes| match ClassFile::read(bytes) {
-                Ok(class) => {
-                    classes.push(class);
-                    Ok(())
-                }
-                Err(error) => Err(format!("failed to parse class file: {error}")),
-            },
-            &mut self.warnings,
-        );
+        let archive = match Archive::open(bytes) {
+            Ok(archive) => archive,
+            Err(message) => return self.warn(origin.clone(), &message),
+        };
+        let is_class = |name: &str| {
+            Archive::extension(name).is_some_and(|ext| ext.eq_ignore_ascii_case("class"))
+        };
+        let parsed = exec::map_with(archive.len(), &archive, |archive, index| {
+            let Some((_, contents)) = Archive::read_member(archive, index, &is_class)? else {
+                return Ok(None);
+            };
+            read_class(&contents).map(Some)
+        });
+        for outcome in parsed {
+            match outcome {
+                Ok(Some(class)) => self.classes.push(class),
+                Ok(None) => {}
+                Err(message) => self.warn(origin.clone(), &message),
+            }
+        }
     }
 
     fn parse_into(&mut self, origin: WarningOrigin, bytes: &[u8]) {
-        match ClassFile::read(bytes) {
+        match read_class(bytes) {
             Ok(class) => self.classes.push(class),
-            Err(error) => self.warn(origin, &format!("failed to parse class file: {error}")),
+            Err(message) => self.warn(origin, &message),
         }
     }
 
@@ -283,6 +363,36 @@ impl<T> JarExtraction<T> {
 struct Archive;
 
 impl Archive {
+    /// Open `bytes` as a zip archive. The reader is a cheap-to-clone cursor and the parsed central
+    /// directory is shared, so parallel walkers clone one open archive per worker.
+    fn open(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, String> {
+        zip::ZipArchive::new(Cursor::new(bytes))
+            .map_err(|error| format!("failed to read archive: {error}"))
+    }
+
+    /// Read the regular member at `index` if its name passes `matches`. `Ok(None)` is a directory
+    /// or a filtered-out name; `Err` is an unreadable entry, diagnosed with the member index.
+    fn read_member(
+        archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+        index: usize,
+        matches: &impl Fn(&str) -> bool,
+    ) -> Result<Option<(String, Vec<u8>)>, String> {
+        let mut member = archive
+            .by_index(index)
+            .map_err(|error| format!("failed to read archive entry {index}: {error}"))?;
+        if member.is_dir() || !matches(member.name()) {
+            return Ok(None);
+        }
+        let mut contents = Vec::with_capacity(usize::try_from(member.size()).unwrap_or(0));
+        if let Err(error) = member.read_to_end(&mut contents) {
+            return Err(format!(
+                "failed to read archive member `{}`: {error}",
+                member.name()
+            ));
+        }
+        Ok(Some((member.name().to_owned(), contents)))
+    }
+
     /// Walk `bytes` as a zip archive, feeding every regular member whose name passes `matches`
     /// through `accept`. An unreadable archive/entry and a rejected member are diagnosed into
     /// `warnings` under `origin`; nothing aborts the walk.
@@ -293,39 +403,18 @@ impl Archive {
         mut accept: impl FnMut(&str, &[u8]) -> Result<(), String>,
         warnings: &mut Vec<Warning>,
     ) {
-        let mut archive = match zip::ZipArchive::new(Cursor::new(bytes)) {
+        let mut archive = match Self::open(bytes) {
             Ok(archive) => archive,
-            Err(error) => {
-                warnings.push(Warning::new(
-                    origin.clone(),
-                    format!("failed to read archive: {error}"),
-                ));
+            Err(message) => {
+                warnings.push(Warning::new(origin.clone(), message));
                 return;
             }
         };
         for index in 0..archive.len() {
-            let mut member = match archive.by_index(index) {
-                Ok(member) => member,
-                Err(error) => {
-                    warnings.push(Warning::new(
-                        origin.clone(),
-                        format!("failed to read archive entry {index}: {error}"),
-                    ));
-                    continue;
-                }
-            };
-            if member.is_dir() || !matches(member.name()) {
-                continue;
-            }
-            let mut contents = Vec::with_capacity(usize::try_from(member.size()).unwrap_or(0));
-            if let Err(error) = member.read_to_end(&mut contents) {
-                warnings.push(Warning::new(
-                    origin.clone(),
-                    format!("failed to read archive member `{}`: {error}", member.name()),
-                ));
-                continue;
-            }
-            if let Err(message) = accept(member.name(), &contents) {
+            let result = Self::read_member(&mut archive, index, &matches).and_then(|member| {
+                member.map_or(Ok(()), |(name, contents)| accept(&name, &contents))
+            });
+            if let Err(message) = result {
                 warnings.push(Warning::new(origin.clone(), message));
             }
         }

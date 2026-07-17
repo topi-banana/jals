@@ -7,12 +7,14 @@ use jals_storage::{
 
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
 
-fn jar_bytes() -> Vec<u8> {
+fn jar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(&mut bytes);
-    zip.start_file("pkg/Box.class", zip::write::SimpleFileOptions::default())
-        .unwrap();
-    zip.write_all(BOX_CLASS).unwrap();
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, contents) in entries {
+        zip.start_file(*name, options).unwrap();
+        zip.write_all(contents).unwrap();
+    }
     zip.finish().unwrap();
     bytes.into_inner()
 }
@@ -28,7 +30,10 @@ fn loads_typed_project_directory_and_file_entries() {
             FileKey::parse("classes/Bad.class").unwrap(),
             b"bad".to_vec(),
         ),
-        Entry::File(FileKey::parse("dep.jar").unwrap(), jar_bytes()),
+        Entry::File(
+            FileKey::parse("dep.jar").unwrap(),
+            jar(&[("pkg/Box.class", BOX_CLASS)]),
+        ),
     ])
     .unwrap();
     let storage = MemoryStorage::memory(tree);
@@ -49,10 +54,51 @@ fn loads_typed_project_directory_and_file_entries() {
     ));
 }
 
+/// `BOX_CLASS` with `minor_version` patched to `minor` — parseable, but distinguishable, so member
+/// order stays observable.
+fn class_with_minor(minor: u16) -> Vec<u8> {
+    let mut bytes = BOX_CLASS.to_vec();
+    bytes[4..6].copy_from_slice(&minor.to_be_bytes());
+    bytes
+}
+
+#[test]
+fn jar_members_load_in_archive_order() {
+    let (a, b, c) = (
+        class_with_minor(1),
+        class_with_minor(2),
+        class_with_minor(3),
+    );
+    let bytes = jar(&[
+        ("pkg/A.class", &a),
+        ("pkg/Broken.class", b"bad"),
+        ("pkg/B.class", &b),
+        ("notes.txt", b"not a class"),
+        ("pkg/C.class", &c),
+    ]);
+
+    let tree = CodeTree::new([Entry::File(FileKey::parse("dep.jar").unwrap(), bytes)]).unwrap();
+    let storage = MemoryStorage::memory(tree);
+    let load = ClasspathLoad::load(
+        &storage.view(),
+        storage.artifacts(),
+        &[ClasspathEntry::ProjectFile(
+            FileKey::parse("dep.jar").unwrap(),
+        )],
+    );
+    let minors: Vec<_> = load
+        .classes
+        .iter()
+        .map(|class| class.minor_version)
+        .collect();
+    assert_eq!(minors, [1, 2, 3]);
+    assert_eq!(load.warnings.len(), 1);
+}
+
 #[test]
 fn loads_verified_cached_jar_and_warns_on_missing_artifact() {
     let mut storage = MemoryStorage::memory(CodeTree::default());
-    let bytes = jar_bytes();
+    let bytes = jar(&[("pkg/Box.class", BOX_CLASS)]);
     let key = CacheKey::new(
         CacheNamespace::DependencyJar,
         ContentDigest::of(b"fixture"),

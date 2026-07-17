@@ -113,7 +113,10 @@ pub(crate) mod private {
 }
 
 /// Closed persistence seam used by [`ArtifactCache`].
-pub trait CacheBackend: private::Sealed {
+///
+/// `Sync` is part of the sealed contract: a content-addressed, read-mostly cache is shareable
+/// across threads by nature, so verified `lookup`s can fan out to concurrent readers.
+pub trait CacheBackend: private::Sealed + Sync {
     #[doc(hidden)]
     fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError>;
     #[doc(hidden)]

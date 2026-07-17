@@ -56,7 +56,8 @@ supplies it through `.cargo/config.toml`.
 
 - `jals-storage --no-default-features` is `no_std + alloc`.
 - `jals-classpath --no-default-features` is `no_std + alloc`; `archive` introduces only `std::io`,
-  and `native` introduces HTTP plus `jals-storage/std`.
+  `parallel` layers rayon fan-out over `archive` (same entry-ordered results), and `native`
+  introduces HTTP plus `jals-storage/std`.
 - `jals-build --no-default-features` must remain a genuine portable core.
 - `serde` stays `default-features = false, features = ["derive", "alloc"]`.
 - `toml` stays `default-features = false, features = ["parse", "serde"]`.

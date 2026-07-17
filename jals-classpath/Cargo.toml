@@ -5,11 +5,15 @@ edition.workspace = true
 
 [features]
 # Archive decoding is the only core operation which needs `std` (`zip`'s `Read + Seek` contract).
-# Native adds the HTTP adapter; project and cache access remains entirely in `jals-storage`.
+# Parallel fans classpath entry and archive-member loading out over rayon threads; it stays a
+# separate layer so the wasm32 playground keeps the inline walker. Native adds the HTTP adapter;
+# project and cache access remains entirely in `jals-storage`.
 default = ["native"]
 archive = ["dep:zip"]
+parallel = ["archive", "dep:rayon"]
 native = [
   "archive",
+  "parallel",
   "dep:reqwest",
   "dep:tempfile",
   "dep:futures",
@@ -22,6 +26,7 @@ jals-config.workspace = true
 jals-decompile.workspace = true
 jals-storage.workspace = true
 zip = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 # Host-only blocking HTTP adapter. Kept out of the no-`native` build, which injects a `Fetcher`.
 reqwest = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }

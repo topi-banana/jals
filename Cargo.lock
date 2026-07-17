@@ -1087,6 +1087,7 @@ dependencies = [
  "jals-decompile",
  "jals-storage",
  "jals-syntax",
+ "rayon",
  "reqwest",
  "tempfile",
  "zip",
