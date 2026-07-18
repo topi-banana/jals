@@ -85,8 +85,8 @@ pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
         })
     }
 
-    /// Search upward from `start_dir` (a `/`-separated virtual path) for
-    /// [`FILE_NAME`](Self::FILE_NAME), read through `fs`.
+    /// Search upward from `start_dir` for [`FILE_NAME`](Self::FILE_NAME), reading through
+    /// `view`.
     ///
     /// Returns the parsed config if a file is found, otherwise `Self::default()`. The walk
     /// cooperates per ancestor step, so deep trees never monopolize the executor.

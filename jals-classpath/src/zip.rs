@@ -12,7 +12,7 @@
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -52,13 +52,9 @@ mod le {
         buf.copy_from_slice(&bytes[at..at + 8]);
         u64::from_le_bytes(buf)
     }
-
-    pub(super) fn read_failed(error: &super::IoError) -> alloc::string::String {
-        alloc::string::ToString::to_string(error)
-    }
 }
 
-use le::{read_failed, u16le, u32le, u64le};
+use le::{u16le, u32le, u64le};
 
 /// One central-directory entry, with any zip64 extra-field values already folded in.
 #[derive(Debug, Clone)]
@@ -102,7 +98,7 @@ impl CentralDirectory {
         let len = reader
             .seek(SeekFrom::End(0))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         if len < EOCD_LEN as u64 {
             return Err("not a zip archive (too short)".to_owned());
         }
@@ -113,12 +109,12 @@ impl CentralDirectory {
         reader
             .seek(SeekFrom::Start(window_start))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         let mut tail = vec![0u8; usize::try_from(window_len).expect("window fits usize")];
         reader
             .read_exact(&mut tail)
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
 
         let eocd_local = Self::find_eocd(&tail)
             .ok_or_else(|| "not a zip archive (no end-of-central-directory record)".to_owned())?;
@@ -157,13 +153,13 @@ impl CentralDirectory {
         reader
             .seek(SeekFrom::Start(cd_offset))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         let mut directory =
             vec![0u8; usize::try_from(cd_size).map_err(|_| "central directory is too large")?];
         reader
             .read_exact(&mut directory)
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
 
         let members = Self::parse_entries(&directory).await?;
         if members.len() as u64 != total {
@@ -204,12 +200,12 @@ impl CentralDirectory {
         reader
             .seek(SeekFrom::Start(locator_offset))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         let mut locator = [0u8; EOCD64_LOCATOR_LEN];
         reader
             .read_exact(&mut locator)
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         if u32le(&locator, 0) != EOCD64_LOCATOR_SIG {
             return Err("zip64 end-of-central-directory locator is missing".to_owned());
         }
@@ -220,12 +216,12 @@ impl CentralDirectory {
         reader
             .seek(SeekFrom::Start(u64le(&locator, 8)))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         let mut record = [0u8; EOCD64_LEN];
         reader
             .read_exact(&mut record)
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         if u32le(&record, 0) != EOCD64_SIG {
             return Err("zip64 end-of-central-directory record is malformed".to_owned());
         }
@@ -379,12 +375,12 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
         source
             .seek(SeekFrom::Start(member.header_offset))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         let mut header = [0u8; LOCAL_HEADER_LEN];
         source
             .read_exact(&mut header)
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
         if u32le(&header, 0) != LOCAL_HEADER_SIG {
             return Err(format!(
                 "archive member `{}` has a malformed local header",
@@ -398,7 +394,7 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
         source
             .seek(SeekFrom::Current(name_len + extra_len))
             .await
-            .map_err(|error| read_failed(&error))?;
+            .map_err(|error| error.to_string())?;
 
         let window = usize::try_from(member.compressed_size.min(COMPRESSED_WINDOW as u64))
             .expect("window fits usize")

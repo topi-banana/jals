@@ -96,9 +96,7 @@ impl ProjectView {
     pub fn file(&self, key: &FileKey) -> Result<&crate::CodeFile> {
         match self.tree.lookup_file(key) {
             Some(EntryRef::File(file)) => Ok(file),
-            Some(EntryRef::Directory(_)) => {
-                Err(Error::ExpectedFile(DirKey::new(key.path().clone())))
-            }
+            Some(EntryRef::Directory(_)) => Err(Error::ExpectedFile(key.as_dir_key())),
             None => Err(Error::NotFoundFile(key.clone())),
         }
     }
@@ -114,7 +112,7 @@ impl ProjectView {
         match self.tree.lookup_dir(key) {
             Some(EntryRef::Directory(dir)) => Ok(dir),
             Some(EntryRef::File(_)) => Err(Error::ExpectedDirectory(
-                FileKey::new(key.path().clone()).expect("non-root directory collision"),
+                key.as_file_key().expect("non-root directory collision"),
             )),
             None => Err(Error::NotFoundDirectory(key.clone())),
         }
@@ -207,11 +205,9 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
             let current = Self::build_current(&snapshot.tree, &self.overlay)?;
             self.base = snapshot.tree;
             self.current = Arc::new(current);
-            self.diagnostics.clone_from(&diagnostics);
             self.revision = self.revision.next();
-        } else {
-            self.diagnostics.clone_from(&diagnostics);
         }
+        self.diagnostics.clone_from(&diagnostics);
         Ok(RefreshOutcome {
             revision: self.revision,
             changed,
@@ -245,7 +241,7 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
         let mut staged = false;
         for (key, bytes) in entries {
             if matches!(self.current.lookup_file(&key), Some(EntryRef::Directory(_))) {
-                return Err(Error::ExpectedFile(DirKey::new(key.path().clone())));
+                return Err(Error::ExpectedFile(key.as_dir_key()));
             }
             overlay.insert(key, Arc::from(bytes));
             staged = true;
@@ -292,7 +288,7 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
     fn build_current(base: &CodeTree, overlay: &BTreeMap<FileKey, Arc<[u8]>>) -> Result<CodeTree> {
         let mut tree = base.clone();
         for (key, bytes) in overlay {
-            let collision = DirKey::new(key.path().clone());
+            let collision = key.as_dir_key();
             tree.remove_directory(&collision);
             tree.remove_file(key);
             tree.insert_file_with_parents(key.clone(), Arc::clone(bytes))?;
@@ -407,9 +403,7 @@ impl CodeTree {
                             return Err(Error::AlreadyExistsFile(key.clone()));
                         }
                         Some(EntryRef::Directory(_)) => {
-                            return Err(Error::AlreadyExistsDirectory(DirKey::new(
-                                key.path().clone(),
-                            )));
+                            return Err(Error::AlreadyExistsDirectory(key.as_dir_key()));
                         }
                         None => {}
                     }
@@ -419,7 +413,7 @@ impl CodeTree {
                     match self.lookup_file(key) {
                         Some(EntryRef::File(_)) => {}
                         Some(EntryRef::Directory(_)) => {
-                            return Err(Error::ExpectedFile(DirKey::new(key.path().clone())));
+                            return Err(Error::ExpectedFile(key.as_dir_key()));
                         }
                         None => return Err(Error::NotFoundFile(key.clone())),
                     }
@@ -431,7 +425,7 @@ impl CodeTree {
                         self.remove_file(key);
                     }
                     Some(EntryRef::Directory(_)) => {
-                        return Err(Error::ExpectedFile(DirKey::new(key.path().clone())));
+                        return Err(Error::ExpectedFile(key.as_dir_key()));
                     }
                     None => return Err(Error::NotFoundFile(key.clone())),
                 },
@@ -442,7 +436,7 @@ impl CodeTree {
                         }
                         Some(EntryRef::File(_)) => {
                             return Err(Error::AlreadyExistsFile(
-                                FileKey::new(key.path().clone()).expect("non-root"),
+                                key.as_file_key().expect("non-root"),
                             ));
                         }
                         None => {}
@@ -459,7 +453,7 @@ impl CodeTree {
                         }
                         Some(EntryRef::File(_)) => {
                             return Err(Error::ExpectedDirectory(
-                                FileKey::new(key.path().clone()).expect("non-root"),
+                                key.as_file_key().expect("non-root"),
                             ));
                         }
                         None => return Err(Error::NotFoundDirectory(key.clone())),

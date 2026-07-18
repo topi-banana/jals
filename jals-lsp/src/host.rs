@@ -84,7 +84,7 @@ impl LspHost {
         self
     }
     /// Convert a byte offset in `doc` to an LSP position through the document's cached index.
-    fn position(doc: &Document, offset: usize) -> Position {
+    pub(crate) fn position(doc: &Document, offset: usize) -> Position {
         let position = doc.line_index.position(&doc.text, offset);
         Position::new(position.line, position.character)
     }

@@ -348,24 +348,12 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// file's CST, and [`ProjectIndex::assemble`] (order-sensitive, one task) reassembles the
     /// whole index — identical to a from-scratch build, but without re-walking the project.
     async fn rebuild_index(&mut self) {
-        let mut project: Vec<(FileId, &FileFacts)> = Vec::with_capacity(self.files.len());
-        for (k, file) in self.files.iter().enumerate() {
-            project.push((
-                WorkspaceFileId::of_index(WorkspaceFileId::Project, k),
-                file.facts().await,
-            ));
-        }
+        let project = Self::facts_inputs(&self.files, WorkspaceFileId::Project).await;
         // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types),
         // under their own `SourceDep` ids so they navigate back to the right files. The
         // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
-        let mut source_deps: Vec<(FileId, &FileFacts)> =
-            Vec::with_capacity(self.source_dep_files.len());
-        for (k, file) in self.source_dep_files.iter().enumerate() {
-            source_deps.push((
-                WorkspaceFileId::of_index(WorkspaceFileId::SourceDep, k),
-                file.facts().await,
-            ));
-        }
+        let source_deps =
+            Self::facts_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep).await;
         let stub: Vec<(FileId, &FileFacts)> = self
             .stub_facts
             .iter()
@@ -379,6 +367,18 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             &self.source_locations,
         )
         .await;
+    }
+
+    /// `(id, facts)` for each of `files`, in order, under `space`'s id-space.
+    async fn facts_inputs(
+        files: &[SourceFile],
+        space: fn(u32) -> WorkspaceFileId,
+    ) -> Vec<(FileId, &FileFacts)> {
+        let mut out = Vec::with_capacity(files.len());
+        for (k, file) in files.iter().enumerate() {
+            out.push((WorkspaceFileId::of_index(space, k), file.facts().await));
+        }
+        out
     }
 
     /// The workspace file a [`FileId`] addresses, routed by its id-space: a project file, a
@@ -582,19 +582,14 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             return local;
         }
         // A project type: resolve every file (cached across queries), then scan project-wide.
-        for source in &self.files {
-            source.resolved().await;
-        }
-        let files = self.files.iter().enumerate().map(|(index, source)| {
-            QueryFile::new(
+        let mut files = Vec::with_capacity(self.files.len());
+        for (index, source) in self.files.iter().enumerate() {
+            files.push(QueryFile::new(
                 WorkspaceFileId::of_index(WorkspaceFileId::Project, index),
                 source.doc.parse.syntax(),
-                source
-                    .resolved
-                    .get()
-                    .expect("resolved for every file just above"),
-            )
-        });
+                source.resolved().await,
+            ));
+        }
         queries.references(offset, include_declaration, files)
     }
 

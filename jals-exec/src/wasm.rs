@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use crate::yields::yield_now;
+use crate::yields::{fan_out_sequential, yield_now};
 use crate::{ErasedJob, ErasedOutcome, LocalBoxFuture, RawExec, private};
 
 const MACROTASK_PERIOD: u32 = 64;
@@ -49,13 +49,6 @@ impl RawExec for WasmExec {
     }
 
     fn fan_out_boxed(&self, jobs: Vec<ErasedJob>) -> LocalBoxFuture<'static, Vec<ErasedOutcome>> {
-        Box::pin(async move {
-            let mut outcomes = Vec::with_capacity(jobs.len());
-            for job in jobs {
-                outcomes.push(Ok(job().await));
-                yield_now().await;
-            }
-            outcomes
-        })
+        Box::pin(fan_out_sequential(jobs))
     }
 }

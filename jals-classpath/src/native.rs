@@ -281,23 +281,15 @@ impl NativeProjectPlan {
         for (index, source_root) in self.external_source_roots.clone().into_iter().enumerate() {
             let name = Name::new(format!("external-source-{index}"))
                 .expect("generated external source name is portable");
-            match Self::publish_source_tree(
+            let outcome = Self::publish_source_tree(
                 storage,
                 &name,
                 CacheNamespace::PathSource,
                 &format!("build-source\0{}", source_root.display()),
                 &source_root,
             )
-            .await
-            {
-                Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
-                Err(message) => self.warnings.push(Warning::new(
-                    WarningOrigin::External(ExternalLocator::new(
-                        source_root.display().to_string(),
-                    )),
-                    message,
-                )),
-            }
+            .await;
+            self.absorb_sources(source_root.display().to_string(), outcome);
         }
     }
 
@@ -399,13 +391,8 @@ impl NativeProjectPlan {
             return;
         }
         for (name, git) in self.git_dependencies.clone() {
-            match Self::clone_and_publish_git(project_root, storage, &name, &git).await {
-                Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
-                Err(message) => self.warnings.push(Warning::new(
-                    WarningOrigin::External(ExternalLocator::new(git.git)),
-                    message,
-                )),
-            }
+            let outcome = Self::clone_and_publish_git(project_root, storage, &name, &git).await;
+            self.absorb_sources(git.git, outcome);
         }
     }
 
@@ -423,13 +410,21 @@ impl NativeProjectPlan {
             return;
         }
         for (name, dependency) in self.path_dependencies.clone() {
-            match Self::scan_and_publish_path(project_root, storage, &name, &dependency).await {
-                Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
-                Err(message) => self.warnings.push(Warning::new(
-                    WarningOrigin::External(ExternalLocator::new(dependency.path)),
-                    message,
-                )),
-            }
+            let outcome =
+                Self::scan_and_publish_path(project_root, storage, &name, &dependency).await;
+            self.absorb_sources(dependency.path, outcome);
+        }
+    }
+
+    /// Fold one materialization outcome into the plan: the published sources on success, an
+    /// external-locator warning on failure.
+    fn absorb_sources(&mut self, locator: String, outcome: Result<Vec<LibrarySource>, String>) {
+        match outcome {
+            Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
+            Err(message) => self.warnings.push(Warning::new(
+                WarningOrigin::External(ExternalLocator::new(locator)),
+                message,
+            )),
         }
     }
 
@@ -444,7 +439,8 @@ impl NativeProjectPlan {
             .map_err(|error| format!("{error:?}"))?;
         // A tag or rev pins immutable content: recover the previous checkout's file list from
         // the cache and skip the clone while every artifact is still present and verified.
-        if matches!(reference, GitRef::Tag(_) | GitRef::Rev(_))
+        let pinned = matches!(reference, GitRef::Tag(_) | GitRef::Rev(_));
+        if pinned
             && let Some(sources) = Self::cached_git_sources(storage, name, git, &reference).await
         {
             return Ok(sources);
@@ -506,7 +502,7 @@ impl NativeProjectPlan {
             &source_root,
         )
         .await?;
-        if matches!(reference, GitRef::Tag(_) | GitRef::Rev(_)) {
+        if pinned {
             Self::record_git_manifest(storage, git, &reference, &sources).await;
         }
         Ok(sources)
@@ -619,12 +615,7 @@ impl NativeProjectPlan {
     /// auto-detected conventional layout (see [`conventional_source_root`](Self::conventional_source_root)).
     fn host_source_root(root: &Path, configured: Option<&str>) -> Result<PathBuf, String> {
         if let Some(configured) = configured {
-            let selected = Self::resolve_host_path(root, configured);
-            if !selected.starts_with(Self::normalize_host_path(root)) {
-                return Err(format!(
-                    "source directory `{configured}` escapes its dependency root"
-                ));
-            }
+            let selected = Self::resolve_scoped_host_path(root, configured)?;
             return selected
                 .is_dir()
                 .then_some(selected)
@@ -634,6 +625,18 @@ impl NativeProjectPlan {
             Self::conventional_source_root(|candidate| candidate.to_host_path(root).is_dir())
                 .to_host_path(root),
         )
+    }
+
+    /// Resolve the configured source `dir` under a dependency `root`, refusing a path that
+    /// escapes it.
+    fn resolve_scoped_host_path(root: &Path, dir: &str) -> Result<PathBuf, String> {
+        let selected = Self::resolve_host_path(root, dir);
+        if !selected.starts_with(Self::normalize_host_path(root)) {
+            return Err(format!(
+                "source directory `{dir}` escapes its dependency root"
+            ));
+        }
+        Ok(selected)
     }
 
     /// The single statement of the dependency layout convention, shared by the host-path and
@@ -787,12 +790,7 @@ impl NativeProjectPlan {
             return Ok(None);
         };
         let root = if let Some(dir) = &dependency.dir {
-            let selected = Self::resolve_host_path(&base_host, dir);
-            if !selected.starts_with(Self::normalize_host_path(&base_host)) {
-                return Err(format!(
-                    "source directory `{dir}` escapes its dependency root"
-                ));
-            }
+            let selected = Self::resolve_scoped_host_path(&base_host, dir)?;
             Self::relative_to_project(project_root, &selected)
                 .ok_or_else(|| format!("source directory `{dir}` leaves the project"))?
         } else {

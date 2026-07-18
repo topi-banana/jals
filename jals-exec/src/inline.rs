@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::yields::{block_on_inline, yield_now};
+use crate::yields::{block_on_inline, fan_out_sequential, yield_now};
 use crate::{ErasedJob, ErasedOutcome, LocalBoxFuture, RawExec, private};
 
 pub(crate) struct InlineExec;
@@ -27,13 +27,6 @@ impl RawExec for InlineExec {
     }
 
     fn fan_out_boxed(&self, jobs: Vec<ErasedJob>) -> LocalBoxFuture<'static, Vec<ErasedOutcome>> {
-        Box::pin(async move {
-            let mut outcomes = Vec::with_capacity(jobs.len());
-            for job in jobs {
-                outcomes.push(Ok(job().await));
-                yield_now().await;
-            }
-            outcomes
-        })
+        Box::pin(fan_out_sequential(jobs))
     }
 }

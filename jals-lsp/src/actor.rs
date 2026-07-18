@@ -307,7 +307,7 @@ impl Actor {
             };
             Self::guard(self.apply_change(next)).await;
         }
-        Self::guard(self.after_change(&uri)).await;
+        Self::guard(self.refresh_and_publish(&uri)).await;
     }
 
     /// Dispatch one command. `didChange` is normally routed through the coalescer in
@@ -320,7 +320,7 @@ impl Actor {
                 let uri = params.text_document.uri.clone();
                 Self::guard(async {
                     self.apply_change(params).await;
-                    self.after_change(&uri).await;
+                    self.refresh_and_publish(&uri).await;
                 })
                 .await;
             }
@@ -377,22 +377,24 @@ impl Actor {
                 reply,
             } => Self::respond(reply, self.signature_help(&uri, position)).await,
             Cmd::Formatting { uri, reply } => {
-                // `self` is one mutable borrow: build the future in a temporary to end the
-                // `discovery` borrow before `respond` awaits it. (No-op today; kept simple.)
                 Self::respond(reply, self.formatting(&uri)).await;
             }
             Cmd::SemanticTokensFull { uri, reply } => {
-                Self::respond(reply, self.semantic_tokens_full(&uri)).await;
+                Self::respond(reply, async {
+                    Ok(self.semantic_tokens_full_response(&uri).await)
+                })
+                .await;
             }
             Cmd::SemanticTokensFullDelta {
                 uri,
                 previous_result_id,
                 reply,
             } => {
-                Self::respond(
-                    reply,
-                    self.semantic_tokens_full_delta(&uri, &previous_result_id),
-                )
+                Self::respond(reply, async {
+                    Ok(self
+                        .semantic_tokens_delta_response(&uri, &previous_result_id)
+                        .await)
+                })
                 .await;
             }
             Cmd::FoldingRange { uri, reply } => {
@@ -415,12 +417,12 @@ impl Actor {
         // Discover (and index, once) the `jals.toml` project this file belongs to, so cross-file
         // resolution works without ever walking a non-project folder.
         self.ensure_workspace_for(&uri).await;
-        self.refresh_workspace_overlay(&uri).await;
-        self.publish_diagnostics(&uri).await;
+        self.refresh_and_publish(&uri).await;
     }
 
     /// Splice one `didChange` into the stored document. The workspace overlay and diagnostics are
-    /// refreshed separately ([`after_change`](Self::after_change)), once per coalesced burst.
+    /// refreshed separately ([`refresh_and_publish`](Self::refresh_and_publish)), once per
+    /// coalesced burst.
     async fn apply_change(&mut self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         self.store
@@ -430,7 +432,7 @@ impl Actor {
 
     /// Reflect the (possibly coalesced) new text into the owning workspace's index and republish
     /// diagnostics.
-    async fn after_change(&mut self, uri: &Url) {
+    async fn refresh_and_publish(&mut self, uri: &Url) {
         self.refresh_workspace_overlay(uri).await;
         self.publish_diagnostics(uri).await;
     }
@@ -579,15 +581,14 @@ impl Actor {
                 ProjectWorkspace::bare(&root, self.exec.clone()).await
             }
         };
+        let slot = WorkspaceSlot::Ready(Box::new(workspace));
         match self
             .workspaces
             .iter_mut()
             .find(|slot| slot.project_root() == root)
         {
-            Some(slot) => *slot = WorkspaceSlot::Ready(Box::new(workspace)),
-            None => self
-                .workspaces
-                .push(WorkspaceSlot::Ready(Box::new(workspace))),
+            Some(existing) => *existing = slot,
+            None => self.workspaces.push(slot),
         }
         let open: Vec<Url> = self.store.uris().cloned().collect();
         for uri in open {
@@ -595,8 +596,7 @@ impl Actor {
                 .workspace_for(&uri)
                 .is_some_and(|workspace| workspace.project_root() == root);
             if owned_here {
-                self.refresh_workspace_overlay(&uri).await;
-                self.publish_diagnostics(&uri).await;
+                self.refresh_and_publish(&uri).await;
             }
         }
     }
@@ -702,18 +702,17 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<GotoDefinitionResponse>, ResponseError> {
-        let location = match self.workspace_for(uri) {
-            Some(workspace) => workspace.goto_definition(uri, position).await,
-            None => None,
+        if let Some(workspace) = self.workspace_for(uri)
+            && let Some(location) = workspace.goto_definition(uri, position).await
+        {
+            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+        }
+        let Some(doc) = self.store.get(uri) else {
+            return Ok(None);
         };
-        let location = match location {
-            Some(location) => Some(location),
-            None => match self.store.get(uri) {
-                Some(doc) => Self::fallback_definition(&doc, uri, position).await,
-                None => None,
-            },
-        };
-        Ok(location.map(GotoDefinitionResponse::Scalar))
+        Ok(Self::fallback_definition(&doc, uri, position)
+            .await
+            .map(GotoDefinitionResponse::Scalar))
     }
 
     /// A file in an indexed project finds references project-wide through the workspace (a
@@ -747,18 +746,17 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<PrepareRenameResponse>, ResponseError> {
-        let range = match self.workspace_for(uri) {
-            Some(workspace) => workspace.prepare_rename(uri, position).await,
-            None => None,
+        if let Some(workspace) = self.workspace_for(uri)
+            && let Some(range) = workspace.prepare_rename(uri, position).await
+        {
+            return Ok(Some(PrepareRenameResponse::Range(range)));
+        }
+        let Some(doc) = self.store.get(uri) else {
+            return Ok(None);
         };
-        let range = match range {
-            Some(range) => Some(range),
-            None => match self.store.get(uri) {
-                Some(doc) => Self::fallback_prepare_rename(&doc, position).await,
-                None => None,
-            },
-        };
-        Ok(range.map(PrepareRenameResponse::Range))
+        Ok(Self::fallback_prepare_rename(&doc, position)
+            .await
+            .map(PrepareRenameResponse::Range))
     }
 
     /// A file in an indexed project renames project types project-wide through the workspace;
@@ -848,25 +846,6 @@ impl Actor {
         Ok(Some(
             Formatting::formatting_edits(&doc.content, &config).await,
         ))
-    }
-
-    /// Classifies cross-file type names by their declared kind through the owning workspace when
-    /// there is one, else file-locally over the open document alone (see the response builder).
-    async fn semantic_tokens_full(
-        &mut self,
-        uri: &Url,
-    ) -> Result<Option<SemanticTokensResult>, ResponseError> {
-        Ok(self.semantic_tokens_full_response(uri).await)
-    }
-
-    async fn semantic_tokens_full_delta(
-        &mut self,
-        uri: &Url,
-        previous_result_id: &str,
-    ) -> Result<Option<SemanticTokensFullDeltaResult>, ResponseError> {
-        Ok(self
-            .semantic_tokens_delta_response(uri, previous_result_id)
-            .await)
     }
 
     fn folding_range(&self, uri: &Url) -> Option<Vec<FoldingRange>> {
@@ -1014,11 +993,9 @@ impl Actor {
     /// owns `uri` when there is one, otherwise a file-local classification over the open document
     /// alone. `None` if the document is not open.
     async fn compute_semantic_tokens(&self, uri: &Url) -> Option<Vec<SemanticToken>> {
-        let workspace_tokens = match self.workspace_for(uri) {
-            Some(workspace) => workspace.semantic_tokens(uri).await,
-            None => None,
-        };
-        if let Some(tokens) = workspace_tokens {
+        if let Some(workspace) = self.workspace_for(uri)
+            && let Some(tokens) = workspace.semantic_tokens(uri).await
+        {
             return Some(tokens.data);
         }
         let doc = self.store.get(uri)?;

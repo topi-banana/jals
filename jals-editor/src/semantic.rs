@@ -90,9 +90,8 @@ impl SemanticTokens {
             .filter_map(SyntaxElement::into_token)
             .filter_map(|token| {
                 let (kind, declaration) = Self::classify_token(&token, &by_start)?;
-                let range = token.text_range();
                 Some(SemanticToken {
-                    range: usize::from(range.start())..usize::from(range.end()),
+                    range: crate::byte_range(token.text_range()),
                     kind,
                     declaration,
                 })

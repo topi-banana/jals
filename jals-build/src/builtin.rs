@@ -36,7 +36,6 @@ pub(crate) enum BuiltinBackend {
     /// `None` while a compile is in flight; a reentrant compile on the same backend is a
     /// structured [`ToolchainError::Unsupported`] rather than a `BorrowMutError` panic.
     Memory(RefCell<Option<MemoryStorage>>),
-    #[cfg(feature = "native")]
     Native(jals_exec::Exec),
 }
 
@@ -48,14 +47,13 @@ impl BuiltinToolchain {
         }
     }
 
-    /// Consume the toolchain and hand back its file tree, so an in-memory host can read the
+    /// Consume the toolchain and hand back its storage, so an in-memory host can read the
     /// outputs a compile produced.
     pub fn into_storage(self) -> MemoryStorage {
         match self.backend {
             BuiltinBackend::Memory(storage) => storage
                 .into_inner()
                 .expect("builtin storage is checked out by an in-flight build"),
-            #[cfg(feature = "native")]
             BuiltinBackend::Native(_) => {
                 panic!("native builtin storage is owned by the project root")
             }
@@ -183,7 +181,6 @@ impl Compiler for BuiltinToolchain {
                     *cell.borrow_mut() = Some(storage);
                     result?;
                 }
-                #[cfg(feature = "native")]
                 BuiltinBackend::Native(exec) => {
                     let scopes =
                         Self::plan_copies(req)

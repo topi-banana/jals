@@ -147,8 +147,8 @@ impl ProjectWorkspace {
     /// Load a project workspace off the host filesystem: walk `source_roots` for `.java`, fold
     /// the already-parsed classpath `.class` files into the index, register the library /
     /// source-dependency `.java`, and resolve `feature_set` into every lint run — all inside
-    /// [`jals_editor::Workspace`]. The caller (the actor) resolves the manifest and performs the
-    /// dependency I/O; this keeps only the `PathBuf` → virtual-path lowering.
+    /// [`jals_editor::Workspace`]. The caller resolves the manifest and performs the dependency
+    /// I/O; this keeps only the `PathBuf` → virtual-path lowering.
     pub(crate) async fn load(
         project_root: PathBuf,
         source_roots: &[PathBuf],
@@ -276,8 +276,8 @@ impl ProjectWorkspace {
             .is_some_and(|path| self.editor.workspace().owns_path(&path))
     }
 
-    /// Reflect an open document into the index: replace the cached copy of `uri` with the
-    /// editor's current text (or add it, if `uri` is a project file created after the initial
+    /// Reflect an open document into the index: replace the cached copy of `uri` with the open
+    /// document's current text (or add it, if `uri` is a project file created after the initial
     /// load), then rebuild the index. Returns whether `uri` belongs to this workspace.
     pub(crate) async fn set_overlay(&mut self, uri: &Url, doc: &Document) -> bool {
         let Some(path) = self.key(uri) else {
@@ -313,7 +313,8 @@ impl ProjectWorkspace {
     }
 
     /// Completions for the cursor at `position` in `uri`, resolved against the project. `None` if
-    /// `uri` is not in the workspace (the actor then falls back to the one-file project).
+    /// `uri` is not an indexed file of this workspace (the actor then falls back to the one-file
+    /// project).
     pub(crate) async fn completions(
         &self,
         uri: &Url,
@@ -327,7 +328,8 @@ impl ProjectWorkspace {
     }
 
     /// Occurrence highlights for the cursor at `position` in `uri`, resolved against the project
-    /// so a cross-file type name highlights precisely. `None` if `uri` is not in the workspace.
+    /// so a cross-file type name highlights precisely. `None` if `uri` is not an indexed file of
+    /// this workspace.
     pub(crate) async fn document_highlight(
         &self,
         uri: &Url,
@@ -347,8 +349,8 @@ impl ProjectWorkspace {
     }
 
     /// Find-references for the cursor at `position` in `uri` — project-wide for a project type,
-    /// within the file for a file-local binding. `None` if `uri` is not in the workspace; an
-    /// empty vector if the cursor is on no resolvable symbol.
+    /// within the file for a file-local binding. `None` if `uri` is not an indexed file of this
+    /// workspace; an empty vector if the cursor is on no resolvable symbol.
     pub(crate) async fn references(
         &self,
         uri: &Url,
@@ -710,16 +712,7 @@ mod tests {
 
     /// A workspace over `dir` alone (its own source root; no classpath, libraries, or features).
     async fn load_bare(dir: &Path) -> ProjectWorkspace {
-        ProjectWorkspace::load(
-            dir.to_path_buf(),
-            &[dir.to_path_buf()],
-            &[],
-            &[],
-            &[],
-            FeatureSet::default(),
-            Exec::inline(),
-        )
-        .await
+        ProjectWorkspace::bare(dir, Exec::inline()).await
     }
 
     #[test]

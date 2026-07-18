@@ -234,7 +234,7 @@ impl<'a> ProjectQueries<'a> {
             },
             |id| Ident::is_renamable_kind(self.current.resolved.def(id).kind),
         );
-        renamable.then(|| Self::text_range(ident.text_range()))
+        renamable.then(|| crate::byte_range(ident.text_range()))
     }
 
     /// Member completions after `.`, otherwise scope completions followed by Java keywords.
@@ -331,7 +331,7 @@ impl<'a> ProjectQueries<'a> {
             .filter_map(SyntaxElement::into_token)
             .filter(|token| token.kind() == SyntaxKind::IDENT && token.text() == target.text())
             .map(|token| Highlight {
-                range: Self::text_range(token.text_range()),
+                range: crate::byte_range(token.text_range()),
                 kind: HighlightKind::of_token(&token),
             })
             .collect()
@@ -359,7 +359,7 @@ impl<'a> ProjectQueries<'a> {
         )
         .await;
         let owner = inference
-            .type_of_expr(Self::text_range(receiver.syntax().text_range()))?
+            .type_of_expr(crate::byte_range(receiver.syntax().text_range()))?
             .project_id()?;
         let member = self
             .index
@@ -444,14 +444,8 @@ impl<'a> ProjectQueries<'a> {
     fn ident_at(&self, offset: usize) -> Option<SyntaxToken> {
         let root = &self.current.syntax;
         let end = usize::from(root.text_range().end());
-        let offset = u32::try_from(offset.min(end)).unwrap_or(u32::MAX);
-        root.token_at_offset(offset.into())
+        root.token_at_offset(crate::sat_text_size(offset.min(end)))
             .find(|token| token.kind() == SyntaxKind::IDENT)
-    }
-
-    /// A `text_size::TextRange` as a plain byte `Range<usize>`.
-    fn text_range(range: text_size::TextRange) -> Range<usize> {
-        usize::from(range.start())..usize::from(range.end())
     }
 }
 

@@ -31,6 +31,25 @@ pub use selection::SelectionChains;
 pub use semantic::{SemanticToken, SemanticTokenKind, SemanticTokens};
 pub use workspace::{ProjectLayout, SingleFileProject, Workspace};
 
+pub(crate) use ranges::{byte_range, sat_text_size};
+
+/// `text_size` ↔ byte-range conversions shared by the query modules.
+mod ranges {
+    use core::ops::Range;
+
+    use text_size::{TextRange, TextSize};
+
+    /// A `text_size::TextRange` as a plain byte `Range<usize>`.
+    pub(crate) fn byte_range(range: TextRange) -> Range<usize> {
+        usize::from(range.start())..usize::from(range.end())
+    }
+
+    /// `offset` as a `TextSize`, saturating at `u32::MAX` instead of panicking on 64-bit hosts.
+    pub(crate) fn sat_text_size(offset: usize) -> TextSize {
+        TextSize::from(u32::try_from(offset).unwrap_or(u32::MAX))
+    }
+}
+
 use alloc::{vec, vec::Vec};
 
 /// A zero-based line and UTF-16 code-unit coordinate.

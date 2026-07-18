@@ -45,18 +45,10 @@ const JAR_CHUNK_MEMBERS: usize = 64;
 
 /// The two places jar bytes live: an in-memory cursor over project bytes, or a verified cache
 /// reader. Unifying them keeps the decode task type single-parameter.
+#[derive(Clone)]
 enum JarSource<R> {
     Memory(sio::Cursor<Arc<[u8]>>),
     Cache(R),
-}
-
-impl<R: Clone> Clone for JarSource<R> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Memory(cursor) => Self::Memory(cursor.clone()),
-            Self::Cache(reader) => Self::Cache(reader.clone()),
-        }
-    }
 }
 
 impl<R: sio::Read> sio::Read for JarSource<R> {
@@ -348,25 +340,20 @@ impl JarExtraction<LibrarySource> {
                 }
             };
             for (name, outcome) in members {
-                let (member, bytes) = match outcome.and_then(|bytes| {
-                    Archive::safe_relative(&name)
-                        .map(|path| (path, bytes))
-                        .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))
-                }) {
-                    Ok(member) => member,
-                    Err(message) => {
-                        out.warn(jar, &message);
-                        continue;
-                    }
-                };
-                let key =
-                    Archive::member_key(CacheNamespace::ExtractedSource, jar, &member, &bytes);
-                match cache.publish(&key, &bytes).await {
-                    Ok(()) => out.artifacts.push(LibrarySource {
+                match Archive::publish_member(
+                    cache,
+                    CacheNamespace::ExtractedSource,
+                    jar,
+                    &name,
+                    outcome,
+                )
+                .await
+                {
+                    Ok((member, key)) => out.artifacts.push(LibrarySource {
                         path: prefix.concat(&member),
                         key,
                     }),
-                    Err(error) => out.warn(jar, &format!("cache publish failed: {error:?}")),
+                    Err(message) => out.warn(jar, &message),
                 }
             }
         }
@@ -411,21 +398,11 @@ impl JarExtraction<CachedJar> {
             };
             let mut level = Vec::new();
             for (name, outcome) in members {
-                let (member, bytes) = match outcome.and_then(|bytes| {
-                    Archive::safe_relative(&name)
-                        .map(|path| (path, bytes))
-                        .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))
-                }) {
-                    Ok(member) => member,
-                    Err(message) => {
-                        self.warn(jar, &message);
-                        continue;
-                    }
-                };
-                let key = Archive::member_key(CacheNamespace::NestedJar, jar, &member, &bytes);
-                match cache.publish(&key, &bytes).await {
-                    Ok(()) => level.push(CachedJar { member, key }),
-                    Err(error) => self.warn(jar, &format!("cache publish failed: {error:?}")),
+                match Archive::publish_member(cache, CacheNamespace::NestedJar, jar, &name, outcome)
+                    .await
+                {
+                    Ok((member, key)) => level.push(CachedJar { member, key }),
+                    Err(message) => self.warn(jar, &message),
                 }
             }
             for nested in level {
@@ -581,6 +558,28 @@ impl Archive {
                 }
             }
         }
+    }
+
+    /// Publish one decoded member under `namespace` after the archive-safety check. The error
+    /// string is the warning to record when the member is skipped.
+    async fn publish_member<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
+        namespace: CacheNamespace,
+        parent: &CacheKey,
+        name: &str,
+        outcome: Result<Vec<u8>, String>,
+    ) -> Result<(RelativePath, CacheKey), String> {
+        let (member, bytes) = outcome.and_then(|bytes| {
+            Self::safe_relative(name)
+                .map(|path| (path, bytes))
+                .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))
+        })?;
+        let key = Self::member_key(namespace, parent, &member, &bytes);
+        cache
+            .publish(&key, &bytes)
+            .await
+            .map_err(|error| format!("cache publish failed: {error:?}"))?;
+        Ok((member, key))
     }
 
     fn member_key(

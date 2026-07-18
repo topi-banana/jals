@@ -88,15 +88,12 @@ impl FileDiagnostics {
         let mut out: Vec<FileDiagnostic> = parse
             .errors()
             .iter()
-            .map(|err| {
-                let range = err.range();
-                FileDiagnostic {
-                    range: usize::from(range.start())..usize::from(range.end()),
-                    severity: DiagnosticSeverity::Error,
-                    code: None,
-                    message: err.message().to_owned(),
-                    unnecessary: false,
-                }
+            .map(|err| FileDiagnostic {
+                range: crate::byte_range(err.range()),
+                severity: DiagnosticSeverity::Error,
+                code: None,
+                message: err.message().to_owned(),
+                unnecessary: false,
             })
             .collect();
         let clean_parse = out.is_empty();
@@ -178,8 +175,8 @@ impl FileDiagnostics {
     /// A byte range as a `text_size::TextRange` (for slicing the tree's text).
     fn text_range(range: &Range<usize>) -> text_size::TextRange {
         text_size::TextRange::new(
-            text_size::TextSize::from(u32::try_from(range.start).unwrap_or(u32::MAX)),
-            text_size::TextSize::from(u32::try_from(range.end).unwrap_or(u32::MAX)),
+            crate::sat_text_size(range.start),
+            crate::sat_text_size(range.end),
         )
     }
 }

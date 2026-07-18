@@ -305,6 +305,29 @@ impl App {
         format!("{:#?}", workspace.syntax_active().await.syntax())
     }
 
+    /// Repaint everything derived from the active file after it changed: the refreshed payload
+    /// (with the optional syntax dump) then fresh markers, in that order.
+    async fn report_active(
+        ws: &Workspace,
+        link: &yew::html::Scope<Self>,
+        path: String,
+        source: String,
+        want_syntax: bool,
+    ) {
+        let syntax = if want_syntax {
+            Some(Self::dump_of(ws).await)
+        } else {
+            None
+        };
+        let markers = Self::markers_of(ws).await;
+        link.send_message(Msg::ActiveRefreshed {
+            path,
+            source,
+            syntax,
+        });
+        link.send_message(markers);
+    }
+
     /// Reflect `text` into the active Java file's analysis overlay (serialized behind the lock),
     /// without repainting markers — the flush before a switch *away* from the file, where fresh
     /// markers would land on the wrong model.
@@ -633,18 +656,7 @@ impl Component for App {
                         ws.set_active(&path);
                         let source = ws.active_source();
                         monaco::switch_model(&path, &source);
-                        let syntax = if want_syntax {
-                            Some(App::dump_of(&ws).await)
-                        } else {
-                            None
-                        };
-                        let markers = App::markers_of(&ws).await;
-                        link.send_message(Msg::ActiveRefreshed {
-                            path,
-                            source,
-                            syntax,
-                        });
-                        link.send_message(markers);
+                        Self::report_active(&ws, &link, path, source, want_syntax).await;
                     });
                 }
                 true
@@ -668,18 +680,8 @@ impl Component for App {
                     let formatted = ws.format_active(&config).await.formatted;
                     monaco::update_model(&formatted);
                     ws.sync_active(&formatted).await;
-                    let syntax = if want_syntax {
-                        Some(App::dump_of(&ws).await)
-                    } else {
-                        None
-                    };
-                    let markers = App::markers_of(&ws).await;
-                    link.send_message(Msg::ActiveRefreshed {
-                        path: ws.active().to_string(),
-                        source: formatted,
-                        syntax,
-                    });
-                    link.send_message(markers);
+                    let path = ws.active().to_string();
+                    Self::report_active(&ws, &link, path, formatted, want_syntax).await;
                 });
                 false
             }
@@ -743,18 +745,7 @@ impl Component for App {
                     let mut ws = workspace.lock().await;
                     ws.set_active(&path);
                     let source = ws.active_source();
-                    let syntax = if want_syntax {
-                        Some(App::dump_of(&ws).await)
-                    } else {
-                        None
-                    };
-                    let markers = App::markers_of(&ws).await;
-                    link.send_message(Msg::ActiveRefreshed {
-                        path,
-                        source,
-                        syntax,
-                    });
-                    link.send_message(markers);
+                    Self::report_active(&ws, &link, path, source, want_syntax).await;
                 });
                 true
             }

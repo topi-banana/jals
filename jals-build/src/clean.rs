@@ -1,9 +1,10 @@
 //! Pure resolution of the build artifacts that `jals clean` removes.
 //!
-//! [`CleanTargets::paths`] turns a [`Manifest`] plus a project root into the set of paths whose removal
-//! constitutes a clean — the Java analogue of `cargo clean` deleting `target/`. Like the rest of
-//! this crate it is pure: it computes paths but never touches the filesystem. `jals-cli` owns the
-//! removal, which keeps this logic deterministic, unit-testable, and `wasm32`-compatible.
+//! [`CleanTargets::keys`] turns a [`Manifest`] into the set of root-relative directory keys whose
+//! removal constitutes a clean — the Java analogue of `cargo clean` deleting `target/`. Like the
+//! rest of this crate it is pure: it computes keys but never touches the filesystem. `jals-cli`
+//! resolves them against the project root and owns the removal, which keeps this logic
+//! deterministic, unit-testable, and `wasm32`-compatible.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -14,8 +15,8 @@ use jals_storage::DirKey;
 pub struct CleanTargets;
 
 impl CleanTargets {
-    /// Resolve the build-output paths that `jals clean` should remove for `manifest`, each resolved
-    /// against `project_root`.
+    /// Resolve the build-output directories that `jals clean` should remove for `manifest`, as
+    /// root-relative keys the caller resolves against the project root.
     ///
     /// This is the compiler output directory (`classes-dir`) — exactly what `javac -d` writes during
     /// a [`build`](crate::Invocation::build), and nothing the user authored. Returning a `Vec` leaves

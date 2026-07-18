@@ -175,7 +175,7 @@ fn main() -> ExitCode {
             Commands::Lint(args) => args.run(&exec).await,
             Commands::Build(args) => args.run(&exec).await,
             Commands::Run(args) => args.run(&exec).await,
-            Commands::Clean(args) => args.run(),
+            Commands::Clean(args) => args.run().await,
             Commands::Init(args) => args.run(&exec).await,
         }
     });
@@ -195,11 +195,7 @@ fn main() -> ExitCode {
 impl FmtArgs {
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let deny_warnings = self.deny.iter().any(|d| d == "warnings");
-        let explicit_config = self
-            .config
-            .as_deref()
-            .map(|p| App::load_config::<Config>(p).context("loading --config"))
-            .transpose()?;
+        let explicit_config = App::load_explicit::<Config>(self.config.as_deref())?;
 
         // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
         // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
@@ -292,7 +288,7 @@ impl FmtArgs {
                         edits.push((key, out.formatted.into_bytes()));
                     }
                 }
-                Self::commit_edits(&mut storage, &mut edits).await?;
+                Self::commit_edits(&mut storage, edits).await?;
             }
         }
 
@@ -308,13 +304,13 @@ impl FmtArgs {
     /// nothing changed), so a sweep publishes one revision and a failure writes nothing.
     async fn commit_edits(
         storage: &mut NativeStorage,
-        edits: &mut Vec<(FileKey, Vec<u8>)>,
+        edits: Vec<(FileKey, Vec<u8>)>,
     ) -> Result<()> {
         if edits.is_empty() {
             return Ok(());
         }
         let mut transaction = storage.transaction(storage.revision())?;
-        for (key, bytes) in edits.drain(..) {
+        for (key, bytes) in edits {
             transaction.replace_file(key, bytes)?;
         }
         transaction.commit().await?;
@@ -324,11 +320,7 @@ impl FmtArgs {
 
 impl LintArgs {
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
-        let explicit_config = self
-            .config
-            .as_deref()
-            .map(|p| App::load_config::<LintConfig>(p).context("loading --config"))
-            .transpose()?;
+        let explicit_config = App::load_explicit::<LintConfig>(self.config.as_deref())?;
 
         let mut discovery = HostConfigs::new(explicit_config);
         let mut any_finding = false;
@@ -532,9 +524,8 @@ impl CleanArgs {
     /// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
     /// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
     /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
-    fn run(&self) -> Result<ExitCode> {
-        let (manifest, root) =
-            jals_exec::block_on_inline(App::resolve_manifest(self.manifest_path.as_deref()))?;
+    async fn run(&self) -> Result<ExitCode> {
+        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         let keys = jals_build::CleanTargets::keys(&manifest)
             .map_err(|error| anyhow!("invalid classes-dir: {error:?}"))?;
 
@@ -708,26 +699,26 @@ impl App {
             .iter()
             .map(|key| storage.artifacts().backend().artifact_path(key))
             .collect();
-        let source_dep_sources = inputs
-            .source_dep_sources
-            .iter()
-            .filter_map(|source| match source {
-                jals_classpath::SourceFile::Project(key) => Some(key.path().to_host_path(root)),
+        let mut source_dep_sources = Vec::new();
+        for source in &inputs.source_dep_sources {
+            match source {
+                jals_classpath::SourceFile::Project(key) => {
+                    source_dep_sources.push(key.path().to_host_path(root));
+                }
                 jals_classpath::SourceFile::Artifact(source) => {
-                    match jals_exec::block_on_inline(
-                        storage
-                            .artifacts()
-                            .materialize_source(&source.key, &source.path),
-                    ) {
-                        Ok(path) => Some(path),
+                    match storage
+                        .artifacts()
+                        .materialize_source(&source.key, &source.path)
+                        .await
+                    {
+                        Ok(path) => source_dep_sources.push(path),
                         Err(error) => {
                             eprintln!("warning: materializing git source failed: {error:?}");
-                            None
                         }
                     }
                 }
-            })
-            .collect();
+            }
+        }
         HostProjectInputs {
             dependency_jars,
             classpath_classes: inputs.classpath_classes,
@@ -853,6 +844,13 @@ impl App {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         C::from_text(&key, &text).map_err(Into::into)
+    }
+
+    /// The config an explicit `--config` path names, when one was given.
+    fn load_explicit<C: DiscoverableConfig>(explicit: Option<&Path>) -> Result<Option<C>> {
+        explicit
+            .map(|p| Self::load_config::<C>(p).context("loading --config"))
+            .transpose()
     }
 }
 

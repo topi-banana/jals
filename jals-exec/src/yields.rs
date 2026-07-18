@@ -15,12 +15,14 @@ use core::task::{Context, Poll, Waker};
 // `YieldNow` is nameable through `yield_now`'s return type; re-export the rest.
 #[cfg(test)]
 pub(crate) use api::YieldNow;
+pub(crate) use api::fan_out_sequential;
 pub use api::{Yielder, block_on_inline, join_ordered, yield_now};
 
 /// The free-function surface, grouped per the repository's no-free-functions layout; `lib.rs`
 /// re-exports these at the crate root.
 mod api {
     use super::{Box, Context, Future, Pin, Poll, Vec, Waker};
+    use crate::{ErasedJob, ErasedOutcome};
 
     /// Yields once: wakes itself and returns `Pending` a single time, sending the task to the
     /// back of the current executor's queue.
@@ -146,6 +148,17 @@ mod api {
                 Poll::Pending => core::hint::spin_loop(),
             }
         }
+    }
+
+    /// The sequential fan-out baseline: every job in input order, yielding cooperatively
+    /// between jobs. Shared by the runtimes without worker threads (inline, wasm).
+    pub(crate) async fn fan_out_sequential(jobs: Vec<ErasedJob>) -> Vec<ErasedOutcome> {
+        let mut outcomes = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            outcomes.push(Ok(job().await));
+            yield_now().await;
+        }
+        outcomes
     }
 }
 

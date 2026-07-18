@@ -4,6 +4,8 @@ use async_lsp::lsp_types::{Position, Range, TextEdit};
 use jals_config::fmt::Config;
 use jals_editor::Document;
 
+use crate::host::LspHost;
+
 /// Whole-document formatting via `jals-fmt`.
 pub(crate) struct Formatting;
 
@@ -17,11 +19,10 @@ impl Formatting {
         if formatted == *doc.text {
             return Vec::new();
         }
-        let end = doc.line_index.position(&doc.text, doc.text.len());
         vec![TextEdit {
             range: Range {
                 start: Position::new(0, 0),
-                end: Position::new(end.line, end.character),
+                end: LspHost::position(doc, doc.text.len()),
             },
             new_text: formatted,
         }]

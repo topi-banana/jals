@@ -199,6 +199,12 @@ impl FileKey {
         DirKey(self.0.parent().unwrap_or_default())
     }
 
+    /// This file's path reinterpreted as a directory identity, for collision checks and the
+    /// diagnostics that report them.
+    pub(crate) fn as_dir_key(&self) -> DirKey {
+        DirKey(self.0.clone())
+    }
+
     pub fn name(&self) -> &Name {
         self.0.name().expect("FileKey is never root")
     }
@@ -255,6 +261,12 @@ impl DirKey {
 
     pub fn parent(&self) -> Option<Self> {
         self.0.parent().map(Self)
+    }
+
+    /// This directory's path reinterpreted as a file identity (`None` for the root), for
+    /// collision checks and the diagnostics that report them.
+    pub(crate) fn as_file_key(&self) -> Option<FileKey> {
+        FileKey::new(self.0.clone()).ok()
     }
 
     pub fn name(&self) -> Option<&Name> {
