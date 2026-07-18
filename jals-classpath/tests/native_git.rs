@@ -4,7 +4,6 @@ use std::fs;
 use std::process::Command;
 use std::str::FromStr;
 
-use futures::executor::block_on;
 use jals_classpath::{Fetcher, NativeProjectPlan, ProjectInputOptions, ProjectInputs, SourceFile};
 use jals_config::Manifest;
 use jals_storage::{CacheNamespace, NativeStorage};
@@ -67,41 +66,57 @@ fixture = {{ git = "{locator}" }}
 "#
     ))
     .unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let mut storage =
-        NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
-    plan.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
-    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
-
-    let inputs = block_on(ProjectInputs::assemble(
-        &NoFetch,
-        &mut storage,
-        &plan.plan,
-        ProjectInputOptions::Compile,
-    ));
-    let [SourceFile::Artifact(source)] = inputs.source_dep_sources.as_slice() else {
-        panic!("expected one cache-backed Git source");
-    };
-    assert_eq!(source.key.namespace(), CacheNamespace::GitCheckout);
-    assert_eq!(source.path.to_string(), "fixture/example/Hello.java");
-    assert_eq!(
-        storage.artifacts().lookup(&source.key).unwrap().unwrap(),
-        b"package example; public class Hello {}"
-    );
-
-    let materialized = storage
-        .artifacts()
-        .materialize_source(&source.key, &source.path)
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        let mut storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
         .unwrap();
-    assert_eq!(
-        materialized.extension().and_then(|value| value.to_str()),
-        Some("java")
-    );
-    assert_eq!(
-        fs::read(materialized).unwrap(),
-        b"package example; public class Hello {}"
-    );
+        let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        plan.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+            .await;
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+
+        let inputs = ProjectInputs::assemble(
+            &NoFetch,
+            &mut storage,
+            &plan.plan,
+            ProjectInputOptions::Compile,
+        )
+        .await;
+        let [SourceFile::Artifact(source)] = inputs.source_dep_sources.as_slice() else {
+            panic!("expected one cache-backed Git source");
+        };
+        assert_eq!(source.key.namespace(), CacheNamespace::GitCheckout);
+        assert_eq!(source.path.to_string(), "fixture/example/Hello.java");
+        assert_eq!(
+            storage
+                .artifacts()
+                .lookup(&source.key)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"package example; public class Hello {}"
+        );
+
+        let materialized = storage
+            .artifacts()
+            .materialize_source(&source.key, &source.path)
+            .await
+            .unwrap();
+        assert_eq!(
+            materialized.extension().and_then(|value| value.to_str()),
+            Some("java")
+        );
+        assert_eq!(
+            fs::read(materialized).unwrap(),
+            b"package example; public class Hello {}"
+        );
+    })
+    .expect("test runtime bootstraps");
 }
 
 /// A dependency pinned to a `rev` is immutable: once its checkout has been published, a later
@@ -123,23 +138,37 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
 "#
     ))
     .unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let mut storage =
-        NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        let mut storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
 
-    let mut first = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
-    first.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
-    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
-    assert_eq!(first.plan.source_dependency_artifacts.len(), 1);
+        let mut first =
+            NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        first
+            .materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+            .await;
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+        assert_eq!(first.plan.source_dependency_artifacts.len(), 1);
 
-    // The repository is gone; only the published cache can satisfy the second assembly.
-    drop(repository);
+        // The repository is gone; only the published cache can satisfy the second assembly.
+        drop(repository);
 
-    let mut second = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
-    second.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
-    assert!(second.warnings.is_empty(), "{:?}", second.warnings);
-    assert_eq!(
-        first.plan.source_dependency_artifacts,
-        second.plan.source_dependency_artifacts
-    );
+        let mut second =
+            NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        second
+            .materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+            .await;
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+        assert_eq!(
+            first.plan.source_dependency_artifacts,
+            second.plan.source_dependency_artifacts
+        );
+    })
+    .expect("test runtime bootstraps");
 }

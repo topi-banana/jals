@@ -1,7 +1,8 @@
 //! Native external-content adapter.
 //!
 //! Filesystem identity and persistence are intentionally owned by `jals-storage`; this module only
-//! supplies the host HTTP capability.
+//! supplies the host HTTP capability. Blocking host work (filesystem reads, git subprocesses)
+//! runs through [`on_blocking_pool`], so the current-thread executor keeps serving tasks.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +13,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_config::{Dependency, GitDependency, GitRef, Manifest, PathDependency};
+use jals_exec::tokio_rt::on_blocking_pool;
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
     NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, RelativePath,
@@ -22,16 +24,16 @@ use crate::{
     LibrarySource, ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
 };
 
-/// A fetcher backed by `reqwest`'s blocking client.
+/// A fetcher backed by `reqwest`'s async client.
 pub struct ReqwestFetcher {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     project_root: Option<PathBuf>,
 }
 
 impl ReqwestFetcher {
     pub fn new() -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::Client::new(),
             project_root: None,
         }
     }
@@ -40,7 +42,7 @@ impl ReqwestFetcher {
     /// this adapter; HTTP remains the only network capability.
     pub fn for_project(project_root: PathBuf) -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::Client::new(),
             project_root: Some(project_root),
         }
     }
@@ -55,7 +57,11 @@ impl Default for ReqwestFetcher {
 impl Fetcher for ReqwestFetcher {
     async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
         if let Some(path) = locator.strip_prefix("file://") {
-            return fs::read(path).map_err(|error| format!("reading {path}: {error}"));
+            let path = path.to_owned();
+            return on_blocking_pool(move || {
+                fs::read(&path).map_err(|error| format!("reading {path}: {error}"))
+            })
+            .await;
         }
         if !ExternalLocator::is_url(locator) {
             let path = self
@@ -63,17 +69,22 @@ impl Fetcher for ReqwestFetcher {
                 .as_deref()
                 .unwrap_or_else(|| Path::new("."))
                 .join(locator);
-            return fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()));
+            return on_blocking_pool(move || {
+                fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))
+            })
+            .await;
         }
         let response = self
             .client
             .get(locator)
             .send()
+            .await
             .map_err(|error| error.to_string())?
             .error_for_status()
             .map_err(|error| error.to_string())?;
         response
             .bytes()
+            .await
             .map(|bytes| bytes.to_vec())
             .map_err(|error| format!("reading response: {error}"))
     }
@@ -95,28 +106,28 @@ pub struct NativeProjectPlan {
 
 impl NativeProjectPlan {
     /// Lower `manifest` and execute the whole native input assembly against one aggregate:
-    /// materialize Git sources, fetch and resolve dependencies over blocking HTTP, and merge the
-    /// lowering warnings into the result's. Blocking — must not run inside an async runtime (the
-    /// LSP calls it from a dedicated thread). Returns the resolved inputs plus the manifest's
-    /// source roots.
-    pub fn assemble_blocking(
+    /// materialize Git sources, fetch and resolve dependencies over async HTTP, and merge the
+    /// lowering warnings into the result's. Fan-out and blocking host work run on the storage's
+    /// own execution context. Returns the resolved inputs plus the manifest's source roots.
+    pub async fn assemble_native(
         manifest: &Manifest,
         project_root: &Path,
         storage: &mut NativeStorage,
         options: ProjectInputOptions,
     ) -> (ProjectInputs, Vec<DirKey>) {
         let mut native = Self::from_manifest(manifest, project_root, &storage.view());
-        native.materialize_external_sources(storage, options);
-        native.materialize_external_classpath(storage, options);
-        native.materialize_git_sources(project_root, storage, options);
-        native.materialize_path_sources(project_root, storage, options);
+        native.materialize_external_sources(storage, options).await;
+        native
+            .materialize_external_classpath(storage, options)
+            .await;
+        native
+            .materialize_git_sources(project_root, storage, options)
+            .await;
+        native
+            .materialize_path_sources(project_root, storage, options)
+            .await;
         let fetcher = ReqwestFetcher::for_project(project_root.to_path_buf());
-        let mut inputs = futures::executor::block_on(ProjectInputs::assemble(
-            &fetcher,
-            storage,
-            &native.plan,
-            options,
-        ));
+        let mut inputs = ProjectInputs::assemble(&fetcher, storage, &native.plan, options).await;
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
         (inputs, native.source_roots)
@@ -259,7 +270,7 @@ impl NativeProjectPlan {
         scopes
     }
 
-    fn materialize_external_sources(
+    async fn materialize_external_sources(
         &mut self,
         storage: &mut NativeStorage,
         options: ProjectInputOptions,
@@ -276,7 +287,9 @@ impl NativeProjectPlan {
                 CacheNamespace::PathSource,
                 &format!("build-source\0{}", source_root.display()),
                 &source_root,
-            ) {
+            )
+            .await
+            {
                 Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
                 Err(message) => self.warnings.push(Warning::new(
                     WarningOrigin::External(ExternalLocator::new(
@@ -288,7 +301,7 @@ impl NativeProjectPlan {
         }
     }
 
-    fn materialize_external_classpath(
+    async fn materialize_external_classpath(
         &mut self,
         storage: &mut NativeStorage,
         options: ProjectInputOptions,
@@ -297,7 +310,8 @@ impl NativeProjectPlan {
             return;
         }
         for path in self.external_classpath.clone() {
-            if let Err(message) = Self::publish_classpath_path(storage, &path, &mut self.plan) {
+            if let Err(message) = Self::publish_classpath_path(storage, &path, &mut self.plan).await
+            {
                 self.warnings.push(Warning::new(
                     WarningOrigin::External(ExternalLocator::new(path.display().to_string())),
                     message,
@@ -306,7 +320,7 @@ impl NativeProjectPlan {
         }
     }
 
-    fn publish_classpath_path(
+    async fn publish_classpath_path(
         storage: &mut NativeStorage,
         path: &Path,
         plan: &mut ProjectInputPlan,
@@ -320,7 +334,7 @@ impl NativeProjectPlan {
                 })?;
             let logical = RelativePath::new([Name::new(name)
                 .map_err(|error| format!("invalid classpath file name: {error:?}"))?]);
-            let entry = Self::publish_classpath_file(storage, path, logical)?;
+            let entry = Self::publish_classpath_file(storage, path, logical).await?;
             plan.classpath.push(entry);
             return Ok(());
         }
@@ -330,25 +344,34 @@ impl NativeProjectPlan {
         let source = NativeSource::new(path.to_path_buf())
             .map_err(|error| error.to_string())?
             .scoped([NativeScope::extension(RelativePath::ROOT, "class")]);
-        let snapshot = ProjectStorage::open(source, MemoryCache::default())
+        let snapshot = ProjectStorage::open(source, MemoryCache::default(), storage.exec().clone())
+            .await
             .map_err(|error| error.to_string())?;
         for file in snapshot.view().tree().files() {
-            plan.classpath.push(Self::publish_classpath_file(
+            let entry = Self::publish_classpath_file(
                 storage,
                 &file.key().path().to_host_path(path),
                 file.key().path().clone(),
-            )?);
+            )
+            .await?;
+            plan.classpath.push(entry);
         }
         Ok(())
     }
 
-    fn publish_classpath_file(
+    async fn publish_classpath_file(
         storage: &mut NativeStorage,
         host: &Path,
         logical: RelativePath,
     ) -> Result<ClasspathEntry, String> {
-        let bytes = fs::read(host)
-            .map_err(|error| format!("reading classpath file {}: {error}", host.display()))?;
+        let bytes = {
+            let host = host.to_path_buf();
+            on_blocking_pool(move || {
+                fs::read(&host)
+                    .map_err(|error| format!("reading classpath file {}: {error}", host.display()))
+            })
+            .await?
+        };
         let provenance = ContentDigest::of(host.display().to_string().as_bytes());
         let key = CacheKey::new(
             CacheNamespace::ExternalClasspath,
@@ -358,6 +381,7 @@ impl NativeProjectPlan {
         storage
             .artifacts_mut()
             .publish(&key, &bytes)
+            .await
             .map_err(|error| format!("publishing classpath file {}: {error:?}", host.display()))?;
         Ok(ClasspathEntry::ArtifactFile { path: logical, key })
     }
@@ -365,7 +389,7 @@ impl NativeProjectPlan {
     /// Clone native Git dependencies, scan their selected source roots through the same safe native
     /// source adapter, and publish every Java file as a verified `GitCheckout` artifact. Analysis
     /// deliberately skips source dependencies; compile/editor plans retain only typed cache keys.
-    pub fn materialize_git_sources(
+    pub async fn materialize_git_sources(
         &mut self,
         project_root: &Path,
         storage: &mut NativeStorage,
@@ -375,7 +399,7 @@ impl NativeProjectPlan {
             return;
         }
         for (name, git) in self.git_dependencies.clone() {
-            match Self::clone_and_publish_git(project_root, storage, &name, &git) {
+            match Self::clone_and_publish_git(project_root, storage, &name, &git).await {
                 Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
                 Err(message) => self.warnings.push(Warning::new(
                     WarningOrigin::External(ExternalLocator::new(git.git)),
@@ -389,7 +413,7 @@ impl NativeProjectPlan {
     /// native source adapter, and publish every Java file as a verified `PathSource` artifact.
     /// In-project `path` dependencies stay portable source roots (see
     /// [`from_manifest`](Self::from_manifest)).
-    pub fn materialize_path_sources(
+    pub async fn materialize_path_sources(
         &mut self,
         project_root: &Path,
         storage: &mut NativeStorage,
@@ -399,7 +423,7 @@ impl NativeProjectPlan {
             return;
         }
         for (name, dependency) in self.path_dependencies.clone() {
-            match Self::scan_and_publish_path(project_root, storage, &name, &dependency) {
+            match Self::scan_and_publish_path(project_root, storage, &name, &dependency).await {
                 Ok(sources) => self.plan.source_dependency_artifacts.extend(sources),
                 Err(message) => self.warnings.push(Warning::new(
                     WarningOrigin::External(ExternalLocator::new(dependency.path)),
@@ -409,7 +433,7 @@ impl NativeProjectPlan {
         }
     }
 
-    fn clone_and_publish_git(
+    async fn clone_and_publish_git(
         project_root: &Path,
         storage: &mut NativeStorage,
         name: &Name,
@@ -421,21 +445,29 @@ impl NativeProjectPlan {
         // A tag or rev pins immutable content: recover the previous checkout's file list from
         // the cache and skip the clone while every artifact is still present and verified.
         if matches!(reference, GitRef::Tag(_) | GitRef::Rev(_))
-            && let Some(sources) = Self::cached_git_sources(storage, name, git, &reference)
+            && let Some(sources) = Self::cached_git_sources(storage, name, git, &reference).await
         {
             return Ok(sources);
         }
         let temporary =
             tempfile::tempdir().map_err(|error| format!("creating checkout: {error}"))?;
         let checkout = temporary.path().join("checkout");
-        let output = Command::new("git")
-            .current_dir(project_root)
-            .arg("clone")
-            .arg("--quiet")
-            .arg(&git.git)
-            .arg(&checkout)
-            .output()
-            .map_err(|error| format!("failed to run git (is it installed?): {error}"))?;
+        let output = {
+            let project_root = project_root.to_path_buf();
+            let url = git.git.clone();
+            let checkout = checkout.clone();
+            on_blocking_pool(move || {
+                Command::new("git")
+                    .current_dir(project_root)
+                    .arg("clone")
+                    .arg("--quiet")
+                    .arg(url)
+                    .arg(checkout)
+                    .output()
+            })
+            .await
+            .map_err(|error| format!("failed to run git (is it installed?): {error}"))?
+        };
         if !output.status.success() {
             return Err(format!(
                 "git clone failed: {}",
@@ -443,14 +475,21 @@ impl NativeProjectPlan {
             ));
         }
         if let Some(target) = reference.checkout_arg() {
-            let output = Command::new("git")
-                .arg("-C")
-                .arg(&checkout)
-                .arg("checkout")
-                .arg("--quiet")
-                .arg(target)
-                .output()
-                .map_err(|error| format!("failed to run git checkout: {error}"))?;
+            let output = {
+                let checkout = checkout.clone();
+                let target = target.to_owned();
+                on_blocking_pool(move || {
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(checkout)
+                        .arg("checkout")
+                        .arg("--quiet")
+                        .arg(target)
+                        .output()
+                })
+                .await
+                .map_err(|error| format!("failed to run git checkout: {error}"))?
+            };
             if !output.status.success() {
                 return Err(format!(
                     "git checkout failed: {}",
@@ -465,16 +504,17 @@ impl NativeProjectPlan {
             CacheNamespace::GitCheckout,
             &Self::git_identity(git, &reference),
             &source_root,
-        )?;
+        )
+        .await?;
         if matches!(reference, GitRef::Tag(_) | GitRef::Rev(_)) {
-            Self::record_git_manifest(storage, git, &reference, &sources);
+            Self::record_git_manifest(storage, git, &reference, &sources).await;
         }
         Ok(sources)
     }
 
     /// Rebuild a pinned checkout's published sources from its recorded file list, without
     /// cloning. `None` (a missing index, manifest, or file artifact) falls back to a clone.
-    fn cached_git_sources(
+    async fn cached_git_sources(
         storage: &NativeStorage,
         name: &Name,
         git: &GitDependency,
@@ -486,8 +526,9 @@ impl NativeProjectPlan {
         let key = storage
             .artifacts()
             .indexed_key(CacheNamespace::GitCheckout, provenance)
+            .await
             .ok()??;
-        let manifest = String::from_utf8(storage.artifacts().lookup(&key).ok()??).ok()?;
+        let manifest = String::from_utf8(storage.artifacts().lookup(&key).await.ok()??).ok()?;
         let mut sources = Vec::new();
         let prefix = RelativePath::new([name.clone()]);
         for line in manifest.lines() {
@@ -499,7 +540,7 @@ impl NativeProjectPlan {
                 ContentDigest::of(format!("{identity}\0{file}").as_bytes()),
                 content,
             );
-            if !matches!(storage.artifacts().open_verified(&key), Ok(Some(_))) {
+            if !matches!(storage.artifacts().open_verified(&key).await, Ok(Some(_))) {
                 return None;
             }
             sources.push(LibrarySource {
@@ -513,7 +554,7 @@ impl NativeProjectPlan {
     /// Record a pinned checkout's file list — `<content-hex> <in-checkout path>` per line — so
     /// the next run rebuilds the artifact keys without cloning. Best-effort advisory metadata:
     /// the reader re-verifies every artifact, so a failed write only costs a re-clone.
-    fn record_git_manifest(
+    async fn record_git_manifest(
         storage: &mut NativeStorage,
         git: &GitDependency,
         reference: &GitRef,
@@ -538,9 +579,10 @@ impl NativeProjectPlan {
         if storage
             .artifacts_mut()
             .publish(&key, manifest.as_bytes())
+            .await
             .is_ok()
         {
-            let _ = storage.artifacts_mut().record_index(&key);
+            let _ = storage.artifacts_mut().record_index(&key).await;
         }
     }
 
@@ -554,7 +596,7 @@ impl NativeProjectPlan {
         )
     }
 
-    fn scan_and_publish_path(
+    async fn scan_and_publish_path(
         project_root: &Path,
         storage: &mut NativeStorage,
         name: &Name,
@@ -570,6 +612,7 @@ impl NativeProjectPlan {
             &format!("path\0{}", source_root.display()),
             &source_root,
         )
+        .await
     }
 
     /// The source root inside a host dependency tree: the configured `dir` under it, or the
@@ -609,7 +652,7 @@ impl NativeProjectPlan {
     /// Scan `source_root` through the safe native source adapter and publish every Java file as
     /// a verified artifact under `namespace`, with a per-file provenance of
     /// `<identity>\0<in-tree path>`.
-    fn publish_source_tree(
+    async fn publish_source_tree(
         storage: &mut NativeStorage,
         name: &Name,
         namespace: CacheNamespace,
@@ -620,7 +663,8 @@ impl NativeProjectPlan {
             .map_err(|error| error.to_string())?
             .excluding(RelativePath::parse(".git").expect(".git is a portable segment"))
             .scoped([NativeScope::extension(RelativePath::ROOT, "java")]);
-        let checkout = ProjectStorage::open(source, MemoryCache::default())
+        let checkout = ProjectStorage::open(source, MemoryCache::default(), storage.exec().clone())
+            .await
             .map_err(|error| error.to_string())?;
         let view = checkout.view();
         let mut sources = Vec::new();
@@ -640,6 +684,7 @@ impl NativeProjectPlan {
             storage
                 .artifacts_mut()
                 .publish(&key, file.bytes())
+                .await
                 .map_err(|error| format!("publishing dependency source `{path}`: {error:?}"))?;
             sources.push(LibrarySource { path, key });
         }

@@ -1,72 +1,102 @@
 //! Archive adapter and classpath byte loading.
 //!
-//! `zip` is isolated in this module: it consumes portable readers from a project revision or
-//! artifact cache and never opens a host path. Jars stream from their backing source
-//! ([`ArtifactCache::open_verified`] readers, or in-memory cursors over project bytes) and
-//! `.class` members parse straight from the decompressing member stream.
+//! Archive decoding is isolated in this module (over the in-house [`crate::zip`] reader): it
+//! consumes portable readers from a project revision or artifact cache and never opens a host
+//! path. Jars stream from their backing source ([`ArtifactCache::open_verified`] readers, or
+//! in-memory cursors over project bytes) and `.class` members parse straight from the
+//! decompressing member stream.
+//!
+//! Loading is a three-phase pipeline: a serial planning walk emits ordered [`DecodeTask`]s, the
+//! tasks fan out over [`Exec::fan_out`] (jar members in fixed-size chunks, so the split never
+//! depends on worker count), and a serial fold merges results in input order. The output is
+//! therefore byte-identical to a sequential walk on any executor.
 
+use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use jals_classfile::ClassFile;
-use jals_storage::io::{self as sio, Buffered, StdReader, ToStd};
+use jals_exec::{Exec, LocalBoxFuture};
+use jals_storage::io::{self as sio, Buffered, IoError, SeekFrom};
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, DirKey, FileKey, Name, ProjectView,
     RelativePath,
 };
 
+use crate::zip::{CentralDirectory, MemberStream};
 use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
 
-/// What a jar-backing reader must satisfy: portable `Read + Seek` feeds `zip` through
-/// [`ToStd`], and `Clone + Send + Sync` lets the parallel walker clone one open archive per
-/// rayon worker, every clone reading at an independent position.
-trait JarReader: sio::Read + sio::Seek + Clone + Send + Sync {}
-impl<R: sio::Read + sio::Seek + Clone + Send + Sync> JarReader for R {}
+/// What a jar-backing reader must satisfy: portable `Read + Seek` feeds the member streams, and
+/// `Clone + Send + 'static` lets a fan-out chunk carry its own reader clone to a worker, every
+/// clone reading at an independent position.
+trait JarReader: sio::Read + sio::Seek + Clone + Send + 'static {}
+impl<R: sio::Read + sio::Seek + Clone + Send + 'static> JarReader for R {}
 
 const MAX_NESTED_JAR_DEPTH: usize = 64;
 
-/// Order-preserving execution seam: with the `parallel` feature the maps fan out on the rayon
-/// pool, without it they run inline. Both yield results in input order, so loads stay
-/// deterministic either way.
-mod exec {
-    use alloc::vec::Vec;
+/// Members per fan-out decode chunk. Deliberately a fixed constant — never derived from the
+/// worker count — so the task split (and therefore every diagnostic and result order) is
+/// identical at any parallelism.
+const JAR_CHUNK_MEMBERS: usize = 64;
 
-    #[cfg(feature = "parallel")]
-    pub(super) fn map<I: Sync, T: Send>(items: &[I], f: impl Fn(&I) -> T + Send + Sync) -> Vec<T> {
-        use rayon::prelude::*;
-        items.par_iter().map(f).collect()
-    }
+/// The two places jar bytes live: an in-memory cursor over project bytes, or a verified cache
+/// reader. Unifying them keeps the decode task type single-parameter.
+enum JarSource<R> {
+    Memory(sio::Cursor<Arc<[u8]>>),
+    Cache(R),
+}
 
-    #[cfg(not(feature = "parallel"))]
-    pub(super) fn map<I, T>(items: &[I], f: impl Fn(&I) -> T) -> Vec<T> {
-        items.iter().map(f).collect()
+impl<R: Clone> Clone for JarSource<R> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Memory(cursor) => Self::Memory(cursor.clone()),
+            Self::Cache(reader) => Self::Cache(reader.clone()),
+        }
     }
+}
 
-    /// Map over `0..len` with a scratch value cloned from `state`: one clone per worker under
-    /// `parallel`, one for the whole loop inline.
-    #[cfg(feature = "parallel")]
-    pub(super) fn map_with<S: Clone + Sync, T: Send>(
-        len: usize,
-        state: &S,
-        f: impl Fn(&mut S, usize) -> T + Send + Sync,
-    ) -> Vec<T> {
-        use rayon::prelude::*;
-        (0..len)
-            .into_par_iter()
-            .map_init(|| state.clone(), f)
-            .collect()
+impl<R: sio::Read> sio::Read for JarSource<R> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        match self {
+            Self::Memory(cursor) => cursor.read(buf).await,
+            Self::Cache(reader) => reader.read(buf).await,
+        }
     }
+}
 
-    #[cfg(not(feature = "parallel"))]
-    pub(super) fn map_with<S: Clone, T>(
-        len: usize,
-        state: &S,
-        f: impl Fn(&mut S, usize) -> T,
-    ) -> Vec<T> {
-        let mut state = state.clone();
-        (0..len).map(|index| f(&mut state, index)).collect()
+impl<R: sio::Seek> sio::Seek for JarSource<R> {
+    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+        match self {
+            Self::Memory(cursor) => cursor.seek(pos).await,
+            Self::Cache(reader) => reader.seek(pos).await,
+        }
     }
+}
+
+/// One unit of fan-out decode work, planned serially in entry order. Everything inside is
+/// `Send` plain data or a cloneable reader; the decode future itself is built on the worker.
+enum DecodeTask<R> {
+    /// A diagnostic discovered during planning, kept in position so the fold preserves the
+    /// serial walk's warning order.
+    Warn(Warning),
+    /// A single resident `.class` (project file or directory member).
+    ClassBytes {
+        origin: WarningOrigin,
+        bytes: Arc<[u8]>,
+    },
+    /// A single cached `.class` artifact, streamed from its verified reader.
+    ClassReader { origin: WarningOrigin, reader: R },
+    /// A fixed-size range of one jar's central-directory members.
+    JarChunk {
+        origin: WarningOrigin,
+        reader: JarSource<R>,
+        directory: Arc<CentralDirectory>,
+        members: Range<usize>,
+    },
 }
 
 /// A typed classpath input.
@@ -93,162 +123,171 @@ pub struct ClasspathLoad {
 impl ClasspathLoad {
     /// Load from exactly one immutable project revision and a verified artifact cache.
     ///
-    /// With the `parallel` feature, entries and archive members are decoded on the rayon pool;
-    /// classes and warnings are still merged in entry order, so the result is identical to the
-    /// inline walk.
-    pub fn load<C: CacheBackend>(
+    /// Entries are planned serially in order, decoded on `exec`'s fan-out (jar members in
+    /// fixed-size chunks), and folded back in input order — the result is byte-identical to a
+    /// sequential walk on any executor.
+    pub async fn load<C: CacheBackend>(
+        exec: &Exec,
         view: &ProjectView,
         cache: &ArtifactCache<C>,
         entries: &[ClasspathEntry],
     ) -> Self {
-        exec::map(entries, |entry| Self::load_entry(view, cache, entry))
-            .into_iter()
-            .reduce(|mut load, entry_load| {
-                load.classes.extend(entry_load.classes);
-                load.warnings.extend(entry_load.warnings);
-                load
-            })
-            .unwrap_or_default()
-    }
-
-    fn load_entry<C: CacheBackend>(
-        view: &ProjectView,
-        cache: &ArtifactCache<C>,
-        entry: &ClasspathEntry,
-    ) -> Self {
+        let mut tasks: Vec<DecodeTask<C::Reader>> = Vec::new();
+        for entry in entries {
+            Self::plan_entry(view, cache, entry, &mut tasks).await;
+        }
+        let outcomes = exec.fan_out(tasks, Archive::decode_task).await;
         let mut load = Self::default();
-        match entry {
-            ClasspathEntry::ProjectFile(key) => load.load_project_file(view, key),
-            ClasspathEntry::ProjectDirectory(key) => load.load_project_dir(view, key),
-            ClasspathEntry::Artifact(key) => match cache.open_verified(key) {
-                Ok(Some(reader)) => {
-                    load.load_jar_reader(&WarningOrigin::Artifact(key.clone()), reader);
-                }
-                Ok(None) => load.warn(
-                    WarningOrigin::Artifact(key.clone()),
-                    "classpath artifact is not cached",
-                ),
-                Err(error) => load.warn(
-                    WarningOrigin::Artifact(key.clone()),
-                    &format!("classpath artifact is invalid: {error:?}"),
-                ),
-            },
-            ClasspathEntry::ArtifactFile { path, key } => match cache.open_verified(key) {
-                Ok(Some(reader)) => load.load_cached_reader(path, key, reader),
-                Ok(None) => load.warn(
-                    WarningOrigin::Artifact(key.clone()),
-                    "classpath file artifact is not cached",
-                ),
-                Err(error) => load.warn(
-                    WarningOrigin::Artifact(key.clone()),
-                    &format!("classpath file artifact is invalid: {error:?}"),
-                ),
-            },
+        for (classes, warnings) in outcomes {
+            load.classes.extend(classes);
+            load.warnings.extend(warnings);
         }
         load
     }
 
-    fn load_cached_reader<R: JarReader>(&mut self, path: &RelativePath, key: &CacheKey, reader: R) {
-        let origin = WarningOrigin::Artifact(key.clone());
-        match path.name().and_then(|name| name.as_str().rsplit_once('.')) {
-            Some((_, ext)) if ext.eq_ignore_ascii_case("class") => {
-                self.parse_into(origin, reader);
+    /// Phase A: turn one classpath entry into ordered decode tasks.
+    async fn plan_entry<C: CacheBackend>(
+        view: &ProjectView,
+        cache: &ArtifactCache<C>,
+        entry: &ClasspathEntry,
+        tasks: &mut Vec<DecodeTask<C::Reader>>,
+    ) {
+        match entry {
+            ClasspathEntry::ProjectFile(key) => Self::plan_project_file(view, key, tasks).await,
+            ClasspathEntry::ProjectDirectory(key) => Self::plan_project_dir(view, key, tasks),
+            ClasspathEntry::Artifact(key) => {
+                let origin = WarningOrigin::Artifact(key.clone());
+                match cache.open_verified(key).await {
+                    Ok(Some(reader)) => {
+                        Self::plan_jar(origin, JarSource::Cache(reader), tasks).await;
+                    }
+                    Ok(None) => tasks.push(DecodeTask::Warn(Warning::new(
+                        origin,
+                        "classpath artifact is not cached",
+                    ))),
+                    Err(error) => tasks.push(DecodeTask::Warn(Warning::new(
+                        origin,
+                        format!("classpath artifact is invalid: {error:?}"),
+                    ))),
+                }
             }
-            Some((_, ext))
-                if ext.eq_ignore_ascii_case("jar") || ext.eq_ignore_ascii_case("zip") =>
-            {
-                self.load_jar_reader(&origin, reader);
-            }
-            _ => self.warn(
-                origin,
-                "unrecognized cached classpath file (expected `.class`, `.jar`, or `.zip`)",
-            ),
-        }
-    }
-
-    fn load_project_file(&mut self, view: &ProjectView, key: &FileKey) {
-        let origin = WarningOrigin::ProjectFile(key.clone());
-        let file = match view.file(key) {
-            Ok(file) => file,
-            Err(error) => {
-                return self.warn(origin, &format!("classpath file cannot be read: {error}"));
-            }
-        };
-        match key.extension() {
-            Some(ext) if ext.eq_ignore_ascii_case("class") => {
-                self.parse_into(origin, file.bytes());
-            }
-            Some(ext) if ext.eq_ignore_ascii_case("jar") || ext.eq_ignore_ascii_case("zip") => {
-                // Project files are already resident (`CodeTree` snapshot), so the jar reader
-                // is an in-memory cursor over the existing bytes — no copy.
-                self.load_jar_reader(&origin, sio::Cursor::new(file.bytes()));
-            }
-            _ => self.warn(
-                origin,
-                "unrecognized classpath file (expected `.class`, `.jar`, or `.zip`)",
-            ),
-        }
-    }
-
-    fn load_project_dir(&mut self, view: &ProjectView, key: &DirKey) {
-        if let Err(error) = view.directory(key) {
-            self.warn(
-                WarningOrigin::ProjectDirectory(key.clone()),
-                &format!("classpath directory cannot be read: {error}"),
-            );
-            return;
-        }
-        let files: Vec<_> = view
-            .tree()
-            .files_under(key)
-            .filter(|file| file.key().has_extension("class"))
-            .collect();
-        let parsed = exec::map(&files, |file| Self::read_class(file.bytes()));
-        for (file, outcome) in files.into_iter().zip(parsed) {
-            match outcome {
-                Ok(class) => self.classes.push(class),
-                Err(message) => {
-                    self.warn(WarningOrigin::ProjectFile(file.key().clone()), &message);
+            ClasspathEntry::ArtifactFile { path, key } => {
+                let origin = WarningOrigin::Artifact(key.clone());
+                match cache.open_verified(key).await {
+                    Ok(Some(reader)) => {
+                        Self::plan_cached_file::<C>(path, origin, reader, tasks).await;
+                    }
+                    Ok(None) => tasks.push(DecodeTask::Warn(Warning::new(
+                        origin,
+                        "classpath file artifact is not cached",
+                    ))),
+                    Err(error) => tasks.push(DecodeTask::Warn(Warning::new(
+                        origin,
+                        format!("classpath file artifact is invalid: {error:?}"),
+                    ))),
                 }
             }
         }
     }
 
-    fn load_jar_reader<R: JarReader>(&mut self, origin: &WarningOrigin, reader: R) {
-        let archive = match Archive::open(reader) {
-            Ok(archive) => archive,
-            Err(message) => return self.warn(origin.clone(), &message),
-        };
-        let is_class = |name: &str| {
-            Archive::extension(name).is_some_and(|ext| ext.eq_ignore_ascii_case("class"))
-        };
-        let parsed = exec::map_with(archive.len(), &archive, |archive, index| {
-            Archive::parse_class_member(archive, index, &is_class)
-        });
-        for outcome in parsed {
-            match outcome {
-                Ok(Some(class)) => self.classes.push(class),
-                Ok(None) => {}
-                Err(message) => self.warn(origin.clone(), &message),
+    async fn plan_project_file<R: JarReader>(
+        view: &ProjectView,
+        key: &FileKey,
+        tasks: &mut Vec<DecodeTask<R>>,
+    ) {
+        let origin = WarningOrigin::ProjectFile(key.clone());
+        let file = match view.file(key) {
+            Ok(file) => file,
+            Err(error) => {
+                tasks.push(DecodeTask::Warn(Warning::new(
+                    origin,
+                    format!("classpath file cannot be read: {error}"),
+                )));
+                return;
             }
+        };
+        // `CodeFile` exposes only `&[u8]`, so shipping bytes to workers takes one copy into a
+        // shared `Arc<[u8]>`; jar chunks then clone the `Arc`, not the bytes.
+        let bytes: Arc<[u8]> = Arc::from(file.bytes());
+        match key.extension() {
+            Some(ext) if ext.eq_ignore_ascii_case("class") => {
+                tasks.push(DecodeTask::ClassBytes { origin, bytes });
+            }
+            Some(ext) if ext.eq_ignore_ascii_case("jar") || ext.eq_ignore_ascii_case("zip") => {
+                Self::plan_jar(origin, JarSource::Memory(sio::Cursor::new(bytes)), tasks).await;
+            }
+            _ => tasks.push(DecodeTask::Warn(Warning::new(
+                origin,
+                "unrecognized classpath file (expected `.class`, `.jar`, or `.zip`)",
+            ))),
         }
     }
 
-    /// Parse a class file from any portable byte source, tagging a failure with the shared
-    /// diagnostic message.
-    fn read_class<R: sio::Read>(source: R) -> Result<ClassFile, String> {
-        ClassFile::read(source).map_err(|error| format!("failed to parse class file: {error}"))
-    }
-
-    fn parse_into<R: sio::Read>(&mut self, origin: WarningOrigin, source: R) {
-        match Self::read_class(source) {
-            Ok(class) => self.classes.push(class),
-            Err(message) => self.warn(origin, &message),
+    fn plan_project_dir<R: JarReader>(
+        view: &ProjectView,
+        key: &DirKey,
+        tasks: &mut Vec<DecodeTask<R>>,
+    ) {
+        if let Err(error) = view.directory(key) {
+            tasks.push(DecodeTask::Warn(Warning::new(
+                WarningOrigin::ProjectDirectory(key.clone()),
+                format!("classpath directory cannot be read: {error}"),
+            )));
+            return;
+        }
+        for file in view
+            .tree()
+            .files_under(key)
+            .filter(|file| file.key().has_extension("class"))
+        {
+            tasks.push(DecodeTask::ClassBytes {
+                origin: WarningOrigin::ProjectFile(file.key().clone()),
+                bytes: Arc::from(file.bytes()),
+            });
         }
     }
 
-    fn warn(&mut self, origin: WarningOrigin, message: &str) {
-        self.warnings.push(Warning::new(origin, message));
+    async fn plan_cached_file<C: CacheBackend>(
+        path: &RelativePath,
+        origin: WarningOrigin,
+        reader: C::Reader,
+        tasks: &mut Vec<DecodeTask<C::Reader>>,
+    ) {
+        match path.name().and_then(|name| name.as_str().rsplit_once('.')) {
+            Some((_, ext)) if ext.eq_ignore_ascii_case("class") => {
+                tasks.push(DecodeTask::ClassReader { origin, reader });
+            }
+            Some((_, ext))
+                if ext.eq_ignore_ascii_case("jar") || ext.eq_ignore_ascii_case("zip") =>
+            {
+                Self::plan_jar(origin, JarSource::Cache(reader), tasks).await;
+            }
+            _ => tasks.push(DecodeTask::Warn(Warning::new(
+                origin,
+                "unrecognized cached classpath file (expected `.class`, `.jar`, or `.zip`)",
+            ))),
+        }
+    }
+
+    /// Parse the jar's central directory and emit one chunk task per fixed-size member range.
+    async fn plan_jar<R: JarReader>(
+        origin: WarningOrigin,
+        reader: JarSource<R>,
+        tasks: &mut Vec<DecodeTask<R>>,
+    ) {
+        match Archive::open(reader).await {
+            Ok((reader, directory)) => {
+                for members in Archive::chunk_ranges(directory.members.len()) {
+                    tasks.push(DecodeTask::JarChunk {
+                        origin: origin.clone(),
+                        reader: reader.clone(),
+                        directory: Arc::clone(&directory),
+                        members,
+                    });
+                }
+            }
+            Err(message) => tasks.push(DecodeTask::Warn(Warning::new(origin, message))),
+        }
     }
 }
 
@@ -276,13 +315,18 @@ impl<T> Default for JarExtraction<T> {
 }
 
 impl JarExtraction<LibrarySource> {
-    /// Extract `.java` members from verified jar artifacts.
-    pub fn sources<C: CacheBackend>(cache: &mut ArtifactCache<C>, jars: &[CacheKey]) -> Self {
+    /// Extract `.java` members from verified jar artifacts: members decode on the fan-out, then
+    /// a serial loop publishes them in member order.
+    pub async fn sources<C: CacheBackend>(
+        exec: &Exec,
+        cache: &mut ArtifactCache<C>,
+        jars: &[CacheKey],
+    ) -> Self {
         let mut out = Self::default();
         for jar in jars {
             // The reader owns its backing resource, so the cache stays free for the publishes
-            // inside `accept`.
-            let reader = match cache.open_verified(jar) {
+            // below.
+            let reader = match cache.open_verified(jar).await {
                 Ok(Some(reader)) => reader,
                 Ok(None) => {
                     out.warn(jar, "sources jar is not cached");
@@ -296,22 +340,35 @@ impl JarExtraction<LibrarySource> {
             let prefix = RelativePath::new([
                 Name::new(jar.provenance().to_hex()).expect("digest hex is a portable name")
             ]);
-            Archive::extract_members(
-                reader,
-                jar,
-                "java",
-                |member, bytes| {
-                    let key =
-                        Archive::member_key(CacheNamespace::ExtractedSource, jar, &member, bytes);
-                    let path = prefix.concat(&member);
-                    cache
-                        .publish(&key, bytes)
-                        .map_err(|error| format!("cache publish failed: {error:?}"))?;
-                    out.artifacts.push(LibrarySource { path, key });
-                    Ok(())
-                },
-                &mut out.warnings,
-            );
+            let members = match Archive::decode_matching(exec, reader, "java").await {
+                Ok(members) => members,
+                Err(message) => {
+                    out.warn(jar, &message);
+                    continue;
+                }
+            };
+            for (name, outcome) in members {
+                let (member, bytes) = match outcome.and_then(|bytes| {
+                    Archive::safe_relative(&name)
+                        .map(|path| (path, bytes))
+                        .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))
+                }) {
+                    Ok(member) => member,
+                    Err(message) => {
+                        out.warn(jar, &message);
+                        continue;
+                    }
+                };
+                let key =
+                    Archive::member_key(CacheNamespace::ExtractedSource, jar, &member, &bytes);
+                match cache.publish(&key, &bytes).await {
+                    Ok(()) => out.artifacts.push(LibrarySource {
+                        path: prefix.concat(&member),
+                        key,
+                    }),
+                    Err(error) => out.warn(jar, &format!("cache publish failed: {error:?}")),
+                }
+            }
         }
         out
     }
@@ -319,48 +376,64 @@ impl JarExtraction<LibrarySource> {
 
 impl JarExtraction<CachedJar> {
     /// Recursively extract nested jars, deepest first, with a bounded recursion depth.
-    pub fn nested<C: CacheBackend>(cache: &mut ArtifactCache<C>, jar: &CacheKey) -> Self {
+    pub async fn nested<C: CacheBackend>(
+        exec: &Exec,
+        cache: &mut ArtifactCache<C>,
+        jar: &CacheKey,
+    ) -> Self {
         let mut out = Self::default();
-        out.extract_nested(cache, jar, 0);
+        out.extract_nested(exec, cache, jar, 0).await;
         out
     }
 
-    fn extract_nested<C: CacheBackend>(
-        &mut self,
-        cache: &mut ArtifactCache<C>,
-        jar: &CacheKey,
+    fn extract_nested<'a, C: CacheBackend>(
+        &'a mut self,
+        exec: &'a Exec,
+        cache: &'a mut ArtifactCache<C>,
+        jar: &'a CacheKey,
         depth: usize,
-    ) {
-        if depth >= MAX_NESTED_JAR_DEPTH {
-            self.warn(jar, "nested jar recursion too deep; not unpacking further");
-            return;
-        }
-        let reader = match cache.open_verified(jar) {
-            Ok(Some(reader)) => reader,
-            Ok(None) => return self.warn(jar, "nested jar parent is not cached"),
-            Err(error) => {
-                return self.warn(jar, &format!("nested jar parent is invalid: {error:?}"));
+    ) -> LocalBoxFuture<'a, ()> {
+        Box::pin(async move {
+            if depth >= MAX_NESTED_JAR_DEPTH {
+                self.warn(jar, "nested jar recursion too deep; not unpacking further");
+                return;
             }
-        };
-        let mut level = Vec::new();
-        Archive::extract_members(
-            reader,
-            jar,
-            "jar",
-            |member, bytes| {
-                let key = Archive::member_key(CacheNamespace::NestedJar, jar, &member, bytes);
-                cache
-                    .publish(&key, bytes)
-                    .map_err(|error| format!("cache publish failed: {error:?}"))?;
-                level.push(CachedJar { member, key });
-                Ok(())
-            },
-            &mut self.warnings,
-        );
-        for nested in level {
-            self.extract_nested(cache, &nested.key, depth + 1);
-            self.artifacts.push(nested);
-        }
+            let reader = match cache.open_verified(jar).await {
+                Ok(Some(reader)) => reader,
+                Ok(None) => return self.warn(jar, "nested jar parent is not cached"),
+                Err(error) => {
+                    return self.warn(jar, &format!("nested jar parent is invalid: {error:?}"));
+                }
+            };
+            let members = match Archive::decode_matching(exec, reader, "jar").await {
+                Ok(members) => members,
+                Err(message) => return self.warn(jar, &message),
+            };
+            let mut level = Vec::new();
+            for (name, outcome) in members {
+                let (member, bytes) = match outcome.and_then(|bytes| {
+                    Archive::safe_relative(&name)
+                        .map(|path| (path, bytes))
+                        .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))
+                }) {
+                    Ok(member) => member,
+                    Err(message) => {
+                        self.warn(jar, &message);
+                        continue;
+                    }
+                };
+                let key = Archive::member_key(CacheNamespace::NestedJar, jar, &member, &bytes);
+                match cache.publish(&key, &bytes).await {
+                    Ok(()) => level.push(CachedJar { member, key }),
+                    Err(error) => self.warn(jar, &format!("cache publish failed: {error:?}")),
+                }
+            }
+            for nested in level {
+                self.extract_nested(exec, cache, &nested.key, depth + 1)
+                    .await;
+                self.artifacts.push(nested);
+            }
+        })
     }
 }
 
@@ -374,105 +447,140 @@ impl<T> JarExtraction<T> {
 struct Archive;
 
 impl Archive {
-    /// Open a portable reader as a zip archive. The parsed central directory is shared behind
-    /// the archive handle, so parallel walkers clone one open archive per worker and only the
-    /// reader position is per-clone state.
-    fn open<R: JarReader>(reader: R) -> Result<zip::ZipArchive<ToStd<R>>, String> {
-        zip::ZipArchive::new(ToStd(reader))
-            .map_err(|error| format!("failed to read archive: {error}"))
+    /// The fixed-size chunk split of `0..len`.
+    fn chunk_ranges(len: usize) -> impl Iterator<Item = Range<usize>> {
+        (0..len)
+            .step_by(JAR_CHUNK_MEMBERS)
+            .map(move |start| start..(start + JAR_CHUNK_MEMBERS).min(len))
     }
 
-    /// Parse the `.class`-shaped member at `index` straight from its decompressing stream —
-    /// the member is never materialized whole. `Ok(None)` is a directory or a filtered-out
-    /// name; `Err` is an unreadable or unparsable member, diagnosed with its name.
-    fn parse_class_member<R: JarReader>(
-        archive: &mut zip::ZipArchive<ToStd<R>>,
-        index: usize,
-        matches: &impl Fn(&str) -> bool,
-    ) -> Result<Option<ClassFile>, String> {
-        let member = archive
-            .by_index(index)
-            .map_err(|error| format!("failed to read archive entry {index}: {error}"))?;
-        if member.is_dir() || !matches(member.name()) {
-            return Ok(None);
+    /// Phase B: decode one planned task on a fan-out worker.
+    async fn decode_task<R: JarReader>(task: DecodeTask<R>) -> (Vec<ClassFile>, Vec<Warning>) {
+        match task {
+            DecodeTask::Warn(warning) => (Vec::new(), vec![warning]),
+            DecodeTask::ClassBytes { origin, bytes } => Self::decode_class(origin, &*bytes).await,
+            DecodeTask::ClassReader { origin, reader } => {
+                Self::decode_class(origin, Buffered::new(reader)).await
+            }
+            DecodeTask::JarChunk {
+                origin,
+                reader,
+                directory,
+                members,
+            } => Self::decode_jar_chunk(&origin, reader, &directory, members).await,
         }
-        let name = member.name().to_owned();
-        ClassFile::read(Buffered::new(StdReader(member)))
-            .map(Some)
-            .map_err(|error| format!("failed to parse archive member `{name}`: {error}"))
     }
 
-    /// Read the regular member at `index` whole if its name passes `matches`. Extraction
-    /// targets must be fully materialized: their cache key derives from a digest of the
-    /// complete content before a write-once publish. `Ok(None)` is a directory or a
-    /// filtered-out name; `Err` is an unreadable entry.
-    fn read_member<R: JarReader>(
-        archive: &mut zip::ZipArchive<ToStd<R>>,
-        index: usize,
-        matches: &impl Fn(&str) -> bool,
-    ) -> Result<Option<(String, Vec<u8>)>, String> {
-        let mut member = archive
-            .by_index(index)
-            .map_err(|error| format!("failed to read archive entry {index}: {error}"))?;
-        if member.is_dir() || !matches(member.name()) {
-            return Ok(None);
+    async fn decode_class<R: sio::Read>(
+        origin: WarningOrigin,
+        source: R,
+    ) -> (Vec<ClassFile>, Vec<Warning>) {
+        match Self::read_class(source).await {
+            Ok(class) => (vec![class], Vec::new()),
+            Err(message) => (Vec::new(), vec![Warning::new(origin, message)]),
         }
-        let name = member.name().to_owned();
-        let mut contents = Vec::with_capacity(usize::try_from(member.size()).unwrap_or(0));
-        if let Err(error) = std::io::copy(&mut member, &mut contents) {
-            return Err(format!("failed to read archive member `{name}`: {error}"));
-        }
-        Ok(Some((name, contents)))
     }
 
-    /// Walk a zip archive, feeding every regular member whose name passes `matches` through
-    /// `accept`. An unreadable archive/entry and a rejected member are diagnosed into
-    /// `warnings` under `origin`; nothing aborts the walk.
-    fn walk_members<R: JarReader>(
-        reader: R,
+    async fn decode_jar_chunk<R: JarReader>(
         origin: &WarningOrigin,
-        matches: impl Fn(&str) -> bool,
-        mut accept: impl FnMut(&str, &[u8]) -> Result<(), String>,
-        warnings: &mut Vec<Warning>,
-    ) {
-        let mut archive = match Self::open(reader) {
-            Ok(archive) => archive,
-            Err(message) => {
-                warnings.push(Warning::new(origin.clone(), message));
-                return;
+        reader: JarSource<R>,
+        directory: &CentralDirectory,
+        members: Range<usize>,
+    ) -> (Vec<ClassFile>, Vec<Warning>) {
+        let mut classes = Vec::new();
+        let mut warnings = Vec::new();
+        for member in &directory.members[members] {
+            if member.is_dir
+                || !Self::extension(&member.name)
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("class"))
+            {
+                continue;
             }
-        };
-        for index in 0..archive.len() {
-            let result = Self::read_member(&mut archive, index, &matches).and_then(|member| {
-                member.map_or(Ok(()), |(name, contents)| accept(&name, &contents))
-            });
-            if let Err(message) = result {
-                warnings.push(Warning::new(origin.clone(), message));
+            let stream = match MemberStream::open(reader.clone(), member).await {
+                Ok(stream) => stream,
+                Err(message) => {
+                    warnings.push(Warning::new(origin.clone(), message));
+                    continue;
+                }
+            };
+            match ClassFile::read(Buffered::new(stream)).await {
+                Ok(class) => classes.push(class),
+                Err(error) => warnings.push(Warning::new(
+                    origin.clone(),
+                    format!("failed to parse archive member `{}`: {error}", member.name),
+                )),
             }
         }
+        (classes, warnings)
     }
 
-    /// [`walk_members`](Self::walk_members) restricted to members with `wanted_extension` whose
-    /// names lower to safe relative paths (unsafe ones are diagnosed and skipped, never
-    /// partially published).
-    fn extract_members<R: JarReader>(
+    /// Parse a class file from any portable byte source, tagging a failure with the shared
+    /// diagnostic message.
+    async fn read_class<R: sio::Read>(source: R) -> Result<ClassFile, String> {
+        ClassFile::read(source)
+            .await
+            .map_err(|error| format!("failed to parse class file: {error}"))
+    }
+
+    /// Open a portable reader as a zip archive. The parsed central directory is plain data
+    /// shared behind an `Arc`, so fan-out chunks clone one directory and one reader handle and
+    /// only the reader position is per-clone state.
+    async fn open<R: JarReader>(mut reader: R) -> Result<(R, Arc<CentralDirectory>), String> {
+        let directory = CentralDirectory::parse(&mut reader)
+            .await
+            .map_err(|message| format!("failed to read archive: {message}"))?;
+        Ok((reader, Arc::new(directory)))
+    }
+
+    /// Fully materialize every regular member with `wanted_extension`, decoding fixed-size
+    /// member chunks on the fan-out. Results arrive in member order as
+    /// `(raw name, bytes or diagnostic)`; extraction targets must be whole because their cache
+    /// key derives from a digest of the complete content before a write-once publish.
+    async fn decode_matching<R: JarReader>(
+        exec: &Exec,
         reader: R,
-        jar: &CacheKey,
-        wanted_extension: &str,
-        mut accept: impl FnMut(RelativePath, &[u8]) -> Result<(), String>,
-        warnings: &mut Vec<Warning>,
-    ) {
-        Self::walk_members(
-            reader,
-            &WarningOrigin::Artifact(jar.clone()),
-            |name| Self::extension(name) == Some(wanted_extension),
-            |name, contents| {
-                let path = Self::safe_relative(name)
-                    .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))?;
-                accept(path, contents)
-            },
-            warnings,
-        );
+        wanted_extension: &'static str,
+    ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
+        let (reader, directory) = Self::open(reader).await?;
+        let chunks: Vec<_> = Self::chunk_ranges(directory.members.len())
+            .map(|members| (reader.clone(), Arc::clone(&directory), members))
+            .collect();
+        let decoded = exec
+            .fan_out(chunks, move |(reader, directory, members)| async move {
+                let mut out = Vec::new();
+                for member in &directory.members[members] {
+                    if member.is_dir || Self::extension(&member.name) != Some(wanted_extension) {
+                        continue;
+                    }
+                    let outcome = Self::read_member(reader.clone(), member).await;
+                    out.push((member.name.clone(), outcome));
+                }
+                out
+            })
+            .await;
+        Ok(decoded.into_iter().flatten().collect())
+    }
+
+    /// Read one member whole through its verifying stream (the crc32 check runs at EOF).
+    async fn read_member<R: JarReader>(
+        reader: R,
+        member: &crate::zip::MemberRecord,
+    ) -> Result<Vec<u8>, String> {
+        let mut stream = MemberStream::open(reader, member).await?;
+        let mut contents = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            match sio::Read::read(&mut stream, &mut chunk).await {
+                Ok(0) => return Ok(contents),
+                Ok(n) => contents.extend_from_slice(&chunk[..n]),
+                Err(error) => {
+                    return Err(format!(
+                        "failed to read archive member `{}`: {error}",
+                        member.name
+                    ));
+                }
+            }
+        }
     }
 
     fn member_key(

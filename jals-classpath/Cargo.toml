@@ -4,40 +4,36 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# Archive decoding is the only core operation which needs `std` (`zip`'s `Read + Seek` contract).
-# Parallel fans classpath entry and archive-member loading out over rayon threads; it stays a
-# separate layer so the wasm32 playground keeps the inline walker. Native adds the HTTP adapter;
-# project and cache access remains entirely in `jals-storage`.
+# Archive decoding is implemented in-house over the portable `jals_storage::io` byte streams
+# (`src/zip.rs`), so `archive` is fully `no_std + alloc` and wasm-safe. Native adds the async HTTP
+# adapter and the host git/path materializers; project and cache access remains entirely in
+# `jals-storage`.
 default = ["native"]
-# `jals-storage/std-io` supplies only the portable↔std reader bridges (wasm-safe) that feed
-# cache readers to `zip`; the native storage adapters stay behind `native`.
-archive = ["dep:zip", "jals-storage/std-io"]
-parallel = ["archive", "dep:rayon"]
+archive = ["dep:miniz_oxide", "dep:crc32fast"]
 native = [
   "archive",
-  "parallel",
   "dep:reqwest",
   "dep:tempfile",
-  "dep:futures",
   "jals-storage/std",
+  "jals-exec/tokio",
 ]
 
 [dependencies]
 jals-classfile.workspace = true
 jals-config.workspace = true
 jals-decompile.workspace = true
+jals-exec.workspace = true
 jals-storage.workspace = true
-zip = { workspace = true, optional = true }
-rayon = { workspace = true, optional = true }
-# Host-only blocking HTTP adapter. Kept out of the no-`native` build, which injects a `Fetcher`.
+miniz_oxide = { workspace = true, optional = true }
+crc32fast = { workspace = true, optional = true }
+# Host-only async HTTP adapter. Kept out of the no-`native` build, which injects a `Fetcher`.
 reqwest = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
-# Drives the async assembly to completion on the host thread (`assemble_blocking`).
-futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 jals-syntax.workspace = true
-futures.workspace = true
+# Fixture writer and cross-verification oracle for the in-house zip reader; never a runtime dep.
+zip.workspace = true
 tempfile = "3"
 
 [lints]

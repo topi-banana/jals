@@ -1,10 +1,11 @@
-#![cfg_attr(not(any(feature = "archive", feature = "native", test)), no_std)]
+#![cfg_attr(not(any(feature = "native", test)), no_std)]
 //! Deterministic classpath resolution over revisioned project storage.
 //!
 //! The portable API contains no host paths and no existence predicates. Project files are addressed
 //! by typed keys and read from an immutable [`jals_storage::ProjectView`]; generated, downloaded, and
 //! extracted bytes are addressed by SHA-256-backed [`jals_storage::CacheKey`] values. Archive support
-//! is feature-gated because `zip` requires `std::io`; it still operates on bytes, never paths.
+//! (`archive`) decodes jars in-house over the portable [`jals_storage::io`] byte streams, so it is
+//! `no_std + alloc` and wasm-safe; it still operates on bytes, never paths.
 
 mod io;
 mod resolve;
@@ -16,6 +17,8 @@ mod load;
 mod native;
 #[cfg(feature = "archive")]
 mod project;
+#[cfg(feature = "archive")]
+mod zip;
 
 pub use io::Fetcher;
 pub use resolve::{

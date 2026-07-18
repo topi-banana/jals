@@ -19,11 +19,14 @@
 //! lines up. Anonymous / local / synthetic / module classes are skipped.
 
 use alloc::borrow::{Cow, ToOwned};
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
+
+use jals_exec::LocalBoxFuture;
 
 use jals_classfile::{
     Attribute, ClassAccessFlags, ClassFile, ClassSignature, ConstantPool, FieldAccessFlags,
@@ -56,13 +59,16 @@ pub struct SkeletonGroup<'a> {
 }
 
 impl SkeletonGroup<'_> {
-    /// Render and publish one source artifact per top-level type.
-    pub fn synthesize<C: CacheBackend>(
+    /// Render and publish one source artifact per top-level type. Rendering is CPU-bound, so a
+    /// cooperative tick runs per class group; publishes go through the async cache seam.
+    pub async fn synthesize<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         classes: &[ClassFile],
     ) -> Skeletons {
         let mut out = Skeletons::default();
+        let mut yielder = jals_exec::Yielder::every(1);
         for group in Self::groups(classes) {
+            yielder.tick().await;
             let rel = group.rel_path();
             let Ok(path) = RelativePath::parse(&rel) else {
                 out.warnings.push(Warning::new(
@@ -71,14 +77,14 @@ impl SkeletonGroup<'_> {
                 ));
                 continue;
             };
-            let bytes = group.render().into_bytes();
+            let bytes = group.render().await.into_bytes();
             let key = DependencyResolver::cache_key(
                 CacheNamespace::Skeleton,
                 b"skeleton\0",
                 path.to_string().as_bytes(),
                 &bytes,
             );
-            match cache.publish(&key, &bytes) {
+            match cache.publish(&key, &bytes).await {
                 Ok(()) => out.sources.push(LibrarySource { path, key }),
                 Err(error) => out.warnings.push(Warning::new(
                     WarningOrigin::Skeleton,
@@ -103,7 +109,7 @@ impl SkeletonGroup<'_> {
     }
 
     /// Render this group's `.java` text: every type/member declaration, with M0 bodies.
-    fn render(&self) -> String {
+    async fn render(&self) -> String {
         let mut text = String::new();
         if !self.package.is_empty() {
             let _ = writeln!(text, "package {};\n", self.package);
@@ -113,7 +119,8 @@ impl SkeletonGroup<'_> {
             &self.members,
             core::slice::from_ref(&self.top),
             0,
-        );
+        )
+        .await;
         text
     }
 
@@ -149,36 +156,39 @@ impl SkeletonGroup<'_> {
             .collect()
     }
 
-    /// Render the type at `path` (and, recursively, every nested type one level under it) into `out`.
-    fn render_type(
-        out: &mut String,
-        group: &BTreeMap<Vec<String>, &ClassFile>,
-        path: &[String],
+    /// Render the type at `path` (and, recursively, every nested type one level under it) into
+    /// `out`. Boxed because the nested-type recursion makes the future self-referential.
+    fn render_type<'a>(
+        out: &'a mut String,
+        group: &'a BTreeMap<Vec<String>, &ClassFile>,
+        path: &'a [String],
         indent: usize,
-    ) {
-        let Some(cf) = group.get(path) else {
-            return;
-        };
-        let pad = "    ".repeat(indent);
-        let simple = path.last().map(String::as_str).unwrap_or_default();
-        let class_sig = Self::class_signature(cf);
+    ) -> LocalBoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(cf) = group.get(path) else {
+                return;
+            };
+            let pad = "    ".repeat(indent);
+            let simple = path.last().map(String::as_str).unwrap_or_default();
+            let class_sig = Self::class_signature(cf);
 
-        let _ = writeln!(
-            out,
-            "{pad}{} {{",
-            Self::type_header(cf, simple, class_sig.as_ref(), indent == 0)
-        );
-        Self::render_members(out, cf, simple, indent + 1);
+            let _ = writeln!(
+                out,
+                "{pad}{} {{",
+                Self::type_header(cf, simple, class_sig.as_ref(), indent == 0)
+            );
+            Self::render_members(out, cf, simple, indent + 1).await;
 
-        // Nested types: the group's entries whose path extends `path` by exactly one segment.
-        let child_len = path.len() + 1;
-        for child_path in group.keys() {
-            if child_path.len() == child_len && child_path.starts_with(path) {
-                out.push('\n');
-                Self::render_type(out, group, child_path, indent + 1);
+            // Nested types: the group's entries whose path extends `path` by exactly one segment.
+            let child_len = path.len() + 1;
+            for child_path in group.keys() {
+                if child_path.len() == child_len && child_path.starts_with(path) {
+                    out.push('\n');
+                    Self::render_type(out, group, child_path, indent + 1).await;
+                }
             }
-        }
-        let _ = writeln!(out, "{pad}}}");
+            let _ = writeln!(out, "{pad}}}");
+        })
     }
 
     /// The declaration header up to (not including) the opening brace: modifiers, keyword, name, type
@@ -295,7 +305,7 @@ impl SkeletonGroup<'_> {
     }
 
     /// Render a type declaration's body members: enum constants, then fields, then constructors/methods.
-    fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize) {
+    async fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize) {
         let pool = &cf.constant_pool;
         let pad = "    ".repeat(indent);
 
@@ -345,7 +355,7 @@ impl SkeletonGroup<'_> {
             if raw_name == "<clinit>" {
                 continue;
             }
-            Self::render_method(out, method, cf, &raw_name, simple, &pad);
+            Self::render_method(out, method, cf, &raw_name, simple, &pad).await;
         }
     }
 
@@ -353,7 +363,7 @@ impl SkeletonGroup<'_> {
     /// `abstract`/`native` method (which holds none), else the method's decompiled body when
     /// reconstructable ([`jals_decompile::MethodBody::decompile`]), else a safe placeholder
     /// ([`Self::safe_body`]). Recovered source parameter names are used when available.
-    fn render_method(
+    async fn render_method(
         out: &mut String,
         method: &MethodInfo,
         cf: &ClassFile,
@@ -386,7 +396,7 @@ impl SkeletonGroup<'_> {
             let ret = pieces.ret.as_deref().unwrap_or("void");
             format!("{pad}{mods}{type_params}{ret} {raw_name}({params}){throws}")
         };
-        let body = Self::method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad);
+        let body = Self::method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad).await;
         let _ = writeln!(out, "{head}{body}");
     }
 
@@ -395,7 +405,7 @@ impl SkeletonGroup<'_> {
     /// if it cannot be reconstructed, fall back to a safe placeholder — `{}` for a `void` method /
     /// constructor, `{ throw new RuntimeException(); }` for a value-returning one (valid for any return
     /// type, so the output always parses).
-    fn method_body(
+    async fn method_body(
         method: &MethodInfo,
         cf: &ClassFile,
         names: &[String],
@@ -407,7 +417,7 @@ impl SkeletonGroup<'_> {
         if flags.is_abstract() || flags.contains(MethodAccessFlags::NATIVE) {
             return ";".to_owned();
         }
-        if let Some(stmts) = MethodBody::decompile(method, cf, names) {
+        if let Some(stmts) = MethodBody::decompile(method, cf, names).await {
             return Self::render_body_block(&stmts, pad);
         }
         Self::safe_body(is_ctor, returns_value).to_owned()
@@ -681,13 +691,13 @@ mod tests {
     use super::*;
 
     fn box_class() -> ClassFile {
-        jals_classfile::ClassFile::read(
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/fixtures/Box.class"
             ))
             .as_slice(),
-        )
+        ))
         .expect("parse Box.class")
     }
 
@@ -699,7 +709,7 @@ mod tests {
         let group = &groups[0];
         // `Box` is in the default package, so it is `Box.java` at the root.
         assert_eq!(group.rel_path(), "Box.java");
-        let text = group.render();
+        let text = jals_exec::block_on_inline(group.render());
         // The generic type, its field, and its methods — each with its decompiled body (Box.class
         // carries no debug info, so parameters keep their `argN` fallback names).
         assert!(text.contains("public class Box<T> {"), "{text}");

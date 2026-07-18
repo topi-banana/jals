@@ -1096,13 +1096,14 @@ dependencies = [
 name = "jals-classpath"
 version = "0.1.0"
 dependencies = [
- "futures",
+ "crc32fast",
  "jals-classfile",
  "jals-config",
  "jals-decompile",
+ "jals-exec",
  "jals-storage",
  "jals-syntax",
- "rayon",
+ "miniz_oxide",
  "reqwest",
  "tempfile",
  "zip",
@@ -1144,6 +1145,7 @@ name = "jals-decompile"
 version = "0.1.0"
 dependencies = [
  "jals-classfile",
+ "jals-exec",
 ]
 
 [[package]]
@@ -1174,6 +1176,7 @@ version = "0.1.0"
 dependencies = [
  "expect-test",
  "jals-config",
+ "jals-exec",
  "jals-syntax",
  "proptest",
  "unicode-width",
@@ -1187,6 +1190,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "jals-classfile",
  "jals-decompile",
+ "jals-exec",
  "jals-syntax",
  "proptest",
 ]
@@ -1197,6 +1201,7 @@ version = "0.1.0"
 dependencies = [
  "expect-test",
  "jals-config",
+ "jals-exec",
  "jals-hir",
  "jals-syntax",
  "proptest",
@@ -1698,9 +1703,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",

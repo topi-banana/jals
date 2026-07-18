@@ -5,7 +5,6 @@
 use std::fs;
 use std::str::FromStr;
 
-use futures::executor::block_on;
 use jals_classpath::{
     ClasspathEntry, Fetcher, NativeProjectPlan, ProjectInputOptions, ProjectInputs, SourceFile,
 };
@@ -30,9 +29,6 @@ fn host_path_spellings_normalize_to_project_keys() {
     fs::create_dir_all(project.path().join("src")).unwrap();
     fs::create_dir_all(project.path().join("libs")).unwrap();
     fs::write(project.path().join("libs/dep.jar"), b"jar").unwrap();
-    let storage =
-        NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
-
     let manifest = manifest(
         r#"
 [build]
@@ -40,7 +36,18 @@ source-dirs = [".", "./src", "src/"]
 classpath = ["./libs/dep.jar"]
 "#,
     );
-    let plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+
+    let plan = jals_exec::tokio_rt::run(|exec| async move {
+        let storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
+        NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view())
+    })
+    .expect("test runtime bootstraps");
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     assert_eq!(
         plan.source_roots,
@@ -64,11 +71,19 @@ fn in_project_path_dependency_auto_detects_conventional_source_root() {
     .unwrap();
     // A stray file outside the conventional root must not become an analysis input.
     fs::write(project.path().join("lib/Scratch.java"), b"class Scratch {}").unwrap();
-    let storage =
-        NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
-
     let manifest = manifest("[dependencies]\nlib = { path = \"./lib\" }\n");
-    let plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+
+    let plan = jals_exec::tokio_rt::run(|exec| async move {
+        let storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
+        NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view())
+    })
+    .expect("test runtime bootstraps");
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
     assert_eq!(
         plan.plan.source_dependency_roots,
@@ -87,44 +102,65 @@ fn sibling_path_dependency_is_scanned_and_published() {
         b"package pkg; class Lib {}",
     )
     .unwrap();
-
-    let mut storage = NativeStorage::native(&project, project.join("target/jals/cache")).unwrap();
     let manifest = manifest("[dependencies]\nsibling = { path = \"../sibling\" }\n");
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
-    assert!(plan.plan.source_dependency_roots.is_empty());
-    plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile);
-    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 
-    let inputs = block_on(ProjectInputs::assemble(
-        &NoFetch,
-        &mut storage,
-        &plan.plan,
-        ProjectInputOptions::Compile,
-    ));
-    let [SourceFile::Artifact(source)] = inputs.source_dep_sources.as_slice() else {
-        panic!(
-            "expected one cache-backed path source: {:?}",
-            inputs.source_dep_sources
+    jals_exec::tokio_rt::run(|exec| async move {
+        let mut storage = NativeStorage::native(&project, project.join("target/jals/cache"), exec)
+            .await
+            .unwrap();
+        let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
+        assert!(plan.plan.source_dependency_roots.is_empty());
+        plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile)
+            .await;
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+
+        let inputs = ProjectInputs::assemble(
+            &NoFetch,
+            &mut storage,
+            &plan.plan,
+            ProjectInputOptions::Compile,
+        )
+        .await;
+        let [SourceFile::Artifact(source)] = inputs.source_dep_sources.as_slice() else {
+            panic!(
+                "expected one cache-backed path source: {:?}",
+                inputs.source_dep_sources
+            );
+        };
+        assert_eq!(source.key.namespace(), CacheNamespace::PathSource);
+        assert_eq!(source.path.to_string(), "sibling/pkg/Lib.java");
+        assert_eq!(
+            storage
+                .artifacts()
+                .lookup(&source.key)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"package pkg; class Lib {}"
         );
-    };
-    assert_eq!(source.key.namespace(), CacheNamespace::PathSource);
-    assert_eq!(source.path.to_string(), "sibling/pkg/Lib.java");
-    assert_eq!(
-        storage.artifacts().lookup(&source.key).unwrap().unwrap(),
-        b"package pkg; class Lib {}"
-    );
+    })
+    .expect("test runtime bootstraps");
 }
 
 #[test]
 fn missing_path_dependency_is_a_warning_not_a_panic() {
     let project = tempfile::tempdir().unwrap();
-    let mut storage =
-        NativeStorage::native(project.path(), project.path().join("target/jals/cache")).unwrap();
     let manifest = manifest("[dependencies]\ngone = { path = \"../does-not-exist\" }\n");
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
-    plan.materialize_path_sources(project.path(), &mut storage, ProjectInputOptions::Compile);
-    assert_eq!(plan.warnings.len(), 1);
-    assert!(plan.plan.source_dependency_artifacts.is_empty());
+    jals_exec::tokio_rt::run(|exec| async move {
+        let mut storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
+        let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        plan.materialize_path_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+            .await;
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(plan.plan.source_dependency_artifacts.is_empty());
+    })
+    .expect("test runtime bootstraps");
 }
 
 #[test]
@@ -143,12 +179,18 @@ cur = { path = "../sibling", dir = "./src" }
 trailing = { path = "../sibling", dir = "src/" }
 "#,
     );
-    let mut storage = NativeStorage::native(&project, project.join("target/jals/cache")).unwrap();
-    let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
-    plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile);
+    jals_exec::tokio_rt::run(|exec| async move {
+        let mut storage = NativeStorage::native(&project, project.join("target/jals/cache"), exec)
+            .await
+            .unwrap();
+        let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
+        plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile)
+            .await;
 
-    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
-    assert_eq!(plan.plan.source_dependency_artifacts.len(), 3);
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert_eq!(plan.plan.source_dependency_artifacts.len(), 3);
+    })
+    .expect("test runtime bootstraps");
 }
 
 #[test]
@@ -179,14 +221,20 @@ source-dirs = ["../sibling-source", "{absolute_source}"]
 classpath = ["../sibling-classes", "{absolute_class}"]
 "#
     ));
-    let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
-    let mut storage = NativeStorage::for_project_scoped(&project, scopes).unwrap();
-    let (inputs, source_roots) = NativeProjectPlan::assemble_blocking(
-        &manifest,
-        &project,
-        &mut storage,
-        ProjectInputOptions::Editor,
-    );
+    let (inputs, source_roots) = jals_exec::tokio_rt::run(|exec| async move {
+        let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+        let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+            .await
+            .unwrap();
+        NativeProjectPlan::assemble_native(
+            &manifest,
+            &project,
+            &mut storage,
+            ProjectInputOptions::Editor,
+        )
+        .await
+    })
+    .expect("test runtime bootstraps");
 
     assert!(source_roots.is_empty());
     assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
