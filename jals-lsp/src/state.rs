@@ -1,5 +1,6 @@
 //! In-memory server state: open documents, the per-project workspace adapter, and memoized
-//! config discovery.
+//! config discovery. All of it is `!Send` and owned exclusively by the actor
+//! ([`Actor`](crate::actor)).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ use async_lsp::lsp_types::{
 };
 use jals_config::FeatureSet;
 use jals_editor::{Editor, ProjectLayout, Utf16Position};
+use jals_exec::Exec;
+use jals_exec::tokio_rt::on_blocking_pool;
 use jals_hir::ProjectIndex;
 use jals_storage::{
     DirKey, FileKey, NativeCache, NativeScope, NativeSource, NativeStorage, RelativePath,
@@ -21,8 +24,8 @@ use crate::host::LspHost;
 /// client's version.
 ///
 /// The content lives in a [`jals_editor::Document`], whose fields are behind `Arc` so a snapshot
-/// can be cheaply cloned out of the store and moved into an async request handler — and shared
-/// with the owning workspace's overlay without reparsing.
+/// can be cheaply cloned out of the store — and shared with the owning workspace's overlay
+/// without reparsing.
 #[derive(Clone)]
 pub(crate) struct Document {
     pub(crate) content: jals_editor::Document,
@@ -30,9 +33,10 @@ pub(crate) struct Document {
 }
 
 impl Document {
-    fn new(text: String, version: i32) -> Self {
+    /// Parse `text` into the shared per-file caches. Async because parsing yields cooperatively.
+    async fn new(text: String, version: i32) -> Self {
         Self {
-            content: jals_editor::Document::new(text),
+            content: jals_editor::Document::new(text).await,
             version,
         }
     }
@@ -47,8 +51,8 @@ pub(crate) struct DocumentStore {
 }
 
 impl DocumentStore {
-    pub(crate) fn upsert(&mut self, uri: Url, text: String, version: i32) {
-        self.docs.insert(uri, Document::new(text, version));
+    pub(crate) async fn upsert(&mut self, uri: Url, text: String, version: i32) {
+        self.docs.insert(uri, Document::new(text, version).await);
     }
 
     /// Apply `didChange` content changes to the document at `uri`, recording `version`.
@@ -56,7 +60,7 @@ impl DocumentStore {
     /// A change for a document that is not open is ignored (client protocol error;
     /// splicing into a nonexistent base would fabricate text). The version is recorded
     /// even when `changes` is empty.
-    pub(crate) fn apply_changes(
+    pub(crate) async fn apply_changes(
         &mut self,
         uri: &Url,
         changes: &[TextDocumentContentChangeEvent],
@@ -69,15 +73,18 @@ impl DocumentStore {
             doc.version = version;
             return;
         }
-        *doc = Document::new(
-            Self::apply_content_changes(&doc.content.text, changes),
-            version,
-        );
+        let text = Self::apply_content_changes(&doc.content.text, changes);
+        *doc = Document::new(text, version).await;
     }
 
     /// Snapshot the document for `uri` (cheap `Arc` clones), if open.
     pub(crate) fn get(&self, uri: &Url) -> Option<Document> {
         self.docs.get(uri).cloned()
+    }
+
+    /// Every open document's URI, in no particular order.
+    pub(crate) fn uris(&self) -> impl Iterator<Item = &Url> {
+        self.docs.keys()
     }
 
     pub(crate) fn remove(&mut self, uri: &Url) {
@@ -125,8 +132,8 @@ impl DocumentStore {
 /// through the [`Editor`] facade with the [`LspHost`] rendering) plus the URI ↔ virtual-path
 /// mapping that is the LSP's only remaining responsibility.
 ///
-/// The server holds one of these per project a client has a file open in (see
-/// [`ServerState`](crate::server)), discovered lazily by walking up from each opened file — so it
+/// The actor holds one of these per project a client has a file open in (see
+/// [`Actor`](crate::actor)), discovered lazily by walking up from each opened file — so it
 /// only ever indexes the source roots of a real manifest, never a whole git checkout.
 pub(crate) struct ProjectWorkspace {
     /// The `jals.toml` directory this workspace was discovered from; identifies the workspace so
@@ -140,21 +147,23 @@ impl ProjectWorkspace {
     /// Load a project workspace off the host filesystem: walk `source_roots` for `.java`, fold
     /// the already-parsed classpath `.class` files into the index, register the library /
     /// source-dependency `.java`, and resolve `feature_set` into every lint run — all inside
-    /// [`jals_editor::Workspace`]. The caller (the server) resolves the manifest and performs the
+    /// [`jals_editor::Workspace`]. The caller (the actor) resolves the manifest and performs the
     /// dependency I/O; this keeps only the `PathBuf` → virtual-path lowering.
-    pub(crate) fn load(
+    pub(crate) async fn load(
         project_root: PathBuf,
         source_roots: &[PathBuf],
         classfiles: &[jals_classfile::ClassFile],
         library_sources: &[PathBuf],
         source_dep_sources: &[PathBuf],
         feature_set: FeatureSet,
+        exec: Exec,
     ) -> Self {
         let scopes = source_roots.iter().filter_map(|path| {
             RelativePath::from_host_path(&project_root, path)
                 .map(|relative| NativeScope::extension(relative, "java"))
         });
-        let storage = NativeStorage::for_project_scoped(&project_root, scopes)
+        let storage = NativeStorage::for_project_scoped(&project_root, scopes, exec)
+            .await
             .expect("a discovered project root must be readable");
         let source_roots = source_roots
             .iter()
@@ -178,12 +187,13 @@ impl ProjectWorkspace {
             BTreeMap::new(),
             feature_set,
         )
+        .await
     }
 
     /// A workspace over `root` alone — its own lone source root; no classpath, libraries, or
     /// features. The fallback when a manifest is missing, unparsable, or its inputs fail to
     /// assemble.
-    pub(crate) fn bare(root: &Path) -> Self {
+    pub(crate) async fn bare(root: &Path, exec: Exec) -> Self {
         let root = root.to_path_buf();
         Self::load(
             root.clone(),
@@ -192,7 +202,9 @@ impl ProjectWorkspace {
             &[],
             &[],
             FeatureSet::default(),
+            exec,
         )
+        .await
     }
 
     /// Construct from an already-open aggregate after dependency assembly. The same storage owns
@@ -200,7 +212,7 @@ impl ProjectWorkspace {
     /// maps mounted `.jals/…` navigation sources to the real files materialized out of the
     /// artifact cache, so their locations are rendered as openable `file://` URLs.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn load_storage(
+    pub(crate) async fn load_storage(
         project_root: PathBuf,
         storage: NativeStorage,
         source_roots: Vec<DirKey>,
@@ -212,7 +224,7 @@ impl ProjectWorkspace {
     ) -> Self {
         let spec = ProjectLayout {
             source_roots,
-            classpath: ProjectIndex::lower_classpath(classfiles),
+            classpath: ProjectIndex::lower_classpath(classfiles).await,
             library_sources,
             source_dep_sources,
             feature_set,
@@ -220,7 +232,7 @@ impl ProjectWorkspace {
         let host = LspHost::for_root(project_root.clone()).with_materialized(materialized);
         Self {
             project_root,
-            editor: Editor::load(storage, spec, host),
+            editor: Editor::load(storage, spec, host).await,
         }
     }
 
@@ -241,7 +253,7 @@ impl ProjectWorkspace {
     }
 
     /// The virtual path of `uri` when it addresses an *indexed* file of this workspace, so a
-    /// query wrapper can answer `None` (and the server fall back) for anything else.
+    /// query wrapper can answer `None` (and the actor fall back) for anything else.
     fn indexed_path(&self, uri: &Url) -> Option<FileKey> {
         let path = self.key(uri)?;
         self.editor.workspace().file_id(&path)?;
@@ -253,8 +265,8 @@ impl ProjectWorkspace {
         &self.project_root
     }
 
-    pub(crate) fn refresh(&mut self) {
-        let _ = self.editor.workspace_mut().refresh();
+    pub(crate) async fn refresh(&mut self) {
+        let _ = self.editor.workspace_mut().refresh().await;
     }
 
     /// Whether `uri` belongs to this workspace: a file already indexed, or a path under one of
@@ -267,59 +279,77 @@ impl ProjectWorkspace {
     /// Reflect an open document into the index: replace the cached copy of `uri` with the
     /// editor's current text (or add it, if `uri` is a project file created after the initial
     /// load), then rebuild the index. Returns whether `uri` belongs to this workspace.
-    pub(crate) fn set_overlay(&mut self, uri: &Url, doc: &Document) -> bool {
-        self.key(uri).is_some_and(|path| {
-            self.editor
-                .workspace_mut()
-                .set_overlay(&path, &doc.content)
-                .unwrap_or(false)
-        })
+    pub(crate) async fn set_overlay(&mut self, uri: &Url, doc: &Document) -> bool {
+        let Some(path) = self.key(uri) else {
+            return false;
+        };
+        self.editor
+            .workspace_mut()
+            .set_overlay(&path, &doc.content)
+            .await
+            .unwrap_or(false)
     }
 
     /// Go-to-definition for the cursor at `position` in `uri`. `None` if `uri` is not in the
     /// workspace or nothing resolves.
-    pub(crate) fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
-        self.editor.definition(&self.key(uri)?, &position)
+    pub(crate) async fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
+        self.editor.definition(&self.key(uri)?, &position).await
     }
 
     /// The hover for the cursor at `position` in `uri`. `None` if `uri` is not in the workspace
     /// or the expression has no inferred type.
-    pub(crate) fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
-        self.editor.hover(&self.key(uri)?, &position)
+    pub(crate) async fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
+        self.editor.hover(&self.key(uri)?, &position).await
     }
 
     /// The signature help for the call at `position` in `uri`, with cross-file type resolution.
     /// `None` if `uri` is not in the workspace or the cursor is in no resolvable call.
-    pub(crate) fn signature_help(&self, uri: &Url, position: Position) -> Option<SignatureHelp> {
-        self.editor.signature_help(&self.key(uri)?, &position)
+    pub(crate) async fn signature_help(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<SignatureHelp> {
+        self.editor.signature_help(&self.key(uri)?, &position).await
     }
 
     /// Completions for the cursor at `position` in `uri`, resolved against the project. `None` if
-    /// `uri` is not in the workspace (the server then falls back to the one-file project).
-    pub(crate) fn completions(&self, uri: &Url, position: Position) -> Option<Vec<CompletionItem>> {
-        Some(self.editor.completions(&self.indexed_path(uri)?, &position))
+    /// `uri` is not in the workspace (the actor then falls back to the one-file project).
+    pub(crate) async fn completions(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Vec<CompletionItem>> {
+        Some(
+            self.editor
+                .completions(&self.indexed_path(uri)?, &position)
+                .await,
+        )
     }
 
     /// Occurrence highlights for the cursor at `position` in `uri`, resolved against the project
     /// so a cross-file type name highlights precisely. `None` if `uri` is not in the workspace.
-    pub(crate) fn document_highlight(
+    pub(crate) async fn document_highlight(
         &self,
         uri: &Url,
         position: Position,
     ) -> Option<Vec<DocumentHighlight>> {
-        Some(self.editor.highlights(&self.indexed_path(uri)?, &position))
+        Some(
+            self.editor
+                .highlights(&self.indexed_path(uri)?, &position)
+                .await,
+        )
     }
 
     /// Semantic tokens for `uri`, resolved against the project so a cross-file type name is
     /// classified by its declared kind. `None` if `uri` is not in the workspace.
-    pub(crate) fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
-        self.editor.semantic_tokens(&self.key(uri)?)
+    pub(crate) async fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
+        self.editor.semantic_tokens(&self.key(uri)?).await
     }
 
     /// Find-references for the cursor at `position` in `uri` — project-wide for a project type,
     /// within the file for a file-local binding. `None` if `uri` is not in the workspace; an
     /// empty vector if the cursor is on no resolvable symbol.
-    pub(crate) fn references(
+    pub(crate) async fn references(
         &self,
         uri: &Url,
         position: Position,
@@ -327,40 +357,48 @@ impl ProjectWorkspace {
     ) -> Option<Vec<Location>> {
         Some(
             self.editor
-                .references(&self.indexed_path(uri)?, &position, include_declaration),
+                .references(&self.indexed_path(uri)?, &position, include_declaration)
+                .await,
         )
     }
 
     /// prepareRename for the cursor at `position` in `uri`: the range of the identifier under the
     /// cursor when it names a renamable symbol, else `None` (an external name, a keyword/literal,
     /// or a withheld member).
-    pub(crate) fn prepare_rename(&self, uri: &Url, position: Position) -> Option<Range> {
-        self.editor.prepare_rename(&self.key(uri)?, &position)
+    pub(crate) async fn prepare_rename(&self, uri: &Url, position: Position) -> Option<Range> {
+        self.editor.prepare_rename(&self.key(uri)?, &position).await
     }
 
     /// Rename the symbol under `position` in `uri` to `new_name`: a [`WorkspaceEdit`] rewriting
     /// every occurrence. `None` if `uri` is not in the workspace, the cursor is on no renamable
     /// symbol, or there is nothing to change. The caller validates `new_name` is a legal
     /// identifier.
-    pub(crate) fn rename(
+    pub(crate) async fn rename(
         &self,
         uri: &Url,
         position: Position,
         new_name: &str,
     ) -> Option<WorkspaceEdit> {
-        let targets = self.editor.rename_targets(&self.key(uri)?, &position)?;
+        let targets = self
+            .editor
+            .rename_targets(&self.key(uri)?, &position)
+            .await?;
         LspHost::workspace_edit(targets, new_name)
     }
 
     /// The canonical diagnostics of `uri` under `config`, with the project index and the
     /// project's resolved feature set folded in. `None` if `uri` is not an indexed file of this
-    /// workspace (the server then falls back to the one-file project).
-    pub(crate) fn diagnostics(
+    /// workspace (the actor then falls back to the one-file project).
+    pub(crate) async fn diagnostics(
         &self,
         uri: &Url,
         config: &jals_config::lint::Config,
     ) -> Option<Vec<Diagnostic>> {
-        Some(self.editor.diagnostics(&self.indexed_path(uri)?, config))
+        Some(
+            self.editor
+                .diagnostics(&self.indexed_path(uri)?, config)
+                .await,
+        )
     }
 }
 
@@ -372,7 +410,9 @@ impl ProjectWorkspace {
 /// This adapter owns the LSP-side policy — URI → path mapping and the "never fail a request
 /// over a config" fallback to `C::default()` (non-file URIs such as `untitled:`, non-UTF-8
 /// paths, read/parse errors). The parse and error shape live in `jals-config`
-/// ([`from_text`](jals_config::DiscoverableConfig::from_text)), shared with the CLI.
+/// ([`from_text`](jals_config::DiscoverableConfig::from_text)), shared with the CLI. The
+/// filesystem probes and the read are blocking syscalls, so they run through
+/// [`on_blocking_pool`], keeping the actor free to serve other commands.
 #[derive(Default)]
 pub(crate) struct UriConfigs<C> {
     configs: HashMap<PathBuf, C>,
@@ -380,30 +420,37 @@ pub(crate) struct UriConfigs<C> {
 
 impl<C: jals_config::DiscoverableConfig + Clone + Default> UriConfigs<C> {
     /// Discover the config for a document URI.
-    pub(crate) fn for_uri(&mut self, uri: &Url) -> C {
+    pub(crate) async fn for_uri(&mut self, uri: &Url) -> C {
         let Ok(path) = uri.to_file_path() else {
             return C::default();
         };
-        let Some(start) = path.parent() else {
+        let Some(start) = path.parent().map(Path::to_path_buf) else {
             return C::default();
         };
-        let Some(root) = start
-            .ancestors()
-            .find(|dir| dir.join(C::FILE_NAME).is_file())
+        // The ancestor walk probes the host filesystem (`is_file` per directory).
+        let file_name = C::FILE_NAME;
+        let Some(root) = on_blocking_pool(move || {
+            start
+                .ancestors()
+                .find(|dir| dir.join(file_name).is_file())
+                .map(Path::to_path_buf)
+        })
+        .await
         else {
             return C::default();
         };
-        if let Some(config) = self.configs.get(root) {
+        if let Some(config) = self.configs.get(&root) {
             return config.clone();
         }
-        let Ok(text) = std::fs::read_to_string(root.join(C::FILE_NAME)) else {
+        let config_path = root.join(file_name);
+        let Ok(text) = on_blocking_pool(move || std::fs::read_to_string(config_path)).await else {
             return C::default();
         };
         let config = FileKey::parse(C::FILE_NAME)
             .ok()
             .and_then(|key| C::from_text(&key, &text).ok())
             .unwrap_or_default();
-        self.configs.insert(root.to_path_buf(), config.clone());
+        self.configs.insert(root, config.clone());
         config
     }
 
@@ -427,6 +474,7 @@ mod tests {
 
     use async_lsp::lsp_types::NumberOrString;
     use jals_config::fmt::Config;
+    use jals_exec::block_on_inline;
 
     use super::*;
 
@@ -537,66 +585,80 @@ mod tests {
 
     #[test]
     fn store_apply_changes_updates_text_version_and_index() {
-        let mut store = DocumentStore::default();
-        let uri = Url::parse("file:///a/B.java").unwrap();
-        store.upsert(uri.clone(), "ab\ncd".into(), 1);
-        store.apply_changes(&uri, &[ranged((1, 0), (1, 2), "XYZ")], 2);
-        let doc = store.get(&uri).unwrap();
-        assert_eq!(&*doc.content.text, "ab\nXYZ");
-        assert_eq!(doc.version, 2);
-        // A stale index (built from "ab\ncd") would clamp this to 5.
-        let end = doc.content.line_index.offset(
-            &doc.content.text,
-            Utf16Position {
-                line: 1,
-                character: 3,
-            },
-        );
-        assert_eq!(end, 6);
+        block_on_inline(async {
+            let mut store = DocumentStore::default();
+            let uri = Url::parse("file:///a/B.java").unwrap();
+            store.upsert(uri.clone(), "ab\ncd".into(), 1).await;
+            store
+                .apply_changes(&uri, &[ranged((1, 0), (1, 2), "XYZ")], 2)
+                .await;
+            let doc = store.get(&uri).unwrap();
+            assert_eq!(&*doc.content.text, "ab\nXYZ");
+            assert_eq!(doc.version, 2);
+            // A stale index (built from "ab\ncd") would clamp this to 5.
+            let end = doc.content.line_index.offset(
+                &doc.content.text,
+                Utf16Position {
+                    line: 1,
+                    character: 3,
+                },
+            );
+            assert_eq!(end, 6);
+        });
     }
 
     #[test]
     fn store_apply_changes_ignores_unopened_document() {
-        let mut store = DocumentStore::default();
-        let uri = Url::parse("file:///a/B.java").unwrap();
-        store.apply_changes(&uri, &[ranged((0, 0), (0, 0), "x")], 1);
-        assert!(store.get(&uri).is_none());
+        block_on_inline(async {
+            let mut store = DocumentStore::default();
+            let uri = Url::parse("file:///a/B.java").unwrap();
+            store
+                .apply_changes(&uri, &[ranged((0, 0), (0, 0), "x")], 1)
+                .await;
+            assert!(store.get(&uri).is_none());
+        });
     }
 
     #[test]
     fn store_apply_changes_empty_batch_bumps_version_only() {
-        let mut store = DocumentStore::default();
-        let uri = Url::parse("file:///a/B.java").unwrap();
-        store.upsert(uri.clone(), "abc".into(), 1);
-        let before = store.get(&uri).unwrap();
-        store.apply_changes(&uri, &[], 2);
-        let after = store.get(&uri).unwrap();
-        assert_eq!(&*after.content.text, "abc");
-        assert_eq!(after.version, 2);
-        // The text and line index are untouched, not rebuilt.
-        assert!(Arc::ptr_eq(
-            &before.content.line_index,
-            &after.content.line_index
-        ));
+        block_on_inline(async {
+            let mut store = DocumentStore::default();
+            let uri = Url::parse("file:///a/B.java").unwrap();
+            store.upsert(uri.clone(), "abc".into(), 1).await;
+            let before = store.get(&uri).unwrap();
+            store.apply_changes(&uri, &[], 2).await;
+            let after = store.get(&uri).unwrap();
+            assert_eq!(&*after.content.text, "abc");
+            assert_eq!(after.version, 2);
+            // The text and line index are untouched, not rebuilt.
+            assert!(Arc::ptr_eq(
+                &before.content.line_index,
+                &after.content.line_index
+            ));
+        });
     }
 
     #[test]
     fn store_upsert_get_remove() {
-        let mut store = DocumentStore::default();
-        let uri = Url::parse("file:///a/B.java").unwrap();
-        store.upsert(uri.clone(), "class B {}".into(), 1);
-        let doc = store.get(&uri).unwrap();
-        assert_eq!(&*doc.content.text, "class B {}");
-        assert_eq!(doc.version, 1);
-        store.remove(&uri);
-        assert!(store.get(&uri).is_none());
+        block_on_inline(async {
+            let mut store = DocumentStore::default();
+            let uri = Url::parse("file:///a/B.java").unwrap();
+            store.upsert(uri.clone(), "class B {}".into(), 1).await;
+            let doc = store.get(&uri).unwrap();
+            assert_eq!(&*doc.content.text, "class B {}");
+            assert_eq!(doc.version, 1);
+            store.remove(&uri);
+            assert!(store.get(&uri).is_none());
+        });
     }
 
     #[test]
     fn uri_configs_non_file_uri_uses_default() {
-        let mut configs = UriConfigs::<Config>::default();
-        let uri = Url::parse("untitled:Untitled-1").unwrap();
-        assert_eq!(configs.for_uri(&uri), Config::default());
+        block_on_inline(async {
+            let mut configs = UriConfigs::<Config>::default();
+            let uri = Url::parse("untitled:Untitled-1").unwrap();
+            assert_eq!(configs.for_uri(&uri).await, Config::default());
+        });
     }
 
     #[test]
@@ -604,20 +666,22 @@ mod tests {
         // End-to-end over the real filesystem: the URI → directory mapping finds the config root,
         // its file is parsed through the shared `DiscoverableConfig::from_text`, and `clear` is
         // the LSP's watched-file invalidation hook.
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("jalsfmt.toml");
-        let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("jalsfmt.toml");
+            let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
 
-        let mut configs = UriConfigs::<Config>::default();
-        std::fs::write(&config_path, "indent-width = 7\n").unwrap();
-        assert_eq!(configs.for_uri(&uri).indent_width, 7);
+            let mut configs = UriConfigs::<Config>::default();
+            std::fs::write(&config_path, "indent-width = 7\n").unwrap();
+            assert_eq!(configs.for_uri(&uri).await.indent_width, 7);
 
-        // The cached config survives an edit on disk until the cache is cleared.
-        std::fs::write(&config_path, "indent-width = 3\n").unwrap();
-        assert_eq!(configs.for_uri(&uri).indent_width, 7);
+            // The cached config survives an edit on disk until the cache is cleared.
+            std::fs::write(&config_path, "indent-width = 3\n").unwrap();
+            assert_eq!(configs.for_uri(&uri).await.indent_width, 7);
 
-        configs.clear();
-        assert_eq!(configs.for_uri(&uri).indent_width, 3);
+            configs.clear();
+            assert_eq!(configs.for_uri(&uri).await.indent_width, 3);
+        });
     }
 
     #[test]
@@ -645,7 +709,7 @@ mod tests {
     // payloads with the right `file://` URLs out — end to end over a real tempdir.
 
     /// A workspace over `dir` alone (its own source root; no classpath, libraries, or features).
-    fn load_bare(dir: &Path) -> ProjectWorkspace {
+    async fn load_bare(dir: &Path) -> ProjectWorkspace {
         ProjectWorkspace::load(
             dir.to_path_buf(),
             &[dir.to_path_buf()],
@@ -653,136 +717,161 @@ mod tests {
             &[],
             &[],
             FeatureSet::default(),
+            Exec::inline(),
         )
+        .await
     }
 
     #[test]
     fn workspace_resolves_definition_across_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
-        std::fs::write(
-            dir.path().join("Bar.java"),
-            "package a; class Bar { Foo f; }",
-        )
-        .unwrap();
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+            std::fs::write(
+                dir.path().join("Bar.java"),
+                "package a; class Bar { Foo f; }",
+            )
+            .unwrap();
 
-        let ws = load_bare(dir.path());
-        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
-        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
-        assert!(ws.owns_uri(&bar_uri));
-        assert_eq!(ws.project_root(), dir.path());
+            let ws = load_bare(dir.path()).await;
+            let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+            let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+            assert!(ws.owns_uri(&bar_uri));
+            assert_eq!(ws.project_root(), dir.path());
 
-        // The `Foo` reference in Bar.java jumps to the class declaration in Foo.java.
-        let bar = "package a; class Bar { Foo f; }";
-        let use_col = bar.find("Foo").unwrap() as u32;
-        let loc = ws
-            .goto_definition(&bar_uri, Position::new(0, use_col))
-            .expect("Foo resolves cross-file");
-        assert_eq!(loc.uri, foo_uri);
+            // The `Foo` reference in Bar.java jumps to the class declaration in Foo.java.
+            let bar = "package a; class Bar { Foo f; }";
+            let use_col = bar.find("Foo").unwrap() as u32;
+            let loc = ws
+                .goto_definition(&bar_uri, Position::new(0, use_col))
+                .await
+                .expect("Foo resolves cross-file");
+            assert_eq!(loc.uri, foo_uri);
 
-        let foo = "package a; class Foo { }";
-        let decl_col = foo.find("Foo").unwrap() as u32;
-        assert_eq!(loc.range.start, Position::new(0, decl_col));
-        assert_eq!(loc.range.end, Position::new(0, decl_col + 3));
+            let foo = "package a; class Foo { }";
+            let decl_col = foo.find("Foo").unwrap() as u32;
+            assert_eq!(loc.range.start, Position::new(0, decl_col));
+            assert_eq!(loc.range.end, Position::new(0, decl_col + 3));
+        });
     }
 
     #[test]
     fn workspace_overlay_picks_up_a_new_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("Bar.java"),
-            "package a; class Bar { Foo f; }",
-        )
-        .unwrap();
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("Bar.java"),
+                "package a; class Bar { Foo f; }",
+            )
+            .unwrap();
 
-        let mut ws = load_bare(dir.path());
-        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
-        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
-        let bar = "package a; class Bar { Foo f; }";
-        let use_col = bar.find("Foo").unwrap() as u32;
+            let mut ws = load_bare(dir.path()).await;
+            let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+            let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+            let bar = "package a; class Bar { Foo f; }";
+            let use_col = bar.find("Foo").unwrap() as u32;
 
-        // `Foo` is unresolved before any file declares it.
-        assert!(
-            ws.goto_definition(&bar_uri, Position::new(0, use_col))
-                .is_none()
-        );
+            // `Foo` is unresolved before any file declares it.
+            assert!(
+                ws.goto_definition(&bar_uri, Position::new(0, use_col))
+                    .await
+                    .is_none()
+            );
 
-        // The editor opens a new Foo.java under the source root; the overlay adds it to the index.
-        let doc = Document::new("package a; class Foo { }".to_owned(), 1);
-        assert!(ws.set_overlay(&foo_uri, &doc));
-        let loc = ws
-            .goto_definition(&bar_uri, Position::new(0, use_col))
-            .expect("Foo resolves after the overlay");
-        assert_eq!(loc.uri, foo_uri);
+            // The editor opens a new Foo.java under the source root; the overlay adds it to the
+            // index.
+            let doc = Document::new("package a; class Foo { }".to_owned(), 1).await;
+            assert!(ws.set_overlay(&foo_uri, &doc).await);
+            let loc = ws
+                .goto_definition(&bar_uri, Position::new(0, use_col))
+                .await
+                .expect("Foo resolves after the overlay");
+            assert_eq!(loc.uri, foo_uri);
 
-        // A file outside every source root is rejected.
-        let outside = Url::parse("file:///elsewhere/X.java").unwrap();
-        assert!(!ws.set_overlay(&outside, &doc));
+            // A file outside every source root is rejected.
+            let outside = Url::parse("file:///elsewhere/X.java").unwrap();
+            assert!(!ws.set_overlay(&outside, &doc).await);
+        });
     }
 
     #[test]
     fn workspace_rename_rewrites_a_project_type_across_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
-        std::fs::write(
-            dir.path().join("Bar.java"),
-            "package a; class Bar { Foo f; }",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("Baz.java"),
-            "package a; class Baz { Foo g; Foo h; }",
-        )
-        .unwrap();
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("Foo.java"), "package a; class Foo { }").unwrap();
+            std::fs::write(
+                dir.path().join("Bar.java"),
+                "package a; class Bar { Foo f; }",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.path().join("Baz.java"),
+                "package a; class Baz { Foo g; Foo h; }",
+            )
+            .unwrap();
 
-        let ws = load_bare(dir.path());
-        let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
-        let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
-        let baz_uri = Url::from_file_path(dir.path().join("Baz.java")).unwrap();
+            let ws = load_bare(dir.path()).await;
+            let foo_uri = Url::from_file_path(dir.path().join("Foo.java")).unwrap();
+            let bar_uri = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+            let baz_uri = Url::from_file_path(dir.path().join("Baz.java")).unwrap();
 
-        // Rename `Foo` from its declaration: the edit rewrites the declaration plus every use in
-        // every file, each to the new name.
-        let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
-        let edit = ws
-            .rename(&foo_uri, Position::new(0, decl_col), "Renamed")
-            .expect("Foo is a renamable project type");
-        let changes = edit.changes.expect("a plain-edit workspace edit");
-        assert_eq!(changes[&foo_uri].len(), 1); // the declaration
-        assert_eq!(changes[&bar_uri].len(), 1);
-        assert_eq!(changes[&baz_uri].len(), 2);
-        assert!(changes.values().flatten().all(|e| e.new_text == "Renamed"));
+            // Rename `Foo` from its declaration: the edit rewrites the declaration plus every use
+            // in every file, each to the new name.
+            let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
+            let edit = ws
+                .rename(&foo_uri, Position::new(0, decl_col), "Renamed")
+                .await
+                .expect("Foo is a renamable project type");
+            let changes = edit.changes.expect("a plain-edit workspace edit");
+            assert_eq!(changes[&foo_uri].len(), 1); // the declaration
+            assert_eq!(changes[&bar_uri].len(), 1);
+            assert_eq!(changes[&baz_uri].len(), 2);
+            assert!(changes.values().flatten().all(|e| e.new_text == "Renamed"));
 
-        // prepareRename on the same position reports the identifier's range.
-        let range = ws
-            .prepare_rename(&foo_uri, Position::new(0, decl_col))
-            .expect("Foo is renamable");
-        assert_eq!(range.start, Position::new(0, decl_col));
-        assert_eq!(range.end, Position::new(0, decl_col + 3));
+            // prepareRename on the same position reports the identifier's range.
+            let range = ws
+                .prepare_rename(&foo_uri, Position::new(0, decl_col))
+                .await
+                .expect("Foo is renamable");
+            assert_eq!(range.start, Position::new(0, decl_col));
+            assert_eq!(range.end, Position::new(0, decl_col + 3));
+        });
     }
 
     #[test]
     fn workspace_queries_answer_none_outside_the_workspace() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Bar.java"), "class Bar { }").unwrap();
-        let ws = load_bare(dir.path());
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("Bar.java"), "class Bar { }").unwrap();
+            let ws = load_bare(dir.path()).await;
 
-        // A file elsewhere on disk, and a non-`file://` URI (no virtual path at all): every
-        // wrapper answers `None`, so the server falls back to the one-file project.
-        for uri in [
-            Url::parse("file:///elsewhere/Other.java").unwrap(),
-            Url::parse("untitled:Untitled-1").unwrap(),
-        ] {
-            assert!(!ws.owns_uri(&uri));
-            assert!(ws.goto_definition(&uri, Position::new(0, 0)).is_none());
-            assert!(ws.hover(&uri, Position::new(0, 0)).is_none());
-            assert!(ws.completions(&uri, Position::new(0, 0)).is_none());
-            assert!(ws.references(&uri, Position::new(0, 0), true).is_none());
-            assert!(ws.semantic_tokens(&uri).is_none());
-            assert!(
-                ws.diagnostics(&uri, &jals_config::lint::Config::default())
-                    .is_none()
-            );
-        }
+            // A file elsewhere on disk, and a non-`file://` URI (no virtual path at all): every
+            // wrapper answers `None`, so the actor falls back to the one-file project.
+            for uri in [
+                Url::parse("file:///elsewhere/Other.java").unwrap(),
+                Url::parse("untitled:Untitled-1").unwrap(),
+            ] {
+                assert!(!ws.owns_uri(&uri));
+                assert!(
+                    ws.goto_definition(&uri, Position::new(0, 0))
+                        .await
+                        .is_none()
+                );
+                assert!(ws.hover(&uri, Position::new(0, 0)).await.is_none());
+                assert!(ws.completions(&uri, Position::new(0, 0)).await.is_none());
+                assert!(
+                    ws.references(&uri, Position::new(0, 0), true)
+                        .await
+                        .is_none()
+                );
+                assert!(ws.semantic_tokens(&uri).await.is_none());
+                assert!(
+                    ws.diagnostics(&uri, &jals_config::lint::Config::default())
+                        .await
+                        .is_none()
+                );
+            }
+        });
     }
 
     #[test]
@@ -791,50 +880,57 @@ mod tests {
         // a compiled `Box.class` on the classpath resolves, so the project file referencing it
         // has no `cannot-resolve` diagnostic. The full classpath behavior (member resolution,
         // skeleton navigation) is covered in `jals-editor` / `jals-classpath`.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("Main.java"),
-            "class Main { void run() { Box b = new Box(); use(b); } }",
-        )
-        .unwrap();
-        let box_class = jals_classfile::ClassFile::read(
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/Box.class"
-            ))
-            .as_slice(),
-        )
-        .expect("parse Box.class");
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("Main.java"),
+                "class Main { void run() { Box b = new Box(); use(b); } }",
+            )
+            .unwrap();
+            let box_class = jals_classfile::ClassFile::read(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/Box.class"
+                ))
+                .as_slice(),
+            )
+            .await
+            .expect("parse Box.class");
 
-        let ws = ProjectWorkspace::load(
-            dir.path().to_path_buf(),
-            &[dir.path().to_path_buf()],
-            std::slice::from_ref(&box_class),
-            &[],
-            &[],
-            FeatureSet::default(),
-        );
-        let main_uri = Url::from_file_path(dir.path().join("Main.java")).unwrap();
-        let diags = ws
-            .diagnostics(&main_uri, &jals_config::lint::Config::default())
-            .expect("Main.java is indexed");
-        assert!(
-            !diags
-                .iter()
-                .any(|d| { d.code == Some(NumberOrString::String("cannot-resolve".to_owned())) }),
-            "Box resolves through the classpath: {diags:?}"
-        );
+            let ws = ProjectWorkspace::load(
+                dir.path().to_path_buf(),
+                &[dir.path().to_path_buf()],
+                std::slice::from_ref(&box_class),
+                &[],
+                &[],
+                FeatureSet::default(),
+                Exec::inline(),
+            )
+            .await;
+            let main_uri = Url::from_file_path(dir.path().join("Main.java")).unwrap();
+            let diags = ws
+                .diagnostics(&main_uri, &jals_config::lint::Config::default())
+                .await
+                .expect("Main.java is indexed");
+            assert!(
+                !diags.iter().any(|d| {
+                    d.code == Some(NumberOrString::String("cannot-resolve".to_owned()))
+                }),
+                "Box resolves through the classpath: {diags:?}"
+            );
 
-        // Without the classpath, the same reference cannot resolve.
-        let bare = load_bare(dir.path());
-        let diags = bare
-            .diagnostics(&main_uri, &jals_config::lint::Config::default())
-            .expect("Main.java is indexed");
-        assert!(
-            diags
-                .iter()
-                .any(|d| { d.code == Some(NumberOrString::String("cannot-resolve".to_owned())) }),
-            "without the classpath Box is unresolved: {diags:?}"
-        );
+            // Without the classpath, the same reference cannot resolve.
+            let bare = load_bare(dir.path()).await;
+            let diags = bare
+                .diagnostics(&main_uri, &jals_config::lint::Config::default())
+                .await
+                .expect("Main.java is indexed");
+            assert!(
+                diags.iter().any(|d| {
+                    d.code == Some(NumberOrString::String("cannot-resolve".to_owned()))
+                }),
+                "without the classpath Box is unresolved: {diags:?}"
+            );
+        });
     }
 }

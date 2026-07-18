@@ -491,11 +491,13 @@ impl SelectionHost for LspHost {
 
 #[cfg(test)]
 mod tests {
+    use jals_exec::block_on_inline;
+
     use super::*;
 
     /// Parse `text` into the shared per-file document (text + line index + CST).
     fn doc(text: &str) -> Document {
-        Document::new(text.to_owned())
+        block_on_inline(Document::new(text.to_owned()))
     }
 
     // ---- Diagnostic mapping -------------------------------------------------------------------
@@ -503,12 +505,12 @@ mod tests {
     /// Assemble-and-map for `text` under the default config, with no project index.
     fn diagnostics(text: &str) -> Vec<Diagnostic> {
         let document = doc(text);
-        jals_editor::FileDiagnostics::assemble(
+        block_on_inline(jals_editor::FileDiagnostics::assemble(
             &document.parse,
             None,
             None,
             &jals_config::lint::Config::default(),
-        )
+        ))
         .into_iter()
         .map(|d| LspHost.diagnostic(&document, d))
         .collect()
@@ -728,10 +730,11 @@ mod tests {
     /// Decode the tokens produced for `text` (with no project index).
     fn decode(text: &str) -> Vec<Tok> {
         let document = doc(text);
-        decode_tokens(&LspHost.semantic_tokens(
-            &document,
-            jals_editor::SemanticTokens::classify(&document.parse.syntax(), None),
-        ))
+        let classified = block_on_inline(jals_editor::SemanticTokens::classify(
+            &document.parse.syntax(),
+            None,
+        ));
+        decode_tokens(&LspHost.semantic_tokens(&document, classified))
     }
 
     #[test]

@@ -2,8 +2,10 @@
 //!
 //! A thin protocol adapter over the `jals-editor` crate, which owns the editor workspace and
 //! every semantic query in protocol-neutral shapes. This crate keeps only the LSP specifics:
-//! the stdio server loop (`server`), URI ↔ path mapping and the open-document store (`state`),
-//! the `lsp_types` rendering of each neutral payload (`host`), and formatting (`formatting`).
+//! the stdio server loop and the `Send` router frontend (`server`), the single-owner language
+//! service actor that holds all `!Send` analysis state (`actor`), URI ↔ path mapping and the
+//! open-document store (`state`), the `lsp_types` rendering of each neutral payload (`host`),
+//! and formatting (`formatting`).
 //!
 //! Host-only crate: depends on `tokio`/`async-lsp` and uses stdio, so it is not built
 //! for `wasm32` (same exemption as `jals-cli`). The analysis engines it drives
@@ -14,6 +16,7 @@
 // files — so the `usize`/`u32` conversions throughout the crate cannot truncate in practice.
 #![allow(clippy::cast_possible_truncation)]
 
+mod actor;
 mod formatting;
 mod host;
 mod server;

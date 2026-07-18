@@ -12,11 +12,12 @@ jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true
 jals-editor.workspace = true
+jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tower.workspace = true
 
 # async-lsp's asynchronous `stdio` pipe helpers are unix-only; elsewhere the server loop drives
