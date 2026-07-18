@@ -17,6 +17,7 @@ use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_config::{DiscoverableConfig, FeatureSet, Manifest};
+use jals_exec::Exec;
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 use jals_storage::{FileKey, NativeScope, NativeStorage, RelativePath};
 
@@ -165,26 +166,34 @@ struct InitArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let result = match cli.command {
-        Commands::Fmt(args) => args.run(),
-        Commands::Lsp(_) => LspArgs::run(),
-        Commands::Lint(args) => args.run(),
-        Commands::Build(args) => args.run(),
-        Commands::Run(args) => args.run(),
-        Commands::Clean(args) => args.run(),
-        Commands::Init(args) => args.run(),
-    };
+    // One current-thread runtime + LocalSet for the whole invocation; every command runs async
+    // on it, and `jals lsp` serves inside it rather than nesting a second runtime.
+    let result = jals_exec::tokio_rt::run(|exec| async move {
+        match cli.command {
+            Commands::Fmt(args) => args.run(&exec).await,
+            Commands::Lsp(_) => LspArgs::run(exec).await,
+            Commands::Lint(args) => args.run(&exec).await,
+            Commands::Build(args) => args.run(&exec).await,
+            Commands::Run(args) => args.run(&exec).await,
+            Commands::Clean(args) => args.run(),
+            Commands::Init(args) => args.run(&exec).await,
+        }
+    });
     match result {
-        Ok(code) => code,
-        Err(err) => {
+        Ok(Ok(code)) => code,
+        Ok(Err(err)) => {
             eprintln!("error: {err:#}");
+            ExitCode::from(1)
+        }
+        Err(err) => {
+            eprintln!("error: failed to start the runtime: {err}");
             ExitCode::from(1)
         }
     }
 }
 
 impl FmtArgs {
-    fn run(&self) -> Result<ExitCode> {
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let deny_warnings = self.deny.iter().any(|d| d == "warnings");
         let explicit_config = self
             .config
@@ -208,7 +217,7 @@ impl FmtArgs {
                 .context("reading stdin")?;
             let cfg =
                 discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
-            let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
+            let out = jals_fmt::FormatOutput::format_source(&src, &cfg).await;
             let changed = out.formatted != src;
             any_changed |= changed;
             any_warning |= out.has_warnings();
@@ -259,7 +268,8 @@ impl FmtArgs {
                 let scopes = keyed
                     .iter()
                     .map(|(_, key)| NativeScope::all(key.path().clone()));
-                let mut storage = NativeStorage::for_project_scoped(&root, scopes)?;
+                let mut storage =
+                    NativeStorage::for_project_scoped(&root, scopes, exec.clone()).await?;
                 let mut edits = Vec::new();
                 for (path, key) in keyed {
                     let src = storage
@@ -269,7 +279,7 @@ impl FmtArgs {
                         .map_err(|_| anyhow!("source is not valid UTF-8: {}", path.display()))?
                         .to_owned();
                     let cfg = discovery.for_dir(path.parent().unwrap_or_else(|| Path::new(".")))?;
-                    let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
+                    let out = jals_fmt::FormatOutput::format_source(&src, &cfg).await;
                     let changed = out.formatted != src;
                     any_changed |= changed;
                     any_warning |= out.has_warnings();
@@ -282,7 +292,7 @@ impl FmtArgs {
                         edits.push((key, out.formatted.into_bytes()));
                     }
                 }
-                Self::commit_edits(&mut storage, &mut edits)?;
+                Self::commit_edits(&mut storage, &mut edits).await?;
             }
         }
 
@@ -296,7 +306,7 @@ impl FmtArgs {
 
     /// Commit the staged rewrites against one aggregate in a single transaction (a no-op when
     /// nothing changed), so a sweep publishes one revision and a failure writes nothing.
-    fn commit_edits(
+    async fn commit_edits(
         storage: &mut NativeStorage,
         edits: &mut Vec<(FileKey, Vec<u8>)>,
     ) -> Result<()> {
@@ -307,13 +317,13 @@ impl FmtArgs {
         for (key, bytes) in edits.drain(..) {
             transaction.replace_file(key, bytes)?;
         }
-        transaction.commit()?;
+        transaction.commit().await?;
         Ok(())
     }
 }
 
 impl LintArgs {
-    fn run(&self) -> Result<ExitCode> {
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let explicit_config = self
             .config
             .as_deref()
@@ -333,18 +343,19 @@ impl LintArgs {
                 .context("reading stdin")?;
             let cwd = std::env::current_dir().context("getting current dir")?;
             let mut cfg = discovery.for_dir(&cwd)?;
-            let parse = jals_syntax::Parse::parse(&src);
+            let parse = jals_syntax::Parse::parse(&src).await;
             // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
             // so `type-mismatch` sees external library types, and its feature set (`[package]
             // features`) so the feature-gated rules run — exactly as the multi-file path does.
-            let ctx = ProjectLintContext::load(&cwd);
+            let ctx = ProjectLintContext::load(&cwd, exec).await;
             cfg.features = ctx.feature_set;
-            let index = ctx.build_index(&[(FileId(0), parse.syntax())]);
+            let index = ctx.build_index(&[(FileId(0), parse.syntax())]).await;
             let out = jals_lint::LintOutput::lint_parse_with_index(
                 &parse,
                 &cfg,
                 Some((&index, FileId(0))),
-            );
+            )
+            .await;
             any_finding |= Reporter::report_lint("<stdin>", &src, &out);
         } else {
             // Read and parse every file once, then build a project-wide symbol index from the parsed
@@ -356,7 +367,7 @@ impl LintArgs {
             for path in App::collect_java_files(&self.paths)? {
                 let src = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
-                let parse = jals_syntax::Parse::parse(&src);
+                let parse = jals_syntax::Parse::parse(&src).await;
                 files.push((path, src, parse));
             }
             let inputs: Vec<_> = files
@@ -374,8 +385,8 @@ impl LintArgs {
             // index so a method whose argument type comes from a dependency jar resolves) and its
             // feature set (`[package] features`, shared across the project's files), from a single
             // manifest parse.
-            let ctx = ProjectLintContext::load(&start_dir);
-            let index = ctx.build_index(&inputs);
+            let ctx = ProjectLintContext::load(&start_dir, exec).await;
+            let index = ctx.build_index(&inputs).await;
 
             for (i, (path, src, parse)) in files.iter().enumerate() {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -385,7 +396,8 @@ impl LintArgs {
                     parse,
                     &cfg,
                     Some((&index, FileId(i as u32))),
-                );
+                )
+                .await;
                 any_finding |= Reporter::report_lint(&path.display().to_string(), src, &out);
             }
         }
@@ -400,9 +412,10 @@ impl LintArgs {
 
 impl LspArgs {
     /// Runs the language server over stdio until the client disconnects. The parsed `--stdio` flag is
-    /// accepted for editor compatibility and ignored (the stdio transport is always used).
-    fn run() -> Result<ExitCode> {
-        jals_lsp::Server::run()?;
+    /// accepted for editor compatibility and ignored (the stdio transport is always used). Serves
+    /// inside the CLI's own runtime — no nested runtime.
+    async fn run(exec: Exec) -> Result<ExitCode> {
+        jals_lsp::Server::serve(exec).await?;
         Ok(ExitCode::SUCCESS)
     }
 }
@@ -410,8 +423,8 @@ impl LspArgs {
 impl BuildArgs {
     /// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
     /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
-    fn run(&self) -> Result<ExitCode> {
-        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
+        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         if let Some(out) = &self.out_dir {
             manifest.build.classes_dir = out.to_string_lossy().into_owned();
         }
@@ -429,11 +442,13 @@ impl BuildArgs {
             &manifest,
             &root,
             jals_classpath::ProjectInputOptions::Compile,
-        );
+            exec,
+        )
+        .await;
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
-        let compiler = <dyn Compiler>::select(&manifest);
+        let compiler = <dyn Compiler>::select(&manifest, exec).await;
 
         if self.dry_run || self.verbose {
             println!("{}", compiler.describe_compile(&request));
@@ -442,7 +457,10 @@ impl BuildArgs {
             return Ok(ExitCode::SUCCESS);
         }
 
-        let outcome = compiler.compile(&request).map_err(|e| anyhow!("{e}"))?;
+        let outcome = compiler
+            .compile(&request)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
         Ok(App::outcome_exit_code(outcome))
     }
 }
@@ -450,8 +468,8 @@ impl BuildArgs {
 impl RunArgs {
     /// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
     /// run; `--dry-run` prints both commands without executing either.
-    fn run(&self) -> Result<ExitCode> {
-        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
+        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
         let main_class: String = match &self.main_class {
@@ -469,7 +487,9 @@ impl RunArgs {
             &manifest,
             &root,
             jals_classpath::ProjectInputOptions::Compile,
-        );
+            exec,
+        )
+        .await;
         let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
@@ -481,8 +501,8 @@ impl RunArgs {
         // Each step's backend is selected independently from its own `[toolchain]` enum:
         // `"builtin"` is the in-process dummy; anything else spawns `javac`/`java` per
         // `compiler`/`runtime` (each: env override → discovered JDK → `$JAVA_HOME` → `PATH`).
-        let compiler = <dyn Compiler>::select(&manifest);
-        let runtime = <dyn Runtime>::select(&manifest);
+        let compiler = <dyn Compiler>::select(&manifest, exec).await;
+        let runtime = <dyn Runtime>::select(&manifest, exec).await;
 
         if self.dry_run || self.verbose {
             println!("{}", compiler.describe_compile(&compile_request));
@@ -495,11 +515,15 @@ impl RunArgs {
         // Compile first; only run when compilation succeeds.
         let build_outcome = compiler
             .compile(&compile_request)
+            .await
             .map_err(|e| anyhow!("{e}"))?;
         if !build_outcome.success() {
             return Ok(App::outcome_exit_code(build_outcome));
         }
-        let run_outcome = runtime.run(&run_request).map_err(|e| anyhow!("{e}"))?;
+        let run_outcome = runtime
+            .run(&run_request)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
         Ok(App::outcome_exit_code(run_outcome))
     }
 }
@@ -509,7 +533,8 @@ impl CleanArgs {
     /// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
     /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
     fn run(&self) -> Result<ExitCode> {
-        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
+        let (manifest, root) =
+            jals_exec::block_on_inline(App::resolve_manifest(self.manifest_path.as_deref()))?;
         let keys = jals_build::CleanTargets::keys(&manifest)
             .map_err(|error| anyhow!("invalid classes-dir: {error:?}"))?;
 
@@ -537,7 +562,7 @@ impl InitArgs {
     /// Scaffolds a new project: resolves the target directory and name, then writes the files from
     /// [`jals_build::InitOptions::scaffold`]. Refuses to overwrite an existing `jals.toml`; any other
     /// pre-existing scaffold file (e.g. a hand-written `Main.java`) is left untouched.
-    fn run(self) -> Result<ExitCode> {
+    async fn run(self, exec: &Exec) -> Result<ExitCode> {
         /// Infers a project name from a target directory's final component, canonicalizing first so a
         /// relative path or `.` resolves to the directory's real name rather than the literal `.`.
         fn project_name_from_dir(dir: &Path) -> Result<String> {
@@ -568,7 +593,7 @@ impl InitArgs {
         let scopes = files
             .iter()
             .map(|file| NativeScope::all(file.path.path().clone()));
-        let mut storage = NativeStorage::for_project_scoped(&dir, scopes)?;
+        let mut storage = NativeStorage::for_project_scoped(&dir, scopes, exec.clone()).await?;
         let manifest_key = FileKey::parse("jals.toml").expect("static key is valid");
         if storage.view().tree().lookup_file(&manifest_key).is_some() {
             return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
@@ -581,7 +606,7 @@ impl InitArgs {
             }
             let mut transaction = storage.transaction(storage.revision())?;
             transaction.create_file(file.path.clone(), file.contents.as_bytes().to_vec())?;
-            transaction.commit()?;
+            transaction.commit().await?;
         }
 
         println!("created JALS project `{name}` in {}", dir.display());
@@ -602,11 +627,11 @@ struct ProjectLintContext {
 }
 
 impl ProjectLintContext {
-    fn load(start_dir: &Path) -> Self {
-        let Some(manifest_path) = Manifest::discover_path(start_dir) else {
+    async fn load(start_dir: &Path, exec: &Exec) -> Self {
+        let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
             return Self::default();
         };
-        let Ok(manifest) = Manifest::from_file(&manifest_path) else {
+        let Ok(manifest) = Manifest::from_file(&manifest_path).await else {
             // A malformed manifest is the business of `jals build`; lint stays best-effort.
             return Self::default();
         };
@@ -619,9 +644,11 @@ impl ProjectLintContext {
             &manifest,
             root,
             jals_classpath::ProjectInputOptions::Analysis,
-        );
+            exec,
+        )
+        .await;
         Self {
-            classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
+            classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes).await,
             feature_set: inputs.feature_set,
         }
     }
@@ -629,11 +656,12 @@ impl ProjectLintContext {
     /// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and this
     /// context's lowered classpath so the index-aware `type-mismatch` rule resolves stdlib and
     /// external library types. Shared by the stdin and multi-file lint paths.
-    fn build_index(&self, files: &[(FileId, jals_syntax::SyntaxNode)]) -> ProjectIndex {
+    async fn build_index(&self, files: &[(FileId, jals_syntax::SyntaxNode)]) -> ProjectIndex {
         ProjectIndex::builder(files)
             .with_stdlib()
             .with_classpath(&self.classpath)
             .build()
+            .await
     }
 }
 
@@ -653,22 +681,25 @@ struct HostProjectInputs {
 impl App {
     /// Lower host manifest locations once, then execute the portable classpath plan over one
     /// immutable project revision and its verified native artifact cache.
-    fn project_inputs(
+    async fn project_inputs(
         manifest: &Manifest,
         root: &Path,
         options: jals_classpath::ProjectInputOptions,
+        exec: &Exec,
     ) -> HostProjectInputs {
         let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
-        let Ok(mut storage) = NativeStorage::for_project_scoped(root, scopes) else {
+        let Ok(mut storage) = NativeStorage::for_project_scoped(root, scopes, exec.clone()).await
+        else {
             eprintln!("warning: project storage could not be opened");
             return HostProjectInputs::default();
         };
-        let (inputs, _source_roots) = jals_classpath::NativeProjectPlan::assemble_blocking(
+        let (inputs, _source_roots) = jals_classpath::NativeProjectPlan::assemble_native(
             manifest,
             root,
             &mut storage,
             options,
-        );
+        )
+        .await;
         for warning in &inputs.warnings {
             eprintln!("warning: {}", warning.message);
         }
@@ -683,10 +714,11 @@ impl App {
             .filter_map(|source| match source {
                 jals_classpath::SourceFile::Project(key) => Some(key.path().to_host_path(root)),
                 jals_classpath::SourceFile::Artifact(source) => {
-                    match storage
-                        .artifacts()
-                        .materialize_source(&source.key, &source.path)
-                    {
+                    match jals_exec::block_on_inline(
+                        storage
+                            .artifacts()
+                            .materialize_source(&source.key, &source.path),
+                    ) {
                         Ok(path) => Some(path),
                         Err(error) => {
                             eprintln!("warning: materializing git source failed: {error:?}");
@@ -707,15 +739,17 @@ impl App {
     /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
     /// returning the parsed manifest and the project root (the manifest's parent directory). A missing
     /// manifest is an error, unlike the formatter/linter configs.
-    fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
+    async fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
         let manifest_path = if let Some(p) = explicit {
             p.to_path_buf()
         } else {
             let cwd = std::env::current_dir().context("getting current dir")?;
             Manifest::discover_path(&cwd)
+                .await
                 .ok_or_else(|| anyhow!("no `jals.toml` found in {} or any parent", cwd.display()))?
         };
         let manifest = Manifest::from_file(&manifest_path)
+            .await
             .with_context(|| format!("loading {}", manifest_path.display()))?;
         let root = manifest_path
             .parent()
