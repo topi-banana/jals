@@ -1,171 +1,199 @@
-//! Project input assembly: the one place that turns a parsed [`Manifest`] plus injected capabilities
-//! into the ready-to-use analysis / build inputs every host adapter needs.
-//!
-//! CLI, LSP, and the browser playground all need the *same* pipeline — resolve `[dependencies]` jars,
-//! optionally each dependency's `-sources.jar` `.java` and `git`/`path` source deps, load the classpath
-//! `.class` files, synthesize skeleton `.java` for jars that ship no source, and read the project's
-//! `[package] features`. Rather than re-sequence those primitives (and re-invent the warning-formatting,
-//! skeleton-append-order, and classpath-fold conventions) in each adapter, this module composes them
-//! once behind one call. Adapters supply the capabilities ([`Fetcher`] / [`Git`] / [`FileTree`]) and a
-//! single `warn` sink, and receive a [`ProjectInputsIn`] with every resolved input.
-//!
-//! This is the pure, `wasm32`-compatible core (all I/O through the [`FileTree`] abstraction, the two
-//! host capabilities behind traits, the only async step the download). The [`native`](crate::native)
-//! facade wraps it with `OsFileTree` + a blocking `reqwest` [`Fetcher`] + a subprocess [`Git`] and
-//! returns the `PathBuf`-based [`ProjectInputs`](crate::native::ProjectInputs), adding the manifest's
-//! source roots on top.
-//!
-//! Which optional inputs to assemble is chosen by [`ProjectInputOptions`] — `Analysis` (load the
-//! classpath for a `ProjectIndex`), `Compile` (resolve dependency jars + source deps for `javac`,
-//! without loading), or `Editor` (everything, for the LSP's full navigation surface).
+//! Assembly of classpath inputs from one revisioned project storage aggregate.
 
-use std::path::Path;
+use alloc::format;
+use alloc::vec::Vec;
 
-use jals_build::ManifestExt;
 use jals_classfile::ClassFile;
-use jals_config::{FeatureSet, Manifest};
-use jals_fs::FileTree;
+use jals_config::{Dependency, FeatureSet, Manifest};
+use jals_storage::{CacheBackend, CacheKey, DirKey, FileKey, Name, ProjectStorage, SourceBackend};
 
-use crate::io::{Fetcher, Git};
-use crate::load::ClasspathLoad;
-use crate::resolve::{DepsCache, PathExt};
-use crate::skeleton::SkeletonGroup;
+use crate::{
+    ClasspathEntry, ClasspathLoad, DependencyLocation, DependencyResolver, DependencySpec,
+    ExternalLocator, Fetcher, JarExtraction, LibrarySource, SkeletonGroup, Warning, WarningOrigin,
+};
 
-/// Which optional project inputs [`ProjectInputsIn::assemble_project_inputs_in`] should assemble. Each
-/// variant is exactly one host adapter's need — the only three combinations any caller uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectInputOptions {
-    /// For linting / analysis: load the classpath `.class` files (the `[build] classpath` entries plus
-    /// the resolved `[dependencies]` jars) into [`ProjectInputsIn::classpath_classes`] for a
-    /// `ProjectIndex`. No source deps, sources jars, or skeletons (a `jals lint` must never clone a
-    /// `git` dependency or extract source).
     Analysis,
-    /// For `jals build`/`run`: resolve the `[dependencies]` jar *paths* (for `javac -classpath`, into
-    /// [`ProjectInputsIn::dependency_jars`]) and the `git`/`path` source deps' `.java`
-    /// ([`ProjectInputsIn::source_dep_sources`], compiled alongside the project). No classpath
-    /// *loading* (the compiler reads the jars itself), sources jars, or skeletons.
     Compile,
-    /// For the LSP: everything — the loaded classpath, the `git`/`path` source deps folded into the
-    /// index, and both real (`-sources.jar`) and synthesized (skeleton) navigation sources appended to
-    /// [`ProjectInputsIn::library_sources`].
     Editor,
 }
 
-/// The assembled project inputs, as `/`-separated virtual paths (the core representation). See
-/// [`ProjectInputs`](crate::native::ProjectInputs) for the host `PathBuf`-based form.
-#[derive(Debug, Default)]
-pub struct ProjectInputsIn {
-    /// The resolved `[dependencies]` jar paths (downloaded remotes / confirmed local jars, plus any
-    /// unpacked bundled jars). What `jals build`/`run` puts on `javac`'s classpath.
-    pub dependency_jars: Vec<String>,
-    /// The loaded classpath `.class` files, ready for `ProjectIndex::lower_classpath`. Empty unless
-    /// the [`ProjectInputOptions`] loaded the classpath ([`Analysis`](ProjectInputOptions::Analysis)
-    /// or [`Editor`](ProjectInputOptions::Editor)).
-    pub classpath_classes: Vec<ClassFile>,
-    /// Navigation `.java`: each dependency's extracted `-sources.jar` source (when `sources`), then
-    /// the synthesized skeletons (when `skeletons`), in that order so a first-declaration-wins overlay
-    /// keeps real source authoritative.
-    pub library_sources: Vec<String>,
-    /// The `git`/`path` source dependencies' `.java` (when `source_deps`) — an index input and a
-    /// `javac` source.
-    pub source_dep_sources: Vec<String>,
-    /// The project's resolved language feature set from `[package] features`, gating the
-    /// feature-gated lint rules. Empty when the manifest declares none.
+/// Typed, already-classified input plan. Host path and URI conversion happens before this boundary.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectInputPlan {
+    pub dependencies: Vec<DependencySpec>,
+    pub source_archives: Vec<DependencySpec>,
+    pub classpath: Vec<ClasspathEntry>,
+    pub source_dependency_roots: Vec<DirKey>,
+    /// Source files already published by a host adapter, such as a native Git checkout.
+    pub source_dependency_artifacts: Vec<LibrarySource>,
     pub feature_set: FeatureSet,
 }
 
-impl ProjectInputsIn {
-    /// Assemble a project's analysis / build inputs from its parsed `manifest` (rooted at `root`, a
-    /// `/`-separated virtual path), driving all I/O through `fs` and the injected `fetcher` / `git`
-    /// capabilities.
-    ///
-    /// The one place the resolve → load → synthesize pipeline lives; adapters call it and
-    /// consume the fields they need.
-    ///
-    /// Every non-fatal problem — a failed download, a missing local jar, an unreadable `.class`, a
-    /// failed clone — is reported through `warn` with a category prefix (`dependency: …`, `sources: …`,
-    /// `source dependency: …`, `classpath: <path>: …`, `decompile: …`) and skipped; the caller's `warn`
-    /// sink owns only where the message goes (its own tool prefix, a status line, a marker).
-    // The injected capabilities (`&mut dyn FileTree`, non-`Sync` `F`/`Git`, `impl FnMut` sink) are
-    // deliberately not `Send` — the wasm core drives this single-threaded and the `native` facade
-    // `block_on`s it on a dedicated thread, so `future_not_send` does not apply.
-    #[allow(clippy::future_not_send)]
-    pub async fn assemble_project_inputs_in<F: Fetcher>(
-        fetcher: &F,
-        git: Option<&dyn Git>,
-        fs: &mut dyn FileTree,
+impl ProjectInputPlan {
+    /// Lower a manifest's `[dependencies]` jar entries into this plan — each binary jar plus its
+    /// optional `sources` jar — classifying every locator through `classify` (hosts decide what
+    /// resolves as a project file versus external content). A non-portable dependency name is
+    /// diagnosed into `warnings` and skipped. Shared by the native lowering and the browser host.
+    pub fn add_jar_dependencies(
+        &mut self,
         manifest: &Manifest,
-        root: &str,
+        mut classify: impl FnMut(&str) -> DependencyLocation,
+        warnings: &mut Vec<Warning>,
+    ) {
+        for (raw_name, dependency) in &manifest.dependencies {
+            let Dependency::Jar(jar) = dependency else {
+                continue;
+            };
+            let name = match Name::new(raw_name) {
+                Ok(name) => name,
+                Err(error) => {
+                    warnings.push(Warning::new(
+                        WarningOrigin::External(ExternalLocator::new(raw_name)),
+                        format!("dependency name is not a portable name: {error:?}"),
+                    ));
+                    continue;
+                }
+            };
+            self.dependencies.push(DependencySpec {
+                name: name.clone(),
+                location: classify(&jar.jar),
+                recursive: jar.recursive.unwrap_or(false),
+            });
+            if let Some(sources) = &jar.sources {
+                self.source_archives.push(DependencySpec {
+                    name,
+                    location: classify(sources),
+                    recursive: false,
+                });
+            }
+        }
+    }
+}
+
+/// A source dependency read either from the captured project revision or from the verified cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceFile {
+    Project(FileKey),
+    Artifact(LibrarySource),
+}
+
+#[derive(Debug, Default)]
+pub struct ProjectInputs {
+    pub dependency_jars: Vec<CacheKey>,
+    pub classpath_classes: Vec<ClassFile>,
+    pub library_sources: Vec<LibrarySource>,
+    pub source_dep_sources: Vec<SourceFile>,
+    pub feature_set: FeatureSet,
+    pub warnings: Vec<Warning>,
+}
+
+impl ProjectInputs {
+    /// Execute the plan against one immutable view. Cache publication does not mutate that view or
+    /// advance the source revision.
+    #[allow(clippy::future_not_send)]
+    pub async fn assemble<F, S, C>(
+        fetcher: &F,
+        storage: &mut ProjectStorage<S, C>,
+        plan: &ProjectInputPlan,
         options: ProjectInputOptions,
-        mut warn: impl FnMut(String),
-    ) -> Self {
+    ) -> Self
+    where
+        F: Fetcher,
+        S: SourceBackend,
+        C: CacheBackend,
+    {
         use ProjectInputOptions::{Analysis, Compile, Editor};
 
-        // Expand the host-role preset into the four capability flags that actually gate the pipeline.
-        // Skeletons render from the loaded classes, so any preset wanting them also loads the classpath.
+        let view = storage.view();
         let (want_sources, want_source_deps, want_classes, want_skeletons) = match options {
             Analysis => (false, false, true, false),
             Compile => (false, true, false, false),
             Editor => (true, true, true, true),
         };
 
-        // 1. Resolve the `[dependencies]` jars (download remotes / confirm locals, unpack bundled jars).
-        let dependency_jars =
-            DepsCache::resolve_project_dependencies_in(fetcher, &mut *fs, manifest, root, |m| {
-                warn(format!("dependency: {m}"));
-            })
+        let resolved = DependencyResolver::resolve(
+            fetcher,
+            &view,
+            storage.artifacts_mut(),
+            &plan.dependencies,
+        )
+        .await;
+        let mut warnings = resolved.warnings;
+        let resolved_jars = resolved.jars;
+        // Keep top-level dependencies in request order; recursive members are additions appended in
+        // the same second-pass order.
+        let mut dependency_jars: Vec<_> = resolved_jars.iter().map(|jar| jar.key.clone()).collect();
+        for jar in resolved_jars.iter().filter(|jar| jar.recursive) {
+            let nested = JarExtraction::nested(storage.artifacts_mut(), &jar.key);
+            warnings.extend(nested.warnings);
+            dependency_jars.extend(nested.artifacts.into_iter().map(|artifact| artifact.key));
+        }
+
+        let mut library_sources = Vec::new();
+        if want_sources {
+            let source_jars = DependencyResolver::resolve(
+                fetcher,
+                &view,
+                storage.artifacts_mut(),
+                &plan.source_archives,
+            )
             .await;
+            warnings.extend(source_jars.warnings);
+            let keys: Vec<_> = source_jars.jars.into_iter().map(|jar| jar.key).collect();
+            let extracted = JarExtraction::<LibrarySource>::sources(storage.artifacts_mut(), &keys);
+            warnings.extend(extracted.warnings);
+            library_sources.extend(extracted.artifacts);
+        }
 
-        // 2. Optional: each dependency's `-sources.jar` `.java`, the first (authoritative) navigation
-        //    layer — extended with the skeletons below.
-        let mut library_sources = if want_sources {
-            DepsCache::resolve_project_sources_in(fetcher, &mut *fs, manifest, root, |m| {
-                warn(format!("sources: {m}"));
-            })
-            .await
-        } else {
-            Vec::new()
-        };
-
-        // 3. Optional: the `git`/`path` source dependencies' `.java` (a shared borrow — this step
-        //    writes only via the injected `git`, not the tree).
         let source_dep_sources = if want_source_deps {
-            DepsCache::resolve_project_source_deps_in(&*fs, git, manifest, root, |m| {
-                warn(format!("source dependency: {m}"));
-            })
+            let mut files = Vec::new();
+            for root in &plan.source_dependency_roots {
+                if let Err(error) = view.directory(root) {
+                    warnings.push(Warning::new(
+                        WarningOrigin::ProjectDirectory(root.clone()),
+                        format!("source dependency root cannot be read: {error}"),
+                    ));
+                    continue;
+                }
+                files.extend(
+                    view.tree()
+                        .files_under(root)
+                        .filter(|file| file.key().has_extension("java"))
+                        .map(|file| SourceFile::Project(file.key().clone())),
+                );
+            }
+            files.extend(
+                plan.source_dependency_artifacts
+                    .iter()
+                    .cloned()
+                    .map(SourceFile::Artifact),
+            );
+            files
         } else {
             Vec::new()
         };
 
-        // 4-5. Load the classpath `.class` (for analysis, and for the skeleton rendering that reads
-        //      them): the manifest's `[build] classpath` entries folded together with the resolved
-        //      dependency jars, exactly as the adapters did by hand.
         let classpath_classes = if want_classes {
-            let mut entries: Vec<String> = manifest
-                .classpath_entries(Path::new(root))
-                .iter()
-                .map(|p| p.vpath())
-                .collect();
-            entries.extend(dependency_jars.iter().cloned());
-            let load = ClasspathLoad::load_classpath_in(&*fs, &entries);
-            for warning in &load.warnings {
-                warn(format!("classpath: {}: {}", warning.path, warning.message));
-            }
+            let mut entries = plan.classpath.clone();
+            entries.extend(
+                dependency_jars
+                    .iter()
+                    .cloned()
+                    .map(ClasspathEntry::Artifact),
+            );
+            let load = ClasspathLoad::load(&view, storage.artifacts(), &entries);
+            warnings.extend(load.warnings);
             load.classes
         } else {
             Vec::new()
         };
 
-        // 6. Optional: signature-only skeletons, appended **after** the real sources so the overlay
-        //    keeps real source authoritative (a skeleton fills the gap only for a class shipping no
-        //    source).
         if want_skeletons {
-            library_sources.extend(SkeletonGroup::synthesize_classpath_sources_in(
-                &mut *fs,
-                &classpath_classes,
-                root,
-                |m| warn(format!("decompile: {m}")),
-            ));
+            let skeletons = SkeletonGroup::synthesize(storage.artifacts_mut(), &classpath_classes);
+            warnings.extend(skeletons.warnings);
+            library_sources.extend(skeletons.sources);
         }
 
         Self {
@@ -173,7 +201,8 @@ impl ProjectInputsIn {
             classpath_classes,
             library_sources,
             source_dep_sources,
-            feature_set: manifest.feature_set(),
+            feature_set: plan.feature_set,
+            warnings,
         }
     }
 }

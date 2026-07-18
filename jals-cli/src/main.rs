@@ -6,7 +6,7 @@
 
 mod report;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -16,8 +16,9 @@ use clap::{Args, Parser, Subcommand};
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
-use jals_config::{FeatureSet, Manifest};
+use jals_config::{DiscoverableConfig, FeatureSet, Manifest};
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
+use jals_storage::{FileKey, NativeScope, NativeStorage, RelativePath};
 
 use report::Reporter;
 
@@ -188,17 +189,14 @@ impl FmtArgs {
         let explicit_config = self
             .config
             .as_deref()
-            .map(|p| {
-                Config::from_file(&jals_fs::OsFileTree, App::path_str(p)?)
-                    .context("loading --config")
-            })
+            .map(|p| App::load_config::<Config>(p).context("loading --config"))
             .transpose()?;
 
         // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
         // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
         let show_diff = self.check || self.diff;
 
-        let mut discovery = Discovery::new(explicit_config);
+        let mut discovery = HostConfigs::new(explicit_config);
         let mut any_changed = false;
         let mut any_warning = false;
 
@@ -223,24 +221,68 @@ impl FmtArgs {
                     .context("writing stdout")?;
             }
         } else {
-            for path in App::collect_java_files(&self.paths)? {
-                let src = std::fs::read_to_string(&path)
-                    .with_context(|| format!("reading {}", path.display()))?;
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                let cfg = discovery.for_dir(parent)?;
-                let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
-                let changed = out.formatted != src;
-                any_changed |= changed;
-                any_warning |= out.has_warnings();
-                let label = path.display().to_string();
-                Reporter::report_format_warnings(&label, &src, &out);
+            // Discover paths before opening storage, then snapshot exactly those files. Overlapping
+            // targets are deduplicated and files sharing a root commit in one transaction.
+            let mut groups: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+            for target in &self.paths {
+                let root = if target.is_dir() {
+                    target.clone()
+                } else {
+                    target
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_path_buf()
+                };
+                groups
+                    .entry(root)
+                    .or_default()
+                    .extend(App::collect_java_files(std::slice::from_ref(target))?);
+            }
+            for (root, mut paths) in groups {
+                paths.sort();
+                paths.dedup();
+                let keyed: Vec<_> = paths
+                    .into_iter()
+                    .map(|path| {
+                        let key = RelativePath::from_host_path(&root, &path)
+                            .and_then(|relative| FileKey::new(relative).ok())
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "source path is not addressable under {}: {}",
+                                    root.display(),
+                                    path.display()
+                                )
+                            })?;
+                        Ok::<_, anyhow::Error>((path, key))
+                    })
+                    .collect::<Result<_>>()?;
+                let scopes = keyed
+                    .iter()
+                    .map(|(_, key)| NativeScope::all(key.path().clone()));
+                let mut storage = NativeStorage::for_project_scoped(&root, scopes)?;
+                let mut edits = Vec::new();
+                for (path, key) in keyed {
+                    let src = storage
+                        .view()
+                        .file(&key)?
+                        .text()
+                        .map_err(|_| anyhow!("source is not valid UTF-8: {}", path.display()))?
+                        .to_owned();
+                    let cfg = discovery.for_dir(path.parent().unwrap_or_else(|| Path::new(".")))?;
+                    let out = jals_fmt::FormatOutput::format_source(&src, &cfg);
+                    let changed = out.formatted != src;
+                    any_changed |= changed;
+                    any_warning |= out.has_warnings();
+                    let label = path.display().to_string();
+                    Reporter::report_format_warnings(&label, &src, &out);
 
-                if show_diff {
-                    Reporter::print_diff(&label, &src, &out.formatted);
-                } else if changed {
-                    std::fs::write(&path, out.formatted.as_bytes())
-                        .with_context(|| format!("writing {}", path.display()))?;
+                    if show_diff {
+                        Reporter::print_diff(&label, &src, &out.formatted);
+                    } else if changed {
+                        edits.push((key, out.formatted.into_bytes()));
+                    }
                 }
+                Self::commit_edits(&mut storage, &mut edits)?;
             }
         }
 
@@ -251,6 +293,23 @@ impl FmtArgs {
             ExitCode::SUCCESS
         })
     }
+
+    /// Commit the staged rewrites against one aggregate in a single transaction (a no-op when
+    /// nothing changed), so a sweep publishes one revision and a failure writes nothing.
+    fn commit_edits(
+        storage: &mut NativeStorage,
+        edits: &mut Vec<(FileKey, Vec<u8>)>,
+    ) -> Result<()> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let mut transaction = storage.transaction(storage.revision())?;
+        for (key, bytes) in edits.drain(..) {
+            transaction.replace_file(key, bytes)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
 }
 
 impl LintArgs {
@@ -258,13 +317,10 @@ impl LintArgs {
         let explicit_config = self
             .config
             .as_deref()
-            .map(|p| {
-                LintConfig::from_file(&jals_fs::OsFileTree, App::path_str(p)?)
-                    .context("loading --config")
-            })
+            .map(|p| App::load_config::<LintConfig>(p).context("loading --config"))
             .transpose()?;
 
-        let mut discovery = LintDiscovery::new(explicit_config);
+        let mut discovery = HostConfigs::new(explicit_config);
         let mut any_finding = false;
 
         if self.paths.is_empty() {
@@ -369,11 +425,10 @@ impl BuildArgs {
         // the `git`/`path` source dependencies' `.java` compiled alongside the project's own sources so
         // a project that depends on a source dependency builds. Best-effort — a failed download/clone
         // is warned and skipped, never aborting the build.
-        let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
+        let inputs = App::project_inputs(
             &manifest,
             &root,
             jals_classpath::ProjectInputOptions::Compile,
-            |message| eprintln!("warning: {message}"),
         );
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
@@ -410,11 +465,10 @@ impl RunArgs {
         // and run classpaths, and the `git`/`path` source dependencies' `.java` compile alongside the
         // project's own sources (their `.class` land in the run classpath's `classes-dir`, so the run
         // invocation is unchanged). Best-effort — a failed download/clone is warned and skipped.
-        let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
+        let inputs = App::project_inputs(
             &manifest,
             &root,
             jals_classpath::ProjectInputOptions::Compile,
-            |message| eprintln!("warning: {message}"),
         );
         let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
         let run_request = jals_build::RunRequest {
@@ -456,17 +510,22 @@ impl CleanArgs {
     /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
     fn run(&self) -> Result<ExitCode> {
         let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref())?;
-        let paths = jals_build::CleanTargets::paths(&manifest, &root);
+        let keys = jals_build::CleanTargets::keys(&manifest)
+            .map_err(|error| anyhow!("invalid classes-dir: {error:?}"))?;
 
-        for path in &paths {
+        for key in keys {
+            // The typed key confines the target under the project root; removal itself is a host
+            // operation owned by the CLI (see `jals_build::clean`), so deleting build output does
+            // not require snapshotting the project's bytes first.
+            let path = key.path().to_host_path(&root);
             if self.dry_run {
                 println!("would remove {}", path.display());
                 continue;
             }
-            if !path.exists() {
+            if !path.is_dir() {
                 continue;
             }
-            std::fs::remove_dir_all(path)
+            std::fs::remove_dir_all(&path)
                 .with_context(|| format!("removing {}", path.display()))?;
             println!("removed {}", path.display());
         }
@@ -500,29 +559,29 @@ impl InitArgs {
             None => std::env::current_dir().context("getting current dir")?,
         };
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-
-        if dir.join("jals.toml").exists() {
-            return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
-        }
-
         let name = match self.name {
             Some(n) => n,
             None => project_name_from_dir(&dir)?,
         };
 
         let files = jals_build::InitOptions { name: name.clone() }.scaffold();
+        let scopes = files
+            .iter()
+            .map(|file| NativeScope::all(file.path.path().clone()));
+        let mut storage = NativeStorage::for_project_scoped(&dir, scopes)?;
+        let manifest_key = FileKey::parse("jals.toml").expect("static key is valid");
+        if storage.view().tree().lookup_file(&manifest_key).is_some() {
+            return Err(anyhow!("`jals.toml` already exists in {}", dir.display()));
+        }
         for file in &files {
-            let dest = dir.join(&file.path);
-            if dest.exists() {
+            let dest = dir.join(file.path.to_string());
+            if storage.view().tree().lookup_file(&file.path).is_some() {
                 println!("skipping {} (already exists)", dest.display());
                 continue;
             }
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("creating {}", parent.display()))?;
-            }
-            std::fs::write(&dest, file.contents.as_bytes())
-                .with_context(|| format!("writing {}", dest.display()))?;
+            let mut transaction = storage.transaction(storage.revision())?;
+            transaction.create_file(file.path.clone(), file.contents.as_bytes().to_vec())?;
+            transaction.commit()?;
         }
 
         println!("created JALS project `{name}` in {}", dir.display());
@@ -556,11 +615,10 @@ impl ProjectLintContext {
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
         // `type-mismatch` index) and the `[package] features`. An unreadable entry / failed download
         // is reported on stderr and skipped, never an error.
-        let inputs = jals_classpath::ProjectInputs::assemble_project_inputs(
+        let inputs = App::project_inputs(
             &manifest,
             root,
             jals_classpath::ProjectInputOptions::Analysis,
-            |message| eprintln!("warning: {message}"),
         );
         Self {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes),
@@ -584,7 +642,68 @@ impl ProjectLintContext {
 /// stateless namespace grouping these cross-command utilities.
 struct App;
 
+#[derive(Default)]
+struct HostProjectInputs {
+    dependency_jars: Vec<PathBuf>,
+    classpath_classes: Vec<jals_classfile::ClassFile>,
+    source_dep_sources: Vec<PathBuf>,
+    feature_set: FeatureSet,
+}
+
 impl App {
+    /// Lower host manifest locations once, then execute the portable classpath plan over one
+    /// immutable project revision and its verified native artifact cache.
+    fn project_inputs(
+        manifest: &Manifest,
+        root: &Path,
+        options: jals_classpath::ProjectInputOptions,
+    ) -> HostProjectInputs {
+        let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
+        let Ok(mut storage) = NativeStorage::for_project_scoped(root, scopes) else {
+            eprintln!("warning: project storage could not be opened");
+            return HostProjectInputs::default();
+        };
+        let (inputs, _source_roots) = jals_classpath::NativeProjectPlan::assemble_blocking(
+            manifest,
+            root,
+            &mut storage,
+            options,
+        );
+        for warning in &inputs.warnings {
+            eprintln!("warning: {}", warning.message);
+        }
+        let dependency_jars = inputs
+            .dependency_jars
+            .iter()
+            .map(|key| storage.artifacts().backend().artifact_path(key))
+            .collect();
+        let source_dep_sources = inputs
+            .source_dep_sources
+            .iter()
+            .filter_map(|source| match source {
+                jals_classpath::SourceFile::Project(key) => Some(key.path().to_host_path(root)),
+                jals_classpath::SourceFile::Artifact(source) => {
+                    match storage
+                        .artifacts()
+                        .materialize_source(&source.key, &source.path)
+                    {
+                        Ok(path) => Some(path),
+                        Err(error) => {
+                            eprintln!("warning: materializing git source failed: {error:?}");
+                            None
+                        }
+                    }
+                }
+            })
+            .collect();
+        HostProjectInputs {
+            dependency_jars,
+            classpath_classes: inputs.classpath_classes,
+            source_dep_sources,
+            feature_set: inputs.feature_set,
+        }
+    }
+
     /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
     /// returning the parsed manifest and the project root (the manifest's parent directory). A missing
     /// manifest is an error, unlike the formatter/linter configs.
@@ -632,7 +751,7 @@ impl App {
         manifest: &'a Manifest,
         project_root: &'a Path,
         sources: &'a [PathBuf],
-        inputs: &'a jals_classpath::ProjectInputs,
+        inputs: &'a HostProjectInputs,
     ) -> jals_build::CompileRequest<'a> {
         jals_build::CompileRequest {
             manifest,
@@ -666,7 +785,11 @@ impl App {
             for path in entries {
                 if path.is_dir() {
                     collect_dir(&path, out)?;
-                } else if path.extension().is_some_and(|ext| ext == "java") {
+                } else if path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("java"))
+                {
                     out.push(path);
                 }
             }
@@ -685,69 +808,54 @@ impl App {
         Ok(out)
     }
 
-    /// The UTF-8 form of `path`, as required by the `jals_fs::FileTree` config-loader API. Errors on
-    /// the rare non-UTF-8 host path rather than lossily converting.
-    fn path_str(path: &Path) -> Result<&str> {
-        path.to_str()
-            .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", path.display()))
+    /// Read and parse the single config file at `path` — no project snapshot is taken for it.
+    fn load_config<C: DiscoverableConfig>(path: &Path) -> Result<C> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("config filename is not valid UTF-8: {}", path.display()))?;
+        let key = FileKey::parse(name)
+            .map_err(|error| anyhow!("invalid config filename `{name}`: {error:?}"))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        C::from_text(&key, &text).map_err(Into::into)
     }
 }
 
-/// Resolves the config for a directory, either from an explicit `--config` (used for all
-/// files) or by discovering `jalsfmt.toml`, memoized per directory.
-struct Discovery {
-    explicit: Option<Config>,
-    cache: HashMap<PathBuf, Config>,
+/// Host-side memoized config discovery for one run: the explicit `--config` override answers
+/// every directory; otherwise the governing config root is found by walking `dir`'s ancestors on
+/// the host filesystem, and its file is read and parsed once per root.
+struct HostConfigs<C> {
+    explicit: Option<C>,
+    by_root: HashMap<PathBuf, C>,
 }
 
-impl Discovery {
-    fn new(explicit: Option<Config>) -> Self {
+impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
+    fn new(explicit: Option<C>) -> Self {
         Self {
             explicit,
-            cache: HashMap::new(),
+            by_root: HashMap::new(),
         }
     }
 
-    fn for_dir(&mut self, dir: &Path) -> Result<Config> {
-        if let Some(cfg) = &self.explicit {
-            return Ok(cfg.clone());
+    /// The config governing `dir`: the explicit override, the memoized config of the discovered
+    /// root, or the default when no ancestor carries `C::FILE_NAME`.
+    fn for_dir(&mut self, dir: &Path) -> Result<C> {
+        if let Some(config) = &self.explicit {
+            return Ok(config.clone());
         }
-        if let Some(cfg) = self.cache.get(dir) {
-            return Ok(cfg.clone());
+        let Some(root) = dir
+            .ancestors()
+            .find(|candidate| candidate.join(C::FILE_NAME).is_file())
+        else {
+            return Ok(C::default());
+        };
+        if let Some(config) = self.by_root.get(root) {
+            return Ok(config.clone());
         }
-        let cfg = Config::discover(&jals_fs::OsFileTree, App::path_str(dir)?)
+        let config: C = App::load_config(&root.join(C::FILE_NAME))
             .with_context(|| format!("discovering config from {}", dir.display()))?;
-        self.cache.insert(dir.to_path_buf(), cfg.clone());
-        Ok(cfg)
-    }
-}
-
-/// Resolves the lint config for a directory, mirroring [`Discovery`] for [`jals_lint::Config`]:
-/// either from an explicit `--config` (used for all files) or by discovering `jalslint.toml`,
-/// memoized per directory.
-struct LintDiscovery {
-    explicit: Option<LintConfig>,
-    cache: HashMap<PathBuf, LintConfig>,
-}
-
-impl LintDiscovery {
-    fn new(explicit: Option<LintConfig>) -> Self {
-        Self {
-            explicit,
-            cache: HashMap::new(),
-        }
-    }
-
-    fn for_dir(&mut self, dir: &Path) -> Result<LintConfig> {
-        if let Some(cfg) = &self.explicit {
-            return Ok(cfg.clone());
-        }
-        if let Some(cfg) = self.cache.get(dir) {
-            return Ok(cfg.clone());
-        }
-        let cfg = LintConfig::discover(&jals_fs::OsFileTree, App::path_str(dir)?)
-            .with_context(|| format!("discovering config from {}", dir.display()))?;
-        self.cache.insert(dir.to_path_buf(), cfg.clone());
-        Ok(cfg)
+        self.by_root.insert(root.to_path_buf(), config.clone());
+        Ok(config)
     }
 }

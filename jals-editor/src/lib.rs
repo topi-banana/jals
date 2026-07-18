@@ -6,11 +6,30 @@
 //! on an editor protocol or coordinate base. Protocol adapters are responsible for mapping
 //! [`Utf16Position`] to their own position types and applying any one-based coordinates.
 
+mod diagnostics;
+mod document;
+mod editor;
+mod folding;
+mod host;
+mod outline;
 mod queries;
+mod selection;
+mod semantic;
+mod workspace;
 
+pub use diagnostics::{DiagnosticSeverity, FileDiagnostic, FileDiagnostics};
+pub use document::Document;
+pub use editor::Editor;
+pub use folding::{Fold, FoldKind, Folds};
+pub use host::{EditorHost, FoldingHost, SelectionHost, SemanticTokensHost};
+pub use outline::{Outline, OutlineNode};
 pub use queries::{
-    Completion, CompletionKind, FileRange, Highlight, HighlightKind, ProjectQueries, QueryFile,
+    Completion, CompletionKind, FileRange, Highlight, HighlightKind, Ident, ProjectQueries,
+    QueryFile, SignatureHelpUtf16, SignatureUtf16,
 };
+pub use selection::SelectionChains;
+pub use semantic::{SemanticToken, SemanticTokenKind, SemanticTokens};
+pub use workspace::{ProjectLayout, SingleFileProject, Workspace};
 
 use alloc::{vec, vec::Vec};
 

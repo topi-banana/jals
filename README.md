@@ -32,7 +32,7 @@ manifest.
   plans commands as data and never touches the JDK itself until the CLI runs them.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-fs`, `jals-config`) are `no_std` and build for
+  `jals-decompile`, `jals-storage`, `jals-config`) are `no_std` and build for
   `wasm32-unknown-unknown`, and
   `jals-classpath`'s resolution core does too (host I/O sits behind a `native` feature) — so
   the browser playground runs the same analysis stack client-side.
@@ -52,7 +52,7 @@ manifest.
 | [`jals-decompile`](jals-decompile) | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode. |
 | [`jals-classpath`](jals-classpath) | Resolves and loads a project's classpath and `[dependencies]` (local/remote jars, bundled/nested jars, `git`/`path` source deps) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources. |
 | [`jals-config`](jals-config) | The pure data model, parsing, discovery, and validation for all three config files (`jals.toml`, `jalsfmt.toml`, `jalslint.toml`). |
-| [`jals-fs`](jals-fs) | A virtual filesystem trait (`FileTree`) the pure crates read config and sources through, with an in-memory implementation and a `std`-gated real-filesystem one. |
+| [`jals-storage`](jals-storage) | Deterministic, revisioned project storage. Portable code uses validated `FileKey`/`DirKey` values, immutable `CodeTree` snapshots, transactions, overlays, and a SHA-256 verified artifact cache; memory and `std`-gated native adapters implement the same sealed contract. |
 | [`jals-build`](jals-build) | A Cargo-style build orchestrator: it parses a `jals.toml` manifest and turns it into `javac`/`java` command plans, clean paths, and project scaffolding — all as pure data, with no `jals-syntax` dependency and no I/O. Backs `jals build`/`run`/`clean`/`init`. |
 | [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only. |
 | [`jals-cli`](jals-cli) | The `jals` command-line binary. |
@@ -64,19 +64,19 @@ fidelity against real-world Java) and `xtask` (the `cargo xtask codegen` AST gen
 
 ```
 jals/
-├── jals-editor/      # editor queries + byte/UTF-16 coordinates (wasm-compatible)
-├── jals-syntax/      # lexer + CST parser + typed AST      (wasm-compatible)
-├── jals-fmt/         # formatter (CST -> Doc IR -> text)   (wasm-compatible)
-├── jals-lint/        # linter (rules over CST + jals-hir)  (wasm-compatible)
-├── jals-hir/         # name resolution + type inference    (wasm-compatible)
-├── jals-classfile/   # JVM .class read/write model         (wasm-compatible)
-├── jals-decompile/   # .class -> readable Java             (wasm-compatible)
-├── jals-classpath/   # classpath + dependency resolution   (wasm-compatible core)
-├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (wasm-compatible)
-├── jals-fs/          # virtual filesystem abstraction       (wasm-compatible)
-├── jals-build/       # Cargo-style javac/java build planner (wasm-compatible)
-├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)
-├── jals-cli/         # `jals` binary
+├── jals-editor/      # editor queries + byte/UTF-16 coordinates (no_std, wasm-compatible)
+├── jals-syntax/      # lexer + CST parser + typed AST           (no_std, wasm-compatible)
+├── jals-fmt/         # formatter (CST -> Doc IR -> text)        (no_std, wasm-compatible)
+├── jals-lint/        # linter (rules over CST + jals-hir)       (no_std, wasm-compatible)
+├── jals-hir/         # name resolution + type inference         (no_std, wasm-compatible)
+├── jals-classfile/   # JVM .class read/write model              (no_std, wasm-compatible)
+├── jals-decompile/   # .class -> readable Java                  (no_std, wasm-compatible)
+├── jals-classpath/   # classpath + dependency resolution        (no_std + wasm-compatible core)
+├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (no_std, wasm-compatible)
+├── jals-storage/     # revisioned project storage               (no_std, wasm-compatible)
+├── jals-build/       # Cargo-style javac/java build planner     (no_std + wasm-compatible core)
+├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)       (std, host-only)
+├── jals-cli/         # `jals` binary                            (std)
 ├── jals-playground/  # browser playground (Yew + Trunk -> wasm)
 ├── jals-tests/       # corpus test harnesses (dev-only)
 └── xtask/            # codegen automation (dev-only)
@@ -381,7 +381,7 @@ ast-grep scan --error                                         # structural lints
 # wasm: the pure `no_std` crate set (built as one package set so their `std` features stay off) …
 cargo build --release --target wasm32-unknown-unknown \
   -p jals-editor -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
-  -p jals-fmt -p jals-lint -p jals-fs -p jals-config
+  -p jals-fmt -p jals-lint -p jals-storage -p jals-config
 # … plus jals-classpath's wasm-compatible core (host I/O is behind its default `native` feature)
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 ```
@@ -410,7 +410,7 @@ for any change to the syntax or formatting layers:
 - The formatter preserves the significant-token sequence, never drops or reorders comments,
   and is idempotent.
 - `jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-fs`, and `jals-config` build for `wasm32-unknown-unknown` as
+  `jals-decompile`, `jals-storage`, and `jals-config` build for `wasm32-unknown-unknown` as
   `no_std` crates;
   `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`).
 

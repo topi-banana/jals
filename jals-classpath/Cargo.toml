@@ -4,27 +4,33 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# `native` unlocks the host I/O: a blocking `reqwest` downloader, a subprocess `git`, and the
-# `OsFileTree` + `PathBuf`-based facades (the crate's historic public API). On by default so
-# `jals-cli`/`jals-lsp` build unchanged; the wasm playground turns it off (`default-features = false`)
-# and supplies its own `Fetcher` + `InMemoryFileTree`. Off, the crate is std-but-`wasm32`-compatible.
+# Archive decoding is the only core operation which needs `std` (`zip`'s `Read + Seek` contract).
+# Native adds the HTTP adapter; project and cache access remains entirely in `jals-storage`.
 default = ["native"]
-native = ["dep:reqwest", "dep:futures", "jals-fs/std"]
+archive = ["dep:zip"]
+native = [
+  "archive",
+  "dep:reqwest",
+  "dep:tempfile",
+  "dep:futures",
+  "jals-storage/std",
+]
 
 [dependencies]
-jals-build.workspace = true
 jals-classfile.workspace = true
 jals-config.workspace = true
 jals-decompile.workspace = true
-jals-fs.workspace = true
-zip.workspace = true
-# Host-only, behind `native`: the blocking downloader and its `block_on` driver. Kept out of the
-# `wasm32` (no-`native`) build, which uses an injected `Fetcher` instead.
+jals-storage.workspace = true
+zip = { workspace = true, optional = true }
+# Host-only blocking HTTP adapter. Kept out of the no-`native` build, which injects a `Fetcher`.
 reqwest = { workspace = true, optional = true }
+tempfile = { version = "3", optional = true }
+# Drives the async assembly to completion on the host thread (`assemble_blocking`).
 futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 jals-syntax.workspace = true
+futures.workspace = true
 tempfile = "3"
 
 [lints]

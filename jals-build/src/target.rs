@@ -10,8 +10,11 @@
 //! this function (an explicit class bypasses all manifest-based selection), so it is not an input
 //! here.
 
-use std::error::Error;
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use jals_config::Manifest;
 

@@ -1,12 +1,12 @@
-//! The three `FileId` id-spaces a [`Workspace`](crate::state::Workspace) addresses.
+//! The three `FileId` id-spaces a [`Workspace`](super::Workspace) addresses.
 //!
 //! A [`jals_hir::FileId`] is opaque to `jals-hir` (the host assigns it; the index only compares and
-//! stores it), so `jals-lsp` partitions the single `u32` address space into three disjoint regions —
-//! the project's own `.java`, a `-sources.jar` overlay, and a `git`/`path` source dependency. That
-//! partition is an invariant nothing in the raw `u32` enforces; [`WorkspaceFileId`] makes it a type:
-//! [`from_raw`](WorkspaceFileId::from_raw) / [`to_raw`](WorkspaceFileId::to_raw) are the *only* place
-//! the bit-ranges live, so allocation is a constructor and routing
-//! ([`ws_file`](crate::state::Workspace::ws_file)) is one exhaustive match.
+//! stores it), so the workspace partitions the single `u32` address space into three disjoint
+//! regions — the project's own `.java`, a `-sources.jar` overlay, and a `git`/`path` source
+//! dependency. That partition is an invariant nothing in the raw `u32` enforces;
+//! [`WorkspaceFileId`] makes it a type: [`from_raw`](WorkspaceFileId::from_raw) /
+//! [`to_raw`](WorkspaceFileId::to_raw) are the *only* place the bit-ranges live, so allocation is
+//! a constructor and routing ([`ws_file`](super::Workspace::ws_file)) is one exhaustive match.
 
 use jals_hir::FileId;
 
@@ -62,6 +62,13 @@ impl WorkspaceFileId {
             Self::Library(i) => FileId(LIBRARY_FILE_BASE + i),
             Self::SourceDep(i) => FileId(SOURCE_DEP_FILE_BASE + i),
         }
+    }
+
+    /// The raw id of the `index`-th file of `space`. A within-space index is bounded by the set
+    /// of files on disk — nowhere near 2³⁰ — so the narrowing saturates only defensively.
+    #[inline]
+    pub(crate) fn of_index(space: fn(u32) -> Self, index: usize) -> FileId {
+        space(u32::try_from(index).unwrap_or(u32::MAX)).to_raw()
     }
 }
 

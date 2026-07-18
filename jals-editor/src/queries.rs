@@ -157,6 +157,45 @@ impl<'a> ProjectQueries<'a> {
         (!matches!(ty, Ty::Unknown)).then(|| ty.clone())
     }
 
+    /// The [`hover`](Self::hover) type rendered as the Markdown both hosts show — a fenced
+    /// ` ```java ` block.
+    pub fn hover_markdown(&self, offset: usize) -> Option<String> {
+        let ty = self.hover(offset)?;
+        Some(alloc::format!("```java\n{ty}\n```"))
+    }
+
+    /// The byte range of the identifier under `offset` when it names a symbol that may be renamed
+    /// soundly, else `None` (an external name, a keyword/literal, or a withheld member).
+    ///
+    /// A file-local binding qualifies by kind ([`Ident::is_renamable_kind`] — locals and project
+    /// types yes, members no); a cross-file *use* of a project type (one the file-local pass left
+    /// unresolved) qualifies too, since the host rewrites it project-wide. A use that resolves to
+    /// anything *outside* the project's own sources — a stdlib stub, a classpath `.class` type,
+    /// or a `git`/`path` library-source type — does not qualify: those have no host-editable
+    /// project file. Mirrors what [`references`](Self::references) actually rewrites, so a
+    /// renamable symbol always has a complete, in-project occurrence set.
+    pub fn renamable_range(&self, offset: usize) -> Option<Range<usize>> {
+        let ident = self.ident_at(offset)?;
+        let anchor = usize::from(ident.text_range().start());
+        let renamable = self.current.resolved.symbol_at(anchor).map_or_else(
+            || {
+                self.current
+                    .resolved
+                    .reference_at(anchor)
+                    .is_some_and(|reference| {
+                        reference.namespace == Namespace::Type
+                            && matches!(
+                                self.index.resolve_reference(self.current.file, reference),
+                                TypeResolution::Project(id)
+                                    if self.index.item(id).origin.is_host_editable()
+                            )
+                    })
+            },
+            |id| Ident::is_renamable_kind(self.current.resolved.def(id).kind),
+        );
+        renamable.then(|| Self::text_range(ident.text_range()))
+    }
+
     /// Member completions after `.`, otherwise scope completions followed by Java keywords.
     pub fn completions(&self, offset: usize) -> Vec<Completion> {
         let at_member_access = ProjectIndex::at_member_access(&self.current.syntax, offset);
@@ -365,6 +404,100 @@ impl<'a> ProjectQueries<'a> {
     /// A `text_size::TextRange` as a plain byte `Range<usize>`.
     fn text_range(range: text_size::TextRange) -> Range<usize> {
         usize::from(range.start())..usize::from(range.end())
+    }
+}
+
+/// One signature of [`SignatureHelpUtf16`]: its rendered label and, per parameter, the
+/// `(start, end)` UTF-16 code-unit offsets of that parameter's span within the label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignatureUtf16 {
+    pub label: String,
+    pub parameters: Vec<(u32, u32)>,
+}
+
+/// Signature help with its parameter spans already converted to UTF-16 code units — the offset
+/// base every editor protocol (LSP, Monaco) counts labels in, so the conversion lives here once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignatureHelpUtf16 {
+    pub signatures: Vec<SignatureUtf16>,
+    pub active_signature: u32,
+    pub active_parameter: u32,
+}
+
+impl SignatureHelpUtf16 {
+    /// Convert `jals-hir`'s byte-offset signature help into UTF-16 label offsets.
+    pub fn of(help: &jals_hir::SignatureHelp) -> Self {
+        /// The number of UTF-16 code units in `s` (a label is nowhere near 2³² units).
+        fn utf16_len(s: &str) -> u32 {
+            u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)
+        }
+        let signatures = help
+            .signatures
+            .iter()
+            .map(|sig| SignatureUtf16 {
+                label: sig.label.clone(),
+                parameters: sig
+                    .parameters
+                    .iter()
+                    .map(|range| {
+                        (
+                            utf16_len(&sig.label[..range.start]),
+                            utf16_len(&sig.label[..range.end]),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self {
+            signatures,
+            active_signature: u32::try_from(help.active_signature).unwrap_or(u32::MAX),
+            active_parameter: u32::try_from(help.active_parameter).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+/// Identifier policies shared by rename in every host.
+pub struct Ident;
+
+impl Ident {
+    /// Whether `name` is a single legal Java identifier: it tokenizes to exactly one `IDENT`
+    /// token spanning the whole string. A reserved word lexes to its keyword kind (`int` →
+    /// `INT_KW`), and anything with whitespace, punctuation, or a leading digit yields a
+    /// non-`IDENT` token or more than one token — all rejected. (A context-sensitive keyword such
+    /// as `var` lexes as `IDENT` and is accepted; its use is position-restricted, which a rename
+    /// does not police.)
+    pub fn is_valid_java_identifier(name: &str) -> bool {
+        let mut tokens = jals_syntax::Lexer::tokenize(name).into_iter();
+        matches!(
+            (tokens.next(), tokens.next()),
+            (Some(token), None) if token.kind == SyntaxKind::IDENT && token.text == name
+        )
+    }
+
+    /// Whether a binding of this kind may be renamed from a single file's resolution alone.
+    /// Locals and other file-scoped bindings always qualify; project types do too (a host widens
+    /// their rewrite project-wide). Members are withheld — their uses can span files a rename
+    /// does not rewrite.
+    pub const fn is_renamable_kind(kind: DefKind) -> bool {
+        use DefKind::{
+            AnnotationType, CatchParam, Class, Enum, Interface, LambdaParam, Local, Param,
+            PatternVar, Record, Resource, TypeParam,
+        };
+        matches!(
+            kind,
+            Local
+                | Param
+                | LambdaParam
+                | TypeParam
+                | CatchParam
+                | Resource
+                | PatternVar
+                | Class
+                | Interface
+                | Enum
+                | Record
+                | AnnotationType
+        )
     }
 }
 

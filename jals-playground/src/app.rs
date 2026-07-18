@@ -16,16 +16,16 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use jals_config::fmt::Config;
-use jals_config::{Dependency, FeatureSet, ManifestParseError, Severity};
-use jals_fs::InMemoryFileTree;
+use jals_config::{Dependency, FeatureSet, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
+use jals_storage::{ArtifactCache, MemoryCache, MemoryStorage};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
 use crate::components::{EditorPane, FileTree, Header, SyntaxPane, TreeEntry};
 use crate::fetcher::BrowserFetcher;
-use crate::line_index::LineIndex;
+use crate::host::MonacoRange;
 use crate::workspace::Workspace;
 use crate::{monaco, providers};
 
@@ -156,7 +156,17 @@ pub enum Msg {
     SetProxy(String),
     /// The async dependency resolution finished: the lowered classpath + the resolved feature set
     /// (from `[package] features`) + a status line, or an error.
-    ClasspathResolved(Result<(LoweredClasspath, FeatureSet, String), String>),
+    ClasspathResolved(
+        Result<
+            (
+                LoweredClasspath,
+                FeatureSet,
+                String,
+                ArtifactCache<MemoryCache>,
+            ),
+            String,
+        >,
+    ),
 }
 
 /// The playground's root component. Owns every piece of state; the children are presentational.
@@ -171,18 +181,8 @@ pub struct App {
     config: Rc<RefCell<Config>>,
     /// The most recent syntax-tree dump shown in the right pane, if any.
     syntax_dump: Option<String>,
-    /// The in-memory dependency cache — the browser's equivalent of `target/jals/deps`. Downloaded
-    /// jars are written here and reused across resolves (skip-if-exists), shared behind an
-    /// `Rc<RefCell<…>>` so the async resolve task can snapshot and repopulate it without holding a
-    /// borrow across an `.await`.
-    deps_cache: Rc<RefCell<InMemoryFileTree>>,
     /// The last dependency-resolution status line shown in the [`Header`], if any.
     deps_status: Option<String>,
-    /// The project's resolved language feature set from the last resolved `jals.toml`'s
-    /// `[package] features`, threaded into the lint [`Config`] so the feature-gated rules
-    /// (`compact-source-file`, `module-import`) fire in the browser. Empty until a manifest
-    /// declaring features resolves.
-    feature_set: FeatureSet,
     /// The `jals.toml` editor buffer. Held here (not in the workspace's Java file tree) so it is
     /// never analysed/indexed; its `[dependencies]` are re-resolved on edit.
     manifest_src: String,
@@ -204,13 +204,12 @@ impl App {
     /// workspace already maps each range to Monaco's UTF-16 coordinates, so this only marshals
     /// through [`monaco::Marker::set_diagnostics`].
     fn refresh_markers(&self) {
-        // Fold the resolved `[package] features` into the lint config so the feature-gated rules
-        // (`compact-source-file`, `module-import`) fire; every other key stays at its default.
-        let config = jals_config::lint::Config {
-            features: self.feature_set,
-            ..Default::default()
-        };
-        let diags = self.workspace.borrow().analyze_active(&config);
+        // The editor core owns the project's resolved `[package] features` (set on classpath
+        // resolve) and folds them into every diagnostics run, so a default config is enough.
+        let diags = self
+            .workspace
+            .borrow()
+            .analyze_active(&jals_config::lint::Config::default());
         monaco::Marker::set_diagnostics(diags.iter().map(|d| monaco::Marker {
             start_line: d.range.start_line,
             start_col: d.range.start_col,
@@ -241,7 +240,7 @@ impl App {
                 self.apply_fmt(&value);
                 self.fmt_src = value;
             }
-            None => self.workspace.borrow_mut().edit_active(&value),
+            None => self.workspace.borrow_mut().sync_active(&value),
         }
     }
 
@@ -278,15 +277,20 @@ impl App {
             let range = span.clone().unwrap_or_else(|| 0..first_line_len(text));
             // Built only when there is an error to place — a clean parse (the common keystroke) skips
             // the whole-buffer scan.
-            let index = LineIndex::new(text);
-            let (start_line, start_col, end_line, end_col) = index.to_monaco(text, &range);
+            let index = jals_editor::LineIndex::new(text);
+            let MonacoRange {
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+            } = MonacoRange::of(&index, text, &range);
             monaco::Marker {
                 start_line,
                 start_col,
                 end_line,
                 end_col,
                 message: message.as_str(),
-                severity: Severity::Error,
+                severity: jals_editor::DiagnosticSeverity::Error,
             }
         });
         // `Option<Marker>` is an iterator of zero or one marker; either paints the error or clears.
@@ -334,11 +338,11 @@ impl App {
         }
         self.last_resolve_key = Some((manifest.dependencies.clone(), self.proxy.clone()));
         self.deps_status = Some("resolving…".to_string());
-        let cache = self.deps_cache.clone();
+        let storage = self.workspace.borrow().storage_snapshot();
         let proxy = self.proxy.clone();
         let link = ctx.link().clone();
         spawn_local(async move {
-            let result = Self::resolve_classpath(manifest, proxy, cache).await;
+            let result = Self::resolve_classpath(manifest, proxy, storage).await;
             link.send_message(Msg::ClasspathResolved(result));
         });
         true
@@ -371,11 +375,8 @@ impl App {
     /// Append the children of directory `dir` (each at indentation `depth`) to `out`, recursing
     /// into subdirectories so the whole tree is flattened in pre-order.
     fn collect_entries(&self, dir: &str, depth: usize, out: &mut Vec<TreeEntry>) {
-        for path in self.workspace.borrow().read_dir(dir) {
-            let name = jals_fs::path::VPath::file_name(&path)
-                .map(str::to_string)
-                .unwrap_or_else(|| path.clone());
-            let is_dir = self.workspace.borrow().is_dir(&path);
+        for (path, is_dir) in self.workspace.borrow().read_dir(dir) {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
             out.push(TreeEntry {
                 path: path.clone(),
                 name,
@@ -394,46 +395,70 @@ impl App {
     /// resolved feature set from `[package] features` (for the feature-gated lint rules), and a
     /// human-readable status line (class/jar counts plus any warnings), or an error message.
     ///
-    /// The whole resolution runs against a *snapshot clone* of `cache` so no `RefCell` borrow is held
-    /// across an `.await`; the populated snapshot is written back afterwards, so a re-resolve reuses
-    /// the already-downloaded jars (skip-if-exists) — the browser's `target/jals/deps`.
+    /// The whole resolution runs against a detached storage snapshot so no `RefCell` borrow is held
+    /// across an `.await`; only its verified artifact cache is merged back afterwards.
     async fn resolve_classpath(
         manifest: jals_config::Manifest,
         proxy: String,
-        cache: Rc<RefCell<InMemoryFileTree>>,
-    ) -> Result<(LoweredClasspath, FeatureSet, String), String> {
+        mut storage: MemoryStorage,
+    ) -> Result<
+        (
+            LoweredClasspath,
+            FeatureSet,
+            String,
+            ArtifactCache<MemoryCache>,
+        ),
+        String,
+    > {
         let fetcher = BrowserFetcher::new(proxy);
-        let mut snapshot = cache.borrow().clone();
+        let mut plan = jals_classpath::ProjectInputPlan {
+            feature_set: manifest.feature_set(),
+            ..jals_classpath::ProjectInputPlan::default()
+        };
+        // The browser has no project filesystem: every jar locator is external, fetched through
+        // the proxy. The lowering itself is the one shared with the native host.
         let mut warnings = Vec::new();
-        // A synthetic `/` root: remote (`https://`) jars ignore it; local `file://`/`path` jars are
-        // not reachable in the browser anyway. No `Git` capability (browser), and analysis-only
-        // options — jars → classpath; sources jars, `git`/`path` source deps, and skeletons are
-        // host-only features.
-        let inputs = jals_classpath::ProjectInputsIn::assemble_project_inputs_in(
-            &fetcher,
-            None,
-            &mut snapshot,
+        plan.add_jar_dependencies(
             &manifest,
-            "/",
+            |locator| jals_classpath::DependencyLocation::External {
+                locator: jals_classpath::ExternalLocator::new(locator),
+                expected: None,
+            },
+            &mut warnings,
+        );
+        let mut inputs = jals_classpath::ProjectInputs::assemble(
+            &fetcher,
+            &mut storage,
+            &plan,
             jals_classpath::ProjectInputOptions::Analysis,
-            |message| warnings.push(message),
         )
         .await;
-        *cache.borrow_mut() = snapshot;
+        warnings.append(&mut inputs.warnings);
+        inputs.warnings = warnings;
         let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes);
         let mut status = format!(
             "resolved {} class(es) from {} jar(s)",
             inputs.classpath_classes.len(),
             inputs.dependency_jars.len()
         );
-        if !warnings.is_empty() {
+        if !inputs.warnings.is_empty() {
             status.push_str(&format!(
                 " — {} warning(s): {}",
-                warnings.len(),
-                warnings.join("; ")
+                inputs.warnings.len(),
+                inputs
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
-        Ok((classpath, inputs.feature_set, status))
+        Ok((
+            classpath,
+            inputs.feature_set,
+            status,
+            storage.into_artifacts(),
+        ))
     }
 }
 
@@ -446,9 +471,7 @@ impl Component for App {
             workspace: Rc::new(RefCell::new(Workspace::new())),
             config: Rc::new(RefCell::new(Config::default())),
             syntax_dump: None,
-            deps_cache: Rc::new(RefCell::new(InMemoryFileTree::new())),
             deps_status: None,
-            feature_set: FeatureSet::default(),
             manifest_src: ConfigKind::Manifest.seed().to_string(),
             fmt_src: ConfigKind::Fmt.seed().to_string(),
             active_config: None,
@@ -512,7 +535,7 @@ impl Component for App {
                     .format_active(&self.config.borrow())
                     .formatted;
                 monaco::update_model(&formatted);
-                self.workspace.borrow_mut().edit_active(&formatted);
+                self.workspace.borrow_mut().sync_active(&formatted);
                 let rerender = self.refresh_syntax_if_shown();
                 self.refresh_markers();
                 rerender
@@ -558,9 +581,15 @@ impl Component for App {
             }
             Msg::ClasspathResolved(result) => {
                 match result {
-                    Ok((classpath, feature_set, status)) => {
-                        self.workspace.borrow_mut().set_classpath(Some(classpath));
-                        self.feature_set = feature_set;
+                    Ok((classpath, feature_set, status, artifacts)) => {
+                        {
+                            // Both settle in the editor core: the classpath rebuilds the index and
+                            // the feature set folds into every later diagnostics run.
+                            let mut workspace = self.workspace.borrow_mut();
+                            workspace.set_classpath(Some(classpath));
+                            workspace.set_feature_set(feature_set);
+                            workspace.replace_artifacts(artifacts);
+                        }
                         self.deps_status = Some(status);
                         // Re-analyse the active file with the external types now in the index — but
                         // only when a Java file is showing, so we never paint Java markers on a

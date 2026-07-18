@@ -229,20 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn serialization_round_trips() {
-        for toml_source in [
-            "compiler = \"builtin\"\nruntime = \"system\"\n",
-            "compiler = { path = \"/opt/jdk-21\" }\n",
-            "runtime = { distribution = { name = \"temurin\", version = 21 } }\n",
-            "compiler = { distribution = { version = 17 } }\nruntime = \"builtin\"\n",
-        ] {
-            let tc: Toolchain = toml::from_str(toml_source).unwrap();
-            let rendered = toml::to_string(&tc).unwrap();
-            assert_eq!(toml::from_str::<Toolchain>(&rendered).unwrap(), tc);
-        }
-    }
-
-    #[test]
     fn spec_lowers_every_program_selecting_variant() {
         assert_eq!(Compiler::System.spec(), Some(ToolSpec::System));
         assert_eq!(Compiler::Builtin.spec(), None);

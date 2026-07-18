@@ -1,0 +1,18 @@
+id: no-portable-host-path
+
+valid:
+  - |
+      use jals_storage::{DirKey, FileKey};
+
+  - |
+      use std::io::Read;
+
+invalid:
+  - |
+      use std::path::Path;
+
+  - |
+      use std::fs;
+
+  - |
+      struct Input { root: PathBuf }

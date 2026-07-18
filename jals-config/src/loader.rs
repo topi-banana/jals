@@ -7,27 +7,24 @@
 //! `Default` for `discover`'s "no file found" branch), so a future config language server can drive
 //! them for any schema.
 
-use alloc::borrow::ToOwned;
-use alloc::string::String;
-
-use jals_fs::FileTree;
+use jals_storage::{DirKey, FileKey, Name, ProjectView};
 use serde::Deserialize;
 
-/// An error loading or parsing a config file. `no_std`: it holds a rendered path `String` and wraps
-/// [`jals_fs::FsError`] (the read failure) or [`toml::de::Error`] (the parse failure).
+/// An error loading or parsing a config file. It carries a typed [`FileKey`] and wraps either a
+/// [`jals_storage::Error`] or [`toml::de::Error`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     /// The file could not be read.
     Io {
         /// The path that failed to read.
-        path: String,
+        path: FileKey,
         /// The underlying filesystem error.
-        source: jals_fs::FsError,
+        source: jals_storage::Error,
     },
     /// The file contained invalid TOML.
     Parse {
         /// The path that failed to parse.
-        path: String,
+        path: FileKey,
         /// The underlying parse error.
         source: toml::de::Error,
     },
@@ -55,30 +52,35 @@ impl core::error::Error for ConfigError {
     }
 }
 
-/// A config model that is loaded from — and discovered upward through — a [`FileTree`] by its
+/// A config model loaded from and discovered upward through one immutable project revision by its
 /// well-known file name.
 ///
 /// Implementors only name their file ([`FILE_NAME`](Self::FILE_NAME)); `load` / `discover` are
-/// provided. The config structs keep inherent `from_file` / `discover` wrappers with the same
-/// signatures, so consumers do not need this trait in scope.
+/// provided.
 pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
     /// The file name this config is discovered by (e.g. `jalsfmt.toml`).
     const FILE_NAME: &'static str;
 
-    /// Load and parse the config file at `path`, read through `fs`.
-    ///
-    /// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
-    /// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
+    /// Load and parse the typed config file from `view`.
     ///
     /// # Errors
     /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    fn load(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
-        let text = fs.read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_owned(),
+    fn load(view: &ProjectView, path: &FileKey) -> Result<Self, ConfigError> {
+        let text = view.file_text(path).map_err(|source| ConfigError::Io {
+            path: path.clone(),
             source,
         })?;
-        toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_owned(),
+        Self::from_text(path, text)
+    }
+
+    /// Parse the typed config from already-read file text. Host adapters that read a config file
+    /// directly (the CLI and LSP discovery walks) share the parse and error shape through this.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Parse`] when the text is not this config's valid TOML.
+    fn from_text(path: &FileKey, text: &str) -> Result<Self, ConfigError> {
+        toml::from_str(text).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
             source,
         })
     }
@@ -90,18 +92,60 @@ pub trait DiscoverableConfig: Sized + for<'de> Deserialize<'de> {
     ///
     /// # Errors
     /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError>
+    fn discover(view: &ProjectView, start_dir: &DirKey) -> Result<Self, ConfigError>
     where
         Self: Default,
     {
-        let mut dir = Some(start_dir);
-        while let Some(d) = dir {
-            let candidate = jals_fs::path::VPath::join(d, Self::FILE_NAME);
-            if fs.is_file(&candidate) {
-                return Self::load(fs, &candidate);
+        let name = Name::new(Self::FILE_NAME).expect("config file constants are valid names");
+        for dir in start_dir.ancestors() {
+            let candidate = dir.file(name.clone());
+            if view.tree().file(&candidate).is_some() {
+                return Self::load(view, &candidate);
             }
-            dir = jals_fs::path::VPath::parent(d);
         }
         Ok(Self::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
+
+    use super::*;
+    use crate::fmt::Config;
+
+    fn storage(files: &[(&str, &str)]) -> MemoryStorage {
+        let entries = files.iter().map(|(path, text)| {
+            Entry::File(FileKey::parse(path).unwrap(), text.as_bytes().to_vec())
+        });
+        MemoryStorage::memory(CodeTree::new(entries).unwrap())
+    }
+
+    #[test]
+    fn discover_walks_upward_and_defaults_without_a_file() {
+        let fs = storage(&[
+            ("p/jalsfmt.toml", "indent-width = 7"),
+            ("q/A.java", "class A {}"),
+        ]);
+        assert_eq!(
+            Config::discover(&fs.view(), &DirKey::parse("p/src/deep").unwrap())
+                .unwrap()
+                .indent_width,
+            7
+        );
+        assert_eq!(
+            Config::discover(&fs.view(), &DirKey::parse("q").unwrap()).unwrap(),
+            Config::default(),
+            "no config anywhere upward falls back to the default"
+        );
+    }
+
+    #[test]
+    fn discover_propagates_a_parse_error() {
+        let fs = storage(&[("p/jalsfmt.toml", "indent-width = ")]);
+        assert!(matches!(
+            Config::discover(&fs.view(), &DirKey::parse("p").unwrap()),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 }

@@ -5,22 +5,23 @@ edition.workspace = true
 
 [features]
 # On by default: the host `SubprocessToolchain` (JDK discovery + `javac`/`java` spawning) and the
-# `<dyn Toolchain>::select` backend factory (which needs `OsFileTree`, hence `jals-fs/std`) in
-# `native.rs`. Everything else — the `Manifest` model, `Invocation` planner, the pure
-# `Toolchain`/`ToolResolver` seam, and the `BuiltinToolchain` dummy backend (I/O through the
-# `FileTree` abstraction) — stays filesystem/process-free, so `--no-default-features` builds a
+# `<dyn Toolchain>::select` backend factory and native project-storage adapter in `native.rs`.
+# Portable target/scaffold planning stays filesystem/process-free, so `--no-default-features` builds a
 # `wasm32`-compatible core a future in-browser compiler can implement.
 default = ["native"]
-native = ["jals-fs/std"]
+native = ["jals-storage/std"]
 
 [dependencies]
 # The pure `jals.toml` model (`Manifest` and friends) lives in `jals-config`; `jals-build` adds the
 # host-only `std::path`-based resolution (`ManifestExt`) on top. `toml` remains for `ManifestError`'s
-# `toml::de::Error` field type. `jals-fs` is the `FileTree` abstraction the `BuiltinToolchain`
-# copies through (the `std`/`OsFileTree` half only under `native`).
+# `toml::de::Error` field type. `jals-storage` supplies typed project keys, revisions, and the
+# memory/native aggregate used by the builtin backend.
 jals-config.workspace = true
-jals-fs.workspace = true
+jals-storage.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

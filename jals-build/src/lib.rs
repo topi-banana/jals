@@ -21,32 +21,41 @@
 //! that match a manifest's `[toolchain]` enums to the right boxed backend, one per step. The pure
 //! core (the [`Compiler`] / [`Runtime`] traits plus the [`CompileRequest`] / [`RunRequest`] inputs,
 //! the filesystem-free [`ToolResolver`] policy, and the [`BuiltinToolchain`] in-process backend
-//! implementing both traits — today a dummy that copies sources through a `jals_fs::FileTree`
+//! implementing both traits — today a dummy that copies sources through [`jals_storage::ProjectStorage`]
 //! instead of compiling, the seam a real embedded compiler fills) is what a future wasm compiler
 //! would implement instead; build the crate with `--no-default-features` for that `wasm32`-only
 //! core.
 
+#![cfg_attr(not(feature = "native"), no_std)]
+#[cfg(feature = "native")]
 mod builtin;
 mod clean;
 mod init;
+#[cfg(feature = "native")]
 mod invocation;
+#[cfg(feature = "native")]
 mod manifest_ext;
+#[cfg(feature = "native")]
 mod request;
 mod target;
+#[cfg(feature = "native")]
 mod toolchain;
 
 #[cfg(feature = "native")]
 mod native;
 
+#[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
 pub use init::{InitOptions, ScaffoldFile};
+#[cfg(feature = "native")]
 pub use invocation::Invocation;
-pub use manifest_ext::{
-    DependencySource, GitSource, ManifestError, ManifestExt, PathSource, SourceDependency,
-};
+#[cfg(feature = "native")]
+pub use manifest_ext::{ManifestError, ManifestExt};
+#[cfg(feature = "native")]
 pub use request::{CompileRequest, RunRequest};
 pub use target::{ResolveTargetError, RunTarget};
+#[cfg(feature = "native")]
 pub use toolchain::{
     BuildOutcome, Candidates, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
 };

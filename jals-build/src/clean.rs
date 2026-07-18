@@ -5,9 +5,10 @@
 //! this crate it is pure: it computes paths but never touches the filesystem. `jals-cli` owns the
 //! removal, which keeps this logic deterministic, unit-testable, and `wasm32`-compatible.
 
-use std::path::{Path, PathBuf};
-
+use alloc::vec;
+use alloc::vec::Vec;
 use jals_config::Manifest;
+use jals_storage::DirKey;
 
 /// Namespace for resolving the build artifacts that `jals clean` removes.
 pub struct CleanTargets;
@@ -21,8 +22,8 @@ impl CleanTargets {
     /// room for future artifacts (a packaged jar, a dependency cache) without changing the signature.
     /// The result may include paths that do not exist; the caller skips those rather than treating a
     /// never-built project as an error.
-    pub fn paths(manifest: &Manifest, project_root: &Path) -> Vec<PathBuf> {
-        vec![project_root.join(&manifest.build.classes_dir)]
+    pub fn keys(manifest: &Manifest) -> Result<Vec<DirKey>, jals_storage::PathError> {
+        Ok(vec![DirKey::parse(&manifest.build.classes_dir)?])
     }
 }
 
@@ -30,20 +31,18 @@ impl CleanTargets {
 mod tests {
     use super::*;
 
-    const ROOT: &str = "/proj";
-
     #[test]
     fn removes_the_classes_dir() {
         let m = Manifest::default();
-        let paths = CleanTargets::paths(&m, Path::new(ROOT));
-        assert_eq!(paths, vec![PathBuf::from("/proj/target/classes")]);
+        let paths = CleanTargets::keys(&m).unwrap();
+        assert_eq!(paths, vec![DirKey::parse("target/classes").unwrap()]);
     }
 
     #[test]
     fn honors_a_custom_classes_dir() {
         let mut m = Manifest::default();
         m.build.classes_dir = "out".to_owned();
-        let paths = CleanTargets::paths(&m, Path::new(ROOT));
-        assert_eq!(paths, vec![PathBuf::from("/proj/out")]);
+        let paths = CleanTargets::keys(&m).unwrap();
+        assert_eq!(paths, vec![DirKey::parse("out").unwrap()]);
     }
 }

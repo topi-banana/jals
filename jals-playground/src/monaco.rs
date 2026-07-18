@@ -5,8 +5,7 @@
 //! wires the editor, while the root [`crate::app::App`] orchestrates content operations —
 //! switching files, applying a format, repainting diagnostics — through these functions.
 
-use jals_config::Severity;
-use jals_editor::CompletionKind;
+use jals_editor::{CompletionKind, DiagnosticSeverity};
 use jals_hir::DefKind;
 use wasm_bindgen::prelude::*;
 
@@ -200,7 +199,7 @@ impl DefKindExt for DefKind {
 pub const COMPLETION_KIND_KEYWORD: u32 = 17;
 
 /// One diagnostic marker in Monaco coordinates — one-based line/column, UTF-16, ready to display.
-/// The caller maps its byte-offset diagnostics into these (via [`crate::line_index::LineIndex`]);
+/// The caller maps its byte-offset diagnostics into these (via [`crate::host::MonacoRange`]);
 /// the `js_sys`/`JsValue` marshalling stays behind [`Marker::set_diagnostics`].
 pub struct Marker<'a> {
     pub start_line: u32,
@@ -208,7 +207,7 @@ pub struct Marker<'a> {
     pub end_line: u32,
     pub end_col: u32,
     pub message: &'a str,
-    pub severity: Severity,
+    pub severity: DiagnosticSeverity,
 }
 
 impl<'a> Marker<'a> {
@@ -228,13 +227,13 @@ impl<'a> Marker<'a> {
         set_markers(&array);
     }
 
-    /// Map this marker's lint [`Severity`] to a Monaco `MarkerSeverity` (Error = 8, Warning = 4,
-    /// Hint = 1).
+    /// Map this marker's [`DiagnosticSeverity`] to a Monaco `MarkerSeverity` (Error = 8,
+    /// Warning = 4, Hint = 1).
     fn monaco_severity(&self) -> u32 {
         match self.severity {
-            Severity::Error => 8,
-            Severity::Warn => 4,
-            Severity::Allow => 1,
+            DiagnosticSeverity::Error => 8,
+            DiagnosticSeverity::Warning => 4,
+            DiagnosticSeverity::Hint => 1,
         }
     }
 }

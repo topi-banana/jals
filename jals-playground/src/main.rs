@@ -16,16 +16,16 @@
 //! - [`app`] — the root component; owns the workspace, config buffers, and syntax dump.
 //! - [`components`] — the presentational pieces (header, file tree, editor, syntax).
 //! - [`monaco`] — the typed Rust bridge to the single imperative Monaco editor instance.
-//! - [`workspace`] — the wasm-compatible in-memory multi-file workspace + analysis.
+//! - [`workspace`] — the thin Monaco adapter over the shared `jals-editor` core.
 //! - [`providers`] — wires each Monaco language-feature provider to the workspace analysis.
-//! - [`line_index`] — byte-offset → Monaco (UTF-16) position mapping for diagnostics.
+//! - [`host`] — the Monaco `EditorHost`: coordinate mapping and the provider payload shapes.
 //!
 //! [`Config`]: jals_config::fmt::Config
 
 mod app;
 mod components;
 mod fetcher;
-mod line_index;
+mod host;
 mod monaco;
 mod providers;
 mod workspace;

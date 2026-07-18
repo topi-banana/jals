@@ -7,7 +7,6 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 
-use jals_fs::FileTree;
 use serde::Deserialize;
 
 pub use crate::loader::ConfigError;
@@ -65,28 +64,6 @@ impl Config {
     /// The configured severity for `rule`, falling back to `default` when unconfigured.
     pub fn severity(&self, rule: &str, default: Severity) -> Severity {
         self.rules.get(rule).copied().unwrap_or(default)
-    }
-
-    /// Load and parse the `jalslint.toml` at `path`, read through `fs`.
-    ///
-    /// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
-    /// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
-        <Self as crate::DiscoverableConfig>::load(fs, path)
-    }
-
-    /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalslint.toml`, read
-    /// through `fs`.
-    ///
-    /// Returns the parsed config if a file is found, otherwise [`Config::default`].
-    ///
-    /// # Errors
-    /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
-        <Self as crate::DiscoverableConfig>::discover(fs, start_dir)
     }
 }
 

@@ -15,7 +15,7 @@ jals.toml ───────▶ Manifest ──┐
 discovered .java files ───────┘    RunRequest     ─▶  (native feature)      ┤  jals-cli
                                                        spawns javac/java    ├▶ discovers,
 InitOptions ──────────────────────▶ .scaffold()      ─▶ [ScaffoldFile] ────┤  writes files,
-                                     CleanTargets::paths ─▶ [PathBuf] ──────┘  removes dirs
+                                     CleanTargets::keys  ─▶ [DirKey] ───────┘  removes dirs
 ```
 
 `jals-cli` owns the *other* side effects: it discovers the manifest, walks the source tree, writes
@@ -29,15 +29,15 @@ traits** mirroring the two selectors — `Compiler` (compile + describe) and `Ru
 describe) — and the subprocess backend is not their only implementation: the core also ships
 `BuiltinToolchain`, the **in-process backend** selected by `[toolchain] compiler/runtime =
 "builtin"` — today a *dummy* (compile copies each source into the `classes-dir` unchanged; run is a
-successful no-op) whose I/O goes through a `jals_fs::FileTree`, so the same implementation drives
-the host filesystem and an in-memory tree, and a real embedded compiler later replaces the copy
-step without touching the seam. Because each step is selected from its own enum and driven as its
+successful no-op) whose I/O goes through a revisioned `jals_storage::ProjectStorage`; memory and
+native adapters obey the same transaction contract, and a real embedded compiler later replaces
+the copy step without touching the seam. Because each step is selected from its own enum and driven as its
 own `&dyn Compiler` / `&dyn Runtime`, mixed selections need no routing composite. The core — the
 `Manifest` model, the `Invocation` planner, and the `Compiler`/`Runtime` traits plus the
 filesystem-free `ToolResolver` and `BuiltinToolchain` — stays pure: deterministic, unit-testable
 with no JDK installed, and **`wasm32`-compatible** with `--no-default-features` (its only
-dependencies are `jals-config`, for the pure `Manifest` model, `jals-fs`, for the `FileTree` the
-builtin backend copies through, and `toml`, for `ManifestError`'s underlying parse-error type).
+dependencies are `jals-config`, for the pure `Manifest` model, `jals-storage`, for typed project
+keys/revisions/cache, and `toml`, for `ManifestError`'s underlying parse-error type).
 
 ## What it does today
 
@@ -345,8 +345,8 @@ the classification — a `#[serde(untagged)]` enum of `Jar`/`Git`/`Path` variant
 `deny_unknown_fields`, so serde picks the form at parse time and rejects co-occurring/missing/misplaced
 forms as a parse error; `manifest_ext.rs`'s private `DependencySource::{from_jar, from_sources}` /
 `SourceDependency::from_dependency` classifiers back the three `ManifestExt` methods above); the host
-(`jals_classpath::DepsCache::resolve_dependencies` / `resolve_project_source_deps`) downloads the URLs, confirms the
-paths, and clones the git repos, so `jals lint` / the LSP / `jals build` see external library types from
+(`jals_classpath::ProjectInputs::assemble`) resolves project bytes and external locators into a
+verified `ArtifactCache`, so `jals lint` / the LSP / `jals build` see external library types from
 named `jar` dependencies, and `jals-lsp` additionally extracts the `sources` jars and folds each
 `git`/`path` source tree into its index for go-to-definition into (and analysis of references to) library
 source.
@@ -453,8 +453,8 @@ today. No part of this changes the crate's purity.
 explicit-jar form of `[dependencies]` now resolves end-to-end. `Manifest::classpath_entries`
 resolves the `[build] classpath` to paths, and `Manifest::dependency_sources` classifies each
 `[dependencies]` `{ jar = "..." }` into a URL or local path; the host-only `jals-classpath` crate
-reads the `.class` files out of those jars/dirs (and **downloads** the remote dependency jars into a
-`target/jals/deps` cache via `DepsCache::resolve_dependencies`) and parses them with `jals-classfile`; and
+reads the `.class` bytes out of typed project/cache entries (and **downloads** remote jars into the
+SHA-256 verified artifact cache via `ProjectInputs::assemble`) and parses them with `jals-classfile`; and
 `jals-hir`'s `ProjectIndex::builder().with_classpath()` folds them in so external library types resolve in
 `jals lint` and the language server, while `jals build`/`run` put the same jars on `javac`/`java`'s
 classpath. What is still missing is the *resolver* above — turning **Maven coordinates** into those

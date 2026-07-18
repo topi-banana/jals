@@ -8,7 +8,7 @@
 //! - `jalslint.toml` — the linter [`lint::Config`].
 //!
 //! This crate owns the **schema, parsing, discovery, and validation** for all three: the serde data
-//! models, the `from_file` / `discover` loaders (read through a [`jals_fs::FileTree`]), the
+//! models, the `load` / `discover` operations over an immutable [`jals_storage::ProjectView`], the
 //! `FromStr` / `validate` entry points, and the shared [`ConfigError`]. It is a single dependency a
 //! future configuration-file language server can build on. Everything here is pure and `no_std`
 //! (`alloc` only), so it stays `wasm32`-compatible for the browser playground.

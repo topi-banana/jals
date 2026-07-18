@@ -4,9 +4,15 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+jals-config.workspace = true
+jals-storage.workspace = true
 jals-hir.workspace = true
+jals-lint.workspace = true
 jals-syntax.workspace = true
 text-size.workspace = true
+
+[dev-dependencies]
+jals-classfile.workspace = true
 
 [lints]
 workspace = true

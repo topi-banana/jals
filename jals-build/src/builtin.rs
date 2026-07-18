@@ -7,42 +7,52 @@
 //! file into the resolved `classes-dir` verbatim (nothing is compiled), and `run` is a no-op that
 //! reports success (nothing is executed). What earns it a place now is the shape, not the
 //! behavior: it exercises the whole request → backend → outcome path with a non-subprocess
-//! backend, and all its I/O goes through a [`jals_fs::FileTree`], so the same implementation
-//! drives the host filesystem (`OsFileTree`) and an in-memory tree (`InMemoryFileTree`, a browser
-//! host) alike. A future in-process compiler replaces the copy step and inherits everything else.
+//! backend, and all its I/O goes through [`ProjectStorage`], so memory and native adapters share
+//! the same transaction/revision contract. A future in-process compiler replaces the copy step and
+//! inherits everything else.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use jals_fs::{FileTree, FsError};
+use jals_storage::{
+    CacheBackend, Error, FileKey, MemoryStorage, ProjectStorage, ProjectView, SourceBackend,
+};
 
 use crate::manifest_ext::ManifestExt;
 use crate::request::{CompileRequest, RunRequest};
 use crate::toolchain::{BuildOutcome, Compiler, Runtime, ToolchainError};
 
-/// A [`Compiler`] + [`Runtime`] backend realized in-process over a [`FileTree`] — today a dummy
+/// A [`Compiler`] + [`Runtime`] backend realized in-process over [`ProjectStorage`] — today a dummy
 /// that copies sources instead of compiling them and skips running entirely (see the module docs).
 pub struct BuiltinToolchain {
-    /// The file tree the backend reads sources from and writes outputs to. `RefCell` bridges the
-    /// receivers: the toolchain traits' methods take `&self` while [`FileTree::write`] needs
-    /// `&mut`, and a backend is driven single-threaded.
-    tree: RefCell<Box<dyn FileTree>>,
+    /// The storage aggregate the backend reads and commits. `RefCell` bridges the receivers because
+    /// toolchain methods take `&self` while transactions require `&mut` access.
+    pub(crate) backend: BuiltinBackend,
+}
+
+pub(crate) enum BuiltinBackend {
+    Memory(RefCell<MemoryStorage>),
+    #[cfg(feature = "native")]
+    Native,
 }
 
 impl BuiltinToolchain {
-    /// A builtin backend over `tree` — the host filesystem (`OsFileTree`) for the CLI, an
-    /// `InMemoryFileTree` for tests and browser hosts.
-    pub fn new(tree: Box<dyn FileTree>) -> Self {
+    /// A builtin backend over one in-memory project storage aggregate.
+    pub const fn new(storage: MemoryStorage) -> Self {
         Self {
-            tree: RefCell::new(tree),
+            backend: BuiltinBackend::Memory(RefCell::new(storage)),
         }
     }
 
     /// Consume the toolchain and hand back its file tree, so an in-memory host can read the
     /// outputs a compile produced.
-    pub fn into_tree(self) -> Box<dyn FileTree> {
-        self.tree.into_inner()
+    pub fn into_storage(self) -> MemoryStorage {
+        match self.backend {
+            BuiltinBackend::Memory(storage) => storage.into_inner(),
+            #[cfg(feature = "native")]
+            BuiltinBackend::Native => panic!("native builtin storage is owned by the project root"),
+        }
     }
 
     /// Plan the copies [`compile`](Compiler::compile) would perform: each source (the project's
@@ -77,27 +87,104 @@ impl BuiltinToolchain {
             )
     }
 
-    /// Render a path for the [`FileTree`] (a UTF-8 virtual path). A non-UTF-8 path cannot be
-    /// addressed through the tree, so it fails as an error naming the path rather than panicking.
-    fn tree_path(path: &Path) -> Result<&str, ToolchainError> {
-        path.to_str().ok_or_else(|| {
-            ToolchainError::Fs(FsError::Io(format!(
-                "path is not valid UTF-8: {}",
-                path.display()
-            )))
-        })
+    /// Read a planned source's bytes: from the immutable project view when it is a project file,
+    /// else straight from its host path. Source-dependency (`extra_sources`) files are materialized
+    /// under the project cache, which the project view deliberately excludes, so a project-view
+    /// lookup misses them and they are read from disk instead.
+    fn read_source(
+        view: &ProjectView,
+        key: Option<&FileKey>,
+        host: &Path,
+    ) -> Result<Vec<u8>, ToolchainError> {
+        if let Some(key) = key {
+            match view.file(key) {
+                Ok(file) => return Ok(file.bytes().to_vec()),
+                Err(Error::NotFoundFile(_)) => {}
+                Err(error) => return Err(ToolchainError::Fs(error)),
+            }
+        }
+        std::fs::read(host)
+            .map_err(|error| ToolchainError::Fs(Error::Io(format!("{}: {error}", host.display()))))
+    }
+
+    fn key(path: &Path, project_root: &Path) -> Result<FileKey, ToolchainError> {
+        jals_storage::RelativePath::from_host_path(project_root, path)
+            .and_then(|relative| FileKey::new(relative).ok())
+            .ok_or_else(|| {
+                ToolchainError::Fs(jals_storage::Error::Io(format!(
+                    "source is not addressable in project storage: {}",
+                    path.display()
+                )))
+            })
+    }
+
+    fn compile_in<S: SourceBackend, C: CacheBackend>(
+        storage: &mut ProjectStorage<S, C>,
+        req: &CompileRequest<'_>,
+    ) -> Result<(), ToolchainError> {
+        // Stage every copy in one transaction, so the outputs land in a single committed revision
+        // and the tree is snapshotted once rather than per file.
+        let mut copies = Vec::new();
+        let read_revision;
+        {
+            let view = storage.view();
+            read_revision = view.revision();
+            for (src, dest) in Self::plan_copies(req) {
+                let source = jals_storage::RelativePath::from_host_path(req.project_root, &src)
+                    .and_then(|relative| FileKey::new(relative).ok());
+                let destination = Self::key(&dest, req.project_root)?;
+                let contents = Self::read_source(&view, source.as_ref(), &src)?;
+                let exists = view.tree().file(&destination).is_some();
+                copies.push((destination, contents, exists));
+            }
+        }
+        let mut staged = std::collections::BTreeSet::new();
+        // Commit against the revision the copies were read from, so an interleaved change
+        // surfaces as a stale-revision error instead of silently clobbering.
+        let mut transaction = storage
+            .transaction(read_revision)
+            .map_err(ToolchainError::Fs)?;
+        for (destination, contents, exists) in copies {
+            if exists || !staged.insert(destination.clone()) {
+                transaction
+                    .replace_file(destination, contents)
+                    .map_err(ToolchainError::Fs)?;
+            } else {
+                transaction
+                    .create_file(destination, contents)
+                    .map_err(ToolchainError::Fs)?;
+            }
+        }
+        transaction.commit().map_err(ToolchainError::Fs)?;
+        Ok(())
     }
 }
 
 impl Compiler for BuiltinToolchain {
     fn compile(&self, req: &CompileRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
-        let mut tree = self.tree.borrow_mut();
-        for (src, dest) in Self::plan_copies(req) {
-            let contents = tree
-                .read(Self::tree_path(&src)?)
-                .map_err(ToolchainError::Fs)?;
-            tree.write(Self::tree_path(&dest)?, &contents)
-                .map_err(ToolchainError::Fs)?;
+        match &self.backend {
+            BuiltinBackend::Memory(storage) => Self::compile_in(&mut storage.borrow_mut(), req)?,
+            #[cfg(feature = "native")]
+            BuiltinBackend::Native => {
+                let scopes =
+                    Self::plan_copies(req)
+                        .into_iter()
+                        .flat_map(|(source, destination)| {
+                            core::iter::once(source)
+                                .chain(core::iter::once(destination))
+                                .filter_map(|path| {
+                                    jals_storage::RelativePath::from_host_path(
+                                        req.project_root,
+                                        &path,
+                                    )
+                                    .map(jals_storage::NativeScope::all)
+                                })
+                        });
+                let mut storage =
+                    jals_storage::NativeStorage::for_project_scoped(req.project_root, scopes)
+                        .map_err(ToolchainError::Fs)?;
+                Self::compile_in(&mut storage, req)?;
+            }
         }
         Ok(BuildOutcome { code: Some(0) })
     }
@@ -137,16 +224,16 @@ impl Runtime for BuiltinToolchain {
 #[cfg(test)]
 mod tests {
     use jals_config::Manifest;
-    use jals_fs::InMemoryFileTree;
+    use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
     use super::*;
 
     fn toolchain(files: &[(&str, &str)]) -> BuiltinToolchain {
-        let mut tree = InMemoryFileTree::new();
-        for (path, text) in files {
-            tree.write(path, text.as_bytes()).unwrap();
-        }
-        BuiltinToolchain::new(Box::new(tree))
+        let entries = files.iter().map(|(path, text)| {
+            let relative = path.strip_prefix("/proj/").unwrap_or(path);
+            Entry::File(FileKey::parse(relative).unwrap(), text.as_bytes().to_vec())
+        });
+        BuiltinToolchain::new(MemoryStorage::memory(CodeTree::new(entries).unwrap()))
     }
 
     fn compile_req<'a>(
@@ -168,26 +255,34 @@ mod tests {
         let manifest = Manifest::default(); // source-dirs = ["src/main/java"], classes-dir = "target/classes"
         let toolchain = toolchain(&[
             ("/proj/src/main/java/com/example/A.java", "class A {}"),
-            ("/other/lib/Lib.java", "class Lib {}"),
+            ("/proj/vendor/Lib.java", "class Lib {}"),
         ]);
         let sources = vec![PathBuf::from("/proj/src/main/java/com/example/A.java")];
-        let extra_sources = vec![PathBuf::from("/other/lib/Lib.java")];
+        let extra_sources = vec![PathBuf::from("/proj/vendor/Lib.java")];
 
         let outcome = toolchain
             .compile(&compile_req(&manifest, &sources, &extra_sources))
             .unwrap();
         assert!(outcome.success());
 
-        let tree = toolchain.into_tree();
+        let storage = toolchain.into_storage();
         // A source under a source root keeps its root-relative (package) layout; an out-of-tree
         // extra source flattens to its file name.
         assert_eq!(
-            tree.read_to_string("/proj/target/classes/com/example/A.java")
+            storage
+                .view()
+                .file(&FileKey::parse("target/classes/com/example/A.java").unwrap())
+                .unwrap()
+                .text()
                 .unwrap(),
             "class A {}"
         );
         assert_eq!(
-            tree.read_to_string("/proj/target/classes/Lib.java")
+            storage
+                .view()
+                .file(&FileKey::parse("target/classes/vendor/Lib.java").unwrap())
+                .unwrap()
+                .text()
                 .unwrap(),
             "class Lib {}"
         );
@@ -204,8 +299,11 @@ mod tests {
             .unwrap();
         assert!(
             toolchain
-                .into_tree()
-                .is_file("/proj/target/classes/gen/B.java")
+                .into_storage()
+                .view()
+                .tree()
+                .file(&FileKey::parse("target/classes/gen/B.java").unwrap())
+                .is_some()
         );
     }
 
@@ -250,5 +348,34 @@ mod tests {
             "builtin: copy 1 source file(s) into /proj/target/classes (dummy compiler; nothing is compiled)"
         ));
         assert!(description.contains("/proj/src/main/java/A.java -> /proj/target/classes/A.java"));
+    }
+
+    #[test]
+    fn native_builtin_reads_a_source_materialized_under_the_excluded_cache() {
+        let project = tempfile::tempdir().unwrap();
+        let source = project
+            .path()
+            .join("target/jals/cache/source-view/provenance/content/pkg/Lib.java");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"package pkg; class Lib {}").unwrap();
+        let manifest = Manifest::default();
+        let sources = [source];
+        let request = CompileRequest {
+            manifest: &manifest,
+            project_root: project.path(),
+            sources: &[],
+            extra_sources: &sources,
+            extra_classpath: &[],
+        };
+        let destination = BuiltinToolchain::plan_copies(&request).pop().unwrap().1;
+        let toolchain = BuiltinToolchain {
+            backend: BuiltinBackend::Native,
+        };
+
+        assert!(toolchain.compile(&request).unwrap().success());
+        assert_eq!(
+            std::fs::read(destination).unwrap(),
+            b"package pkg; class Lib {}"
+        );
     }
 }

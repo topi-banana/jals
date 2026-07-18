@@ -13,7 +13,6 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jals_fs::FileTree;
 use serde::Deserialize;
 
 mod literals;
@@ -420,28 +419,6 @@ impl Config {
     /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
     pub fn newline(&self, src: &str) -> &'static str {
         self.line_ending.resolve(src)
-    }
-
-    /// Load and parse the `jalsfmt.toml` at `path`, read through `fs`.
-    ///
-    /// `fs` is any [`FileTree`] — a [`jals_fs::OsFileTree`] on the host, or a
-    /// [`jals_fs::InMemoryFileTree`] for wasm / tests; `path` is a `/`-separated virtual path.
-    ///
-    /// # Errors
-    /// Returns [`ConfigError`] when the file cannot be read or contains invalid TOML.
-    pub fn from_file(fs: &dyn FileTree, path: &str) -> Result<Self, ConfigError> {
-        <Self as crate::DiscoverableConfig>::load(fs, path)
-    }
-
-    /// Search upward from `start_dir` (a `/`-separated virtual path) for `jalsfmt.toml`, read
-    /// through `fs`.
-    ///
-    /// Returns the parsed config if a file is found, otherwise [`Config::default`].
-    ///
-    /// # Errors
-    /// Returns [`ConfigError`] when a discovered file cannot be read or parsed.
-    pub fn discover(fs: &dyn FileTree, start_dir: &str) -> Result<Self, ConfigError> {
-        <Self as crate::DiscoverableConfig>::discover(fs, start_dir)
     }
 }
 

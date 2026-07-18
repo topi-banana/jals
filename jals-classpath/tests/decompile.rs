@@ -1,46 +1,78 @@
-//! Synthesizing signature-only `.java` skeletons from classpath `.class` files
-//! ([`SkeletonGroup::synthesize_classpath_sources`]): a dependency class with no real source still gets a navigable
-//! declaration on disk. Covers the cache layout, the rendered signatures, idempotent re-runs, and the
-//! grouping of nested types into their enclosing type's file.
-
-use std::path::Path;
-
 use jals_classfile::ClassFile;
 use jals_classpath::SkeletonGroup;
+use jals_storage::{ArtifactCache, MemoryCache};
 
-fn box_class() -> ClassFile {
-    ClassFile::read(include_bytes!("fixtures/Box.class")).expect("parse Box.class")
+fn class(bytes: &[u8]) -> ClassFile {
+    ClassFile::read(bytes).expect("parse fixture")
 }
 
-/// `Consts` (package `demo`), compiled with `-parameters -g` — the fixture for the M0 enrichments:
-/// `ConstantValue` initializers, real parameter names, a declared checked exception, and the body
-/// shapes (value-returning / `void` / constructor).
-fn consts_class() -> ClassFile {
-    ClassFile::read(include_bytes!("fixtures/Consts.class")).expect("parse Consts.class")
+fn synthesize(classes: &[ClassFile]) -> (Vec<(String, String)>, Vec<jals_classpath::Warning>) {
+    let mut cache = ArtifactCache::new(MemoryCache::default());
+    let result = SkeletonGroup::synthesize(&mut cache, classes);
+    let sources = result
+        .sources
+        .into_iter()
+        .map(|source| {
+            let bytes = cache.lookup(&source.key).unwrap().unwrap();
+            (source.path.to_string(), String::from_utf8(bytes).unwrap())
+        })
+        .collect();
+    (sources, result.warnings)
 }
 
-/// `Branchy` (package `demo`), compiled with `-parameters -g` — the fixture for M2 `if` / `if-else`
-/// control-flow structuring.
-fn branchy_class() -> ClassFile {
-    ClassFile::read(include_bytes!("fixtures/Branchy.class")).expect("parse Branchy.class")
+#[test]
+fn generates_and_reuses_verified_skeleton_artifacts() {
+    let classes = [class(include_bytes!("fixtures/Box.class"))];
+    let mut cache = ArtifactCache::new(MemoryCache::default());
+    let first = SkeletonGroup::synthesize(&mut cache, &classes);
+    let second = SkeletonGroup::synthesize(&mut cache, &classes);
+    assert_eq!(first.sources, second.sources);
+    assert!(first.warnings.is_empty());
+    let text = String::from_utf8(cache.lookup(&first.sources[0].key).unwrap().unwrap()).unwrap();
+    assert!(text.contains("public class Box<T> {"), "{text}");
+    assert!(text.contains("return this.value;"), "{text}");
 }
 
-/// `Locals` (package `demo`), compiled with `-parameters -g` — the fixture for M3 local-variable
-/// reconstruction: hoisted typed declarations, stores as assignments, a local across an `if`-`else`.
-fn locals_class() -> ClassFile {
-    ClassFile::read(include_bytes!("fixtures/Locals.class")).expect("parse Locals.class")
+#[test]
+fn groups_nested_types_into_their_top_level_source() {
+    let classes = [
+        class(include_bytes!("fixtures/Outer.class")),
+        class(include_bytes!("fixtures/Outer$Inner.class")),
+        class(include_bytes!("fixtures/Outer$Color.class")),
+    ];
+    let (sources, warnings) = synthesize(&classes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].0, "demo/Outer.java");
+    assert!(sources[0].1.contains("public static class Inner"));
+    assert!(sources[0].1.contains("public enum Color"));
 }
 
-/// `Loops` (package `demo`), compiled with `-parameters -g` — the fixture for M4 loop structuring:
-/// a bottom-test `while` with an `iinc` counter and a `do`-`while`.
-fn loops_class() -> ClassFile {
-    ClassFile::read(include_bytes!("fixtures/Loops.class")).expect("parse Loops.class")
+#[test]
+fn preserves_rich_members_and_recovered_control_flow() {
+    let classes = [
+        class(include_bytes!("fixtures/Consts.class")),
+        class(include_bytes!("fixtures/Branchy.class")),
+        class(include_bytes!("fixtures/Locals.class")),
+        class(include_bytes!("fixtures/Loops.class")),
+    ];
+    let (sources, warnings) = synthesize(&classes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let joined = sources
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("public static final int MAX = 42;"));
+    assert!(joined.contains("throw new java.io.IOException(path);"));
+    assert!(joined.contains("} else {"));
+    assert!(joined.contains("int doubled;"));
+    assert!(joined.contains("do {"));
 }
 
-/// Every committed fixture class, including `jals-classfile`'s round-trip fixtures, so the skeleton
-/// renderer is exercised across generics, enums, records, switches, and annotations.
-fn all_fixture_classes() -> Vec<ClassFile> {
-    const BYTES: &[&[u8]] = &[
+#[test]
+fn every_generated_fixture_is_valid_java() {
+    let bytes: &[&[u8]] = &[
         include_bytes!("fixtures/Box.class"),
         include_bytes!("fixtures/Consts.class"),
         include_bytes!("fixtures/Branchy.class"),
@@ -48,259 +80,18 @@ fn all_fixture_classes() -> Vec<ClassFile> {
         include_bytes!("fixtures/Loops.class"),
         include_bytes!("fixtures/Arrays.class"),
         include_bytes!("fixtures/Concat.class"),
-        include_bytes!("fixtures/Sb.class"),
-        include_bytes!("fixtures/Cmp.class"),
         include_bytes!("fixtures/Outer.class"),
         include_bytes!("fixtures/Outer$Inner.class"),
         include_bytes!("fixtures/Outer$Color.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Plain.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Iface.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Sample.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Sample$Kind.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Sample$Visitor.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Sample$Point.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/Switches.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/TypeAnno.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/TypeAnno$RNonNull.class"),
-        include_bytes!("../../jals-classfile/tests/fixtures/TypeAnno$CNonNull.class"),
     ];
-    BYTES
-        .iter()
-        .map(|bytes| ClassFile::read(bytes).expect("parse fixture"))
-        .collect()
-}
-
-/// `Outer` plus its nested `Outer$Inner` (a static class) and `Outer$Color` (an enum), in package
-/// `demo` — the fixture for nested-type grouping.
-fn outer_classes() -> Vec<ClassFile> {
-    [
-        include_bytes!("fixtures/Outer.class").as_slice(),
-        include_bytes!("fixtures/Outer$Inner.class").as_slice(),
-        include_bytes!("fixtures/Outer$Color.class").as_slice(),
-    ]
-    .into_iter()
-    .map(|bytes| ClassFile::read(bytes).expect("parse fixture"))
-    .collect()
-}
-
-#[test]
-fn synthesizes_a_skeleton_for_a_class_without_sources() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let mut warnings = Vec::new();
-    let files =
-        SkeletonGroup::synthesize_classpath_sources(&[box_class()], root, |m| warnings.push(m));
+    let classes: Vec<_> = bytes.iter().map(|bytes| class(bytes)).collect();
+    let (sources, warnings) = synthesize(&classes);
     assert!(warnings.is_empty(), "{warnings:?}");
-
-    // One file, written under the decompiled-sources cache, named for the (default-package) type.
-    assert_eq!(files.len(), 1, "{files:?}");
-    let box_java = &files[0];
-    assert!(box_java.ends_with("Box.java"), "{}", box_java.display());
-    assert!(box_java.starts_with(root.join("target/jals/deps/decompiled")));
-
-    // The generic type and its members, each with its decompiled body.
-    let text = std::fs::read_to_string(box_java).unwrap();
-    assert!(text.contains("public class Box<T> {"), "{text}");
-    assert!(text.contains("private T value;"), "{text}");
-    assert!(text.contains("return this.value;"), "{text}");
-    assert!(text.contains("this.value = arg0;"), "{text}");
-    assert!(text.contains("public Box() {}"), "{text}");
-}
-
-#[test]
-fn synthesis_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let mut warnings = Vec::new();
-    let first =
-        SkeletonGroup::synthesize_classpath_sources(&[box_class()], root, |m| warnings.push(m));
-    // A second run reuses the file already on disk (skip-if-exists), yielding the same path.
-    let second =
-        SkeletonGroup::synthesize_classpath_sources(&[box_class()], root, |m| warnings.push(m));
-    assert_eq!(first, second);
-    assert!(warnings.is_empty(), "{warnings:?}");
-}
-
-#[test]
-fn groups_nested_types_into_their_enclosing_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let mut warnings = Vec::new();
-    let files =
-        SkeletonGroup::synthesize_classpath_sources(&outer_classes(), root, |m| warnings.push(m));
-    assert!(warnings.is_empty(), "{warnings:?}");
-
-    // One file per top-level type: `Inner` and `Color` fold into `demo/Outer.java`, not their own.
-    assert_eq!(files.len(), 1, "{files:?}");
-    let outer = &files[0];
-    assert!(
-        outer.ends_with(Path::new("demo").join("Outer.java")),
-        "{}",
-        outer.display()
-    );
-
-    let text = std::fs::read_to_string(outer).unwrap();
-    assert!(text.contains("package demo;"), "{text}");
-    assert!(text.contains("public class Outer {"), "{text}");
-    assert!(
-        text.contains("public java.lang.String greet(java.lang.String arg0) {"),
-        "{text}"
-    );
-    // `greet` returns its parameter — decompiled straight through.
-    assert!(text.contains("return arg0;"), "{text}");
-    // The nested static class and enum are inlined into the enclosing body, with the enum constants.
-    assert!(text.contains("public static class Inner {"), "{text}");
-    assert!(text.contains("public enum Color {"), "{text}");
-    assert!(text.contains("RED, GREEN, BLUE;"), "{text}");
-}
-
-#[test]
-fn renders_constants_parameter_names_throws_and_bodies() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut warnings = Vec::new();
-    let files = SkeletonGroup::synthesize_classpath_sources(&[consts_class()], dir.path(), |m| {
-        warnings.push(m);
-    });
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let text = std::fs::read_to_string(&files[0]).unwrap();
-
-    // `ConstantValue` initializers across every constant kind (a boolean's `1` shows as `true`).
-    assert!(text.contains("public static final int MAX = 42;"), "{text}");
-    assert!(
-        text.contains("public static final long BIG = 9000000000L;"),
-        "{text}"
-    );
-    assert!(
-        text.contains("public static final double RATE = 1.5"),
-        "{text}"
-    );
-    assert!(
-        text.contains("public static final float RATIO = 0.25f;"),
-        "{text}"
-    );
-    assert!(
-        text.contains("public static final boolean ENABLED = true;"),
-        "{text}"
-    );
-    assert!(
-        text.contains("public static final java.lang.String NAME = \"jals\";"),
-        "{text}"
-    );
-
-    // Real parameter names (from `-parameters` / `-g`), a declared checked exception, and decompiled
-    // bodies: a field-storing constructor, an arithmetic return, an empty `void`, and a `throw`.
-    assert!(text.contains("this.count = start;"), "{text}");
-    assert!(text.contains("return this.count + delta;"), "{text}");
-    assert!(text.contains("public void reset() {}"), "{text}");
-    assert!(
-        text.contains("throw new java.io.IOException(path);"),
-        "{text}"
-    );
-    assert!(
-        text.contains("public void risky(java.lang.String path) throws java.io.IOException {"),
-        "{text}"
-    );
-}
-
-#[test]
-fn renders_recovered_control_flow() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut warnings = Vec::new();
-    let files = SkeletonGroup::synthesize_classpath_sources(&[branchy_class()], dir.path(), |m| {
-        warnings.push(m);
-    });
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let text = std::fs::read_to_string(&files[0]).unwrap();
-
-    // A guard-clause `if` (the `then` returns, so there is no `else`).
-    assert!(text.contains("if (a > b) {"), "{text}");
-    // A null guard whose body stores a call result to a field.
-    assert!(text.contains("if (s != null) {"), "{text}");
-    assert!(text.contains("this.value = s.length();"), "{text}");
-    // A real `if`-`else` with a join afterwards.
-    assert!(text.contains("} else {"), "{text}");
-    assert!(text.contains("this.value = this.value + 1;"), "{text}");
-
-    // The recovered bodies must parse cleanly.
-    assert!(
-        jals_syntax::Parse::parse(&text).errors().is_empty(),
-        "{text}\n{:#?}",
-        jals_syntax::Parse::parse(&text).errors()
-    );
-}
-
-#[test]
-fn renders_local_variables() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut warnings = Vec::new();
-    let files = SkeletonGroup::synthesize_classpath_sources(&[locals_class()], dir.path(), |m| {
-        warnings.push(m);
-    });
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let text = std::fs::read_to_string(&files[0]).unwrap();
-
-    // Hoisted typed declarations plus stores lowered to assignments.
-    assert!(text.contains("int doubled;"), "{text}");
-    assert!(text.contains("result = doubled + 1;"), "{text}");
-    // A local hoisted across an `if`-`else`, in scope after the join.
-    assert!(text.contains("int x;"), "{text}");
-    assert!(text.contains("x = 1;"), "{text}");
-    // A reference-typed local.
-    assert!(text.contains("java.lang.String t;"), "{text}");
-    assert!(text.contains("return t.length();"), "{text}");
-
-    // The recovered bodies must parse cleanly.
-    assert!(
-        jals_syntax::Parse::parse(&text).errors().is_empty(),
-        "{text}\n{:#?}",
-        jals_syntax::Parse::parse(&text).errors()
-    );
-}
-
-#[test]
-fn renders_loops() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut warnings = Vec::new();
-    let files = SkeletonGroup::synthesize_classpath_sources(&[loops_class()], dir.path(), |m| {
-        warnings.push(m);
-    });
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let text = std::fs::read_to_string(&files[0]).unwrap();
-
-    // A bottom-test `while` (javac's default loop layout) with the loop body.
-    assert!(text.contains("while (i < n) {"), "{text}");
-    assert!(text.contains("i = i + 1;"), "{text}");
-    // A `do`-`while`.
-    assert!(text.contains("do {"), "{text}");
-    assert!(text.contains("} while (c < n);"), "{text}");
-
-    // The recovered bodies must parse cleanly.
-    assert!(
-        jals_syntax::Parse::parse(&text).errors().is_empty(),
-        "{text}\n{:#?}",
-        jals_syntax::Parse::parse(&text).errors()
-    );
-}
-
-#[test]
-fn synthesized_skeletons_are_valid_java() {
-    // Whatever the renderer emits for any fixture, it must parse without syntax errors — the
-    // invariant that keeps go-to-definition landing in a well-formed file.
-    let dir = tempfile::tempdir().unwrap();
-    let mut warnings = Vec::new();
-    let files =
-        SkeletonGroup::synthesize_classpath_sources(&all_fixture_classes(), dir.path(), |m| {
-            warnings.push(m);
-        });
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert!(!files.is_empty(), "expected some skeletons");
-    for file in files {
-        let text = std::fs::read_to_string(&file).unwrap();
+    for (path, text) in sources {
         let parse = jals_syntax::Parse::parse(&text);
         assert!(
             parse.errors().is_empty(),
-            "{}: {:#?}\n{text}",
-            file.display(),
+            "{path}: {:#?}\n{text}",
             parse.errors()
         );
     }

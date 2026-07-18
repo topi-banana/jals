@@ -144,7 +144,7 @@ pub struct PathDependency {
 /// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
 ///
 /// The pure classification of a [`GitDependency`]'s `branch` / `tag` / `rev` (see
-/// [`GitDependency::git_ref`]); `jals-build`'s `GitSource` pairs it with the resolved clone URL.
+/// [`GitDependency::git_ref`]); `jals-classpath`'s native plan pairs it with the clone URL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GitRef {
     /// No `branch`/`tag`/`rev` given: check out the repository's default branch.
@@ -720,7 +720,7 @@ impl Dependency {
 
 impl GitDependency {
     /// Classify the pinned commit from at most one of `branch` / `tag` / `rev`. Pure — [`GitRef`]
-    /// holds only strings; `jals-build`'s `GitSource` pairs the result with the clone URL.
+    /// holds only strings; `jals-classpath`'s native plan pairs the result with the clone URL.
     ///
     /// # Errors
     /// [`DependencyError::ConflictingGitRef`] when more than one is set, [`DependencyError::Empty`]
