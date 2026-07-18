@@ -342,7 +342,7 @@ impl AttributeBody {
     /// `bytes`.
     ///
     /// The `Code` and `Record` arms recurse back into [`Attribute::read_all`]
-    /// (attribute-in-attribute), so those calls are `Box::pin`ned to keep this future finite.
+    /// (attribute-in-attribute), so those calls are pinned with `Box::pin` to keep this future finite.
     async fn parse(name: &str, bytes: &[u8], pool: &ConstantPool) -> Option<Self> {
         /// Read the per-parameter annotation lists of a `Runtime*ParameterAnnotations` attribute (a
         /// `u8` parameter count, then a `u16`-counted annotation list per parameter).

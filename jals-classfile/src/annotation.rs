@@ -192,7 +192,7 @@ impl Annotation {
 
 impl ElementValue {
     /// The `@` and `[` arms recurse (annotation-in-value, value-in-value), so those calls are
-    /// `Box::pin`ned to keep this future finite.
+    /// pinned with `Box::pin` to keep this future finite.
     pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let tag = r.u8().await?;
         Ok(match tag {
