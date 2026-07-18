@@ -16,14 +16,14 @@ fn help(sources: &[&str], file: usize) -> Option<SignatureHelp> {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::Parse::parse(s).syntax(),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(s)).syntax(),
             )
         })
         .collect();
-    let index = ProjectIndex::builder(&nodes).build();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let (fid, root) = &nodes[file];
-    let resolved = Resolved::resolve_node(root);
-    index.signature_help(root, &resolved, *fid, offset)
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
+    jals_exec::block_on_inline(index.signature_help(root, &resolved, *fid, offset))
 }
 
 #[test]

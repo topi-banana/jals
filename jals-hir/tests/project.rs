@@ -19,7 +19,7 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::Parse::parse(s).syntax(),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(s)).syntax(),
             )
         })
         .collect()
@@ -27,10 +27,10 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
 
 fn render(sources: &[&str]) -> String {
     let nodes = nodes(sources);
-    let index = ProjectIndex::builder(&nodes).build();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let mut out = String::new();
     for (file, root) in &nodes {
-        let resolved = Resolved::resolve_node(root);
+        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
         for r in &resolved.references {
             if r.namespace != Namespace::Type {
                 continue;
@@ -189,8 +189,8 @@ fn definition_at_jumps_across_files() {
         "package a; class Bar { Foo f; }",
     ];
     let nodes = nodes(&srcs);
-    let index = ProjectIndex::builder(&nodes).build();
-    let resolved = Resolved::resolve_node(&nodes[1].1);
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[1].1));
     let offset = srcs[1].find("Foo").unwrap();
 
     let (file, range) = index
@@ -206,10 +206,10 @@ fn unresolved_types_reports_only_genuine_unknowns() {
     // file-locally. Only `Nope` is a diagnostic span.
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);
-    let index = ProjectIndex::builder(&nodes).build();
-    let resolved = Resolved::resolve_node(&nodes[0].1);
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[0].1));
 
-    let spans = index.unresolved_types(FileId(0), &resolved);
+    let spans = jals_exec::block_on_inline(index.unresolved_types(FileId(0), &resolved));
     assert_eq!(spans.len(), 1);
     assert_eq!(&srcs[0][spans[0].clone()], "Nope");
 }

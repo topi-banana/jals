@@ -22,6 +22,7 @@
 
 use alloc::vec::Vec;
 
+use jals_exec::LocalBoxFuture;
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::config::{AnnotationPlacement, Config};
@@ -33,8 +34,8 @@ use crate::rules::StructuralRule;
 pub(crate) struct ModifierRule;
 
 impl StructuralRule for ModifierRule {
-    fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-        Self::lower_modifiers(node, ctx)
+    fn lower<'t>(&'t self, node: &'t SyntaxNode, ctx: &'t Ctx<'t>) -> LocalBoxFuture<'t, Doc> {
+        alloc::boxed::Box::pin(Self::lower_modifiers(node, ctx))
     }
 }
 
@@ -277,11 +278,11 @@ impl ModifierRule {
     /// [`Self::emitted_boundary_tokens`] (the emitted-order first / last token), not the structural
     /// ones, which keeps idempotency. When the last emitted part is a forced break, that trailing
     /// parent space is trimmed by the renderer.
-    pub(crate) fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    pub(crate) async fn lower_modifiers(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         let expanded = ctx.cfg.annotation_placement == AnnotationPlacement::Expanded;
         // The hot path: nothing to reorder and no annotation to break out.
         if !ctx.cfg.reorder_modifiers && !expanded {
-            return ctx.lower_generic(node);
+            return ctx.lower_generic(node).await;
         }
         // Whether a type follows the modifiers; both the reorder and the break step keep the
         // trailing type-use annotation run (directly before that type) inline instead of treating it
@@ -300,9 +301,9 @@ impl ModifierRule {
             els
         };
         if expanded && Self::is_decl_level_modifiers(node) {
-            Self::lower_modifiers_with_breaks(&els, ctx, type_follows)
+            Self::lower_modifiers_with_breaks(&els, ctx, type_follows).await
         } else {
-            ctx.lower_elements(els.into_iter(), false)
+            ctx.lower_elements(els.into_iter(), false).await
         }
     }
 
@@ -316,7 +317,7 @@ impl ModifierRule {
     /// [`Self::trailing_type_use_start`], the position-based half of google-java-format's split. With
     /// `reorder-modifiers` on, [`Self::plan`] has already grouped the leading declaration
     /// annotations into one front run, so every one of those breaks.
-    fn lower_modifiers_with_breaks(
+    async fn lower_modifiers_with_breaks(
         els: &[SyntaxElement],
         ctx: &Ctx<'_>,
         type_follows: bool,
@@ -340,17 +341,17 @@ impl ModifierRule {
             let is_leading_annotation = is_annotation && still_leading && !in_trailing_run;
 
             let first = Self::element_first_token(el);
-            let el_doc = el.as_node().map_or_else(
-                || ctx.tok(el.as_token().expect("element is a node or a token")),
-                |n| ctx.lower(n),
-            );
+            let el_doc = match el.as_node() {
+                Some(n) => ctx.lower(n).await,
+                None => ctx.tok(el.as_token().expect("element is a node or a token")),
+            };
             let last = Self::element_last_token(el);
 
             if let Some(first) = first.as_ref() {
                 let s = if prev_was_leading_annotation {
                     Doc::hardline()
                 } else {
-                    ctx.sep(prev.as_ref(), first)
+                    ctx.sep(prev.as_ref(), first).await
                 };
                 parts.push(s);
             }
@@ -396,7 +397,7 @@ mod tests {
     /// class decl carries its own empty `MODIFIERS`, which is skipped).
     fn modifiers_of(member: &str) -> SyntaxNode {
         let src = format!("class C {{ {member} }}");
-        jals_syntax::Parse::parse(&src)
+        jals_exec::block_on_inline(jals_syntax::Parse::parse(&src))
             .syntax()
             .descendants()
             .filter(|n| n.kind() == S::MODIFIERS)
@@ -542,7 +543,7 @@ mod tests {
 
     /// The first `MODIFIERS` node in `src` whose parent has kind `parent`.
     fn modifiers_under(src: &str, parent: S) -> SyntaxNode {
-        jals_syntax::Parse::parse(src)
+        jals_exec::block_on_inline(jals_syntax::Parse::parse(src))
             .syntax()
             .descendants()
             .filter(|n| n.kind() == S::MODIFIERS)

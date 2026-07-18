@@ -11,27 +11,33 @@ use jals_syntax::ast::{self, AstNode};
 /// `Box<T>` (generic, with `T get()` / `void set(T)`), compiled from `tests/fixtures/Box.java`.
 fn box_classfile() -> ClassFile {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Box.class");
-    ClassFile::read(std::fs::read(path).expect("read Box.class").as_slice())
-        .expect("parse Box.class")
+    jals_exec::block_on_inline(ClassFile::read(
+        std::fs::read(path).expect("read Box.class").as_slice(),
+    ))
+    .expect("parse Box.class")
 }
 
 /// The `Box.java` source `Box.class` was compiled from — used as a library-sources overlay.
 const BOX_SOURCE: &str = include_str!("fixtures/Box.java");
 
 fn parse(src: &str) -> SyntaxNode {
-    jals_syntax::Parse::parse(src).syntax()
+    jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax()
 }
 
 /// The inferred type of the expression whose source text is exactly `text`, with `classfiles` folded
 /// into the index as classpath types.
 fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
     let node = parse(src);
-    let resolved = Resolved::resolve_node(&node);
-    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
-        .with_stdlib()
-        .with_classpath(&ProjectIndex::lower_classpath(classfiles))
-        .build();
-    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node.clone())])
+            .with_stdlib()
+            .with_classpath(&jals_exec::block_on_inline(ProjectIndex::lower_classpath(
+                classfiles,
+            )))
+            .build(),
+    );
+    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
     let expr = node
         .descendants()
         .filter_map(ast::Expr::cast)
@@ -65,13 +71,15 @@ fn classpath_type_is_not_a_navigation_target() {
     // A classpath type has no host-openable source, so go-to-definition is suppressed (like a stub).
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
-    let resolved = Resolved::resolve_node(&node);
-    let index = ProjectIndex::builder(&[(FileId(0), node)])
-        .with_stdlib()
-        .with_classpath(&ProjectIndex::lower_classpath(std::slice::from_ref(
-            &box_classfile(),
-        )))
-        .build();
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node)])
+            .with_stdlib()
+            .with_classpath(&jals_exec::block_on_inline(ProjectIndex::lower_classpath(
+                std::slice::from_ref(&box_classfile()),
+            )))
+            .build(),
+    );
     let offset = src.find("Box").expect("Box in source");
     assert!(
         index.definition_at(FileId(0), &resolved, offset).is_none(),
@@ -85,16 +93,23 @@ fn classpath_type_navigates_to_library_source() {
     // classpath type lands on its real source declaration instead of being suppressed.
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
-    let resolved = Resolved::resolve_node(&node);
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
 
     let lib = FileId(100);
-    let sources = ProjectIndex::index_source_locations(&[(lib, parse(BOX_SOURCE))]);
-    let classpath = ProjectIndex::lower_classpath(std::slice::from_ref(&box_classfile()));
-    let index = ProjectIndex::builder(&[(FileId(0), node)])
-        .with_stdlib()
-        .with_classpath(&classpath)
-        .with_source_locations(&sources)
-        .build();
+    let sources = jals_exec::block_on_inline(ProjectIndex::index_source_locations(&[(
+        lib,
+        parse(BOX_SOURCE),
+    )]));
+    let classpath = jals_exec::block_on_inline(ProjectIndex::lower_classpath(
+        std::slice::from_ref(&box_classfile()),
+    ));
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node)])
+            .with_stdlib()
+            .with_classpath(&classpath)
+            .with_source_locations(&sources)
+            .build(),
+    );
 
     let offset = src.find("Box").expect("Box in source");
     let (file, range) = index
@@ -112,19 +127,23 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     // A `git`/`path` dependency: `Box.java` is folded in as a `Source`-origin type with NO `.class`
     // backing it, so the source is both the typing authority and the navigation target.
     let node = parse(SRC);
-    let resolved = Resolved::resolve_node(&node);
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
 
     let lib = FileId(100);
     let lib_box = parse(BOX_SOURCE);
-    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
-        .with_stdlib()
-        .with_source_deps(&[(lib, lib_box)])
-        .with_classpath(&ProjectIndex::lower_classpath(&[]))
-        .with_source_locations(&SourceLocations::default())
-        .build();
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node.clone())])
+            .with_stdlib()
+            .with_source_deps(&[(lib, lib_box)])
+            .with_classpath(&jals_exec::block_on_inline(ProjectIndex::lower_classpath(
+                &[],
+            )))
+            .with_source_locations(&SourceLocations::default())
+            .build(),
+    );
 
     // Typing flows through the library source: `Box<String>.get()` substitutes `T` ↦ `String`.
-    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
+    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
     let expr = node
         .descendants()
         .filter_map(ast::Expr::cast)
@@ -173,13 +192,20 @@ fn classpath_member_navigates_to_library_source() {
     let node = parse(src);
 
     let lib = FileId(100);
-    let sources = ProjectIndex::index_source_locations(&[(lib, parse(BOX_SOURCE))]);
-    let classpath = ProjectIndex::lower_classpath(std::slice::from_ref(&box_classfile()));
-    let index = ProjectIndex::builder(&[(FileId(0), node)])
-        .with_stdlib()
-        .with_classpath(&classpath)
-        .with_source_locations(&sources)
-        .build();
+    let sources = jals_exec::block_on_inline(ProjectIndex::index_source_locations(&[(
+        lib,
+        parse(BOX_SOURCE),
+    )]));
+    let classpath = jals_exec::block_on_inline(ProjectIndex::lower_classpath(
+        std::slice::from_ref(&box_classfile()),
+    ));
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node)])
+            .with_stdlib()
+            .with_classpath(&classpath)
+            .with_source_locations(&sources)
+            .build(),
+    );
 
     let box_id = index
         .resolve_type_name(FileId(0), "Box", None)

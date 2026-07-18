@@ -43,8 +43,8 @@ impl LintOutput {
     /// This is the file-local entry point: reference types resolve only by spelling. A caller
     /// holding a project-wide [`ProjectIndex`] (the CLI over a multi-file run, the language server)
     /// uses [`LintOutput::lint_parse_with_index`] instead to also catch cross-file type mismatches.
-    pub fn lint_source(src: &str, config: &Config) -> Self {
-        Self::lint_parse_with_index(&jals_syntax::Parse::parse(src), config, None)
+    pub async fn lint_source(src: &str, config: &Config) -> Self {
+        Self::lint_parse_with_index(&jals_syntax::Parse::parse(src).await, config, None).await
     }
 
     /// Lint an already-parsed `parse`, optionally resolving reference types against a project
@@ -56,8 +56,12 @@ impl LintOutput {
     /// [`LintOutput::lint_source`]; with `Some`, the `type-mismatch` rule additionally catches
     /// project-internal subtyping mismatches and cross-file call-argument errors. Name resolution
     /// is computed once and shared across the resolution-based rules.
-    pub fn lint_parse_with_index(parse: &Parse, config: &Config, index: Option<IndexCtx>) -> Self {
-        let diagnostics = Self::lint_node_with_index(&parse.syntax(), config, index);
+    pub async fn lint_parse_with_index(
+        parse: &Parse,
+        config: &Config,
+        index: Option<IndexCtx<'_>>,
+    ) -> Self {
+        let diagnostics = Self::lint_node_with_index(&parse.syntax(), config, index).await;
         let parse_errors = parse
             .errors()
             .iter()
@@ -76,8 +80,8 @@ impl LintOutput {
     /// This is the rule half of [`LintOutput::lint_source`], split out so a caller that already
     /// holds a parse tree (e.g. the language server, which caches it per document) can lint without
     /// reparsing. Parser errors are *not* included — they belong to the parse, not the rules.
-    pub fn lint_node(root: &SyntaxNode, config: &Config) -> Vec<Diagnostic> {
-        Self::lint_node_with_index(root, config, None)
+    pub async fn lint_node(root: &SyntaxNode, config: &Config) -> Vec<Diagnostic> {
+        Self::lint_node_with_index(root, config, None).await
     }
 
     /// The rule engine, shared by [`LintOutput::lint_node`] (with `index` `None`) and
@@ -87,10 +91,10 @@ impl LintOutput {
     /// so a configuration that enables only syntactic rules (or disables the resolution-based ones)
     /// never pays for it, and one that enables several resolves just once. The `index`, when
     /// present, is threaded only into [`Checker::Indexed`] rules.
-    fn lint_node_with_index(
+    async fn lint_node_with_index(
         root: &SyntaxNode,
         config: &Config,
-        index: Option<IndexCtx>,
+        index: Option<IndexCtx<'_>>,
     ) -> Vec<Diagnostic> {
         let resolved = OnceCell::new();
         let mut diagnostics = Vec::new();
@@ -100,15 +104,13 @@ impl LintOutput {
                 continue;
             }
             let findings = match rule.check {
-                Checker::Syntactic(check) => check(root),
+                Checker::Syntactic(check) => check(root).await,
                 Checker::Resolved(check) => {
-                    check(root, resolved.get_or_init(|| Resolved::resolve_node(root)))
+                    check(root, Self::resolved_once(&resolved, root).await).await
                 }
-                Checker::Indexed(check) => check(
-                    root,
-                    resolved.get_or_init(|| Resolved::resolve_node(root)),
-                    index,
-                ),
+                Checker::Indexed(check) => {
+                    check(root, Self::resolved_once(&resolved, root).await, index).await
+                }
                 // Run a feature-gated rule's detector only when the project's set does not permit
                 // its guarded feature (`FeatureSet::permits` owns the empty-set exemption),
                 // stamping the shared gate message on each node the detector located.
@@ -135,17 +137,32 @@ impl LintOutput {
         diagnostics.sort_by_key(|d| d.range.start);
         diagnostics
     }
+
+    /// The shared file-local name resolution, computed at most once per lint. The async-once
+    /// shape (compute, then `get_or_init` with the ready value) is single-threaded, so at worst a
+    /// re-entrant caller would compute twice — benign, since resolution is pure.
+    async fn resolved_once<'c>(cell: &'c OnceCell<Resolved>, root: &SyntaxNode) -> &'c Resolved {
+        if cell.get().is_none() {
+            let computed = Resolved::resolve_node(root).await;
+            let _ = cell.set(computed);
+        }
+        cell.get().expect("the cell was just filled")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jals_exec::block_on_inline;
 
     #[test]
     fn lint_node_reports_rule_findings_without_parse_errors() {
         // `import java.util.*;` is well-formed but trips the `wildcard-import` rule.
-        let root = jals_syntax::Parse::parse("import java.util.*;\nclass C {}\n").syntax();
-        let diagnostics = LintOutput::lint_node(&root, &Config::default());
+        let root = block_on_inline(jals_syntax::Parse::parse(
+            "import java.util.*;\nclass C {}\n",
+        ))
+        .syntax();
+        let diagnostics = block_on_inline(LintOutput::lint_node(&root, &Config::default()));
         assert!(
             diagnostics.iter().any(|d| d.rule == "wildcard-import"),
             "expected a wildcard-import finding: {diagnostics:?}"
@@ -158,10 +175,10 @@ mod tests {
     fn lint_node_matches_lint_source_rule_diagnostics() {
         let src = "import java.util.*;\nclass C {}\n";
         let cfg = Config::default();
-        let root = jals_syntax::Parse::parse(src).syntax();
+        let root = block_on_inline(jals_syntax::Parse::parse(src)).syntax();
         assert_eq!(
-            LintOutput::lint_node(&root, &cfg),
-            LintOutput::lint_source(src, &cfg).diagnostics
+            block_on_inline(LintOutput::lint_node(&root, &cfg)),
+            block_on_inline(LintOutput::lint_source(src, &cfg)).diagnostics
         );
     }
 
@@ -170,9 +187,9 @@ mod tests {
         // The `None` path is exactly `lint_source` — the delegation must not drift.
         let src = "import java.util.*;\nclass C { int x = 1.0; }\n";
         let cfg = Config::default();
-        let parse = jals_syntax::Parse::parse(src);
-        let with_none = LintOutput::lint_parse_with_index(&parse, &cfg, None);
-        let file_local = LintOutput::lint_source(src, &cfg);
+        let parse = block_on_inline(jals_syntax::Parse::parse(src));
+        let with_none = block_on_inline(LintOutput::lint_parse_with_index(&parse, &cfg, None));
+        let file_local = block_on_inline(LintOutput::lint_source(src, &cfg));
         assert_eq!(with_none.diagnostics, file_local.diagnostics);
         assert_eq!(with_none.parse_errors, file_local.parse_errors);
     }
@@ -184,21 +201,25 @@ mod tests {
         // A field initializer keeps `unused-local` out of the way, isolating `type-mismatch`.
         let src = "class Base {} class Sub extends Base {} class C { Sub f = new Base(); }";
         let cfg = Config::default();
-        let parse = jals_syntax::Parse::parse(src);
+        let parse = block_on_inline(jals_syntax::Parse::parse(src));
 
         // File-local: the subtyping mismatch is invisible.
         assert!(
-            LintOutput::lint_source(src, &cfg)
+            block_on_inline(LintOutput::lint_source(src, &cfg))
                 .diagnostics
                 .iter()
                 .all(|d| d.rule != TYPE_MISMATCH_RULE)
         );
 
         // Index-aware: it is flagged.
-        let index =
-            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())]).build();
-        let out =
-            LintOutput::lint_parse_with_index(&parse, &cfg, Some((&index, jals_hir::FileId(0))));
+        let index = block_on_inline(
+            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())]).build(),
+        );
+        let out = block_on_inline(LintOutput::lint_parse_with_index(
+            &parse,
+            &cfg,
+            Some((&index, jals_hir::FileId(0))),
+        ));
         assert!(
             out.diagnostics.iter().any(|d| d.rule == TYPE_MISMATCH_RULE
                 && d.message.contains("Base")
@@ -211,8 +232,8 @@ mod tests {
     #[test]
     fn constant_condition_carries_the_dead_branch_range() {
         let src = "class C { void m() { if (true) { a(); } else { b(); } } }";
-        let root = jals_syntax::Parse::parse(src).syntax();
-        let diagnostics = LintOutput::lint_node(&root, &Config::default());
+        let root = block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+        let diagnostics = block_on_inline(LintOutput::lint_node(&root, &Config::default()));
         let constant = diagnostics
             .iter()
             .find(|d| d.rule == "constant-condition")
@@ -226,8 +247,12 @@ mod tests {
             ))
         );
         // Every other rule leaves the secondary range empty.
-        let wildcard_root = jals_syntax::Parse::parse("import java.util.*;\nclass C {}\n").syntax();
-        let diagnostics = LintOutput::lint_node(&wildcard_root, &Config::default());
+        let wildcard_root = block_on_inline(jals_syntax::Parse::parse(
+            "import java.util.*;\nclass C {}\n",
+        ))
+        .syntax();
+        let diagnostics =
+            block_on_inline(LintOutput::lint_node(&wildcard_root, &Config::default()));
         let wildcard = diagnostics
             .iter()
             .find(|d| d.rule == "wildcard-import")
@@ -241,22 +266,27 @@ mod tests {
         // undeclared needs the project index (with stdlib), so `lint_source` cannot see it.
         let src = "class MyEx extends Exception {} class C { void f() { throw new MyEx(); } }";
         let cfg = Config::default();
-        let parse = jals_syntax::Parse::parse(src);
+        let parse = block_on_inline(jals_syntax::Parse::parse(src));
 
         // File-local: nothing to report without the hierarchy.
         assert!(
-            LintOutput::lint_source(src, &cfg)
+            block_on_inline(LintOutput::lint_source(src, &cfg))
                 .diagnostics
                 .iter()
                 .all(|d| d.rule != "unreported-exception")
         );
 
         // Index-aware (with stdlib): the undeclared checked exception is flagged.
-        let index = jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())])
-            .with_stdlib()
-            .build();
-        let out =
-            LintOutput::lint_parse_with_index(&parse, &cfg, Some((&index, jals_hir::FileId(0))));
+        let index = block_on_inline(
+            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())])
+                .with_stdlib()
+                .build(),
+        );
+        let out = block_on_inline(LintOutput::lint_parse_with_index(
+            &parse,
+            &cfg,
+            Some((&index, jals_hir::FileId(0))),
+        ));
         assert!(
             out.diagnostics
                 .iter()

@@ -101,7 +101,7 @@ impl Ctx<'_> {
     }
 
     /// Lower an `ENUM_BODY`. See the module docs for the GJF layout rules.
-    pub(crate) fn lower_enum_body(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_enum_body(&self, node: &SyntaxNode) -> Doc {
         let tokens: Vec<SyntaxToken> = node
             .children_with_tokens()
             .filter_map(SyntaxElement::into_token)
@@ -112,12 +112,12 @@ impl Ctx<'_> {
         // Malformed (a brace missing from error recovery): never synthesize a brace — fall back to
         // inline emission so the significant-token sequence is preserved (mirrors `lower_braced`).
         let (Some(lbrace), Some(rbrace)) = (lbrace, rbrace) else {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         };
         // Anything other than constants/commas before the terminator means error recovery; inline
         // emission keeps the tokens in source order rather than reordering them into sections.
         let Some(parts) = Self::partition(node) else {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         };
 
         let open = self.tok(lbrace);
@@ -133,7 +133,7 @@ impl Ctx<'_> {
         // Non-empty (or dangling-only): always break, one constant / member per line.
         let mut body: Vec<Doc> = vec![Doc::hardline()];
         if !parts.is_empty() {
-            body.push(self.build_inner(&parts));
+            body.push(self.build_inner(&parts).await);
         }
         if has_dangling {
             // A plain break before the dangling comment, matching `lower_braced` (a blank line there
@@ -153,7 +153,7 @@ impl Ctx<'_> {
 
     /// Build the indented body rows: the constants (with their commas and blank lines), the
     /// terminator `;`, then the members — each row separated by a blank-line-aware break.
-    fn build_inner(&self, parts: &EnumParts) -> Doc {
+    async fn build_inner(&self, parts: &EnumParts) -> Doc {
         let mut rows: Vec<Doc> = Vec::new();
 
         // Glue the terminator onto the last constant only when there are constants, no trailing
@@ -185,7 +185,10 @@ impl Ctx<'_> {
             } else {
                 Doc::nil()
             };
-            rows.push(Doc::concat(vec![self.lower_enum_constant(constant), tail]));
+            rows.push(Doc::concat(vec![
+                self.lower_enum_constant(constant).await,
+                tail,
+            ]));
         }
 
         // The terminator on its own line, when it was not glued onto the last constant.
@@ -208,7 +211,7 @@ impl Ctx<'_> {
                 rows.push(self.row_sep(first.as_ref()));
             }
             rows.push(match el {
-                SyntaxElement::Node(n) => self.lower(n),
+                SyntaxElement::Node(n) => self.lower(n).await,
                 SyntaxElement::Token(t) => self.tok(t),
             });
         }
@@ -230,9 +233,9 @@ impl Ctx<'_> {
     /// The constant's arg list and class body recurse through [`Ctx::lower`] either way. Enum-constant
     /// annotations never live in a `MODIFIERS` node, so [`crate::rules::modifiers`]'s expanded path
     /// never reaches them — this re-implements the same leading-run break locally.
-    fn lower_enum_constant(&self, node: &SyntaxNode) -> Doc {
+    async fn lower_enum_constant(&self, node: &SyntaxNode) -> Doc {
         if self.cfg.annotation_placement != AnnotationPlacement::Expanded {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
         let mut parts: Vec<Doc> = Vec::new();
         let mut prev: Option<SyntaxToken> = None;
@@ -257,12 +260,12 @@ impl Ctx<'_> {
                 let s = if prev_was_leading_annotation {
                     Doc::hardline()
                 } else {
-                    self.sep(prev.as_ref(), f)
+                    self.sep(prev.as_ref(), f).await
                 };
                 parts.push(s);
             }
             parts.push(match &el {
-                SyntaxElement::Node(n) => self.lower(n),
+                SyntaxElement::Node(n) => self.lower(n).await,
                 SyntaxElement::Token(t) => self.tok(t),
             });
             if last.is_some() {

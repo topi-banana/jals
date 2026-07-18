@@ -60,7 +60,7 @@ pub(crate) struct ClasspathLower;
 
 impl ClasspathLower {
     /// Lower a class file to its [`ClassfileClass`], or `None` for `module-info` (a module, not a type).
-    pub(crate) fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
+    pub(crate) async fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
         if cf.access_flags.is_module() {
             return None;
         }
@@ -72,7 +72,7 @@ impl ClasspathLower {
             .map(|s| Self::lower_type_params(&s.type_parameters))
             .unwrap_or_default();
         let supertypes = Self::lower_supertypes(cf, class_sig.as_ref(), pool);
-        let members = Self::lower_members(cf, pool, Fqn::simple_name_of(&fqn));
+        let members = Self::lower_members(cf, pool, Fqn::simple_name_of(&fqn)).await;
         Some(ClassfileClass {
             fqn,
             kind: Self::class_kind(cf),
@@ -154,13 +154,15 @@ impl ClasspathLower {
         out
     }
 
-    fn lower_members(
+    async fn lower_members(
         cf: &ClassFile,
         pool: &ConstantPool,
         owner_simple: &str,
     ) -> Vec<ClassfileMember> {
+        let mut yielder = jals_exec::Yielder::new();
         let mut out = Vec::new();
         for field in &cf.fields {
+            yielder.tick().await;
             let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
                 continue;
             };
@@ -174,6 +176,7 @@ impl ClasspathLower {
             });
         }
         for method in &cf.methods {
+            yielder.tick().await;
             let Some(raw_name) = pool.utf8(method.name_index).map(Cow::into_owned) else {
                 continue;
             };

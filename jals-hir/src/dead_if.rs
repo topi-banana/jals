@@ -59,15 +59,20 @@ impl DeadIf {
 
     /// Every `if` statement in `root` whose condition folds to a constant, in source order.
     /// `resolved` is the file's name resolution, used to fold `final` constant variables.
-    pub fn collect(root: &SyntaxNode, resolved: &Resolved) -> Vec<Self> {
+    pub async fn collect(root: &SyntaxNode, resolved: &Resolved) -> Vec<Self> {
         let mut evaluator = Evaluator {
             root,
             resolved,
             decls: None,
             visiting: Vec::new(),
         };
+        let mut yielder = jals_exec::Yielder::new();
         let mut out = Vec::new();
-        for if_stmt in root.descendants().filter_map(ast::IfStmt::cast) {
+        for node in root.descendants() {
+            yielder.tick().await;
+            let Some(if_stmt) = ast::IfStmt::cast(node) else {
+                continue;
+            };
             let Some(condition) = if_stmt.condition() else {
                 continue; // broken parse (`if () {}`) — nothing to evaluate.
             };

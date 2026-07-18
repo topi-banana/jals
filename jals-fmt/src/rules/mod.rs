@@ -17,6 +17,7 @@
 
 use alloc::string::String;
 
+use jals_exec::LocalBoxFuture;
 use jals_syntax::{SyntaxKind as S, SyntaxNode};
 
 use crate::config::Config;
@@ -40,9 +41,10 @@ pub(crate) trait LiteralRule {
 
 /// A node-level lowering a rule owns wholesale. Implementors are zero-sized handles held by the
 /// [`Registry`]; their `lower` reads `ctx.cfg` for the gating options exactly as the prior free
-/// functions did.
+/// functions did. The rule recurses back into the async [`Ctx::lower`] walk, and the trait is a
+/// `dyn` object, so the method returns the boxed future (one box per structural node).
 pub(crate) trait StructuralRule {
-    fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc;
+    fn lower<'t>(&'t self, node: &'t SyntaxNode, ctx: &'t Ctx<'t>) -> LocalBoxFuture<'t, Doc>;
 }
 
 /// The per-format rule set, built once from `&Config` and carried on [`Ctx`].

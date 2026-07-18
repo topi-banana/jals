@@ -27,6 +27,7 @@ use core::fmt;
 use core::ops::Range;
 
 use hashbrown::{HashMap, HashSet};
+use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
@@ -468,12 +469,12 @@ impl<'a> ProjectIndexBuilder<'a> {
     }
 
     /// Build the index, folding in every configured input.
-    #[must_use]
-    pub fn build(self) -> ProjectIndex {
+    pub async fn build(self) -> ProjectIndex {
         let empty = SourceLocations::default();
         let sources = self.sources.unwrap_or(&empty);
         let classes = self.classpath.map_or(&[][..], |cp| &cp.classes[..]);
         ProjectIndex::build_inner(self.files, self.source_files, self.stdlib, classes, sources)
+            .await
     }
 }
 
@@ -507,13 +508,16 @@ impl ProjectIndex {
     /// re-decoding the (unchanging) classpath each time. Lowering decodes every member's descriptor
     /// and generic signature — the expensive half of folding a classpath in; registering the
     /// resulting facts (the cheap half) still runs per rebuild. Pure and `wasm32`-compatible.
-    pub fn lower_classpath(classfiles: &[jals_classfile::ClassFile]) -> LoweredClasspath {
-        LoweredClasspath {
-            classes: classfiles
-                .iter()
-                .filter_map(crate::classpath::ClasspathLower::lower)
-                .collect(),
+    pub async fn lower_classpath(classfiles: &[jals_classfile::ClassFile]) -> LoweredClasspath {
+        let mut yielder = Yielder::new();
+        let mut classes = Vec::new();
+        for cf in classfiles {
+            yielder.tick().await;
+            if let Some(class) = crate::classpath::ClasspathLower::lower(cf).await {
+                classes.push(class);
+            }
         }
+        LoweredClasspath { classes }
     }
 
     /// Index where the types and members of the host's extracted library *sources* are declared, once,
@@ -521,7 +525,7 @@ impl ProjectIndex {
     /// result across rebuilds (the sources of a fixed dependency do not change). Each entry of
     /// `sources` is a library `.java` file's `(FileId, SOURCE_FILE root)`; the host registers those
     /// `FileId`s so it can map a match back to a real URL. Pure and `wasm32`-compatible.
-    pub fn index_source_locations(sources: &[(FileId, SyntaxNode)]) -> SourceLocations {
+    pub async fn index_source_locations(sources: &[(FileId, SyntaxNode)]) -> SourceLocations {
         let mut locs = SourceLocations::default();
         for (file, root) in sources {
             let package = ast::SourceFile::cast(root.clone())
@@ -529,12 +533,12 @@ impl ProjectIndex {
                 .and_then(|p| p.name())
                 .map(|n| n.text())
                 .filter(|p| !p.is_empty());
-            locs.collect(*file, root, package.as_deref(), None);
+            locs.collect(*file, root, package.as_deref()).await;
         }
         locs
     }
 
-    fn build_inner(
+    async fn build_inner(
         files: &[(FileId, SyntaxNode)],
         source_files: &[(FileId, SyntaxNode)],
         stdlib: bool,
@@ -544,16 +548,16 @@ impl ProjectIndex {
         // The CST-walking half: extract each file's cacheable facts. A from-scratch build extracts
         // every file; an incremental host (the LSP) caches these and re-extracts only the file that
         // changed, then calls `assemble` (below) — which folds them in with no CST walking.
-        let project: Vec<(FileId, FileFacts)> = files
-            .iter()
-            .map(|(file, root)| (*file, Self::extract_file(root)))
-            .collect();
-        let source: Vec<(FileId, FileFacts)> = source_files
-            .iter()
-            .map(|(file, root)| (*file, Self::extract_file(root)))
-            .collect();
+        let mut project: Vec<(FileId, FileFacts)> = Vec::with_capacity(files.len());
+        for (file, root) in files {
+            project.push((*file, Self::extract_file(root).await));
+        }
+        let mut source: Vec<(FileId, FileFacts)> = Vec::with_capacity(source_files.len());
+        for (file, root) in source_files {
+            source.push((*file, Self::extract_file(root).await));
+        }
         let stub: Vec<(FileId, FileFacts)> = if stdlib {
-            Self::stub_facts()
+            Self::stub_facts().await
         } else {
             Vec::new()
         };
@@ -564,14 +568,14 @@ impl ProjectIndex {
             classes,
             sources,
         )
+        .await
     }
 
     /// Extract one source file's cacheable [`FileFacts`] — the CST-walking half of indexing, isolated
     /// so a host can cache it per file and re-extract only the file that changed (then re-`assemble`).
     /// Captures both build passes' per-file data in one walk. Pure and `wasm32`-compatible; a root that
     /// is not a source file yields empty facts that contribute nothing.
-    #[must_use]
-    pub fn extract_file(root: &SyntaxNode) -> FileFacts {
+    pub async fn extract_file(root: &SyntaxNode) -> FileFacts {
         let Some(src) = ast::SourceFile::cast(root.clone()) else {
             return FileFacts {
                 meta: None,
@@ -603,7 +607,7 @@ impl ProjectIndex {
             }
         }
         let mut types = Vec::new();
-        Self::extract_types(root, package.as_deref(), None, &mut types);
+        Self::extract_types(root, package.as_deref(), &mut types).await;
         FileFacts {
             meta: Some(FileMeta {
                 package,
@@ -618,18 +622,14 @@ impl ProjectIndex {
     /// `u32::MAX`, disjoint from the host's low ids). The stubs never change, so a host that
     /// re-indexes on every edit extracts these once and reuses them across every
     /// [`assemble`](Self::assemble).
-    #[must_use]
-    pub fn stub_facts() -> Vec<(FileId, FileFacts)> {
-        crate::stdlib::Stdlib::stub_sources()
-            .iter()
-            .enumerate()
-            .map(|(i, src)| {
-                (
-                    FileId(u32::MAX - i as u32),
-                    Self::extract_file(&jals_syntax::Parse::parse(src).syntax()),
-                )
-            })
-            .collect()
+    pub async fn stub_facts() -> Vec<(FileId, FileFacts)> {
+        let sources = crate::stdlib::Stdlib::stub_sources();
+        let mut facts = Vec::with_capacity(sources.len());
+        for (i, src) in sources.iter().enumerate() {
+            let root = jals_syntax::Parse::parse(src).await.syntax();
+            facts.push((FileId(u32::MAX - i as u32), Self::extract_file(&root).await));
+        }
+        facts
     }
 
     /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts and
@@ -641,18 +641,17 @@ impl ProjectIndex {
     /// on every edit — reusing cached facts for the unchanged files — is the incremental path, bit-for
     /// -bit identical to a from-scratch [`builder`](Self::builder) build over the same inputs. Pure and
     /// `wasm32`-compatible.
-    #[must_use]
-    pub fn assemble(
+    pub async fn assemble(
         project: &[(FileId, &FileFacts)],
         source: &[(FileId, &FileFacts)],
         stub: &[(FileId, &FileFacts)],
         classpath: &LoweredClasspath,
         sources: &SourceLocations,
     ) -> Self {
-        Self::assemble_inner(project, source, stub, &classpath.classes, sources)
+        Self::assemble_inner(project, source, stub, &classpath.classes, sources).await
     }
 
-    fn assemble_inner(
+    async fn assemble_inner(
         project: &[(FileId, &FileFacts)],
         source: &[(FileId, &FileFacts)],
         stub: &[(FileId, &FileFacts)],
@@ -688,7 +687,7 @@ impl ProjectIndex {
 
         // First pass: package, imports, and type declarations.
         for &(file, facts, origin) in &units {
-            index.register_file_types(file, facts, origin);
+            index.register_file_types(file, facts, origin).await;
         }
         // Classpath `.class` files (already lowered to self-contained data) registered like source
         // types. Their reserved `FileId`s sit just below the stub block so they never collide.
@@ -698,26 +697,35 @@ impl ProjectIndex {
             .enumerate()
             .map(|(j, class)| (FileId(classfile_block_start - j as u32), class))
             .collect();
-        let classfile_owners: Vec<ItemId> = classfiles
-            .iter()
-            .map(|&(file, class)| index.collect_classfile_type(file, class, sources))
-            .collect();
+        let mut yielder = Yielder::new();
+        let mut classfile_owners: Vec<ItemId> = Vec::with_capacity(classfiles.len());
+        for &(file, class) in &classfiles {
+            yielder.tick().await;
+            classfile_owners.push(index.collect_classfile_type(file, class, sources));
+        }
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
-        for (i, item) in index.items.iter().enumerate() {
-            index
-                .decl_to_item
-                .insert((item.file, item.name_range.start), ItemId(i as u32));
+        let decl_sites: Vec<((FileId, usize), ItemId)> = index
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| ((item.file, item.name_range.start), ItemId(i as u32)))
+            .collect();
+        for (key, id) in decl_sites {
+            yielder.tick().await;
+            index.decl_to_item.insert(key, id);
         }
         // Second pass: members and project-internal inheritance. It runs after every type is indexed
         // so a supertype declared later (or in another file / stub) still resolves.
         for &(file, facts, _) in &units {
-            index.register_file_members(file, facts);
+            index.register_file_members(file, facts).await;
         }
         // The same second pass for classpath types, now that every type (project, stub, classpath) is
         // registered, so their supertypes resolve by fully-qualified name.
         for ((file, class), &owner) in classfiles.iter().copied().zip(&classfile_owners) {
-            index.collect_classfile_members_and_supertypes(file, owner, class, sources);
+            index
+                .collect_classfile_members_and_supertypes(file, owner, class, sources)
+                .await;
         }
         index
     }
@@ -727,12 +735,14 @@ impl ProjectIndex {
     /// [`meta`](FileFacts::meta) (not a source file) contributes nothing, exactly as a from-scratch
     /// walk skips it. The `RawType`s are in pre-order, so the assigned [`ItemId`]s match a whole-tree
     /// walk's.
-    fn register_file_types(&mut self, file: FileId, facts: &FileFacts, origin: ItemOrigin) {
+    async fn register_file_types(&mut self, file: FileId, facts: &FileFacts, origin: ItemOrigin) {
         let Some(meta) = &facts.meta else {
             return;
         };
         self.files.insert(file, meta.clone());
+        let mut yielder = Yielder::new();
         for raw in &facts.types {
+            yielder.tick().await;
             let id = ItemId(self.items.len() as u32);
             self.items.push(Item {
                 fqn: Fqn(raw.fqn.clone()),
@@ -754,12 +764,14 @@ impl ProjectIndex {
     /// pass of [`assemble_inner`](Self::assemble_inner). Each cached member's placeholder
     /// [`owner`](Member::owner) / [`file`](Member::file) is fixed to the now-assigned item and this
     /// `file`. Runs after every type is indexed, so a forward / cross-file supertype resolves.
-    fn register_file_members(&mut self, file: FileId, facts: &FileFacts) {
+    async fn register_file_members(&mut self, file: FileId, facts: &FileFacts) {
+        let mut yielder = Yielder::new();
         for raw in &facts.types {
             let Some(owner) = self.item_by_decl(file, raw.name_range.start) else {
                 continue;
             };
             for member in &raw.members {
+                yielder.tick().await;
                 let mut member = member.clone();
                 member.owner = owner;
                 member.file = file;
@@ -850,14 +862,16 @@ impl ProjectIndex {
     /// Registers a classpath type's members and resolves its supertypes by fully-qualified name
     /// (second pass), the classfile counterpart of
     /// [`collect_members_and_supertypes`](Self::collect_members_and_supertypes).
-    fn collect_classfile_members_and_supertypes(
+    async fn collect_classfile_members_and_supertypes(
         &mut self,
         file: FileId,
         owner: ItemId,
         class: &crate::classpath::ClassfileClass,
         sources: &SourceLocations,
     ) {
+        let mut yielder = Yielder::new();
         for member in &class.members {
+            yielder.tick().await;
             self.register_member(
                 owner,
                 Member {
@@ -1014,14 +1028,19 @@ impl ProjectIndex {
     /// The byte ranges of `file`'s type-name references that resolve to nothing — neither
     /// file-locally nor across the project. These are the "cannot resolve symbol" spans; a name
     /// that might come from outside the indexed sources is deliberately excluded.
-    pub fn unresolved_types(&self, file: FileId, resolved: &Resolved) -> Vec<Range<usize>> {
-        resolved
-            .references
-            .iter()
-            .filter(|r| r.namespace == Namespace::Type && r.resolution == Resolution::Unresolved)
-            .filter(|r| self.resolve_reference(file, r) == TypeResolution::Unresolved)
-            .map(|r| r.range.clone())
-            .collect()
+    pub async fn unresolved_types(&self, file: FileId, resolved: &Resolved) -> Vec<Range<usize>> {
+        let mut yielder = Yielder::new();
+        let mut out = Vec::new();
+        for r in &resolved.references {
+            yielder.tick().await;
+            if r.namespace == Namespace::Type
+                && r.resolution == Resolution::Unresolved
+                && self.resolve_reference(file, r) == TypeResolution::Unresolved
+            {
+                out.push(r.range.clone());
+            }
+        }
+        out
     }
 
     /// The item with the given id.
@@ -1217,35 +1236,42 @@ impl SourceLocations {
     /// like `by_fqn`). Member ranges and parameter counts come straight from
     /// [`ProjectIndex::members_of_decl`] so they line up with how the index reads members; the
     /// `ItemId(0)` owner is a placeholder, only the member name, arity, and range are read.
-    fn collect(
-        &mut self,
-        file: FileId,
-        node: &SyntaxNode,
-        package: Option<&str>,
-        enclosing: Option<&str>,
-    ) {
-        let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
-            && let Some(name_tok) = Collect::first_ident_token(node)
-        {
-            let fqn = ProjectIndex::build_fqn(package, enclosing, name_tok.text());
-            self.types
-                .entry(fqn.clone())
-                .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
-            for member in ProjectIndex::members_of_decl(ItemId(0), file, node, name_tok.text()) {
-                let loc = (member.file, member.name_range.clone());
-                self.members
-                    .entry((fqn.clone(), member.name.clone(), member.params.len()))
-                    .or_insert_with(|| loc.clone());
-                self.members_by_name
-                    .entry((fqn.clone(), member.name.clone()))
-                    .or_insert(loc);
+    async fn collect(&mut self, file: FileId, root: &SyntaxNode, package: Option<&str>) {
+        let mut yielder = Yielder::new();
+        // The recursion's `enclosing` parameter, made explicit: each frame carries the enclosing
+        // type's FQN as of that node. Children are pushed reversed so the walk visits — and records
+        // — types in exactly the recursion's pre-order.
+        let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
+        while let Some((node, enclosing)) = stack.pop() {
+            yielder.tick().await;
+            let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
+                && let Some(name_tok) = Collect::first_ident_token(&node)
+            {
+                let fqn = ProjectIndex::build_fqn(package, enclosing.as_deref(), name_tok.text());
+                self.types
+                    .entry(fqn.clone())
+                    .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
+                for member in ProjectIndex::members_of_decl(ItemId(0), file, &node, name_tok.text())
+                {
+                    let loc = (member.file, member.name_range.clone());
+                    self.members
+                        .entry((fqn.clone(), member.name.clone(), member.params.len()))
+                        .or_insert_with(|| loc.clone());
+                    self.members_by_name
+                        .entry((fqn.clone(), member.name.clone()))
+                        .or_insert(loc);
+                }
+                Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
+            } else {
+                enclosing
+            };
+            // `SyntaxNodeChildren` is not double-ended, so the reversal needs the buffer
+            // (clippy's `needless_collect` suggestion of `.children().rev()` does not compile).
+            #[allow(clippy::needless_collect)]
+            let children: Vec<SyntaxNode> = node.children().collect();
+            for child in children.into_iter().rev() {
+                stack.push((child, next_enclosing.clone()));
             }
-            Some(fqn)
-        } else {
-            enclosing.map(str::to_owned)
-        };
-        for child in node.children() {
-            self.collect(file, &child, package, next_enclosing.as_deref());
         }
     }
 }
@@ -1267,31 +1293,38 @@ impl ProjectIndex {
 /// facts are folded into a specific index) and are fixed up in
 /// [`register_file_members`](ProjectIndex::register_file_members).
 impl ProjectIndex {
-    fn extract_types(
-        node: &SyntaxNode,
-        package: Option<&str>,
-        enclosing: Option<&str>,
-        out: &mut Vec<RawType>,
-    ) {
-        let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
-            && let Some(name_tok) = Collect::first_ident_token(node)
-        {
-            let fqn = Self::build_fqn(package, enclosing, name_tok.text());
-            out.push(RawType {
-                fqn: fqn.clone(),
-                kind,
-                name_range: Collect::byte_range(&name_tok),
-                type_params: Self::type_params_of(node),
-                // Placeholder owner/file, fixed up when these facts are folded into an index.
-                members: Self::members_of_decl(ItemId(0), FileId(0), node, name_tok.text()),
-                raw_supertypes: Self::raw_supertypes_of(node),
-            });
-            Some(fqn)
-        } else {
-            enclosing.map(str::to_owned)
-        };
-        for child in node.children() {
-            Self::extract_types(&child, package, next_enclosing.as_deref(), out);
+    async fn extract_types(root: &SyntaxNode, package: Option<&str>, out: &mut Vec<RawType>) {
+        let mut yielder = Yielder::new();
+        // The recursion's `enclosing` parameter, made explicit: each frame carries the enclosing
+        // type's FQN as of that node. Children are pushed reversed so `out` receives the
+        // `RawType`s in exactly the recursion's pre-order (the ItemId assignment order).
+        let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
+        while let Some((node, enclosing)) = stack.pop() {
+            yielder.tick().await;
+            let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
+                && let Some(name_tok) = Collect::first_ident_token(&node)
+            {
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), name_tok.text());
+                out.push(RawType {
+                    fqn: fqn.clone(),
+                    kind,
+                    name_range: Collect::byte_range(&name_tok),
+                    type_params: Self::type_params_of(&node),
+                    // Placeholder owner/file, fixed up when these facts are folded into an index.
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, name_tok.text()),
+                    raw_supertypes: Self::raw_supertypes_of(&node),
+                });
+                Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
+            } else {
+                enclosing
+            };
+            // `SyntaxNodeChildren` is not double-ended, so the reversal needs the buffer
+            // (clippy's `needless_collect` suggestion of `.children().rev()` does not compile).
+            #[allow(clippy::needless_collect)]
+            let children: Vec<SyntaxNode> = node.children().collect();
+            for child in children.into_iter().rev() {
+                stack.push((child, next_enclosing.clone()));
+            }
         }
     }
 }
@@ -1612,6 +1645,16 @@ impl ProjectIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jals_exec::block_on_inline;
+
+    /// Synchronous test-side drivers for the async parse / extract entry points.
+    fn parse_root(src: &str) -> SyntaxNode {
+        block_on_inline(jals_syntax::Parse::parse(src)).syntax()
+    }
+
+    fn extract(root: &SyntaxNode) -> FileFacts {
+        block_on_inline(ProjectIndex::extract_file(root))
+    }
 
     /// A canonical, comparable projection of an index: each [`Item`] (which derives `PartialEq`)
     /// paired with its members in registration order. Two indexes with identical items, members,
@@ -1637,24 +1680,18 @@ mod tests {
     fn assemble_from_facts_matches_a_from_scratch_build() {
         let a = "package p; class Base { int f() { return 0; } }";
         let b = "package p; class Sub extends Base { String g(int x) { return null; } }";
-        let files = [
-            (FileId(0), jals_syntax::Parse::parse(a).syntax()),
-            (FileId(1), jals_syntax::Parse::parse(b).syntax()),
-        ];
-        let built = ProjectIndex::builder(&files).with_stdlib().build();
+        let files = [(FileId(0), parse_root(a)), (FileId(1), parse_root(b))];
+        let built = block_on_inline(ProjectIndex::builder(&files).with_stdlib().build());
 
-        let facts: Vec<(FileId, FileFacts)> = files
-            .iter()
-            .map(|(f, r)| (*f, ProjectIndex::extract_file(r)))
-            .collect();
-        let stub = ProjectIndex::stub_facts();
-        let assembled = ProjectIndex::assemble(
+        let facts: Vec<(FileId, FileFacts)> = files.iter().map(|(f, r)| (*f, extract(r))).collect();
+        let stub = block_on_inline(ProjectIndex::stub_facts());
+        let assembled = block_on_inline(ProjectIndex::assemble(
             &ProjectIndex::borrow_facts(&facts),
             &[],
             &ProjectIndex::borrow_facts(&stub),
-            &ProjectIndex::lower_classpath(&[]),
+            &block_on_inline(ProjectIndex::lower_classpath(&[])),
             &SourceLocations::default(),
-        );
+        ));
 
         assert_eq!(summary(&built), summary(&assembled));
         // Sanity: the cross-file supertype actually resolved, so the comparison is not vacuous.
@@ -1669,11 +1706,8 @@ mod tests {
     #[test]
     fn extract_file_is_deterministic() {
         let src = "package p; import a.B; class C<T> extends B { T get() { return null; } }";
-        let root = jals_syntax::Parse::parse(src).syntax();
-        assert_eq!(
-            ProjectIndex::extract_file(&root),
-            ProjectIndex::extract_file(&root)
-        );
+        let root = parse_root(src);
+        assert_eq!(extract(&root), extract(&root));
     }
 
     /// Re-extracting a single file's facts and reassembling — reusing the other files' cached facts,
@@ -1682,29 +1716,24 @@ mod tests {
     fn re_extracting_one_file_reproduces_the_same_index() {
         let a = "package p; class A { B b; }";
         let b = "package p; class B extends A { int x; }";
-        let files = [
-            (FileId(0), jals_syntax::Parse::parse(a).syntax()),
-            (FileId(1), jals_syntax::Parse::parse(b).syntax()),
-        ];
-        let mut facts: Vec<(FileId, FileFacts)> = files
-            .iter()
-            .map(|(f, r)| (*f, ProjectIndex::extract_file(r)))
-            .collect();
-        let stub = ProjectIndex::stub_facts();
-        let empty_cp = ProjectIndex::lower_classpath(&[]);
+        let files = [(FileId(0), parse_root(a)), (FileId(1), parse_root(b))];
+        let mut facts: Vec<(FileId, FileFacts)> =
+            files.iter().map(|(f, r)| (*f, extract(r))).collect();
+        let stub = block_on_inline(ProjectIndex::stub_facts());
+        let empty_cp = block_on_inline(ProjectIndex::lower_classpath(&[]));
         let assemble = |facts: &[(FileId, FileFacts)]| {
-            ProjectIndex::assemble(
+            block_on_inline(ProjectIndex::assemble(
                 &ProjectIndex::borrow_facts(facts),
                 &[],
                 &ProjectIndex::borrow_facts(&stub),
                 &empty_cp,
                 &SourceLocations::default(),
-            )
+            ))
         };
         let full = assemble(&facts);
 
         // Re-extract only file 0, then reassemble from the (partially reused) facts.
-        facts[0].1 = ProjectIndex::extract_file(&files[0].1);
+        facts[0].1 = extract(&files[0].1);
         let incremental = assemble(&facts);
         assert_eq!(summary(&full), summary(&incremental));
     }

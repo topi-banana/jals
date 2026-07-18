@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+use jals_exec::{LocalBoxFuture, Yielder};
 use jals_syntax::SyntaxKind;
 use jals_syntax::ast::{AstNode, ImportDecl};
 
@@ -18,9 +19,16 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct WildcardImport;
 
 impl WildcardImport {
-    fn check(root: &jals_syntax::SyntaxNode) -> Vec<Finding> {
+    /// The table-edge shim: boxes the async rule body once per file.
+    fn check(root: &jals_syntax::SyntaxNode) -> LocalBoxFuture<'_, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root))
+    }
+
+    async fn check_impl(root: &jals_syntax::SyntaxNode) -> Vec<Finding> {
+        let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
+            yielder.tick().await;
             if node.kind() != SyntaxKind::IMPORT_DECL {
                 continue;
             }

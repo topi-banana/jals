@@ -13,15 +13,16 @@ use jals_syntax::ast::{self, AstNode};
 
 /// Parses `src`, keeping its `SOURCE_FILE` node alive (rowan nodes are ref-counted).
 fn parse(src: &str) -> SyntaxNode {
-    jals_syntax::Parse::parse(src).syntax()
+    jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax()
 }
 
 /// Infers a single-file project (so reference type names can resolve to project items).
 fn analyse(src: &str) -> (SyntaxNode, Resolved, TypeInference) {
     let node = parse(src);
-    let resolved = Resolved::resolve_node(&node);
-    let index = ProjectIndex::builder(&[(FileId(0), node.clone())]).build();
-    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let index =
+        jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node.clone())]).build());
+    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
     (node, resolved, ti)
 }
 
@@ -295,8 +296,8 @@ fn project_free_inference_names_reference_types_externally() {
     // infer_node has no index, so a sibling type is known only by spelling — but structural
     // inference (the `int`, the `var`) still works.
     let node = parse("class C { void m() { Helper h = make(); var n = 1; } } class Helper { }");
-    let resolved = Resolved::resolve_node(&node);
-    let ti = TypeInference::infer_node(&node, &resolved);
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let ti = jals_exec::block_on_inline(TypeInference::infer_node(&node, &resolved));
     let helper = resolved.defs.iter().find(|d| d.name == "h").unwrap();
     let n = resolved.defs.iter().find(|d| d.name == "n").unwrap();
     assert_eq!(ti.type_of_def(helper.id).to_string(), "Helper");

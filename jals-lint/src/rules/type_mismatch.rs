@@ -14,6 +14,7 @@
 
 use alloc::vec::Vec;
 
+use jals_exec::LocalBoxFuture;
 use jals_hir::Resolved;
 use jals_syntax::SyntaxNode;
 
@@ -31,8 +32,22 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct TypeMismatch;
 
 impl TypeMismatch {
-    fn check(root: &SyntaxNode, resolved: &Resolved, index: Option<IndexCtx>) -> Vec<Finding> {
+    /// The table-edge shim: boxes the async rule body once per file.
+    fn check<'a>(
+        root: &'a SyntaxNode,
+        resolved: &'a Resolved,
+        index: Option<IndexCtx<'a>>,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root, resolved, index))
+    }
+
+    async fn check_impl(
+        root: &SyntaxNode,
+        resolved: &Resolved,
+        index: Option<IndexCtx<'_>>,
+    ) -> Vec<Finding> {
         jals_hir::TypeInference::type_mismatches(root, resolved, index)
+            .await
             .into_iter()
             .map(|m| Finding {
                 message: m.message(),

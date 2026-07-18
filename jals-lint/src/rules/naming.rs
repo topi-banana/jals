@@ -17,6 +17,8 @@ use jals_syntax::SyntaxKind::{
 };
 use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
+use jals_exec::{LocalBoxFuture, Yielder};
+
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
@@ -30,9 +32,16 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct NamingConvention;
 
 impl NamingConvention {
-    fn check(root: &SyntaxNode) -> Vec<Finding> {
+    /// The table-edge shim: boxes the async rule body once per file.
+    fn check(root: &SyntaxNode) -> LocalBoxFuture<'_, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root))
+    }
+
+    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+        let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
+            yielder.tick().await;
             match node.kind() {
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL => {
                     if let Some(tok) = Self::first_name_ident(&node) {

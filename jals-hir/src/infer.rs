@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use hashbrown::{HashMap, HashSet};
+use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
@@ -88,13 +89,15 @@ impl TypeInference {
 impl TypeInference {
     /// Infers types for `root` (a `SOURCE_FILE`), resolving reference type names against `index` from
     /// the perspective of `file`. `resolved` is the file's name resolution.
-    pub fn infer(
+    pub async fn infer(
         root: &SyntaxNode,
         resolved: &Resolved,
         index: &ProjectIndex,
         file: FileId,
     ) -> Self {
-        Inferer::new(root, resolved, Some((index, file))).run()
+        Inferer::new(root, resolved, Some((index, file)))
+            .run()
+            .await
     }
 
     /// Infers types for `root` without a project index.
@@ -102,8 +105,8 @@ impl TypeInference {
     /// Reference type names resolve only to [`ClassTy::External`] (by spelling), but all structural
     /// inference — primitives, arrays, literals, numeric promotion, `var` from initializer — still
     /// works. For file-local tooling holding no index.
-    pub fn infer_node(root: &SyntaxNode, resolved: &Resolved) -> Self {
-        Inferer::new(root, resolved, None).run()
+    pub async fn infer_node(root: &SyntaxNode, resolved: &Resolved) -> Self {
+        Inferer::new(root, resolved, None).run().await
     }
 }
 
@@ -172,18 +175,20 @@ impl TypeInference {
     /// surface. Conservative throughout (it builds on [`Ty::is_assignable_to`]): an `Unknown` type, an
     /// external/boxing pair, and a numeric constant that narrowing could rescue are never reported, so a
     /// consumer turning these into diagnostics never shows a false positive. Pure; never panics.
-    pub fn type_mismatches(
+    pub async fn type_mismatches(
         root: &SyntaxNode,
         resolved: &Resolved,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> Vec<TypeMismatch> {
         let ti = match project {
-            Some((index, file)) => Self::infer(root, resolved, index, file),
-            None => Self::infer_node(root, resolved),
+            Some((index, file)) => Self::infer(root, resolved, index, file).await,
+            None => Self::infer_node(root, resolved).await,
         };
         let index = project.map(|(index, _)| index);
+        let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
+            yielder.tick().await;
             match node.kind() {
                 LOCAL_VAR_DECL | FIELD_DECL => {
                     ti.check_initializer(&node, resolved, index, &mut out);
@@ -487,10 +492,10 @@ impl<'a> Inferer<'a> {
         }
     }
 
-    fn run(mut self) -> TypeInference {
+    async fn run(mut self) -> TypeInference {
         let root = self.root.clone();
-        self.collect_declared_types(&root);
-        self.infer_in(&root);
+        self.collect_declared_types(&root).await;
+        self.infer_in(&root).await;
         TypeInference {
             def_types: self.def_types,
             expr_by_span: self.expr_by_span,
@@ -499,20 +504,22 @@ impl<'a> Inferer<'a> {
 
     // --- Pass 1: declared types ---------------------------------------------------------------
 
-    /// Records the written type of every explicitly-typed binding under `node`. A `var` binding is
-    /// skipped here (it has no written type) and filled from its initializer in pass 2.
-    fn collect_declared_types(&mut self, node: &SyntaxNode) {
-        if Self::declares_typed_bindings(node.kind()) {
-            let ty = node.children().find_map(ast::Type::cast);
-            if !ty.as_ref().is_some_and(Cst::is_var_type) {
-                let t = self.ty_of_opt_type(ty.as_ref());
-                for tok in Collect::direct_ident_tokens(node) {
-                    self.set_def_type(Collect::token_start(&tok), t.clone());
+    /// Records the written type of every explicitly-typed binding under `root`. A `var` binding is
+    /// skipped here (it has no written type) and filled from its initializer in pass 2. Each node's
+    /// handling is independent, so the recursive walk is a plain pre-order loop here.
+    async fn collect_declared_types(&mut self, root: &SyntaxNode) {
+        let mut yielder = Yielder::new();
+        for node in root.descendants() {
+            yielder.tick().await;
+            if Self::declares_typed_bindings(node.kind()) {
+                let ty = node.children().find_map(ast::Type::cast);
+                if !ty.as_ref().is_some_and(Cst::is_var_type) {
+                    let t = self.ty_of_opt_type(ty.as_ref());
+                    for tok in Collect::direct_ident_tokens(&node) {
+                        self.set_def_type(Collect::token_start(&tok), t.clone());
+                    }
                 }
             }
-        }
-        for child in node.children() {
-            self.collect_declared_types(&child);
         }
     }
 
@@ -524,19 +531,37 @@ impl<'a> Inferer<'a> {
 
     // --- Pass 2: expression inference ---------------------------------------------------------
 
-    /// Walks `node` post-order, typing every expression (children first), and fills a `var` local's
+    /// Walks `root` post-order, typing every expression (children first), and fills a `var` local's
     /// type from its already-typed initializer.
-    fn infer_in(&mut self, node: &SyntaxNode) {
-        for child in node.children() {
-            self.infer_in(&child);
-        }
-        if let Some(expr) = ast::Expr::cast(node.clone()) {
-            let r = node.text_range();
-            let span = (usize::from(r.start()), usize::from(r.end()));
-            let ty = self.compute_expr_ty(&expr);
-            self.expr_by_span.insert(span, ty);
-        } else if matches!(node.kind(), LOCAL_VAR_DECL | RESOURCE) {
-            self.fill_var_binding(node);
+    ///
+    /// The walk is an explicit-stack post-order rather than per-node recursion: each node is pushed
+    /// unexpanded, re-pushed expanded above its (reversed) children, and processed when popped
+    /// expanded — visiting nodes in exactly the order the recursive walk did, so every child's type
+    /// is memoised before its parent reads it and a same-span parent still overwrites last.
+    async fn infer_in(&mut self, root: &SyntaxNode) {
+        let mut yielder = Yielder::new();
+        let mut stack: Vec<(SyntaxNode, bool)> = vec![(root.clone(), false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if !expanded {
+                stack.push((node.clone(), true));
+                // `SyntaxNodeChildren` is not double-ended, so the reversal needs the buffer
+                // (clippy's `needless_collect` suggestion of `.children().rev()` does not compile).
+                #[allow(clippy::needless_collect)]
+                let children: Vec<SyntaxNode> = node.children().collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, false));
+                }
+                continue;
+            }
+            yielder.tick().await;
+            if let Some(expr) = ast::Expr::cast(node.clone()) {
+                let r = node.text_range();
+                let span = (usize::from(r.start()), usize::from(r.end()));
+                let ty = self.compute_expr_ty(&expr);
+                self.expr_by_span.insert(span, ty);
+            } else if matches!(node.kind(), LOCAL_VAR_DECL | RESOURCE) {
+                self.fill_var_binding(&node);
+            }
         }
     }
 
@@ -1132,7 +1157,7 @@ impl ProjectIndex {
     /// receiver's project type, or a bare `m(..)` on the enclosing type — then renders every overload.
     /// Returns `None` when the cursor is in no call, the receiver is not an indexed project type (e.g.
     /// an external/JDK type), or the method names no project member. Never panics.
-    pub fn signature_help(
+    pub async fn signature_help(
         &self,
         root: &SyntaxNode,
         resolved: &Resolved,
@@ -1140,7 +1165,7 @@ impl ProjectIndex {
         offset: usize,
     ) -> Option<SignatureHelp> {
         let (call, active_parameter) = Cst::enclosing_call(root, offset)?;
-        let ti = TypeInference::infer(root, resolved, self, file);
+        let ti = TypeInference::infer(root, resolved, self, file).await;
         let (owner, name) = ti.call_target(&call, self, file)?;
         let signatures: Vec<Signature> = self
             .resolve_members_all(owner, &name, Namespace::Method)
@@ -1252,19 +1277,21 @@ impl ProjectIndex {
     /// an indexed project type (an external / JDK type, whose members are not indexed). One entry per
     /// distinct name (a field shadows, overloads collapse to one); the editor filters by the typed
     /// prefix. Never panics.
-    pub fn member_completions(
+    pub async fn member_completions(
         &self,
         root: &SyntaxNode,
         resolved: &Resolved,
         file: FileId,
         offset: usize,
     ) -> Vec<Completion> {
-        let Some(owner) = self.receiver_owner(root, resolved, file, offset) else {
+        let Some(owner) = self.receiver_owner(root, resolved, file, offset).await else {
             return Vec::new();
         };
+        let mut yielder = Yielder::new();
         let mut seen: HashSet<(String, Namespace)> = HashSet::new();
         let mut out = Vec::new();
         for id in self.members_of(owner) {
+            yielder.tick().await;
             let member = self.member(id);
             // Only instance-accessible members complete after `.`: fields and methods, not
             // constructors or enum constants.
@@ -1311,7 +1338,7 @@ impl ProjectIndex {
     /// Anchors structurally first and only runs the (whole-file) type inference once a real receiver
     /// expression is found — so a cursor on no member access, or a `this.` / `super.` receiver, costs
     /// no inference at all (member completion is triggered on every `.`).
-    fn receiver_owner(
+    async fn receiver_owner(
         &self,
         root: &SyntaxNode,
         resolved: &Resolved,
@@ -1327,7 +1354,7 @@ impl ProjectIndex {
         }
         let dot_start = usize::from(dot.text_range().start());
         let receiver = Cst::receiver_node(&before, dot_start)?;
-        let ti = TypeInference::infer(root, resolved, self, file);
+        let ti = TypeInference::infer(root, resolved, self, file).await;
         ti.type_of_expr(Collect::node_span(&receiver))?.project_id()
     }
 
@@ -1354,19 +1381,21 @@ impl ProjectIndex {
     /// field or method is reachable without `this.`). An inner binding shadows an outer one of the
     /// same name and name-space. Project types from other files are then added by simple name. One
     /// entry per (name, name-space); the editor filters by the typed prefix. Never panics.
-    pub fn scope_completions(
+    pub async fn scope_completions(
         &self,
         root: &SyntaxNode,
         resolved: &Resolved,
         file: FileId,
         offset: usize,
     ) -> Vec<Completion> {
-        let ti = TypeInference::infer(root, resolved, self, file);
+        let ti = TypeInference::infer(root, resolved, self, file).await;
+        let mut yielder = Yielder::new();
         let mut seen: HashSet<(String, Namespace)> = HashSet::new();
         let mut out = Vec::new();
         // Visible bindings, innermost scope outward (the first seen per name / name-space wins, so an
         // inner binding shadows an outer one).
         for def in resolved.visible_defs(offset) {
+            yielder.tick().await;
             // A constructor is not a name completed in an expression position.
             if def.kind == DefKind::Constructor {
                 continue;
@@ -1378,6 +1407,7 @@ impl ProjectIndex {
         // Project type names from other files (a sibling type already in scope is deduped away). The
         // simple name completes; the fully-qualified name is the detail.
         for item in self.items() {
+            yielder.tick().await;
             let name = item.fqn.simple_name().to_owned();
             if seen.insert((name.clone(), Namespace::Type)) {
                 out.push(Completion {

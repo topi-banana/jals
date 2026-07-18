@@ -21,7 +21,10 @@ fn render(out: &LintOutput) -> String {
 }
 
 fn lint(src: &str) -> String {
-    render(&LintOutput::lint_source(src, &Config::default()))
+    render(&jals_exec::block_on_inline(LintOutput::lint_source(
+        src,
+        &Config::default(),
+    )))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -261,7 +264,7 @@ fn allow_suppresses_a_rule() {
     config
         .rules
         .insert("wildcard-import".to_owned(), Severity::Allow);
-    let out = LintOutput::lint_source("import java.util.*;", &config);
+    let out = jals_exec::block_on_inline(LintOutput::lint_source("import java.util.*;", &config));
     assert!(
         out.diagnostics.is_empty(),
         "rule set to allow should not fire"
@@ -274,7 +277,7 @@ fn severity_is_resolved_from_config() {
     config
         .rules
         .insert("wildcard-import".to_owned(), Severity::Error);
-    let out = LintOutput::lint_source("import java.util.*;", &config);
+    let out = jals_exec::block_on_inline(LintOutput::lint_source("import java.util.*;", &config));
     assert_eq!(out.diagnostics.len(), 1);
     assert_eq!(out.diagnostics[0].severity, Severity::Error);
 }
@@ -319,7 +322,9 @@ fn lint_with_features(src: &str, features: &[Feature]) -> String {
         features: FeatureSet::resolve(features),
         ..Default::default()
     };
-    render(&LintOutput::lint_source(src, &config))
+    render(&jals_exec::block_on_inline(LintOutput::lint_source(
+        src, &config,
+    )))
 }
 
 #[test]
@@ -381,7 +386,7 @@ fn compact_source_file_respects_allow_config() {
     config
         .rules
         .insert("compact-source-file".to_owned(), Severity::Allow);
-    let out = LintOutput::lint_source("void main() {}", &config);
+    let out = jals_exec::block_on_inline(LintOutput::lint_source("void main() {}", &config));
     assert!(
         out.diagnostics
             .iter()
@@ -442,7 +447,8 @@ fn module_import_respects_allow_config() {
     config
         .rules
         .insert("module-import".to_owned(), Severity::Allow);
-    let out = LintOutput::lint_source("import module java.base;", &config);
+    let out =
+        jals_exec::block_on_inline(LintOutput::lint_source("import module java.base;", &config));
     assert!(
         out.diagnostics.iter().all(|d| d.rule != "module-import"),
         "expected the rule to be suppressed: {:?}",

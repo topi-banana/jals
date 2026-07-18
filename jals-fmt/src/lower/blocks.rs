@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
+use jals_exec::Yielder;
+
 use crate::config::{BraceStyle, ControlBraceStyle, SwitchCaseBody};
 use crate::doc::Doc;
 use crate::lower::Ctx;
@@ -24,7 +26,7 @@ type SwitchLabelPair = (SyntaxNode, SyntaxToken);
 
 impl Ctx<'_> {
     /// Lower a `{ ... }` node (block, class body, switch body) with one indentation level.
-    pub(crate) fn lower_braced(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_braced(&self, node: &SyntaxNode) -> Doc {
         let tokens: Vec<SyntaxToken> = node
             .children_with_tokens()
             .filter_map(SyntaxElement::into_token)
@@ -35,10 +37,10 @@ impl Ctx<'_> {
         // Malformed (a brace is missing from error recovery): never synthesize a brace —
         // fall back to inline emission so the significant-token sequence is preserved.
         let (Some(lbrace), Some(rbrace)) = (lbrace, rbrace) else {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         };
 
-        let (inner, any) = self.lower_items(node);
+        let (inner, any) = self.lower_items(node).await;
         let open = self.tok(lbrace);
         let has_dangling = self.comments.has_dangling(rbrace);
         let dangling = self.comments.dangling(rbrace);
@@ -76,8 +78,8 @@ impl Ctx<'_> {
             && !self.cfg.force_multiline_blocks
             && !has_dangling
             && Self::is_declaration_body(node)
-            && self.single_statement_no_comments(node)
-            && !self.header_has_trailing_comment(node)
+            && self.single_statement_no_comments(node).await
+            && !self.header_has_trailing_comment(node).await
         {
             let lead = if self.opens_on_next_line(node) {
                 Doc::if_break(Doc::hardline(), Doc::nil())
@@ -174,14 +176,14 @@ impl Ctx<'_> {
     /// [`fn_single_line`](crate::config::Config::fn_single_line) to collapse it onto one line. A
     /// comment (which must never be dropped or moved off its anchor) or a second statement keeps the
     /// body multi-line.
-    fn single_statement_no_comments(&self, node: &SyntaxNode) -> bool {
+    async fn single_statement_no_comments(&self, node: &SyntaxNode) -> bool {
         let mut stmts = node
             .children()
             .filter(|c| Self::first_sig_token(c).is_some());
         if stmts.next().is_none() || stmts.next().is_some() {
             return false; // zero or more than one statement
         }
-        !self.has_comments_in_subtree(node)
+        !self.has_comments_in_subtree(node).await
     }
 
     /// Whether any significant token of `node`'s parent declaration that precedes the body (`node`)
@@ -191,22 +193,31 @@ impl Ctx<'_> {
     /// brace, re-anchoring it on the next parse and breaking idempotency — so a header trailing
     /// comment keeps the body multi-line. (A comment *inside* the braces is already caught by
     /// [`Ctx::single_statement_no_comments`].)
-    fn header_has_trailing_comment(&self, node: &SyntaxNode) -> bool {
+    async fn header_has_trailing_comment(&self, node: &SyntaxNode) -> bool {
         let Some(parent) = node.parent() else {
             return false;
         };
+        let mut yielder = Yielder::new();
         let body_start = node.text_range().start();
-        parent
+        for t in parent
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
-            .filter(|t| !t.kind().is_trivia() && t.text_range().end() <= body_start)
-            .any(|t| self.comments.has_trailing(&t))
+        {
+            yielder.tick().await;
+            if !t.kind().is_trivia()
+                && t.text_range().end() <= body_start
+                && self.comments.has_trailing(&t)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Build the inner document for a sequence of item nodes. Returns the content and whether
     /// any item was emitted. Braces are skipped (a brace wrapper adds them); blank lines from
     /// the source are preserved (clamped by the renderer).
-    pub(crate) fn lower_items(&self, node: &SyntaxNode) -> (Doc, bool) {
+    pub(crate) async fn lower_items(&self, node: &SyntaxNode) -> (Doc, bool) {
         let mut parts: Vec<Doc> = Vec::new();
         let mut saw = false;
 
@@ -221,7 +232,7 @@ impl Ctx<'_> {
                 if saw {
                     parts.push(self.item_separator(child));
                 }
-                parts.push(self.lower(child));
+                parts.push(self.lower(child).await);
                 saw = true;
             } else if let Some(t) = el.as_token() {
                 let kind = t.kind();
@@ -312,21 +323,21 @@ impl Ctx<'_> {
     /// layout. `SingleLine` keeps a lone label with a single, comment-free statement inline. A
     /// malformed group (error recovery — a label without a colon, a stray significant token) falls
     /// back to the inline path, so every significant token is still emitted exactly once.
-    pub(crate) fn lower_switch_group(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_switch_group(&self, node: &SyntaxNode) -> Doc {
         if self.cfg.switch_case_body == SwitchCaseBody::SameLine {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
         let Some((labels, stmts)) = Self::split_switch_group(node) else {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         };
         // `single-line`: a single label with a single statement and no comments stays on the colon
         // line. A comment forces the broken, indented form so it renders correctly and idempotently.
         if self.cfg.switch_case_body == SwitchCaseBody::SingleLine
             && labels.len() == 1
             && stmts.len() == 1
-            && !self.has_comments_in_subtree(node)
+            && !self.has_comments_in_subtree(node).await
         {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
 
         let mut parts: Vec<Doc> = Vec::new();
@@ -340,14 +351,14 @@ impl Ctx<'_> {
                 SyntaxElement::Node(label.clone()),
                 SyntaxElement::Token(colon.clone()),
             ];
-            parts.push(self.lower_elements(els.into_iter(), false));
+            parts.push(self.lower_elements(els.into_iter(), false).await);
         }
         // The body statements break onto their own lines, one indent level deeper than the labels;
         // the first statement's `item_separator` is the break from the last label's colon line.
         let mut body: Vec<Doc> = Vec::new();
         for stmt in &stmts {
             body.push(self.item_separator(stmt));
-            body.push(self.lower(stmt));
+            body.push(self.lower(stmt).await);
         }
         if !body.is_empty() {
             parts.push(Doc::indent(Doc::concat(body)));
@@ -368,7 +379,7 @@ impl Ctx<'_> {
     /// A `{ … }` body is excluded (blocks never take a continuation indent), and a malformed rule
     /// with no `->` falls back to the inline path, so every significant token is still emitted
     /// exactly once.
-    pub(crate) fn lower_switch_rule(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_switch_rule(&self, node: &SyntaxNode) -> Doc {
         // Children (grammar): `SwitchLabel '->' (Block | ThrowStmt | Expr ';')`. The label is the
         // only significant content before the `->`, so the rule splits cleanly into the label and a
         // tail.
@@ -378,14 +389,14 @@ impl Ctx<'_> {
             .filter_map(SyntaxElement::into_token)
             .find(|t| t.kind() == S::ARROW);
         let (Some(label), Some(arrow)) = (label, arrow) else {
-            return self.lower_generic(node); // malformed: missing the label or the `->`
+            return self.lower_generic(node).await; // malformed: missing the label or the `->`
         };
 
         // A `{ … }` block body keeps the generic layout — its `{` rides on the arrow line and it
         // aligns its own `}` with the label, so it is never hung at a continuation indent.
         let body = node.children().find(|n| n.kind() != S::SWITCH_LABEL);
         if body.as_ref().map(SyntaxNode::kind) == Some(S::BLOCK) {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
 
         // The body lands on its own line only when a comment forces a break right after `->` — a
@@ -404,37 +415,41 @@ impl Ctx<'_> {
         // this the label group's `fits` look-ahead would run into the body and wrap the (short)
         // labels instead.
         if !forces_break && self.case_label_wraps(&label) {
-            let arrow_sep = self.sep(Self::last_sig_token(&label).as_ref(), &arrow);
+            let arrow_sep = self
+                .sep(Self::last_sig_token(&label).as_ref(), &arrow)
+                .await;
             let after_arrow = node
                 .children_with_tokens()
                 .skip_while(|e| e.as_token().map(SyntaxToken::kind) != Some(S::ARROW))
                 .skip(1);
             return Doc::group(Doc::concat(vec![
-                self.lower(&label),
+                self.lower(&label).await,
                 arrow_sep,
                 self.tok(&arrow),
                 Doc::continuation_indent(Doc::concat(vec![
                     Doc::line(),
-                    self.lower_elements(after_arrow, false),
+                    self.lower_elements(after_arrow, false).await,
                 ])),
             ]));
         }
         if !forces_break {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
 
         // The label stays at the rule's level; the `->` and the body hang at one continuation
         // indent, so the comment-forced body line sits one level past the label. The `->` is inside
         // the wrap so the break its trailing comment carries — and any leading-comment break on the
         // body — is requested at `base + continuation`, governing where the body's first line lands.
-        let arrow_sep = self.sep(Self::last_sig_token(&label).as_ref(), &arrow);
+        let arrow_sep = self
+            .sep(Self::last_sig_token(&label).as_ref(), &arrow)
+            .await;
         let tail = node
             .children_with_tokens()
             .skip_while(|e| e.as_token().map(SyntaxToken::kind) != Some(S::ARROW));
         Doc::concat(vec![
-            self.lower(&label),
+            self.lower(&label).await,
             arrow_sep,
-            Doc::continuation_indent(self.lower_elements(tail, false)),
+            Doc::continuation_indent(self.lower_elements(tail, false).await),
         ])
     }
 
@@ -451,9 +466,9 @@ impl Ctx<'_> {
     /// With the option off, or for any label that is not a multi-constant `case`, this is
     /// byte-for-byte [`Ctx::lower_generic`]; a malformed label (no `case`, an empty constant) also
     /// falls back, so every significant token is still emitted exactly once.
-    pub(crate) fn lower_switch_label(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_switch_label(&self, node: &SyntaxNode) -> Doc {
         if !self.cfg.wrap_case_labels {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
         // Only a multi-constant `case` list can wrap; skip the split (and its allocations) for the
         // common single-constant label and a bare `default`, neither of which has a top-level comma.
@@ -462,41 +477,39 @@ impl Ctx<'_> {
             .filter_map(SyntaxElement::into_token)
             .any(|t| t.kind() == S::COMMA)
         {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
         let Some((case_kw, chunks)) = Self::split_case_label(node) else {
-            return self.lower_generic(node); // a bare `default`, or malformed
+            return self.lower_generic(node).await; // a bare `default`, or malformed
         };
         // A lone constant with a trailing comma (`case A,` — error recovery) yields a single chunk.
         if chunks.len() < 2 {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         }
         let Some(first) = chunks
             .first()
             .and_then(|(els, _)| Self::first_sig_token_of_elements(els))
         else {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         };
 
         // Each constant carries its trailing comma, and consecutive constants are joined by `line()`
         // (a space when the list fits, a break when it wraps). The whole run hangs at one
         // continuation indent; the first constant stays on the `case` line (no leading break), the
         // rest break below.
-        let rows: Vec<Doc> = chunks
-            .iter()
-            .map(|(els, comma)| {
-                let mut row = vec![self.lower_elements(els.iter().cloned(), false)];
-                if let Some(c) = comma {
-                    // No space before a comma; its leading/trailing comments ride along via `tok`.
-                    row.push(self.tok(c));
-                }
-                Doc::concat(row)
-            })
-            .collect();
+        let mut rows: Vec<Doc> = Vec::with_capacity(chunks.len());
+        for (els, comma) in &chunks {
+            let mut row = vec![self.lower_elements(els.iter().cloned(), false).await];
+            if let Some(c) = comma {
+                // No space before a comma; its leading/trailing comments ride along via `tok`.
+                row.push(self.tok(c));
+            }
+            rows.push(Doc::concat(row));
+        }
         Doc::group(Doc::concat(vec![
             self.tok(&case_kw),
             Doc::continuation_indent(Doc::concat(vec![
-                self.sep(Some(&case_kw), &first),
+                self.sep(Some(&case_kw), &first).await,
                 Doc::join(&Doc::line(), rows),
             ])),
         ]))
@@ -600,10 +613,17 @@ impl Ctx<'_> {
     /// Whether any significant token in `node`'s subtree carries a comment. Used to keep a body that
     /// holds a comment (which must never be dropped or moved off its anchor) out of a one-line
     /// layout.
-    fn has_comments_in_subtree(&self, node: &SyntaxNode) -> bool {
-        node.descendants_with_tokens()
+    async fn has_comments_in_subtree(&self, node: &SyntaxNode) -> bool {
+        let mut yielder = Yielder::new();
+        for t in node
+            .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
-            .filter(|t| !t.kind().is_trivia())
-            .any(|t| self.comments.has_comments(&t))
+        {
+            yielder.tick().await;
+            if !t.kind().is_trivia() && self.comments.has_comments(&t) {
+                return true;
+            }
+        }
+        false
     }
 }

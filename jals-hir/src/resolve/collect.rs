@@ -76,7 +76,7 @@ mod tests {
     }
 
     fn node_of(src: &str, kind: jals_syntax::SyntaxKind) -> SyntaxNode {
-        jals_syntax::Parse::parse(src)
+        jals_exec::block_on_inline(jals_syntax::Parse::parse(src))
             .syntax()
             .descendants()
             .find(|n| n.kind() == kind)

@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use jals_exec::LocalBoxFuture;
 use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
 
@@ -23,8 +24,8 @@ use crate::rules::StructuralRule;
 pub(crate) struct ImportRule;
 
 impl StructuralRule for ImportRule {
-    fn lower(&self, node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
-        Self::lower_source_file(node, ctx)
+    fn lower<'t>(&'t self, node: &'t SyntaxNode, ctx: &'t Ctx<'t>) -> LocalBoxFuture<'t, Doc> {
+        alloc::boxed::Box::pin(Self::lower_source_file(node, ctx))
     }
 }
 
@@ -67,14 +68,14 @@ impl ImportRule {
     ///
     /// Sorting reuses the original import nodes, so every token keeps its byte offset and its
     /// attached comments follow it automatically; the significant-token *multiset* is preserved.
-    pub(crate) fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
+    pub(crate) async fn lower_source_file(node: &SyntaxNode, ctx: &Ctx<'_>) -> Doc {
         let Some(ordering) = ImportOrdering::from_config(ctx.cfg) else {
-            return ctx.lower_items(node).0;
+            return ctx.lower_items(node).await.0;
         };
         let els: Vec<SyntaxElement> = node.children_with_tokens().collect();
         let Some((start, end)) = Self::import_run(&els) else {
             // Nothing to sort/group (zero or one import), or — defensively — a non-contiguous run.
-            return ctx.lower_items(node).0;
+            return ctx.lower_items(node).await.0;
         };
         // The blank lines before the whole block come from the import that was originally first
         // (its gap from the package decl). Capture it before sorting so the value is positional,
@@ -121,7 +122,7 @@ impl ImportRule {
                         Doc::hardline()
                     });
                 }
-                parts.push(ctx.lower(import));
+                parts.push(ctx.lower(import).await);
                 saw = true;
                 emitted_import = true;
                 continue;
@@ -135,7 +136,7 @@ impl ImportRule {
                 if saw {
                     parts.push(ctx.item_separator(child));
                 }
-                parts.push(ctx.lower(child));
+                parts.push(ctx.lower(child).await);
                 saw = true;
             } else if let Some(t) = el.as_token() {
                 let kind = t.kind();
@@ -322,7 +323,7 @@ mod tests {
 
     /// The source file's child elements.
     fn els_of(src: &str) -> Vec<SyntaxElement> {
-        jals_syntax::Parse::parse(src)
+        jals_exec::block_on_inline(jals_syntax::Parse::parse(src))
             .syntax()
             .children_with_tokens()
             .collect()

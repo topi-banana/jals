@@ -7,6 +7,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 
+use jals_exec::{LocalBoxFuture, Yielder};
 use jals_syntax::SyntaxKind::{
     self, ASSERT_STMT, BLOCK, BREAK_STMT, CONTINUE_STMT, DO_WHILE_STMT, EMPTY_STMT, EXPR_STMT,
     FOR_EACH_STMT, FOR_STMT, IF_STMT, LABELED_STMT, LOCAL_VAR_DECL, RETURN_STMT, SWITCH_STMT,
@@ -27,9 +28,16 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct MissingBraces;
 
 impl MissingBraces {
-    fn check(root: &SyntaxNode) -> Vec<Finding> {
+    /// The table-edge shim: boxes the async rule body once per file.
+    fn check(root: &SyntaxNode) -> LocalBoxFuture<'_, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root))
+    }
+
+    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+        let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
+            yielder.tick().await;
             match node.kind() {
                 IF_STMT => Self::check_if(&node, &mut out),
                 WHILE_STMT | FOR_STMT | FOR_EACH_STMT | DO_WHILE_STMT => {
