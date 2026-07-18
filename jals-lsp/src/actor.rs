@@ -277,12 +277,10 @@ impl Actor {
         }
     }
 
-    /// Apply one `didChange`, opportunistically coalescing a burst: everything already queued is
-    /// drained into `pending`, the queued changes for this same document are applied in order
-    /// (each event's splices are relative to the previous state), and the workspace overlay and
-    /// diagnostics are refreshed once, for the newest text. The set-aside commands run afterwards
-    /// in their original relative order — a query enqueued inside the burst still runs, it just
-    /// observes the newest text, which is what a client that kept typing wants anyway.
+    /// Apply one `didChange`, opportunistically coalescing a contiguous burst: everything already
+    /// queued is drained into `pending`, then adjacent changes for this same document are applied
+    /// in order (each event's splices are relative to the previous state). Coalescing stops at the
+    /// first intervening command so requests observe the document version at which they arrived.
     async fn did_change(
         &mut self,
         params: DidChangeTextDocumentParams,
@@ -294,16 +292,12 @@ impl Actor {
         while let Ok(cmd) = receiver.try_recv() {
             pending.push_back(cmd);
         }
-        let mut index = 0;
-        while index < pending.len() {
-            let same_doc =
-                matches!(&pending[index], Cmd::DidChange(next) if next.text_document.uri == uri);
-            if !same_doc {
-                index += 1;
-                continue;
-            }
-            let Some(Cmd::DidChange(next)) = pending.remove(index) else {
-                unreachable!("just matched a didChange at this index");
+        while matches!(
+            pending.front(),
+            Some(Cmd::DidChange(next)) if next.text_document.uri == uri
+        ) {
+            let Some(Cmd::DidChange(next)) = pending.pop_front() else {
+                unreachable!("front just matched a didChange");
             };
             Self::guard(self.apply_change(next)).await;
         }
@@ -1351,11 +1345,10 @@ mod tests {
         });
     }
 
-    /// A burst of queued `didChange`s for one document coalesces: every splice applies in order,
-    /// diagnostics run once for the newest text, and a request enqueued inside the burst is set
-    /// aside (in order) rather than dropped — it answers over the newest text.
+    /// A contiguous burst of queued `didChange`s for one document coalesces, but an intervening
+    /// request is answered before any later change is applied.
     #[test]
-    fn didchange_bursts_coalesce_and_keep_interleaved_requests() {
+    fn didchange_bursts_stop_at_interleaved_requests() {
         fn change(uri: &Url, version: i32, text: &str) -> Cmd {
             Cmd::DidChange(DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
@@ -1378,8 +1371,9 @@ mod tests {
                 .upsert(uri.clone(), "class A {}".into(), 1)
                 .await;
 
-            // The client typed twice more (and asked for a hover in between) before the actor
-            // got to the first change.
+            // The client typed again, asked for a hover, then kept typing before the actor got to
+            // the first change.
+            sender.send(change(&uri, 3, "class C {}")).unwrap();
             let (reply, response) = oneshot::channel();
             sender
                 .send(Cmd::Hover {
@@ -1388,7 +1382,7 @@ mod tests {
                     reply,
                 })
                 .unwrap();
-            sender.send(change(&uri, 3, "class C {}")).unwrap();
+            sender.send(change(&uri, 4, "class D {}")).unwrap();
 
             let mut pending = VecDeque::new();
             let Cmd::DidChange(first) = change(&uri, 2, "class B {}") else {
@@ -1396,23 +1390,31 @@ mod tests {
             };
             actor.did_change(first, &mut receiver, &mut pending).await;
 
-            // Both changes applied, newest text wins.
+            // Only the contiguous changes before the hover are applied.
             let doc = actor.store.get(&uri).unwrap();
             assert_eq!(&*doc.content.text, "class C {}");
             assert_eq!(doc.version, 3);
 
-            // The interleaved hover was set aside, not dropped; processing it answers over the
-            // newest text.
-            assert_eq!(pending.len(), 1, "only the hover remains pending");
+            // The hover remains ahead of the later change, preserving the request boundary.
+            assert_eq!(
+                pending.len(),
+                2,
+                "the hover and later change remain pending"
+            );
             let cmd = pending.pop_front().unwrap();
             assert!(matches!(cmd, Cmd::Hover { .. }));
             actor.process(cmd).await;
-            // The reply arrives (over the newest text); its payload is hover semantics,
-            // pinned elsewhere.
             response
                 .await
                 .expect("the actor replied")
                 .expect("hover is not an error");
+
+            let cmd = pending.pop_front().unwrap();
+            assert!(matches!(cmd, Cmd::DidChange(_)));
+            actor.process(cmd).await;
+            let doc = actor.store.get(&uri).unwrap();
+            assert_eq!(&*doc.content.text, "class D {}");
+            assert_eq!(doc.version, 4);
         });
     }
 
