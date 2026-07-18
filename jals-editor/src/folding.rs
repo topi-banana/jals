@@ -130,14 +130,11 @@ mod tests {
 
     /// `(start_line, end_line, kind)` tuples, sorted, for order-independent asserts.
     fn folds(text: &str) -> Vec<(u32, u32, FoldKind)> {
-        let mut v: Vec<_> = Folds::of(
-            &jals_syntax::Parse::parse(text).syntax(),
-            text,
-            &LineIndex::new(text),
-        )
-        .into_iter()
-        .map(|f| (f.start_line, f.end_line, f.kind))
-        .collect();
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        let mut v: Vec<_> = Folds::of(&parse.syntax(), text, &LineIndex::new(text))
+            .into_iter()
+            .map(|f| (f.start_line, f.end_line, f.kind))
+            .collect();
         v.sort_by_key(|&(s, e, _)| (s, e));
         v
     }

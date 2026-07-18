@@ -55,7 +55,8 @@ mod tests {
     use super::*;
 
     fn chain_at(text: &str, offset: usize) -> Vec<Range<usize>> {
-        SelectionChains::at(&jals_syntax::Parse::parse(text).syntax(), offset)
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        SelectionChains::at(&parse.syntax(), offset)
     }
 
     #[test]

@@ -137,7 +137,8 @@ mod tests {
     use super::*;
 
     fn outline(text: &str) -> Vec<OutlineNode> {
-        Outline::of(&jals_syntax::Parse::parse(text).syntax())
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        Outline::of(&parse.syntax())
     }
 
     /// `(name, kind)` pairs of a level, for compact assertions.

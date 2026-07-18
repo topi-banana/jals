@@ -1154,6 +1154,7 @@ version = "0.1.0"
 dependencies = [
  "jals-classfile",
  "jals-config",
+ "jals-exec",
  "jals-hir",
  "jals-lint",
  "jals-storage",

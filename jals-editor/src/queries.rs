@@ -81,6 +81,15 @@ pub struct Highlight {
     pub kind: HighlightKind,
 }
 
+/// Where a references query anchors, as routed by
+/// [`ProjectQueries::reference_anchor`]: nothing, a file-local binding's complete occurrence
+/// set, or a project item to scan the supplied project files for.
+enum ReferenceAnchor {
+    None,
+    Local(Vec<FileRange>),
+    Item(ItemId),
+}
+
 /// Semantic editor queries shared by protocol adapters.
 pub struct ProjectQueries<'a> {
     index: &'a ProjectIndex,
@@ -94,14 +103,14 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// Resolve a definition in file-local → project type → inferred member order.
-    pub fn definition(&self, offset: usize) -> Option<FileRange> {
+    pub async fn definition(&self, offset: usize) -> Option<FileRange> {
         if let Some((file, range)) =
             self.index
                 .definition_at(self.current.file, self.current.resolved, offset)
         {
             return Some(FileRange { file, range });
         }
-        let (file, range) = self.member_definition(offset)?;
+        let (file, range) = self.member_definition(offset).await?;
         Some(FileRange { file, range })
     }
 
@@ -115,8 +124,38 @@ impl<'a> ProjectQueries<'a> {
         include_declaration: bool,
         files: impl IntoIterator<Item = QueryFile<'b>>,
     ) -> Vec<FileRange> {
+        match self.reference_anchor(offset, include_declaration) {
+            ReferenceAnchor::None => Vec::new(),
+            ReferenceAnchor::Local(ranges) => ranges,
+            ReferenceAnchor::Item(item) => self.item_references(item, include_declaration, files),
+        }
+    }
+
+    /// The occurrence set of the symbol at `offset` when it resolves within this file alone —
+    /// `None` when the symbol is a project item whose occurrences span the project files. Lets a
+    /// caller whose project files resolve lazily (and asynchronously) answer a file-local query
+    /// without touching any other file, then fall back to [`references`](Self::references) with
+    /// the fully-resolved set.
+    pub fn local_references(
+        &self,
+        offset: usize,
+        include_declaration: bool,
+    ) -> Option<Vec<FileRange>> {
+        match self.reference_anchor(offset, include_declaration) {
+            ReferenceAnchor::None => Some(Vec::new()),
+            ReferenceAnchor::Local(ranges) => Some(ranges),
+            ReferenceAnchor::Item(_) => None,
+        }
+    }
+
+    /// Where a references query anchors: nothing under the cursor, a file-local binding's
+    /// occurrence set (complete without other files), or a project item whose occurrences the
+    /// caller collects across the project files. The one statement of the local-vs-project
+    /// routing shared by [`references`](Self::references) /
+    /// [`local_references`](Self::local_references).
+    fn reference_anchor(&self, offset: usize, include_declaration: bool) -> ReferenceAnchor {
         let Some(ident) = self.ident_at(offset) else {
-            return Vec::new();
+            return ReferenceAnchor::None;
         };
         let anchor = usize::from(ident.text_range().start());
 
@@ -125,42 +164,44 @@ impl<'a> ProjectQueries<'a> {
                 self.current.file,
                 self.current.resolved.def(def_id).name_range.start,
             ) {
-                return self.item_references(item, include_declaration, files);
+                return ReferenceAnchor::Item(item);
             }
-            return self
-                .current
-                .resolved
-                .occurrences(def_id, include_declaration)
-                .into_iter()
-                .map(|range| FileRange {
-                    file: self.current.file,
-                    range,
-                })
-                .collect();
+            return ReferenceAnchor::Local(
+                self.current
+                    .resolved
+                    .occurrences(def_id, include_declaration)
+                    .into_iter()
+                    .map(|range| FileRange {
+                        file: self.current.file,
+                        range,
+                    })
+                    .collect(),
+            );
         }
 
         if let Some(item) = self.cross_file_type_at(anchor) {
-            return self.item_references(item, include_declaration, files);
+            return ReferenceAnchor::Item(item);
         }
-        Vec::new()
+        ReferenceAnchor::None
     }
 
     /// The inferred type under `offset`, suppressing an uninformative unknown result.
-    pub fn hover(&self, offset: usize) -> Option<Ty> {
+    pub async fn hover(&self, offset: usize) -> Option<Ty> {
         let inference = jals_hir::TypeInference::infer(
             &self.current.syntax,
             self.current.resolved,
             self.index,
             self.current.file,
-        );
+        )
+        .await;
         let ty = inference.type_at(offset)?;
         (!matches!(ty, Ty::Unknown)).then(|| ty.clone())
     }
 
     /// The [`hover`](Self::hover) type rendered as the Markdown both hosts show — a fenced
     /// ` ```java ` block.
-    pub fn hover_markdown(&self, offset: usize) -> Option<String> {
-        let ty = self.hover(offset)?;
+    pub async fn hover_markdown(&self, offset: usize) -> Option<String> {
+        let ty = self.hover(offset).await?;
         Some(alloc::format!("```java\n{ty}\n```"))
     }
 
@@ -197,22 +238,26 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// Member completions after `.`, otherwise scope completions followed by Java keywords.
-    pub fn completions(&self, offset: usize) -> Vec<Completion> {
+    pub async fn completions(&self, offset: usize) -> Vec<Completion> {
         let at_member_access = ProjectIndex::at_member_access(&self.current.syntax, offset);
         let semantic = if at_member_access {
-            self.index.member_completions(
-                &self.current.syntax,
-                self.current.resolved,
-                self.current.file,
-                offset,
-            )
+            self.index
+                .member_completions(
+                    &self.current.syntax,
+                    self.current.resolved,
+                    self.current.file,
+                    offset,
+                )
+                .await
         } else {
-            self.index.scope_completions(
-                &self.current.syntax,
-                self.current.resolved,
-                self.current.file,
-                offset,
-            )
+            self.index
+                .scope_completions(
+                    &self.current.syntax,
+                    self.current.resolved,
+                    self.current.file,
+                    offset,
+                )
+                .await
         };
         let mut completions: Vec<_> = semantic
             .into_iter()
@@ -233,13 +278,15 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// Signature help for the call containing `offset`.
-    pub fn signature_help(&self, offset: usize) -> Option<jals_hir::SignatureHelp> {
-        self.index.signature_help(
-            &self.current.syntax,
-            self.current.resolved,
-            self.current.file,
-            offset,
-        )
+    pub async fn signature_help(&self, offset: usize) -> Option<jals_hir::SignatureHelp> {
+        self.index
+            .signature_help(
+                &self.current.syntax,
+                self.current.resolved,
+                self.current.file,
+                offset,
+            )
+            .await
     }
 
     /// Highlights for the symbol at `offset`, in document order.
@@ -290,7 +337,7 @@ impl<'a> ProjectQueries<'a> {
             .collect()
     }
 
-    fn member_definition(&self, offset: usize) -> Option<(FileId, Range<usize>)> {
+    async fn member_definition(&self, offset: usize) -> Option<(FileId, Range<usize>)> {
         let token = self.ident_at(offset)?;
         let field_access = token
             .parent()
@@ -309,7 +356,8 @@ impl<'a> ProjectQueries<'a> {
             self.current.resolved,
             self.index,
             self.current.file,
-        );
+        )
+        .await;
         let owner = inference
             .type_of_expr(Self::text_range(receiver.syntax().text_range()))?
             .project_id()?;
@@ -465,9 +513,9 @@ impl Ident {
     /// `INT_KW`), and anything with whitespace, punctuation, or a leading digit yields a
     /// non-`IDENT` token or more than one token — all rejected. (A context-sensitive keyword such
     /// as `var` lexes as `IDENT` and is accepted; its use is position-restricted, which a rename
-    /// does not police.)
-    pub fn is_valid_java_identifier(name: &str) -> bool {
-        let mut tokens = jals_syntax::Lexer::tokenize(name).into_iter();
+    /// does not police.) Async because the lexer yields cooperatively.
+    pub async fn is_valid_java_identifier(name: &str) -> bool {
+        let mut tokens = jals_syntax::Lexer::tokenize(name).await.into_iter();
         matches!(
             (tokens.next(), tokens.next()),
             (Some(token), None) if token.kind == SyntaxKind::IDENT && token.text == name
@@ -626,6 +674,7 @@ mod tests {
     use super::*;
     use alloc::string::ToString;
     use core::cell::Cell;
+    use jals_exec::block_on_inline;
     use jals_syntax::Parse;
 
     struct Fixture {
@@ -635,22 +684,19 @@ mod tests {
     }
 
     impl Fixture {
-        fn new(files: &[&str]) -> Self {
-            let roots: Vec<_> = files
-                .iter()
-                .enumerate()
-                .map(|(index, text)| {
-                    (
-                        FileId(u32::try_from(index).expect("test file index fits u32")),
-                        Parse::parse(text).syntax(),
-                    )
-                })
-                .collect();
-            let resolved = roots
-                .iter()
-                .map(|(_, root)| Resolved::resolve_node(root))
-                .collect();
-            let index = ProjectIndex::builder(&roots).with_stdlib().build();
+        async fn new(files: &[&str]) -> Self {
+            let mut roots = Vec::new();
+            for (index, text) in files.iter().enumerate() {
+                roots.push((
+                    FileId(u32::try_from(index).expect("test file index fits u32")),
+                    Parse::parse(text).await.syntax(),
+                ));
+            }
+            let mut resolved = Vec::new();
+            for (_, root) in &roots {
+                resolved.push(Resolved::resolve_node(root).await);
+            }
+            let index = ProjectIndex::builder(&roots).with_stdlib().build().await;
             Self {
                 roots,
                 resolved,
@@ -679,192 +725,245 @@ mod tests {
 
     #[test]
     fn definition_prefers_local_then_cross_file_and_member() {
-        let files = [
-            "package p; class Box { int size; }",
-            "package p; class Use { void f(Box b) { int n = b.size; use(n); } }",
-        ];
-        let fixture = Fixture::new(&files);
-        let queries = fixture.queries(1);
-        assert_eq!(
-            queries.definition(files[1].find("Box").unwrap()),
-            Some(FileRange {
-                file: FileId(0),
-                range: 17..20
-            })
-        );
-        assert_eq!(
-            queries.definition(files[1].find("size").unwrap()),
-            Some(FileRange {
-                file: FileId(0),
-                range: 27..31
-            })
-        );
-        assert_eq!(
-            queries.definition(files[1].rfind('n').unwrap()),
-            Some(FileRange {
-                file: FileId(1),
-                range: 43..44
-            })
-        );
+        block_on_inline(async {
+            let files = [
+                "package p; class Box { int size; }",
+                "package p; class Use { void f(Box b) { int n = b.size; use(n); } }",
+            ];
+            let fixture = Fixture::new(&files).await;
+            let queries = fixture.queries(1);
+            assert_eq!(
+                queries.definition(files[1].find("Box").unwrap()).await,
+                Some(FileRange {
+                    file: FileId(0),
+                    range: 17..20
+                })
+            );
+            assert_eq!(
+                queries.definition(files[1].find("size").unwrap()).await,
+                Some(FileRange {
+                    file: FileId(0),
+                    range: 27..31
+                })
+            );
+            assert_eq!(
+                queries.definition(files[1].rfind('n').unwrap()).await,
+                Some(FileRange {
+                    file: FileId(1),
+                    range: 43..44
+                })
+            );
+        });
     }
 
     #[test]
     fn project_references_are_sorted_and_declaration_is_optional() {
-        let files = ["package p; class A {}", "package p; class B { A a; }"];
-        let fixture = Fixture::new(&files);
-        let offset = files[1].find('A').unwrap();
-        assert_eq!(
-            fixture.queries(1).references(offset, true, fixture.files()),
-            [
-                FileRange {
-                    file: FileId(0),
-                    range: 17..18
-                },
-                FileRange {
+        block_on_inline(async {
+            let files = ["package p; class A {}", "package p; class B { A a; }"];
+            let fixture = Fixture::new(&files).await;
+            let offset = files[1].find('A').unwrap();
+            assert_eq!(
+                fixture.queries(1).references(offset, true, fixture.files()),
+                [
+                    FileRange {
+                        file: FileId(0),
+                        range: 17..18
+                    },
+                    FileRange {
+                        file: FileId(1),
+                        range: 21..22
+                    },
+                ]
+            );
+            assert_eq!(
+                fixture
+                    .queries(1)
+                    .references(offset, false, fixture.files()),
+                [FileRange {
                     file: FileId(1),
                     range: 21..22
-                },
-            ]
-        );
-        assert_eq!(
-            fixture
-                .queries(1)
-                .references(offset, false, fixture.files()),
-            [FileRange {
-                file: FileId(1),
-                range: 21..22
-            }]
-        );
+                }]
+            );
+        });
     }
 
     #[test]
     fn local_references_do_not_consume_the_project_iterator() {
-        let text = "class C { void f() { int x = 0; use(x); } }";
-        let fixture = Fixture::new(&[text]);
-        let consumed = Cell::new(0);
-        let files = fixture
-            .files()
-            .inspect(|_| consumed.set(consumed.get() + 1));
-        let ranges = fixture
-            .queries(0)
-            .references(text.find("x = 0").unwrap(), true, files);
-        assert_eq!(ranges.len(), 2);
-        assert_eq!(consumed.get(), 0);
+        block_on_inline(async {
+            let text = "class C { void f() { int x = 0; use(x); } }";
+            let fixture = Fixture::new(&[text]).await;
+            let consumed = Cell::new(0);
+            let files = fixture
+                .files()
+                .inspect(|_| consumed.set(consumed.get() + 1));
+            let ranges = fixture
+                .queries(0)
+                .references(text.find("x = 0").unwrap(), true, files);
+            assert_eq!(ranges.len(), 2);
+            assert_eq!(consumed.get(), 0);
+        });
+    }
+
+    #[test]
+    fn local_references_declines_project_types_and_answers_locals() {
+        block_on_inline(async {
+            let files = [
+                "package p; class A {}",
+                "package p; class B { A a; void f() { int x = 0; use(x); } }",
+            ];
+            let fixture = Fixture::new(&files).await;
+            let queries = fixture.queries(1);
+            // A project type needs the project files: the local fast path declines.
+            assert!(
+                queries
+                    .local_references(files[1].find('A').unwrap(), true)
+                    .is_none()
+            );
+            // A file-local binding answers completely without them, matching `references`.
+            let offset = files[1].find("x = 0").unwrap();
+            let local = queries.local_references(offset, true).expect("local");
+            assert_eq!(
+                local,
+                fixture.queries(1).references(offset, true, fixture.files())
+            );
+            // Nothing under the cursor answers empty, not `None`.
+            assert_eq!(
+                queries.local_references(files[1].find("{ A").unwrap(), true),
+                Some(Vec::new())
+            );
+        });
     }
 
     #[test]
     fn cross_file_highlight_does_not_match_a_same_spelled_local() {
-        let files = [
-            "package p; class A {}",
-            "package p; class B { A value; void f() { int A = 0; use(A); } }",
-        ];
-        let fixture = Fixture::new(&files);
-        let type_offset = files[1].find("A value").unwrap();
-        assert_eq!(
-            fixture.queries(1).highlights(type_offset),
-            [Highlight {
-                range: type_offset..type_offset + 1,
-                kind: HighlightKind::Read,
-            }]
-        );
+        block_on_inline(async {
+            let files = [
+                "package p; class A {}",
+                "package p; class B { A value; void f() { int A = 0; use(A); } }",
+            ];
+            let fixture = Fixture::new(&files).await;
+            let type_offset = files[1].find("A value").unwrap();
+            assert_eq!(
+                fixture.queries(1).highlights(type_offset),
+                [Highlight {
+                    range: type_offset..type_offset + 1,
+                    kind: HighlightKind::Read,
+                }]
+            );
+        });
     }
 
     #[test]
     fn member_completion_excludes_keywords_and_bare_completion_includes_them() {
-        let text = "class Box { int size; void f(Box box) { box. } }";
-        let fixture = Fixture::new(&[text]);
-        let member = fixture
-            .queries(0)
-            .completions(text.find("box.").unwrap() + "box.".len());
-        assert!(
-            member
-                .iter()
-                .any(|item| { item.label == "size" && item.kind == CompletionKind::Field })
-        );
-        assert!(
-            member
-                .iter()
-                .all(|item| item.kind != CompletionKind::Keyword)
-        );
+        block_on_inline(async {
+            let text = "class Box { int size; void f(Box box) { box. } }";
+            let fixture = Fixture::new(&[text]).await;
+            let member = fixture
+                .queries(0)
+                .completions(text.find("box.").unwrap() + "box.".len())
+                .await;
+            assert!(
+                member
+                    .iter()
+                    .any(|item| { item.label == "size" && item.kind == CompletionKind::Field })
+            );
+            assert!(
+                member
+                    .iter()
+                    .all(|item| item.kind != CompletionKind::Keyword)
+            );
 
-        let bare = fixture.queries(0).completions(text.find("box)").unwrap());
-        assert!(
-            bare.iter()
-                .any(|item| { item.label == "return" && item.kind == CompletionKind::Keyword })
-        );
+            let bare = fixture
+                .queries(0)
+                .completions(text.find("box)").unwrap())
+                .await;
+            assert!(
+                bare.iter()
+                    .any(|item| { item.label == "return" && item.kind == CompletionKind::Keyword })
+            );
+        });
     }
 
     #[test]
     fn source_less_stdlib_type_has_references_but_no_declaration_target() {
-        let text = "class C { String first; String second; }";
-        let fixture = Fixture::new(&[text]);
-        let ranges =
-            fixture
-                .queries(0)
-                .references(text.find("String").unwrap(), true, fixture.files());
-        assert_eq!(
-            ranges,
-            [
-                FileRange {
-                    file: FileId(0),
-                    range: 10..16,
-                },
-                FileRange {
-                    file: FileId(0),
-                    range: 24..30,
-                },
-            ]
-        );
-        assert!(
-            fixture
-                .queries(0)
-                .definition(text.find("String").unwrap())
-                .is_none()
-        );
+        block_on_inline(async {
+            let text = "class C { String first; String second; }";
+            let fixture = Fixture::new(&[text]).await;
+            let ranges =
+                fixture
+                    .queries(0)
+                    .references(text.find("String").unwrap(), true, fixture.files());
+            assert_eq!(
+                ranges,
+                [
+                    FileRange {
+                        file: FileId(0),
+                        range: 10..16,
+                    },
+                    FileRange {
+                        file: FileId(0),
+                        range: 24..30,
+                    },
+                ]
+            );
+            assert!(
+                fixture
+                    .queries(0)
+                    .definition(text.find("String").unwrap())
+                    .await
+                    .is_none()
+            );
+        });
     }
 
     #[test]
     fn hover_completion_signature_and_highlight_policies_are_shared() {
-        let text = "class C { int area(int w, int h) { return w; } void f() { int x = 1; x++; area(x, ); } }";
-        let fixture = Fixture::new(&[text]);
-        let queries = fixture.queries(0);
-        assert_eq!(
-            queries
-                .hover(text.find('1').unwrap())
-                .map(|ty| ty.to_string()),
-            Some("int".to_owned())
-        );
-        let completions = queries.completions(text.find("x = 1").unwrap());
-        assert!(
-            completions
-                .iter()
-                .any(|item| item.label == "return" && item.kind == CompletionKind::Keyword)
-        );
-        let help = queries
-            .signature_help(text.find("area(x, ").unwrap() + "area(x, ".len())
-            .unwrap();
-        assert_eq!(help.active_parameter, 1);
-        let highlights = queries.highlights(text.find("x = 1").unwrap());
-        assert_eq!(
-            highlights
-                .iter()
-                .map(|highlight| highlight.kind)
-                .collect::<Vec<_>>(),
-            [
-                HighlightKind::Write,
-                HighlightKind::Write,
-                HighlightKind::Read
-            ]
-        );
+        block_on_inline(async {
+            let text = "class C { int area(int w, int h) { return w; } void f() { int x = 1; x++; area(x, ); } }";
+            let fixture = Fixture::new(&[text]).await;
+            let queries = fixture.queries(0);
+            assert_eq!(
+                queries
+                    .hover(text.find('1').unwrap())
+                    .await
+                    .map(|ty| ty.to_string()),
+                Some("int".to_owned())
+            );
+            let completions = queries.completions(text.find("x = 1").unwrap()).await;
+            assert!(
+                completions
+                    .iter()
+                    .any(|item| item.label == "return" && item.kind == CompletionKind::Keyword)
+            );
+            let help = queries
+                .signature_help(text.find("area(x, ").unwrap() + "area(x, ".len())
+                .await
+                .unwrap();
+            assert_eq!(help.active_parameter, 1);
+            let highlights = queries.highlights(text.find("x = 1").unwrap());
+            assert_eq!(
+                highlights
+                    .iter()
+                    .map(|highlight| highlight.kind)
+                    .collect::<Vec<_>>(),
+                [
+                    HighlightKind::Write,
+                    HighlightKind::Write,
+                    HighlightKind::Read
+                ]
+            );
+        });
     }
 
     #[test]
     fn unresolved_names_fall_back_lexically_and_bad_offsets_are_safe() {
-        let text = "class C { Missing x; void f() { use(Missing); } }";
-        let fixture = Fixture::new(&[text]);
-        let queries = fixture.queries(0);
-        assert_eq!(queries.highlights(text.find("Missing").unwrap()).len(), 2);
-        assert!(queries.definition(usize::MAX).is_none());
-        assert!(queries.highlights(usize::MAX).is_empty());
+        block_on_inline(async {
+            let text = "class C { Missing x; void f() { use(Missing); } }";
+            let fixture = Fixture::new(&[text]).await;
+            let queries = fixture.queries(0);
+            assert_eq!(queries.highlights(text.find("Missing").unwrap()).len(), 2);
+            assert!(queries.definition(usize::MAX).await.is_none());
+            assert!(queries.highlights(usize::MAX).is_empty());
+        });
     }
 }
