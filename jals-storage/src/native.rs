@@ -960,6 +960,7 @@ impl io::Read for NativeArtifactReader {
             // next read reallocates it on the pool — never corruption, never a lost position.
             let file = Arc::clone(&self.file);
             let pos = self.pos;
+            self.buf_len = 0;
             let mut scratch = core::mem::take(&mut self.buf);
             let (scratch, outcome) = on_blocking_pool(move || {
                 if scratch.is_empty() {
