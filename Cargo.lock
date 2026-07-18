@@ -1220,6 +1220,7 @@ dependencies = [
  "jals-classpath",
  "jals-config",
  "jals-editor",
+ "jals-exec",
  "jals-fmt",
  "jals-hir",
  "jals-storage",
@@ -1234,10 +1235,12 @@ dependencies = [
 name = "jals-playground"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gloo-net",
  "jals-classpath",
  "jals-config",
  "jals-editor",
+ "jals-exec",
  "jals-fmt",
  "jals-hir",
  "jals-storage",
