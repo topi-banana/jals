@@ -101,13 +101,19 @@ impl<S: Seek + ?Sized> Seek for &mut S {
     }
 }
 
-/// Consumes a slice from the front without suspending, mirroring `std`.
-pub(crate) fn read_from_slice(source: &mut &[u8], buf: &mut [u8]) -> usize {
-    let n = source.len().min(buf.len());
-    let (head, tail) = source.split_at(n);
-    buf[..n].copy_from_slice(head);
-    *source = tail;
-    n
+pub(crate) use detail::read_from_slice;
+
+/// Slice plumbing shared by the in-memory readers, grouped per the repository's
+/// no-free-functions layout.
+mod detail {
+    /// Consumes a slice from the front without suspending, mirroring `std`.
+    pub(crate) fn read_from_slice(source: &mut &[u8], buf: &mut [u8]) -> usize {
+        let n = source.len().min(buf.len());
+        let (head, tail) = source.split_at(n);
+        buf[..n].copy_from_slice(head);
+        *source = tail;
+        n
+    }
 }
 
 /// Mirrors `std`: a slice reads by consuming itself from the front. Always ready.

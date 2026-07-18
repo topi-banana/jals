@@ -15,6 +15,7 @@
 //! ([`Parser::nth_nofuel`]) and always terminates within the input length.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use jals_exec::LocalBoxFuture;
 
@@ -1964,36 +1965,54 @@ impl Parser<'_> {
     }
 
     /// Parses a binary expression with minimum binding power `min_bp` (precedence climbing).
+    ///
+    /// Iterative: the recursive right-operand call is replaced by an explicit frame stack, so
+    /// the hottest grammar path pays no per-operand `Box::pin`. Each frame is an open
+    /// `BINARY_EXPR` marker plus the minimum binding power its right operand imposes; a frame
+    /// closes (completing the node) exactly where the recursive version returned. Node order
+    /// and shape are identical to the recursion.
     async fn expr_bp(&mut self, min_bp: u8) -> Option<CompletedMarker> {
         let mut lhs = self.unary_expr().await?;
+        let mut frames: Vec<(Marker, u8)> = Vec::new();
 
-        while let Some((op_bp, op_len, right_assoc)) = self.peek_bin_op() {
-            if op_bp < min_bp {
-                break;
-            }
-            self.yielder.tick().await;
-            let m = lhs.precede(self);
-            if self.at(INSTANCEOF_KW) {
-                // Right-hand side of `instanceof` is a type or pattern (`o instanceof String s`).
-                self.bump(INSTANCEOF_KW);
-                if self.at_pattern() {
-                    self.pattern().await;
-                } else {
-                    self.type_().await;
+        loop {
+            let current_min = frames.last().map_or(min_bp, |&(_, frame_min)| frame_min);
+            match self.peek_bin_op() {
+                Some((op_bp, op_len, right_assoc)) if op_bp >= current_min => {
+                    self.yielder.tick().await;
+                    let m = lhs.precede(self);
+                    if self.at(INSTANCEOF_KW) {
+                        // Right-hand side of `instanceof` is a type or pattern
+                        // (`o instanceof String s`) — no operand frame to open.
+                        self.bump(INSTANCEOF_KW);
+                        if self.at_pattern() {
+                            self.pattern().await;
+                        } else {
+                            self.type_().await;
+                        }
+                        lhs = m.complete(self, BINARY_EXPR);
+                    } else {
+                        self.consume_bin_op(op_len);
+                        let next_min = if right_assoc { op_bp } else { op_bp + 1 };
+                        match self.unary_expr().await {
+                            Some(operand) => {
+                                frames.push((m, next_min));
+                                lhs = operand;
+                            }
+                            // Missing right operand: the recursion completed the node with an
+                            // empty right side and kept scanning at the enclosing level.
+                            None => lhs = m.complete(self, BINARY_EXPR),
+                        }
+                    }
                 }
-            } else {
-                self.consume_bin_op(op_len);
-                let next_min = if right_assoc { op_bp } else { op_bp + 1 };
-                self.expr_bp_boxed(next_min).await;
+                // The next token binds no tighter than the innermost open frame: close it, or
+                // finish when nothing is open.
+                _ => match frames.pop() {
+                    Some((m, _)) => lhs = m.complete(self, BINARY_EXPR),
+                    None => return Some(lhs),
+                },
             }
-            lhs = m.complete(self, BINARY_EXPR);
         }
-        Some(lhs)
-    }
-
-    /// Boxed back-edge for [`Self::expr_bp`]'s own higher-binding-power right-operand call.
-    fn expr_bp_boxed(&mut self, min_bp: u8) -> LocalBoxFuture<'_, Option<CompletedMarker>> {
-        Box::pin(self.expr_bp(min_bp))
     }
 
     /// Returns (binding power, token length, is right-associative) for the next binary operator, including fused `>` family.

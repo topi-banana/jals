@@ -158,22 +158,24 @@ impl Exec {
             }
         }
         if let Some(payload) = first_panic {
-            resume_panic(payload);
+            Self::resume_panic(payload);
         }
         results
     }
 }
 
-#[cfg(any(feature = "std", test))]
-fn resume_panic(payload: Box<dyn Any + Send>) -> ! {
-    std::panic::resume_unwind(payload)
-}
+impl Exec {
+    #[cfg(any(feature = "std", test))]
+    fn resume_panic(payload: Box<dyn Any + Send>) -> ! {
+        std::panic::resume_unwind(payload)
+    }
 
-/// Without `std` no runtime catches job panics, so a payload can never reach this point; the
-/// message exists only to keep the signature total.
-#[cfg(not(any(feature = "std", test)))]
-fn resume_panic(_payload: Box<dyn Any + Send>) -> ! {
-    panic!("fan-out job panicked")
+    /// Without `std` no runtime catches job panics, so a payload can never reach this point;
+    /// the message exists only to keep the signature total.
+    #[cfg(not(any(feature = "std", test)))]
+    fn resume_panic(_payload: Box<dyn Any + Send>) -> ! {
+        panic!("fan-out job panicked")
+    }
 }
 
 #[cfg(test)]

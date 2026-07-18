@@ -29,35 +29,43 @@ impl Exec {
     }
 }
 
-/// Run a blocking host closure off the executor.
-///
-/// On the tokio runtime the closure moves to the blocking pool so the current-thread executor
-/// keeps serving tasks; without a runtime (inline-executor tests, fan-out worker threads, which
-/// are blocking-legal by design) it runs on the calling thread. Native adapters use this for
-/// every blocking syscall batch.
-pub async fn on_blocking_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => match handle.spawn_blocking(f).await {
-            Ok(value) => value,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("blocking host task failed: {error}"),
-        },
-        Err(_) => f(),
-    }
-}
+pub use api::{on_blocking_pool, run};
 
-/// Builds a current-thread tokio runtime and a `LocalSet`, hands the program an [`Exec`], and
-/// blocks until the returned future completes.
-pub fn run<T, F, Fut>(f: F) -> std::io::Result<T>
-where
-    F: FnOnce(Exec) -> Fut,
-    Fut: Future<Output = T>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let local = tokio::task::LocalSet::new();
-    Ok(local.block_on(&runtime, f(Exec::tokio())))
+/// The free-function surface, grouped per the repository's no-free-functions layout; re-exported
+/// at the module root.
+mod api {
+    use super::{Exec, Future};
+
+    /// Run a blocking host closure off the executor.
+    ///
+    /// On the tokio runtime the closure moves to the blocking pool so the current-thread
+    /// executor keeps serving tasks; without a runtime (inline-executor tests, fan-out worker
+    /// threads, which are blocking-legal by design) it runs on the calling thread. Native
+    /// adapters use this for every blocking syscall batch.
+    pub async fn on_blocking_pool<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => match handle.spawn_blocking(f).await {
+                Ok(value) => value,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(error) => panic!("blocking host task failed: {error}"),
+            },
+            Err(_) => f(),
+        }
+    }
+
+    /// Builds a current-thread tokio runtime and a `LocalSet`, hands the program an [`Exec`],
+    /// and blocks until the returned future completes.
+    pub fn run<T, F, Fut>(f: F) -> std::io::Result<T>
+    where
+        F: FnOnce(Exec) -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let local = tokio::task::LocalSet::new();
+        Ok(local.block_on(&runtime, f(Exec::tokio())))
+    }
 }
 
 struct WorkOrder {
@@ -81,29 +89,11 @@ impl TokioExec {
                 let receiver = Arc::clone(&receiver);
                 std::thread::Builder::new()
                     .name(std::format!("jals-exec-worker-{n}"))
-                    .spawn(move || worker_loop(&receiver))
+                    .spawn(move || Self::worker_loop(&receiver))
                     .expect("failed to spawn jals-exec fan-out worker");
             }
             sender
         })
-    }
-}
-
-fn worker_loop(receiver: &Mutex<mpsc::Receiver<WorkOrder>>) {
-    loop {
-        // Hold the lock only for the receive; the job itself runs unlocked so other workers
-        // can pick up orders concurrently.
-        let order = {
-            let receiver = receiver.lock().expect("fan-out receiver lock poisoned");
-            receiver.recv()
-        };
-        let Ok(order) = order else {
-            // Channel closed: the owning `Exec` is gone.
-            break;
-        };
-        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| worker_block_on((order.job)())));
-        // A dropped fan-out future closes the reply channel; the result is discarded.
-        let _ = order.reply.send((order.index, outcome));
     }
 }
 
@@ -119,16 +109,37 @@ impl std::task::Wake for ThreadWaker {
     }
 }
 
-/// Drives one job future to completion on the worker thread with a parking waker. The future is
-/// created on this thread and never leaves it — this is where `!Send` futures meet real
-/// parallelism.
-fn worker_block_on<T>(mut future: Pin<Box<dyn Future<Output = T> + '_>>) -> T {
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::park(),
+impl TokioExec {
+    fn worker_loop(receiver: &Mutex<mpsc::Receiver<WorkOrder>>) {
+        loop {
+            // Hold the lock only for the receive; the job itself runs unlocked so other workers
+            // can pick up orders concurrently.
+            let order = {
+                let receiver = receiver.lock().expect("fan-out receiver lock poisoned");
+                receiver.recv()
+            };
+            let Ok(order) = order else {
+                // Channel closed: the owning `Exec` is gone.
+                break;
+            };
+            let outcome =
+                std::panic::catch_unwind(AssertUnwindSafe(|| Self::worker_block_on((order.job)())));
+            // A dropped fan-out future closes the reply channel; the result is discarded.
+            let _ = order.reply.send((order.index, outcome));
+        }
+    }
+
+    /// Drives one job future to completion on the worker thread with a parking waker. The
+    /// future is created on this thread and never leaves it — this is where `!Send` futures
+    /// meet real parallelism.
+    fn worker_block_on<T>(mut future: Pin<Box<dyn Future<Output = T> + '_>>) -> T {
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::park(),
+            }
         }
     }
 }
