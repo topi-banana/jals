@@ -1280,6 +1280,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "jals-config",
+ "jals-exec",
  "jals-fmt",
  "jals-syntax",
  "rayon",
