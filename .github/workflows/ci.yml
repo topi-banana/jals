@@ -161,7 +161,9 @@ jobs:
       - run: cargo check -p jals-storage --no-default-features
       - run: cargo check -p jals-classpath --no-default-features
       - run: cargo check -p jals-build --no-default-features
+      - run: cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
+      - run: cargo build -p jals-playground --target wasm32-unknown-unknown
       - run: cargo tree -e features -p jals-classpath --no-default-features
       - run: cargo tree -e features -p jals-build --no-default-features
 
