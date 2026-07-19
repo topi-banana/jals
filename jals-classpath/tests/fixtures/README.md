@@ -1,10 +1,9 @@
 # Decompile test fixtures
 
-These `.class` files drive `../decompile.rs`, the skeleton synthesis tests (`ClassFile` →
-signature-`.java` with M0 bodies). They are compiled locally with `javac` from trivial Java sources
-written for this crate (no third-party or GPL-licensed code). `../decompile.rs` also reuses
-`jals-classfile`'s round-trip fixtures (referenced by relative path) for breadth in the
-valid-Java property test.
+These `.class` files drive the skeleton synthesis tests in `../decompile.rs` (`ClassFile` → `.java`
+source with recovered or safe-fallback bodies). They are compiled locally with `javac`
+from trivial Java sources written for this crate (no third-party or GPL-licensed code). The
+valid-Java property test renders and parses every class fixture listed below.
 
 ## Provenance / regenerating
 
@@ -13,7 +12,8 @@ Compiled with the JDK pinned for this repo (`javac 25`, class-file major version
 ```sh
 # Consts (M0 enrichments) / Branchy (M2 control flow) / Locals (M3 local variables) /
 # Loops (M4 loops) / Arrays (M5 array operations) / Concat + Sb (M6 string concatenation) /
-# Cmp (M7 numeric comparison conditions) — need -parameters + -g:
+# Cmp (M7 numeric comparison conditions) / IntCarried (JVM int-carried boolean/char values) —
+# need -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Consts.java
 cp out/demo/Consts.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Branchy.java
@@ -27,6 +27,8 @@ cp out/demo/Arrays.class jals-classpath/tests/fixtures/
 
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Cmp.java
 cp out/demo/Cmp.class jals-classpath/tests/fixtures/
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/IntCarried.java
+cp out/demo/IntCarried.class jals-classpath/tests/fixtures/
 
 # Concat (M6 string concatenation, javac's default invokedynamic lowering) — needs -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Concat.java
@@ -57,6 +59,7 @@ package, no debug info) and its source is not committed.
 | `Concat.class` | `src/Concat.java` | M6 string concatenation via `invokedynamic makeConcatWithConstants`: recipe chunks, String/int/char/double/boolean operands, a vanished `""` operand (the `""`-seed case), a marker-bearing constant passed as a bootstrap argument (the U+0002 path), a LambdaMetafactory call site that must bail, and a discarded `new` expression statement |
 | `Sb.class` | `src/Sb.java` | M6 string concatenation via `StringBuilder` chains (`-XDstringConcat=inline`): foldable append runs (String/int/boolean, a constant char appended as an int, an empty-String anchor), plus chains that must stay calls — no `toString()`, consumed by `length()`, discarded as a statement, or appended onto a parameter |
 | `Cmp.class` | `src/Cmp.java` | M7 numeric comparison conditions: a `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` fused into the following `if<cond>` across all six operators and both NaN flavors, in `if`/`while`/`do`-`while`, plus the two bails — a NaN-inexact rendering (`!(f < g)`, `fcmpg` + `iflt`) and a `*cmp` feeding a ternary's value merge |
+| `IntCarried.class` | `src/IntCarried.java` | Type-directed recovery of JVM int-carried `boolean`/`char` values in returns, locals, fields, ordinary call arguments/results, and arrays; integer-zero tests versus boolean negation; explicit `i2c` and literal char casts, including a lone surrogate code unit |
 | `Outer.class` | `Outer.java` | a top-level class with a nested static class and a nested enum (nested-type grouping) |
 | `Outer$Inner.class` | `Outer.java` | a nested static class |
 | `Outer$Color.class` | `Outer.java` | a nested enum with constants |

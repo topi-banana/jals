@@ -1,7 +1,5 @@
-//! Method-body decompilation (`MethodBody::decompile`) over a real compiled class. Uses the
-//! `Consts` fixture from `jals-classpath` (compiled with `-parameters -g`) so the straight-line
-//! reconstructions — a field-storing constructor, an arithmetic return, an empty `void`, a `throw` —
-//! are checked against actual bytecode.
+//! Method-body decompilation (`MethodBody::decompile`) over real classes compiled with
+//! `-parameters -g`, so reconstruction is checked against actual javac bytecode.
 
 use jals_classfile::{ClassFile, MethodInfo};
 use jals_decompile::MethodBody;
@@ -61,6 +59,12 @@ fn sb() -> ClassFile {
 fn cmp() -> ClassFile {
     fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Cmp.class"
+    ))
+}
+
+fn int_carried() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/IntCarried.class"
     ))
 }
 
@@ -360,6 +364,125 @@ fn compound_element_store_bails() {
     let cf = arrays();
     let names = ["xs".to_owned(), "i".to_owned()];
     assert!(decompile(method(&cf, "bump"), &cf, &names).is_none());
+}
+
+// --- JVM int-carried boolean and char values ---
+
+#[test]
+fn recovers_boolean_and_char_returns() {
+    let cf = int_carried();
+    let boolean =
+        decompile(method(&cf, "booleanReturn"), &cf, &[]).expect("booleanReturn decompiles");
+    let character = decompile(method(&cf, "charReturn"), &cf, &[]).expect("charReturn decompiles");
+    assert_eq!(boolean, ["return true;"]);
+    assert_eq!(character, ["return 'A';"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_locals() {
+    let cf = int_carried();
+    let boolean =
+        decompile(method(&cf, "booleanLocal"), &cf, &[]).expect("booleanLocal decompiles");
+    let character = decompile(method(&cf, "charLocal"), &cf, &[]).expect("charLocal decompiles");
+    assert_eq!(
+        boolean,
+        ["boolean value;", "value = true;", "return value;"]
+    );
+    assert_eq!(character, ["char value;", "value = 'B';", "return value;"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_fields() {
+    let cf = int_carried();
+    let stores = decompile(method(&cf, "storeFields"), &cf, &[]).expect("storeFields decompiles");
+    let boolean = decompile(method(&cf, "readFlag"), &cf, &[]).expect("readFlag decompiles");
+    let character = decompile(method(&cf, "readLetter"), &cf, &[]).expect("readLetter decompiles");
+    assert_eq!(stores, ["this.flag = true;", "this.letter = 'C';"]);
+    assert_eq!(boolean, ["return this.flag;"]);
+    assert_eq!(character, ["return this.letter;"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_call_arguments_and_results() {
+    let cf = int_carried();
+    let boolean = decompile(method(&cf, "callBoolean"), &cf, &[]).expect("callBoolean decompiles");
+    let character = decompile(method(&cf, "callChar"), &cf, &[]).expect("callChar decompiles");
+    let result = decompile(method(&cf, "branchOnCall"), &cf, &["value".to_owned()])
+        .expect("branchOnCall decompiles");
+    assert_eq!(boolean, ["return this.passBoolean(true);"]);
+    assert_eq!(character, ["return this.passChar('D');"]);
+    assert_eq!(
+        result,
+        [
+            "if (!this.passBoolean(value)) {",
+            "    return 1;",
+            "}",
+            "return 2;"
+        ]
+    );
+}
+
+#[test]
+fn preserves_char_to_int_widening() {
+    let cf = int_carried();
+    let names = ["value".to_owned()];
+    let call =
+        decompile(method(&cf, "widenedCharCall"), &cf, &names).expect("widenedCharCall decompiles");
+    let concat = decompile(method(&cf, "widenedCharConcat"), &cf, &names)
+        .expect("widenedCharConcat decompiles");
+    assert_eq!(call, ["return this.charOrInt((int) value);"]);
+    assert_eq!(concat, ["return \"\" + (int) value;"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_arrays() {
+    let cf = int_carried();
+    let booleans =
+        decompile(method(&cf, "booleanArray"), &cf, &[]).expect("booleanArray decompiles");
+    let characters = decompile(method(&cf, "charArray"), &cf, &[]).expect("charArray decompiles");
+    let names = ["flags".to_owned(), "letters".to_owned()];
+    let stores =
+        decompile(method(&cf, "storeArrays"), &cf, &names).expect("storeArrays decompiles");
+    let boolean_read = decompile(method(&cf, "readBoolean"), &cf, &["values".to_owned()])
+        .expect("readBoolean decompiles");
+    let char_read = decompile(method(&cf, "readChar"), &cf, &["values".to_owned()])
+        .expect("readChar decompiles");
+    assert_eq!(booleans, ["return new boolean[]{true, false};"]);
+    assert_eq!(characters, ["return new char[]{'E', (char) 55296};"]);
+    assert_eq!(stores, ["flags[0] = true;", "letters[0] = 'F';"]);
+    assert_eq!(boolean_read, ["return values[0];"]);
+    assert_eq!(char_read, ["return values[0];"]);
+}
+
+#[test]
+fn distinguishes_integer_zero_from_boolean_negation() {
+    // javac emits the same `iload; ifne` pair for both methods; the local's descriptor determines
+    // whether the source condition is an integer comparison or boolean negation.
+    let cf = int_carried();
+    let names = ["value".to_owned()];
+    let integer =
+        decompile(method(&cf, "integerZero"), &cf, &names).expect("integerZero decompiles");
+    let boolean =
+        decompile(method(&cf, "booleanNegation"), &cf, &names).expect("booleanNegation decompiles");
+    assert_eq!(
+        integer,
+        ["if (value == 0) {", "    return 1;", "}", "return 2;"]
+    );
+    assert_eq!(
+        boolean,
+        ["if (!value) {", "    return 1;", "}", "return 2;"]
+    );
+}
+
+#[test]
+fn recovers_char_casts_including_a_surrogate() {
+    let cf = int_carried();
+    let cast = decompile(method(&cf, "castChar"), &cf, &["value".to_owned()])
+        .expect("castChar decompiles");
+    let surrogate = decompile(method(&cf, "surrogate"), &cf, &[]).expect("surrogate decompiles");
+    assert_eq!(cast, ["return (char) value;"]);
+    // A lone UTF-16 surrogate is not a Unicode scalar, so preserve its code unit as a cast.
+    assert_eq!(surrogate, ["return (char) 55296;"]);
 }
 
 // --- invokedynamic makeConcatWithConstants (javac's default string-concat lowering) ---

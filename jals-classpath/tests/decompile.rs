@@ -74,6 +74,34 @@ fn preserves_rich_members_and_recovered_control_flow() {
 }
 
 #[test]
+fn preserves_int_carried_boolean_and_char_values() {
+    let classes = [class(include_bytes!("fixtures/IntCarried.class"))];
+    let (sources, warnings) = synthesize(&classes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].0, "demo/IntCarried.java");
+    let text = &sources[0].1;
+    for expected in [
+        "public static final char CONSTANT_CHAR = 'G';",
+        "private boolean flag;",
+        "private char letter;",
+        "return true;",
+        "value = 'B';",
+        "this.flag = true;",
+        "return this.passChar('D');",
+        "return this.charOrInt((int) value);",
+        "return \"\" + (int) value;",
+        "return new char[]{'E', (char) 55296};",
+        "if (value == 0) {",
+        "if (!value) {",
+        "return (char) value;",
+        "return (char) 55296;",
+    ] {
+        assert!(text.contains(expected), "{text}");
+    }
+}
+
+#[test]
 fn every_generated_fixture_is_valid_java() {
     let bytes: &[&[u8]] = &[
         include_bytes!("fixtures/Box.class"),
@@ -83,6 +111,9 @@ fn every_generated_fixture_is_valid_java() {
         include_bytes!("fixtures/Loops.class"),
         include_bytes!("fixtures/Arrays.class"),
         include_bytes!("fixtures/Concat.class"),
+        include_bytes!("fixtures/Sb.class"),
+        include_bytes!("fixtures/Cmp.class"),
+        include_bytes!("fixtures/IntCarried.class"),
         include_bytes!("fixtures/Outer.class"),
         include_bytes!("fixtures/Outer$Inner.class"),
         include_bytes!("fixtures/Outer$Color.class"),

@@ -57,6 +57,13 @@ impl Literal {
         out
     }
 
+    /// Render one JVM `char` code unit. Lone UTF-16 surrogates are not Rust/Unicode scalar values,
+    /// so preserve those with an explicit Java cast instead of inventing a character literal.
+    pub(crate) fn char_code_unit(value: i64) -> Option<String> {
+        let value = u32::from(u16::try_from(value).ok()?);
+        Some(char::from_u32(value).map_or_else(|| format!("(char) {value}"), Self::char_literal))
+    }
+
     /// Render a `String` constant as an escaped Java string literal (quotes included).
     pub(crate) fn string_literal(s: &str) -> String {
         let mut out = String::with_capacity(s.len() + 2);
@@ -121,6 +128,17 @@ mod tests {
     fn strings_are_escaped() {
         assert_eq!(Literal::string_literal("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
         assert_eq!(Literal::string_literal("\u{01}"), "\"\\u0001\"");
+    }
+
+    #[test]
+    fn char_code_units_preserve_surrogates() {
+        assert_eq!(Literal::char_code_unit(65).as_deref(), Some("'A'"));
+        assert_eq!(
+            Literal::char_code_unit(0xD800).as_deref(),
+            Some("(char) 55296")
+        );
+        assert_eq!(Literal::char_code_unit(-1), None);
+        assert_eq!(Literal::char_code_unit(0x1_0000), None);
     }
 
     #[test]
