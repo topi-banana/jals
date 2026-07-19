@@ -165,10 +165,10 @@ let script = BuildScript::Rhai {
 assert_eq!(script.tag_name(), "rhai");
 ```
 
-`file` must be a non-root portable project-relative file path outside the managed
-`target/jals/build` tree. The CLI executes it before source
-discovery and `javac` for both `build` and `run`. The LSP executes it while assembling a project, so
-generated Java and classpath entries participate in diagnostics, navigation, hover, and completion;
+`file` must be a non-root portable project-relative file path outside both `[build] classes-dir`
+and the managed `target/jals/build` tree, since `jals clean` removes both. The CLI executes it before
+source discovery and `javac` for both `build` and `run`. The LSP executes it while assembling a
+project, so generated Java and classpath entries participate in diagnostics, navigation, hover, and completion;
 failures are attached to the script document and ordinary project analysis continues. The browser
 playground exposes editable `jals.toml` and `build.rhai` buffers and runs the same engine entirely in
 WebAssembly. It uses generated source/classpath for analysis but, like the LSP, does not run

@@ -790,15 +790,26 @@ impl Manifest {
     /// Checks the `[[bin]]` table: every bin needs a non-empty `name` and `main-class`, names must
     /// be unique, and `[package] default-run` (when set) must name a declared bin. Also applies each
     /// `[dependencies]` entry's value-level checks (see [`Dependency::validate`]) and requires a
-    /// configured build script to name a non-root portable project file outside the managed build
-    /// output root.
+    /// configured build script to name a non-root portable project file outside every directory
+    /// removed by `jals clean`.
     ///
     /// # Errors
     /// Returns [`ValidationError`] describing the first problem found.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        let classes_dir = DirKey::parse(&self.build.classes_dir).map_err(|_| {
+            ValidationError::InvalidClassesDir {
+                dir: self.build.classes_dir.clone(),
+            }
+        })?;
         if let Some(BuildScript::Rhai { file }) = &self.build.script {
             let script = FileKey::parse(file)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
+            if script.path().starts_with(classes_dir.path()) {
+                return Err(ValidationError::BuildScriptInClassesDir {
+                    file: file.clone(),
+                    classes_dir: self.build.classes_dir.clone(),
+                });
+            }
             let managed_root = DirKey::parse(MANAGED_BUILD_ROOT)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
             if script.path().starts_with(managed_root.path()) {
@@ -942,6 +953,11 @@ impl Error for ManifestParseError {
 /// came from — the host [`ManifestParseError`] / `jals-build`'s `ManifestError` add the path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
+    /// `[build] classes-dir` is not a portable project directory path.
+    InvalidClassesDir {
+        /// The invalid compiler output directory.
+        dir: String,
+    },
     /// A `[build] script.file` is not a non-root portable project file path.
     InvalidBuildScriptFile {
         /// The invalid script file value.
@@ -951,6 +967,13 @@ pub enum ValidationError {
     BuildScriptInManagedRoot {
         /// The unsafe script file value.
         file: String,
+    },
+    /// A `[build] script.file` is inside `classes-dir`, which `jals clean` owns and removes.
+    BuildScriptInClassesDir {
+        /// The unsafe script file value.
+        file: String,
+        /// The compiler output directory containing the script.
+        classes_dir: String,
     },
     /// Two `[[bin]]` entries share a `name`.
     DuplicateBin {
@@ -978,6 +1001,10 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidClassesDir { dir } => write!(
+                f,
+                "invalid `[build] classes-dir` `{dir}`: expected a portable project directory path"
+            ),
             Self::InvalidBuildScriptFile { file } => write!(
                 f,
                 "invalid `[build] script.file` `{file}`: expected a non-root portable file path"
@@ -985,6 +1012,10 @@ impl fmt::Display for ValidationError {
             Self::BuildScriptInManagedRoot { file } => write!(
                 f,
                 "invalid `[build] script.file` `{file}`: scripts must be outside `target/jals/build`, which `jals clean` removes"
+            ),
+            Self::BuildScriptInClassesDir { file, classes_dir } => write!(
+                f,
+                "invalid `[build] script.file` `{file}`: scripts must be outside `[build] classes-dir` `{classes_dir}`, which `jals clean` removes"
             ),
             Self::DuplicateBin { name } => {
                 write!(f, "duplicate `[[bin]]` name `{name}`")
@@ -1143,6 +1174,28 @@ mod tests {
             );
             assert!(source.to_string().contains("`jals clean` removes"));
         }
+    }
+
+    #[test]
+    fn build_script_file_must_be_outside_the_classes_dir() {
+        let error = r#"
+            [build]
+            classes-dir = "out"
+            script = { type = "rhai", file = "out/build.rhai" }
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("script inside classes-dir must be a validation error");
+        };
+        assert_eq!(
+            source,
+            ValidationError::BuildScriptInClassesDir {
+                file: "out/build.rhai".to_owned(),
+                classes_dir: "out".to_owned(),
+            }
+        );
+        assert!(source.to_string().contains("`jals clean` removes"));
     }
 
     #[test]
