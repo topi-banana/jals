@@ -1508,10 +1508,13 @@ impl Sim<'_> {
                 Expr::lit(Literal::string_literal(&self.pool.utf8(*string_index)?)),
                 "java/lang/String",
             ),
-            ConstantPoolEntry::Class { name_index } => StackValue::object(
-                Expr::lit(Literal::class_literal(&self.pool.utf8(*name_index)?)),
-                "java/lang/Class",
-            ),
+            ConstantPoolEntry::Class { .. } => {
+                let class_type = self.class_ref_type(index)?;
+                StackValue::object(
+                    Expr::lit(Literal::class_literal(&class_type)),
+                    "java/lang/Class",
+                )
+            }
             _ => return None,
         })
     }
@@ -1572,8 +1575,8 @@ impl Sim<'_> {
 
     /// The type a `Class` entry points to, as a [`FieldType`]: an array class entry holds the full
     /// field descriptor (`[I`, `[Ljava/lang/String;`), any other a plain internal name (JVMS
-    /// §4.4.1) — the ambiguity is resolved once here for every instruction that takes a class
-    /// operand (`checkcast`, `anewarray`, `multianewarray`).
+    /// §4.4.1) — the ambiguity is resolved once here for every instruction that uses a class entry
+    /// (`ldc`, `checkcast`, `anewarray`, `multianewarray`).
     fn class_ref_type(&self, index: u16) -> Option<FieldType> {
         let internal = self.class_ref(index)?;
         Self::internal_type(&internal)
@@ -2116,6 +2119,15 @@ mod tests {
         .expect("typed null");
         assert_eq!(object.render(), "(java.lang.Object) s");
         assert_eq!(null.render(), "(java.lang.String) null");
+    }
+
+    #[test]
+    fn class_constants_distinguish_names_from_array_descriptors() {
+        assert_eq!(Sim::internal_type("I"), Some(FieldType::Object("I".into())));
+        assert_eq!(Sim::internal_type("[I"), FieldType::parse("[I").ok());
+        for malformed in ["[", "[V", "[Ljava/lang/String", "[I;"] {
+            assert_eq!(Sim::internal_type(malformed), None, "{malformed}");
+        }
     }
 
     // The fixtures only cover the flavor/operator pairings `javac` emits, so the full NaN
