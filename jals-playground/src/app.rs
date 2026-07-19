@@ -21,7 +21,7 @@
 //! ([`Msg::MarkersComputed`]), where the current model is known — a stale result for a file no
 //! longer showing is dropped instead of painted on the wrong model.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -150,6 +150,19 @@ impl ConfigParseError {
     }
 }
 
+/// A snapshot of the current selection generation. Delayed tasks use it to avoid applying results
+/// after a newer sidebar or cross-file selection has won.
+struct SelectionToken {
+    generation: Rc<Cell<u64>>,
+    captured: u64,
+}
+
+impl SelectionToken {
+    fn is_current(&self) -> bool {
+        self.generation.get() == self.captured
+    }
+}
+
 /// A message driving an [`App`] state transition.
 pub enum Msg {
     /// The async workspace construction finished: the shared workspace plus the sync view mirrors
@@ -235,6 +248,9 @@ pub struct App {
     fmt_src: String,
     /// Which config file is open in the editor, or `None` when a Java workspace file is active.
     active_config: Option<ConfigKind>,
+    /// Monotonically increasing identity of the latest sidebar or cross-file selection. Async
+    /// selection/format tasks capture it and drop model writes after a newer selection wins.
+    selection_generation: Rc<Cell<u64>>,
     /// The CORS proxy for jar downloads (typed in the header); empty by default.
     proxy: String,
     /// The `([dependencies], proxy)` of the last resolve kicked off from a `jals.toml` edit. A
@@ -275,6 +291,21 @@ impl App {
         self.workspace.clone()
     }
 
+    /// Capture the current selection generation for a delayed task.
+    fn selection_token(&self) -> SelectionToken {
+        SelectionToken {
+            generation: Rc::clone(&self.selection_generation),
+            captured: self.selection_generation.get(),
+        }
+    }
+
+    /// Invalidate older selection tokens and capture the new generation.
+    fn advance_selection(&self) -> SelectionToken {
+        self.selection_generation
+            .set(self.selection_generation.get().wrapping_add(1));
+        self.selection_token()
+    }
+
     /// Compute the active file's diagnostics as a [`Msg::MarkersComputed`] — sent back to `update`,
     /// which paints only if that file is still showing.
     async fn markers_of(workspace: &Workspace) -> Msg {
@@ -313,13 +344,20 @@ impl App {
         path: String,
         source: String,
         want_syntax: bool,
+        selection: &SelectionToken,
     ) {
         let syntax = if want_syntax {
             Some(Self::dump_of(ws).await)
         } else {
             None
         };
+        if !selection.is_current() {
+            return;
+        }
         let markers = Self::markers_of(ws).await;
+        if !selection.is_current() {
+            return;
+        }
         link.send_message(Msg::ActiveRefreshed {
             path,
             source,
@@ -567,6 +605,7 @@ impl Component for App {
             manifest_src: ConfigKind::Manifest.seed().to_string(),
             fmt_src: ConfigKind::Fmt.seed().to_string(),
             active_config: None,
+            selection_generation: Rc::new(Cell::new(0)),
             proxy: String::new(),
             last_resolve_key: None,
         }
@@ -618,6 +657,7 @@ impl Component for App {
                 }
             },
             Msg::SelectFile(path) => {
+                let selection = self.advance_selection();
                 // Flush the live editor text into the (still-active) file/buffer before switching.
                 let live = monaco::current_value();
                 if let Some(kind) = ConfigKind::from_path(&path) {
@@ -650,13 +690,20 @@ impl Component for App {
                     let link = ctx.link().clone();
                     spawn_local(async move {
                         let mut ws = workspace.lock().await;
+                        if !selection.is_current() {
+                            return;
+                        }
                         if let Some(text) = outgoing_java {
                             ws.sync_active(&text).await;
+                        }
+                        if !selection.is_current() {
+                            return;
                         }
                         ws.set_active(&path);
                         let source = ws.active_source();
                         monaco::switch_model(&path, &source);
-                        Self::report_active(&ws, &link, path, source, want_syntax).await;
+                        Self::report_active(&ws, &link, path, source, want_syntax, &selection)
+                            .await;
                     });
                 }
                 true
@@ -673,15 +720,19 @@ impl Component for App {
                 let config = self.config.borrow().clone();
                 let want_syntax = self.syntax_dump.is_some();
                 let link = ctx.link().clone();
+                let selection = self.selection_token();
                 spawn_local(async move {
                     let mut ws = workspace.lock().await;
                     // Flush the live buffer, format it, and rewrite the editor in place.
                     ws.sync_active(&live).await;
                     let formatted = ws.format_active(&config).await.formatted;
+                    if !selection.is_current() {
+                        return;
+                    }
                     monaco::update_model(&formatted);
                     ws.sync_active(&formatted).await;
                     let path = ws.active().to_string();
-                    Self::report_active(&ws, &link, path, formatted, want_syntax).await;
+                    Self::report_active(&ws, &link, path, formatted, want_syntax, &selection).await;
                 });
                 false
             }
@@ -730,6 +781,7 @@ impl Component for App {
                 false
             }
             Msg::ModelOpened(path) => {
+                let selection = self.advance_selection();
                 // Monaco already switched the model (and flushed the outgoing file via `on_change`,
                 // whose message — and therefore its lock turn — precedes this one); only track the
                 // new active file and repaint. Must not flush or `switch_model` again. Cross-file
@@ -743,9 +795,12 @@ impl Component for App {
                 let link = ctx.link().clone();
                 spawn_local(async move {
                     let mut ws = workspace.lock().await;
+                    if !selection.is_current() {
+                        return;
+                    }
                     ws.set_active(&path);
                     let source = ws.active_source();
-                    Self::report_active(&ws, &link, path, source, want_syntax).await;
+                    Self::report_active(&ws, &link, path, source, want_syntax, &selection).await;
                 });
                 true
             }
