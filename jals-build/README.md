@@ -4,29 +4,26 @@ Cargo-style build orchestration for Java projects — the engine behind `jals bu
 / `jals clean` / `jals init`.
 
 A [`jals.toml`](#the-manifest-jalstoml) manifest is the Java analogue of `Cargo.toml`: it says
-where the sources live, where compiled classes go, which Java release to target, and what is on
-the classpath. This crate parses that manifest and turns it (plus already-resolved inputs) into
-a `javac`/`java` command line, the set of paths a clean removes, or the files a fresh project
-needs — the **core is pure data**, never spawning a process or touching the filesystem:
+where the sources live, where compiled classes go, which Java release to target, what is on the
+classpath, and optionally which Rhai script runs before compilation. This crate turns that manifest
+and already-resolved inputs into `javac`/`java` plans, clean keys, or scaffold files. With the `rhai`
+feature it can also evaluate the script against revisioned `jals-storage` project data, without
+giving the script direct host access:
 
 ```
-jals.toml ───────▶ Manifest ──┐
-                              ├──▶ CompileRequest ─▶ SubprocessToolchain ─▶ ┐
-discovered .java files ───────┘    RunRequest     ─▶  (native feature)      ┤  jals-cli
-                                                       spawns javac/java    ├▶ discovers,
-InitOptions ──────────────────────▶ .scaffold()      ─▶ [ScaffoldFile] ────┤  writes files,
-                                     CleanTargets::keys  ─▶ [DirKey] ───────┘  removes dirs
+jals.toml + project snapshot ─▶ optional Rhai pre-build ─▶ generated files/directives
+              │                                                    │
+              └──────────────────────┬─────────────────────────────┘
+                                     ▼
+discovered .java files ───────▶ CompileRequest / RunRequest ─▶ javac / java
+InitOptions ──────────────────▶ [ScaffoldFile]       CleanTargets ─▶ [DirKey]
 ```
 
-`jals-cli` owns the *other* side effects: it discovers the manifest, walks the source tree, writes
-the scaffold, and deletes the clean paths. Spawning `javac`/`java` (and discovering installed JDKs
-for `[toolchain]`) is the one side effect that lives **here**, in the default-on **`native` feature**
-(`SubprocessToolchain`, plus the `<dyn Compiler>::select` / `<dyn Runtime>::select` factories that
-match the manifest's two `[toolchain]` enums — `jals_config::Compiler` / `jals_config::Runtime` —
-to a boxed backend, one per step) — a deliberate exception so a single toolchain abstraction serves
-both the CLI and, later, an in-browser (wasm) backend. The abstraction is a **pair of object-safe
-traits** mirroring the two selectors — `Compiler` (compile + describe) and `Runtime` (run +
-describe) — and the subprocess backend is not their only implementation: the core also ships
+`jals-cli` owns manifest discovery, host source walking, scaffold writes, and clean removal. Spawning
+`javac`/`java` (and discovering installed JDKs for `[toolchain]`) lives in the default-on `native`
+feature (`SubprocessToolchain`, plus the `<dyn Compiler>::select` / `<dyn Runtime>::select`
+factories). The toolchain abstraction is a pair of object-safe traits, `Compiler` and `Runtime`, and
+the subprocess backend is not their only implementation: the core also ships
 `BuiltinToolchain`, the **in-process backend** selected by `[toolchain] compiler/runtime =
 "builtin"` — today a *dummy* (compile copies each source into the `classes-dir` unchanged; run is a
 successful no-op) whose I/O goes through a revisioned `jals_storage::ProjectStorage`; memory and
@@ -34,20 +31,23 @@ native adapters obey the same transaction contract, and a real embedded compiler
 the copy step without touching the seam. Because each step is selected from its own enum and driven as its
 own `&dyn Compiler` / `&dyn Runtime`, mixed selections need no routing composite. The core — the
 `Manifest` model, the `Invocation` planner, and the `Compiler`/`Runtime` traits plus the
-filesystem-free `ToolResolver` and `BuiltinToolchain` — stays pure: deterministic, unit-testable
-with no JDK installed, and **`wasm32`-compatible** with `--no-default-features` (its only
-dependencies are `jals-config`, for the pure `Manifest` model, `jals-storage`, for typed project
-keys/revisions/cache, and `toml`, for `ManifestError`'s underlying parse-error type).
+filesystem-free `ToolResolver` and `BuiltinToolchain` — remains deterministic and testable with no
+JDK installed.
+
+The optional `rhai` feature adds [`execute_build_script`](#rhai-build-scripts). It is also portable:
+`jals-build --no-default-features --features rhai` is `no_std + alloc`, uses only typed project
+storage and its verified artifact cache, and builds for `wasm32-unknown-unknown`. The browser
+playground uses that exact configuration.
 
 ## What it does today
 
-Four subcommands are wired through `jals-cli`, each backed by one pure entry point here:
+Four subcommands are wired through `jals-cli`:
 
 | Command | Backed by | What it does | Flags |
 | --- | --- | --- | --- |
-| `jals build` | `Invocation::build` | Discover the manifest and `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
-| `jals run` | `RunTarget::resolve` + `Invocation::build` + `Invocation::run` | Compile, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
-| `jals clean` | `CleanTargets::paths` | Remove the build output (the `classes-dir`). A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
+| `jals build` | `execute_build_script` + `Invocation::build` | Run the optional pre-build script, discover `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
+| `jals run` | `execute_build_script` + `RunTarget::resolve` + invocations | Run the pre-build phase, compile, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
+| `jals clean` | `CleanTargets::keys` | Remove `classes-dir` and, when a script is configured, `target/jals/build`. A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
 | `jals init [PATH]` | `InitOptions::scaffold` | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`. | `--name <NAME>` |
 
 Common behavior, all implemented in `jals-cli` on top of this crate:
@@ -56,11 +56,14 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
   (like Cargo). The project root is the manifest's parent directory; every manifest path is
   resolved relative to it. A missing manifest is an **error** (there is nothing to build),
   unlike the formatter/linter configs where a missing file means "use defaults".
-- **Source discovery** — every `source-dirs` entry must exist, and at least one `.java` file
-  must be found, else the build errors. Sources are passed to `javac` last, in sorted order.
+- **Source discovery** — after the optional build script runs, at least one project or generated
+  `.java` source must be present. Without a generated source, every `source-dirs` entry must exist;
+  generated sources permit an otherwise absent or empty ordinary source root. Sources are passed to
+  `javac` last, in sorted order.
 - **`--dry-run`** prints the exact command(s) (via `Invocation::display_command`, which quotes
-  whitespace) and exits without compiling/running/deleting. `-v`/`--verbose` prints the same
-  command(s) and then runs them.
+  whitespace) and exits without compiling/running/deleting. A configured build script still runs
+  and publishes its storage output because its directives are needed to plan that exact command.
+  `-v`/`--verbose` prints the same command(s) and then runs them.
 - **JDK tool resolution** — the `SubprocessToolchain` (the crate's default-on `native` feature)
   selects `javac`/`java` per the manifest's [`[toolchain]`](#toolchain): the `$JAVAC`/`$JAVA` override
   first, then the `[toolchain] compiler`/`runtime` selection (an explicit path, or a
@@ -85,6 +88,7 @@ version = "0.1.0"
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
 [build]
+# script = { type = "rhai", file = "build.rhai" } # optional pre-javac phase
 source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
 classes-dir = "target/classes"    # javac -d
 release = 21                       # javac --release N
@@ -131,6 +135,7 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 
 | Key | Type | Default | Maps to |
 | --- | --- | --- | --- |
+| `script` | tagged table | — | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }` |
 | `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files |
 | `classes-dir` | string | `"target/classes"` | `javac -d` (also the dir `jals clean` removes) |
 | `release` | integer | — | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored |
@@ -138,6 +143,143 @@ gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.c
 | `target` | integer | — | `--target N` — only when `release` is unset |
 | `classpath` | array of strings | `[]` | `-classpath` (joined with the platform separator); omitted entirely when empty |
 | `javac-flags` | array of strings | `[]` | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet |
+
+### Rhai build scripts
+
+Enable the optional pre-build phase with an inline tagged table:
+
+```toml
+[build]
+script = { type = "rhai", file = "build.rhai" }
+```
+
+The corresponding Rust model is `BuildScript::Rhai { file }`; `tag_name()` returns the exact serde
+tag used in the manifest:
+
+```rust
+use jals_config::BuildScript;
+
+let script = BuildScript::Rhai {
+    file: "build.rhai".into(),
+};
+assert_eq!(script.tag_name(), "rhai");
+```
+
+`file` must be a non-root portable project-relative file path outside the managed
+`target/jals/build` tree. The CLI executes it before source
+discovery and `javac` for both `build` and `run`. The LSP executes it while assembling a project, so
+generated Java and classpath entries participate in diagnostics, navigation, hover, and completion;
+failures are attached to the script document and ordinary project analysis continues. The browser
+playground exposes editable `jals.toml` and `build.rhai` buffers and runs the same engine entirely in
+WebAssembly. It uses generated source/classpath for analysis but, like the LSP, does not run
+`javac`/`java`.
+
+The runner receives a `ProjectStorage` aggregate rather than a host path. It evaluates against one
+immutable `ProjectView`, buffers generated files and directives, then commits files in one
+revision-checked transaction only after successful evaluation. Scripts get exactly three scope
+objects:
+
+| Object | Method | Effect |
+| --- | --- | --- |
+| `project` | `read(path)` | Read a project file as an array of bytes (`0..=255`). |
+| `project` | `read_text(path)` | Read a UTF-8 project file as a string. |
+| `project` | `exists(path)` | Test whether a project-relative file or directory exists. |
+| `project` | `read_dir(path)` | List direct child paths in deterministic order. |
+| `project` | `walk_files(path)` | List all files below a directory in deterministic order. |
+| `output` | `write(path, bytes)` | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`. |
+| `output` | `write_text(path, text)` | Buffer UTF-8 text below the same output root and return an `OutputPath`. |
+| `build` | `env(name)` | Read a value from the environment map explicitly supplied by the host; returns `()` when absent. |
+| `build` | `rerun_if_changed(path)` | Track one project file for cache invalidation. |
+| `build` | `rerun_if_env_changed(name)` | Track one supplied environment value for cache invalidation. |
+| `build` | `add_source(path)` | Add a project file or returned `OutputPath` to the later source set. |
+| `build` | `add_classpath(path)` | Add a project file or returned `OutputPath` to the classpath. |
+| `build` | `add_javac_arg(arg)` / `add_jvm_arg(arg)` | Append compiler or JVM arguments in call order. |
+| `build` | `set_compile_env(name, value)` / `set_run_env(name, value)` | Add environment entries to the compiler or runtime request. |
+| `build` | `warning(message)` / `error(message)` | Report a non-fatal warning or a fatal diagnostic. Any error prevents publication. |
+| `build` | `metadata(key, value)` | Return deterministic host-readable metadata without changing a tool invocation. |
+
+A concise `build.rhai` that generates and registers a Java source is:
+
+```rhai
+let source = output.write_text(
+    "generated/BuildInfo.java",
+    "public final class BuildInfo { public static final String VALUE = \"rhai\"; }\n"
+);
+build.add_source(source);
+build.add_javac_arg("-Xlint:all");
+build.add_jvm_arg("-Djals.build.script=rhai");
+build.set_run_env("JALS_BUILD_SCRIPT", "rhai");
+build.rerun_if_changed("src/main/java/Main.java");
+build.rerun_if_env_changed("CI");
+build.warning("generated BuildInfo.java");
+build.metadata("generator", "rhai");
+```
+
+For CLI builds, `build.env` sees a snapshot of the host environment plus `OUT_DIR` (always
+`target/jals/build/rhai/out`), `JALS_MANIFEST_DIR` (`.`), and the optional
+`JALS_PACKAGE_NAME`/`JALS_PACKAGE_VERSION`. The fixed values replace same-named host entries. The LSP
+and playground deliberately supply only those fixed project values, not their host/browser
+environment. `set_compile_env`/`set_run_env` contribute entries to the eventual CLI subprocesses;
+the LSP/playground do not apply process-only flag/environment directives because they spawn no JDK
+tools.
+
+Script `javac` arguments follow manifest `javac-flags` and remain before source paths. Script JVM
+arguments precede `-cp`. Manifest classpath entries come first; script and resolved dependency
+entries are stably deduplicated while preserving their first-occurrence order. Added sources are compiled with
+ordinary project and source-dependency sources. Warnings are surfaced by each host. `build.error`, a
+Rhai compile/evaluation error, a bad path, or a limit violation publishes no partial generated
+output. Metadata is available in `BuildScriptOutput` for host integrations and is not otherwise
+interpreted by `javac` or `java`.
+
+#### Fingerprints, cache, and clean
+
+Successful state and generated bytes are published write-once to the storage artifact cache and
+read back through digest-verified lookups. The native adapter persists them under
+`target/jals/cache`; memory hosts retain them in their aggregate. A fingerprint covers the API/state
+versions, script path and bytes, `jals.toml`, limits, tracked project bytes, and declared environment
+values. A matching cache hit restores outputs and all directives without evaluating Rhai.
+
+If the script calls no `rerun_if_changed`, the conservative default fingerprints every project file
+except `target/jals/build/**`. Calling it at least once narrows project-file tracking to the declared
+set; the script and manifest remain tracked independently. Only names passed to
+`rerun_if_env_changed` contribute environment values to the fingerprint. Managed build-output paths
+cannot be registered as rerun inputs, preventing generated files from invalidating or certifying
+their own build.
+
+Stale generated files are removed only when their current bytes still match output bytes verified
+from this session or the persistent cache. Unknown or externally modified stale files are never
+deleted. Missing cached output, a digest mismatch, changed inputs, or invalid cached state causes
+normal script evaluation. Failure to persist cache state becomes a warning after generated output
+has committed, not a failed build.
+
+With a configured script, `jals clean` removes both `classes-dir` and `target/jals/build`, including
+`target/jals/build/rhai/out`. It intentionally leaves the shared verified cache at
+`target/jals/cache`; the next build can safely restore matching output from it.
+
+#### Sandbox and WebAssembly
+
+The script has no API for host filesystem access, spawning processes, network requests, clock/time,
+or randomness. Project reads and output writes go only through validated storage keys; output paths
+cannot escape the dedicated root. Module loading, Rhai time support, custom syntax, `print`, and
+`debug` do not provide host capabilities (`print`/`debug` output is discarded).
+
+Compiler/JVM arguments, classpath entries, and compile/run environment directives are inert during
+the Rhai phase, but intentionally affect the later JDK subprocess started by an explicit CLI
+`build`/`run`. They can enable compiler plugins, annotation processors, agents, or other JDK
+features, so build scripts remain trusted project code rather than a security boundary for the
+subsequent compiler process. The LSP and playground never spawn that process.
+
+Default limits include 1 MiB script source, 1,000,000 operations, 1,024 variables, 256 functions,
+32 nested calls, expression depths of 64/32, 1 MiB strings, 65,536-item arrays, 4,096-entry maps,
+4 KiB/128-segment paths, 1 MiB aggregate directives, 256 output files, 4 MiB per output, 16 MiB
+total output, and 4 MiB cached state. Hosts may supply stricter non-zero `BuildScriptLimits`. The
+same bounded engine builds for `wasm32-unknown-unknown` with:
+
+```sh
+cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+```
+
+See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable project.
 
 ### `[run]`
 
@@ -292,13 +434,12 @@ jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run the [[bin]] named "server"
 jals run -- arg1 arg2       # ...passing args to the program
 jals run --main-class com.example.Other
-jals clean                  # remove target/classes
+jals clean                  # remove target/classes (+ target/jals/build when scripted)
 ```
 
 ## Library API
 
-Every entry point is an associated function on the type it produces or acts on — no free
-functions (the crate follows the workspace's `no-free-functions` rule):
+Planning entry points are associated functions on the type they produce or act on:
 
 ```rust
 impl Invocation {
@@ -312,7 +453,7 @@ impl RunTarget {
 }
 
 impl CleanTargets {
-    pub fn paths(manifest: &Manifest, project_root: &Path) -> Vec<PathBuf>;
+    pub fn keys(manifest: &Manifest) -> Result<Vec<DirKey>, PathError>;
 }
 
 impl InitOptions {
@@ -328,8 +469,14 @@ appended after the `[build] classpath` entries on `javac`/`java`'s `-classpath`;
 separator is supplied by the backend planning the command (the requests stay tool-agnostic).
 `RunTarget::resolve`
 picks the `main-class` `jals run` should execute from `[[bin]]`/`default-run`/`[run] main-class`.
-`InitOptions { name }.scaffold()` (for `jals init`) and `CleanTargets::paths` (for `jals clean`)
+`InitOptions { name }.scaffold()` (for `jals init`) and `CleanTargets::keys` (for `jals clean`)
 round out the pure planning surface.
+
+With the `rhai` feature, the async `execute_build_script(storage, manifest, environment, limits,
+session)` function is the portable execution entry point. It returns `Ok(None)` when no script is
+configured or a `BuildScriptOutput` containing the committed revision, generated/source/classpath
+keys, process directives, diagnostics, rerun inputs, and metadata. `BuildScriptSession` carries
+aggregate-local verified output ownership between calls.
 
 The `ManifestExt` trait (`jals-build`'s host-side extension of `jals_config::Manifest`) adds the
 path-resolving half: `Manifest::from_file` loads, parses, and validates (`Manifest::validate`, an
@@ -354,24 +501,27 @@ source.
 ## Development
 
 ```sh
-cargo test  -p jals-build                                          # manifest + invocation + target + clean + scaffold tests
+cargo test -p jals-build --all-features
 cargo clippy -p jals-build --all-targets --all-features -- -D warnings
-cargo build --release --target wasm32-unknown-unknown -p jals-build  # stays wasm-compatible
+cargo check -p jals-build --no-default-features
+cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
 ---
 
 # Roadmap
 
-`jals-build` today is a thin, faithful `javac`/`java` wrapper. The goal is to grow it into a
-**Cargo-for-Java** front end: dependency management, packaging, testing, and richer build
-configuration. Each item below names its Cargo analogue (or marks a Java-specific extension).
+`jals-build` today is a thin, faithful `javac`/`java` wrapper with a portable Rhai pre-build phase.
+The goal is to grow it into a **Cargo-for-Java** front end: dependency management, packaging,
+testing, and richer build configuration. Each item below names its Cargo analogue (or marks a
+Java-specific extension).
 
-**The architectural rule for every item:** `jals-build` stays **pure** — no filesystem, process,
-or network I/O, so it keeps building for `wasm32`. New side effects (downloading a jar, running
-a test runner, writing a jar archive) live in `jals-cli`; this crate only *plans* them. A
-resolved dependency classpath, for instance, is fed into `Invocation::build` exactly as the
-discovered source list is fed in today.
+**The architectural rule for every item:** portable code gets no direct host filesystem, process,
+or network capability, so it keeps building for `wasm32`. Storage-backed operations use typed
+`ProjectStorage`; direct host effects (downloading a jar, running a test runner, writing a jar
+archive) live in native adapters or `jals-cli`. A resolved dependency classpath, for instance, is
+fed into `Invocation::build` exactly as the discovered source list is fed in today.
 
 ## 1. Commands to add
 
@@ -494,11 +644,11 @@ classpath plan, a runner-`Invocation` builder, and result reporting in `jals-cli
 
 ## Out of scope (for `jals-build` the crate)
 
-Anything with side effects stays in `jals-cli` (or a future host-only helper crate): process
-spawning, filesystem walking/writing, network fetches, and the dependency cache. This crate's
-remit is the **pure planning layer** — manifests in, command plans / path lists / scaffold files
-out — which is exactly what keeps it deterministic, unit-testable without a JDK, and
-`wasm32`-buildable.
+Direct host capabilities stay in `jals-cli`, a native adapter, or a future host-only helper crate:
+process spawning, host filesystem walking, and network fetches. Portable `jals-build` code either
+plans data or operates through `ProjectStorage`; Rhai scripts receive only the latter's typed,
+revisioned project/cache contract. This keeps the portable feature set deterministic, unit-testable
+without a JDK, and `wasm32`-buildable.
 
 ## Suggested priority
 

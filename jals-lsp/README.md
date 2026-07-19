@@ -51,7 +51,7 @@ Server capabilities advertised on `initialize`:
 | Completion | `textDocument/completion` | `jals-hir` `ProjectIndex` | Triggered on `.`. A member access (`receiver.` or a partial `receiver.fo`) offers the receiver type's fields and methods; a bare identifier offers in-scope bindings, project type names, and the Java keywords. Cross-file through the project index; a single-file index otherwise. |
 | Signature help | `textDocument/signatureHelp` | `jals-hir` `ProjectIndex` | Triggered on `(` and `,`. Shows the overloads of the call at the cursor with the active parameter's range. Cross-file through the project index; file-local otherwise. |
 | Formatting | `textDocument/formatting` | `jals_fmt::format_source` | Whole-document: one full-range edit, or none if already formatted. |
-| Config hot-reload | `workspace/didChangeWatchedFiles` | — | Dynamically registers `**/jalsfmt.toml` and `**/jalslint.toml` watchers via `client/registerCapability` (when the client supports dynamic registration); a change clears the affected config's discovery cache so the next request rediscovers. |
+| Project/config hot-reload | `workspace/didChangeWatchedFiles` | — | Dynamically watches workspace files with one broad, non-overlapping glob. Authored Java changes under existing source roots refresh the editor snapshot; manifests, scripts, classpath/dependency inputs, declared `rerun_if_changed` files, and unknown inputs serialize full reassembly. A script with no declared inputs conservatively reruns for every project change. Generated `target/jals/build/**` and cache `target/jals/cache/**` feedback are ignored. |
 | Text sync | `didOpen` / `didChange` / `didClose` | — | Incremental sync (`TextDocumentSyncKind::INCREMENTAL`): change events are spliced in order (UTF-16 ranges → byte offsets); full-replacement events are still accepted. |
 | Lifecycle | `initialize` / `shutdown` / `exit` | — | Managed by async-lsp's `LifecycleLayer`. |
 
@@ -61,13 +61,19 @@ Formatting and lint config are each discovered per document by searching upward 
 default. When the client supports file watching, edits to either file take effect without a
 server restart.
 
+Rhai `build.warning`/`build.error` messages and compilation/runtime failures are published on the
+configured script URI as `jals-build` diagnostics as well as logged to stderr. Compilation/runtime
+failures use Rhai's exact source position; script-reported messages use a first-line fallback range.
+A clean rerun or script removal clears the previous publication.
+
 Cross-file features (diagnostics beyond syntax + file-local lint, semantic tokens' cross-file
 classification, hover, go-to-definition, find-references, rename, completion, and signature
 help) run against a `Workspace`: one `jals-hir` `ProjectIndex` per `jals.toml` project, built
 lazily the first time a file in that project is opened (walking up from the file to find its
 manifest) and reused for every other file in the same project. It folds in the project's
 `[build] classpath` `.class` files and resolved `[dependencies]` jars (via `jals-classpath`; the
-`reqwest` download runs on a dedicated thread to stay off the Tokio runtime), each dependency's
+`reqwest` download runs on a dedicated thread to stay off the Tokio runtime), successful Rhai
+build-script generated sources and additional classpath entries, each dependency's
 extracted `sources` jar `.java` — or, when a jar ships none, a decompiled skeleton `.java` — as
 read-only navigation targets, each `git`/`path` source dependency's `.java` as both an index
 input (its types resolve for analysis) and a navigation target, and the project's `[package]
@@ -75,6 +81,10 @@ features` (feeding the feature-gated lint rules). Library and source-dependency 
 linted, and rename/find-references only ever rewrite the project's own sources. A file that
 belongs to no `jals.toml` project falls back to file-local resolution for every one of these
 features.
+
+Each `build.add_source` result is an exact project source identity: it participates in project
+resolution, diagnostics, navigation, and editing, but selecting one generated file never includes
+its unselected siblings.
 
 ## Usage
 
