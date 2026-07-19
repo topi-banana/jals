@@ -4,7 +4,6 @@
 //! conservative — it returns `None`/empty when it cannot produce something a Java parser accepts, so
 //! the caller falls back to a safe form (no initializer, `argN` names) and the output stays valid.
 
-use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -22,34 +21,50 @@ use crate::types::JavaType;
 pub struct Attrs;
 
 impl Attrs {
-    /// A field's `ConstantValue` rendered as a Java initializer expression (the text after `=`), or
-    /// `None` if the field has no constant value or it cannot be rendered.
+    /// A static field's `ConstantValue` rendered as a Java initializer expression (the text after
+    /// `=`), or `None` if the field has no constant value or it cannot be rendered.
     ///
-    /// A boolean field's `0`/`1` becomes `false`/`true`; `long`/`float`/`double` get their type
-    /// suffix; a `String` is escaped.
+    /// A boolean field's `0`/`1` becomes `false`/`true`, a `char` becomes a character literal,
+    /// `long`/`float`/`double` get their type suffix, and a `String` is escaped.
     pub fn constant_value_initializer(field: &FieldInfo, pool: &ConstantPool) -> Option<String> {
+        if !field.access_flags.is_static() {
+            return None;
+        }
         let index = field.attributes.iter().find_map(|a| match &a.body {
             AttributeBody::ConstantValue {
                 constantvalue_index,
             } => Some(*constantvalue_index),
             _ => None,
         })?;
-        let is_boolean = pool
-            .utf8(field.descriptor_index)
-            .and_then(|d| FieldType::parse(&d).ok())
-            .is_some_and(|ft| matches!(ft, FieldType::Base(BaseType::Boolean)));
-        Some(match pool.get(index)? {
-            ConstantPoolEntry::Integer(v) => {
-                if is_boolean {
-                    if *v != 0 { "true" } else { "false" }.to_owned()
-                } else {
-                    v.to_string()
-                }
+        let descriptor = pool.utf8(field.descriptor_index)?;
+        let ty = FieldType::parse(&descriptor).ok()?;
+        Some(match (pool.get(index)?, ty) {
+            (ConstantPoolEntry::Integer(0), FieldType::Base(BaseType::Boolean)) => "false".into(),
+            (ConstantPoolEntry::Integer(1), FieldType::Base(BaseType::Boolean)) => "true".into(),
+            (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Char)) => {
+                Literal::char_code_unit(i64::from(*v))?
             }
-            ConstantPoolEntry::Long(v) => format!("{v}L"),
-            ConstantPoolEntry::Float(v) => Literal::float_literal(*v),
-            ConstantPoolEntry::Double(v) => Literal::double_literal(*v),
-            ConstantPoolEntry::String { string_index } => {
+            (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Byte))
+                if i8::try_from(*v).is_ok() =>
+            {
+                v.to_string()
+            }
+            (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Short))
+                if i16::try_from(*v).is_ok() =>
+            {
+                v.to_string()
+            }
+            (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Int)) => v.to_string(),
+            (ConstantPoolEntry::Long(v), FieldType::Base(BaseType::Long)) => format!("{v}L"),
+            (ConstantPoolEntry::Float(v), FieldType::Base(BaseType::Float)) => {
+                Literal::float_literal(*v)
+            }
+            (ConstantPoolEntry::Double(v), FieldType::Base(BaseType::Double)) => {
+                Literal::double_literal(*v)
+            }
+            (ConstantPoolEntry::String { string_index }, FieldType::Object(name))
+                if name == "java/lang/String" =>
+            {
                 Literal::string_literal(&pool.utf8(*string_index)?)
             }
             _ => return None,
@@ -198,7 +213,7 @@ impl Attrs {
         })
     }
 
-    /// Resolve a non-parameter local `slot` to its `(name, rendered-Java-type)` from a method's
+    /// Resolve a non-parameter local `slot` to its `(name, descriptor type)` from a method's
     /// `LocalVariableTable`, used to hoist a typed declaration for every local a method stores into.
     /// Returns `None` — bailing the whole method — when the slot cannot be resolved unambiguously:
     /// - it has no entry (a synthetic temporary, or the class was compiled without `-g`),
@@ -214,15 +229,15 @@ impl Attrs {
         table: &[LocalVariableEntry],
         pool: &ConstantPool,
         slot: u16,
-    ) -> Option<(String, String)> {
-        let mut resolved: Option<(String, String)> = None;
+    ) -> Option<(String, FieldType)> {
+        let mut resolved: Option<(String, FieldType)> = None;
         for entry in table.iter().filter(|e| e.index == slot) {
             let name = pool.utf8(entry.name_index)?.into_owned();
             if !Self::is_java_identifier(&name) {
                 return None;
             }
             let descriptor = pool.utf8(entry.descriptor_index)?;
-            let ty = JavaType::render_field_type(&FieldType::parse(&descriptor).ok()?);
+            let ty = FieldType::parse(&descriptor).ok()?;
             let pair = (name, ty);
             match &resolved {
                 Some(prev) if *prev != pair => return None,

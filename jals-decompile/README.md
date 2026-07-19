@@ -356,10 +356,10 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
-  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`) and assert the recovered
-  statements.
+  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`, `IntCarried.class`) and
+  assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
-  `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton (across this crate's
-  fixtures plus `jals-classfile`'s round-trip corpus) and asserts zero syntax errors.
+  `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton from the fixture corpus
+  and asserts zero syntax errors.
 - Fixtures are pre-compiled `.class` files committed under `jals-classpath/tests/fixtures/` (see its
   `README.md` for provenance / how to regenerate with `javac`).
