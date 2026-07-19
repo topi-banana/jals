@@ -308,6 +308,16 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         ws
     }
 
+    /// Replace the exact project source files included alongside the source-root walks.
+    ///
+    /// Call [`reload_project_files`](Self::reload_project_files) to apply the new membership to the
+    /// cached files and symbol index.
+    pub fn set_project_sources(&mut self, mut project_sources: Vec<FileKey>) {
+        project_sources.sort();
+        project_sources.dedup();
+        self.project_sources = project_sources;
+    }
+
     /// Reload project `.java` files from the aggregate's current [`ProjectView`] and rebuild the
     /// symbol index.
     ///
@@ -856,7 +866,7 @@ mod tests {
                 ("generated/Selected.java", "class Selected { }"),
                 ("generated/Sibling.java", "class Sibling { }"),
             ]);
-            let ws = Workspace::load(
+            let mut ws = Workspace::load(
                 storage,
                 ProjectLayout {
                     project_sources: vec![generated.clone(), generated.clone()],
@@ -877,6 +887,13 @@ mod tests {
                 .await
                 .expect("the exact generated source resolves as a project type");
             assert_eq!(ws.path_of(target.file), Some(&generated));
+
+            ws.set_project_sources(vec![sibling.clone()]);
+            ws.reload_project_files().await;
+            assert!(!ws.owns_path(&generated));
+            assert!(ws.file_id(&generated).is_none());
+            assert!(ws.owns_path(&sibling));
+            assert!(ws.file_id(&sibling).is_some());
         });
     }
 

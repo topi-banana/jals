@@ -102,9 +102,8 @@ impl Workspace {
         )
         .await
         .expect("an in-memory snapshot is immediate and infallible");
-        // The whole tree is one source root (the sample files live at its top).
-        let editor =
-            Editor::load(storage, ProjectLayout::new(vec![DirKey::ROOT]), MonacoHost).await;
+        let source_root = DirKey::parse("com/example").expect("sample source root is valid");
+        let editor = Editor::load(storage, ProjectLayout::new(vec![source_root]), MonacoHost).await;
         // The first (sorted) indexed file is active on load.
         let active = editor
             .workspace()
@@ -216,7 +215,12 @@ impl Workspace {
                 .await?
             }
         };
-        self.editor.workspace_mut().reload_project_files().await;
+        let project_sources = output.as_ref().map_or_else(Vec::new, |output| {
+            output.generated_sources.iter().cloned().collect()
+        });
+        let workspace = self.editor.workspace_mut();
+        workspace.set_project_sources(project_sources);
+        workspace.reload_project_files().await;
         self.ensure_active_indexed();
         Ok(output)
     }
@@ -426,13 +430,14 @@ mod tests {
     }
 
     #[test]
-    fn generated_java_is_indexed_and_resolves_from_unsaved_source() {
+    fn only_registered_generated_java_is_indexed_and_resolves_from_unsaved_source() {
         block_on_inline(async {
             let mut ws = Workspace::new().await;
             ws.set_active("com/example/Main.java");
             ws.sync_active("package com.example;\npublic class Main { Generated value; }\n")
                 .await;
             let generated = output_key("com/example/Generated.java");
+            let unregistered = output_key("com/example/Unregistered.java");
 
             let output = ws
                 .run_build_script(
@@ -443,6 +448,10 @@ mod tests {
                             "com/example/Generated.java",
                             "package com.example; public class Generated {}\n"
                         );
+                        output.write_text(
+                            "com/example/Unregistered.java",
+                            "package com.example; public class Unregistered {}\n"
+                        );
                         build.add_source(source);
                     "#,
                 )
@@ -451,11 +460,24 @@ mod tests {
                 .expect("script is configured");
 
             assert!(output.generated_sources.contains(&generated));
+            assert!(!output.generated_sources.contains(&unregistered));
+            assert!(output.generated_files.contains(&generated));
+            assert!(output.generated_files.contains(&unregistered));
+            let view = ws.editor.workspace().view();
+            assert!(view.file(&generated).is_ok());
+            assert!(view.file(&unregistered).is_ok());
             assert!(
                 ws.file_texts()
                     .iter()
                     .any(|(path, _)| path == &generated.to_string())
             );
+            assert!(
+                ws.file_texts()
+                    .iter()
+                    .all(|(path, _)| path != &unregistered.to_string())
+            );
+            assert!(ws.editor.workspace().file_id(&generated).is_some());
+            assert!(ws.editor.workspace().file_id(&unregistered).is_none());
             assert_eq!(
                 ws.active_source(),
                 "package com.example;\npublic class Main { Generated value; }\n",
@@ -565,8 +587,10 @@ mod tests {
                 &build_manifest(),
                 BUILD_MANIFEST,
                 r#"
-                    output.write_text("A.java", "class A { int oldValue; }\n");
-                    output.write_text("B.java", "class B {}\n");
+                    let a = output.write_text("A.java", "class A { int oldValue; }\n");
+                    let b = output.write_text("B.java", "class B {}\n");
+                    build.add_source(a);
+                    build.add_source(b);
                 "#,
             )
             .await
@@ -576,8 +600,10 @@ mod tests {
                 &build_manifest(),
                 BUILD_MANIFEST,
                 r#"
-                    output.write_text("A.java", "class A { int newValue; }\n");
-                    output.write_text("C.java", "class C {}\n");
+                    let a = output.write_text("A.java", "class A { int newValue; }\n");
+                    let c = output.write_text("C.java", "class C {}\n");
+                    build.add_source(a);
+                    build.add_source(c);
                 "#,
             )
             .await
@@ -608,7 +634,10 @@ mod tests {
             ws.run_build_script(
                 &build_manifest(),
                 BUILD_MANIFEST,
-                r#"output.write_text("Generated.java", "class Generated {}\n");"#,
+                r#"
+                    let generated = output.write_text("Generated.java", "class Generated {}\n");
+                    build.add_source(generated);
+                "#,
             )
             .await
             .expect("generation succeeds");
