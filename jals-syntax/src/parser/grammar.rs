@@ -14,6 +14,11 @@
 //! lambda / cast / for-each / switch / pattern disambiguation uses bounded lookahead that consumes no fuel
 //! ([`Parser::nth_nofuel`]) and always terminates within the input length.
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use jals_exec::LocalBoxFuture;
+
 use super::Parser;
 use super::marker::{CompletedMarker, Marker};
 use super::token_set::TokenSet;
@@ -195,17 +200,17 @@ const EXPR_START: TokenSet = TokenSet::new(&[
 
 impl Parser<'_> {
     /// Entry point. Parses a compilation unit.
-    pub(crate) fn root(&mut self) {
+    pub(crate) async fn root(&mut self) {
         let m = self.start();
         if self.at(PACKAGE_KW) {
-            self.package_decl();
+            self.package_decl().await;
         }
         while self.at(IMPORT_KW) {
-            self.import_decl();
+            self.import_decl().await;
         }
         while !self.at_eof() {
             let before = self.pos();
-            self.type_decl();
+            self.type_decl().await;
             // Progress guarantee (last-resort safeguard).
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
@@ -214,15 +219,15 @@ impl Parser<'_> {
         m.complete(self, SOURCE_FILE);
     }
 
-    fn package_decl(&mut self) {
+    async fn package_decl(&mut self) {
         let m = self.start();
         self.bump(PACKAGE_KW);
-        self.qualified_name(false);
+        self.qualified_name(false).await;
         self.expect(SEMICOLON);
         m.complete(self, PACKAGE_DECL);
     }
 
-    fn import_decl(&mut self) {
+    async fn import_decl(&mut self) {
         let m = self.start();
         self.bump(IMPORT_KW);
         // `import module M;` (JEP 511). `module` is a restricted keyword (lexed as `IDENT`);
@@ -230,20 +235,21 @@ impl Parser<'_> {
         // and `import module;` remain ordinary type imports of a package/type named `module`.
         if self.at_contextual_kw("module") && self.nth_at(1, IDENT) {
             self.bump_remap(MODULE_KW);
-            self.qualified_name(false);
+            self.qualified_name(false).await;
         } else {
             self.eat(STATIC_KW);
-            self.qualified_name(true);
+            self.qualified_name(true).await;
         }
         self.expect(SEMICOLON);
         m.complete(self, IMPORT_DECL);
     }
 
     /// Dotted name. If `allow_star` is true, allows a trailing `.*` (for imports).
-    fn qualified_name(&mut self, allow_star: bool) {
+    async fn qualified_name(&mut self, allow_star: bool) {
         let m = self.start();
         self.expect(IDENT);
         while self.at(DOT) {
+            self.yielder.tick().await;
             if allow_star && self.nth_at(1, STAR) {
                 self.bump(DOT);
                 self.bump(STAR);
@@ -271,23 +277,23 @@ impl Parser<'_> {
     /// Top-level declaration: a type declaration (class / interface / enum / record /
     /// `@interface` / module) or, in a compact source file (JEP 512), a top-level field
     /// or method declaration belonging to the file's implicit class.
-    fn type_decl(&mut self) {
+    async fn type_decl(&mut self) {
         let m = self.start();
-        self.modifiers();
+        self.modifiers().await;
         match self.current() {
-            CLASS_KW => self.class_rest(m),
-            INTERFACE_KW => self.interface_rest(m),
-            ENUM_KW => self.enum_rest(m),
-            AT if self.nth_at(1, INTERFACE_KW) => self.annotation_type_rest(m),
-            _ if self.at_module_decl() => self.module_rest(m),
-            _ if self.at_record_decl() => self.record_rest(m),
+            CLASS_KW => self.class_rest(m).await,
+            INTERFACE_KW => self.interface_rest(m).await,
+            ENUM_KW => self.enum_rest(m).await,
+            AT if self.nth_at(1, INTERFACE_KW) => self.annotation_type_rest(m).await,
+            _ if self.at_module_decl() => self.module_rest(m).await,
+            _ if self.at_record_decl() => self.record_rest(m).await,
             // Top-level field / (generic) method in a compact source file.
             _ if self.at_type_start() || self.at(LT) => {
                 if self.at(LT) {
                     // Type parameters of a generic method, e.g. `<T> T id(T x) { ... }`.
-                    self.type_params();
+                    self.type_params().await;
                 }
-                self.field_or_method(m);
+                self.field_or_method(m).await;
             }
             _ => {
                 m.abandon(self);
@@ -310,18 +316,18 @@ impl Parser<'_> {
     }
 
     /// Module declaration (`m` is the enclosing start marker; modifiers/annotations already consumed).
-    fn module_rest(&mut self, m: Marker) {
+    async fn module_rest(&mut self, m: Marker) {
         if self.at_contextual_kw("open") {
             self.bump_remap(OPEN_KW);
         }
         self.bump_remap(MODULE_KW);
-        self.qualified_name(false);
-        self.module_body();
+        self.qualified_name(false).await;
+        self.module_body().await;
         m.complete(self, MODULE_DECL);
     }
 
     /// Module body (`{ directive* }`).
-    fn module_body(&mut self) {
+    async fn module_body(&mut self) {
         let m = self.start();
         if !self.expect(LBRACE) {
             m.complete(self, MODULE_BODY);
@@ -329,7 +335,7 @@ impl Parser<'_> {
         }
         while !self.at(RBRACE) && !self.at_eof() {
             let before = self.pos();
-            self.module_directive();
+            self.module_directive().await;
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
             }
@@ -339,17 +345,20 @@ impl Parser<'_> {
     }
 
     /// A single module directive (`requires` / `exports` / `opens` / `uses` / `provides`).
-    fn module_directive(&mut self) {
+    async fn module_directive(&mut self) {
         if self.at_contextual_kw("requires") {
-            self.requires_directive();
+            self.requires_directive().await;
         } else if self.at_contextual_kw("exports") {
-            self.exports_opens_directive(EXPORTS_KW, EXPORTS_DIRECTIVE);
+            self.exports_opens_directive(EXPORTS_KW, EXPORTS_DIRECTIVE)
+                .await;
         } else if self.at_contextual_kw("opens") {
-            self.exports_opens_directive(OPENS_KW, OPENS_DIRECTIVE);
+            self.exports_opens_directive(OPENS_KW, OPENS_DIRECTIVE)
+                .await;
         } else if self.at_contextual_kw("uses") {
-            self.uses_provides_directive(USES_KW, USES_DIRECTIVE);
+            self.uses_provides_directive(USES_KW, USES_DIRECTIVE).await;
         } else if self.at_contextual_kw("provides") {
-            self.uses_provides_directive(PROVIDES_KW, PROVIDES_DIRECTIVE);
+            self.uses_provides_directive(PROVIDES_KW, PROVIDES_DIRECTIVE)
+                .await;
         } else {
             self.err_and_bump("expected a module directive");
         }
@@ -357,7 +366,7 @@ impl Parser<'_> {
 
     /// `requires {transitive | static} ModuleName ;`. `transitive` is itself a valid module name,
     /// so it is a modifier only when another name part or `static` follows.
-    fn requires_directive(&mut self) {
+    async fn requires_directive(&mut self) {
         let m = self.start();
         self.bump_remap(REQUIRES_KW);
         loop {
@@ -371,21 +380,21 @@ impl Parser<'_> {
                 break;
             }
         }
-        self.qualified_name(false);
+        self.qualified_name(false).await;
         self.expect(SEMICOLON);
         m.complete(self, REQUIRES_DIRECTIVE);
     }
 
     /// `exports PackageName [to ModuleName {, ModuleName}] ;` (and the identical `opens` form).
-    fn exports_opens_directive(&mut self, kw: SyntaxKind, node: SyntaxKind) {
+    async fn exports_opens_directive(&mut self, kw: SyntaxKind, node: SyntaxKind) {
         let m = self.start();
         self.bump_remap(kw);
-        self.qualified_name(false);
+        self.qualified_name(false).await;
         if self.at_contextual_kw("to") {
             self.bump_remap(TO_KW);
-            self.qualified_name(false);
+            self.qualified_name(false).await;
             while self.eat(COMMA) {
-                self.qualified_name(false);
+                self.qualified_name(false).await;
             }
         }
         self.expect(SEMICOLON);
@@ -393,16 +402,16 @@ impl Parser<'_> {
     }
 
     /// `uses TypeName ;` and `provides TypeName with TypeName {, TypeName} ;`.
-    fn uses_provides_directive(&mut self, kw: SyntaxKind, node: SyntaxKind) {
+    async fn uses_provides_directive(&mut self, kw: SyntaxKind, node: SyntaxKind) {
         let m = self.start();
         self.bump_remap(kw);
-        self.qualified_name(false);
+        self.qualified_name(false).await;
         if kw == PROVIDES_KW {
             if self.at_contextual_kw("with") {
                 self.bump_remap(WITH_KW);
-                self.qualified_name(false);
+                self.qualified_name(false).await;
                 while self.eat(COMMA) {
-                    self.qualified_name(false);
+                    self.qualified_name(false).await;
                 }
             } else {
                 self.error("expected `with`");
@@ -413,11 +422,12 @@ impl Parser<'_> {
     }
 
     /// Modifier sequence (annotations, modifier keywords, `sealed`, `non-sealed`). Always creates a node.
-    fn modifiers(&mut self) {
+    async fn modifiers(&mut self) {
         let m = self.start();
         loop {
+            self.yielder.tick().await;
             if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                self.annotation();
+                self.annotation().await;
             } else if self.at_ts(MODIFIER_KW) {
                 self.bump_any();
             } else if self.at_non_sealed() {
@@ -431,18 +441,18 @@ impl Parser<'_> {
         m.complete(self, MODIFIERS);
     }
 
-    fn annotation(&mut self) {
+    async fn annotation(&mut self) {
         let m = self.start();
         self.bump(AT);
-        self.qualified_name(false);
+        self.qualified_name(false).await;
         if self.at(LPAREN) {
-            self.annotation_arg_list();
+            self.annotation_arg_list().await;
         }
         m.complete(self, ANNOTATION);
     }
 
     /// Annotation argument list (`(value)` / `(name = value, ...)`).
-    fn annotation_arg_list(&mut self) {
+    async fn annotation_arg_list(&mut self) {
         let m = self.start();
         self.bump(LPAREN);
         while !self.at(RPAREN) && !self.at_eof() {
@@ -451,10 +461,10 @@ impl Parser<'_> {
                 let pair = self.start();
                 self.bump(IDENT);
                 self.bump(EQ);
-                self.element_value();
+                self.element_value().await;
                 pair.complete(self, ANNOTATION_PAIR);
             } else {
-                self.element_value();
+                self.element_value().await;
             }
             if self.pos() == before {
                 self.err_and_bump("unexpected argument");
@@ -468,23 +478,26 @@ impl Parser<'_> {
     }
 
     /// Annotation element value or array initializer element (expression / nested annotation / array).
-    fn element_value(&mut self) {
-        if self.at(LBRACE) {
-            self.array_init();
-        } else if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-            self.annotation();
-        } else {
-            self.expr();
-        }
+    fn element_value(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            if self.at(LBRACE) {
+                self.array_init().await;
+            } else if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
+                self.annotation().await;
+            } else {
+                self.expr().await;
+            }
+        })
     }
 
     /// Array initializer `{ a, b, c }` (nested, trailing comma allowed).
-    fn array_init(&mut self) {
+    async fn array_init(&mut self) {
         let m = self.start();
         self.bump(LBRACE);
         while !self.at(RBRACE) && !self.at_eof() {
             let before = self.pos();
-            self.element_value();
+            self.element_value().await;
             if self.pos() == before {
                 self.err_and_bump("unexpected element");
             }
@@ -516,55 +529,55 @@ impl Parser<'_> {
     }
 
     /// After `class` (modifiers already consumed by the caller, `m` is the enclosing start marker).
-    fn class_rest(&mut self, m: Marker) {
+    async fn class_rest(&mut self, m: Marker) {
         self.bump(CLASS_KW);
         self.expect(IDENT);
         if self.at(LT) {
-            self.type_params();
+            self.type_params().await;
         }
         if self.at(EXTENDS_KW) {
-            self.extends_clause(false);
+            self.extends_clause(false).await;
         }
         if self.at(IMPLEMENTS_KW) {
-            self.implements_clause();
+            self.implements_clause().await;
         }
         if self.at_contextual_kw("permits") {
-            self.permits_clause();
+            self.permits_clause().await;
         }
-        self.class_body();
+        self.class_body().await;
         m.complete(self, CLASS_DECL);
     }
 
     /// After `interface`.
-    fn interface_rest(&mut self, m: Marker) {
+    async fn interface_rest(&mut self, m: Marker) {
         self.bump(INTERFACE_KW);
         self.expect(IDENT);
         if self.at(LT) {
-            self.type_params();
+            self.type_params().await;
         }
         if self.at(EXTENDS_KW) {
             // interfaces can extend multiple types.
-            self.extends_clause(true);
+            self.extends_clause(true).await;
         }
         if self.at_contextual_kw("permits") {
-            self.permits_clause();
+            self.permits_clause().await;
         }
-        self.class_body();
+        self.class_body().await;
         m.complete(self, INTERFACE_DECL);
     }
 
     /// After `enum`.
-    fn enum_rest(&mut self, m: Marker) {
+    async fn enum_rest(&mut self, m: Marker) {
         self.bump(ENUM_KW);
         self.expect(IDENT);
         if self.at(IMPLEMENTS_KW) {
-            self.implements_clause();
+            self.implements_clause().await;
         }
-        self.enum_body();
+        self.enum_body().await;
         m.complete(self, ENUM_DECL);
     }
 
-    fn enum_body(&mut self) {
+    async fn enum_body(&mut self) {
         let m = self.start();
         if !self.expect(LBRACE) {
             m.complete(self, ENUM_BODY);
@@ -574,7 +587,7 @@ impl Parser<'_> {
         while !self.at(RBRACE) && !self.at(SEMICOLON) && !self.at_eof() {
             let before = self.pos();
             if self.at(IDENT) || self.at(AT) {
-                self.enum_constant();
+                self.enum_constant().await;
             } else {
                 self.err_and_bump("expected an enum constant");
             }
@@ -589,7 +602,7 @@ impl Parser<'_> {
         if self.eat(SEMICOLON) {
             while !self.at(RBRACE) && !self.at_eof() {
                 let before = self.pos();
-                self.member();
+                self.member().await;
                 if self.pos() == before {
                     self.err_and_bump("unexpected token");
                 }
@@ -599,38 +612,38 @@ impl Parser<'_> {
         m.complete(self, ENUM_BODY);
     }
 
-    fn enum_constant(&mut self) {
+    async fn enum_constant(&mut self) {
         let m = self.start();
         while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-            self.annotation();
+            self.annotation().await;
         }
         self.expect(IDENT);
         if self.at(LPAREN) {
-            self.arg_list();
+            self.arg_list().await;
         }
         if self.at(LBRACE) {
             // Class body specific to this constant.
-            self.class_body();
+            self.class_body().await;
         }
         m.complete(self, ENUM_CONSTANT);
     }
 
     /// After `record`.
-    fn record_rest(&mut self, m: Marker) {
+    async fn record_rest(&mut self, m: Marker) {
         self.bump_remap(RECORD_KW);
         self.expect(IDENT);
         if self.at(LT) {
-            self.type_params();
+            self.type_params().await;
         }
-        self.record_header();
+        self.record_header().await;
         if self.at(IMPLEMENTS_KW) {
-            self.implements_clause();
+            self.implements_clause().await;
         }
-        self.class_body();
+        self.class_body().await;
         m.complete(self, RECORD_DECL);
     }
 
-    fn record_header(&mut self) {
+    async fn record_header(&mut self) {
         let m = self.start();
         if !self.expect(LPAREN) {
             m.complete(self, RECORD_HEADER);
@@ -638,9 +651,9 @@ impl Parser<'_> {
         }
         while !self.at(RPAREN) && !self.at_eof() {
             let comp = self.start();
-            self.modifiers();
-            self.type_();
-            self.eat_varargs();
+            self.modifiers().await;
+            self.type_().await;
+            self.eat_varargs().await;
             self.expect(IDENT);
             comp.complete(self, RECORD_COMPONENT);
             if !self.eat(COMMA) {
@@ -652,62 +665,62 @@ impl Parser<'_> {
     }
 
     /// After `@interface` (annotation type declaration).
-    fn annotation_type_rest(&mut self, m: Marker) {
+    async fn annotation_type_rest(&mut self, m: Marker) {
         self.bump(AT);
         self.bump(INTERFACE_KW);
         self.expect(IDENT);
-        self.class_body();
+        self.class_body().await;
         m.complete(self, ANNOTATION_TYPE_DECL);
     }
 
-    fn extends_clause(&mut self, multi: bool) {
+    async fn extends_clause(&mut self, multi: bool) {
         let c = self.start();
         self.bump(EXTENDS_KW);
-        self.type_();
+        self.type_().await;
         if multi {
             while self.eat(COMMA) {
-                self.type_();
+                self.type_().await;
             }
         }
         c.complete(self, EXTENDS_CLAUSE);
     }
 
-    fn implements_clause(&mut self) {
+    async fn implements_clause(&mut self) {
         let c = self.start();
         self.bump(IMPLEMENTS_KW);
-        self.type_();
+        self.type_().await;
         while self.eat(COMMA) {
-            self.type_();
+            self.type_().await;
         }
         c.complete(self, IMPLEMENTS_CLAUSE);
     }
 
-    fn permits_clause(&mut self) {
+    async fn permits_clause(&mut self) {
         let c = self.start();
         self.bump_remap(PERMITS_KW);
-        self.type_();
+        self.type_().await;
         while self.eat(COMMA) {
-            self.type_();
+            self.type_().await;
         }
         c.complete(self, PERMITS_CLAUSE);
     }
 
-    fn type_params(&mut self) {
+    async fn type_params(&mut self) {
         let m = self.start();
         self.bump(LT);
         while !self.at(GT) && !self.at_eof() {
             let tp = self.start();
             // Type parameters may also carry annotations.
             while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                self.annotation();
+                self.annotation().await;
             }
             self.expect(IDENT);
             if self.at(EXTENDS_KW) {
                 self.bump(EXTENDS_KW);
-                self.type_();
+                self.type_().await;
                 while self.at(AMP) {
                     self.bump(AMP);
-                    self.type_();
+                    self.type_().await;
                 }
             }
             tp.complete(self, TYPE_PARAM);
@@ -719,7 +732,7 @@ impl Parser<'_> {
         m.complete(self, TYPE_PARAMS);
     }
 
-    fn class_body(&mut self) {
+    async fn class_body(&mut self) {
         let m = self.start();
         if !self.expect(LBRACE) {
             m.complete(self, CLASS_BODY);
@@ -727,7 +740,7 @@ impl Parser<'_> {
         }
         while !self.at(RBRACE) && !self.at_eof() {
             let before = self.pos();
-            self.member();
+            self.member().await;
             // Progress guarantee: if member consumed no tokens, force-wrap one token as ERROR.
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
@@ -738,133 +751,137 @@ impl Parser<'_> {
     }
 
     /// Member of class / interface / enum / `@interface`.
-    fn member(&mut self) {
-        if self.at(SEMICOLON) {
-            // Empty member.
-            self.bump(SEMICOLON);
-            return;
-        }
-        let m = self.start();
-        self.modifiers();
-
-        // Nested type declaration.
-        match self.current() {
-            CLASS_KW => return self.class_rest(m),
-            INTERFACE_KW => return self.interface_rest(m),
-            ENUM_KW => return self.enum_rest(m),
-            AT if self.nth_at(1, INTERFACE_KW) => return self.annotation_type_rest(m),
-            _ => {}
-        }
-        if self.at_record_decl() {
-            return self.record_rest(m);
-        }
-
-        // Initializer block (`{ ... }` / `static { ... }`).
-        if self.at(LBRACE) {
-            self.block();
-            m.complete(self, INITIALIZER);
-            return;
-        }
-
-        // Type arguments for generic methods/constructors.
-        if self.at(LT) {
-            self.type_params();
-        }
-
-        // Compact canonical constructor (record): `Name { ... }`.
-        if self.at(IDENT) && self.nth_at(1, LBRACE) {
-            self.bump(IDENT);
-            self.block();
-            m.complete(self, CONSTRUCTOR_DECL);
-            return;
-        }
-
-        // Constructor: `Name ( ... )`.
-        if self.at(IDENT) && self.nth_at(1, LPAREN) {
-            self.bump(IDENT);
-            self.param_list();
-            if self.at(THROWS_KW) {
-                self.throws_clause();
+    fn member(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            if self.at(SEMICOLON) {
+                // Empty member.
+                self.bump(SEMICOLON);
+                return;
             }
+            let m = self.start();
+            self.modifiers().await;
+
+            // Nested type declaration.
+            match self.current() {
+                CLASS_KW => return self.class_rest(m).await,
+                INTERFACE_KW => return self.interface_rest(m).await,
+                ENUM_KW => return self.enum_rest(m).await,
+                AT if self.nth_at(1, INTERFACE_KW) => return self.annotation_type_rest(m).await,
+                _ => {}
+            }
+            if self.at_record_decl() {
+                return self.record_rest(m).await;
+            }
+
+            // Initializer block (`{ ... }` / `static { ... }`).
             if self.at(LBRACE) {
-                self.block();
-            } else {
-                self.expect(SEMICOLON);
+                self.block().await;
+                m.complete(self, INITIALIZER);
+                return;
             }
-            m.complete(self, CONSTRUCTOR_DECL);
-            return;
-        }
 
-        // Otherwise starts with a type (field or method).
-        self.field_or_method(m);
+            // Type arguments for generic methods/constructors.
+            if self.at(LT) {
+                self.type_params().await;
+            }
+
+            // Compact canonical constructor (record): `Name { ... }`.
+            if self.at(IDENT) && self.nth_at(1, LBRACE) {
+                self.bump(IDENT);
+                self.block().await;
+                m.complete(self, CONSTRUCTOR_DECL);
+                return;
+            }
+
+            // Constructor: `Name ( ... )`.
+            if self.at(IDENT) && self.nth_at(1, LPAREN) {
+                self.bump(IDENT);
+                self.param_list().await;
+                if self.at(THROWS_KW) {
+                    self.throws_clause().await;
+                }
+                if self.at(LBRACE) {
+                    self.block().await;
+                } else {
+                    self.expect(SEMICOLON);
+                }
+                m.complete(self, CONSTRUCTOR_DECL);
+                return;
+            }
+
+            // Otherwise starts with a type (field or method).
+            self.field_or_method(m).await;
+        })
     }
 
     /// Parses a field or method declaration, given a marker `m` started before the
     /// modifiers were consumed. The current position is just past the modifiers (and any
     /// leading method type parameters). Shared by class members and top-level members
     /// (JEP 512 compact source files).
-    fn field_or_method(&mut self, m: Marker) {
+    async fn field_or_method(&mut self, m: Marker) {
         if !self.at_type_start() {
             m.abandon(self);
             self.err_recover("expected a member declaration", MEMBER_RECOVERY);
             return;
         }
-        self.type_();
+        self.type_().await;
         self.expect(IDENT);
         if self.at(LPAREN) {
             // Method (including annotation elements).
-            self.param_list();
+            self.param_list().await;
             // Old-style return-type array dimensions `m()[]` (each optionally annotated).
-            self.dims();
+            self.dims().await;
             if self.at(THROWS_KW) {
-                self.throws_clause();
+                self.throws_clause().await;
             }
             if self.at(DEFAULT_KW) {
                 // Default value for annotation element.
                 let d = self.start();
                 self.bump(DEFAULT_KW);
-                self.element_value();
+                self.element_value().await;
                 d.complete(self, ANNOTATION_DEFAULT);
             }
             if self.at(LBRACE) {
-                self.block();
+                self.block().await;
             } else {
                 self.expect(SEMICOLON);
             }
             m.complete(self, METHOD_DECL);
         } else {
             // Field (supports multiple declarators, array dimensions, and array initializers).
-            self.field_tail();
+            self.field_tail().await;
             self.expect(SEMICOLON);
             m.complete(self, FIELD_DECL);
         }
     }
 
     /// Remainder of a field/local variable declarator (the first name is already consumed).
-    fn field_tail(&mut self) {
-        self.dims();
+    async fn field_tail(&mut self) {
+        self.dims().await;
         if self.eat(EQ) {
-            self.var_init();
+            self.var_init().await;
         }
         while self.eat(COMMA) {
             self.binding_name();
-            self.dims();
+            self.dims().await;
             if self.eat(EQ) {
-                self.var_init();
+                self.var_init().await;
             }
         }
     }
 
     /// Skips a sequence of array dimensions (`[]`), each optionally annotated (`String @A []`).
-    fn dims(&mut self) {
+    async fn dims(&mut self) {
         loop {
+            self.yielder.tick().await;
             // An annotation here belongs to a dimension only if `[]` follows it
             // (`String @A []`); otherwise leave it for whatever comes next.
             if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
                 let i = self.skip_annotations_lookahead(0);
                 if self.nth_nofuel(i) == LBRACK && self.nth_nofuel(i + 1) == RBRACK {
                     while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                        self.annotation();
+                        self.annotation().await;
                     }
                     // The lookahead promised `[]` after the annotations, but a malformed
                     // annotation argument list can make the real parse stop short of it
@@ -888,20 +905,20 @@ impl Parser<'_> {
     }
 
     /// Variable initializer (array initializer `{...}` or an expression).
-    fn var_init(&mut self) {
+    async fn var_init(&mut self) {
         if self.at(LBRACE) {
-            self.array_init();
+            self.array_init().await;
         } else {
-            self.expr();
+            self.expr().await;
         }
     }
 
-    fn throws_clause(&mut self) {
+    async fn throws_clause(&mut self) {
         let m = self.start();
         self.bump(THROWS_KW);
-        self.type_();
+        self.type_().await;
         while self.eat(COMMA) {
-            self.type_();
+            self.type_().await;
         }
         m.complete(self, THROWS_CLAUSE);
     }
@@ -909,29 +926,29 @@ impl Parser<'_> {
     /// Eats an optional varargs `...`, consuming any type-use annotations on the varargs element
     /// type that `type_` left behind first (`Object @A...`, `String @A [] @B ...`). Such an
     /// annotation is not followed by `[]`, so the array-only `dims` leaves it for this caller.
-    fn eat_varargs(&mut self) {
+    async fn eat_varargs(&mut self) {
         if self.nth_nofuel(self.skip_annotations_lookahead(0)) == ELLIPSIS {
             while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                self.annotation();
+                self.annotation().await;
             }
         }
         self.eat(ELLIPSIS);
     }
 
-    fn param_list(&mut self) {
+    async fn param_list(&mut self) {
         let m = self.start();
         self.bump(LPAREN);
         while !self.at(RPAREN) && !self.at_eof() {
             let param = self.start();
-            self.modifiers();
-            self.type_();
-            self.eat_varargs(); // varargs.
+            self.modifiers().await;
+            self.type_().await;
+            self.eat_varargs().await; // varargs.
             // Also allows a `this` receiver parameter (`Foo this`).
             if self.at(THIS_KW) {
                 self.bump(THIS_KW);
             } else {
                 self.expect(IDENT);
-                self.dims();
+                self.dims().await;
             }
             param.complete(self, PARAM);
             if !self.eat(COMMA) {
@@ -959,11 +976,11 @@ impl Parser<'_> {
         self.at(DOT) && self.nth_nofuel(self.skip_annotations_lookahead(1)) == IDENT
     }
 
-    fn type_(&mut self) {
+    async fn type_(&mut self) {
         let m = self.start();
         // Annotations on types.
         while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-            self.annotation();
+            self.annotation().await;
         }
         if self.at_contextual_kw("var") {
             self.bump_remap(VAR_KW);
@@ -973,46 +990,49 @@ impl Parser<'_> {
             // Reference type: name + optional type arguments + dotted continuation.
             self.expect(IDENT);
             if self.at(LT) {
-                self.type_args();
+                self.type_args().await;
             }
             while self.dot_continues_type() {
                 self.bump(DOT);
                 // Annotations on the inner type (`Outer.@A Inner`).
                 while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                    self.annotation();
+                    self.annotation().await;
                 }
                 // `dot_continues_type`'s lookahead promised an `IDENT` past the annotations, but a
                 // malformed annotation argument list (`Outer.@A(x y) Inner`) can make the real parse
                 // stop short of it, so `expect` (not `bump`) the inner name to stay panic-free.
                 self.expect(IDENT);
                 if self.at(LT) {
-                    self.type_args();
+                    self.type_args().await;
                 }
             }
         }
-        self.dims();
+        self.dims().await;
         m.complete(self, TYPE);
     }
 
-    fn type_args(&mut self) {
-        let m = self.start();
-        self.bump(LT);
-        if !self.at(GT) {
-            self.type_arg();
-            while self.eat(COMMA) {
-                self.type_arg();
+    fn type_args(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            let m = self.start();
+            self.bump(LT);
+            if !self.at(GT) {
+                self.type_arg().await;
+                while self.eat(COMMA) {
+                    self.type_arg().await;
+                }
             }
-        }
-        self.expect_gt();
-        m.complete(self, TYPE_ARGS);
+            self.expect_gt();
+            m.complete(self, TYPE_ARGS);
+        })
     }
 
-    fn type_arg(&mut self) {
+    async fn type_arg(&mut self) {
         // A wildcard may carry leading type-use annotations: `@A ?`, `@A ? extends T`. Annotated
         // non-wildcard arguments (`@A Foo`) are handled by `type_`'s own leading-annotation loop.
         if self.nth_nofuel(self.skip_annotations_lookahead(0)) == QUESTION {
             while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                self.annotation();
+                self.annotation().await;
             }
             // The lookahead promised a `?` past the annotations, but a malformed annotation argument
             // list (`@A(x y) ?`) can make the real parse stop short of it, so `expect` (not `bump`)
@@ -1020,10 +1040,10 @@ impl Parser<'_> {
             self.expect(QUESTION);
             if self.at(EXTENDS_KW) || self.at(SUPER_KW) {
                 self.bump_any();
-                self.type_();
+                self.type_().await;
             }
         } else {
-            self.type_();
+            self.type_().await;
         }
     }
 
@@ -1109,12 +1129,12 @@ impl Parser<'_> {
 
     // ===== Statements =====
 
-    fn block(&mut self) {
+    async fn block(&mut self) {
         let m = self.start();
         self.bump(LBRACE);
         while !self.at(RBRACE) && !self.at_eof() {
             let before = self.pos();
-            self.stmt();
+            self.stmt().await;
             // Progress guarantee (last-resort safeguard).
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
@@ -1124,81 +1144,84 @@ impl Parser<'_> {
         m.complete(self, BLOCK);
     }
 
-    fn stmt(&mut self) {
-        match self.current() {
-            LBRACE => self.block(),
-            SEMICOLON => {
-                let m = self.start();
-                self.bump(SEMICOLON);
-                m.complete(self, EMPTY_STMT);
-            }
-            IF_KW => self.if_stmt(),
-            WHILE_KW => self.while_stmt(),
-            DO_KW => self.do_while_stmt(),
-            FOR_KW => self.for_stmt(),
-            RETURN_KW => self.return_stmt(),
-            THROW_KW => self.throw_stmt(),
-            BREAK_KW => self.break_or_continue(BREAK_KW, BREAK_STMT),
-            CONTINUE_KW => self.break_or_continue(CONTINUE_KW, CONTINUE_STMT),
-            ASSERT_KW => self.assert_stmt(),
-            SYNCHRONIZED_KW => self.synchronized_stmt(),
-            TRY_KW => self.try_stmt(),
-            SWITCH_KW => self.switch_stmt(),
-            CLASS_KW | INTERFACE_KW | ENUM_KW => self.type_decl(),
-            AT if self.nth_at(1, INTERFACE_KW) => self.type_decl(),
-            _ => {
-                // Labeled statement (`label:`). Distinguishable from ternary `?:` by the absence of `?`.
-                if self.at(IDENT) && self.nth_at(1, COLON) {
-                    return self.labeled_stmt();
-                }
-                // Local record declaration.
-                if self.at_record_decl() {
-                    return self.type_decl();
-                }
-                // yield statement (inside a switch expression).
-                if self.at_yield_stmt() {
-                    return self.yield_stmt();
-                }
-                // Local type declaration with modifiers/annotations.
-                if (self.at_ts(MODIFIER_KW) || self.at(AT)) && self.at_local_type_decl() {
-                    return self.type_decl();
-                }
-                if self.at_local_var_decl() {
-                    self.local_var_decl();
-                } else if self.at_expr_start() {
+    fn stmt(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            match self.current() {
+                LBRACE => self.block().await,
+                SEMICOLON => {
                     let m = self.start();
-                    self.expr();
-                    self.expect(SEMICOLON);
-                    m.complete(self, EXPR_STMT);
-                } else {
-                    self.err_recover("expected a statement", STMT_RECOVERY);
+                    self.bump(SEMICOLON);
+                    m.complete(self, EMPTY_STMT);
+                }
+                IF_KW => self.if_stmt().await,
+                WHILE_KW => self.while_stmt().await,
+                DO_KW => self.do_while_stmt().await,
+                FOR_KW => self.for_stmt().await,
+                RETURN_KW => self.return_stmt().await,
+                THROW_KW => self.throw_stmt().await,
+                BREAK_KW => self.break_or_continue(BREAK_KW, BREAK_STMT),
+                CONTINUE_KW => self.break_or_continue(CONTINUE_KW, CONTINUE_STMT),
+                ASSERT_KW => self.assert_stmt().await,
+                SYNCHRONIZED_KW => self.synchronized_stmt().await,
+                TRY_KW => self.try_stmt().await,
+                SWITCH_KW => self.switch_stmt().await,
+                CLASS_KW | INTERFACE_KW | ENUM_KW => self.type_decl().await,
+                AT if self.nth_at(1, INTERFACE_KW) => self.type_decl().await,
+                _ => {
+                    // Labeled statement (`label:`). Distinguishable from ternary `?:` by the absence of `?`.
+                    if self.at(IDENT) && self.nth_at(1, COLON) {
+                        return self.labeled_stmt().await;
+                    }
+                    // Local record declaration.
+                    if self.at_record_decl() {
+                        return self.type_decl().await;
+                    }
+                    // yield statement (inside a switch expression).
+                    if self.at_yield_stmt() {
+                        return self.yield_stmt().await;
+                    }
+                    // Local type declaration with modifiers/annotations.
+                    if (self.at_ts(MODIFIER_KW) || self.at(AT)) && self.at_local_type_decl() {
+                        return self.type_decl().await;
+                    }
+                    if self.at_local_var_decl() {
+                        self.local_var_decl().await;
+                    } else if self.at_expr_start() {
+                        let m = self.start();
+                        self.expr().await;
+                        self.expect(SEMICOLON);
+                        m.complete(self, EXPR_STMT);
+                    } else {
+                        self.err_recover("expected a statement", STMT_RECOVERY);
+                    }
                 }
             }
-        }
+        })
     }
 
-    fn labeled_stmt(&mut self) {
+    async fn labeled_stmt(&mut self) {
         let m = self.start();
         self.bump(IDENT);
         self.bump(COLON);
-        self.stmt();
+        self.stmt().await;
         m.complete(self, LABELED_STMT);
     }
 
-    fn return_stmt(&mut self) {
+    async fn return_stmt(&mut self) {
         let m = self.start();
         self.bump(RETURN_KW);
         if !self.at(SEMICOLON) {
-            self.expr();
+            self.expr().await;
         }
         self.expect(SEMICOLON);
         m.complete(self, RETURN_STMT);
     }
 
-    fn throw_stmt(&mut self) {
+    async fn throw_stmt(&mut self) {
         let m = self.start();
         self.bump(THROW_KW);
-        self.expr();
+        self.expr().await;
         self.expect(SEMICOLON);
         m.complete(self, THROW_STMT);
     }
@@ -1213,61 +1236,61 @@ impl Parser<'_> {
         m.complete(self, node);
     }
 
-    fn assert_stmt(&mut self) {
+    async fn assert_stmt(&mut self) {
         let m = self.start();
         self.bump(ASSERT_KW);
-        self.expr();
+        self.expr().await;
         if self.eat(COLON) {
-            self.expr();
+            self.expr().await;
         }
         self.expect(SEMICOLON);
         m.complete(self, ASSERT_STMT);
     }
 
-    fn synchronized_stmt(&mut self) {
+    async fn synchronized_stmt(&mut self) {
         let m = self.start();
         self.bump(SYNCHRONIZED_KW);
         self.expect(LPAREN);
-        self.expr();
+        self.expr().await;
         self.expect(RPAREN);
         if self.at(LBRACE) {
-            self.block();
+            self.block().await;
         }
         m.complete(self, SYNCHRONIZED_STMT);
     }
 
-    fn yield_stmt(&mut self) {
+    async fn yield_stmt(&mut self) {
         let m = self.start();
         self.bump_remap(YIELD_KW);
-        self.expr();
+        self.expr().await;
         self.expect(SEMICOLON);
         m.complete(self, YIELD_STMT);
     }
 
-    fn try_stmt(&mut self) {
+    async fn try_stmt(&mut self) {
         let m = self.start();
         self.bump(TRY_KW);
         if self.at(LPAREN) {
-            self.resource_list();
+            self.resource_list().await;
         }
         if self.at(LBRACE) {
-            self.block();
+            self.block().await;
         }
         while self.at(CATCH_KW) {
-            self.catch_clause();
+            self.catch_clause().await;
         }
         if self.at(FINALLY_KW) {
-            self.finally_clause();
+            self.finally_clause().await;
         }
         m.complete(self, TRY_STMT);
     }
 
-    fn resource_list(&mut self) {
+    async fn resource_list(&mut self) {
         let m = self.start();
         self.bump(LPAREN);
         while !self.at(RPAREN) && !self.at_eof() {
             let before = self.pos();
-            self.resource();
+            self.resource().await;
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
             }
@@ -1279,44 +1302,44 @@ impl Parser<'_> {
         m.complete(self, RESOURCE_LIST);
     }
 
-    fn resource(&mut self) {
+    async fn resource(&mut self) {
         let m = self.start();
         if self.at_local_var_decl() {
             // Resource variable declaration: {modifiers} Type id = expr
-            self.modifiers();
-            self.type_();
+            self.modifiers().await;
+            self.type_().await;
             self.binding_name();
             self.expect(EQ);
         }
         // Reference to an existing variable (Java 9+).
-        self.expr();
+        self.expr().await;
         m.complete(self, RESOURCE);
     }
 
-    fn catch_clause(&mut self) {
+    async fn catch_clause(&mut self) {
         let m = self.start();
         self.bump(CATCH_KW);
         self.expect(LPAREN);
-        self.modifiers();
-        self.type_();
+        self.modifiers().await;
+        self.type_().await;
         while self.at(PIPE) {
             // Multi-catch `A | B`.
             self.bump(PIPE);
-            self.type_();
+            self.type_().await;
         }
         self.binding_name();
         self.expect(RPAREN);
         if self.at(LBRACE) {
-            self.block();
+            self.block().await;
         }
         m.complete(self, CATCH_CLAUSE);
     }
 
-    fn finally_clause(&mut self) {
+    async fn finally_clause(&mut self) {
         let m = self.start();
         self.bump(FINALLY_KW);
         if self.at(LBRACE) {
-            self.block();
+            self.block().await;
         }
         m.complete(self, FINALLY_CLAUSE);
     }
@@ -1379,72 +1402,72 @@ impl Parser<'_> {
         }
     }
 
-    fn if_stmt(&mut self) {
+    async fn if_stmt(&mut self) {
         let m = self.start();
         self.bump(IF_KW);
         self.expect(LPAREN);
-        self.expr();
+        self.expr().await;
         self.expect(RPAREN);
-        self.stmt();
+        self.stmt().await;
         if self.at(ELSE_KW) {
             self.bump(ELSE_KW);
-            self.stmt();
+            self.stmt().await;
         }
         m.complete(self, IF_STMT);
     }
 
-    fn while_stmt(&mut self) {
+    async fn while_stmt(&mut self) {
         let m = self.start();
         self.bump(WHILE_KW);
         self.expect(LPAREN);
-        self.expr();
+        self.expr().await;
         self.expect(RPAREN);
-        self.stmt();
+        self.stmt().await;
         m.complete(self, WHILE_STMT);
     }
 
-    fn do_while_stmt(&mut self) {
+    async fn do_while_stmt(&mut self) {
         let m = self.start();
         self.bump(DO_KW);
-        self.stmt();
+        self.stmt().await;
         self.expect(WHILE_KW);
         self.expect(LPAREN);
-        self.expr();
+        self.expr().await;
         self.expect(RPAREN);
         self.expect(SEMICOLON);
         m.complete(self, DO_WHILE_STMT);
     }
 
-    fn for_stmt(&mut self) {
+    async fn for_stmt(&mut self) {
         let m = self.start();
         self.bump(FOR_KW);
         self.expect(LPAREN);
         if self.at_for_each() {
             // for-each: {modifiers} Type id : expr
-            self.modifiers();
-            self.type_();
+            self.modifiers().await;
+            self.type_().await;
             self.binding_name();
             self.expect(COLON);
-            self.expr();
+            self.expr().await;
             self.expect(RPAREN);
-            self.stmt();
+            self.stmt().await;
             m.complete(self, FOR_EACH_STMT);
         } else {
             // C-style for: init ; cond ; update
-            self.for_init();
+            self.for_init().await;
             self.expect(SEMICOLON);
             if !self.at(SEMICOLON) {
-                self.expr();
+                self.expr().await;
             }
             self.expect(SEMICOLON);
             if !self.at(RPAREN) {
-                self.expr();
+                self.expr().await;
                 while self.eat(COMMA) {
-                    self.expr();
+                    self.expr().await;
                 }
             }
             self.expect(RPAREN);
-            self.stmt();
+            self.stmt().await;
             m.complete(self, FOR_STMT);
         }
     }
@@ -1485,23 +1508,23 @@ impl Parser<'_> {
         }
     }
 
-    fn for_init(&mut self) {
+    async fn for_init(&mut self) {
         if self.at(SEMICOLON) {
             return; // empty.
         }
         if (self.at_ts(MODIFIER_KW) || self.at(AT)) && self.at_local_type_decl() {
             // A local type in for-init is unusual, but treat it as a declaration if it appears.
-            self.type_decl();
+            self.type_decl().await;
             return;
         }
         if self.at_local_var_decl() {
             let m = self.start();
-            self.var_decl_inner();
+            self.var_decl_inner().await;
             m.complete(self, LOCAL_VAR_DECL);
         } else {
-            self.expr();
+            self.expr().await;
             while self.eat(COMMA) {
-                self.expr();
+                self.expr().await;
             }
         }
     }
@@ -1608,34 +1631,34 @@ impl Parser<'_> {
             && self.nth_nofuel(self.skip_annotations_lookahead(0)) == LBRACK
     }
 
-    fn local_var_decl(&mut self) {
+    async fn local_var_decl(&mut self) {
         let m = self.start();
-        self.var_decl_inner();
+        self.var_decl_inner().await;
         self.expect(SEMICOLON);
         m.complete(self, LOCAL_VAR_DECL);
     }
 
     /// Body of a local variable declaration (does not consume `;`). Also used in for-init.
-    fn var_decl_inner(&mut self) {
-        self.modifiers();
-        self.type_();
+    async fn var_decl_inner(&mut self) {
+        self.modifiers().await;
+        self.type_().await;
         self.binding_name();
-        self.field_tail();
+        self.field_tail().await;
     }
 
     // ===== switch (shared body for statement and expression) =====
 
-    fn switch_stmt(&mut self) {
+    async fn switch_stmt(&mut self) {
         let m = self.start();
         self.bump(SWITCH_KW);
         self.expect(LPAREN);
-        self.expr();
+        self.expr().await;
         self.expect(RPAREN);
-        self.switch_block();
+        self.switch_block().await;
         m.complete(self, SWITCH_STMT);
     }
 
-    fn switch_block(&mut self) {
+    async fn switch_block(&mut self) {
         let m = self.start();
         if !self.expect(LBRACE) {
             m.complete(self, SWITCH_BLOCK);
@@ -1643,7 +1666,7 @@ impl Parser<'_> {
         }
         while !self.at(RBRACE) && !self.at_eof() {
             let before = self.pos();
-            self.switch_entry();
+            self.switch_entry().await;
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
             }
@@ -1652,7 +1675,7 @@ impl Parser<'_> {
         m.complete(self, SWITCH_BLOCK);
     }
 
-    fn switch_entry(&mut self) {
+    async fn switch_entry(&mut self) {
         if !(self.at(CASE_KW) || self.at(DEFAULT_KW)) {
             self.err_and_bump("expected `case` or `default`");
             return;
@@ -1660,29 +1683,29 @@ impl Parser<'_> {
         if self.label_is_arrow() {
             // Arrow rule: label -> (block | throw | expr ;)
             let m = self.start();
-            self.switch_label();
+            self.switch_label().await;
             self.expect(ARROW);
             if self.at(LBRACE) {
-                self.block();
+                self.block().await;
             } else if self.at(THROW_KW) {
-                self.throw_stmt();
+                self.throw_stmt().await;
             } else {
-                self.expr();
+                self.expr().await;
                 self.expect(SEMICOLON);
             }
             m.complete(self, SWITCH_RULE);
         } else {
             // Colon group: label: (label:)* statements
             let m = self.start();
-            self.switch_label();
+            self.switch_label().await;
             self.expect(COLON);
             while self.at(CASE_KW) || self.at(DEFAULT_KW) {
-                self.switch_label();
+                self.switch_label().await;
                 self.expect(COLON);
             }
             while !self.at(RBRACE) && !self.at(CASE_KW) && !self.at(DEFAULT_KW) && !self.at_eof() {
                 let before = self.pos();
-                self.stmt();
+                self.stmt().await;
                 if self.pos() == before {
                     break;
                 }
@@ -1721,46 +1744,46 @@ impl Parser<'_> {
         }
     }
 
-    fn switch_label(&mut self) {
+    async fn switch_label(&mut self) {
         let m = self.start();
         if self.at(DEFAULT_KW) {
             self.bump(DEFAULT_KW);
         } else {
             self.bump(CASE_KW);
-            self.switch_case_item();
+            self.switch_case_item().await;
             while self.eat(COMMA) {
-                self.switch_case_item();
+                self.switch_case_item().await;
             }
         }
         m.complete(self, SWITCH_LABEL);
     }
 
-    fn switch_case_item(&mut self) {
+    async fn switch_case_item(&mut self) {
         if self.at(DEFAULT_KW) {
             // `case null, default`.
             self.bump(DEFAULT_KW);
         } else if self.at_pattern() {
-            self.pattern();
+            self.pattern().await;
         } else {
             // A case constant is an expression, but in an arrow rule the trailing
             // `->` is the rule arrow, not a lambda: `case A -> ...` is the label `A`
             // followed by the arrow, never the lambda `A -> ...`. Parse just below
             // the lambda layer so the arrow is left for the rule.
-            let _ = self.assignment_expr();
+            let _ = self.assignment_expr_boxed().await;
         }
         // A guard (`when <expr>`) may follow a pattern or — leniently, for error
         // resilience — a bare constant label.
         if self.at_contextual_kw("when") {
-            self.guard();
+            self.guard().await;
         }
     }
 
-    fn guard(&mut self) {
+    async fn guard(&mut self) {
         let m = self.start();
         self.bump_remap(WHEN_KW);
         // The guard is a boolean expression; like a case constant, it must not eat
         // the rule's trailing `->` as a lambda arrow, so parse below the lambda layer.
-        let _ = self.assignment_expr();
+        let _ = self.assignment_expr_boxed().await;
         m.complete(self, GUARD);
     }
 
@@ -1805,46 +1828,49 @@ impl Parser<'_> {
         }
     }
 
-    fn pattern(&mut self) {
-        let m = self.start();
-        // A type pattern may carry variable modifiers (`final`). Annotations are consumed by `type_`,
-        // so only a keyword modifier needs `modifiers` here (keeps annotation placement symmetric with
-        // the binding-less type case and avoids an empty `MODIFIERS` node on the common path).
-        if self.at_ts(MODIFIER_KW) {
-            self.modifiers();
-        }
-        self.type_();
-        if self.at(LPAREN) {
-            // Record pattern: Type(component, ...)
-            self.bump(LPAREN);
-            while !self.at(RPAREN) && !self.at_eof() {
-                let before = self.pos();
-                self.record_component();
-                if self.pos() == before {
-                    self.err_and_bump("unexpected token");
-                }
-                if !self.eat(COMMA) {
-                    break;
-                }
+    fn pattern(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            let m = self.start();
+            // A type pattern may carry variable modifiers (`final`). Annotations are consumed by `type_`,
+            // so only a keyword modifier needs `modifiers` here (keeps annotation placement symmetric with
+            // the binding-less type case and avoids an empty `MODIFIERS` node on the common path).
+            if self.at_ts(MODIFIER_KW) {
+                self.modifiers().await;
             }
-            self.expect(RPAREN);
-            m.complete(self, RECORD_PATTERN);
-        } else {
-            // Type pattern: {modifier} Type binding
-            self.binding_name();
-            m.complete(self, TYPE_PATTERN);
-        }
+            self.type_().await;
+            if self.at(LPAREN) {
+                // Record pattern: Type(component, ...)
+                self.bump(LPAREN);
+                while !self.at(RPAREN) && !self.at_eof() {
+                    let before = self.pos();
+                    self.record_component().await;
+                    if self.pos() == before {
+                        self.err_and_bump("unexpected token");
+                    }
+                    if !self.eat(COMMA) {
+                        break;
+                    }
+                }
+                self.expect(RPAREN);
+                m.complete(self, RECORD_PATTERN);
+            } else {
+                // Type pattern: {modifier} Type binding
+                self.binding_name();
+                m.complete(self, TYPE_PATTERN);
+            }
+        })
     }
 
     /// One component of a record pattern: the unnamed pattern `_`, or a nested pattern
     /// (type pattern, `var`/annotated binding, or another record pattern).
-    fn record_component(&mut self) {
+    async fn record_component(&mut self) {
         if self.at(UNDERSCORE) {
             let m = self.start();
             self.bump(UNDERSCORE);
             m.complete(self, UNNAMED_PATTERN);
         } else {
-            self.pattern();
+            self.pattern().await;
         }
     }
 
@@ -1866,29 +1892,40 @@ impl Parser<'_> {
     }
 
     /// Parses an expression (entry point).
-    fn expr(&mut self) {
-        let _ = self.expr_opt();
+    fn expr(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            let _ = self.expr_opt().await;
+        })
     }
 
-    fn expr_opt(&mut self) -> Option<CompletedMarker> {
+    async fn expr_opt(&mut self) -> Option<CompletedMarker> {
         if self.at_lambda() {
-            return Some(self.lambda_expr());
+            return Some(self.lambda_expr().await);
         }
-        self.assignment_expr()
+        self.assignment_expr().await
     }
 
     /// Assignment expression (right-associative). Handles `=` / `+=` etc., including fused `>>=` / `>>>=`.
-    fn assignment_expr(&mut self) -> Option<CompletedMarker> {
-        let lhs = self.ternary_expr()?;
+    async fn assignment_expr(&mut self) -> Option<CompletedMarker> {
+        let lhs = self.ternary_expr().await?;
         if let Some(len) = self.at_assign_op() {
             let m = lhs.precede(self);
             for _ in 0..len {
                 self.bump_any();
             }
-            self.expr(); // right-associative: allows lambda/ternary/nested assignment.
+            self.expr().await; // right-associative: allows lambda/ternary/nested assignment.
             return Some(m.complete(self, ASSIGNMENT_EXPR));
         }
         Some(lhs)
+    }
+
+    /// Boxed back-edge for the switch-label call sites ([`Self::switch_case_item`] /
+    /// [`Self::guard`]): closes the assignment -> ternary -> binary -> unary -> postfix ->
+    /// primary -> switch expression -> label -> assignment recursion cycle that bypasses
+    /// [`Self::expr`].
+    fn assignment_expr_boxed(&mut self) -> LocalBoxFuture<'_, Option<CompletedMarker>> {
+        Box::pin(self.assignment_expr())
     }
 
     /// Length (token count) of an assignment operator. `>>=` is GT GT EQ = 3, `>>>=` is 4.
@@ -1914,44 +1951,68 @@ impl Parser<'_> {
         }
     }
 
-    fn ternary_expr(&mut self) -> Option<CompletedMarker> {
-        let cond = self.expr_bp(0)?;
+    async fn ternary_expr(&mut self) -> Option<CompletedMarker> {
+        let cond = self.expr_bp(0).await?;
         if self.at(QUESTION) {
             let m = cond.precede(self);
             self.bump(QUESTION);
-            self.expr(); // then
+            self.expr().await; // then
             self.expect(COLON);
-            self.expr(); // else (right-associative)
+            self.expr().await; // else (right-associative)
             return Some(m.complete(self, TERNARY_EXPR));
         }
         Some(cond)
     }
 
     /// Parses a binary expression with minimum binding power `min_bp` (precedence climbing).
-    fn expr_bp(&mut self, min_bp: u8) -> Option<CompletedMarker> {
-        let mut lhs = self.unary_expr()?;
+    ///
+    /// Iterative: the recursive right-operand call is replaced by an explicit frame stack, so
+    /// the hottest grammar path pays no per-operand `Box::pin`. Each frame is an open
+    /// `BINARY_EXPR` marker plus the minimum binding power its right operand imposes; a frame
+    /// closes (completing the node) exactly where the recursive version returned. Node order
+    /// and shape are identical to the recursion.
+    async fn expr_bp(&mut self, min_bp: u8) -> Option<CompletedMarker> {
+        let mut lhs = self.unary_expr().await?;
+        let mut frames: Vec<(Marker, u8)> = Vec::new();
 
-        while let Some((op_bp, op_len, right_assoc)) = self.peek_bin_op() {
-            if op_bp < min_bp {
-                break;
-            }
-            let m = lhs.precede(self);
-            if self.at(INSTANCEOF_KW) {
-                // Right-hand side of `instanceof` is a type or pattern (`o instanceof String s`).
-                self.bump(INSTANCEOF_KW);
-                if self.at_pattern() {
-                    self.pattern();
-                } else {
-                    self.type_();
+        loop {
+            let current_min = frames.last().map_or(min_bp, |&(_, frame_min)| frame_min);
+            match self.peek_bin_op() {
+                Some((op_bp, op_len, right_assoc)) if op_bp >= current_min => {
+                    self.yielder.tick().await;
+                    let m = lhs.precede(self);
+                    if self.at(INSTANCEOF_KW) {
+                        // Right-hand side of `instanceof` is a type or pattern
+                        // (`o instanceof String s`) — no operand frame to open.
+                        self.bump(INSTANCEOF_KW);
+                        if self.at_pattern() {
+                            self.pattern().await;
+                        } else {
+                            self.type_().await;
+                        }
+                        lhs = m.complete(self, BINARY_EXPR);
+                    } else {
+                        self.consume_bin_op(op_len);
+                        let next_min = if right_assoc { op_bp } else { op_bp + 1 };
+                        match self.unary_expr().await {
+                            Some(operand) => {
+                                frames.push((m, next_min));
+                                lhs = operand;
+                            }
+                            // Missing right operand: the recursion completed the node with an
+                            // empty right side and kept scanning at the enclosing level.
+                            None => lhs = m.complete(self, BINARY_EXPR),
+                        }
+                    }
                 }
-            } else {
-                self.consume_bin_op(op_len);
-                let next_min = if right_assoc { op_bp } else { op_bp + 1 };
-                self.expr_bp(next_min);
+                // The next token binds no tighter than the innermost open frame: close it, or
+                // finish when nothing is open.
+                _ => match frames.pop() {
+                    Some((m, _)) => lhs = m.complete(self, BINARY_EXPR),
+                    None => return Some(lhs),
+                },
             }
-            lhs = m.complete(self, BINARY_EXPR);
         }
-        Some(lhs)
     }
 
     /// Returns (binding power, token length, is right-associative) for the next binary operator, including fused `>` family.
@@ -1998,19 +2059,25 @@ impl Parser<'_> {
         }
     }
 
-    fn unary_expr(&mut self) -> Option<CompletedMarker> {
+    async fn unary_expr(&mut self) -> Option<CompletedMarker> {
         if let Some(pure_primitive) = self.cast_kind() {
-            return Some(self.cast_expr(pure_primitive));
+            return Some(self.cast_expr(pure_primitive).await);
         }
         match self.current() {
             BANG | TILDE | PLUS | MINUS | PLUS_PLUS | MINUS_MINUS => {
                 let m = self.start();
                 self.bump_any();
-                self.unary_expr();
+                self.unary_expr_boxed().await;
                 Some(m.complete(self, UNARY_EXPR))
             }
-            _ => self.postfix_expr(),
+            _ => self.postfix_expr().await,
         }
+    }
+
+    /// Boxed back-edge for the recursive unary call sites ([`Self::unary_expr`]'s own operand
+    /// and [`Self::cast_expr`]'s operand).
+    fn unary_expr_boxed(&mut self) -> LocalBoxFuture<'_, Option<CompletedMarker>> {
+        Box::pin(self.unary_expr())
     }
 
     /// Classifies `( ... ) operand` as a cast (fuel-free lookahead). `Some(true)` = a single
@@ -2044,21 +2111,21 @@ impl Parser<'_> {
         ok.then_some(pure_primitive)
     }
 
-    fn cast_expr(&mut self, pure_primitive: bool) -> CompletedMarker {
+    async fn cast_expr(&mut self, pure_primitive: bool) -> CompletedMarker {
         let m = self.start();
         self.bump(LPAREN);
-        self.type_();
+        self.type_().await;
         while self.at(AMP) {
             self.bump(AMP);
-            self.type_();
+            self.type_().await;
         }
         self.expect(RPAREN);
         // A lambda operand is legal only after a reference/intersection type (JLS §15.16);
         // a pure primitive cast keeps the unary-operand path.
         if !pure_primitive && self.at_lambda() {
-            self.lambda_expr();
+            self.lambda_expr().await;
         } else {
-            self.unary_expr();
+            self.unary_expr_boxed().await;
         }
         m.complete(self, CAST_EXPR)
     }
@@ -2119,14 +2186,14 @@ impl Parser<'_> {
     }
 
     /// Parses the `:: [type_args] (new | ident)` tail of a method reference.
-    fn method_ref_tail(&mut self) {
+    async fn method_ref_tail(&mut self) {
         // `expect` rather than `bump`: the `::` lookahead (`at_generic_method_ref` /
         // `at_array_method_ref`) skips a balanced `<...>`/`[]` run permissively, but the
         // real consumer (`type_args`) can stop short on malformed input (e.g. `x<0<>>::`),
         // leaving the cursor off the `::`. Recording an error keeps the parser panic-free.
         self.expect(COLON_COLON);
         if self.at(LT) {
-            self.type_args();
+            self.type_args().await;
         }
         if self.at(NEW_KW) {
             self.bump(NEW_KW);
@@ -2135,9 +2202,10 @@ impl Parser<'_> {
         }
     }
 
-    fn postfix_expr(&mut self) -> Option<CompletedMarker> {
-        let mut lhs = self.primary_expr()?;
+    async fn postfix_expr(&mut self) -> Option<CompletedMarker> {
+        let mut lhs = self.primary_expr().await?;
         loop {
+            self.yielder.tick().await;
             match self.current() {
                 DOT if self.nth_at(1, CLASS_KW) => {
                     let m = lhs.precede(self);
@@ -2154,7 +2222,7 @@ impl Parser<'_> {
                     // invocation `recv.<Type>super(...)` / `recv.<Type>this(...)` (JLS 8.8.7.1).
                     let m = lhs.precede(self);
                     self.bump(DOT);
-                    self.type_args();
+                    self.type_args().await;
                     if self.at(THIS_KW) || self.at(SUPER_KW) {
                         self.bump_any();
                     } else {
@@ -2180,13 +2248,13 @@ impl Parser<'_> {
                     self.bump(DOT);
                     self.bump(NEW_KW);
                     if self.at(LT) {
-                        self.type_args();
+                        self.type_args().await;
                     }
-                    self.type_();
+                    self.type_().await;
                     if self.at(LPAREN) {
-                        self.arg_list();
+                        self.arg_list().await;
                         if self.at(LBRACE) {
-                            self.class_body();
+                            self.class_body().await;
                         }
                     }
                     lhs = m.complete(self, NEW_EXPR);
@@ -2200,22 +2268,22 @@ impl Parser<'_> {
                     // and any dimension tokens sit directly under METHOD_REF_EXPR, mirroring the
                     // array-dimension tokens of `String[]::new`.
                     let m = lhs.precede(self);
-                    self.type_args();
+                    self.type_args().await;
                     while self.at(LBRACK) && self.nth_at(1, RBRACK) {
                         self.bump(LBRACK);
                         self.bump(RBRACK);
                     }
-                    self.method_ref_tail();
+                    self.method_ref_tail().await;
                     lhs = m.complete(self, METHOD_REF_EXPR);
                 }
                 COLON_COLON => {
                     let m = lhs.precede(self);
-                    self.method_ref_tail();
+                    self.method_ref_tail().await;
                     lhs = m.complete(self, METHOD_REF_EXPR);
                 }
                 LPAREN => {
                     let m = lhs.precede(self);
-                    self.arg_list();
+                    self.arg_list().await;
                     lhs = m.complete(self, CALL_EXPR);
                 }
                 LBRACK if self.at_array_method_ref() => {
@@ -2228,7 +2296,7 @@ impl Parser<'_> {
                         self.bump(LBRACK);
                         self.bump(RBRACK);
                     }
-                    self.method_ref_tail();
+                    self.method_ref_tail().await;
                     lhs = m.complete(self, METHOD_REF_EXPR);
                 }
                 LBRACK if self.at_array_class_literal() => {
@@ -2248,7 +2316,7 @@ impl Parser<'_> {
                 LBRACK => {
                     let m = lhs.precede(self);
                     self.bump(LBRACK);
-                    self.expr();
+                    self.expr().await;
                     self.expect(RBRACK);
                     lhs = m.complete(self, INDEX_EXPR);
                 }
@@ -2263,7 +2331,7 @@ impl Parser<'_> {
         Some(lhs)
     }
 
-    fn primary_expr(&mut self) -> Option<CompletedMarker> {
+    async fn primary_expr(&mut self) -> Option<CompletedMarker> {
         let cm = match self.current() {
             _ if self.at_ts(LITERAL_TOKEN) => {
                 let m = self.start();
@@ -2288,7 +2356,7 @@ impl Parser<'_> {
                 // under CALL_EXPR, before the `this`/`super` callee — letting the postfix LPAREN
                 // arm form the CALL_EXPR instead would nest the witness one level too deep.
                 let m = self.start();
-                self.type_args();
+                self.type_args().await;
                 let nm = self.start();
                 if self.at(THIS_KW) || self.at(SUPER_KW) {
                     self.bump_any();
@@ -2297,27 +2365,27 @@ impl Parser<'_> {
                 }
                 nm.complete(self, NAME_REF);
                 if self.at(LPAREN) {
-                    self.arg_list();
+                    self.arg_list().await;
                 }
                 m.complete(self, CALL_EXPR)
             }
             LPAREN => {
                 let m = self.start();
                 self.bump(LPAREN);
-                self.expr();
+                self.expr().await;
                 self.expect(RPAREN);
                 m.complete(self, PAREN_EXPR)
             }
-            NEW_KW => self.new_expr(),
-            SWITCH_KW => self.switch_expr(),
+            NEW_KW => self.new_expr().await,
+            SWITCH_KW => self.switch_expr().await,
             _ if self.at_ts(PRIMITIVE_TYPE) && self.at_primitive_class_literal_or_method_ref() => {
                 // Class literal `int.class` / `boolean[].class` / `void.class` (JLS 15.8.2)
                 // or array constructor reference `int[]::new` (JLS 15.13) — the only
                 // expressions that can begin with a primitive type keyword.
                 let m = self.start();
-                self.type_(); // keyword + `[]` dims → TYPE node
+                self.type_().await; // keyword + `[]` dims → TYPE node
                 if self.at(COLON_COLON) {
-                    self.method_ref_tail();
+                    self.method_ref_tail().await;
                     m.complete(self, METHOD_REF_EXPR)
                 } else {
                     self.expect(DOT); // guaranteed by the gate above
@@ -2333,17 +2401,17 @@ impl Parser<'_> {
         Some(cm)
     }
 
-    fn switch_expr(&mut self) -> CompletedMarker {
+    async fn switch_expr(&mut self) -> CompletedMarker {
         let m = self.start();
         self.bump(SWITCH_KW);
         self.expect(LPAREN);
-        self.expr();
+        self.expr().await;
         self.expect(RPAREN);
-        self.switch_block();
+        self.switch_block().await;
         m.complete(self, SWITCH_EXPR)
     }
 
-    fn new_expr(&mut self) -> CompletedMarker {
+    async fn new_expr(&mut self) -> CompletedMarker {
         let m = self.start();
         self.bump(NEW_KW);
         if self.at(LT) {
@@ -2351,43 +2419,43 @@ impl Parser<'_> {
             // `new <Integer>Foo<>(...)` (JLS 15.9 `new [TypeArguments] ...`). The qualified
             // inner-class form `outer.new <T>Inner()` is handled by the matching arm in
             // `postfix_expr`; the TYPE_ARGS node sits directly under NEW_EXPR before `ty`.
-            self.type_args();
+            self.type_args().await;
         }
-        self.type_();
+        self.type_().await;
         if self.at(LPAREN) {
-            self.arg_list();
+            self.arg_list().await;
             if self.at(LBRACE) {
                 // Anonymous class body.
-                self.class_body();
+                self.class_body().await;
             }
         } else if self.at(LBRACK) || self.at_annotated_dim() {
             // Array creation `new int[n]` / `new int[n][]` / `new int @A [n]`.
             while self.at(LBRACK) || self.at_annotated_dim() {
                 while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
-                    self.annotation();
+                    self.annotation().await;
                 }
                 self.expect(LBRACK);
                 if !self.at(RBRACK) {
-                    self.expr();
+                    self.expr().await;
                 }
                 self.expect(RBRACK);
             }
             if self.at(LBRACE) {
-                self.array_init();
+                self.array_init().await;
             }
         } else if self.at(LBRACE) {
             // `new int[]{...}` (the type side already consumed `[]`).
-            self.array_init();
+            self.array_init().await;
         }
         m.complete(self, NEW_EXPR)
     }
 
-    fn arg_list(&mut self) {
+    async fn arg_list(&mut self) {
         let m = self.start();
         self.bump(LPAREN);
         while !self.at(RPAREN) && !self.at_eof() {
             let before = self.pos();
-            self.expr();
+            self.expr().await;
             if self.pos() == before {
                 self.err_and_bump("unexpected argument");
             }
@@ -2427,25 +2495,25 @@ impl Parser<'_> {
         false
     }
 
-    fn lambda_expr(&mut self) -> CompletedMarker {
+    async fn lambda_expr(&mut self) -> CompletedMarker {
         let m = self.start();
-        self.lambda_params();
+        self.lambda_params().await;
         self.expect(ARROW);
         if self.at(LBRACE) {
-            self.block();
+            self.block().await;
         } else {
-            self.expr();
+            self.expr().await;
         }
         m.complete(self, LAMBDA_EXPR)
     }
 
-    fn lambda_params(&mut self) {
+    async fn lambda_params(&mut self) {
         let m = self.start();
         if self.at(LPAREN) {
             self.bump(LPAREN);
             while !self.at(RPAREN) && !self.at_eof() {
                 let before = self.pos();
-                self.lambda_param();
+                self.lambda_param().await;
                 if self.pos() == before {
                     self.err_and_bump("unexpected argument");
                 }
@@ -2464,7 +2532,7 @@ impl Parser<'_> {
         m.complete(self, LAMBDA_PARAMS);
     }
 
-    fn lambda_param(&mut self) {
+    async fn lambda_param(&mut self) {
         let pm = self.start();
         if (self.at(IDENT) || self.at(UNDERSCORE))
             && (self.nth_at(1, COMMA) || self.nth_at(1, RPAREN))
@@ -2473,8 +2541,8 @@ impl Parser<'_> {
             self.bump_any();
         } else {
             // Typed parameter (including `var`).
-            self.modifiers();
-            self.type_();
+            self.modifiers().await;
+            self.type_().await;
             self.binding_name();
         }
         pm.complete(self, PARAM);

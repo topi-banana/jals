@@ -4,9 +4,9 @@
 use jals_hir::{DeadIf, Resolved};
 
 fn dead(src: &str) -> Vec<DeadIf> {
-    let root = jals_syntax::Parse::parse(src).syntax();
-    let resolved = Resolved::resolve_node(&root);
-    DeadIf::collect(&root, &resolved)
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    jals_exec::block_on_inline(DeadIf::collect(&root, &resolved))
 }
 
 /// Wraps a statement body in a method so it parses as a valid local context.

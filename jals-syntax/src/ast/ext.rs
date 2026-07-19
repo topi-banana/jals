@@ -315,7 +315,7 @@ mod tests {
 
     /// Returns the first descendant of `src` that casts to `T`.
     fn first<T: AstNode<Language = crate::language::JavaLanguage>>(src: &str) -> T {
-        Parse::parse(src)
+        jals_exec::block_on_inline(Parse::parse(src))
             .syntax()
             .descendants()
             .find_map(T::cast)

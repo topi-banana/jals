@@ -5,13 +5,21 @@ edition.workspace = true
 
 [features]
 default = []
-std = []
+# `std::io` bridge adapter for the portable `io` module only — no host paths; wasm-safe.
+std-io = []
+# Native adapters. `std` is also the tokio feature for this crate: the host filesystem backends
+# are unimplementable on a current-thread runtime without `spawn_blocking`.
+std = ["std-io", "dep:tokio", "jals-exec/tokio"]
 
 [dependencies]
+jals-exec.workspace = true
 sha2.workspace = true
+tokio = { workspace = true, optional = true, features = ["rt"] }
 
 [dev-dependencies]
+jals-exec = { workspace = true, features = ["tokio"] }
 tempfile = "3"
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

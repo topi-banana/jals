@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn monaco_positions_are_one_based() {
-        let doc = Document::new("a😀\nb".to_string());
+        let doc = jals_exec::block_on_inline(Document::new("a😀\nb".to_string()));
         assert_eq!(MonacoHost.offset(&doc, &(1, 2)), 1);
         assert_eq!(MonacoHost.offset(&doc, &(1, 4)), 5);
         assert_eq!(MonacoHost.offset(&doc, &(2, 1)), 6);

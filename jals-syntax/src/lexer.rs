@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 
+use jals_exec::Yielder;
 use text_size::{TextRange, TextSize};
 
 use crate::syntax_kind::SyntaxKind;
@@ -34,9 +35,17 @@ impl<'a> Lexer<'a> {
         Lexer { src, pos: 0 }
     }
 
-    /// Tokenizes the whole input and returns the token sequence.
-    pub fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
-        Lexer::new(src).collect()
+    /// Tokenizes the whole input and returns the token sequence. Yields cooperatively
+    /// (amortized, once per [`Yielder`] period of tokens) so long inputs do not
+    /// monopolize the executor; the output is identical to iterating [`Lexer`] directly.
+    pub async fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
+        let mut yielder = Yielder::new();
+        let mut tokens = Vec::new();
+        for token in Lexer::new(src) {
+            yielder.tick().await;
+            tokens.push(token);
+        }
+        tokens
     }
 }
 
@@ -661,9 +670,14 @@ mod tests {
     use super::*;
     use SyntaxKind::*;
 
+    /// 非同期の [`Lexer::tokenize`] をその場で完了まで駆動する(テスト用)。
+    fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
+        jals_exec::block_on_inline(Lexer::tokenize(src))
+    }
+
     /// `(kind, text)` の列に落とす。
     fn lexed(src: &str) -> Vec<(SyntaxKind, &str)> {
-        Lexer::tokenize(src)
+        tokenize(src)
             .into_iter()
             .map(|t| (t.kind, t.text))
             .collect()
@@ -671,12 +685,12 @@ mod tests {
 
     /// 種別の列に落とす。
     fn kinds(src: &str) -> Vec<SyntaxKind> {
-        Lexer::tokenize(src).into_iter().map(|t| t.kind).collect()
+        tokenize(src).into_iter().map(|t| t.kind).collect()
     }
 
     /// 連結すると入力に一致する(lossless)。
     fn roundtrip(src: &str) -> String {
-        Lexer::tokenize(src).iter().map(|t| t.text).collect()
+        tokenize(src).iter().map(|t| t.text).collect()
     }
 
     #[test]
@@ -880,7 +894,10 @@ mod prop {
         /// これが lossless 保証(全バイトをちょうど 1 トークンに対応)の中核。
         #[test]
         fn roundtrip_any_string(src in any::<String>()) {
-            let joined: String = Lexer::tokenize(&src).iter().map(|t| t.text).collect();
+            let joined: String = jals_exec::block_on_inline(Lexer::tokenize(&src))
+                .iter()
+                .map(|t| t.text)
+                .collect();
             prop_assert_eq!(joined, src);
         }
     }

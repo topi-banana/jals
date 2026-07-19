@@ -4,10 +4,18 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Cooperative yielding (`Yielder`) inside the async parse loops, plus `block_on_inline` for
+# tests and doctests; no runtime feature is enabled, so the crate stays `no_std`.
+jals-exec = { workspace = true }
+# Portable byte-source traits only (`jals_storage::io`); the workspace dependency is
+# `default-features = false`, so no host adapters reach this crate.
+jals-storage = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
 expect-test = "1.5"
+# `std-io` for the File/BufReader streaming tests.
+jals-storage = { workspace = true, features = ["std-io"] }
 proptest = "1"
 serde_json = { workspace = true }
 

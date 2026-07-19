@@ -131,7 +131,7 @@ impl Out<'_> {
 impl<'c> Out<'c> {
     /// Render `root` into a formatted string. `src` is the original input, consulted once to
     /// resolve an `Auto`/`Native` line ending.
-    pub(crate) fn print(root: &Doc, cfg: &'c Config, src: &str) -> String {
+    pub(crate) async fn print(root: &Doc, cfg: &'c Config, src: &str) -> String {
         /// Push the current break command back and queue pending line suffixes ahead of it.
         /// Returns `true` when suffixes were flushed (the caller should not request the break yet).
         fn flush_suffixes<'a>(
@@ -159,6 +159,7 @@ impl<'c> Out<'c> {
             pending_newlines: 0,
             pending_indent: 0,
         };
+        let mut yielder = jals_exec::Yielder::new();
         let mut suffixes: Vec<Cmd<'_>> = Vec::new();
         let mut stack: Vec<Cmd<'_>> = vec![Cmd {
             indent: 0,
@@ -167,6 +168,7 @@ impl<'c> Out<'c> {
         }];
 
         while let Some(cmd) = stack.pop() {
+            yielder.tick().await;
             let Cmd { indent, mode, doc } = cmd;
             match doc {
                 Doc::Text(s) => out.text(s),
@@ -253,6 +255,7 @@ impl<'c> Out<'c> {
             stack.push(s);
         }
         while let Some(cmd) = stack.pop() {
+            yielder.tick().await;
             match cmd.doc {
                 Doc::Text(s) => out.text(s),
                 Doc::RawText(s) => out.raw(s),

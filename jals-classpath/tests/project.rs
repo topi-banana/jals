@@ -1,11 +1,11 @@
 use std::io::{Cursor, Write};
 
-use futures::executor::block_on;
 use jals_classpath::{
     DependencyLocation, DependencySpec, Fetcher, ProjectInputOptions, ProjectInputPlan,
     ProjectInputs,
 };
 use jals_config::{Feature, FeatureSet};
+use jals_exec::block_on_inline;
 use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage, Name};
 
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
@@ -45,7 +45,7 @@ fn setup() -> (MemoryStorage, ProjectInputPlan) {
 #[test]
 fn analysis_resolves_and_loads_from_one_storage_revision() {
     let (mut storage, plan) = setup();
-    let inputs = block_on(ProjectInputs::assemble(
+    let inputs = block_on_inline(ProjectInputs::assemble(
         &NoFetch,
         &mut storage,
         &plan,
@@ -60,7 +60,7 @@ fn analysis_resolves_and_loads_from_one_storage_revision() {
 #[test]
 fn compile_resolves_without_parsing_classfiles() {
     let (mut storage, plan) = setup();
-    let inputs = block_on(ProjectInputs::assemble(
+    let inputs = block_on_inline(ProjectInputs::assemble(
         &NoFetch,
         &mut storage,
         &plan,

@@ -6,9 +6,9 @@ use jals_syntax::SyntaxNode;
 
 /// Mismatches found without a project index (reference types stay external / lenient).
 fn free(src: &str) -> Vec<TypeMismatch> {
-    let root = jals_syntax::Parse::parse(src).syntax();
-    let resolved = Resolved::resolve_node(&root);
-    TypeInference::type_mismatches(&root, &resolved, None)
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    jals_exec::block_on_inline(TypeInference::type_mismatches(&root, &resolved, None))
 }
 
 /// Mismatches found in `sources[file]` with a project index built over every source.
@@ -19,14 +19,18 @@ fn indexed(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::Parse::parse(s).syntax(),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(s)).syntax(),
             )
         })
         .collect();
-    let index = ProjectIndex::builder(&nodes).build();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let (fid, root) = &nodes[file as usize];
-    let resolved = Resolved::resolve_node(root);
-    TypeInference::type_mismatches(root, &resolved, Some((&index, *fid)))
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
+    jals_exec::block_on_inline(TypeInference::type_mismatches(
+        root,
+        &resolved,
+        Some((&index, *fid)),
+    ))
 }
 
 /// Wraps a statement body in a method so it parses as a valid local context.

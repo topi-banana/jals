@@ -21,37 +21,42 @@ use jals_storage::{
 
 use crate::manifest_ext::ManifestExt;
 use crate::request::{CompileRequest, RunRequest};
-use crate::toolchain::{BuildOutcome, Compiler, Runtime, ToolchainError};
+use crate::toolchain::{BuildOutcome, Compiler, Runtime, ToolchainError, ToolchainFuture};
 
 /// A [`Compiler`] + [`Runtime`] backend realized in-process over [`ProjectStorage`] — today a dummy
 /// that copies sources instead of compiling them and skips running entirely (see the module docs).
 pub struct BuiltinToolchain {
-    /// The storage aggregate the backend reads and commits. `RefCell` bridges the receivers because
-    /// toolchain methods take `&self` while transactions require `&mut` access.
+    /// The storage aggregate the backend reads and commits. Toolchain methods take `&self` while
+    /// transactions require `&mut`, so the memory backend checks its storage *out* for the
+    /// duration of a compile (take/put) — never holding a `RefCell` borrow across an await.
     pub(crate) backend: BuiltinBackend,
 }
 
 pub(crate) enum BuiltinBackend {
-    Memory(RefCell<MemoryStorage>),
-    #[cfg(feature = "native")]
-    Native,
+    /// `None` while a compile is in flight; a reentrant compile on the same backend is a
+    /// structured [`ToolchainError::Unsupported`] rather than a `BorrowMutError` panic.
+    Memory(RefCell<Option<MemoryStorage>>),
+    Native(jals_exec::Exec),
 }
 
 impl BuiltinToolchain {
     /// A builtin backend over one in-memory project storage aggregate.
     pub const fn new(storage: MemoryStorage) -> Self {
         Self {
-            backend: BuiltinBackend::Memory(RefCell::new(storage)),
+            backend: BuiltinBackend::Memory(RefCell::new(Some(storage))),
         }
     }
 
-    /// Consume the toolchain and hand back its file tree, so an in-memory host can read the
+    /// Consume the toolchain and hand back its storage, so an in-memory host can read the
     /// outputs a compile produced.
     pub fn into_storage(self) -> MemoryStorage {
         match self.backend {
-            BuiltinBackend::Memory(storage) => storage.into_inner(),
-            #[cfg(feature = "native")]
-            BuiltinBackend::Native => panic!("native builtin storage is owned by the project root"),
+            BuiltinBackend::Memory(storage) => storage
+                .into_inner()
+                .expect("builtin storage is checked out by an in-flight build"),
+            BuiltinBackend::Native(_) => {
+                panic!("native builtin storage is owned by the project root")
+            }
         }
     }
 
@@ -118,7 +123,7 @@ impl BuiltinToolchain {
             })
     }
 
-    fn compile_in<S: SourceBackend, C: CacheBackend>(
+    async fn compile_in<S: SourceBackend, C: CacheBackend>(
         storage: &mut ProjectStorage<S, C>,
         req: &CompileRequest<'_>,
     ) -> Result<(), ToolchainError> {
@@ -155,38 +160,54 @@ impl BuiltinToolchain {
                     .map_err(ToolchainError::Fs)?;
             }
         }
-        transaction.commit().map_err(ToolchainError::Fs)?;
+        transaction.commit().await.map_err(ToolchainError::Fs)?;
         Ok(())
     }
 }
 
 impl Compiler for BuiltinToolchain {
-    fn compile(&self, req: &CompileRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
-        match &self.backend {
-            BuiltinBackend::Memory(storage) => Self::compile_in(&mut storage.borrow_mut(), req)?,
-            #[cfg(feature = "native")]
-            BuiltinBackend::Native => {
-                let scopes =
-                    Self::plan_copies(req)
-                        .into_iter()
-                        .flat_map(|(source, destination)| {
-                            core::iter::once(source)
-                                .chain(core::iter::once(destination))
-                                .filter_map(|path| {
-                                    jals_storage::RelativePath::from_host_path(
-                                        req.project_root,
-                                        &path,
-                                    )
-                                    .map(jals_storage::NativeScope::all)
-                                })
-                        });
-                let mut storage =
-                    jals_storage::NativeStorage::for_project_scoped(req.project_root, scopes)
-                        .map_err(ToolchainError::Fs)?;
-                Self::compile_in(&mut storage, req)?;
+    fn compile<'a>(&'a self, req: &'a CompileRequest<'_>) -> ToolchainFuture<'a> {
+        Box::pin(async move {
+            match &self.backend {
+                BuiltinBackend::Memory(cell) => {
+                    // Check the storage out for the duration of the (awaiting) compile; no
+                    // borrow is held across an await, and the storage is put back on every
+                    // exit path.
+                    let mut storage = cell
+                        .borrow_mut()
+                        .take()
+                        .ok_or(ToolchainError::Unsupported("a concurrent builtin build"))?;
+                    let result = Self::compile_in(&mut storage, req).await;
+                    *cell.borrow_mut() = Some(storage);
+                    result?;
+                }
+                BuiltinBackend::Native(exec) => {
+                    let scopes =
+                        Self::plan_copies(req)
+                            .into_iter()
+                            .flat_map(|(source, destination)| {
+                                core::iter::once(source)
+                                    .chain(core::iter::once(destination))
+                                    .filter_map(|path| {
+                                        jals_storage::RelativePath::from_host_path(
+                                            req.project_root,
+                                            &path,
+                                        )
+                                        .map(jals_storage::NativeScope::all)
+                                    })
+                            });
+                    let mut storage = jals_storage::NativeStorage::for_project_scoped(
+                        req.project_root,
+                        scopes,
+                        exec.clone(),
+                    )
+                    .await
+                    .map_err(ToolchainError::Fs)?;
+                    Self::compile_in(&mut storage, req).await?;
+                }
             }
-        }
-        Ok(BuildOutcome { code: Some(0) })
+            Ok(BuildOutcome { code: Some(0) })
+        })
     }
 
     fn describe_compile(&self, req: &CompileRequest<'_>) -> String {
@@ -207,10 +228,10 @@ impl Compiler for BuiltinToolchain {
 }
 
 impl Runtime for BuiltinToolchain {
-    fn run(&self, _req: &RunRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
+    fn run<'a>(&'a self, _req: &'a RunRequest<'_>) -> ToolchainFuture<'a> {
         // The dummy runtime executes nothing and reports success, so a builtin `jals run` drives
         // the compile-then-run pipeline end-to-end.
-        Ok(BuildOutcome { code: Some(0) })
+        Box::pin(async { Ok(BuildOutcome { code: Some(0) }) })
     }
 
     fn describe_run(&self, req: &RunRequest<'_>) -> String {
@@ -224,6 +245,7 @@ impl Runtime for BuiltinToolchain {
 #[cfg(test)]
 mod tests {
     use jals_config::Manifest;
+    use jals_exec::block_on_inline;
     use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
     use super::*;
@@ -260,9 +282,9 @@ mod tests {
         let sources = vec![PathBuf::from("/proj/src/main/java/com/example/A.java")];
         let extra_sources = vec![PathBuf::from("/proj/vendor/Lib.java")];
 
-        let outcome = toolchain
-            .compile(&compile_req(&manifest, &sources, &extra_sources))
-            .unwrap();
+        let outcome =
+            block_on_inline(toolchain.compile(&compile_req(&manifest, &sources, &extra_sources)))
+                .unwrap();
         assert!(outcome.success());
 
         let storage = toolchain.into_storage();
@@ -294,9 +316,7 @@ mod tests {
         let toolchain = toolchain(&[("/proj/gen/B.java", "class B {}")]);
         let sources = vec![PathBuf::from("/proj/gen/B.java")];
 
-        toolchain
-            .compile(&compile_req(&manifest, &sources, &[]))
-            .unwrap();
+        block_on_inline(toolchain.compile(&compile_req(&manifest, &sources, &[]))).unwrap();
         assert!(
             toolchain
                 .into_storage()
@@ -313,9 +333,8 @@ mod tests {
         let toolchain = toolchain(&[]);
         let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
 
-        let err = toolchain
-            .compile(&compile_req(&manifest, &sources, &[]))
-            .unwrap_err();
+        let err =
+            block_on_inline(toolchain.compile(&compile_req(&manifest, &sources, &[]))).unwrap_err();
         assert!(matches!(err, ToolchainError::Fs(_)), "got {err}");
     }
 
@@ -330,7 +349,7 @@ mod tests {
             program_args: &[],
             extra_classpath: &[],
         };
-        assert!(toolchain.run(&req).unwrap().success());
+        assert!(block_on_inline(toolchain.run(&req)).unwrap().success());
         assert_eq!(
             toolchain.describe_run(&req),
             "builtin: skip running com.example.Main (dummy runtime; nothing is executed)"
@@ -369,10 +388,14 @@ mod tests {
         };
         let destination = BuiltinToolchain::plan_copies(&request).pop().unwrap().1;
         let toolchain = BuiltinToolchain {
-            backend: BuiltinBackend::Native,
+            backend: BuiltinBackend::Native(jals_exec::Exec::inline()),
         };
 
-        assert!(toolchain.compile(&request).unwrap().success());
+        assert!(
+            block_on_inline(toolchain.compile(&request))
+                .unwrap()
+                .success()
+        );
         assert_eq!(
             std::fs::read(destination).unwrap(),
             b"package pkg; class Lib {}"

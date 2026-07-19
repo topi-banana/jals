@@ -9,9 +9,10 @@
 
 use alloc::vec::Vec;
 
+use jals_exec::Yielder;
 use serde::{Deserialize, Serialize};
 
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// A single decoded bytecode instruction. Operands carry constant-pool indices, local-variable slot
@@ -336,12 +337,15 @@ pub enum WideInstruction {
 }
 
 impl Instruction {
-    /// Decode a `Code` attribute's `code` array into instructions.
-    pub(crate) fn decode_code(bytes: &[u8]) -> Result<Vec<Self>> {
+    /// Decode a `Code` attribute's `code` array into instructions, ticking a [`Yielder`] once
+    /// per instruction so a long method cannot hog the executor.
+    pub(crate) async fn decode_code(bytes: &[u8]) -> Result<Vec<Self>> {
         let mut r = Reader::new(bytes);
+        let mut yielder = Yielder::new();
         let mut out = Vec::new();
         while r.remaining() > 0 {
-            out.push(Self::read(&mut r)?);
+            yielder.tick().await;
+            out.push(Self::read(&mut r).await?);
         }
         Ok(out)
     }
@@ -355,8 +359,8 @@ impl Instruction {
         w.into_vec()
     }
 
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
-        let opcode = r.u8()?;
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let opcode = r.u8().await?;
         Ok(match opcode {
             0x00 => Self::Nop,
             0x01 => Self::AconstNull,
@@ -374,16 +378,16 @@ impl Instruction {
             0x0d => Self::Fconst2,
             0x0e => Self::Dconst0,
             0x0f => Self::Dconst1,
-            0x10 => Self::Bipush(r.u8()? as i8),
-            0x11 => Self::Sipush(r.u16()? as i16),
-            0x12 => Self::Ldc(r.u8()?),
-            0x13 => Self::LdcW(r.u16()?),
-            0x14 => Self::Ldc2W(r.u16()?),
-            0x15 => Self::Iload(r.u8()?),
-            0x16 => Self::Lload(r.u8()?),
-            0x17 => Self::Fload(r.u8()?),
-            0x18 => Self::Dload(r.u8()?),
-            0x19 => Self::Aload(r.u8()?),
+            0x10 => Self::Bipush(r.u8().await? as i8),
+            0x11 => Self::Sipush(r.u16().await? as i16),
+            0x12 => Self::Ldc(r.u8().await?),
+            0x13 => Self::LdcW(r.u16().await?),
+            0x14 => Self::Ldc2W(r.u16().await?),
+            0x15 => Self::Iload(r.u8().await?),
+            0x16 => Self::Lload(r.u8().await?),
+            0x17 => Self::Fload(r.u8().await?),
+            0x18 => Self::Dload(r.u8().await?),
+            0x19 => Self::Aload(r.u8().await?),
             0x1a => Self::Iload0,
             0x1b => Self::Iload1,
             0x1c => Self::Iload2,
@@ -412,11 +416,11 @@ impl Instruction {
             0x33 => Self::Baload,
             0x34 => Self::Caload,
             0x35 => Self::Saload,
-            0x36 => Self::Istore(r.u8()?),
-            0x37 => Self::Lstore(r.u8()?),
-            0x38 => Self::Fstore(r.u8()?),
-            0x39 => Self::Dstore(r.u8()?),
-            0x3a => Self::Astore(r.u8()?),
+            0x36 => Self::Istore(r.u8().await?),
+            0x37 => Self::Lstore(r.u8().await?),
+            0x38 => Self::Fstore(r.u8().await?),
+            0x39 => Self::Dstore(r.u8().await?),
+            0x3a => Self::Astore(r.u8().await?),
             0x3b => Self::Istore0,
             0x3c => Self::Istore1,
             0x3d => Self::Istore2,
@@ -491,8 +495,8 @@ impl Instruction {
             0x82 => Self::Ixor,
             0x83 => Self::Lxor,
             0x84 => Self::Iinc {
-                index: r.u8()?,
-                value: r.u8()? as i8,
+                index: r.u8().await?,
+                value: r.u8().await? as i8,
             },
             0x85 => Self::I2l,
             0x86 => Self::I2f,
@@ -514,83 +518,83 @@ impl Instruction {
             0x96 => Self::Fcmpg,
             0x97 => Self::Dcmpl,
             0x98 => Self::Dcmpg,
-            0x99 => Self::Ifeq(r.u16()? as i16),
-            0x9a => Self::Ifne(r.u16()? as i16),
-            0x9b => Self::Iflt(r.u16()? as i16),
-            0x9c => Self::Ifge(r.u16()? as i16),
-            0x9d => Self::Ifgt(r.u16()? as i16),
-            0x9e => Self::Ifle(r.u16()? as i16),
-            0x9f => Self::IfIcmpeq(r.u16()? as i16),
-            0xa0 => Self::IfIcmpne(r.u16()? as i16),
-            0xa1 => Self::IfIcmplt(r.u16()? as i16),
-            0xa2 => Self::IfIcmpge(r.u16()? as i16),
-            0xa3 => Self::IfIcmpgt(r.u16()? as i16),
-            0xa4 => Self::IfIcmple(r.u16()? as i16),
-            0xa5 => Self::IfAcmpeq(r.u16()? as i16),
-            0xa6 => Self::IfAcmpne(r.u16()? as i16),
-            0xa7 => Self::Goto(r.u16()? as i16),
-            0xa8 => Self::Jsr(r.u16()? as i16),
-            0xa9 => Self::Ret(r.u8()?),
-            0xaa => Self::read_table_switch(r)?,
-            0xab => Self::read_lookup_switch(r)?,
+            0x99 => Self::Ifeq(r.u16().await? as i16),
+            0x9a => Self::Ifne(r.u16().await? as i16),
+            0x9b => Self::Iflt(r.u16().await? as i16),
+            0x9c => Self::Ifge(r.u16().await? as i16),
+            0x9d => Self::Ifgt(r.u16().await? as i16),
+            0x9e => Self::Ifle(r.u16().await? as i16),
+            0x9f => Self::IfIcmpeq(r.u16().await? as i16),
+            0xa0 => Self::IfIcmpne(r.u16().await? as i16),
+            0xa1 => Self::IfIcmplt(r.u16().await? as i16),
+            0xa2 => Self::IfIcmpge(r.u16().await? as i16),
+            0xa3 => Self::IfIcmpgt(r.u16().await? as i16),
+            0xa4 => Self::IfIcmple(r.u16().await? as i16),
+            0xa5 => Self::IfAcmpeq(r.u16().await? as i16),
+            0xa6 => Self::IfAcmpne(r.u16().await? as i16),
+            0xa7 => Self::Goto(r.u16().await? as i16),
+            0xa8 => Self::Jsr(r.u16().await? as i16),
+            0xa9 => Self::Ret(r.u8().await?),
+            0xaa => Self::read_table_switch(r).await?,
+            0xab => Self::read_lookup_switch(r).await?,
             0xac => Self::Ireturn,
             0xad => Self::Lreturn,
             0xae => Self::Freturn,
             0xaf => Self::Dreturn,
             0xb0 => Self::Areturn,
             0xb1 => Self::Return,
-            0xb2 => Self::GetStatic(r.u16()?),
-            0xb3 => Self::PutStatic(r.u16()?),
-            0xb4 => Self::GetField(r.u16()?),
-            0xb5 => Self::PutField(r.u16()?),
-            0xb6 => Self::InvokeVirtual(r.u16()?),
-            0xb7 => Self::InvokeSpecial(r.u16()?),
-            0xb8 => Self::InvokeStatic(r.u16()?),
+            0xb2 => Self::GetStatic(r.u16().await?),
+            0xb3 => Self::PutStatic(r.u16().await?),
+            0xb4 => Self::GetField(r.u16().await?),
+            0xb5 => Self::PutField(r.u16().await?),
+            0xb6 => Self::InvokeVirtual(r.u16().await?),
+            0xb7 => Self::InvokeSpecial(r.u16().await?),
+            0xb8 => Self::InvokeStatic(r.u16().await?),
             0xb9 => {
-                let index = r.u16()?;
-                let count = r.u8()?;
-                let _zero = r.u8()?;
+                let index = r.u16().await?;
+                let count = r.u8().await?;
+                let _zero = r.u8().await?;
                 Self::InvokeInterface { index, count }
             }
             0xba => {
-                let index = r.u16()?;
-                let _zero = r.u16()?;
+                let index = r.u16().await?;
+                let _zero = r.u16().await?;
                 Self::InvokeDynamic { index }
             }
-            0xbb => Self::New(r.u16()?),
-            0xbc => Self::NewArray(r.u8()?),
-            0xbd => Self::ANewArray(r.u16()?),
+            0xbb => Self::New(r.u16().await?),
+            0xbc => Self::NewArray(r.u8().await?),
+            0xbd => Self::ANewArray(r.u16().await?),
             0xbe => Self::ArrayLength,
             0xbf => Self::Athrow,
-            0xc0 => Self::CheckCast(r.u16()?),
-            0xc1 => Self::InstanceOf(r.u16()?),
+            0xc0 => Self::CheckCast(r.u16().await?),
+            0xc1 => Self::InstanceOf(r.u16().await?),
             0xc2 => Self::MonitorEnter,
             0xc3 => Self::MonitorExit,
-            0xc4 => Self::Wide(WideInstruction::read(r)?),
+            0xc4 => Self::Wide(WideInstruction::read(r).await?),
             0xc5 => Self::MultiANewArray {
-                index: r.u16()?,
-                dimensions: r.u8()?,
+                index: r.u16().await?,
+                dimensions: r.u8().await?,
             },
-            0xc6 => Self::IfNull(r.u16()? as i16),
-            0xc7 => Self::IfNonNull(r.u16()? as i16),
-            0xc8 => Self::GotoW(r.u32()? as i32),
-            0xc9 => Self::JsrW(r.u32()? as i32),
+            0xc6 => Self::IfNull(r.u16().await? as i16),
+            0xc7 => Self::IfNonNull(r.u16().await? as i16),
+            0xc8 => Self::GotoW(r.u32().await? as i32),
+            0xc9 => Self::JsrW(r.u32().await? as i32),
             other => return Err(ClassfileError::InvalidOpcode(other)),
         })
     }
 
-    fn read_table_switch(r: &mut Reader<'_>) -> Result<Self> {
-        Self::skip_switch_padding(r)?;
-        let default = r.u32()? as i32;
-        let low = r.u32()? as i32;
-        let high = r.u32()? as i32;
+    async fn read_table_switch<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        Self::skip_switch_padding(r).await?;
+        let default = r.u32().await? as i32;
+        let low = r.u32().await? as i32;
+        let high = r.u32().await? as i32;
         let count = i64::from(high) - i64::from(low) + 1;
         if !(0..=i64::from(u32::MAX)).contains(&count) {
             return Err(ClassfileError::Malformed("tableswitch bounds"));
         }
         let mut offsets = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            offsets.push(r.u32()? as i32);
+            offsets.push(r.u32().await? as i32);
         }
         Ok(Self::TableSwitch {
             default,
@@ -600,14 +604,14 @@ impl Instruction {
         })
     }
 
-    fn read_lookup_switch(r: &mut Reader<'_>) -> Result<Self> {
-        Self::skip_switch_padding(r)?;
-        let default = r.u32()? as i32;
-        let npairs = r.u32()?;
+    async fn read_lookup_switch<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        Self::skip_switch_padding(r).await?;
+        let default = r.u32().await? as i32;
+        let npairs = r.u32().await?;
         let mut pairs = Vec::with_capacity(npairs as usize);
         for _ in 0..npairs {
-            let key = r.u32()? as i32;
-            let offset = r.u32()? as i32;
+            let key = r.u32().await? as i32;
+            let offset = r.u32().await? as i32;
             pairs.push((key, offset));
         }
         Ok(Self::LookupSwitch { default, pairs })
@@ -974,23 +978,23 @@ impl Instruction {
 }
 
 impl WideInstruction {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
-        let opcode = r.u8()?;
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let opcode = r.u8().await?;
         Ok(match opcode {
-            0x15 => Self::Iload(r.u16()?),
-            0x16 => Self::Lload(r.u16()?),
-            0x17 => Self::Fload(r.u16()?),
-            0x18 => Self::Dload(r.u16()?),
-            0x19 => Self::Aload(r.u16()?),
-            0x36 => Self::Istore(r.u16()?),
-            0x37 => Self::Lstore(r.u16()?),
-            0x38 => Self::Fstore(r.u16()?),
-            0x39 => Self::Dstore(r.u16()?),
-            0x3a => Self::Astore(r.u16()?),
-            0xa9 => Self::Ret(r.u16()?),
+            0x15 => Self::Iload(r.u16().await?),
+            0x16 => Self::Lload(r.u16().await?),
+            0x17 => Self::Fload(r.u16().await?),
+            0x18 => Self::Dload(r.u16().await?),
+            0x19 => Self::Aload(r.u16().await?),
+            0x36 => Self::Istore(r.u16().await?),
+            0x37 => Self::Lstore(r.u16().await?),
+            0x38 => Self::Fstore(r.u16().await?),
+            0x39 => Self::Dstore(r.u16().await?),
+            0x3a => Self::Astore(r.u16().await?),
+            0xa9 => Self::Ret(r.u16().await?),
             0x84 => Self::Iinc {
-                index: r.u16()?,
-                value: r.u16()? as i16,
+                index: r.u16().await?,
+                value: r.u16().await? as i16,
             },
             other => return Err(ClassfileError::InvalidOpcode(other)),
         })
@@ -1060,9 +1064,9 @@ impl Instruction {
 
     /// Skip the 0–3 alignment-padding bytes after a `tableswitch` / `lookupswitch` opcode. The
     /// reader's position is the code-array offset, so the padded position lands on a 4-byte boundary.
-    fn skip_switch_padding(r: &mut Reader<'_>) -> Result<()> {
+    async fn skip_switch_padding<R: Input>(r: &mut Reader<R>) -> Result<()> {
         let pad = (4 - (r.pos() % 4)) % 4;
-        r.bytes(pad)?;
+        r.bytes(pad).await?;
         Ok(())
     }
 
@@ -1120,15 +1124,17 @@ mod tests {
             Instruction::Return,
         ];
         let bytes = Instruction::encode_code(&code);
-        let mut r = Reader::new(&bytes);
-        let mut pc = 0usize;
-        for ins in &code {
-            assert_eq!(r.pos(), pc, "reader drifted before {ins:?}");
-            let decoded = Instruction::read(&mut r).expect("decode");
-            assert_eq!(&decoded, ins, "round-trip mismatch");
-            pc += ins.encoded_len(pc);
-            assert_eq!(r.pos(), pc, "encoded_len wrong for {ins:?}");
-        }
-        assert_eq!(pc, bytes.len());
+        jals_exec::block_on_inline(async {
+            let mut r = Reader::new(bytes.as_slice());
+            let mut pc = 0usize;
+            for ins in &code {
+                assert_eq!(r.pos(), pc, "reader drifted before {ins:?}");
+                let decoded = Instruction::read(&mut r).await.expect("decode");
+                assert_eq!(&decoded, ins, "round-trip mismatch");
+                pc += ins.encoded_len(pc);
+                assert_eq!(r.pos(), pc, "encoded_len wrong for {ins:?}");
+            }
+            assert_eq!(pc, bytes.len());
+        });
     }
 }

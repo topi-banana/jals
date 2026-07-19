@@ -21,6 +21,7 @@ path = "src/bin/golden.rs"
 [dependencies]
 clap.workspace = true
 jals-config.workspace = true
+jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt.workspace = true
 jals-syntax.workspace = true
 rayon.workspace = true

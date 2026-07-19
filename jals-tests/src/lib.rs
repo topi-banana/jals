@@ -122,7 +122,7 @@ impl Outcome {
             Err(_) => return Self::ReadError,
         };
         let parsed = panic::catch_unwind(AssertUnwindSafe(|| {
-            let parse = jals_syntax::Parse::parse(&src);
+            let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(&src));
             let lossless = parse.syntax().text().to_string() == src;
             (parse.errors().len(), lossless)
         }));
@@ -140,7 +140,7 @@ impl Outcome {
     pub fn first_error(path: &Path) -> Option<String> {
         let src = std::fs::read_to_string(path).ok()?;
         panic::catch_unwind(AssertUnwindSafe(|| {
-            jals_syntax::Parse::parse(&src)
+            jals_exec::block_on_inline(jals_syntax::Parse::parse(&src))
                 .errors()
                 .first()
                 .map(|e| format!("{} @ {:?}", e.message(), e.range()))

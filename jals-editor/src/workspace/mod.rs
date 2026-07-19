@@ -7,6 +7,11 @@
 //! identifies files by validated [`FileKey`] values in one immutable revision, and answers every
 //! query in neutral shapes (byte offsets, [`FileRange`]s). Hosts keep only protocol mapping and
 //! coordinate conversion.
+//!
+//! Analysis is `async` end to end: parsing, resolution, and index assembly yield cooperatively,
+//! and a full load/refresh distributes per-file parse + fact extraction across the storage's
+//! [`Exec`] via [`Exec::fan_out`] (ordered, so ids and index inputs stay deterministic). Queries
+//! answer from cached trees; only lazily-computed per-file analysis awaits.
 
 mod file_id;
 
@@ -18,6 +23,7 @@ use core::cell::OnceCell;
 use core::ops::Range;
 
 use jals_config::FeatureSet;
+use jals_exec::Exec;
 use jals_hir::{FileFacts, FileId, LoweredClasspath, ProjectIndex, Resolved, SourceLocations, Ty};
 use jals_storage::{CacheBackend, DirKey, FileKey, ProjectStorage, ProjectView, SourceBackend};
 use jals_syntax::{Parse, SyntaxNode};
@@ -50,10 +56,6 @@ struct SourceFile {
 }
 
 impl SourceFile {
-    fn new(path: FileKey, text: String) -> Self {
-        Self::with_document(path, Document::new(text))
-    }
-
     /// Wrap an already-parsed [`Document`] (an open-editor overlay), sharing its `Arc`s so the
     /// text is never reparsed, with fresh analysis caches.
     const fn with_document(path: FileKey, doc: Document) -> Self {
@@ -66,46 +68,96 @@ impl SourceFile {
     }
 
     /// The file's cached name resolution (computed on first use).
-    fn resolved(&self) -> &Resolved {
-        self.resolved
-            .get_or_init(|| Resolved::resolve_node(&self.doc.parse.syntax()))
+    ///
+    /// Async-once over the `OnceCell`: compute, then publish. The workspace is single-threaded,
+    /// but two queries interleaved at an await point can both see the empty cell and both
+    /// compute — the value is a pure function of the parse, so the duplicate work is benign and
+    /// the first `set` wins. No locking or single-flight gate keeps the pattern
+    /// cancellation-safe (a dropped query leaves the cell either empty or fully published).
+    async fn resolved(&self) -> &Resolved {
+        if self.resolved.get().is_none() {
+            let resolved = Resolved::resolve_node(&self.doc.parse.syntax()).await;
+            let _ = self.resolved.set(resolved);
+        }
+        self.resolved.get().expect("published just above")
     }
 
     /// The file's cached index facts (computed on first use), the input to the incremental
-    /// [`ProjectIndex::assemble`].
-    fn facts(&self) -> &FileFacts {
-        self.facts
-            .get_or_init(|| ProjectIndex::extract_file(&self.doc.parse.syntax()))
+    /// [`ProjectIndex::assemble`]. Same async-once pattern (and duplicate-compute window) as
+    /// [`resolved`](Self::resolved).
+    async fn facts(&self) -> &FileFacts {
+        if self.facts.get().is_none() {
+            let facts = ProjectIndex::extract_file(&self.doc.parse.syntax()).await;
+            let _ = self.facts.set(facts);
+        }
+        self.facts.get().expect("published just above")
     }
 
-    /// Read and parse each library `.java` in `paths` through `fs`, skipping unreadable ones and
-    /// de-duplicating by path, into [`SourceFile`]s. Shared by both library-source kinds (the
-    /// `-sources.jar` overlays and the `git`/`path` source dependencies).
-    fn read_all(view: &ProjectView, paths: &[FileKey]) -> Vec<Self> {
+    /// Parse every `(path, text)` into a [`SourceFile`] through one ordered [`Exec::fan_out`].
+    ///
+    /// Each worker receives one file's text (`Send`), parses it, and — when `extract_facts` —
+    /// walks the fresh CST for its index [`FileFacts`], entirely on that worker; only plain
+    /// `Send` data (the green-tree [`Parse`], the [`LineIndex`], the facts) crosses back. The
+    /// results come back in input order regardless of completion order, so [`FileId`]
+    /// assignment and index inputs stay deterministic across runtimes and worker counts. On the
+    /// inline/wasm executors the jobs run sequentially on the calling task — identical output.
+    async fn parse_all(
+        exec: &Exec,
+        files: Vec<(FileKey, String)>,
+        extract_facts: bool,
+    ) -> Vec<Self> {
+        let (paths, texts): (Vec<FileKey>, Vec<String>) = files.into_iter().unzip();
+        let parsed = exec
+            .fan_out(texts, move |text: String| async move {
+                let parse = Parse::parse(&text).await;
+                let facts = if extract_facts {
+                    Some(ProjectIndex::extract_file(&parse.syntax()).await)
+                } else {
+                    None
+                };
+                (text, parse, facts)
+            })
+            .await;
+        paths
+            .into_iter()
+            .zip(parsed)
+            .map(|(path, (text, parse, facts))| {
+                let file = Self::with_document(path, Document::with_parse(text, parse));
+                if let Some(facts) = facts {
+                    let _ = file.facts.set(facts);
+                }
+                file
+            })
+            .collect()
+    }
+
+    /// Read and parse each library `.java` in `paths` through `view`, skipping unreadable ones
+    /// and de-duplicating by path, into [`SourceFile`]s (fanned out per file). Shared by both
+    /// library-source kinds; `extract_facts` pre-fills the facts cache for the kind that is an
+    /// index input (the `git`/`path` source dependencies), while the navigation-only
+    /// `-sources.jar` overlays skip the walk their facts cache never needs.
+    async fn read_all(
+        exec: &Exec,
+        view: &ProjectView,
+        paths: &[FileKey],
+        extract_facts: bool,
+    ) -> Vec<Self> {
         let mut files = Vec::new();
         let mut seen = BTreeSet::new();
         for path in paths {
             if let Ok(text) = view.file_text(path)
                 && seen.insert(path.clone())
             {
-                files.push(Self::new(path.clone(), text.to_owned()));
+                files.push((path.clone(), text.to_owned()));
             }
         }
-        files
+        Self::parse_all(exec, files, extract_facts).await
     }
 
     /// Pair each file in `files` with a sequential [`FileId`] in the id-space named by `space`,
-    /// mapping it through `extract` — the `(FileId, T)` inputs the index builds from. Shared by
-    /// the project files ([`WorkspaceFileId::Project`]) and the two library-source id-spaces
-    /// ([`Library`](WorkspaceFileId::Library) / [`SourceDep`](WorkspaceFileId::SourceDep)), so
-    /// every id space derives its inputs the same way — the base offset lives only in
+    /// mapping it through `extract` — the `(FileId, T)` inputs the index builds from. Every id
+    /// space derives its inputs the same way — the base offset lives only in
     /// [`WorkspaceFileId::to_raw`].
-    ///
-    /// `extract` picks the per-file input: the cached parse tree for the from-scratch
-    /// [`ProjectIndex::builder`] path, or the cached index [`FileFacts`]
-    /// ([`facts`](SourceFile::facts)) for the incremental [`ProjectIndex::assemble`] path —
-    /// where only the just-edited file re-extracts and the rest return their cache, so a rebuild
-    /// re-walks one file.
     fn file_inputs<'a, T>(
         files: &'a [Self],
         space: fn(u32) -> WorkspaceFileId,
@@ -157,13 +209,17 @@ impl ProjectLayout {
 
 /// A single project's symbol index plus the per-file data needed to answer cross-file queries.
 ///
-/// All project I/O goes through [`ProjectStorage`], and only during [`load`](Workspace::load) —
-/// queries answer from the cached parsed trees. Open documents are kept current via
-/// [`set_overlay`](Workspace::set_overlay) / [`sync_overlay`](Workspace::sync_overlay), which
-/// swap a file's cached text for the editor's and rebuild the (in-memory, no-I/O) index. The
-/// rebuild re-walks only the changed file's CST but reassembles the whole index — linear in
-/// project size, adequate until an incremental index is needed.
+/// All project I/O goes through [`ProjectStorage`], and only during [`load`](Workspace::load) /
+/// [`refresh`](Workspace::refresh) — queries answer from the cached parsed trees. Open documents
+/// are kept current via [`set_overlay`](Workspace::set_overlay) /
+/// [`sync_overlay`](Workspace::sync_overlay), which swap a file's cached text for the editor's
+/// and rebuild the (in-memory, no-I/O) index. The rebuild re-walks only the changed file's CST
+/// but reassembles the whole index — linear in project size, adequate until an incremental index
+/// is needed.
 pub struct Workspace<S: SourceBackend, C: CacheBackend> {
+    /// The execution context, cloned from the storage's at [`load`](Workspace::load): fan-outs
+    /// during full loads/refreshes, cooperative yields everywhere else.
+    exec: Exec,
     storage: ProjectStorage<S, C>,
     source_roots: Vec<DirKey>,
     files: Vec<SourceFile>,
@@ -200,47 +256,55 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
 }
 
 impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
-    /// Build a workspace over `fs`: walk the spec's source roots for `.java`, read and parse each
-    /// (skipping unreadable ones), register the library / source-dependency `.java`, and build
-    /// the symbol index. Paths are visited in sorted order so the index is deterministic.
-    pub fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
+    /// Build a workspace over `storage`: walk the spec's source roots for `.java`, read and parse
+    /// each (skipping unreadable ones), register the library / source-dependency `.java`, and
+    /// build the symbol index. Paths are visited in sorted order and per-file work fans out in
+    /// that order, so the index is deterministic. The execution context is taken from the
+    /// storage ([`ProjectStorage::exec`]) — one handle threads through the whole aggregate.
+    pub async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
+        let exec = storage.exec().clone();
         let view = storage.view();
 
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
-        let library_files = SourceFile::read_all(&view, &spec.library_sources);
+        let library_files = SourceFile::read_all(&exec, &view, &spec.library_sources, false).await;
         let library_inputs =
             SourceFile::file_inputs(&library_files, WorkspaceFileId::Library, |f| {
                 f.doc.parse.syntax()
             });
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types
-        // on every rebuild (their `FileId`s are assigned in `rebuild_index`).
-        let source_dep_files = SourceFile::read_all(&view, &spec.source_dep_sources);
+        // on every rebuild (their `FileId`s are assigned in `rebuild_index`). They are facts
+        // inputs, so the fan-out pre-extracts their facts alongside the parse.
+        let source_dep_files =
+            SourceFile::read_all(&exec, &view, &spec.source_dep_sources, true).await;
 
         let mut ws = Self {
+            exec,
             storage,
             source_roots: spec.source_roots,
             files: Vec::new(),
             by_path: BTreeMap::new(),
             library_files,
             source_dep_files,
-            index: ProjectIndex::builder(&[]).with_stdlib().build(),
+            index: ProjectIndex::builder(&[]).with_stdlib().build().await,
             classpath: spec.classpath,
-            source_locations: ProjectIndex::index_source_locations(&library_inputs),
+            source_locations: ProjectIndex::index_source_locations(&library_inputs).await,
             feature_set: spec.feature_set,
             // Extracted once; reused on every rebuild (the stubs never change).
-            stub_facts: ProjectIndex::stub_facts(),
+            stub_facts: ProjectIndex::stub_facts().await,
         };
-        ws.reload_project_files(&view);
-        ws.rebuild_index();
+        ws.reload_project_files(&view).await;
+        ws.rebuild_index().await;
         ws
     }
 
     /// Walk the source roots for `.java`, read each (skipping unreadable ones), and register the
     /// files in sorted path order — the one place `FileId` assignment happens, so the initial load
-    /// and every refresh stay deterministic and identical.
-    fn reload_project_files(&mut self, view: &ProjectView) {
+    /// and every refresh stay deterministic and identical. Parsing and fact extraction fan out
+    /// per file ([`SourceFile::parse_all`]); the ordered results keep id assignment identical to
+    /// the sequential walk.
+    async fn reload_project_files(&mut self, view: &ProjectView) {
         let mut paths: Vec<FileKey> = self
             .source_roots
             .iter()
@@ -250,16 +314,24 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             .collect();
         paths.sort();
         paths.dedup();
-        self.files.clear();
-        self.by_path.clear();
+        let mut inputs = Vec::new();
         for path in paths {
             if let Ok(text) = view.file_text(&path) {
-                let text = text.to_owned();
-                let id = WorkspaceFileId::of_index(WorkspaceFileId::Project, self.files.len());
-                self.by_path.insert(path.clone(), id);
-                self.files.push(SourceFile::new(path, text));
+                inputs.push((path, text.to_owned()));
             }
         }
+        self.files = SourceFile::parse_all(&self.exec, inputs, true).await;
+        self.by_path = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(k, file)| {
+                (
+                    file.path.clone(),
+                    WorkspaceFileId::of_index(WorkspaceFileId::Project, k),
+                )
+            })
+            .collect();
     }
 
     /// Rebuild the symbol index from the cached per-file facts, stubs, and classpath. No I/O.
@@ -269,22 +341,19 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// to a real item with members and supertypes — hover, completion, member navigation, and
     /// assignment checks see through it instead of stopping at a bare name.
     ///
-    /// Incremental: [`file_inputs`](SourceFile::file_inputs) over each file's
-    /// [`facts`](SourceFile::facts) re-extracts only the file whose facts cache was cleared (the
-    /// one just edited, via [`set_overlay`](Workspace::set_overlay)); every other file, plus the
-    /// stubs, reuses its cache. So a keystroke re-walks a single file's CST, and this step (which
-    /// allocates and resolves supertypes but walks nothing) reassembles the whole index —
-    /// identical to a from-scratch build, but without re-walking the project.
-    fn rebuild_index(&mut self) {
-        let project =
-            SourceFile::file_inputs(&self.files, WorkspaceFileId::Project, SourceFile::facts);
+    /// Incremental: awaiting each file's [`facts`](SourceFile::facts) re-extracts only the file
+    /// whose facts cache was cleared (the one just edited, via
+    /// [`set_overlay`](Workspace::set_overlay)); every other file — pre-filled by the load /
+    /// refresh fan-out — plus the stubs, reuses its cache. So a keystroke re-walks a single
+    /// file's CST, and [`ProjectIndex::assemble`] (order-sensitive, one task) reassembles the
+    /// whole index — identical to a from-scratch build, but without re-walking the project.
+    async fn rebuild_index(&mut self) {
+        let project = Self::facts_inputs(&self.files, WorkspaceFileId::Project).await;
         // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types),
         // under their own `SourceDep` ids so they navigate back to the right files. The
         // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
         let source_deps =
-            SourceFile::file_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep, |f| {
-                f.facts()
-            });
+            Self::facts_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep).await;
         let stub: Vec<(FileId, &FileFacts)> = self
             .stub_facts
             .iter()
@@ -296,7 +365,20 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             &stub,
             &self.classpath,
             &self.source_locations,
-        );
+        )
+        .await;
+    }
+
+    /// `(id, facts)` for each of `files`, in order, under `space`'s id-space.
+    async fn facts_inputs(
+        files: &[SourceFile],
+        space: fn(u32) -> WorkspaceFileId,
+    ) -> Vec<(FileId, &FileFacts)> {
+        let mut out = Vec::with_capacity(files.len());
+        for (k, file) in files.iter().enumerate() {
+            out.push((WorkspaceFileId::of_index(space, k), file.facts().await));
+        }
+        out
     }
 
     /// The workspace file a [`FileId`] addresses, routed by its id-space: a project file, a
@@ -323,13 +405,13 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     }
 
     /// Shared semantic query module for one project file, or `None` for an id that addresses no
-    /// project file. Creating it does not resolve any other file; project-wide references receive
-    /// their lazy iterator separately.
-    fn queries(&self, file: FileId) -> Option<ProjectQueries<'_>> {
+    /// project file. Awaits only this file's lazy resolution; project-wide references receive
+    /// the other files separately.
+    async fn queries(&self, file: FileId) -> Option<ProjectQueries<'_>> {
         let source = self.project_file(file)?;
         Some(ProjectQueries::new(
             &self.index,
-            QueryFile::new(file, source.doc.parse.syntax(), source.resolved()),
+            QueryFile::new(file, source.doc.parse.syntax(), source.resolved().await),
         ))
     }
 
@@ -353,9 +435,9 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// Replace the lowered classpath and fold it into the index (the browser resolves
     /// dependencies asynchronously, after the workspace already exists).
-    pub fn set_classpath(&mut self, classpath: LoweredClasspath) {
+    pub async fn set_classpath(&mut self, classpath: LoweredClasspath) {
         self.classpath = classpath;
-        self.rebuild_index();
+        self.rebuild_index().await;
     }
 
     /// The file tree the workspace was loaded from, for the host's own browsing (the playground's
@@ -375,14 +457,14 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     }
 
     /// Publish a fresh backend snapshot and invalidate parse/HIR caches in the same revision.
-    pub fn refresh(&mut self) -> Result<jals_storage::RefreshOutcome, jals_storage::Error> {
-        let outcome = self.storage.refresh()?;
+    pub async fn refresh(&mut self) -> Result<jals_storage::RefreshOutcome, jals_storage::Error> {
+        let outcome = self.storage.refresh().await?;
         if !outcome.changed {
             return Ok(outcome);
         }
         let view = self.storage.view();
-        self.reload_project_files(&view);
-        self.rebuild_index();
+        self.reload_project_files(&view).await;
+        self.rebuild_index().await;
         Ok(outcome)
     }
 
@@ -428,13 +510,13 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// editor's current text (or add it, if `path` is a project file created after the initial
     /// load), then rebuild the index. The document's `Arc`s are shared, so the text is never
     /// reparsed. Returns whether `path` belongs to this workspace.
-    pub fn set_overlay(
+    pub async fn set_overlay(
         &mut self,
         path: &FileKey,
         doc: &Document,
     ) -> Result<bool, jals_storage::Error> {
         // Fresh analysis caches: this file re-extracts on the next rebuild; every other file
-        // reuses its cache, so a keystroke re-walks only the edited file.
+        // reuses its cache, so a keystroke re-walks only the edited file (no fan-out — one file).
         let file = SourceFile::with_document(path.clone(), doc.clone());
         if let Some(id) = self.by_path.get(path).copied() {
             self.files[id.0 as usize] = file;
@@ -451,7 +533,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             path.clone(),
             doc.text.as_bytes().to_vec(),
         )?;
-        self.rebuild_index();
+        self.rebuild_index().await;
         Ok(true)
     }
 
@@ -459,7 +541,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// when it differs** from the cached copy — so a query storm over an unchanged buffer (hover
     /// after hover) hits the caches instead of re-analyzing per request. Returns whether `path`
     /// belongs to this workspace.
-    pub fn sync_overlay(
+    pub async fn sync_overlay(
         &mut self,
         path: &FileKey,
         text: &str,
@@ -471,82 +553,97 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         } else if !self.under_source_root(path) {
             return Ok(false);
         }
-        self.set_overlay(path, &Document::new(text.to_owned()))
+        let doc = Document::new(text.to_owned()).await;
+        self.set_overlay(path, &doc).await
     }
 
     /// Go-to-definition for the cursor at `offset` in `file`: a file-local binding if there is
     /// one, then the project type a reference names, then — for a member access — the member the
     /// receiver type declares.
-    pub fn definition(&self, file: FileId, offset: usize) -> Option<crate::FileRange> {
-        self.queries(file)?.definition(offset)
+    pub async fn definition(&self, file: FileId, offset: usize) -> Option<crate::FileRange> {
+        self.queries(file).await?.definition(offset).await
     }
 
     /// Find-references for the cursor at `offset` in `file`: every occurrence of the symbol under
     /// the cursor — across the whole project when it is a project type, or within this one file
     /// for a file-local binding. The declaration is included when `include_declaration`. Empty if
     /// the cursor is on no resolvable symbol.
-    pub fn references(
+    pub async fn references(
         &self,
         file: FileId,
         offset: usize,
         include_declaration: bool,
     ) -> Vec<crate::FileRange> {
-        let Some(queries) = self.queries(file) else {
+        let Some(queries) = self.queries(file).await else {
             return Vec::new();
         };
         // Lazily resolved: a file-local binding returns before any other file resolves.
-        let files = self.files.iter().enumerate().map(|(index, source)| {
-            QueryFile::new(
+        if let Some(local) = queries.local_references(offset, include_declaration) {
+            return local;
+        }
+        // A project type: resolve every file (cached across queries), then scan project-wide.
+        let mut files = Vec::with_capacity(self.files.len());
+        for (index, source) in self.files.iter().enumerate() {
+            files.push(QueryFile::new(
                 WorkspaceFileId::of_index(WorkspaceFileId::Project, index),
                 source.doc.parse.syntax(),
-                source.resolved(),
-            )
-        });
+                source.resolved().await,
+            ));
+        }
         queries.references(offset, include_declaration, files)
     }
 
     /// The inferred type under `offset` in `file`, or `None` for nothing informative.
-    pub fn hover(&self, file: FileId, offset: usize) -> Option<Ty> {
-        self.queries(file)?.hover(offset)
+    pub async fn hover(&self, file: FileId, offset: usize) -> Option<Ty> {
+        self.queries(file).await?.hover(offset).await
     }
 
     /// [`hover`](Self::hover) rendered as the shared Markdown (a fenced ` ```java ` block).
-    pub fn hover_markdown(&self, file: FileId, offset: usize) -> Option<String> {
-        self.queries(file)?.hover_markdown(offset)
+    pub async fn hover_markdown(&self, file: FileId, offset: usize) -> Option<String> {
+        self.queries(file).await?.hover_markdown(offset).await
     }
 
     /// Completions for the cursor at `offset` in `file`: the members after a `.`, otherwise the
     /// in-scope bindings, project types, and keywords.
-    pub fn completions(&self, file: FileId, offset: usize) -> Vec<Completion> {
-        self.queries(file)
-            .map(|queries| queries.completions(offset))
-            .unwrap_or_default()
+    pub async fn completions(&self, file: FileId, offset: usize) -> Vec<Completion> {
+        match self.queries(file).await {
+            Some(queries) => queries.completions(offset).await,
+            None => Vec::new(),
+        }
     }
 
     /// Signature help for the call at `offset` in `file`, with cross-file type resolution.
-    pub fn signature_help(&self, file: FileId, offset: usize) -> Option<jals_hir::SignatureHelp> {
-        self.queries(file)?.signature_help(offset)
+    pub async fn signature_help(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Option<jals_hir::SignatureHelp> {
+        self.queries(file).await?.signature_help(offset).await
     }
 
     /// Occurrence highlights for the cursor at `offset` in `file`, resolved against the project
     /// so a cross-file type name highlights precisely.
-    pub fn highlights(&self, file: FileId, offset: usize) -> Vec<Highlight> {
+    pub async fn highlights(&self, file: FileId, offset: usize) -> Vec<Highlight> {
         self.queries(file)
+            .await
             .map(|queries| queries.highlights(offset))
             .unwrap_or_default()
     }
 
     /// Classified semantic tokens for `file`, resolved against the project so a cross-file type
     /// name is classified by its declared kind rather than the generic `Type`.
-    pub fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
-        self.project_file(file)
-            .map(|source| {
+    pub async fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
+        match self.project_file(file) {
+            Some(source) => {
                 SemanticTokens::classify(&source.doc.parse.syntax(), Some((&self.index, file)))
-            })
-            .unwrap_or_default()
+                    .await
+            }
+            None => Vec::new(),
+        }
     }
 
-    /// The document outline of `file`.
+    /// The document outline of `file`. Purely syntactic over the cached tree, so it stays a
+    /// synchronous read.
     pub fn outline(&self, file: FileId) -> Vec<OutlineNode> {
         self.project_file(file)
             .map(|source| Outline::of(&source.doc.parse.syntax()))
@@ -555,7 +652,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// The canonical diagnostics of `file` under `config`, with the project's feature set and
     /// index folded in (see [`FileDiagnostics`]).
-    pub fn diagnostics(
+    pub async fn diagnostics(
         &self,
         file: FileId,
         config: &jals_config::lint::Config,
@@ -567,26 +664,31 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         config.features = self.feature_set;
         FileDiagnostics::assemble(
             &source.doc.parse,
-            Some(source.resolved()),
+            Some(source.resolved().await),
             Some((&self.index, file)),
             &config,
         )
+        .await
     }
 
     /// prepareRename for the cursor at `offset` in `file`: the byte range of the identifier under
     /// the cursor when it names a renamable symbol, else `None` (an external name, a
     /// keyword/literal, or a withheld member — see [`ProjectQueries::renamable_range`]).
-    pub fn prepare_rename(&self, file: FileId, offset: usize) -> Option<Range<usize>> {
-        self.queries(file)?.renamable_range(offset)
+    pub async fn prepare_rename(&self, file: FileId, offset: usize) -> Option<Range<usize>> {
+        self.queries(file).await?.renamable_range(offset)
     }
 
     /// The occurrence set a rename of the symbol at `offset` in `file` rewrites — project-wide
     /// for a project type, within the file for a file-local binding — or `None` if the cursor is
     /// on no renamable symbol or there is nothing to change. The host validates the new name
     /// ([`crate::Ident::is_valid_java_identifier`]) and shapes the edit.
-    pub fn rename_targets(&self, file: FileId, offset: usize) -> Option<Vec<crate::FileRange>> {
-        self.prepare_rename(file, offset)?;
-        let targets = self.references(file, offset, true);
+    pub async fn rename_targets(
+        &self,
+        file: FileId,
+        offset: usize,
+    ) -> Option<Vec<crate::FileRange>> {
+        self.prepare_rename(file, offset).await?;
+        let targets = self.references(file, offset, true).await;
         (!targets.is_empty()).then_some(targets)
     }
 
@@ -613,12 +715,13 @@ impl SingleFileProject {
     pub const FILE: FileId = FileId(0);
 
     /// Build the one-file project over an already-parsed document.
-    pub fn new(parse: &Parse) -> Self {
+    pub async fn new(parse: &Parse) -> Self {
         let root = parse.syntax();
-        let resolved = Resolved::resolve_node(&root);
+        let resolved = Resolved::resolve_node(&root).await;
         let index = ProjectIndex::builder(&[(Self::FILE, root.clone())])
             .with_stdlib()
-            .build();
+            .build()
+            .await;
         Self {
             root,
             resolved,
@@ -643,7 +746,7 @@ impl SingleFileProject {
 
     /// The canonical diagnostics of the file under `config`, with the one-file index folded in
     /// (so in-file subtyping and stdlib-classified exceptions still check).
-    pub fn diagnostics(
+    pub async fn diagnostics(
         &self,
         parse: &Parse,
         config: &jals_config::lint::Config,
@@ -654,6 +757,7 @@ impl SingleFileProject {
             Some((&self.index, Self::FILE)),
             config,
         )
+        .await
     }
 }
 
@@ -662,6 +766,7 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
 
+    use jals_exec::block_on_inline;
     use jals_storage::{CodeTree, Entry, MemoryCache, MemorySource, MemoryStorage};
 
     use super::*;
@@ -680,7 +785,7 @@ mod tests {
         FileKey::parse(path).unwrap()
     }
 
-    fn sample_workspace() -> Workspace<MemorySource, MemoryCache> {
+    async fn sample_workspace() -> Workspace<MemorySource, MemoryCache> {
         let storage = memory(&[
             (
                 "src/Greeter.java",
@@ -695,257 +800,310 @@ mod tests {
             storage,
             ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
         )
+        .await
     }
 
     #[test]
     fn load_walks_sorts_and_indexes_the_tree() {
-        let ws = sample_workspace();
-        // Sorted walk: Greeter before Main.
-        assert_eq!(
-            ws.path_of(FileId(0)).map(ToString::to_string),
-            Some("src/Greeter.java".to_owned())
-        );
-        assert_eq!(
-            ws.path_of(FileId(1)).map(ToString::to_string),
-            Some("src/Main.java".to_owned())
-        );
-        assert_eq!(ws.file_id(&key("src/Main.java")), Some(FileId(1)));
-        assert!(
-            ws.owns_path(&key("src/New.java")),
-            "unopened but under root"
-        );
-        assert!(!ws.owns_path(&key("elsewhere/X.java")));
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            // Sorted walk: Greeter before Main.
+            assert_eq!(
+                ws.path_of(FileId(0)).map(ToString::to_string),
+                Some("src/Greeter.java".to_owned())
+            );
+            assert_eq!(
+                ws.path_of(FileId(1)).map(ToString::to_string),
+                Some("src/Main.java".to_owned())
+            );
+            assert_eq!(ws.file_id(&key("src/Main.java")), Some(FileId(1)));
+            assert!(
+                ws.owns_path(&key("src/New.java")),
+                "unopened but under root"
+            );
+            assert!(!ws.owns_path(&key("elsewhere/X.java")));
+        });
     }
 
     #[test]
     fn definition_resolves_across_files() {
-        let ws = sample_workspace();
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let text = &*ws.document(main).unwrap().text.clone();
-        let offset = text.find("Greeter g").unwrap();
-        let target = ws.definition(main, offset).expect("cross-file definition");
-        assert_eq!(
-            ws.path_of(target.file).map(ToString::to_string),
-            Some("src/Greeter.java".to_owned())
-        );
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &*ws.document(main).unwrap().text.clone();
+            let offset = text.find("Greeter g").unwrap();
+            let target = ws
+                .definition(main, offset)
+                .await
+                .expect("cross-file definition");
+            assert_eq!(
+                ws.path_of(target.file).map(ToString::to_string),
+                Some("src/Greeter.java".to_owned())
+            );
+        });
     }
 
     #[test]
     fn references_span_the_project_and_include_the_declaration() {
-        let ws = sample_workspace();
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let text = &*ws.document(main).unwrap().text.clone();
-        let offset = text.find("Greeter g").unwrap();
-        let refs = ws.references(main, offset, true);
-        let files: BTreeSet<_> = refs
-            .iter()
-            .filter_map(|r| ws.path_of(r.file).map(ToString::to_string))
-            .collect();
-        assert!(files.contains("src/Greeter.java"), "{refs:?}");
-        assert!(files.contains("src/Main.java"), "{refs:?}");
-        assert!(refs.len() >= 3, "two uses + declaration: {refs:?}");
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &*ws.document(main).unwrap().text.clone();
+            let offset = text.find("Greeter g").unwrap();
+            let refs = ws.references(main, offset, true).await;
+            let files: BTreeSet<_> = refs
+                .iter()
+                .filter_map(|r| ws.path_of(r.file).map(ToString::to_string))
+                .collect();
+            assert!(files.contains("src/Greeter.java"), "{refs:?}");
+            assert!(files.contains("src/Main.java"), "{refs:?}");
+            assert!(refs.len() >= 3, "two uses + declaration: {refs:?}");
+        });
     }
 
     #[test]
     fn set_overlay_updates_the_index_and_new_files_join_under_a_root() {
-        let mut ws = sample_workspace();
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
+        block_on_inline(async {
+            let mut ws = sample_workspace().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
 
-        // Renaming `Greeter` in its defining file makes Main's reference unresolvable.
-        assert!(
-            ws.set_overlay(
-                &key("src/Greeter.java"),
-                &Document::new("public class Renamed { }".to_owned()),
-            )
-            .unwrap()
-        );
-        let diags = ws.diagnostics(main, &jals_config::lint::Config::default());
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.code == Some("cannot-resolve") && d.message.contains("Greeter")),
-            "{diags:?}"
-        );
-
-        // A brand-new file under a source root joins the project...
-        assert!(
-            ws.set_overlay(
-                &key("src/Extra.java"),
-                &Document::new("public class Extra { }".to_owned()),
-            )
-            .unwrap()
-        );
-        assert!(ws.file_id(&key("src/Extra.java")).is_some());
-        // ...but a file outside every root is rejected.
-        assert!(
-            !ws.set_overlay(&key("elsewhere/X.java"), &Document::new(String::new()))
+            // Renaming `Greeter` in its defining file makes Main's reference unresolvable.
+            assert!(
+                ws.set_overlay(
+                    &key("src/Greeter.java"),
+                    &Document::new("public class Renamed { }".to_owned()).await,
+                )
+                .await
                 .unwrap()
-        );
+            );
+            let diags = ws
+                .diagnostics(main, &jals_config::lint::Config::default())
+                .await;
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == Some("cannot-resolve") && d.message.contains("Greeter")),
+                "{diags:?}"
+            );
+
+            // A brand-new file under a source root joins the project...
+            assert!(
+                ws.set_overlay(
+                    &key("src/Extra.java"),
+                    &Document::new("public class Extra { }".to_owned()).await,
+                )
+                .await
+                .unwrap()
+            );
+            assert!(ws.file_id(&key("src/Extra.java")).is_some());
+            // ...but a file outside every root is rejected.
+            assert!(
+                !ws.set_overlay(
+                    &key("elsewhere/X.java"),
+                    &Document::new(String::new()).await
+                )
+                .await
+                .unwrap()
+            );
+        });
     }
 
     #[test]
     fn sync_overlay_is_a_no_op_for_unchanged_text() {
-        let mut ws = sample_workspace();
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let text = ws.document(main).unwrap().text.clone();
-        let parse_before = alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse);
-        assert!(ws.sync_overlay(&key("src/Main.java"), &text).unwrap());
-        let parse_after = alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse);
-        assert_eq!(parse_before, parse_after, "unchanged text must not reparse");
+        block_on_inline(async {
+            let mut ws = sample_workspace().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = ws.document(main).unwrap().text.clone();
+            let parse_before = alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse);
+            assert!(ws.sync_overlay(&key("src/Main.java"), &text).await.unwrap());
+            let parse_after = alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse);
+            assert_eq!(parse_before, parse_after, "unchanged text must not reparse");
 
-        // A real edit replaces the document.
-        assert!(
-            ws.sync_overlay(&key("src/Main.java"), "public class Main { }")
-                .unwrap()
-        );
-        assert_ne!(
-            alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse),
-            parse_after
-        );
+            // A real edit replaces the document.
+            assert!(
+                ws.sync_overlay(&key("src/Main.java"), "public class Main { }")
+                    .await
+                    .unwrap()
+            );
+            assert_ne!(
+                alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse),
+                parse_after
+            );
+        });
     }
 
     #[test]
     fn hover_completion_and_highlights_answer_from_the_index() {
-        let ws = sample_workspace();
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let text = &*ws.document(main).unwrap().text.clone();
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &*ws.document(main).unwrap().text.clone();
 
-        // Hover over the `new Greeter()` expression shows the cross-file type.
-        let new_expr = text.find("new Greeter").unwrap();
-        let hover = ws.hover_markdown(main, new_expr).expect("hover");
-        assert!(hover.contains("Greeter"), "{hover}");
+            // Hover over the `new Greeter()` expression shows the cross-file type.
+            let new_expr = text.find("new Greeter").unwrap();
+            let hover = ws.hover_markdown(main, new_expr).await.expect("hover");
+            assert!(hover.contains("Greeter"), "{hover}");
 
-        // Scope completions offer the sibling type.
-        let inside = text.find("Greeter g").unwrap();
-        let completions = ws.completions(main, inside);
-        assert!(
-            completions.iter().any(|c| c.label == "Greeter"),
-            "{completions:?}"
-        );
+            // Scope completions offer the sibling type.
+            let inside = text.find("Greeter g").unwrap();
+            let completions = ws.completions(main, inside).await;
+            assert!(
+                completions.iter().any(|c| c.label == "Greeter"),
+                "{completions:?}"
+            );
 
-        // Highlights find both occurrences of `Greeter` in this file.
-        let hl = ws.highlights(main, inside);
-        assert_eq!(hl.len(), 2, "{hl:?}");
+            // Highlights find both occurrences of `Greeter` in this file.
+            let hl = ws.highlights(main, inside).await;
+            assert_eq!(hl.len(), 2, "{hl:?}");
+        });
     }
 
     #[test]
     fn semantic_tokens_and_outline_answer_neutrally() {
-        let ws = sample_workspace();
-        let greeter = ws.file_id(&key("src/Greeter.java")).unwrap();
-        assert!(
-            ws.semantic_tokens(greeter)
-                .iter()
-                .any(|t| t.kind == crate::SemanticTokenKind::Class && t.declaration)
-        );
-        let outline = ws.outline(greeter);
-        assert_eq!(outline[0].name, "Greeter");
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let greeter = ws.file_id(&key("src/Greeter.java")).unwrap();
+            assert!(
+                ws.semantic_tokens(greeter)
+                    .await
+                    .iter()
+                    .any(|t| t.kind == crate::SemanticTokenKind::Class && t.declaration)
+            );
+            let outline = ws.outline(greeter);
+            assert_eq!(outline[0].name, "Greeter");
+        });
     }
 
     #[test]
     fn rename_gates_on_project_origin() {
-        let ws = sample_workspace();
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let text = &*ws.document(main).unwrap().text.clone();
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &*ws.document(main).unwrap().text.clone();
 
-        // A cross-file *use* of a project type is renamable, and its targets span the project.
-        let use_site = text.find("Greeter g").unwrap();
-        assert!(ws.prepare_rename(main, use_site).is_some());
-        let targets = ws.rename_targets(main, use_site).expect("targets");
-        assert!(targets.len() >= 3, "{targets:?}");
+            // A cross-file *use* of a project type is renamable, and its targets span the project.
+            let use_site = text.find("Greeter g").unwrap();
+            assert!(ws.prepare_rename(main, use_site).await.is_some());
+            let targets = ws.rename_targets(main, use_site).await.expect("targets");
+            assert!(targets.len() >= 3, "{targets:?}");
 
-        // A stdlib type (`String` in Greeter) is not host-editable: not renamable.
-        let greeter = ws.file_id(&key("src/Greeter.java")).unwrap();
-        let gtext = &*ws.document(greeter).unwrap().text.clone();
-        let string_use = gtext.find("String name").unwrap();
-        assert!(ws.prepare_rename(greeter, string_use).is_none());
+            // A stdlib type (`String` in Greeter) is not host-editable: not renamable.
+            let greeter = ws.file_id(&key("src/Greeter.java")).unwrap();
+            let gtext = &*ws.document(greeter).unwrap().text.clone();
+            let string_use = gtext.find("String name").unwrap();
+            assert!(ws.prepare_rename(greeter, string_use).await.is_none());
 
-        // A member (the method `greet`) is withheld.
-        let method = gtext.find("greet").unwrap();
-        assert!(ws.prepare_rename(greeter, method).is_none());
+            // A member (the method `greet`) is withheld.
+            let method = gtext.find("greet").unwrap();
+            assert!(ws.prepare_rename(greeter, method).await.is_none());
+        });
     }
 
     #[test]
     fn classpath_types_fold_into_the_index() {
-        // A project whose classpath carries a compiled `Box.class`: the workspace folds it into
-        // the index as a `Classpath`-origin type, so external library types resolve here.
-        let class = jals_classfile::ClassFile::read(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/Box.class"
-        )))
-        .expect("parse Box.class");
-        let storage = memory(&[(
-            "src/Main.java",
-            "class Main { void run() { Box b = new Box(); } }",
-        )]);
-        let spec = ProjectLayout {
-            classpath: ProjectIndex::lower_classpath(&[class]),
-            ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
-        };
-        let ws = Workspace::load(storage, spec);
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let diags = ws.diagnostics(main, &jals_config::lint::Config::default());
-        assert!(
-            !diags.iter().any(|d| d.code == Some("cannot-resolve")),
-            "Box resolves through the classpath: {diags:?}"
-        );
+        block_on_inline(async {
+            // A project whose classpath carries a compiled `Box.class`: the workspace folds it
+            // into the index as a `Classpath`-origin type, so external library types resolve here.
+            let class = jals_classfile::ClassFile::read(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/Box.class"
+                ))
+                .as_slice(),
+            )
+            .await
+            .expect("parse Box.class");
+            let storage = memory(&[(
+                "src/Main.java",
+                "class Main { void run() { Box b = new Box(); } }",
+            )]);
+            let spec = ProjectLayout {
+                classpath: ProjectIndex::lower_classpath(&[class]).await,
+                ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+            };
+            let ws = Workspace::load(storage, spec).await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let diags = ws
+                .diagnostics(main, &jals_config::lint::Config::default())
+                .await;
+            assert!(
+                !diags.iter().any(|d| d.code == Some("cannot-resolve")),
+                "Box resolves through the classpath: {diags:?}"
+            );
+        });
     }
 
     #[test]
     fn source_dep_files_are_indexed_and_navigable() {
-        // A `git`/`path` source dependency's `.java` resolves for analysis *and* is a
-        // go-to-definition target, under the `SourceDep` id-space.
-        let storage = memory(&[
-            ("src/Main.java", "class Main { Lib l; }"),
-            ("deps/lib/Lib.java", "public class Lib { }"),
-        ]);
-        let spec = ProjectLayout {
-            source_dep_sources: vec![key("deps/lib/Lib.java")],
-            ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
-        };
-        let ws = Workspace::load(storage, spec);
-        let main = ws.file_id(&key("src/Main.java")).unwrap();
-        let text = &*ws.document(main).unwrap().text.clone();
-        let target = ws
-            .definition(main, text.find("Lib l").unwrap())
-            .expect("definition into the source dep");
-        assert_eq!(
-            ws.path_of(target.file).map(ToString::to_string),
-            Some("deps/lib/Lib.java".to_owned())
-        );
-        // The dep is external: not renamable from the project.
-        assert!(
-            ws.prepare_rename(main, text.find("Lib l").unwrap())
-                .is_none()
-        );
+        block_on_inline(async {
+            // A `git`/`path` source dependency's `.java` resolves for analysis *and* is a
+            // go-to-definition target, under the `SourceDep` id-space.
+            let storage = memory(&[
+                ("src/Main.java", "class Main { Lib l; }"),
+                ("deps/lib/Lib.java", "public class Lib { }"),
+            ]);
+            let spec = ProjectLayout {
+                source_dep_sources: vec![key("deps/lib/Lib.java")],
+                ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+            };
+            let ws = Workspace::load(storage, spec).await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &*ws.document(main).unwrap().text.clone();
+            let target = ws
+                .definition(main, text.find("Lib l").unwrap())
+                .await
+                .expect("definition into the source dep");
+            assert_eq!(
+                ws.path_of(target.file).map(ToString::to_string),
+                Some("deps/lib/Lib.java".to_owned())
+            );
+            // The dep is external: not renamable from the project.
+            assert!(
+                ws.prepare_rename(main, text.find("Lib l").unwrap())
+                    .await
+                    .is_none()
+            );
+        });
     }
 
     #[test]
     fn out_of_space_ids_answer_empty_not_panic() {
-        let ws = sample_workspace();
-        let bogus = FileId(u32::MAX);
-        assert!(ws.document(bogus).is_none());
-        assert!(ws.path_of(bogus).is_none());
-        assert!(ws.definition(bogus, 0).is_none());
-        assert!(ws.references(bogus, 0, true).is_empty());
-        assert!(
-            ws.diagnostics(bogus, &jals_config::lint::Config::default())
-                .is_empty()
-        );
-        assert!(ws.outline(bogus).is_empty());
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let bogus = FileId(u32::MAX);
+            assert!(ws.document(bogus).is_none());
+            assert!(ws.path_of(bogus).is_none());
+            assert!(ws.definition(bogus, 0).await.is_none());
+            assert!(ws.references(bogus, 0, true).await.is_empty());
+            assert!(
+                ws.diagnostics(bogus, &jals_config::lint::Config::default())
+                    .await
+                    .is_empty()
+            );
+            assert!(ws.outline(bogus).is_empty());
+        });
     }
 
     #[test]
     fn single_file_project_answers_the_same_queries() {
-        let parse = Parse::parse("class C { int f; void m() { int x = f; } }");
-        let project = SingleFileProject::new(&parse);
-        let text = "class C { int f; void m() { int x = f; } }";
-        let offset = text.rfind('f').unwrap();
-        let target = project.queries().definition(offset).expect("definition");
-        assert_eq!(target.file, SingleFileProject::FILE);
-        let diags = project.diagnostics(&parse, &jals_config::lint::Config::default());
-        assert!(
-            diags.iter().any(|d| d.code == Some("unused-local")),
-            "{diags:?}"
-        );
+        block_on_inline(async {
+            let text = "class C { int f; void m() { int x = f; } }";
+            let parse = Parse::parse(text).await;
+            let project = SingleFileProject::new(&parse).await;
+            let offset = text.rfind('f').unwrap();
+            let target = project
+                .queries()
+                .definition(offset)
+                .await
+                .expect("definition");
+            assert_eq!(target.file, SingleFileProject::FILE);
+            let diags = project
+                .diagnostics(&parse, &jals_config::lint::Config::default())
+                .await;
+            assert!(
+                diags.iter().any(|d| d.code == Some("unused-local")),
+                "{diags:?}"
+            );
+        });
     }
 }

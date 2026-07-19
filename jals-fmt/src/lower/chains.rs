@@ -35,16 +35,16 @@ impl Ctx<'_> {
     /// the chain does not fit `max-width` or its flat width exceeds `chain-width`. Anything else
     /// (a lone call, a pure field path `a.b.c`, a malformed node) falls back to inline emission,
     /// byte-for-byte unchanged.
-    pub(crate) fn lower_chain(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_chain(&self, node: &SyntaxNode) -> Doc {
         let Some((head, links)) = Self::flatten_chain(node) else {
-            return self.lower_inline(node, false);
+            return self.lower_inline(node, false).await;
         };
         // Count every method invocation in the chain — the head itself if it is a call/`new`, plus
         // each call link — so `a.b.c` (no calls) and `foo.bar()` (one) stay inline.
         let calls = links.iter().filter(|l| l.is_call()).count()
             + usize::from(matches!(head.kind(), S::CALL_EXPR | S::NEW_EXPR));
         if calls < 2 {
-            return self.lower_inline(node, false);
+            return self.lower_inline(node, false).await;
         }
 
         // Leading field accesses (before the first call) ride on the head's line, so
@@ -52,19 +52,19 @@ impl Ctx<'_> {
         let first_call = links.iter().position(ChainLink::is_call).unwrap_or(0);
         let (lead, rest) = links.split_at(first_call);
 
-        let mut head_line = vec![self.lower(&head)];
+        let mut head_line = vec![self.lower(&head).await];
         for link in lead {
-            head_line.push(self.lower_link(link));
+            head_line.push(self.lower_link(link).await);
         }
         // The first call hugs the head; subsequent steps wrap one per line.
         let mut rest = rest.iter();
         if let Some(first) = rest.next() {
-            head_line.push(self.lower_link(first));
+            head_line.push(self.lower_link(first).await);
         }
         let mut wrapped: Vec<Doc> = Vec::new();
         for link in rest {
             wrapped.push(Doc::softline());
-            wrapped.push(self.lower_link(link));
+            wrapped.push(self.lower_link(link).await);
         }
 
         let doc = Doc::concat(vec![
@@ -75,10 +75,10 @@ impl Ctx<'_> {
     }
 
     /// Lower one chain step: its `.selector`, plus the argument list when it is a call.
-    fn lower_link(&self, link: &ChainLink) -> Doc {
-        let selector = self.lower_after_first_node(&link.callee);
+    async fn lower_link(&self, link: &ChainLink) -> Doc {
+        let selector = self.lower_after_first_node(&link.callee).await;
         match &link.call {
-            Some(call) => Doc::concat(vec![selector, self.lower_after_first_node(call)]),
+            Some(call) => Doc::concat(vec![selector, self.lower_after_first_node(call).await]),
             None => selector,
         }
     }
@@ -131,7 +131,7 @@ impl Ctx<'_> {
     /// For a chain step the dropped child is the receiver / callee (the spine continuation, lowered
     /// separately), so the emitted part is exactly this step's `.`, type witness, name, and — for a
     /// `CALL_EXPR` — its argument list. Every token is still emitted exactly once.
-    fn lower_after_first_node(&self, node: &SyntaxNode) -> Doc {
+    async fn lower_after_first_node(&self, node: &SyntaxNode) -> Doc {
         let mut dropped = false;
         let els = node.children_with_tokens().filter(move |el| {
             if !dropped && el.as_node().is_some() {
@@ -140,6 +140,6 @@ impl Ctx<'_> {
             }
             true
         });
-        self.lower_elements(els, false)
+        self.lower_elements(els, false).await
     }
 }

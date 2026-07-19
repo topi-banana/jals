@@ -1,11 +1,15 @@
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use jals_exec::Yielder;
 use sha2::{Digest, Sha256};
 
 use crate::error::CacheError;
+use crate::io::{self, IoError, Seek as _};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentDigest([u8; 32]);
@@ -13,6 +17,21 @@ pub struct ContentDigest([u8; 32]);
 impl ContentDigest {
     pub fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
+    }
+
+    /// Digest an entire reader by streaming fixed-size chunks, never materializing the content.
+    /// Cooperates once per chunk, so digesting a large artifact never monopolizes the executor.
+    pub async fn of_reader<R: io::Read>(reader: &mut R) -> core::result::Result<Self, IoError> {
+        let mut hasher = Sha256::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        let mut yielder = Yielder::new();
+        loop {
+            match reader.read(&mut chunk).await? {
+                0 => return Ok(Self(hasher.finalize().into())),
+                n => hasher.update(&chunk[..n]),
+            }
+            yielder.tick().await;
+        }
     }
 
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -113,23 +132,35 @@ pub(crate) mod private {
 }
 
 /// Closed persistence seam used by [`ArtifactCache`].
+///
+/// The backend itself lives on the main task — every method runs there. What crosses threads is
+/// an owned [`Reader`](Self::Reader) clone handed to a fan-out worker as a `Send` input; the
+/// read futures it produces are `!Send` and are driven entirely on that worker.
+#[allow(async_fn_in_trait)]
 pub trait CacheBackend: private::Sealed {
+    /// Owning, cheap-to-clone reader over one stored artifact. Every clone reads at an
+    /// independent position: the parallel archive walkers clone one open archive per worker
+    /// and interleave reads.
     #[doc(hidden)]
-    fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError>;
+    type Reader: io::Read + io::Seek + Clone + Send + 'static;
     #[doc(hidden)]
-    fn publish_once(
+    async fn open(&self, key: &CacheKey) -> core::result::Result<Option<Self::Reader>, CacheError>;
+    #[doc(hidden)]
+    async fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError>;
+    #[doc(hidden)]
+    async fn publish_once(
         &mut self,
         key: &CacheKey,
         bytes: &[u8],
     ) -> core::result::Result<(), CacheError>;
     #[doc(hidden)]
-    fn load_index(
+    async fn load_index(
         &self,
         namespace: CacheNamespace,
         provenance: &ContentDigest,
     ) -> core::result::Result<Option<ContentDigest>, CacheError>;
     #[doc(hidden)]
-    fn store_index(
+    async fn store_index(
         &mut self,
         namespace: CacheNamespace,
         provenance: &ContentDigest,
@@ -139,33 +170,42 @@ pub trait CacheBackend: private::Sealed {
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryCache {
-    entries: BTreeMap<CacheKey, Vec<u8>>,
+    entries: BTreeMap<CacheKey, Arc<[u8]>>,
     index: BTreeMap<(CacheNamespace, ContentDigest), ContentDigest>,
 }
 
 impl private::Sealed for MemoryCache {}
 
 impl CacheBackend for MemoryCache {
-    fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError> {
-        Ok(self.entries.get(key).cloned())
+    type Reader = io::Cursor<Arc<[u8]>>;
+
+    async fn open(&self, key: &CacheKey) -> core::result::Result<Option<Self::Reader>, CacheError> {
+        Ok(self
+            .entries
+            .get(key)
+            .map(|bytes| io::Cursor::new(Arc::clone(bytes))))
     }
 
-    fn publish_once(
+    async fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError> {
+        Ok(self.entries.get(key).map(|bytes| bytes.to_vec()))
+    }
+
+    async fn publish_once(
         &mut self,
         key: &CacheKey,
         bytes: &[u8],
     ) -> core::result::Result<(), CacheError> {
         match self.entries.get(key) {
-            Some(existing) if existing == bytes => Ok(()),
+            Some(existing) if existing[..] == *bytes => Ok(()),
             Some(_) => Err(CacheError::Conflict),
             None => {
-                self.entries.insert(key.clone(), bytes.to_vec());
+                self.entries.insert(key.clone(), Arc::from(bytes));
                 Ok(())
             }
         }
     }
 
-    fn load_index(
+    async fn load_index(
         &self,
         namespace: CacheNamespace,
         provenance: &ContentDigest,
@@ -173,7 +213,7 @@ impl CacheBackend for MemoryCache {
         Ok(self.index.get(&(namespace, *provenance)).copied())
     }
 
-    fn store_index(
+    async fn store_index(
         &mut self,
         namespace: CacheNamespace,
         provenance: &ContentDigest,
@@ -194,23 +234,57 @@ impl<C: CacheBackend> ArtifactCache<C> {
         Self { backend }
     }
 
-    pub fn lookup(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError> {
-        let Some(bytes) = self.backend.load(key)? else {
+    pub async fn lookup(
+        &self,
+        key: &CacheKey,
+    ) -> core::result::Result<Option<Vec<u8>>, CacheError> {
+        let Some(bytes) = self.backend.load(key).await? else {
             return Ok(None);
         };
-        if ContentDigest::of(&bytes) != key.content {
+        let digest = ContentDigest::of_reader(&mut bytes.as_slice())
+            .await
+            .map_err(|error| CacheError::Io(error.to_string()))?;
+        if digest != key.content {
             return Err(CacheError::Corrupt);
         }
         Ok(Some(bytes))
     }
 
-    pub fn publish(
+    /// Reader-based verified lookup: stream the stored bytes through one digest pass, rewind,
+    /// and hand the reader out — the artifact is never materialized in memory. `Ok(None)` is a
+    /// miss; a digest mismatch is [`CacheError::Corrupt`]; a source failure is
+    /// [`CacheError::Io`], never conflated with a miss. Verification pins the opened backend
+    /// resource, so a post-verification swap of the stored location cannot redirect reads.
+    pub async fn open_verified(
+        &self,
+        key: &CacheKey,
+    ) -> core::result::Result<Option<C::Reader>, CacheError> {
+        fn io_failure(error: &IoError) -> CacheError {
+            CacheError::Io(error.to_string())
+        }
+        let Some(mut reader) = self.backend.open(key).await? else {
+            return Ok(None);
+        };
+        let digest = ContentDigest::of_reader(&mut reader)
+            .await
+            .map_err(|error| io_failure(&error))?;
+        if digest != key.content {
+            return Err(CacheError::Corrupt);
+        }
+        reader
+            .seek(io::SeekFrom::Start(0))
+            .await
+            .map_err(|error| io_failure(&error))?;
+        Ok(Some(reader))
+    }
+
+    pub async fn publish(
         &mut self,
         key: &CacheKey,
         bytes: &[u8],
     ) -> core::result::Result<(), CacheError> {
         if ContentDigest::of(bytes) != key.content {
-            return match self.backend.load(key)? {
+            return match self.backend.load(key).await? {
                 Some(existing) if existing != bytes => Err(CacheError::Conflict),
                 _ => Err(CacheError::DigestMismatch),
             };
@@ -219,14 +293,14 @@ impl<C: CacheBackend> ArtifactCache<C> {
         // write-once winner: a warm publish returns without re-writing. This is not the
         // forbidden contains-then-write — the hit is verified, and a miss still goes through
         // the backend's atomic create-once, which arbitrates real races.
-        if let Some(existing) = self.backend.load(key)?
+        if let Some(existing) = self.backend.load(key).await?
             && ContentDigest::of(&existing) == key.content
         {
             return Ok(());
         }
         // The digest check above plus the backend's write-once winner comparison already
         // guarantee the stored bytes match `key`; no read-back verification is needed.
-        self.backend.publish_once(key, bytes)
+        self.backend.publish_once(key, bytes).await
     }
 
     /// The full key most recently recorded for `(namespace, provenance)` through
@@ -235,23 +309,25 @@ impl<C: CacheBackend> ArtifactCache<C> {
     /// with no pinned digest) rediscover the content half of the key. The artifact must still
     /// be read through verified [`lookup`](Self::lookup), which is what keeps a stale or
     /// tampered index entry harmless: it can cause a miss, never wrong bytes.
-    pub fn indexed_key(
+    pub async fn indexed_key(
         &self,
         namespace: CacheNamespace,
         provenance: ContentDigest,
     ) -> core::result::Result<Option<CacheKey>, CacheError> {
         Ok(self
             .backend
-            .load_index(namespace, &provenance)?
+            .load_index(namespace, &provenance)
+            .await?
             .map(|content| CacheKey::new(namespace, provenance, content)))
     }
 
     /// Remember `key` as the current content for its `(namespace, provenance)` pair. Unlike
     /// artifact publication this is last-writer-wins by design: every racer records a digest
     /// its own verified artifact backs, so either outcome is valid.
-    pub fn record_index(&mut self, key: &CacheKey) -> core::result::Result<(), CacheError> {
+    pub async fn record_index(&mut self, key: &CacheKey) -> core::result::Result<(), CacheError> {
         self.backend
             .store_index(key.namespace(), &key.provenance(), &key.content())
+            .await
     }
 
     pub const fn backend(&self) -> &C {
@@ -261,6 +337,8 @@ impl<C: CacheBackend> ArtifactCache<C> {
 
 #[cfg(test)]
 mod tests {
+    use jals_exec::block_on_inline;
+
     use super::*;
 
     fn key(bytes: &[u8]) -> CacheKey {
@@ -273,18 +351,72 @@ mod tests {
 
     #[test]
     fn publish_is_write_once_and_verified() {
-        let mut cache = ArtifactCache::new(MemoryCache::default());
-        let artifact_key = key(b"jar");
-        cache.publish(&artifact_key, b"jar").unwrap();
-        cache.publish(&artifact_key, b"jar").unwrap();
-        assert_eq!(cache.lookup(&artifact_key).unwrap(), Some(b"jar".to_vec()));
-        assert_eq!(
-            cache.publish(&artifact_key, b"other"),
-            Err(CacheError::Conflict)
-        );
-        assert_eq!(
-            cache.publish(&key(b"missing"), b"other"),
-            Err(CacheError::DigestMismatch)
-        );
+        block_on_inline(async {
+            let mut cache = ArtifactCache::new(MemoryCache::default());
+            let artifact_key = key(b"jar");
+            cache.publish(&artifact_key, b"jar").await.unwrap();
+            cache.publish(&artifact_key, b"jar").await.unwrap();
+            assert_eq!(
+                cache.lookup(&artifact_key).await.unwrap(),
+                Some(b"jar".to_vec())
+            );
+            assert_eq!(
+                cache.publish(&artifact_key, b"other").await,
+                Err(CacheError::Conflict)
+            );
+            assert_eq!(
+                cache.publish(&key(b"missing"), b"other").await,
+                Err(CacheError::DigestMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn open_verified_returns_a_rewound_reader() {
+        block_on_inline(async {
+            let mut cache = ArtifactCache::new(MemoryCache::default());
+            let artifact_key = key(b"jar-bytes");
+            cache.publish(&artifact_key, b"jar-bytes").await.unwrap();
+            let mut reader = cache.open_verified(&artifact_key).await.unwrap().unwrap();
+            let mut out = alloc::vec![0u8; 9];
+            io::Read::read_exact(&mut reader, &mut out).await.unwrap();
+            assert_eq!(out, b"jar-bytes");
+            assert!(
+                cache
+                    .open_verified(&key(b"missing"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn open_verified_rejects_corrupt_entries_structurally() {
+        block_on_inline(async {
+            let mut cache = ArtifactCache::new(MemoryCache::default());
+            let artifact_key = key(b"jar-bytes");
+            cache.publish(&artifact_key, b"jar-bytes").await.unwrap();
+            cache
+                .backend
+                .entries
+                .insert(artifact_key.clone(), Arc::from(&b"tampered"[..]));
+            assert!(matches!(
+                cache.open_verified(&artifact_key).await,
+                Err(CacheError::Corrupt)
+            ));
+        });
+    }
+
+    #[test]
+    fn of_reader_matches_of_for_multi_chunk_input() {
+        block_on_inline(async {
+            let bytes = alloc::vec![7u8; 200 * 1024];
+            let mut reader = io::Cursor::new(bytes.as_slice());
+            assert_eq!(
+                ContentDigest::of_reader(&mut reader).await.unwrap(),
+                ContentDigest::of(&bytes)
+            );
+        });
     }
 }

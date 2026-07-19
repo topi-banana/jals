@@ -23,14 +23,19 @@ pub struct Document {
 }
 
 impl Document {
-    /// Parse `text` and build its coordinate map, once.
-    pub fn new(text: String) -> Self {
+    /// Parse `text` and build its coordinate map, once. Parsing yields cooperatively.
+    pub async fn new(text: String) -> Self {
+        let parse = Parse::parse(&text).await;
+        Self::with_parse(text, parse)
+    }
+
+    /// Wrap an already-parsed `text` (a fan-out worker's output) without reparsing.
+    pub fn with_parse(text: String, parse: Parse) -> Self {
         let line_index = Arc::new(LineIndex::new(&text));
-        let parse = Arc::new(Parse::parse(&text));
         Self {
             text: Arc::from(text),
             line_index,
-            parse,
+            parse: Arc::new(parse),
         }
     }
 }

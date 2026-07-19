@@ -79,19 +79,19 @@ pub struct SemanticTokens;
 
 impl SemanticTokens {
     /// Classify every significant token under `root`, in document order. Whitespace, operators,
-    /// delimiters, and unclassifiable identifiers are skipped.
-    pub fn classify(
+    /// delimiters, and unclassifiable identifiers are skipped. Async because the resolution
+    /// pass ([`jals_hir::Resolved::resolve_node`]) yields cooperatively.
+    pub async fn classify(
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> Vec<SemanticToken> {
-        let by_start = Self::resolution_classes(root, project);
+        let by_start = Self::resolution_classes(root, project).await;
         root.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter_map(|token| {
                 let (kind, declaration) = Self::classify_token(&token, &by_start)?;
-                let range = token.text_range();
                 Some(SemanticToken {
-                    range: usize::from(range.start())..usize::from(range.end()),
+                    range: crate::byte_range(token.text_range()),
                     kind,
                     declaration,
                 })
@@ -111,11 +111,11 @@ impl SemanticTokens {
     /// offset. A reference the file-local pass left unresolved is placed only when `project`
     /// binds it to a cross-file type (by its declared kind); any other unresolved reference is
     /// omitted, leaving its token to the syntactic fallback.
-    fn resolution_classes(
+    async fn resolution_classes(
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> BTreeMap<usize, (SemanticTokenKind, bool)> {
-        let resolved = jals_hir::Resolved::resolve_node(root);
+        let resolved = jals_hir::Resolved::resolve_node(root).await;
         let mut by_start: BTreeMap<usize, (SemanticTokenKind, bool)> = BTreeMap::new();
         for reference in &resolved.references {
             if let Some(id) = reference.resolution.def_id() {
@@ -335,11 +335,15 @@ impl SemanticTokens {
 
 #[cfg(test)]
 mod tests {
+    use jals_exec::block_on_inline;
+
     use super::*;
 
     /// Classify `text` with no project index.
     fn classify(text: &str) -> Vec<SemanticToken> {
-        SemanticTokens::classify(&jals_syntax::Parse::parse(text).syntax(), None)
+        block_on_inline(async {
+            SemanticTokens::classify(&jals_syntax::Parse::parse(text).await.syntax(), None).await
+        })
     }
 
     /// The token starting at `needle`'s first occurrence.
@@ -478,25 +482,32 @@ mod tests {
     fn cross_file_type_is_classified_by_its_kind() {
         use jals_hir::{FileId, ProjectIndex};
 
-        // `Color` is declared as an `enum` in another file. The file-local pass leaves the
-        // reference unresolved (a generic `Type`); the project index sharpens it to `Enum`.
-        let other = "package a; enum Color { RED }";
-        let main = "package a; class C { Color c; }";
-        let nodes = [
-            (FileId(0), jals_syntax::Parse::parse(other).syntax()),
-            (FileId(1), jals_syntax::Parse::parse(main).syntax()),
-        ];
-        let index = ProjectIndex::builder(&nodes).build();
-        let start = main.find("Color").unwrap();
-        let kind_at = |project| {
-            SemanticTokens::classify(&jals_syntax::Parse::parse(main).syntax(), project)
-                .into_iter()
-                .find(|t| t.range.start == start)
-                .map(|t| t.kind)
-                .expect("no token at the `Color` reference")
-        };
-        assert_eq!(kind_at(None), SemanticTokenKind::Type);
-        assert_eq!(kind_at(Some((&index, FileId(1)))), SemanticTokenKind::Enum);
+        block_on_inline(async {
+            // `Color` is declared as an `enum` in another file. The file-local pass leaves the
+            // reference unresolved (a generic `Type`); the project index sharpens it to `Enum`.
+            let other = "package a; enum Color { RED }";
+            let main = "package a; class C { Color c; }";
+            let nodes = [
+                (FileId(0), jals_syntax::Parse::parse(other).await.syntax()),
+                (FileId(1), jals_syntax::Parse::parse(main).await.syntax()),
+            ];
+            let index = ProjectIndex::builder(&nodes).build().await;
+            let start = main.find("Color").unwrap();
+            let root = jals_syntax::Parse::parse(main).await.syntax();
+            let kind_at = async |project| {
+                SemanticTokens::classify(&root, project)
+                    .await
+                    .into_iter()
+                    .find(|t| t.range.start == start)
+                    .map(|t| t.kind)
+                    .expect("no token at the `Color` reference")
+            };
+            assert_eq!(kind_at(None).await, SemanticTokenKind::Type);
+            assert_eq!(
+                kind_at(Some((&index, FileId(1)))).await,
+                SemanticTokenKind::Enum
+            );
+        });
     }
 
     #[test]

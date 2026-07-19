@@ -25,19 +25,32 @@ use crate::scope::{ScopeId, ScopeKind};
 
 impl Resolver {
     /// Dispatches on `node`'s kind, building scopes/definitions and recording references in `scope`.
-    pub(super) fn build(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    ///
+    /// The one boxed shim of the pass-1 recursion: every `build_*` helper recurses back through
+    /// here, so the async cycle has a single `Box::pin` choke point.
+    pub(super) fn build<'a>(
+        &'a mut self,
+        node: &'a SyntaxNode,
+        scope: ScopeId,
+    ) -> jals_exec::LocalBoxFuture<'a, ()> {
+        alloc::boxed::Box::pin(self.build_impl(node, scope))
+    }
+
+    /// The per-node dispatch behind [`Resolver::build`].
+    async fn build_impl(&mut self, node: &SyntaxNode, scope: ScopeId) {
+        self.tick().await;
         match node.kind() {
             CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL => {
-                self.build_type_decl(node, scope);
+                self.build_type_decl(node, scope).await;
             }
-            METHOD_DECL | CONSTRUCTOR_DECL => self.build_method(node, scope),
+            METHOD_DECL | CONSTRUCTOR_DECL => self.build_method(node, scope).await,
             FIELD_DECL => {
                 if let Some(field) = FieldDecl::cast(node.clone()) {
                     for tok in field.names() {
                         self.add_def(scope, DefKind::Field, &tok);
                     }
                 }
-                self.build_children(node, scope);
+                self.build_children(node, scope).await;
             }
             LOCAL_VAR_DECL => {
                 if let Some(local) = LocalVarDecl::cast(node.clone()) {
@@ -45,30 +58,30 @@ impl Resolver {
                         self.add_def(scope, DefKind::Local, &tok);
                     }
                 }
-                self.build_children(node, scope);
+                self.build_children(node, scope).await;
             }
-            ENUM_CONSTANT => self.build_enum_constant(node, scope),
+            ENUM_CONSTANT => self.build_enum_constant(node, scope).await,
             BLOCK => {
                 let bs = self.new_scope(ScopeKind::Block, scope, node);
-                self.build_children(node, bs);
+                self.build_children(node, bs).await;
             }
             FOR_STMT => {
                 let fs = self.new_scope(ScopeKind::For, scope, node);
-                self.build_children(node, fs);
+                self.build_children(node, fs).await;
             }
-            FOR_EACH_STMT => self.build_for_each(node, scope),
-            TRY_STMT => self.build_try(node, scope),
-            CATCH_CLAUSE => self.build_catch(node, scope),
-            SWITCH_STMT | SWITCH_EXPR => self.build_switch(node, scope),
-            LAMBDA_EXPR => self.build_lambda(node, scope),
+            FOR_EACH_STMT => self.build_for_each(node, scope).await,
+            TRY_STMT => self.build_try(node, scope).await,
+            CATCH_CLAUSE => self.build_catch(node, scope).await,
+            SWITCH_STMT | SWITCH_EXPR => self.build_switch(node, scope).await,
+            LAMBDA_EXPR => self.build_lambda(node, scope).await,
             NEW_EXPR => {
                 // An anonymous-class body gets its own type scope; the qualifier/args stay in the
                 // enclosing scope.
                 for child in node.children() {
                     if child.kind() == CLASS_BODY {
-                        self.build_anon_type(&child, scope);
+                        self.build_anon_type(&child, scope).await;
                     } else {
-                        self.build(&child, scope);
+                        self.build(&child, scope).await;
                     }
                 }
             }
@@ -77,20 +90,20 @@ impl Resolver {
                 // A type-name occurrence is a Type-namespace reference. Recurse so that nested type
                 // arguments (`List<Foo>` — the inner `Foo`) are recorded as their own references.
                 self.record_type_ref(scope, node);
-                self.build_children(node, scope);
+                self.build_children(node, scope).await;
             }
-            _ => self.build_children(node, scope),
+            _ => self.build_children(node, scope).await,
         }
     }
 
     /// Recurses every child node of `node` in `scope`.
-    fn build_children(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_children(&mut self, node: &SyntaxNode, scope: ScopeId) {
         for child in node.children() {
-            self.build(&child, scope);
+            self.build(&child, scope).await;
         }
     }
 
-    fn build_type_decl(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_type_decl(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let kind = match node.kind() {
             CLASS_DECL => DefKind::Class,
             INTERFACE_DECL => DefKind::Interface,
@@ -112,10 +125,10 @@ impl Resolver {
                 }
             }
         }
-        self.build_children(node, ts);
+        self.build_children(node, ts).await;
     }
 
-    fn build_method(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_method(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let kind = if node.kind() == CONSTRUCTOR_DECL {
             DefKind::Constructor
         } else {
@@ -136,7 +149,7 @@ impl Resolver {
                 }
             }
         }
-        self.build_children(node, ms);
+        self.build_children(node, ms).await;
     }
 
     fn register_type_params(&mut self, node: &SyntaxNode, scope: ScopeId) {
@@ -149,26 +162,26 @@ impl Resolver {
         }
     }
 
-    fn build_enum_constant(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_enum_constant(&mut self, node: &SyntaxNode, scope: ScopeId) {
         if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(scope, DefKind::EnumConstant, &tok);
         }
         for child in node.children() {
             if child.kind() == CLASS_BODY {
-                self.build_anon_type(&child, scope);
+                self.build_anon_type(&child, scope).await;
             } else {
-                self.build(&child, scope);
+                self.build(&child, scope).await;
             }
         }
     }
 
     /// Builds an anonymous-class / enum-constant body as its own type scope.
-    fn build_anon_type(&mut self, body: &SyntaxNode, scope: ScopeId) {
+    async fn build_anon_type(&mut self, body: &SyntaxNode, scope: ScopeId) {
         let ts = self.new_scope(ScopeKind::Type, scope, body);
-        self.build_children(body, ts);
+        self.build_children(body, ts).await;
     }
 
-    fn build_for_each(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_for_each(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let fs = self.new_scope(ScopeKind::For, scope, node);
         let Some(fe) = ForEachStmt::cast(node.clone()) else {
             return;
@@ -178,50 +191,51 @@ impl Resolver {
         }
         // The element type is a type reference (`for (Foo f : ...)`); it does not see the variable.
         if let Some(ty) = fe.ty() {
-            self.build(ty.syntax(), fs);
+            self.build(ty.syntax(), fs).await;
         }
         // The iterable is evaluated where the loop sits — the loop variable is not visible to it.
         if let Some(it) = fe.iterable() {
-            self.build(it.syntax(), scope);
+            self.build(it.syntax(), scope).await;
         }
         if let Some(body) = fe.body() {
-            self.build(body.syntax(), fs);
+            self.build(body.syntax(), fs).await;
         }
     }
 
-    fn build_try(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_try(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let Some(t) = TryStmt::cast(node.clone()) else {
-            self.build_children(node, scope);
+            self.build_children(node, scope).await;
             return;
         };
         // Resources are visible in the try block; catch/finally do not see them.
-        let body_scope = t
-            .resources()
-            .map_or(scope, |res| self.build_resources(&res, scope));
+        let body_scope = match t.resources() {
+            Some(res) => self.build_resources(&res, scope).await,
+            None => scope,
+        };
         if let Some(b) = t.block() {
-            self.build(b.syntax(), body_scope);
+            self.build(b.syntax(), body_scope).await;
         }
         for c in t.catches() {
-            self.build(c.syntax(), scope);
+            self.build(c.syntax(), scope).await;
         }
         if let Some(f) = t.finally() {
-            self.build(f.syntax(), scope);
+            self.build(f.syntax(), scope).await;
         }
     }
 
-    fn build_resources(&mut self, res: &ResourceList, scope: ScopeId) -> ScopeId {
+    async fn build_resources(&mut self, res: &ResourceList, scope: ScopeId) -> ScopeId {
         let rs = self.new_scope(ScopeKind::Resources, scope, res.syntax());
         for r in res.resources() {
             if let Some(tok) = Resource::cast(r.syntax().clone()).and_then(|r| r.binding()) {
                 self.add_def(rs, DefKind::Resource, &tok);
             }
             // A resource initializer can reference resources declared before it (sequential).
-            self.build_children(r.syntax(), rs);
+            self.build_children(r.syntax(), rs).await;
         }
         rs
     }
 
-    fn build_catch(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_catch(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let cs = self.new_scope(ScopeKind::Catch, scope, node);
         let Some(catch) = CatchClause::cast(node.clone()) else {
             return;
@@ -233,18 +247,18 @@ impl Resolver {
         // binding is a bare token, not a node, so it is not revisited here. This records the
         // exception type(s) (`catch (IOException e)`) as type references.
         for child in node.children() {
-            self.build(&child, cs);
+            self.build(&child, cs).await;
         }
     }
 
-    fn build_switch(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_switch(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let (selector, body) = if node.kind() == SWITCH_STMT {
             SwitchStmt::cast(node.clone()).map_or((None, None), |s| (s.selector(), s.body()))
         } else {
             SwitchExpr::cast(node.clone()).map_or((None, None), |s| (s.selector(), s.body()))
         };
         if let Some(sel) = selector {
-            self.build(sel.syntax(), scope);
+            self.build(sel.syntax(), scope).await;
         }
         let Some(body) = body else {
             return;
@@ -259,14 +273,14 @@ impl Resolver {
                         }
                     }
                     // Guard and body resolve in the switch scope, seeing the pattern variables.
-                    self.build_children(&child, ss);
+                    self.build_children(&child, ss).await;
                 }
-                _ => self.build(&child, scope),
+                _ => self.build(&child, scope).await,
             }
         }
     }
 
-    fn build_lambda(&mut self, node: &SyntaxNode, scope: ScopeId) {
+    async fn build_lambda(&mut self, node: &SyntaxNode, scope: ScopeId) {
         let ls = self.new_scope(ScopeKind::Lambda, scope, node);
         let Some(lambda) = LambdaExpr::cast(node.clone()) else {
             return;
@@ -278,15 +292,15 @@ impl Resolver {
                 }
                 // An explicitly-typed parameter (`(Foo f) -> ...`) contributes a type reference.
                 for ty in p.syntax().children().filter(|c| c.kind() == TYPE) {
-                    self.build(&ty, ls);
+                    self.build(&ty, ls).await;
                 }
             }
         }
         if let Some(b) = lambda.block_body() {
-            self.build(b.syntax(), ls);
+            self.build(b.syntax(), ls).await;
         }
         if let Some(e) = lambda.expr_body() {
-            self.build(e.syntax(), ls);
+            self.build(e.syntax(), ls).await;
         }
     }
 }

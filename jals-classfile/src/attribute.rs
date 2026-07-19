@@ -9,12 +9,13 @@
 //! `StackMapTable` and the instruction stream inside `Code` are modelled in later phases; until then
 //! they ride along as `Unknown` / raw `code` bytes.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
 use crate::annotation::{Annotation, ElementValue, TypeAnnotation};
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::constant_pool::ConstantPool;
 use crate::error::Result;
 use crate::instruction::Instruction;
@@ -302,14 +303,15 @@ pub struct ModuleProvide {
 }
 
 impl Attribute {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
-        let name_index = r.u16()?;
-        let length = r.u32()? as usize;
-        let body_bytes = r.bytes(length)?;
-        let body = pool
-            .utf8(name_index)
-            .and_then(|name| AttributeBody::parse(&name, body_bytes, pool))
-            .unwrap_or_else(|| AttributeBody::Unknown(body_bytes.to_vec()));
+    async fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
+        let name_index = r.u16().await?;
+        let length = r.u32().await? as usize;
+        let body_bytes = r.bytes(length).await?;
+        let body = match pool.utf8(name_index) {
+            Some(name) => AttributeBody::parse(&name, &body_bytes, pool).await,
+            None => None,
+        }
+        .unwrap_or(AttributeBody::Unknown(body_bytes));
         Ok(Self { name_index, body })
     }
 
@@ -321,8 +323,11 @@ impl Attribute {
     }
 
     /// Read an `attributes_count`-prefixed run of attributes, dispatching each by name.
-    pub(crate) fn read_all(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Vec<Self>> {
-        r.list(|r| Self::read(r, pool))
+    pub(crate) async fn read_all<R: Input>(
+        r: &mut Reader<R>,
+        pool: &ConstantPool,
+    ) -> Result<Vec<Self>> {
+        r.list(async |r| Self::read(r, pool).await).await
     }
 
     /// Write an `attributes_count`-prefixed run of attributes; the count is derived from the slice.
@@ -335,14 +340,19 @@ impl AttributeBody {
     /// Decode a recognised attribute body, or `None` to fall back to [`AttributeBody::Unknown`].
     /// Returns `None` for an unknown name, a parse error, or a body that does not consume exactly
     /// `bytes`.
-    fn parse(name: &str, bytes: &[u8], pool: &ConstantPool) -> Option<Self> {
+    ///
+    /// The `Code` and `Record` arms recurse back into [`Attribute::read_all`]
+    /// (attribute-in-attribute), so those calls are pinned with `Box::pin` to keep this future finite.
+    async fn parse(name: &str, bytes: &[u8], pool: &ConstantPool) -> Option<Self> {
         /// Read the per-parameter annotation lists of a `Runtime*ParameterAnnotations` attribute (a
         /// `u8` parameter count, then a `u16`-counted annotation list per parameter).
-        fn read_parameter_annotations(r: &mut Reader<'_>) -> Result<Vec<Vec<Annotation>>> {
-            let count = r.u8()?;
+        async fn read_parameter_annotations<R: Input>(
+            r: &mut Reader<R>,
+        ) -> Result<Vec<Vec<Annotation>>> {
+            let count = r.u8().await?;
             let mut params = Vec::with_capacity(count as usize);
             for _ in 0..count {
-                params.push(r.list(Annotation::read)?);
+                params.push(r.list(Annotation::read).await?);
             }
             Ok(params)
         }
@@ -350,81 +360,85 @@ impl AttributeBody {
         let mut r = Reader::new(bytes);
         let body = match name {
             "ConstantValue" => Self::ConstantValue {
-                constantvalue_index: r.u16().ok()?,
+                constantvalue_index: r.u16().await.ok()?,
             },
-            "Code" => Self::Code(CodeAttribute::read(&mut r, pool).ok()?),
-            "StackMapTable" => Self::StackMapTable(r.list(StackMapFrame::read).ok()?),
+            "Code" => Self::Code(Box::pin(CodeAttribute::read(&mut r, pool)).await.ok()?),
+            "StackMapTable" => Self::StackMapTable(r.list(StackMapFrame::read).await.ok()?),
             "Exceptions" => Self::Exceptions {
-                exception_index_table: r.u16_list().ok()?,
+                exception_index_table: r.u16_list().await.ok()?,
             },
-            "InnerClasses" => Self::InnerClasses(r.list(InnerClassEntry::read).ok()?),
+            "InnerClasses" => Self::InnerClasses(r.list(InnerClassEntry::read).await.ok()?),
             "EnclosingMethod" => Self::EnclosingMethod {
-                class_index: r.u16().ok()?,
-                method_index: r.u16().ok()?,
+                class_index: r.u16().await.ok()?,
+                method_index: r.u16().await.ok()?,
             },
             "Synthetic" => Self::Synthetic,
             "Signature" => Self::Signature {
-                signature_index: r.u16().ok()?,
+                signature_index: r.u16().await.ok()?,
             },
             "SourceFile" => Self::SourceFile {
-                sourcefile_index: r.u16().ok()?,
+                sourcefile_index: r.u16().await.ok()?,
             },
             "SourceDebugExtension" => {
                 let n = r.remaining();
-                Self::SourceDebugExtension(r.bytes(n).ok()?.to_vec())
+                Self::SourceDebugExtension(r.bytes(n).await.ok()?)
             }
-            "LineNumberTable" => Self::LineNumberTable(r.list(LineNumberEntry::read).ok()?),
+            "LineNumberTable" => Self::LineNumberTable(r.list(LineNumberEntry::read).await.ok()?),
             "LocalVariableTable" => {
-                Self::LocalVariableTable(r.list(LocalVariableEntry::read).ok()?)
+                Self::LocalVariableTable(r.list(LocalVariableEntry::read).await.ok()?)
             }
             "LocalVariableTypeTable" => {
-                Self::LocalVariableTypeTable(r.list(LocalVariableTypeEntry::read).ok()?)
+                Self::LocalVariableTypeTable(r.list(LocalVariableTypeEntry::read).await.ok()?)
             }
             "Deprecated" => Self::Deprecated,
             "RuntimeVisibleAnnotations" => {
-                Self::RuntimeVisibleAnnotations(r.list(Annotation::read).ok()?)
+                Self::RuntimeVisibleAnnotations(r.list(Annotation::read).await.ok()?)
             }
             "RuntimeInvisibleAnnotations" => {
-                Self::RuntimeInvisibleAnnotations(r.list(Annotation::read).ok()?)
+                Self::RuntimeInvisibleAnnotations(r.list(Annotation::read).await.ok()?)
             }
-            "RuntimeVisibleParameterAnnotations" => {
-                Self::RuntimeVisibleParameterAnnotations(read_parameter_annotations(&mut r).ok()?)
-            }
-            "RuntimeInvisibleParameterAnnotations" => {
-                Self::RuntimeInvisibleParameterAnnotations(read_parameter_annotations(&mut r).ok()?)
-            }
+            "RuntimeVisibleParameterAnnotations" => Self::RuntimeVisibleParameterAnnotations(
+                read_parameter_annotations(&mut r).await.ok()?,
+            ),
+            "RuntimeInvisibleParameterAnnotations" => Self::RuntimeInvisibleParameterAnnotations(
+                read_parameter_annotations(&mut r).await.ok()?,
+            ),
             "RuntimeVisibleTypeAnnotations" => {
-                Self::RuntimeVisibleTypeAnnotations(r.list(TypeAnnotation::read).ok()?)
+                Self::RuntimeVisibleTypeAnnotations(r.list(TypeAnnotation::read).await.ok()?)
             }
             "RuntimeInvisibleTypeAnnotations" => {
-                Self::RuntimeInvisibleTypeAnnotations(r.list(TypeAnnotation::read).ok()?)
+                Self::RuntimeInvisibleTypeAnnotations(r.list(TypeAnnotation::read).await.ok()?)
             }
-            "AnnotationDefault" => Self::AnnotationDefault(ElementValue::read(&mut r).ok()?),
-            "BootstrapMethods" => Self::BootstrapMethods(r.list(BootstrapMethod::read).ok()?),
+            "AnnotationDefault" => Self::AnnotationDefault(ElementValue::read(&mut r).await.ok()?),
+            "BootstrapMethods" => Self::BootstrapMethods(r.list(BootstrapMethod::read).await.ok()?),
             "MethodParameters" => {
-                let count = r.u8().ok()?;
+                let count = r.u8().await.ok()?;
                 let mut v = Vec::with_capacity(count as usize);
                 for _ in 0..count {
-                    v.push(MethodParameterEntry::read(&mut r).ok()?);
+                    v.push(MethodParameterEntry::read(&mut r).await.ok()?);
                 }
                 Self::MethodParameters(v)
             }
-            "Module" => Self::Module(ModuleAttribute::read(&mut r).ok()?),
+            "Module" => Self::Module(ModuleAttribute::read(&mut r).await.ok()?),
             "ModulePackages" => Self::ModulePackages {
-                package_index: r.u16_list().ok()?,
+                package_index: r.u16_list().await.ok()?,
             },
             "ModuleMainClass" => Self::ModuleMainClass {
-                main_class_index: r.u16().ok()?,
+                main_class_index: r.u16().await.ok()?,
             },
             "NestHost" => Self::NestHost {
-                host_class_index: r.u16().ok()?,
+                host_class_index: r.u16().await.ok()?,
             },
             "NestMembers" => Self::NestMembers {
-                classes: r.u16_list().ok()?,
+                classes: r.u16_list().await.ok()?,
             },
-            "Record" => Self::Record(r.list(|r| RecordComponentInfo::read(r, pool)).ok()?),
+            "Record" => Self::Record(
+                r.list(async |r| Box::pin(RecordComponentInfo::read(r, pool)).await)
+                    .await
+                    .ok()?,
+            ),
             "PermittedSubclasses" => Self::PermittedSubclasses {
-                classes: r.u16_list().ok()?,
+                classes: r.u16_list().await.ok()?,
             },
             _ => return None,
         };
@@ -500,13 +514,13 @@ impl AttributeBody {
 }
 
 impl CodeAttribute {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
-        let max_stack = r.u16()?;
-        let max_locals = r.u16()?;
-        let code_length = r.u32()? as usize;
-        let code = Instruction::decode_code(r.bytes(code_length)?)?;
-        let exception_table = r.list(ExceptionTableEntry::read)?;
-        let attributes = Attribute::read_all(r, pool)?;
+    async fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
+        let max_stack = r.u16().await?;
+        let max_locals = r.u16().await?;
+        let code_length = r.u32().await? as usize;
+        let code = Instruction::decode_code(&r.bytes(code_length).await?).await?;
+        let exception_table = r.list(ExceptionTableEntry::read).await?;
+        let attributes = Attribute::read_all(r, pool).await?;
         Ok(Self {
             max_stack,
             max_locals,
@@ -528,12 +542,12 @@ impl CodeAttribute {
 }
 
 impl ExceptionTableEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            start_pc: r.u16()?,
-            end_pc: r.u16()?,
-            handler_pc: r.u16()?,
-            catch_type: r.u16()?,
+            start_pc: r.u16().await?,
+            end_pc: r.u16().await?,
+            handler_pc: r.u16().await?,
+            catch_type: r.u16().await?,
         })
     }
 
@@ -546,12 +560,12 @@ impl ExceptionTableEntry {
 }
 
 impl InnerClassEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            inner_class_info_index: r.u16()?,
-            outer_class_info_index: r.u16()?,
-            inner_name_index: r.u16()?,
-            inner_class_access_flags: r.u16()?,
+            inner_class_info_index: r.u16().await?,
+            outer_class_info_index: r.u16().await?,
+            inner_name_index: r.u16().await?,
+            inner_class_access_flags: r.u16().await?,
         })
     }
 
@@ -564,10 +578,10 @@ impl InnerClassEntry {
 }
 
 impl LineNumberEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            start_pc: r.u16()?,
-            line_number: r.u16()?,
+            start_pc: r.u16().await?,
+            line_number: r.u16().await?,
         })
     }
 
@@ -578,13 +592,13 @@ impl LineNumberEntry {
 }
 
 impl LocalVariableEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            start_pc: r.u16()?,
-            length: r.u16()?,
-            name_index: r.u16()?,
-            descriptor_index: r.u16()?,
-            index: r.u16()?,
+            start_pc: r.u16().await?,
+            length: r.u16().await?,
+            name_index: r.u16().await?,
+            descriptor_index: r.u16().await?,
+            index: r.u16().await?,
         })
     }
 
@@ -598,13 +612,13 @@ impl LocalVariableEntry {
 }
 
 impl LocalVariableTypeEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            start_pc: r.u16()?,
-            length: r.u16()?,
-            name_index: r.u16()?,
-            signature_index: r.u16()?,
-            index: r.u16()?,
+            start_pc: r.u16().await?,
+            length: r.u16().await?,
+            name_index: r.u16().await?,
+            signature_index: r.u16().await?,
+            index: r.u16().await?,
         })
     }
 
@@ -618,10 +632,10 @@ impl LocalVariableTypeEntry {
 }
 
 impl BootstrapMethod {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            bootstrap_method_ref: r.u16()?,
-            bootstrap_arguments: r.u16_list()?,
+            bootstrap_method_ref: r.u16().await?,
+            bootstrap_arguments: r.u16_list().await?,
         })
     }
 
@@ -632,10 +646,10 @@ impl BootstrapMethod {
 }
 
 impl MethodParameterEntry {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            name_index: r.u16()?,
-            access_flags: r.u16()?,
+            name_index: r.u16().await?,
+            access_flags: r.u16().await?,
         })
     }
 
@@ -646,11 +660,11 @@ impl MethodParameterEntry {
 }
 
 impl RecordComponentInfo {
-    fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
         Ok(Self {
-            name_index: r.u16()?,
-            descriptor_index: r.u16()?,
-            attributes: Attribute::read_all(r, pool)?,
+            name_index: r.u16().await?,
+            descriptor_index: r.u16().await?,
+            attributes: Attribute::read_all(r, pool).await?,
         })
     }
 
@@ -662,15 +676,15 @@ impl RecordComponentInfo {
 }
 
 impl ModuleAttribute {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
-        let module_name_index = r.u16()?;
-        let module_flags = r.u16()?;
-        let module_version_index = r.u16()?;
-        let requires = r.list(ModuleRequire::read)?;
-        let exports = r.list(ModuleExport::read)?;
-        let opens = r.list(ModuleOpen::read)?;
-        let uses_index = r.u16_list()?;
-        let provides = r.list(ModuleProvide::read)?;
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
+        let module_name_index = r.u16().await?;
+        let module_flags = r.u16().await?;
+        let module_version_index = r.u16().await?;
+        let requires = r.list(ModuleRequire::read).await?;
+        let exports = r.list(ModuleExport::read).await?;
+        let opens = r.list(ModuleOpen::read).await?;
+        let uses_index = r.u16_list().await?;
+        let provides = r.list(ModuleProvide::read).await?;
         Ok(Self {
             module_name_index,
             module_flags,
@@ -696,11 +710,11 @@ impl ModuleAttribute {
 }
 
 impl ModuleRequire {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            requires_index: r.u16()?,
-            requires_flags: r.u16()?,
-            requires_version_index: r.u16()?,
+            requires_index: r.u16().await?,
+            requires_flags: r.u16().await?,
+            requires_version_index: r.u16().await?,
         })
     }
 
@@ -712,11 +726,11 @@ impl ModuleRequire {
 }
 
 impl ModuleExport {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            exports_index: r.u16()?,
-            exports_flags: r.u16()?,
-            exports_to_index: r.u16_list()?,
+            exports_index: r.u16().await?,
+            exports_flags: r.u16().await?,
+            exports_to_index: r.u16_list().await?,
         })
     }
 
@@ -728,11 +742,11 @@ impl ModuleExport {
 }
 
 impl ModuleOpen {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            opens_index: r.u16()?,
-            opens_flags: r.u16()?,
-            opens_to_index: r.u16_list()?,
+            opens_index: r.u16().await?,
+            opens_flags: r.u16().await?,
+            opens_to_index: r.u16_list().await?,
         })
     }
 
@@ -744,10 +758,10 @@ impl ModuleOpen {
 }
 
 impl ModuleProvide {
-    fn read(r: &mut Reader<'_>) -> Result<Self> {
+    async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
-            provides_index: r.u16()?,
-            provides_with_index: r.u16_list()?,
+            provides_index: r.u16().await?,
+            provides_with_index: r.u16_list().await?,
         })
     }
 

@@ -11,6 +11,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use jals_exec::LocalBoxFuture;
 use jals_hir::Resolved;
 use jals_syntax::SyntaxNode;
 
@@ -27,8 +28,14 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
 struct ConstantCondition;
 
 impl ConstantCondition {
-    fn check(root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
+    /// The table-edge shim: boxes the async rule body once per file.
+    fn check<'a>(root: &'a SyntaxNode, resolved: &'a Resolved) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root, resolved))
+    }
+
+    async fn check_impl(root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
         jals_hir::DeadIf::collect(root, resolved)
+            .await
             .into_iter()
             .map(|d| Finding {
                 message: d.message(),

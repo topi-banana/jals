@@ -59,38 +59,44 @@ extern "C" {
     #[wasm_bindgen(js_name = setMarkers)]
     fn set_markers(markers: &js_sys::Array);
 
-    /// Register the Java document-formatting provider, calling `format` for the text.
+    /// Register the Java document-formatting provider, calling `format` for the text
+    /// (a Rust closure returning `Promise<string>`, awaited by the glue).
     #[wasm_bindgen(js_name = registerFormatter)]
     pub fn register_formatter(format: &js_sys::Function);
 
-    // --- Language-feature providers. Each is registered once and calls a synchronous Rust closure
-    // that runs the analysis and returns a plain Monaco payload (see `providers`). ---
+    // --- Language-feature providers. Each is registered once and calls a Rust closure that
+    // returns a `Promise` resolving to the plain Monaco payload (see `providers`); Monaco accepts
+    // Thenables for every ProviderResult, so the glue passes most results through untouched. ---
 
-    /// Register the hover provider. `hover(text, line, col) -> { contents } | null`.
+    /// Register the hover provider. `hover(text, line, col) -> Promise<{ contents } | null>`.
     #[wasm_bindgen(js_name = registerHover)]
     pub fn register_hover(hover: &js_sys::Function);
 
-    /// Register the completion provider. `complete(text, line, col) -> { suggestions }`.
+    /// Register the completion provider. `complete(text, line, col) -> Promise<suggestions[]>`
+    /// (the glue awaits it to stamp each suggestion's replace range).
     #[wasm_bindgen(js_name = registerCompletion)]
     pub fn register_completion(complete: &js_sys::Function);
 
-    /// Register the signature-help provider. `help(text, line, col) -> { value, dispose } | null`.
+    /// Register the signature-help provider. `help(text, line, col) -> Promise<value | null>`
+    /// (the glue awaits it to wrap the result as `{ value, dispose }`).
     #[wasm_bindgen(js_name = registerSignatureHelp)]
     pub fn register_signature_help(help: &js_sys::Function);
 
-    /// Register the document-symbol provider. `symbols(text) -> DocumentSymbol[]`.
+    /// Register the document-symbol provider. `symbols(text) -> Promise<DocumentSymbol[]>`.
     #[wasm_bindgen(js_name = registerDocumentSymbols)]
     pub fn register_document_symbols(symbols: &js_sys::Function);
 
-    /// Register the document-highlight provider. `highlight(text, line, col) -> DocumentHighlight[]`.
+    /// Register the document-highlight provider.
+    /// `highlight(text, line, col) -> Promise<DocumentHighlight[]>`.
     #[wasm_bindgen(js_name = registerDocumentHighlight)]
     pub fn register_document_highlight(highlight: &js_sys::Function);
 
-    /// Register the definition provider. `definition(text, line, col) -> Location | null`.
+    /// Register the definition provider. `definition(text, line, col) -> Promise<Location | null>`.
     #[wasm_bindgen(js_name = registerDefinition)]
     pub fn register_definition(definition: &js_sys::Function);
 
-    /// Register the references provider. `references(text, line, col, includeDecl) -> Location[]`.
+    /// Register the references provider.
+    /// `references(text, line, col, includeDecl) -> Promise<Location[]>`.
     #[wasm_bindgen(js_name = registerReferences)]
     pub fn register_references(references: &js_sys::Function);
 

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::attribute::Attribute;
-use crate::bytes::{Reader, Writer};
+use crate::bytes::{Input, Reader, Writer};
 use crate::constant_pool::ConstantPool;
 use crate::error::Result;
 use crate::flags::MethodAccessFlags;
@@ -25,11 +25,11 @@ pub struct MethodInfo {
 }
 
 impl MethodInfo {
-    pub(crate) fn read(r: &mut Reader<'_>, pool: &ConstantPool) -> Result<Self> {
-        let access_flags = MethodAccessFlags(r.u16()?);
-        let name_index = r.u16()?;
-        let descriptor_index = r.u16()?;
-        let attributes = Attribute::read_all(r, pool)?;
+    pub(crate) async fn read<R: Input>(r: &mut Reader<R>, pool: &ConstantPool) -> Result<Self> {
+        let access_flags = MethodAccessFlags(r.u16().await?);
+        let name_index = r.u16().await?;
+        let descriptor_index = r.u16().await?;
+        let attributes = Attribute::read_all(r, pool).await?;
         Ok(Self {
             access_flags,
             name_index,

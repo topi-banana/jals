@@ -63,7 +63,7 @@ impl CommentMap {
     /// `inline_block_comments` is the resolved `inline-block-comments` policy: when set, a block /
     /// doc comment written immediately before a significant token on the same line hugs that token
     /// as a leading-inline comment instead of trailing the previous one to end of line.
-    pub(crate) fn build(
+    pub(crate) async fn build(
         root: &SyntaxNode,
         normalize_param_comments: bool,
         inline_block_comments: bool,
@@ -73,6 +73,7 @@ impl CommentMap {
         let mut trailing_inline: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
         let mut trailing_below: BTreeMap<usize, Vec<Comment>> = BTreeMap::new();
 
+        let mut yielder = jals_exec::Yielder::new();
         let mut last_sig: Option<usize> = None;
         let mut newlines: usize = 0; // newlines since the last significant token or comment
         let mut pending: Vec<Comment> = Vec::new();
@@ -81,6 +82,7 @@ impl CommentMap {
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
         {
+            yielder.tick().await;
             let kind = tok.kind();
             if Self::is_comment(kind) {
                 let (text, mut inline) = Self::classify(&tok, normalize_param_comments);

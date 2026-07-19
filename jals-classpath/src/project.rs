@@ -91,8 +91,7 @@ pub struct ProjectInputs {
 
 impl ProjectInputs {
     /// Execute the plan against one immutable view. Cache publication does not mutate that view or
-    /// advance the source revision.
-    #[allow(clippy::future_not_send)]
+    /// advance the source revision. Fan-out work runs on the storage's own execution context.
     pub async fn assemble<F, S, C>(
         fetcher: &F,
         storage: &mut ProjectStorage<S, C>,
@@ -106,6 +105,7 @@ impl ProjectInputs {
     {
         use ProjectInputOptions::{Analysis, Compile, Editor};
 
+        let exec = storage.exec().clone();
         let view = storage.view();
         let (want_sources, want_source_deps, want_classes, want_skeletons) = match options {
             Analysis => (false, false, true, false),
@@ -126,7 +126,7 @@ impl ProjectInputs {
         // the same second-pass order.
         let mut dependency_jars: Vec<_> = resolved_jars.iter().map(|jar| jar.key.clone()).collect();
         for jar in resolved_jars.iter().filter(|jar| jar.recursive) {
-            let nested = JarExtraction::nested(storage.artifacts_mut(), &jar.key);
+            let nested = JarExtraction::nested(&exec, storage.artifacts_mut(), &jar.key).await;
             warnings.extend(nested.warnings);
             dependency_jars.extend(nested.artifacts.into_iter().map(|artifact| artifact.key));
         }
@@ -142,7 +142,9 @@ impl ProjectInputs {
             .await;
             warnings.extend(source_jars.warnings);
             let keys: Vec<_> = source_jars.jars.into_iter().map(|jar| jar.key).collect();
-            let extracted = JarExtraction::<LibrarySource>::sources(storage.artifacts_mut(), &keys);
+            let extracted =
+                JarExtraction::<LibrarySource>::sources(&exec, storage.artifacts_mut(), &keys)
+                    .await;
             warnings.extend(extracted.warnings);
             library_sources.extend(extracted.artifacts);
         }
@@ -183,7 +185,7 @@ impl ProjectInputs {
                     .cloned()
                     .map(ClasspathEntry::Artifact),
             );
-            let load = ClasspathLoad::load(&view, storage.artifacts(), &entries);
+            let load = ClasspathLoad::load(&exec, &view, storage.artifacts(), &entries).await;
             warnings.extend(load.warnings);
             load.classes
         } else {
@@ -191,7 +193,8 @@ impl ProjectInputs {
         };
 
         if want_skeletons {
-            let skeletons = SkeletonGroup::synthesize(storage.artifacts_mut(), &classpath_classes);
+            let skeletons =
+                SkeletonGroup::synthesize(storage.artifacts_mut(), &classpath_classes).await;
             warnings.extend(skeletons.warnings);
             library_sources.extend(skeletons.sources);
         }

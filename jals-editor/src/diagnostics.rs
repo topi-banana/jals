@@ -76,7 +76,7 @@ impl FileDiagnostics {
     ///
     /// `resolved` is the file's local name resolution when the caller has it cached; `None`
     /// resolves on demand (only needed for the unresolved-types pass).
-    pub fn assemble(
+    pub async fn assemble(
         parse: &Parse,
         resolved: Option<&Resolved>,
         index: Option<(&ProjectIndex, FileId)>,
@@ -88,15 +88,12 @@ impl FileDiagnostics {
         let mut out: Vec<FileDiagnostic> = parse
             .errors()
             .iter()
-            .map(|err| {
-                let range = err.range();
-                FileDiagnostic {
-                    range: usize::from(range.start())..usize::from(range.end()),
-                    severity: DiagnosticSeverity::Error,
-                    code: None,
-                    message: err.message().to_owned(),
-                    unnecessary: false,
-                }
+            .map(|err| FileDiagnostic {
+                range: crate::byte_range(err.range()),
+                severity: DiagnosticSeverity::Error,
+                code: None,
+                message: err.message().to_owned(),
+                unnecessary: false,
             })
             .collect();
         let clean_parse = out.is_empty();
@@ -105,14 +102,16 @@ impl FileDiagnostics {
         // forced off; a clean tree threads the index in, so the index-aware rules check
         // cross-file facts under the user's configured severities.
         let findings = if clean_parse {
-            jals_lint::LintOutput::lint_parse_with_index(parse, config, index).diagnostics
+            jals_lint::LintOutput::lint_parse_with_index(parse, config, index)
+                .await
+                .diagnostics
         } else {
             let mut quiet = config.clone();
             quiet.rules.insert(
                 jals_lint::TYPE_MISMATCH_RULE.to_owned(),
                 jals_config::Severity::Allow,
             );
-            jals_lint::LintOutput::lint_node(&root, &quiet)
+            jals_lint::LintOutput::lint_node(&root, &quiet).await
         };
         for finding in findings {
             out.push(FileDiagnostic {
@@ -139,15 +138,11 @@ impl FileDiagnostics {
         // spurious unknowns would only echo the syntax errors already reported. Reuses the
         // caller's cached resolution, resolving on demand otherwise.
         if clean_parse && let Some((index, file)) = index {
-            match resolved {
-                Some(resolved) => Self::push_unresolved(&mut out, &root, index, file, resolved),
-                None => Self::push_unresolved(
-                    &mut out,
-                    &root,
-                    index,
-                    file,
-                    &Resolved::resolve_node(&root),
-                ),
+            if let Some(resolved) = resolved {
+                Self::push_unresolved(&mut out, &root, index, file, resolved).await;
+            } else {
+                let resolved = Resolved::resolve_node(&root).await;
+                Self::push_unresolved(&mut out, &root, index, file, &resolved).await;
             }
         }
 
@@ -157,7 +152,7 @@ impl FileDiagnostics {
 
     /// Append a `cannot resolve symbol` error for each of `file`'s type-name references that
     /// resolve to nothing — neither file-locally nor anywhere in the project index.
-    fn push_unresolved(
+    async fn push_unresolved(
         out: &mut Vec<FileDiagnostic>,
         root: &jals_syntax::SyntaxNode,
         index: &ProjectIndex,
@@ -165,7 +160,7 @@ impl FileDiagnostics {
         resolved: &Resolved,
     ) {
         let text = root.text();
-        for range in index.unresolved_types(file, resolved) {
+        for range in index.unresolved_types(file, resolved).await {
             let name = text.slice(Self::text_range(&range)).to_string();
             out.push(FileDiagnostic {
                 range,
@@ -180,14 +175,15 @@ impl FileDiagnostics {
     /// A byte range as a `text_size::TextRange` (for slicing the tree's text).
     fn text_range(range: &Range<usize>) -> text_size::TextRange {
         text_size::TextRange::new(
-            text_size::TextSize::from(u32::try_from(range.start).unwrap_or(u32::MAX)),
-            text_size::TextSize::from(u32::try_from(range.end).unwrap_or(u32::MAX)),
+            crate::sat_text_size(range.start),
+            crate::sat_text_size(range.end),
         )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use jals_exec::block_on_inline;
     use jals_hir::FileId;
     use jals_hir::ProjectIndex;
 
@@ -195,21 +191,27 @@ mod tests {
 
     /// Assemble diagnostics for `text` under the default config, with no project index.
     fn assemble_local(text: &str) -> Vec<FileDiagnostic> {
-        FileDiagnostics::assemble(
-            &jals_syntax::Parse::parse(text),
-            None,
-            None,
-            &Config::default(),
-        )
+        block_on_inline(async {
+            FileDiagnostics::assemble(
+                &jals_syntax::Parse::parse(text).await,
+                None,
+                None,
+                &Config::default(),
+            )
+            .await
+        })
     }
 
     /// Assemble diagnostics for `text` as file 0 of a single-file, stdlib-folded project.
     fn assemble_indexed(text: &str, config: &Config) -> Vec<FileDiagnostic> {
-        let parse = jals_syntax::Parse::parse(text);
-        let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())])
-            .with_stdlib()
-            .build();
-        FileDiagnostics::assemble(&parse, None, Some((&index, FileId(0))), config)
+        block_on_inline(async {
+            let parse = jals_syntax::Parse::parse(text).await;
+            let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())])
+                .with_stdlib()
+                .build()
+                .await;
+            FileDiagnostics::assemble(&parse, None, Some((&index, FileId(0))), config).await
+        })
     }
 
     /// The diagnostics with `code == rule`.
@@ -246,22 +248,23 @@ mod tests {
     fn feature_gated_rule_reads_the_injected_feature_set() {
         // A top-level `main` is a preview feature before Java 25; the caller injects the
         // project's resolved feature set as `config.features`.
-        let text = "void main() {}\n";
-        let mut config = Config {
-            features: jals_config::FeatureSet::resolve(&[jals_config::Feature::Java24]),
-            ..Default::default()
-        };
-        let diags =
-            FileDiagnostics::assemble(&jals_syntax::Parse::parse(text), None, None, &config);
-        let gated = with_code(&diags, "compact-source-file");
-        assert_eq!(gated.len(), 1);
-        assert_eq!(gated[0].severity, DiagnosticSeverity::Error);
+        block_on_inline(async {
+            let text = "void main() {}\n";
+            let mut config = Config {
+                features: jals_config::FeatureSet::resolve(&[jals_config::Feature::Java24]),
+                ..Default::default()
+            };
+            let parse = jals_syntax::Parse::parse(text).await;
+            let diags = FileDiagnostics::assemble(&parse, None, None, &config).await;
+            let gated = with_code(&diags, "compact-source-file");
+            assert_eq!(gated.len(), 1);
+            assert_eq!(gated[0].severity, DiagnosticSeverity::Error);
 
-        // A `java25` set (or no features at all) allows the syntax: nothing is reported.
-        config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
-        let diags =
-            FileDiagnostics::assemble(&jals_syntax::Parse::parse(text), None, None, &config);
-        assert!(with_code(&diags, "compact-source-file").is_empty());
+            // A `java25` set (or no features at all) allows the syntax: nothing is reported.
+            config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
+            let diags = FileDiagnostics::assemble(&parse, None, None, &config).await;
+            assert!(with_code(&diags, "compact-source-file").is_empty());
+        });
     }
 
     #[test]
@@ -308,21 +311,31 @@ mod tests {
 
     #[test]
     fn unresolved_types_flag_only_genuine_unknowns() {
-        // `Nope` is nameable from nowhere; `String` is java.lang; `Foo` is a same-package
-        // project type. Only `Nope` is reported.
-        let text = "package a; class Bar { Nope n; String s; Foo f; }";
-        let parse = jals_syntax::Parse::parse(text);
-        let sibling = jals_syntax::Parse::parse("package a; class Foo { }");
-        let index =
-            ProjectIndex::builder(&[(FileId(0), parse.syntax()), (FileId(1), sibling.syntax())])
-                .with_stdlib()
-                .build();
-        let diags =
-            FileDiagnostics::assemble(&parse, None, Some((&index, FileId(0))), &Config::default());
-        let unresolved = with_code(&diags, "cannot-resolve");
-        assert_eq!(unresolved.len(), 1);
-        assert_eq!(unresolved[0].message, "cannot resolve symbol `Nope`");
-        assert_eq!(unresolved[0].severity, DiagnosticSeverity::Error);
+        block_on_inline(async {
+            // `Nope` is nameable from nowhere; `String` is java.lang; `Foo` is a same-package
+            // project type. Only `Nope` is reported.
+            let text = "package a; class Bar { Nope n; String s; Foo f; }";
+            let parse = jals_syntax::Parse::parse(text).await;
+            let sibling = jals_syntax::Parse::parse("package a; class Foo { }").await;
+            let index = ProjectIndex::builder(&[
+                (FileId(0), parse.syntax()),
+                (FileId(1), sibling.syntax()),
+            ])
+            .with_stdlib()
+            .build()
+            .await;
+            let diags = FileDiagnostics::assemble(
+                &parse,
+                None,
+                Some((&index, FileId(0))),
+                &Config::default(),
+            )
+            .await;
+            let unresolved = with_code(&diags, "cannot-resolve");
+            assert_eq!(unresolved.len(), 1);
+            assert_eq!(unresolved[0].message, "cannot resolve symbol `Nope`");
+            assert_eq!(unresolved[0].severity, DiagnosticSeverity::Error);
+        });
     }
 
     #[test]

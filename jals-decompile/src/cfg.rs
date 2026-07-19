@@ -10,6 +10,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use jals_classfile::{Instruction, WideInstruction};
+use jals_exec::Yielder;
 
 /// A method's basic blocks, in instruction order (block 0 is the entry).
 pub(crate) struct Cfg {
@@ -72,7 +73,7 @@ enum Flow {
 
 impl Cfg {
     /// Build the CFG for a method's instructions, or `None` if it uses a construct M2 does not model.
-    pub(crate) fn build(code: &[Instruction]) -> Option<Self> {
+    pub(crate) async fn build(code: &[Instruction]) -> Option<Self> {
         /// How an instruction affects control flow.
         fn flow(ins: &Instruction) -> Flow {
             use Instruction as I;
@@ -112,11 +113,14 @@ impl Cfg {
         if code.is_empty() {
             return None;
         }
+        // Amortized cooperative point shared by the per-instruction and per-block loops below.
+        let mut yielder = Yielder::new();
         // Byte offset (pc) of each instruction. Strictly increasing, so a branch target resolves to
         // its instruction index by binary search — no reverse map to build.
         let mut pcs = Vec::with_capacity(code.len());
         let mut pc = 0usize;
         for ins in code {
+            yielder.tick().await;
             pcs.push(pc);
             pc += ins.encoded_len(pc);
         }
@@ -129,6 +133,7 @@ impl Cfg {
         let mut leaders = BTreeSet::new();
         leaders.insert(0usize);
         for (i, ins) in code.iter().enumerate() {
+            yielder.tick().await;
             match flow(ins) {
                 Flow::Cond(o) | Flow::Goto(o) => {
                     leaders.insert(target(i, o)?);
@@ -152,6 +157,7 @@ impl Cfg {
         let block_of = |start: usize| -> Option<usize> { leaders.binary_search(&start).ok() };
         let mut blocks = Vec::with_capacity(leaders.len());
         for (b, &start) in leaders.iter().enumerate() {
+            yielder.tick().await;
             let end = leaders.get(b + 1).copied().unwrap_or(code.len());
             let last = end - 1;
             let term = match flow(&code[last]) {

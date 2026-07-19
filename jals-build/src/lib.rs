@@ -4,7 +4,7 @@
 //! where the sources live, where compiled classes go, which Java release to target, and what is on
 //! the classpath. [`Invocation::build`] and [`Invocation::run`] turn a manifest plus already-resolved
 //! inputs into an [`Invocation`] — a program name and an argument vector for `javac`/`java`.
-//! [`CleanTargets::paths`] resolves the build artifacts to delete (for `jals clean`).
+//! [`CleanTargets::keys`] resolves the build artifacts to delete (for `jals clean`).
 //! [`InitOptions::scaffold`] goes the other way: it produces the files a brand-new project needs (for
 //! `jals init`). [`RunTarget::resolve`] picks which `main-class` `jals run` should execute, from a
 //! manifest's `[[bin]]` entries, `[package] default-run`, and `[run] main-class`.
@@ -58,6 +58,7 @@ pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub use toolchain::{
     BuildOutcome, Candidates, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
+    ToolchainFuture,
 };
 
 #[cfg(feature = "native")]

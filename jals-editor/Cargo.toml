@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 jals-config.workspace = true
+jals-exec.workspace = true
 jals-storage.workspace = true
 jals-hir.workspace = true
 jals-lint.workspace = true

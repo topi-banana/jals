@@ -148,26 +148,28 @@ export function setMarkers(markers) {
 }
 
 // Register a Java document-formatting provider that calls back into `format`
-// (a Rust closure) with the buffer text and applies the returned string. Wires
-// up "Format Document" (Ctrl+Shift+I / right-click).
+// (a Rust closure returning a Promise of the formatted string) and applies the
+// awaited result. Wires up "Format Document" (Ctrl+Shift+I / right-click).
 export function registerFormatter(format) {
     monaco.languages.registerDocumentFormattingEditProvider("java", {
-        provideDocumentFormattingEdits(model) {
-            return [
-                { range: model.getFullModelRange(), text: format(model.getValue()) },
-            ];
+        async provideDocumentFormattingEdits(model) {
+            const text = await format(model.getValue());
+            return [{ range: model.getFullModelRange(), text }];
         },
     });
 }
 
-// --- Language-feature providers. Each calls a synchronous Rust closure with the
-// model's text and the cursor position, and returns the plain Monaco payload the
-// closure built (via the factories below). ---
+// --- Language-feature providers. Each calls a Rust closure with the model's
+// text and the cursor position; the closure returns a `Promise` resolving to
+// the plain Monaco payload it built (via the factories below). Monaco accepts
+// Thenables for every ProviderResult, so a Promise that needs no reshaping is
+// returned as-is; only results whose fields must be touched are awaited here.
 
 export function registerHover(hover) {
     monaco.languages.registerHoverProvider("java", {
         provideHover(model, position) {
-            return hover(model.getValue(), position.lineNumber, position.column) || null;
+            // Resolves to `{ contents }` or null; Monaco accepts the Thenable directly.
+            return hover(model.getValue(), position.lineNumber, position.column);
         },
     });
 }
@@ -175,7 +177,7 @@ export function registerHover(hover) {
 export function registerCompletion(complete) {
     monaco.languages.registerCompletionItemProvider("java", {
         triggerCharacters: ["."],
-        provideCompletionItems(model, position) {
+        async provideCompletionItems(model, position) {
             const word = model.getWordUntilPosition(position);
             const range = {
                 startLineNumber: position.lineNumber,
@@ -183,7 +185,7 @@ export function registerCompletion(complete) {
                 startColumn: word.startColumn,
                 endColumn: word.endColumn,
             };
-            const suggestions = complete(model.getValue(), position.lineNumber, position.column);
+            const suggestions = await complete(model.getValue(), position.lineNumber, position.column);
             for (const s of suggestions) s.range = range;
             return { suggestions };
         },
@@ -194,8 +196,8 @@ export function registerSignatureHelp(help) {
     monaco.languages.registerSignatureHelpProvider("java", {
         signatureHelpTriggerCharacters: ["(", ","],
         signatureHelpRetriggerCharacters: [","],
-        provideSignatureHelp(model, position) {
-            const value = help(model.getValue(), position.lineNumber, position.column);
+        async provideSignatureHelp(model, position) {
+            const value = await help(model.getValue(), position.lineNumber, position.column);
             return value ? { value, dispose() {} } : null;
         },
     });
@@ -220,7 +222,8 @@ export function registerDocumentHighlight(highlight) {
 export function registerDefinition(definition) {
     monaco.languages.registerDefinitionProvider("java", {
         provideDefinition(model, position) {
-            return definition(model.getValue(), position.lineNumber, position.column) || null;
+            // Resolves to a Location or null; Monaco accepts the Thenable directly.
+            return definition(model.getValue(), position.lineNumber, position.column);
         },
     });
 }

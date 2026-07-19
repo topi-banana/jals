@@ -20,8 +20,8 @@ impl Ctx<'_> {
     /// Lay a node out inline: child nodes are recursed, tokens are separated by single
     /// spaces per [`Ctx::want_space`]. Whitespace, newlines, and comment trivia are skipped
     /// here (comments are injected via [`Ctx::tok`]).
-    pub(crate) fn lower_generic(&self, node: &SyntaxNode) -> Doc {
-        self.lower_inline(node, false)
+    pub(crate) async fn lower_generic(&self, node: &SyntaxNode) -> Doc {
+        self.lower_inline(node, false).await
     }
 
     /// Lay out a control-flow statement (`if` / `try` / `do-while`) inline, honoring
@@ -29,22 +29,23 @@ impl Ctx<'_> {
     /// brace (`} else`, `} catch`, `} finally`, `} while`) moves onto its own line. (The opening
     /// brace of each block is handled separately, by `lower_braced` via `opens_on_next_line`.)
     /// With the default `same-line` it is byte-for-byte identical to [`Ctx::lower_generic`].
-    pub(crate) fn lower_control_flow(&self, node: &SyntaxNode) -> Doc {
-        self.lower_inline(node, true)
+    pub(crate) async fn lower_control_flow(&self, node: &SyntaxNode) -> Doc {
+        self.lower_inline(node, true).await
     }
 
     /// Shared core of [`Ctx::lower_generic`] and [`Ctx::lower_control_flow`]. When `control_flow`
     /// is set, the separator before a `}`-anchored continuation becomes a forced break under
     /// `control-brace-style = next-line` (see [`Ctx::flow_sep`]).
-    pub(crate) fn lower_inline(&self, node: &SyntaxNode, control_flow: bool) -> Doc {
+    pub(crate) async fn lower_inline(&self, node: &SyntaxNode, control_flow: bool) -> Doc {
         self.lower_elements(node.children_with_tokens(), control_flow)
+            .await
     }
 
     /// Lay out an arbitrary run of CST elements inline. The element loop is shared between
     /// [`Ctx::lower_inline`] (a whole node's children) and chain-selector emission, which feeds it
     /// a `FIELD_ACCESS`'s children minus the receiver (see `lower_after_first_node`); routing both
     /// through here keeps the type-witness hug below in one place.
-    pub(crate) fn lower_elements(
+    pub(crate) async fn lower_elements(
         &self,
         els: impl Iterator<Item = SyntaxElement>,
         control_flow: bool,
@@ -69,7 +70,7 @@ impl Ctx<'_> {
                 {
                     parts.push(Doc::continuation_indent(Doc::concat(vec![
                         Doc::hardline(),
-                        self.lower(child),
+                        self.lower(child).await,
                     ])));
                     prev = Self::last_sig_token(child);
                     hug_witness = false;
@@ -89,9 +90,10 @@ impl Ctx<'_> {
                         // fusion-safety net: a malformed witness can end in a token that would fuse
                         // with the name (`<void` then `x` → `voidx`), so a space is still needed
                         // there.
-                        Self::tight_sep(prev.as_ref(), first)
+                        Self::tight_sep(prev.as_ref(), first).await
                     } else {
                         self.flow_sep(control_flow, prev.as_ref(), child.kind(), first)
+                            .await
                     };
                     parts.push(s);
                 }
@@ -100,7 +102,7 @@ impl Ctx<'_> {
                         prev.as_ref().map(SyntaxToken::kind),
                         Some(S::DOT | S::COLON_COLON)
                     );
-                parts.push(self.lower(child));
+                parts.push(self.lower(child).await);
                 if let Some(last) = emitted_last {
                     prev = Some(last);
                 }
@@ -109,9 +111,10 @@ impl Ctx<'_> {
                     continue;
                 }
                 let s = if hug_witness {
-                    Self::tight_sep(prev.as_ref(), t)
+                    Self::tight_sep(prev.as_ref(), t).await
                 } else {
                     self.flow_sep(control_flow, prev.as_ref(), t.kind(), t)
+                        .await
                 };
                 parts.push(s);
                 hug_witness = false;
@@ -135,7 +138,7 @@ impl Ctx<'_> {
     /// The separator before a child element (`next`, of kind `next_kind`). When `control_flow`
     /// is set, `control-brace-style = next-line` forces a break before a continuation that
     /// directly follows a closing brace; otherwise the normal token spacing from [`Ctx::sep`].
-    fn flow_sep(
+    async fn flow_sep(
         &self,
         control_flow: bool,
         prev: Option<&SyntaxToken>,
@@ -149,6 +152,6 @@ impl Ctx<'_> {
         {
             return Doc::hardline();
         }
-        self.sep(prev, next)
+        self.sep(prev, next).await
     }
 }

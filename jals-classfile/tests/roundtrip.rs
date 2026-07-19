@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 
 use jals_classfile::ClassFile;
 
+/// Drive the async parse to completion; slice-backed reads never suspend.
+fn read(bytes: &[u8]) -> jals_classfile::Result<ClassFile> {
+    jals_exec::block_on_inline(ClassFile::read(bytes))
+}
+
 /// Every `.class` file under `tests/fixtures/`, as `(file name, bytes)`, sorted by name.
 fn fixtures() -> Vec<(String, Vec<u8>)> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -34,7 +39,7 @@ fn roundtrip_is_byte_exact() {
     let fixtures = fixtures();
     assert!(!fixtures.is_empty(), "no .class fixtures found");
     for (name, bytes) in fixtures {
-        let class = ClassFile::read(&bytes).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let class = read(&bytes).unwrap_or_else(|e| panic!("read {name}: {e}"));
         assert_eq!(class.write(), bytes, "round-trip mismatch for {name}");
     }
 }
@@ -42,7 +47,7 @@ fn roundtrip_is_byte_exact() {
 #[test]
 fn serde_json_roundtrip_preserves_the_model() {
     for (name, bytes) in fixtures() {
-        let class = ClassFile::read(&bytes).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let class = read(&bytes).unwrap_or_else(|e| panic!("read {name}: {e}"));
         let json = serde_json::to_string(&class).expect("serialize");
         let back: ClassFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, class, "model changed across serde for {name}");

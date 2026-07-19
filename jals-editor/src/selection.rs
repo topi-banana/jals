@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_syntax::{SyntaxElement, SyntaxNode};
-use text_size::{TextRange, TextSize};
+use text_size::TextRange;
 
 /// Computes selection-expansion chains.
 pub struct SelectionChains;
@@ -21,7 +21,7 @@ impl SelectionChains {
     /// `offset` past EOF is clamped. The result always holds at least the root's range.
     pub fn at(root: &SyntaxNode, offset: usize) -> Vec<Range<usize>> {
         let end = usize::from(root.text_range().end());
-        let offset = TextSize::from(u32::try_from(offset.min(end)).unwrap_or(u32::MAX));
+        let offset = crate::sat_text_size(offset.min(end));
         // Deepest element covering the empty range at the cursor. `offset` is clamped into
         // `[0, len]`, so the precondition (range contained in the root) holds.
         let elem = root.covering_element(TextRange::new(offset, offset));
@@ -30,23 +30,18 @@ impl SelectionChains {
         let mut ranges: Vec<Range<usize>> = Vec::new();
         let mut node = match elem {
             SyntaxElement::Token(token) => {
-                ranges.push(Self::byte_range(token.text_range()));
+                ranges.push(crate::byte_range(token.text_range()));
                 token.parent()
             }
             SyntaxElement::Node(n) => Some(n),
         };
         while let Some(n) = node {
-            ranges.push(Self::byte_range(n.text_range()));
+            ranges.push(crate::byte_range(n.text_range()));
             node = n.parent();
         }
         // A node wrapping a single child shares its range; collapse so the chain strictly nests.
         ranges.dedup();
         ranges
-    }
-
-    /// A `text_size::TextRange` as a plain byte range.
-    fn byte_range(range: TextRange) -> Range<usize> {
-        usize::from(range.start())..usize::from(range.end())
     }
 }
 
@@ -55,7 +50,8 @@ mod tests {
     use super::*;
 
     fn chain_at(text: &str, offset: usize) -> Vec<Range<usize>> {
-        SelectionChains::at(&jals_syntax::Parse::parse(text).syntax(), offset)
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        SelectionChains::at(&parse.syntax(), offset)
     }
 
     #[test]

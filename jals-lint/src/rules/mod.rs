@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_config::Feature;
+use jals_exec::LocalBoxFuture;
 use jals_hir::Resolved;
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
@@ -104,16 +105,25 @@ impl FeatureGate {
 /// How a rule is invoked. Most rules need only the CST; resolution-based rules additionally take
 /// the file-local name resolution, which the library computes at most once per lint (see
 /// [`crate::lint_node`]) and shares across every [`Checker::Resolved`] / [`Checker::Indexed`] rule.
+///
+/// Rule bodies are `async` (their walks tick cooperatively), so each checker is a plain `fn`
+/// pointer returning the boxed future — one box per rule per file, at the table edge.
 #[derive(Clone, Copy)]
 pub(crate) enum Checker {
     /// A pure syntactic rule: given the CST root, return every finding.
-    Syntactic(fn(&SyntaxNode) -> Vec<Finding>),
+    Syntactic(for<'a> fn(&'a SyntaxNode) -> LocalBoxFuture<'a, Vec<Finding>>),
     /// A rule that also consumes `jals-hir` file-local name resolution.
-    Resolved(fn(&SyntaxNode, &Resolved) -> Vec<Finding>),
+    Resolved(for<'a> fn(&'a SyntaxNode, &'a Resolved) -> LocalBoxFuture<'a, Vec<Finding>>),
     /// A rule that, in addition to name resolution, may resolve reference types against a
     /// project-wide symbol index when the caller supplies one ([`IndexCtx`]); with no index it
     /// falls back to the file-local behavior. The basis for cross-file type checking.
-    Indexed(fn(&SyntaxNode, &Resolved, Option<IndexCtx>) -> Vec<Finding>),
+    Indexed(
+        for<'a> fn(
+            &'a SyntaxNode,
+            &'a Resolved,
+            Option<IndexCtx<'a>>,
+        ) -> LocalBoxFuture<'a, Vec<Finding>>,
+    ),
     /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
     /// names the [`Feature`] it guards, and the driver runs `find` only when the set does not
     /// [`permit`](jals_config::FeatureSet::permits) that feature (threaded from the host via

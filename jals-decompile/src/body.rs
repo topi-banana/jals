@@ -23,6 +23,7 @@ use jals_classfile::{
     ConstantPoolEntry, FieldType, Instruction, MethodDescriptor, MethodInfo, ReturnType,
     WideInstruction,
 };
+use jals_exec::{LocalBoxFuture, Yielder};
 
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
@@ -46,7 +47,7 @@ impl MethodBody {
     /// the descriptor's parameters (a generic signature that hides synthetic parameters, e.g. an
     /// `enum` constructor's `String, int`) makes this bail so the body can never reference a phantom
     /// parameter.
-    pub fn decompile(
+    pub async fn decompile(
         method: &MethodInfo,
         cf: &ClassFile,
         param_names: &[String],
@@ -77,7 +78,7 @@ impl MethodBody {
         // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
         // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
         let decls = Self::local_declarations(code, pool, is_static, &mut locals)?;
-        let cfg = Cfg::build(&code.code)?;
+        let cfg = Cfg::build(&code.code).await?;
         let structurer = Structurer {
             code: &code.code,
             cfg: &cfg,
@@ -88,7 +89,7 @@ impl MethodBody {
             locals,
         };
         let mut stmts = decls;
-        stmts.extend(structurer.structure()?);
+        stmts.extend(structurer.structure().await?);
         Some(Self::render_body(&stmts))
     }
 
@@ -1102,20 +1103,32 @@ struct Structurer<'a> {
 impl Structurer<'_> {
     /// Structure the whole method, requiring every block to be emitted exactly once — a strong guard
     /// that the recovered tree matches the actual control flow (any mismatch bails to a safe body).
-    fn structure(&self) -> Option<Vec<Stmt>> {
+    async fn structure(&self) -> Option<Vec<Stmt>> {
         let n = self.cfg.blocks.len();
         let mut visited = vec![false; n];
-        let stmts = self.emit_region(0, n, n, &mut visited)?;
+        let stmts = self.emit_region(0, n, n, &mut visited).await?;
         if visited.iter().any(|&seen| !seen) {
             return None;
         }
         Some(stmts)
     }
 
+    /// The one boxed shim of the region recursion: `emit_region` and `structure_loop` recurse into
+    /// nested regions through here, so the async cycle has a single `Box::pin` choke point.
+    fn emit_region_boxed<'a>(
+        &'a self,
+        lo: usize,
+        hi: usize,
+        exit: usize,
+        visited: &'a mut [bool],
+    ) -> LocalBoxFuture<'a, Option<Vec<Stmt>>> {
+        Box::pin(self.emit_region(lo, hi, exit, visited))
+    }
+
     /// Structure the single-entry region of blocks `[lo, hi)` (entered at `lo`), whose normal exit is
     /// block `exit` (reached by a fall-through or `goto`). Returns the statements, or `None` on any
     /// shape that is not a clean acyclic tree.
-    fn emit_region(
+    async fn emit_region(
         &self,
         lo: usize,
         hi: usize,
@@ -1132,13 +1145,13 @@ impl Structurer<'_> {
             // resume past its exit. (Checked before marking `b` visited; the loop's blocks are
             // visited inside `structure_loop`.)
             if let Some(latch) = self.loop_latch(b) {
-                let (loop_stmt, cont) = self.structure_loop(b, latch, hi, visited)?;
+                let (loop_stmt, cont) = self.structure_loop(b, latch, hi, visited).await?;
                 out.push(loop_stmt);
                 b = cont;
                 continue;
             }
             visited[b] = true;
-            let (mut stmts, cond_stack, cmp) = self.run_block(b)?;
+            let (mut stmts, cond_stack, cmp) = self.run_block(b).await?;
             out.append(&mut stmts);
             // Only a conditional-branch block may leave operands (its condition) on the stack; a
             // leftover on any other terminator means we mis-read the block, so bail.
@@ -1181,12 +1194,16 @@ impl Structurer<'_> {
                     // trailing skip: `taken..e` is the `else` and `e` the join; otherwise no `else`.
                     let (then, els, join) = match self.cfg.blocks[taken - 1].term {
                         Term::Goto(e) if e > taken && e <= hi => {
-                            let then = self.emit_region(fallthrough, taken, e, visited)?;
-                            let els = self.emit_region(taken, e, e, visited)?;
+                            let then = self
+                                .emit_region_boxed(fallthrough, taken, e, visited)
+                                .await?;
+                            let els = self.emit_region_boxed(taken, e, e, visited).await?;
                             (then, els, e)
                         }
                         _ => {
-                            let then = self.emit_region(fallthrough, taken, taken, visited)?;
+                            let then = self
+                                .emit_region_boxed(fallthrough, taken, taken, visited)
+                                .await?;
                             (then, Vec::new(), taken)
                         }
                     };
@@ -1202,7 +1219,7 @@ impl Structurer<'_> {
     /// stack (the condition of a conditional-branch block; empty for every other block), and the
     /// flavor of a trailing `*cmp` fused into the block's conditional branch (its two operands are
     /// then the leftover stack, for [`Self::branch_condition`] to read back).
-    fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<Expr>, Option<Cmp>)> {
+    async fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<Expr>, Option<Cmp>)> {
         let mut sim = Sim {
             pool: self.pool,
             bootstrap: self.bootstrap,
@@ -1223,7 +1240,9 @@ impl Structurer<'_> {
         if cmp.is_some() {
             body.end -= 1;
         }
+        let mut yielder = Yielder::new();
         for ins in &self.code[body] {
+            yielder.tick().await;
             sim.step(ins)?;
         }
         // Finalize anything left on the stack — a still-collecting array initializer or a leaked
@@ -1264,7 +1283,7 @@ impl Structurer<'_> {
     /// `javac` emits — a top-test `while` (the header's branch exits the loop, the latch's `goto`
     /// jumps back) and a `do`-`while` (the latch's conditional branch is itself the back-edge) — and
     /// bails on anything else (a `break`/`continue` edge, an irregular exit, a side-effecting header).
-    fn structure_loop(
+    async fn structure_loop(
         &self,
         header: usize,
         latch: usize,
@@ -1285,9 +1304,11 @@ impl Structurer<'_> {
                 }
                 // Body: the forward region `[header, latch)` that flows into the latch, then the
                 // latch's own statements finish the body (its leftover operands are the condition).
-                let mut body = self.emit_region(header, latch, latch, visited)?;
+                let mut body = self
+                    .emit_region_boxed(header, latch, latch, visited)
+                    .await?;
                 Self::claim(visited, latch)?;
-                let (mut tail, cond_stack, cmp) = self.run_block(latch)?;
+                let (mut tail, cond_stack, cmp) = self.run_block(latch).await?;
                 body.append(&mut tail);
                 let cond = Self::branch_condition(&self.code[instr], false, cmp, cond_stack)?;
                 Some((Stmt::DoWhile { body, cond }, exit))
@@ -1308,13 +1329,15 @@ impl Structurer<'_> {
                 }
                 Self::claim(visited, header)?;
                 // The header carries only the loop condition — a side effect there would repeat.
-                let (head_stmts, cond_stack, cmp) = self.run_block(header)?;
+                let (head_stmts, cond_stack, cmp) = self.run_block(header).await?;
                 if !head_stmts.is_empty() {
                     return None;
                 }
                 let cond = Self::branch_condition(&self.code[instr], true, cmp, cond_stack)?;
                 // The body `[body_start, latch]` exits back to the header (the latch's goto-back).
-                let body = self.emit_region(body_start, latch + 1, header, visited)?;
+                let body = self
+                    .emit_region_boxed(body_start, latch + 1, header, visited)
+                    .await?;
                 Some((Stmt::While { cond, body }, exit))
             }
             _ => None,

@@ -37,8 +37,8 @@ pub struct Resolved {
 
 impl Resolved {
     /// Parses `src` and resolves names within it.
-    pub fn resolve(src: &str) -> Self {
-        Self::resolve_node(&jals_syntax::Parse::parse(src).syntax())
+    pub async fn resolve(src: &str) -> Self {
+        Self::resolve_node(&jals_syntax::Parse::parse(src).await.syntax()).await
     }
 
     /// Resolves names over an already-parsed CST `root` (the `SOURCE_FILE` node).
@@ -46,8 +46,8 @@ impl Resolved {
     /// This is the half a caller holding a cached parse tree (the language server, which keeps an
     /// `Arc<Parse>` per document; a lint rule, which is handed the root) calls without reparsing —
     /// mirroring `jals_lint::LintOutput::lint_node`.
-    pub fn resolve_node(root: &SyntaxNode) -> Self {
-        Resolver::new(root).run()
+    pub async fn resolve_node(root: &SyntaxNode) -> Self {
+        Resolver::new(root).run().await
     }
 
     /// The definition with the given id.
@@ -196,6 +196,20 @@ pub(crate) struct Resolver {
     defs: Vec<Def>,
     scopes: Vec<Scope>,
     raw_refs: Vec<RawRef>,
+    /// Amortized-yield countdown for the pass-1 walk (a field, not a local `Yielder`, because the
+    /// walk is recursive — every visited node shares the one budget).
+    yield_left: u32,
+}
+
+impl Resolver {
+    /// One unit of pass-1 work: yields once per [`jals_exec::Yielder::DEFAULT_PERIOD`] nodes.
+    async fn tick(&mut self) {
+        self.yield_left -= 1;
+        if self.yield_left == 0 {
+            self.yield_left = jals_exec::Yielder::DEFAULT_PERIOD;
+            jals_exec::yield_now().await;
+        }
+    }
 }
 
 impl Resolver {
@@ -213,17 +227,20 @@ impl Resolver {
             defs: Vec::new(),
             scopes: vec![file_scope],
             raw_refs: Vec::new(),
+            yield_left: jals_exec::Yielder::DEFAULT_PERIOD,
         }
     }
 
     /// Runs both passes and returns the result.
-    pub(crate) fn run(mut self) -> Resolved {
+    pub(crate) async fn run(mut self) -> Resolved {
         let root = self.root.clone();
-        self.build(&root, ScopeId(0));
+        self.build(&root, ScopeId(0)).await;
 
+        let mut yielder = jals_exec::Yielder::new();
         let raw_refs = core::mem::take(&mut self.raw_refs);
         let mut references = Vec::with_capacity(raw_refs.len());
         for raw in raw_refs {
+            yielder.tick().await;
             // A qualified type name (`a.b.C`) never binds to a file-local definition; leave it
             // unresolved for the project layer, which resolves it against a fully-qualified name.
             let resolution = if raw.qualified.is_some() {

@@ -1,21 +1,36 @@
-//! A minimal big-endian byte cursor ([`Reader`]) and sink ([`Writer`]).
+//! A minimal big-endian streaming reader ([`Reader`]) and sink ([`Writer`]).
 //!
-//! The sole primitive codec layer. No external byte crate, so the crate stays `wasm32`-pure. Every
-//! read is bounds-checked and returns [`Result`] rather than panicking.
+//! The sole primitive codec layer. The reader pulls from any portable byte source
+//! ([`jals_storage::io::Read`]), so the crate stays `wasm32`-pure while hosts stream class files
+//! straight from buffered files or archive members. Reads are `async` to match the portable
+//! source (slice-backed readers are always ready) and cooperate through [`jals_exec::Yielder`]
+//! in the bulk loops ([`Reader::bytes`], [`Reader::list`]). Every read is checked against the
+//! stream and returns [`Result`] rather than panicking. The [`Writer`] is pure in-memory `Vec`
+//! construction and stays synchronous.
 
 use alloc::vec::Vec;
 
+use jals_exec::Yielder;
+use jals_storage::io::IoError;
+pub(crate) use jals_storage::io::Read as Input;
+
 use crate::error::{ClassfileError, Result};
 
-/// A big-endian cursor over an input buffer.
-pub(crate) struct Reader<'a> {
-    buf: &'a [u8],
+/// A big-endian reader over a portable byte source, tracking the absolute offset consumed.
+pub(crate) struct Reader<R> {
+    src: R,
     pos: usize,
 }
 
-impl<'a> Reader<'a> {
-    pub(crate) const fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, pos: 0 }
+/// Cap on a single up-front buffer allocation. Declared byte lengths are attacker-controlled
+/// `u32`s and a stream cannot pre-check them, so capacity grows chunkwise as bytes actually
+/// arrive and a huge length over a short input cannot force a huge allocation. (The old slice
+/// cursor got this for free from its bounds check.)
+const ALLOCATION_CHUNK: usize = 64 * 1024;
+
+impl<R: Input> Reader<R> {
+    pub(crate) const fn new(src: R) -> Self {
+        Self { src, pos: 0 }
     }
 
     /// The current absolute byte offset. Used by `Code` to compute the alignment padding of
@@ -24,73 +39,103 @@ impl<'a> Reader<'a> {
         self.pos
     }
 
-    /// How many bytes are left unread.
-    pub(crate) const fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    /// Borrow and consume the next `n` bytes, or fail if fewer remain.
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        match self.pos.checked_add(n).filter(|&end| end <= self.buf.len()) {
-            Some(end) => {
-                let s = &self.buf[self.pos..end];
-                self.pos = end;
-                Ok(s)
+    /// Fill `out` from the source, or fail without advancing the tracked offset.
+    async fn fill(&mut self, out: &mut [u8]) -> Result<()> {
+        match self.src.read_exact(out).await {
+            Ok(()) => {
+                self.pos += out.len();
+                Ok(())
             }
-            None => Err(ClassfileError::UnexpectedEof {
+            Err(IoError::UnexpectedEof) => Err(ClassfileError::UnexpectedEof {
                 offset: self.pos,
-                needed: n,
+                needed: out.len(),
             }),
+            Err(error @ IoError::Failed(_)) => Err(ClassfileError::Source(error)),
         }
     }
 
-    pub(crate) fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
+    pub(crate) async fn u8(&mut self) -> Result<u8> {
+        let mut b = [0; 1];
+        self.fill(&mut b).await?;
+        Ok(b[0])
     }
 
-    pub(crate) fn u16(&mut self) -> Result<u16> {
-        let s = self.take(2)?;
-        Ok(u16::from_be_bytes([s[0], s[1]]))
+    pub(crate) async fn u16(&mut self) -> Result<u16> {
+        let mut b = [0; 2];
+        self.fill(&mut b).await?;
+        Ok(u16::from_be_bytes(b))
     }
 
-    pub(crate) fn u32(&mut self) -> Result<u32> {
-        let s = self.take(4)?;
-        Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    pub(crate) async fn u32(&mut self) -> Result<u32> {
+        let mut b = [0; 4];
+        self.fill(&mut b).await?;
+        Ok(u32::from_be_bytes(b))
     }
 
-    pub(crate) fn u64(&mut self) -> Result<u64> {
-        let s = self.take(8)?;
-        Ok(u64::from_be_bytes([
-            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-        ]))
+    pub(crate) async fn u64(&mut self) -> Result<u64> {
+        let mut b = [0; 8];
+        self.fill(&mut b).await?;
+        Ok(u64::from_be_bytes(b))
     }
 
-    /// Borrow and consume the next `n` bytes verbatim.
-    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
-        self.take(n)
+    /// Read and own the next `n` bytes verbatim, ticking a [`Yielder`] once per allocation chunk
+    /// so a large body cannot hog the executor.
+    pub(crate) async fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        let mut yielder = Yielder::new();
+        let mut out = Vec::new();
+        while out.len() < n {
+            yielder.tick().await;
+            let start = out.len();
+            let chunk = (n - start).min(ALLOCATION_CHUNK);
+            out.resize(start + chunk, 0);
+            self.fill(&mut out[start..]).await?;
+        }
+        Ok(out)
     }
 
-    /// Read a `u16`-counted run of items, each parsed by `read_one`.
-    pub(crate) fn list<T>(
+    /// Read a `u16`-counted run of items, each parsed by `read_one`, ticking a [`Yielder`] once
+    /// per item.
+    pub(crate) async fn list<T>(
         &mut self,
-        read_one: impl Fn(&mut Reader<'_>) -> Result<T>,
+        mut read_one: impl AsyncFnMut(&mut Self) -> Result<T>,
     ) -> Result<Vec<T>> {
-        let count = self.u16()?;
+        let count = self.u16().await?;
+        let mut yielder = Yielder::new();
         let mut v = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            v.push(read_one(self)?);
+            yielder.tick().await;
+            v.push(read_one(self).await?);
         }
         Ok(v)
     }
 
     /// Read a `u16`-counted run of raw `u16` indices.
-    pub(crate) fn u16_list(&mut self) -> Result<Vec<u16>> {
-        let count = self.u16()?;
+    pub(crate) async fn u16_list(&mut self) -> Result<Vec<u16>> {
+        let count = self.u16().await?;
         let mut v = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            v.push(self.u16()?);
+            v.push(self.u16().await?);
         }
         Ok(v)
+    }
+
+    /// Require end of input — the top-level "no trailing bytes" check.
+    pub(crate) async fn expect_eof(&mut self) -> Result<()> {
+        let mut probe = [0u8; 1];
+        match self.src.read(&mut probe).await {
+            Ok(0) | Err(IoError::UnexpectedEof) => Ok(()),
+            Ok(_) => Err(ClassfileError::TrailingBytes),
+            Err(error) => Err(ClassfileError::Source(error)),
+        }
+    }
+}
+
+impl Reader<&[u8]> {
+    /// How many bytes are left unread. Only slice-backed readers (attribute bodies, code
+    /// arrays) can know this; a slice source consumes itself from the front, so its length is
+    /// exactly the unread remainder.
+    pub(crate) const fn remaining(&self) -> usize {
+        self.src.len()
     }
 }
 

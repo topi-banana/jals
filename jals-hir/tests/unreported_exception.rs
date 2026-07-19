@@ -7,15 +7,21 @@ use jals_hir::{FileId, ProjectIndex, Resolved, UnreportedException};
 
 /// The simple names of the exceptions reported unreported in `src`, index built over the whole file.
 fn reported(src: &str) -> Vec<String> {
-    let root = jals_syntax::Parse::parse(src).syntax();
-    let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
-        .with_stdlib()
-        .build();
-    let resolved = Resolved::resolve_node(&root);
-    UnreportedException::collect(&root, &resolved, Some((&index, FileId(0))))
-        .into_iter()
-        .map(|e| e.name)
-        .collect()
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), root.clone())])
+            .with_stdlib()
+            .build(),
+    );
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    jals_exec::block_on_inline(UnreportedException::collect(
+        &root,
+        &resolved,
+        Some((&index, FileId(0))),
+    ))
+    .into_iter()
+    .map(|e| e.name)
+    .collect()
 }
 
 /// A user-defined checked exception plus a class `C` holding `body` as the single method `f`.
@@ -168,19 +174,33 @@ fn a_throw_inside_a_lambda_is_not_attributed_to_the_method() {
 
 #[test]
 fn without_an_index_nothing_is_reported() {
-    let root = jals_syntax::Parse::parse(&with_checked("throw new MyEx();")).syntax();
-    let resolved = Resolved::resolve_node(&root);
-    assert!(UnreportedException::collect(&root, &resolved, None).is_empty());
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(&with_checked(
+        "throw new MyEx();",
+    )))
+    .syntax();
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    assert!(
+        jals_exec::block_on_inline(UnreportedException::collect(&root, &resolved, None)).is_empty()
+    );
 }
 
 #[test]
 fn the_message_names_the_exception() {
-    let root = jals_syntax::Parse::parse(&with_checked("throw new MyEx();")).syntax();
-    let index = ProjectIndex::builder(&[(FileId(0), root.clone())])
-        .with_stdlib()
-        .build();
-    let resolved = Resolved::resolve_node(&root);
-    let found = UnreportedException::collect(&root, &resolved, Some((&index, FileId(0))));
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(&with_checked(
+        "throw new MyEx();",
+    )))
+    .syntax();
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), root.clone())])
+            .with_stdlib()
+            .build(),
+    );
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    let found = jals_exec::block_on_inline(UnreportedException::collect(
+        &root,
+        &resolved,
+        Some((&index, FileId(0))),
+    ));
     assert_eq!(found.len(), 1);
     assert_eq!(
         found[0].message(),

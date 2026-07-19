@@ -7,6 +7,7 @@ edition.workspace = true
 # The config data models for `jals.toml` / `jalsfmt.toml` / `jalslint.toml`, plus their parsing and
 # discovery. Pure/`no_std`: loaders read an immutable `jals-storage` revision, so this crate has no
 # direct filesystem access and stays `wasm32`-compatible.
+jals-exec.workspace = true
 jals-storage.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true

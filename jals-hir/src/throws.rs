@@ -60,7 +60,7 @@ impl UnreportedException {
     /// Every checked exception raised in `root` that its enclosing method / constructor neither
     /// declares in `throws` nor catches. Requires a project `index` (with stdlib stubs) — returns
     /// empty otherwise.
-    pub fn collect(
+    pub async fn collect(
         root: &SyntaxNode,
         resolved: &Resolved,
         project: Option<(&ProjectIndex, FileId)>,
@@ -72,17 +72,19 @@ impl UnreportedException {
         let Some(classifier) = Classifier::new(index, file) else {
             return Vec::new();
         };
-        let ti = TypeInference::infer(root, resolved, index, file);
+        let ti = TypeInference::infer(root, resolved, index, file).await;
         let cx = Cx {
             index,
             file,
             ti: &ti,
             classifier,
         };
+        let mut yielder = jals_exec::Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
+            yielder.tick().await;
             if matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
-                cx.check_decl(&node, &mut out);
+                cx.check_decl(&node, &mut out).await;
             }
         }
         out
@@ -135,7 +137,7 @@ impl Cx<'_> {
     /// Report each checked exception raised directly in `decl`'s body that it neither declares nor
     /// catches. Sources inside a nested throws boundary (a lambda, a local/anonymous-class method) are
     /// left to that boundary's own check.
-    fn check_decl(&self, decl: &SyntaxNode, out: &mut Vec<UnreportedException>) {
+    async fn check_decl(&self, decl: &SyntaxNode, out: &mut Vec<UnreportedException>) {
         let body = ast::MethodDecl::cast(decl.clone())
             .and_then(|m| m.body())
             .or_else(|| ast::ConstructorDecl::cast(decl.clone()).and_then(|c| c.body()));
@@ -143,7 +145,9 @@ impl Cx<'_> {
             return; // an abstract / interface method (`;`) has no body.
         };
         let declared = self.declared_throws(decl);
+        let mut yielder = jals_exec::Yielder::new();
         for node in body.syntax().descendants() {
+            yielder.tick().await;
             // Only a throw / call / `new` can raise; skip the boundary walk for every other node.
             if !matches!(node.kind(), THROW_STMT | CALL_EXPR | NEW_EXPR) {
                 continue;

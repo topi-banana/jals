@@ -120,8 +120,7 @@ impl Outline {
         kind: DefKind,
         children: Vec<OutlineNode>,
     ) -> OutlineNode {
-        let range = node.text_range();
-        let range = usize::from(range.start())..usize::from(range.end());
+        let range = crate::byte_range(node.text_range());
         OutlineNode {
             name: name.unwrap_or_else(|| "<anonymous>".to_owned()),
             kind,
@@ -137,7 +136,8 @@ mod tests {
     use super::*;
 
     fn outline(text: &str) -> Vec<OutlineNode> {
-        Outline::of(&jals_syntax::Parse::parse(text).syntax())
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        Outline::of(&parse.syntax())
     }
 
     /// `(name, kind)` pairs of a level, for compact assertions.

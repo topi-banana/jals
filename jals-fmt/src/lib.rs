@@ -45,11 +45,11 @@ pub use output::{FormatOutput, Warning};
 
 impl FormatOutput {
     /// Format `src` according to `config`.
-    pub fn format_source(src: &str, config: &Config) -> Self {
-        let parse = jals_syntax::Parse::parse(src);
+    pub async fn format_source(src: &str, config: &Config) -> Self {
+        let parse = jals_syntax::Parse::parse(src).await;
         let root = parse.syntax();
-        let doc = lower::Ctx::lower_root(&root, config);
-        let formatted = render::Out::print(&doc, config, src);
+        let doc = lower::Ctx::lower_root(&root, config).await;
+        let formatted = render::Out::print(&doc, config, src).await;
         let warnings = parse
             .errors()
             .iter()

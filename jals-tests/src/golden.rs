@@ -73,7 +73,8 @@ impl PairResult {
     /// Format `input` with `cfg` and score it against the expected `expected` output:
     /// a line-level similarity ratio plus whether the two are byte-identical.
     pub fn score(input: &str, expected: &str, cfg: &Config) -> (f64, bool) {
-        let formatted = jals_fmt::FormatOutput::format_source(input, cfg).formatted;
+        let formatted =
+            jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(input, cfg)).formatted;
         let exact = formatted == expected;
         let ratio = TextDiff::from_lines(expected, &formatted).ratio() as f64;
         (ratio, exact)

@@ -1,5 +1,5 @@
-use futures::executor::block_on;
 use jals_classpath::{Fetcher, ProjectInputOptions, ProjectInputPlan, ProjectInputs};
+use jals_exec::block_on_inline;
 use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
 struct NoFetch;
@@ -31,7 +31,7 @@ fn typed_source_dependency_roots_collect_only_java_in_stable_order() {
         source_dependency_roots: vec![jals_storage::DirKey::parse("dep/src").unwrap()],
         ..ProjectInputPlan::default()
     };
-    let inputs = block_on(ProjectInputs::assemble(
+    let inputs = block_on_inline(ProjectInputs::assemble(
         &NoFetch,
         &mut storage,
         &plan,
@@ -56,7 +56,7 @@ fn missing_source_root_is_diagnostic_not_missing_data() {
         source_dependency_roots: vec![jals_storage::DirKey::parse("missing").unwrap()],
         ..ProjectInputPlan::default()
     };
-    let inputs = block_on(ProjectInputs::assemble(
+    let inputs = block_on_inline(ProjectInputs::assemble(
         &NoFetch,
         &mut storage,
         &plan,

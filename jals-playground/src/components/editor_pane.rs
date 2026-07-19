@@ -85,12 +85,20 @@ impl Component for EditorPane {
             on_open.emit(path);
         });
 
-        // "Format Document" (Ctrl+Shift+I) formats with the latest shared config.
+        // "Format Document" (Ctrl+Shift+I) formats with the latest shared config. The formatter
+        // is async, so the closure bridges to a Promise; the config is cloned out of the
+        // `RefCell` before the future runs — no borrow is held across an await.
         let config = props.config.clone();
-        let formatter = Closure::<dyn FnMut(String) -> String>::new(move |text: String| {
-            let cfg = config.borrow();
-            jals_fmt::FormatOutput::format_source(&text, &cfg).formatted
-        });
+        let formatter =
+            Closure::<dyn FnMut(String) -> js_sys::Promise>::new(move |text: String| {
+                let cfg = config.borrow().clone();
+                wasm_bindgen_futures::future_to_promise(async move {
+                    let formatted = jals_fmt::FormatOutput::format_source(&text, &cfg)
+                        .await
+                        .formatted;
+                    Ok(JsValue::from(formatted))
+                })
+            });
 
         let on_ready = props.on_ready.clone();
         spawn_local(async move {

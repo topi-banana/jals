@@ -19,6 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+use jals_exec::Yielder;
 use rowan::GreenNode;
 
 use crate::language::SyntaxNode;
@@ -38,6 +39,9 @@ pub(crate) struct Parser<'a> {
     pos: usize,
     pub(crate) events: Vec<Event>,
     fuel: Cell<u32>,
+    /// Amortized cooperative yield point, ticked by the grammar's hub functions and
+    /// unbounded token loops.
+    yielder: Yielder,
 }
 
 impl<'a> Parser<'a> {
@@ -47,6 +51,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             events: Vec::new(),
             fuel: Cell::new(PARSER_FUEL),
+            yielder: Yielder::new(),
         }
     }
 
@@ -213,13 +218,14 @@ pub struct Parse {
 // though it matches the type name.
 #[allow(clippy::self_named_constructors)]
 impl Parse {
-    /// Parse the source and return a [`Parse`].
-    pub fn parse(src: &str) -> Self {
-        let input = Input::new(src);
+    /// Parse the source and return a [`Parse`]. Yields cooperatively (amortized) while
+    /// lexing, parsing, and building the tree; output is identical to a synchronous parse.
+    pub async fn parse(src: &str) -> Self {
+        let input = Input::new(src).await;
         let mut p = Parser::new(&input);
-        p.root();
+        p.root().await;
         let events = p.finish();
-        let (green, errors) = sink::Sink::build(&input, events);
+        let (green, errors) = sink::Sink::build(&input, events).await;
         Self { green, errors }
     }
 

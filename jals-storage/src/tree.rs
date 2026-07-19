@@ -88,7 +88,7 @@ impl CodeTree {
         if let Some(file) = self.files.get(key) {
             return Some(EntryRef::File(file));
         }
-        let dir = DirKey::new(key.path().clone());
+        let dir = key.as_dir_key();
         self.directories.get(&dir).map(EntryRef::Directory)
     }
 
@@ -96,8 +96,7 @@ impl CodeTree {
         if let Some(dir) = self.directories.get(key) {
             return Some(EntryRef::Directory(dir));
         }
-        FileKey::new(key.path().clone())
-            .ok()
+        key.as_file_key()
             .and_then(|file| self.files.get(&file))
             .map(EntryRef::File)
     }
@@ -130,7 +129,7 @@ impl CodeTree {
     /// Every file under `key`. Keys sort lexicographically by segment, so a directory's
     /// descendants are a contiguous range.
     fn descendant_files(&self, key: &DirKey) -> impl Iterator<Item = &CodeFile> {
-        let start = FileKey::new(key.path().clone()).map_or(Bound::Unbounded, Bound::Included);
+        let start = key.as_file_key().map_or(Bound::Unbounded, Bound::Included);
         self.files
             .range((start, Bound::Unbounded))
             .take_while(move |(file, _)| file.path().starts_with(key.path()))
@@ -141,7 +140,6 @@ impl CodeTree {
         self.files.values()
     }
 
-    #[cfg(any(feature = "std", test))]
     pub(crate) fn directories_under(&self, key: &DirKey) -> impl Iterator<Item = &DirKey> {
         self.directories
             .range((Bound::Included(key), Bound::Unbounded))
@@ -152,7 +150,7 @@ impl CodeTree {
         &mut self,
         key: &DirKey,
     ) -> core::result::Result<(), TreeError> {
-        if let Ok(file) = FileKey::new(key.path().clone())
+        if let Some(file) = key.as_file_key()
             && self.files.contains_key(&file)
         {
             return Err(TreeError::FileDirectoryCollision(file));
@@ -160,7 +158,7 @@ impl CodeTree {
         let mut lineage: Vec<_> = key.ancestors().collect();
         lineage.reverse();
         for dir in lineage {
-            if let Ok(file) = FileKey::new(dir.path().clone())
+            if let Some(file) = dir.as_file_key()
                 && self.files.contains_key(&file)
             {
                 return Err(TreeError::FileAncestor(file));
@@ -175,13 +173,12 @@ impl CodeTree {
         key: FileKey,
         bytes: impl Into<Arc<[u8]>>,
     ) -> core::result::Result<(), TreeError> {
-        let collision = DirKey::new(key.path().clone());
+        let collision = key.as_dir_key();
         if self.directories.contains(&collision) {
             return Err(TreeError::FileDirectoryCollision(key));
         }
         if let Some(ancestor) = key.parent().ancestors().find_map(|dir| {
-            FileKey::new(dir.path().clone())
-                .ok()
+            dir.as_file_key()
                 .filter(|file| self.files.contains_key(file))
         }) {
             return Err(TreeError::FileAncestor(ancestor));
@@ -225,12 +222,7 @@ impl CodeTree {
         for file in files {
             self.files.remove(&file);
         }
-        let dirs: Vec<_> = self
-            .directories
-            .range((Bound::Included(key), Bound::Unbounded))
-            .take_while(|dir| dir.path().starts_with(key.path()))
-            .cloned()
-            .collect();
+        let dirs: Vec<_> = self.directories_under(key).cloned().collect();
         for dir in dirs {
             self.directories.remove(&dir);
         }

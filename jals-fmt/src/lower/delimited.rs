@@ -14,6 +14,8 @@ use alloc::vec::Vec;
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
+use jals_exec::Yielder;
+
 use crate::config::{ClosingParen, FnParamsLayout, TrailingComma};
 use crate::doc::Doc;
 use crate::lower::Ctx;
@@ -101,10 +103,18 @@ impl Ctx<'_> {
     /// Whether the subtree under `node` contains any comment token. A tabular layout preserves
     /// inter-element whitespace only; an interior comment would need its own anchoring, so a
     /// commented initializer is never treated as tabular and falls back to width-based wrapping.
-    fn has_interior_comment(node: &SyntaxNode) -> bool {
-        node.descendants_with_tokens()
+    async fn has_interior_comment(node: &SyntaxNode) -> bool {
+        let mut yielder = Yielder::new();
+        for t in node
+            .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
-            .any(|t| crate::comments::CommentMap::is_comment(t.kind()))
+        {
+            yielder.tick().await;
+            if crate::comments::CommentMap::is_comment(t.kind()) {
+                return true;
+            }
+        }
+        false
     }
 
     /// The source-row partition of an array initializer laid out as a *table*, or `None` when it is
@@ -113,8 +123,8 @@ impl Ctx<'_> {
     /// `element_count` is the number of comma-separated items the caller built — the partition is
     /// rejected unless it accounts for exactly that many, so a malformed list (stray tokens, a
     /// count mismatch) safely falls back to width-based wrapping.
-    fn tabular_rows(node: &SyntaxNode, element_count: usize) -> Option<Vec<usize>> {
-        if Self::has_interior_comment(node) {
+    async fn tabular_rows(node: &SyntaxNode, element_count: usize) -> Option<Vec<usize>> {
+        if Self::has_interior_comment(node).await {
             return None;
         }
         let mut rows: Vec<usize> = Vec::new();
@@ -203,7 +213,7 @@ impl Ctx<'_> {
     /// default; for an array initializer it instead follows the `trailing-comma` policy (see
     /// [`crate::rules::trailing_comma::TrailingCommaRule::doc`]) — the only Java list where adding
     /// or dropping it is legal.
-    pub(crate) fn lower_delimited(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_delimited(&self, node: &SyntaxNode) -> Doc {
         // Never synthesize a delimiter that the source lacks (error recovery): start empty
         // and fill from the real tokens so the significant-token sequence is preserved.
         let mut open_doc = Doc::nil();
@@ -220,9 +230,9 @@ impl Ctx<'_> {
         for el in node.children_with_tokens() {
             if let Some(child) = el.as_node() {
                 if let Some(first) = Self::first_sig_token(child) {
-                    current.push(self.sep(cur_prev.as_ref(), &first));
+                    current.push(self.sep(cur_prev.as_ref(), &first).await);
                 }
-                current.push(self.lower(child));
+                current.push(self.lower(child).await);
                 cur_prev = Self::last_sig_token(child);
             } else if let Some(t) = el.as_token() {
                 let kind = t.kind();
@@ -240,7 +250,7 @@ impl Ctx<'_> {
                     }
                     _ if kind.is_trivia() => {}
                     _ => {
-                        current.push(self.sep(cur_prev.as_ref(), t));
+                        current.push(self.sep(cur_prev.as_ref(), t).await);
                         current.push(self.tok(t));
                         cur_prev = Some(t.clone());
                     }
@@ -292,7 +302,7 @@ impl Ctx<'_> {
         // verbatim.
         if node.kind() == S::ARRAY_INIT
             && self.cfg.tabular_array_initializers
-            && let Some(row_sizes) = Self::tabular_rows(node, items.len())
+            && let Some(row_sizes) = Self::tabular_rows(node, items.len()).await
         {
             return Self::tabular_doc(open_doc, close_doc, items, &row_sizes);
         }

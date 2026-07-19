@@ -13,10 +13,16 @@ jals-classpath = { path = "../jals-classpath", default-features = false, feature
 ] }
 jals-config = { workspace = true }
 jals-editor = { workspace = true }
+# The browser runtime adapter (`Exec::wasm()`): `spawn_local` tasks and macrotask-escaping yields
+# so the page paints during long parses. Host-side tests use `Exec::inline`/`block_on_inline`.
+jals-exec = { workspace = true, features = ["wasm"] }
 jals-fmt = { workspace = true }
 jals-storage = { workspace = true }
 jals-hir = { workspace = true }
 jals-syntax = { workspace = true }
+# `futures::lock::Mutex` — the FIFO-fair, single-thread-safe async lock serializing every
+# workspace touch (providers hold it across their awaits; no `RefCell` borrow crosses an await).
+futures = { workspace = true }
 # Browser `fetch` for downloading dependency jars (already in the tree via yew's `gloo`).
 gloo-net = { version = "0.7", default-features = false, features = ["http"] }
 js-sys = "0.3"

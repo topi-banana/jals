@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use jals_storage::io::IoError;
+
 /// The result of a fallible class-file codec operation.
 pub type Result<T> = core::result::Result<T, ClassfileError>;
 
@@ -18,11 +20,12 @@ pub enum ClassfileError {
     },
     /// The leading 4-byte magic was not `0xCAFEBABE`.
     BadMagic(u32),
-    /// Bytes remained after a structurally complete class file.
-    TrailingBytes {
-        /// How many bytes were left over.
-        remaining: usize,
-    },
+    /// Bytes remained after a structurally complete class file. (A streaming source cannot
+    /// know how many without draining, so no count is carried.)
+    TrailingBytes,
+    /// The byte source itself failed (host I/O, decompression, ...). Distinct from every other
+    /// variant: the input was not malformed, it could not be read.
+    Source(IoError),
     /// A constant-pool entry carried a tag byte that is not defined by the JVM spec.
     InvalidConstantTag(u8),
     /// A bytecode (or `wide`-prefixed) instruction used an opcode that is not defined by the JVM spec.
@@ -43,11 +46,11 @@ impl fmt::Display for ClassfileError {
             Self::BadMagic(m) => {
                 write!(f, "bad magic: expected 0xCAFEBABE, found {m:#010X}")
             }
-            Self::TrailingBytes { remaining } => {
-                write!(
-                    f,
-                    "{remaining} trailing byte(s) after a complete class file"
-                )
+            Self::TrailingBytes => {
+                write!(f, "trailing byte(s) after a complete class file")
+            }
+            Self::Source(error) => {
+                write!(f, "class-file source read failed: {error}")
             }
             Self::InvalidConstantTag(t) => {
                 write!(f, "invalid constant-pool tag: {t}")

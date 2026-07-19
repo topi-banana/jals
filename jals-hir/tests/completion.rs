@@ -20,27 +20,27 @@ fn at(
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::Parse::parse(s).syntax(),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(s)).syntax(),
             )
         })
         .collect();
-    let index = ProjectIndex::builder(&nodes).build();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let (fid, root) = &nodes[file];
-    let resolved = Resolved::resolve_node(root);
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
     run(root, &resolved, &index, *fid, offset)
 }
 
 /// Run member completion at the `$0` marker in `sources[file]`.
 fn complete(sources: &[&str], file: usize) -> Vec<Completion> {
     at(sources, file, |root, resolved, index, file, offset| {
-        index.member_completions(root, resolved, file, offset)
+        jals_exec::block_on_inline(index.member_completions(root, resolved, file, offset))
     })
 }
 
 /// Run scope completion (a non-member-access position) at the `$0` marker in `sources[file]`.
 fn scope(sources: &[&str], file: usize) -> Vec<Completion> {
     at(sources, file, |root, resolved, index, file, offset| {
-        index.scope_completions(root, resolved, file, offset)
+        jals_exec::block_on_inline(index.scope_completions(root, resolved, file, offset))
     })
 }
 
@@ -178,7 +178,7 @@ fn scope_offers_project_types_from_other_files() {
 #[test]
 fn at_member_access_distinguishes_the_two_contexts() {
     let src = "class C { void m(C c) { c. } }";
-    let root = jals_syntax::Parse::parse(src).syntax();
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
     // Right after `c.`: a member-access position.
     let dot = src.find("c.").unwrap() + 2;
     assert!(ProjectIndex::at_member_access(&root, dot));
@@ -197,11 +197,19 @@ fn never_panics_on_broken_input() {
         ".",
         "class C { .$0 }",
     ] {
-        let nodes = [(FileId(0), jals_syntax::Parse::parse(src).syntax())];
-        let index = ProjectIndex::builder(&nodes).build();
-        let resolved = Resolved::resolve_node(&nodes[0].1);
+        let nodes = [(
+            FileId(0),
+            jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax(),
+        )];
+        let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[0].1));
         for offset in [0, src.len(), src.len().saturating_sub(1)] {
-            let _ = index.member_completions(&nodes[0].1, &resolved, FileId(0), offset);
+            let _ = jals_exec::block_on_inline(index.member_completions(
+                &nodes[0].1,
+                &resolved,
+                FileId(0),
+                offset,
+            ));
         }
     }
 }

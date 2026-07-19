@@ -15,12 +15,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use jals_config::{Compiler as CompilerSpec, Manifest, Runtime as RuntimeSpec, ToolSpec};
+use jals_exec::Exec;
+use jals_exec::tokio_rt::on_blocking_pool;
 
 use crate::builtin::BuiltinToolchain;
 use crate::invocation::Invocation;
 use crate::request::{CompileRequest, RunRequest};
 use crate::toolchain::{
     BuildOutcome, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
+    ToolchainFuture,
 };
 
 impl dyn Compiler {
@@ -28,12 +31,12 @@ impl dyn Compiler {
     /// matching the [`jals_config::Compiler`] variant routes `"builtin"` to the in-process
     /// [`BuiltinToolchain`] (over the host filesystem) and every `javac` selector to the host
     /// [`SubprocessToolchain`] — so a host drives one `&dyn Compiler`, whatever the manifest
-    /// selects.
-    pub fn select(manifest: &Manifest) -> Box<dyn Compiler> {
+    /// selects. The `exec` handle backs the builtin backend's native project storage.
+    pub async fn select(manifest: &Manifest, exec: &Exec) -> Box<dyn Compiler> {
         match &manifest.toolchain.compiler {
-            CompilerSpec::Builtin => Box::new(BuiltinToolchain::host()),
+            CompilerSpec::Builtin => Box::new(BuiltinToolchain::host(exec.clone())),
             CompilerSpec::System | CompilerSpec::Path(_) | CompilerSpec::Distribution(_) => {
-                Box::new(SubprocessToolchain::from_manifest(manifest))
+                Box::new(SubprocessToolchain::from_manifest(manifest).await)
             }
         }
     }
@@ -44,11 +47,11 @@ impl dyn Runtime {
     /// the run-step mirror of `<dyn Compiler>::select`, matching [`jals_config::Runtime`]. The two
     /// selections are independent, so a builtin compile can pair with a real `java` run (and vice
     /// versa) with no routing composite in between.
-    pub fn select(manifest: &Manifest) -> Box<dyn Runtime> {
+    pub async fn select(manifest: &Manifest, exec: &Exec) -> Box<dyn Runtime> {
         match &manifest.toolchain.runtime {
-            RuntimeSpec::Builtin => Box::new(BuiltinToolchain::host()),
+            RuntimeSpec::Builtin => Box::new(BuiltinToolchain::host(exec.clone())),
             RuntimeSpec::System | RuntimeSpec::Path(_) | RuntimeSpec::Distribution(_) => {
-                Box::new(SubprocessToolchain::from_manifest(manifest))
+                Box::new(SubprocessToolchain::from_manifest(manifest).await)
             }
         }
     }
@@ -56,9 +59,9 @@ impl dyn Runtime {
 
 impl BuiltinToolchain {
     /// The builtin backend over the host filesystem.
-    const fn host() -> Self {
+    const fn host(exec: Exec) -> Self {
         Self {
-            backend: super::builtin::BuiltinBackend::Native,
+            backend: super::builtin::BuiltinBackend::Native(exec),
         }
     }
 }
@@ -85,7 +88,7 @@ impl SubprocessToolchain {
     ///
     /// Discovers installed JDKs only when a [`ToolSpec::Distribution`] selector is present (the
     /// common no-`[toolchain]` project pays no discovery cost).
-    pub fn from_manifest(manifest: &Manifest) -> Self {
+    pub async fn from_manifest(manifest: &Manifest) -> Self {
         let tc = &manifest.toolchain;
         let needs_discovery = matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
             || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }));
@@ -93,7 +96,7 @@ impl SubprocessToolchain {
             compiler: tc.compiler.clone(),
             runtime: tc.runtime.clone(),
             installs: if needs_discovery {
-                Self::discover_installs()
+                on_blocking_pool(Self::discover_installs).await
             } else {
                 Vec::new()
             },
@@ -111,10 +114,9 @@ impl SubprocessToolchain {
         }
     }
 
-    /// Resolve `tool` to a concrete program path: read the environment (`$JAVAC`/`$JAVA`,
-    /// `$JAVA_HOME`, `$HOME`) into the pure [`ToolResolver`] policy and pick the first candidate
-    /// that exists on disk (else the policy's own fallback).
-    fn resolve_program(&self, tool: Tool, project_root: &Path) -> PathBuf {
+    /// The [`Candidates`](crate::Candidates) for `tool`: the environment (`$JAVAC`/`$JAVA`,
+    /// `$JAVA_HOME`, `$HOME`) read into the pure [`ToolResolver`] policy.
+    fn candidates(&self, tool: Tool, project_root: &Path) -> crate::Candidates {
         let env_override = std::env::var_os(tool.env_var()).map(PathBuf::from);
         let java_home = std::env::var_os("JAVA_HOME").map(PathBuf::from);
         let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -124,35 +126,53 @@ impl SubprocessToolchain {
             home: home.as_deref(),
             project_root,
         };
-        resolver
-            .resolve(tool, self.spec(tool), env_override)
-            .pick(Path::is_file)
+        resolver.resolve(tool, self.spec(tool), env_override)
     }
 
-    /// The `javac` [`Invocation`] with its program resolved, ready to spawn or display.
-    fn plan_compile(&self, req: &CompileRequest<'_>) -> Invocation {
+    /// Resolve `tool` to a concrete program path, probing candidate existence off the executor.
+    async fn resolve_program(&self, tool: Tool, project_root: &Path) -> PathBuf {
+        self.candidates(tool, project_root)
+            .pick_async(async |path: &Path| {
+                let path = path.to_path_buf();
+                on_blocking_pool(move || path.is_file()).await
+            })
+            .await
+    }
+
+    /// [`resolve_program`](Self::resolve_program) with inline probes, for the display-only
+    /// `describe_*` paths (a handful of `stat` calls; not worth suspending over).
+    fn resolve_program_blocking(&self, tool: Tool, project_root: &Path) -> PathBuf {
+        self.candidates(tool, project_root).pick(Path::is_file)
+    }
+
+    /// The `javac` [`Invocation`] with its program resolved, ready to spawn.
+    async fn plan_compile(&self, req: &CompileRequest<'_>) -> Invocation {
         Invocation::build(req, self.path_sep)
-            .with_program(self.resolve_program(Tool::Javac, req.project_root))
+            .with_program(self.resolve_program(Tool::Javac, req.project_root).await)
     }
 
-    /// The `java` [`Invocation`] with its program resolved, ready to spawn or display.
-    fn plan_run(&self, req: &RunRequest<'_>) -> Invocation {
+    /// The `java` [`Invocation`] with its program resolved, ready to spawn.
+    async fn plan_run(&self, req: &RunRequest<'_>) -> Invocation {
         Invocation::run(req, self.path_sep)
-            .with_program(self.resolve_program(Tool::Java, req.project_root))
+            .with_program(self.resolve_program(Tool::Java, req.project_root).await)
     }
 
-    /// Spawn an invocation, inheriting stdio, and map the exit status to a [`BuildOutcome`].
-    fn spawn(invocation: &Invocation) -> Result<BuildOutcome, ToolchainError> {
-        let status = Command::new(&invocation.program)
-            .args(&invocation.args)
-            .status()
-            .map_err(|source| ToolchainError::Spawn {
-                program: invocation.program.clone(),
-                source,
-            })?;
-        Ok(BuildOutcome {
-            code: status.code(),
+    /// Spawn an invocation on the blocking pool, inheriting stdio, and map the exit status to a
+    /// [`BuildOutcome`]. The subprocess wait blocks one pool thread; the executor keeps running.
+    async fn spawn(invocation: Invocation) -> Result<BuildOutcome, ToolchainError> {
+        on_blocking_pool(move || {
+            let status = Command::new(&invocation.program)
+                .args(&invocation.args)
+                .status()
+                .map_err(|source| ToolchainError::Spawn {
+                    program: invocation.program.clone(),
+                    source,
+                })?;
+            Ok(BuildOutcome {
+                code: status.code(),
+            })
         })
+        .await
     }
 
     /// Scan the common JDK install locations and describe each install for [`ToolResolver`].
@@ -204,31 +224,38 @@ impl SubprocessToolchain {
 }
 
 impl Compiler for SubprocessToolchain {
-    fn compile(&self, req: &CompileRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
-        Self::spawn(&self.plan_compile(req))
+    fn compile<'a>(&'a self, req: &'a CompileRequest<'_>) -> ToolchainFuture<'a> {
+        Box::pin(async move { Self::spawn(self.plan_compile(req).await).await })
     }
 
     fn describe_compile(&self, req: &CompileRequest<'_>) -> String {
-        self.plan_compile(req).display_command()
+        Invocation::build(req, self.path_sep)
+            .with_program(self.resolve_program_blocking(Tool::Javac, req.project_root))
+            .display_command()
     }
 }
 
 impl Runtime for SubprocessToolchain {
-    fn run(&self, req: &RunRequest<'_>) -> Result<BuildOutcome, ToolchainError> {
-        Self::spawn(&self.plan_run(req))
+    fn run<'a>(&'a self, req: &'a RunRequest<'_>) -> ToolchainFuture<'a> {
+        Box::pin(async move { Self::spawn(self.plan_run(req).await).await })
     }
 
     fn describe_run(&self, req: &RunRequest<'_>) -> String {
-        self.plan_run(req).display_command()
+        Invocation::run(req, self.path_sep)
+            .with_program(self.resolve_program_blocking(Tool::Java, req.project_root))
+            .display_command()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use jals_exec::block_on_inline;
+
     use super::*;
 
     #[test]
     fn select_routes_each_tool_to_its_backend() {
+        let exec = Exec::inline();
         let root = Path::new("/proj");
         let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
 
@@ -249,13 +276,14 @@ mod tests {
             program_args: &[],
             extra_classpath: &[],
         };
-        let compiler = <dyn Compiler>::select(&manifest);
+        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
         assert!(
             compiler
                 .describe_compile(&compile_req)
                 .starts_with("builtin:")
         );
-        let run_description = <dyn Runtime>::select(&manifest).describe_run(&run_req);
+        let run_description =
+            block_on_inline(<dyn Runtime>::select(&manifest, &exec)).describe_run(&run_req);
         assert!(run_description.contains("java"));
         assert!(!run_description.starts_with("builtin:"));
 
@@ -268,7 +296,7 @@ mod tests {
             extra_sources: &[],
             extra_classpath: &[],
         };
-        let compiler = <dyn Compiler>::select(&manifest);
+        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
         assert!(compiler.describe_compile(&compile_req).contains("javac"));
 
         // runtime = "builtin" alone: the dummy run next to a real `javac` compile.
@@ -280,7 +308,7 @@ mod tests {
             program_args: &[],
             extra_classpath: &[],
         };
-        let runtime = <dyn Runtime>::select(&manifest);
+        let runtime = block_on_inline(<dyn Runtime>::select(&manifest, &exec));
         assert!(runtime.describe_run(&run_req).starts_with("builtin:"));
         let compile_req = CompileRequest {
             manifest: &manifest,
@@ -289,7 +317,7 @@ mod tests {
             extra_sources: &[],
             extra_classpath: &[],
         };
-        let compiler = <dyn Compiler>::select(&manifest);
+        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
         assert!(compiler.describe_compile(&compile_req).contains("javac"));
     }
 
@@ -298,7 +326,7 @@ mod tests {
         // A manifest with no `[toolchain]` and no env override resolves to the system tools; whatever
         // path is chosen, it ends in the tool's binary name.
         let manifest = Manifest::default();
-        let toolchain = SubprocessToolchain::from_manifest(&manifest);
+        let toolchain = block_on_inline(SubprocessToolchain::from_manifest(&manifest));
         let root = Path::new("/proj");
 
         let compile_req = CompileRequest {
@@ -308,7 +336,7 @@ mod tests {
             extra_sources: &[],
             extra_classpath: &[],
         };
-        let program = toolchain.plan_compile(&compile_req).program;
+        let program = block_on_inline(toolchain.plan_compile(&compile_req)).program;
         assert!(
             program.ends_with("javac"),
             "compiler program should end in `javac`, got {program}"
@@ -321,7 +349,7 @@ mod tests {
             program_args: &[],
             extra_classpath: &[],
         };
-        let program = toolchain.plan_run(&run_req).program;
+        let program = block_on_inline(toolchain.plan_run(&run_req)).program;
         assert!(
             program.ends_with("java"),
             "runtime program should end in `java`, got {program}"

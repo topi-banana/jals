@@ -5,7 +5,9 @@ use super::event::Event;
 use crate::syntax_kind::SyntaxKind;
 
 /// 開いたノードのマーカ。必ず [`complete`](Marker::complete) か [`abandon`](Marker::abandon)
-/// で消費する(消費し忘れると `Drop` で panic)。
+/// で消費する(テストでは消費し忘れると `Drop` で panic)。本番ビルドでは、サスペンド中の
+/// パース future が drop された(キャンセルされた)ときに未完了マーカが正当に drop される
+/// ため、`Drop` は検査しない。
 #[must_use]
 pub(crate) struct Marker {
     pos: usize,
@@ -49,10 +51,16 @@ impl Marker {
 
 impl Drop for Marker {
     fn drop(&mut self) {
-        assert!(
-            self.completed || Self::currently_panicking(),
-            "Marker は complete か abandon で消費しなければならない"
-        );
+        // Test-only guard: test parse futures always run to completion, so an incomplete marker
+        // there is a real grammar bug. In production a parse future dropped while suspended
+        // (cancellation) legitimately drops open markers, and panicking inside `Drop` during
+        // that teardown would escalate to an abort — so the check must not run there.
+        if cfg!(test) {
+            assert!(
+                self.completed || Self::currently_panicking(),
+                "Marker は complete か abandon で消費しなければならない"
+            );
+        }
     }
 }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 jals-classfile.workspace = true
+jals-exec.workspace = true
 
 [lints]
 workspace = true

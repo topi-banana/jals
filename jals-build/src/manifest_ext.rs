@@ -73,6 +73,7 @@ impl Error for ManifestError {
 /// This is the counterpart of the pure model in [`jals_config`]. Brought into scope alongside
 /// `jals_config::Manifest`, its methods are callable with the historic `manifest.method(dir)` /
 /// `Manifest::from_file(path)` syntax.
+#[allow(async_fn_in_trait)]
 pub trait ManifestExt {
     /// Load, parse, and validate a specific `jals.toml` file. Delegates parse+validation to
     /// `jals_config`'s [`FromStr`](core::str::FromStr), re-stamping errors with the real path.
@@ -80,7 +81,7 @@ pub trait ManifestExt {
     /// # Errors
     /// Returns [`ManifestError`] when the file cannot be read, contains invalid TOML, or fails
     /// validation (e.g. duplicate `[[bin]]` names).
-    fn from_file(path: &Path) -> Result<Manifest, ManifestError>;
+    async fn from_file(path: &Path) -> Result<Manifest, ManifestError>;
 
     /// Search upward from `start_dir` for a `jals.toml`, returning its path.
     ///
@@ -88,7 +89,7 @@ pub trait ManifestExt {
     /// relative to it. Returns `None` when no manifest is found in `start_dir` or any ancestor.
     /// Unlike the formatter/linter configs (where a missing file means "use defaults"), a missing
     /// manifest is left for the caller to treat as an error — there is nothing to build without one.
-    fn discover_path(start_dir: &Path) -> Option<PathBuf>;
+    async fn discover_path(start_dir: &Path) -> Option<PathBuf>;
 
     /// The absolute `.java` source roots: each `[build] source-dirs` entry resolved against
     /// `manifest_dir` (the manifest's own directory). These feed `javac -sourcepath` and are the
@@ -97,33 +98,41 @@ pub trait ManifestExt {
 }
 
 impl ManifestExt for Manifest {
-    fn from_file(path: &Path) -> Result<Manifest, ManifestError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ManifestError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        text.parse::<Self>().map_err(|err| match err {
-            ManifestParseError::Parse { source, .. } => ManifestError::Parse {
-                path: path.to_path_buf(),
+    async fn from_file(path: &Path) -> Result<Self, ManifestError> {
+        let path = path.to_path_buf();
+        jals_exec::tokio_rt::on_blocking_pool(move || {
+            let text = std::fs::read_to_string(&path).map_err(|source| ManifestError::Io {
+                path: path.clone(),
                 source,
-            },
-            ManifestParseError::Invalid { source, .. } => ManifestError::Invalid {
-                path: path.to_path_buf(),
-                source,
-            },
+            })?;
+            text.parse::<Self>().map_err(|err| match err {
+                ManifestParseError::Parse { source, .. } => ManifestError::Parse {
+                    path: path.clone(),
+                    source,
+                },
+                ManifestParseError::Invalid { source, .. } => ManifestError::Invalid {
+                    path: path.clone(),
+                    source,
+                },
+            })
         })
+        .await
     }
 
-    fn discover_path(start_dir: &Path) -> Option<PathBuf> {
-        let mut dir = Some(start_dir);
-        while let Some(d) = dir {
-            let candidate = d.join("jals.toml");
-            if candidate.is_file() {
-                return Some(candidate);
+    async fn discover_path(start_dir: &Path) -> Option<PathBuf> {
+        let start_dir = start_dir.to_path_buf();
+        jals_exec::tokio_rt::on_blocking_pool(move || {
+            let mut dir = Some(start_dir.as_path());
+            while let Some(d) = dir {
+                let candidate = d.join("jals.toml");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+                dir = d.parent();
             }
-            dir = d.parent();
-        }
-        None
+            None
+        })
+        .await
     }
 
     fn source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf> {
@@ -142,7 +151,10 @@ mod tests {
     #[test]
     fn discover_path_returns_none_when_absent() {
         // A path with no `jals.toml` anywhere above it yields None. Use the root, which has none.
-        assert_eq!(Manifest::discover_path(Path::new("/")), None);
+        assert_eq!(
+            jals_exec::block_on_inline(Manifest::discover_path(Path::new("/"))),
+            None
+        );
     }
 
     #[test]

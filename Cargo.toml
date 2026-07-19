@@ -8,6 +8,7 @@ members = [
   "jals-config",
   "jals-decompile",
   "jals-editor",
+  "jals-exec",
   "jals-fmt",
   "jals-storage",
   "jals-hir",
@@ -34,6 +35,9 @@ anyhow = { version = "1.0.99" }
 ariadne = { version = "0.6.0" }
 async-lsp = { version = "0.2.4" }
 clap = { version = "4.6.1", features = ["derive"] }
+# Raw-deflate decompression and crc32 for jals-classpath's in-house zip reader; both stay
+# `default-features = false` so the archive path is `no_std + alloc` and wasm-safe.
+crc32fast = { version = "1", default-features = false }
 futures = { version = "0.3" }
 hashbrown = { version = "0.17" }
 # `default-features = false`: `jals-build`'s host half (`SubprocessToolchain`) is behind its
@@ -45,20 +49,24 @@ jals-classpath = { path = "jals-classpath" }
 jals-config = { path = "jals-config" }
 jals-decompile = { path = "jals-decompile" }
 jals-editor = { path = "jals-editor" }
+jals-exec = { path = "jals-exec", default-features = false }
 jals-fmt = { path = "jals-fmt" }
 jals-storage = { path = "jals-storage", default-features = false }
 jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
 jals-syntax = { path = "jals-syntax" }
+miniz_oxide = { version = "0.8", default-features = false, features = [
+  "with-alloc",
+] }
 num-derive = { version = "0.4.2" }
 num-traits = { version = "0.2.19" }
 rayon = { version = "1" }
 # Host-only (jals-classpath downloads dependency jars). `rustls-tls` for pure-Rust TLS (no system
-# OpenSSL, so it cross-compiles cleanly); `blocking` fits the sync CLI. `default-features = false`
-# drops the OpenSSL-backed default TLS, keeping it out of the pure/`wasm32` crates.
+# OpenSSL, so it cross-compiles cleanly); the async client runs on the workspace's current-thread
+# tokio runtime. `default-features = false` drops the OpenSSL-backed default TLS, keeping it out
+# of the pure/`wasm32` crates.
 reqwest = { version = "0.12", default-features = false, features = [
-  "blocking",
   "rustls-tls",
 ] }
 rowan = { version = "0.16.1" }
@@ -85,8 +93,9 @@ ungrammar = { version = "1.16" }
 unicode-properties = { version = "=0.1.4" }
 unicode-width = { version = "0.2.1" }
 walkdir = { version = "2" }
-# Host-only (jals-classpath reads jars). `deflate` is the only compression jars use; disabling the
-# rest keeps the dependency tree small and out of the pure/`wasm32` crates.
+# Dev-only: jals-classpath reads jars through its own portable zip reader; the `zip` crate remains
+# solely to write test fixtures and cross-verify that reader. `deflate` is the only compression
+# jars use.
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [workspace.lints.clippy]
@@ -125,6 +134,10 @@ todo = "deny"
 unimplemented = "deny"
 
 module_name_repetitions = "allow"
+# The whole workspace is deliberately `!Send`-async: runtimes are current-thread everywhere and
+# multi-core parallelism happens only through `jals-exec`'s fan-out (workers drive `!Send`
+# futures locally). Requiring `Send` futures would contradict the execution model.
+future_not_send = "allow"
 # `pub(crate)` in a private module is a deliberate crate-internal intent marker; the nursery lint
 # that flags it as redundant would erase that signal, so keep it off.
 redundant_pub_crate = "allow"

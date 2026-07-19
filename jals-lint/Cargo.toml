@@ -7,6 +7,7 @@ edition.workspace = true
 # The linter configuration (`Config`) and the `Severity` value type live in `jals-config`, the shared
 # config-model crate; `jals-lint` lints with them and re-exports `Severity` through `diagnostic`.
 jals-config.workspace = true
+jals-exec.workspace = true
 jals-hir.workspace = true
 jals-syntax.workspace = true
 

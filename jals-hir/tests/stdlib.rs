@@ -17,7 +17,7 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
         .map(|(i, s)| {
             (
                 FileId(u32::try_from(i).unwrap()),
-                jals_syntax::Parse::parse(s).syntax(),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(s)).syntax(),
             )
         })
         .collect()
@@ -25,19 +25,25 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
 
 /// Analyses a single-file project *with the stdlib stubs*, returning the pieces a test queries.
 fn analyse_with_stdlib(src: &str) -> (SyntaxNode, Resolved, TypeInference, ProjectIndex) {
-    let node = jals_syntax::Parse::parse(src).syntax();
-    let resolved = Resolved::resolve_node(&node);
-    let index = ProjectIndex::builder(&[(FileId(0), node.clone())])
-        .with_stdlib()
-        .build();
-    let ti = TypeInference::infer(&node, &resolved, &index, FileId(0));
+    let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node.clone())])
+            .with_stdlib()
+            .build(),
+    );
+    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
     (node, resolved, ti, index)
 }
 
 /// The type-mismatch diagnostics for a single-file project analysed *with the stdlib stubs*.
 fn mismatches_with_stdlib(src: &str) -> Vec<TypeMismatch> {
     let (node, resolved, _ti, index) = analyse_with_stdlib(src);
-    TypeInference::type_mismatches(&node, &resolved, Some((&index, FileId(0))))
+    jals_exec::block_on_inline(TypeInference::type_mismatches(
+        &node,
+        &resolved,
+        Some((&index, FileId(0))),
+    ))
 }
 
 /// The inferred type of the first definition named `name`.
@@ -105,7 +111,7 @@ fn stdlib_symbol_goto_is_none() {
 fn default_build_keeps_string_external() {
     // Regression guard: without the stubs, `String` is external exactly as before.
     let src = "class C { String f; }";
-    let index = ProjectIndex::builder(&nodes(&[src])).build();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes(&[src])).build());
     assert_eq!(
         index.resolve_type_name(FileId(0), "String", None),
         TypeResolution::External,
@@ -286,7 +292,7 @@ fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
         "🦀 class Broken { int (}",
     ];
     let nodes = nodes(&sources);
-    let index = ProjectIndex::builder(&nodes).with_stdlib().build();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
     // Every *project* item's name range stays within its source; stub items live at reserved high
     // file ids and are excluded from this host-source bounds check.
     for item in index.items().filter(|it| it.origin == ItemOrigin::Project) {

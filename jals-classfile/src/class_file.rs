@@ -46,29 +46,32 @@ pub struct ClassFile {
 }
 
 impl ClassFile {
-    /// Parse a class file from its raw bytes. Returns an [`Err`] (never panics) on any structural
-    /// problem, including a bad magic or trailing bytes.
-    pub fn read(bytes: &[u8]) -> Result<Self> {
-        let mut r = Reader::new(bytes);
-        let magic = r.u32()?;
+    /// Parse a class file from any portable byte source ([`jals_storage::io::Read`]) — a
+    /// `&[u8]` slice, or a host-side reader bridged through `jals_storage::io::StdReader`.
+    /// In-memory sources complete without suspending; the parse yields cooperatively inside
+    /// its bulk loops. Returns an [`Err`] (never panics) on any structural problem, including
+    /// a bad magic or trailing bytes.
+    pub async fn read<R: jals_storage::io::Read>(source: R) -> Result<Self> {
+        let mut r = Reader::new(source);
+        let magic = r.u32().await?;
         if magic != MAGIC {
             return Err(ClassfileError::BadMagic(magic));
         }
-        let minor_version = r.u16()?;
-        let major_version = r.u16()?;
-        let constant_pool = ConstantPool::read(&mut r)?;
-        let access_flags = ClassAccessFlags(r.u16()?);
-        let this_class = r.u16()?;
-        let super_class = r.u16()?;
-        let interfaces = r.u16_list()?;
-        let fields = r.list(|r| FieldInfo::read(r, &constant_pool))?;
-        let methods = r.list(|r| MethodInfo::read(r, &constant_pool))?;
-        let attributes = Attribute::read_all(&mut r, &constant_pool)?;
-        if r.remaining() != 0 {
-            return Err(ClassfileError::TrailingBytes {
-                remaining: r.remaining(),
-            });
-        }
+        let minor_version = r.u16().await?;
+        let major_version = r.u16().await?;
+        let constant_pool = ConstantPool::read(&mut r).await?;
+        let access_flags = ClassAccessFlags(r.u16().await?);
+        let this_class = r.u16().await?;
+        let super_class = r.u16().await?;
+        let interfaces = r.u16_list().await?;
+        let fields = r
+            .list(async |r| FieldInfo::read(r, &constant_pool).await)
+            .await?;
+        let methods = r
+            .list(async |r| MethodInfo::read(r, &constant_pool).await)
+            .await?;
+        let attributes = Attribute::read_all(&mut r, &constant_pool).await?;
+        r.expect_eof().await?;
         Ok(Self {
             minor_version,
             major_version,

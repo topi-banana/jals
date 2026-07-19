@@ -7,6 +7,7 @@ edition.workspace = true
 # The formatter configuration (`Config` and its option enums) lives in `jals-config`, the shared
 # config-model crate; `jals-fmt` re-exports it internally and formats with it.
 jals-config.workspace = true
+jals-exec.workspace = true
 jals-syntax.workspace = true
 unicode-width.workspace = true
 

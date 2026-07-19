@@ -78,25 +78,72 @@ pub struct ResolvedDependencies {
     pub warnings: Vec<Warning>,
 }
 
+/// One spec's state after the serial classification pass: decided from the project or cache, or
+/// waiting on the deduplicated fetch at `locator`.
+enum Classified {
+    Done(Result<CacheKey, Warning>),
+    NeedsFetch { locator: usize },
+}
+
 /// Stateless dependency resolver. Persistence belongs to [`ArtifactCache`].
 pub struct DependencyResolver;
 
 impl DependencyResolver {
     /// Resolve project and external jars into the cache.
     ///
-    /// Project content is read only from `view`; external content is published write-once after its
-    /// SHA-256 content digest is known. An external request with `expected` first performs a verified
-    /// lookup and therefore avoids a download on a cache hit.
-    #[allow(clippy::future_not_send)]
+    /// Three passes keep the output byte-identical to a sequential walk while overlapping the
+    /// network waits: (1) serial, in spec order — everything up to a fetch (project publication,
+    /// verified lookups, locator-index recovery); (2) the remaining locators, deduplicated,
+    /// fetched concurrently on the current task; (3) serial, in spec order — digest verification,
+    /// write-once publication, index recording, and emission of jars and warnings.
     pub async fn resolve<F: Fetcher, C: CacheBackend>(
         fetcher: &F,
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         specs: &[DependencySpec],
     ) -> ResolvedDependencies {
-        let mut out = ResolvedDependencies::default();
+        // Pass 1: classify serially, collecting the deduplicated locators still needing bytes.
+        let mut classified = Vec::with_capacity(specs.len());
+        let mut locators: Vec<&ExternalLocator> = Vec::new();
         for spec in specs {
-            match Self::resolve_one(fetcher, view, cache, spec).await {
+            let state = Self::classify(view, cache, spec).await.map_or_else(
+                || {
+                    let DependencyLocation::External { locator, .. } = &spec.location else {
+                        unreachable!("only external specs need a fetch");
+                    };
+                    let index = locators
+                        .iter()
+                        .position(|known| *known == locator)
+                        .unwrap_or_else(|| {
+                            locators.push(locator);
+                            locators.len() - 1
+                        });
+                    Classified::NeedsFetch { locator: index }
+                },
+                Classified::Done,
+            );
+            classified.push(state);
+        }
+
+        // Pass 2: overlap the network waits. Single-thread concurrency is the right shape here —
+        // the work is waiting, not CPU.
+        let fetched = jals_exec::join_ordered(
+            locators
+                .iter()
+                .map(|locator| fetcher.fetch(locator.as_str())),
+        )
+        .await;
+
+        // Pass 3: serial, in spec order — verify, publish, record, emit.
+        let mut out = ResolvedDependencies::default();
+        for (spec, state) in specs.iter().zip(classified) {
+            let outcome = match state {
+                Classified::Done(outcome) => outcome,
+                Classified::NeedsFetch { locator } => {
+                    Self::publish_fetched(cache, spec, &fetched[locator]).await
+                }
+            };
+            match outcome {
                 Ok(key) => out.jars.push(ResolvedJar {
                     name: spec.name.clone(),
                     key,
@@ -108,37 +155,16 @@ impl DependencyResolver {
         out
     }
 
-    #[allow(clippy::future_not_send)]
-    async fn resolve_one<F: Fetcher, C: CacheBackend>(
-        fetcher: &F,
+    /// Everything that can be decided before fetching: project reads/publication, verified
+    /// external lookups, and locator-index recovery. `None` means the spec needs a fetch.
+    async fn classify<C: CacheBackend>(
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
-    ) -> Result<CacheKey, Warning> {
+    ) -> Option<Result<CacheKey, Warning>> {
         match &spec.location {
             DependencyLocation::Project(file) => {
-                let bytes = view
-                    .file(file)
-                    .map_err(|error| {
-                        Warning::new(
-                            WarningOrigin::ProjectFile(file.clone()),
-                            format!("dependency `{}` cannot be read: {error}", spec.name),
-                        )
-                    })?
-                    .bytes();
-                let key = Self::cache_key(
-                    CacheNamespace::DependencyJar,
-                    b"project\0",
-                    file.to_string().as_bytes(),
-                    bytes,
-                );
-                cache.publish(&key, bytes).map_err(|error| {
-                    Warning::new(
-                        WarningOrigin::ProjectFile(file.clone()),
-                        format!("dependency `{}` cache publish failed: {error:?}", spec.name),
-                    )
-                })?;
-                Ok(key)
+                Some(Self::publish_project(view, cache, spec, file).await)
             }
             DependencyLocation::External { locator, expected } => {
                 if let Some(content) = expected {
@@ -148,17 +174,17 @@ impl DependencyResolver {
                         locator.as_str().as_bytes(),
                         *content,
                     );
-                    match cache.lookup(&key) {
-                        Ok(Some(_)) => return Ok(key),
+                    match cache.open_verified(&key).await {
+                        Ok(Some(_)) => return Some(Ok(key)),
                         Ok(None) => {}
                         Err(error) => {
-                            return Err(Warning::new(
+                            return Some(Err(Warning::new(
                                 WarningOrigin::External(locator.clone()),
                                 format!(
                                     "dependency `{}` cache lookup failed: {error:?}",
                                     spec.name
                                 ),
-                            ));
+                            )));
                         }
                     }
                 } else if ExternalLocator::is_remote(locator.as_str()) {
@@ -168,54 +194,98 @@ impl DependencyResolver {
                     // verified lookup; any index or artifact problem just falls back to a fetch.
                     let provenance =
                         Self::provenance_digest(b"external\0", locator.as_str().as_bytes());
-                    if let Ok(Some(key)) =
-                        cache.indexed_key(CacheNamespace::DependencyJar, provenance)
-                        && matches!(cache.lookup(&key), Ok(Some(_)))
+                    if let Ok(Some(key)) = cache
+                        .indexed_key(CacheNamespace::DependencyJar, provenance)
+                        .await
+                        && matches!(cache.open_verified(&key).await, Ok(Some(_)))
                     {
-                        return Ok(key);
+                        return Some(Ok(key));
                     }
                 }
-                let bytes = fetcher.fetch(locator.as_str()).await.map_err(|message| {
-                    Warning::new(
-                        WarningOrigin::External(locator.clone()),
-                        format!("dependency `{}` fetch failed: {message}", spec.name),
-                    )
-                })?;
-                let actual = ContentDigest::of(&bytes);
-                if let Some(expected) = expected
-                    && *expected != actual
-                {
-                    return Err(Warning::new(
-                        WarningOrigin::External(locator.clone()),
-                        format!(
-                            "dependency `{}` digest mismatch: expected {}, got {}",
-                            spec.name,
-                            expected.to_hex(),
-                            actual.to_hex()
-                        ),
-                    ));
-                }
-                let key = Self::cache_key_for_digest(
-                    CacheNamespace::DependencyJar,
-                    b"external\0",
-                    locator.as_str().as_bytes(),
-                    actual,
-                );
-                cache.publish(&key, &bytes).map_err(|error| {
-                    Warning::new(
-                        WarningOrigin::External(locator.clone()),
-                        format!("dependency `{}` cache publish failed: {error:?}", spec.name),
-                    )
-                })?;
-                // Best-effort: remember this locator's content so a digest-less request can
-                // recover it next time. Resolution already succeeded; an index write failure
-                // only costs a refetch later.
-                if ExternalLocator::is_remote(locator.as_str()) {
-                    let _ = cache.record_index(&key);
-                }
-                Ok(key)
+                None
             }
         }
+    }
+
+    async fn publish_project<C: CacheBackend>(
+        view: &ProjectView,
+        cache: &mut ArtifactCache<C>,
+        spec: &DependencySpec,
+        file: &FileKey,
+    ) -> Result<CacheKey, Warning> {
+        let bytes = view
+            .file(file)
+            .map_err(|error| {
+                Warning::new(
+                    WarningOrigin::ProjectFile(file.clone()),
+                    format!("dependency `{}` cannot be read: {error}", spec.name),
+                )
+            })?
+            .bytes();
+        let key = Self::cache_key(
+            CacheNamespace::DependencyJar,
+            b"project\0",
+            file.to_string().as_bytes(),
+            bytes,
+        );
+        cache.publish(&key, bytes).await.map_err(|error| {
+            Warning::new(
+                WarningOrigin::ProjectFile(file.clone()),
+                format!("dependency `{}` cache publish failed: {error:?}", spec.name),
+            )
+        })?;
+        Ok(key)
+    }
+
+    /// The pass-3 half of an external resolution: verify the fetched bytes against a pinned
+    /// digest, publish write-once, and record the locator index for remote locators.
+    async fn publish_fetched<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
+        spec: &DependencySpec,
+        fetched: &Result<Vec<u8>, String>,
+    ) -> Result<CacheKey, Warning> {
+        let DependencyLocation::External { locator, expected } = &spec.location else {
+            unreachable!("only external specs are fetched");
+        };
+        let bytes = fetched.as_ref().map_err(|message| {
+            Warning::new(
+                WarningOrigin::External(locator.clone()),
+                format!("dependency `{}` fetch failed: {message}", spec.name),
+            )
+        })?;
+        let actual = ContentDigest::of(bytes);
+        if let Some(expected) = expected
+            && *expected != actual
+        {
+            return Err(Warning::new(
+                WarningOrigin::External(locator.clone()),
+                format!(
+                    "dependency `{}` digest mismatch: expected {}, got {}",
+                    spec.name,
+                    expected.to_hex(),
+                    actual.to_hex()
+                ),
+            ));
+        }
+        let key = Self::cache_key_for_digest(
+            CacheNamespace::DependencyJar,
+            b"external\0",
+            locator.as_str().as_bytes(),
+            actual,
+        );
+        cache.publish(&key, bytes).await.map_err(|error| {
+            Warning::new(
+                WarningOrigin::External(locator.clone()),
+                format!("dependency `{}` cache publish failed: {error:?}", spec.name),
+            )
+        })?;
+        // Best-effort: remember this locator's content so a digest-less request can recover it
+        // next time. Resolution already succeeded; an index write failure only costs a refetch
+        // later.
+        if ExternalLocator::is_remote(locator.as_str()) {
+            let _ = cache.record_index(&key).await;
+        }
+        Ok(key)
     }
 
     pub(crate) fn cache_key(

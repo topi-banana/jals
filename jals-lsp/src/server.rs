@@ -1,31 +1,35 @@
-//! The LSP server: wires the document store and the [`LspHost`] rendering of `jals-editor`'s
-//! queries to async-lsp's `LanguageServer` trait, and runs the stdio event loop.
+//! The LSP server: the stdio event loop, plus the `Send` frontend that bridges async-lsp's
+//! router to the single-owner language service actor ([`Actor`](crate::actor)).
+//!
+//! async-lsp's router requires request handlers to return `Send` futures, while the analysis
+//! state is `!Send` by design. [`ServerState`] therefore owns nothing but the client handle and
+//! a command sender: request handlers enqueue a [`Cmd`] carrying a oneshot reply channel and
+//! return a future that only awaits the reply (channel endpoints are `Send`); notification
+//! handlers enqueue and continue. The actor task processes the queue FIFO, which gives
+//! didChange-before-query ordering for free.
 
-use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
 
 use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::lsp_types::{
-    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, CreateFilesParams,
-    DeleteFilesParams, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidChangeWatchedFilesRegistrationOptions,
-    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentFormattingParams, DocumentHighlight,
-    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FileSystemWatcher,
-    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, GlobPattern,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, Location, OneOf, Position,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams, Registration,
+    CompletionOptions, CompletionParams, CompletionResponse, CreateFilesParams, DeleteFilesParams,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FileSystemWatcher, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, Location, OneOf, PrepareRenameResponse, ReferenceParams, Registration,
     RegistrationParams, RenameFilesParams, RenameOptions, RenameParams, SelectionRange,
-    SelectionRangeParams, SelectionRangeProviderCapability, SemanticToken, SemanticTokens,
-    SemanticTokensDelta, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams, WorkDoneProgressCancelParams,
-    WorkDoneProgressOptions, WorkspaceEdit,
+    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    WillSaveTextDocumentParams, WorkDoneProgressCancelParams, WorkDoneProgressOptions,
+    WorkspaceEdit,
     notification::{self, Notification},
     request,
 };
@@ -35,46 +39,48 @@ use async_lsp::server::LifecycleLayer;
 use async_lsp::tracing::TracingLayer;
 use async_lsp::{ClientSocket, ErrorCode, LanguageServer, MainLoop, ResponseError};
 use futures::future::BoxFuture;
-use jals_build::ManifestExt;
-use jals_config::Manifest;
-use jals_editor::{
-    EditorHost, FoldingHost, Folds, Ident, Outline, SelectionChains, SelectionHost,
-    SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
-};
-use jals_storage::{DirKey, FileKey, NativeStorage};
+use jals_exec::Exec;
+use tokio::sync::{mpsc, oneshot};
 use tower::ServiceBuilder;
 
-use crate::formatting::Formatting;
+use crate::actor::{Actor, Cmd, Reply};
 use crate::host::LspHost;
-use crate::state::{Document, DocumentStore, ProjectWorkspace, UriConfigs};
 
 /// The jals language server: builds the async-lsp main loop and runs the stdio event loop.
 pub struct Server;
 
 impl Server {
-    /// Run the language server over stdio on a fresh current-thread runtime. Blocks until the
-    /// client disconnects. The public entry point (`jals lsp`).
+    /// Run the language server over stdio on a fresh current-thread runtime (the workspace-wide
+    /// `jals-exec` bootstrap). Blocks until the client disconnects. The public entry point
+    /// (`jals lsp`).
     pub fn run() -> anyhow::Result<()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build()?;
-        runtime.block_on(Self::serve())
+        jals_exec::tokio_rt::run(Self::serve)?
     }
 
-    /// Build the server and run its stdio event loop until the client disconnects.
-    // Runs on a current-thread runtime (see [`Server::run`]), so the future is deliberately `!Send`
-    // — it holds the non-`Send` stdio locks across `.await`. Those guards are moved into
+    /// Build the server and run its stdio event loop until the client disconnects. Exported so a
+    /// host that already owns a `jals-exec` runtime (the CLI) can await it directly.
+    // Runs on a current-thread runtime (see [`Server::run`]), so the future is deliberately
+    // `!Send` — it holds the non-`Send` stdio locks across `.await`. Those guards are moved into
     // `run_buffered` and live for the whole loop by design, so neither can be dropped earlier.
-    #[allow(clippy::future_not_send, clippy::significant_drop_tightening)]
-    async fn serve() -> anyhow::Result<()> {
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn serve(exec: Exec) -> anyhow::Result<()> {
+        let (commands, receiver) = mpsc::unbounded_channel();
         let (server, _client) = MainLoop::new_server(|client| {
+            // The actor task owns every piece of `!Send` analysis state (documents, workspaces,
+            // caches); the router below only ever holds the command sender, so the futures its
+            // handlers return stay `Send`. The actor keeps a sender clone of its own, for
+            // spawned workspace assemblies to report back through the same queue.
+            let actor = Actor::new(client.clone(), exec.clone(), commands.clone());
+            drop(exec.spawn(actor.run(receiver)));
             ServiceBuilder::new()
                 .layer(TracingLayer::default())
                 .layer(LifecycleLayer::default())
                 .layer(CatchUnwindLayer::default())
                 .layer(ConcurrencyLayer::default())
                 .layer(ClientProcessMonitorLayer::new(client.clone()))
-                .service(Router::from_language_server(ServerState::new(client)))
+                .service(Router::from_language_server(ServerState::new(
+                    client, commands,
+                )))
         });
 
         // stdout is the LSP transport, so all logging must go to stderr.
@@ -101,429 +107,53 @@ impl Server {
     }
 }
 
-/// Server state: the client handle, open documents, memoized config discovery (one cache each for
-/// the formatter's `jalsfmt.toml` and the linter's `jalslint.toml`), and one workspace per open
-/// `jals.toml` project.
+/// The `Send` half of the server: the client handle, the actor's command sender, and the one
+/// piece of handshake state the frontend itself needs (`initialize` is answered here — the
+/// capabilities are static). Everything else is a one-way trip into the actor's queue.
 struct ServerState {
     client: ClientSocket,
-    store: DocumentStore,
-    discovery: UriConfigs<jals_config::fmt::Config>,
-    lint_discovery: UriConfigs<jals_config::lint::Config>,
-    /// One [`ProjectWorkspace`] per `jals.toml` project a client has a file open in. Populated
-    /// lazily on `did_open` by walking up from the file to its manifest (see
-    /// [`ServerState::ensure_workspace_for`]), so the server only ever indexes a real project's
-    /// source roots, never a whole git checkout. Empty for files that belong to no manifest,
-    /// which fall back to one-file resolution.
-    workspaces: Vec<ProjectWorkspace>,
+    commands: mpsc::UnboundedSender<Cmd>,
     /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
     /// taken from the `initialize` request. Gates the config watcher registration.
     config_watch_registration_supported: bool,
-    /// The last semantic-tokens response published per document — its `result_id` and the
-    /// delta-encoded token array — so a `textDocument/semanticTokens/full/delta` request can be
-    /// answered with just the edits turning the client's copy into the current one. Evicted on
-    /// `did_close`; a `previous_result_id` the cache no longer holds falls back to a full response.
-    semantic_tokens_cache: HashMap<Url, (String, Vec<SemanticToken>)>,
-    /// Monotonic counter minting a fresh `result_id` for each semantic-tokens response.
-    semantic_tokens_result_id: u64,
 }
 
 impl ServerState {
-    fn new(client: ClientSocket) -> Self {
+    const fn new(client: ClientSocket, commands: mpsc::UnboundedSender<Cmd>) -> Self {
         Self {
             client,
-            store: DocumentStore::default(),
-            discovery: UriConfigs::default(),
-            lint_discovery: UriConfigs::default(),
-            workspaces: Vec::new(),
+            commands,
             config_watch_registration_supported: false,
-            semantic_tokens_cache: HashMap::new(),
-            semantic_tokens_result_id: 0,
         }
     }
 
-    /// Ensure a [`ProjectWorkspace`] is loaded for the `jals.toml` project `uri` belongs to.
-    ///
-    /// Walks up from the file's directory to find its manifest. If there is one and no workspace
-    /// for that project root is loaded yet, builds it from the manifest's source roots and adds it;
-    /// if one already exists it is reused, and a file under no manifest is left for one-file
-    /// resolution. The manifest is only parsed when a new workspace is actually built, so reopening
-    /// files in an already-loaded project is cheap.
-    fn ensure_workspace_for(&mut self, uri: &Url) {
-        let Some(dir) = uri
-            .to_file_path()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-        else {
-            return;
-        };
-        let Some(manifest_path) = Manifest::discover_path(&dir) else {
-            return;
-        };
-        let root = manifest_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        if self.workspaces.iter().any(|ws| ws.project_root() == root) {
-            return;
-        }
-        let Ok(manifest) = Manifest::from_file(&manifest_path) else {
-            // An unparsable manifest: index the project root as a lone source root, no classpath.
-            self.workspaces.push(ProjectWorkspace::bare(&root));
-            return;
-        };
-        // Assemble the project's full analysis + navigation inputs in one call (see
-        // `NativeProjectPlan::assemble_blocking`). The native fetch adapter uses reqwest's
-        // blocking client, which panics inside the Tokio runtime this server uses, so it runs on
-        // a dedicated thread (`manifest` moves in), joined immediately — blocking workspace load
-        // once per project. stderr is safe to log on: the LSP protocol owns stdout, not stderr.
-        let deps_root = root.clone();
-        let assembled = std::thread::spawn(move || {
-            let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(&manifest, &deps_root);
-            let mut storage = NativeStorage::for_project_scoped(&deps_root, scopes)
-                .map_err(|error| error.to_string())?;
-            let (inputs, source_roots) = jals_classpath::NativeProjectPlan::assemble_blocking(
-                &manifest,
-                &deps_root,
-                &mut storage,
-                jals_classpath::ProjectInputOptions::Editor,
-            );
-            for warning in &inputs.warnings {
-                eprintln!("jals-lsp: {}", warning.message);
-            }
-
-            // Navigation sources are cache artifacts, not host paths. Mount them as overlay files
-            // in the same aggregate so the editor reads them from this exact revision, and
-            // materialize each one out of the cache so its definition targets are real,
-            // openable files.
-            let mut materialized = BTreeMap::new();
-            let mut mounts = Vec::new();
-            let library_sources: Vec<_> = inputs
-                .library_sources
-                .iter()
-                .filter_map(|source| {
-                    Self::stage_artifact(
-                        &storage,
-                        "library",
-                        source,
-                        &mut mounts,
-                        &mut materialized,
-                    )
-                })
-                .collect();
-            let source_dep_sources: Vec<_> = inputs
-                .source_dep_sources
-                .iter()
-                .filter_map(|source| match source {
-                    jals_classpath::SourceFile::Project(key) => Some(key.clone()),
-                    jals_classpath::SourceFile::Artifact(source) => Self::stage_artifact(
-                        &storage,
-                        "source-dependency",
-                        source,
-                        &mut mounts,
-                        &mut materialized,
-                    ),
-                })
-                .collect();
-            // One revision bump and tree rebuild for the whole batch — mounting the sources one
-            // `set_overlay` at a time rebuilds the merged tree per file, quadratic in mount count.
-            // On failure the mounts are simply absent and the workspace loads without them.
-            let revision = storage.revision();
-            if let Err(error) = storage.set_overlays(revision, mounts) {
-                eprintln!("jals-lsp: mounting dependency sources failed: {error}");
-            }
-            Ok::<_, String>((
-                storage,
-                source_roots,
-                inputs,
-                library_sources,
-                source_dep_sources,
-                materialized,
-            ))
-        })
-        .join()
-        .expect("project input assembly thread panicked");
-
-        let Ok((storage, source_roots, inputs, library_sources, source_dep_sources, materialized)) =
-            assembled
-        else {
-            self.workspaces.push(ProjectWorkspace::bare(&root));
-            return;
-        };
-
-        self.workspaces.push(ProjectWorkspace::load_storage(
-            root,
-            storage,
-            source_roots,
-            &inputs.classpath_classes,
-            library_sources,
-            source_dep_sources,
-            materialized,
-            inputs.feature_set,
-        ));
+    fn service_unavailable() -> ResponseError {
+        ResponseError::new(ErrorCode::INTERNAL_ERROR, "language service unavailable")
     }
 
-    /// Stage a cached navigation source for mounting into the aggregate's overlay under
-    /// `.jals/<kind>/…`, returning its overlay key. `None` skips an artifact that is missing
-    /// from the cache or whose path cannot be addressed. The artifact is also materialized to a
-    /// real file under the cache root and recorded in `materialized`, so go-to-definition
-    /// targets resolve to a `file://` URL the client can actually open. The caller commits the
-    /// staged batch with one `set_overlays`.
-    fn stage_artifact(
-        storage: &NativeStorage,
-        kind: &str,
-        source: &jals_classpath::LibrarySource,
-        mounts: &mut Vec<(FileKey, Vec<u8>)>,
-        materialized: &mut BTreeMap<FileKey, PathBuf>,
-    ) -> Option<FileKey> {
-        let bytes = storage.artifacts().lookup(&source.key).ok().flatten()?;
-        let mount_root = DirKey::parse(&format!(".jals/{kind}")).ok()?;
-        let key = mount_root.file_at(&source.path).ok()?;
-        mounts.push((key.clone(), bytes));
-        // Best-effort: a failed materialization keeps the mount (analysis still works), it only
-        // degrades navigation into this one file.
-        if let Ok(target) = storage
-            .artifacts()
-            .materialize_source(&source.key, &source.path)
-        {
-            materialized.insert(key.clone(), target);
-        }
-        Some(key)
-    }
-
-    /// The loaded workspace that owns `uri`, if any.
-    fn workspace_for(&self, uri: &Url) -> Option<&ProjectWorkspace> {
-        self.workspaces.iter().find(|ws| ws.owns_uri(uri))
-    }
-
-    /// The shared request dispatch: answer through the workspace that owns `uri`, falling back
-    /// to the one-file project over the open document for files outside any indexed workspace.
-    fn answer<T>(
+    /// Enqueue a request command and return the future that awaits its reply. The future holds
+    /// only the oneshot receiver (`Send`), never any analysis state. A dead actor (send failed,
+    /// or the reply sender dropped without answering) resolves to `INTERNAL_ERROR` instead of
+    /// hanging the client.
+    fn request<R: Send + 'static>(
         &self,
-        uri: &Url,
-        workspace: impl FnOnce(&ProjectWorkspace) -> Option<T>,
-        fallback: impl FnOnce(&Document) -> Option<T>,
-    ) -> Option<T> {
-        self.workspace_for(uri)
-            .and_then(workspace)
-            .or_else(|| self.store.get(uri).and_then(|doc| fallback(&doc)))
-    }
-
-    /// Reflect the open document at `uri` into the project index of the workspace that owns it, if
-    /// any.
-    fn refresh_workspace_overlay(&mut self, uri: &Url) {
-        let Some(doc) = self.store.get(uri) else {
-            return;
-        };
-        if let Some(workspace) = self.workspaces.iter_mut().find(|ws| ws.owns_uri(uri)) {
-            workspace.set_overlay(uri, &doc);
-        }
-    }
-
-    /// Compute and push diagnostics for `uri` (a no-op if the document is not open).
-    ///
-    /// The assembly policy (syntax + lint + cross-file resolution, ordering, suppression) is
-    /// [`jals_editor::FileDiagnostics`], driven through the owning workspace (which folds in the
-    /// project index and its resolved feature set). A file outside any workspace runs the same
-    /// policy over an index-aware one-file project ([`SingleFileProject`]), so in-file subtyping
-    /// and stdlib-classified exceptions still check.
-    fn publish_diagnostics(&mut self, uri: &Url) {
-        let Some(doc) = self.store.get(uri) else {
-            return;
-        };
-        let config = self.lint_discovery.for_uri(uri);
-        let diagnostics = self
-            .workspace_for(uri)
-            .and_then(|ws| ws.diagnostics(uri, &config))
-            .unwrap_or_else(|| {
-                let project = SingleFileProject::new(&doc.content.parse);
-                project
-                    .diagnostics(&doc.content.parse, &config)
-                    .into_iter()
-                    .map(|diagnostic| LspHost.diagnostic(&doc.content, diagnostic))
-                    .collect()
-            });
-        let _ = self
-            .client
-            .notify::<notification::PublishDiagnostics>(PublishDiagnosticsParams {
-                uri: uri.clone(),
-                diagnostics,
-                version: Some(doc.version),
-            });
-    }
-
-    // ---- One-file fallbacks ---------------------------------------------------------------------
-    //
-    // Requests on a document outside any indexed workspace drive the same [`SingleFileProject`]
-    // query surface the workspace path uses, mapped through [`LspHost`]. A stdlib-aware one-file
-    // index is built per request; targets outside the open document (a source-less stdlib member
-    // keeps a reserved file id) are never mapped onto its text.
-
-    /// Go-to-definition over the open document alone.
-    fn fallback_definition(doc: &Document, uri: &Url, position: Position) -> Option<Location> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        let target = project
-            .queries()
-            .definition(LspHost.offset(&doc.content, &position))?;
-        (target.file == SingleFileProject::FILE).then(|| Location {
-            uri: uri.clone(),
-            range: LspHost.range(&doc.content, target.range),
+        build: impl FnOnce(Reply<R>) -> Cmd,
+    ) -> BoxFuture<'static, Result<R, ResponseError>> {
+        let (reply, response) = oneshot::channel();
+        let sent = self.commands.send(build(reply)).is_ok();
+        Box::pin(async move {
+            if !sent {
+                return Err(Self::service_unavailable());
+            }
+            response.await.map_err(|_| Self::service_unavailable())?
         })
     }
 
-    /// Find-references over the open document alone, each as a `Location` under `uri`.
-    fn fallback_references(
-        doc: &Document,
-        uri: &Url,
-        position: Position,
-        include_declaration: bool,
-    ) -> Vec<Location> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        project
-            .queries()
-            .references(
-                LspHost.offset(&doc.content, &position),
-                include_declaration,
-                [project.file()],
-            )
-            .into_iter()
-            .map(|target| Location {
-                uri: uri.clone(),
-                range: LspHost.range(&doc.content, target.range),
-            })
-            .collect()
-    }
-
-    /// prepareRename over the open document alone.
-    fn fallback_prepare_rename(doc: &Document, position: Position) -> Option<Range> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        let range = project
-            .queries()
-            .renamable_range(LspHost.offset(&doc.content, &position))?;
-        Some(LspHost.range(&doc.content, range))
-    }
-
-    /// Rename over the open document alone: gate on renamability, then rewrite every occurrence.
-    fn fallback_rename(
-        doc: &Document,
-        uri: &Url,
-        position: Position,
-        new_name: &str,
-    ) -> Option<WorkspaceEdit> {
-        Self::fallback_prepare_rename(doc, position)?;
-        LspHost::workspace_edit(
-            Self::fallback_references(doc, uri, position, true),
-            new_name,
-        )
-    }
-
-    /// Hover over the open document alone.
-    fn fallback_hover(doc: &Document, position: Position) -> Option<Hover> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        let markdown = project
-            .queries()
-            .hover_markdown(LspHost.offset(&doc.content, &position))?;
-        Some(LspHost.hover(markdown))
-    }
-
-    /// Completions over the open document alone.
-    fn fallback_completions(doc: &Document, position: Position) -> Vec<CompletionItem> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        project
-            .queries()
-            .completions(LspHost.offset(&doc.content, &position))
-            .into_iter()
-            .map(|completion| LspHost.completion(completion))
-            .collect()
-    }
-
-    /// Signature help over the open document alone.
-    fn fallback_signature_help(doc: &Document, position: Position) -> Option<SignatureHelp> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        let help = project
-            .queries()
-            .signature_help(LspHost.offset(&doc.content, &position))?;
-        Some(LspHost.signature_help(SignatureHelpUtf16::of(&help)))
-    }
-
-    /// Occurrence highlights over the open document alone.
-    fn fallback_highlights(doc: &Document, position: Position) -> Vec<DocumentHighlight> {
-        let project = SingleFileProject::new(&doc.content.parse);
-        project
-            .queries()
-            .highlights(LspHost.offset(&doc.content, &position))
-            .into_iter()
-            .map(|highlight| LspHost.highlight(&doc.content, highlight))
-            .collect()
-    }
-
-    /// The document's delta-encoded semantic tokens: cross-file-aware through the workspace that
-    /// owns `uri` when there is one, otherwise a file-local classification over the open document
-    /// alone. `None` if the document is not open.
-    fn compute_semantic_tokens(&self, uri: &Url) -> Option<Vec<SemanticToken>> {
-        self.workspace_for(uri)
-            .and_then(|workspace| workspace.semantic_tokens(uri))
-            .or_else(|| {
-                self.store.get(uri).map(|doc| {
-                    LspHost.semantic_tokens(
-                        &doc.content,
-                        jals_editor::SemanticTokens::classify(&doc.content.parse.syntax(), None),
-                    )
-                })
-            })
-            .map(|tokens| tokens.data)
-    }
-
-    /// Mint a fresh `result_id` for a semantic-tokens response.
-    fn next_semantic_tokens_result_id(&mut self) -> String {
-        self.semantic_tokens_result_id += 1;
-        self.semantic_tokens_result_id.to_string()
-    }
-
-    /// The full semantic-tokens response for `uri`, tagged with a fresh `result_id` and cached as the
-    /// baseline for a later `full/delta`. `None` if the document is not open.
-    fn semantic_tokens_full_response(&mut self, uri: &Url) -> Option<SemanticTokensResult> {
-        let data = self.compute_semantic_tokens(uri)?;
-        let result_id = self.next_semantic_tokens_result_id();
-        self.semantic_tokens_cache
-            .insert(uri.clone(), (result_id.clone(), data.clone()));
-        Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: Some(result_id),
-            data,
-        }))
-    }
-
-    /// The `full/delta` response for `uri` against the client's `previous_result_id`: just the edits
-    /// since that baseline when the server still holds it, otherwise the full token set. Either way a
-    /// fresh `result_id` is minted and cached. `None` if the document is not open.
-    fn semantic_tokens_delta_response(
-        &mut self,
-        uri: &Url,
-        previous_result_id: &str,
-    ) -> Option<SemanticTokensFullDeltaResult> {
-        let data = self.compute_semantic_tokens(uri)?;
-        let result_id = self.next_semantic_tokens_result_id();
-        // If the client still holds the baseline we cached under `previous_result_id`, compute the
-        // edits turning it into the current tokens — borrowing it in place, before we overwrite the
-        // cache below, so a stale/evicted id costs no clone of the previous token array.
-        let edits = self
-            .semantic_tokens_cache
-            .get(uri)
-            .filter(|(cached_id, _)| *cached_id == previous_result_id)
-            .map(|(_, cached_data)| LspHost::tokens_delta(cached_data, &data));
-        self.semantic_tokens_cache
-            .insert(uri.clone(), (result_id.clone(), data.clone()));
-        Some(match edits {
-            // A matching baseline: reply with just the edits turning it into the current tokens.
-            Some(edits) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
-                result_id: Some(result_id),
-                edits,
-            }),
-            // No matching baseline (evicted, or a stale id): reply with the full token set.
-            None => SemanticTokensFullDeltaResult::Tokens(SemanticTokens {
-                result_id: Some(result_id),
-                data,
-            }),
-        })
+    /// Enqueue a notification command; delivery is fire-and-forget (a dead actor means the
+    /// server is shutting down anyway) and the main loop always continues.
+    fn forward(&self, cmd: Cmd) -> ControlFlow<async_lsp::Result<()>> {
+        let _ = self.commands.send(cmd);
+        ControlFlow::Continue(())
     }
 }
 
@@ -554,7 +184,7 @@ impl LanguageServer for ServerState {
             let client = self.client.clone();
             // Notification handlers are sync and run on the main-loop task; send the
             // client request from a spawned task so the loop stays free to deliver
-            // the response.
+            // the response. The registration future touches no `!Send` state.
             tokio::spawn(async move {
                 let _ = client
                     .request::<request::RegisterCapability>(Self::config_watch_registration())
@@ -562,8 +192,8 @@ impl LanguageServer for ServerState {
             });
         }
         // Project symbol indexes are built lazily, per `jals.toml` project, the first time a file
-        // in that project is opened (see `did_open`/`ensure_workspace_for`) — so a client that
-        // opens a large folder with no manifest never triggers a whole-tree walk here.
+        // in that project is opened (see the actor's `did_open`) — so a client that opens a large
+        // folder with no manifest never triggers a whole-tree walk here.
         ControlFlow::Continue(())
     }
 
@@ -571,76 +201,19 @@ impl LanguageServer for ServerState {
         &mut self,
         params: DidChangeWatchedFilesParams,
     ) -> Self::NotifyResult {
-        // A created/changed/deleted config file can affect discovery for any directory at or
-        // below it (including shadowing); drop the whole memo for the affected tool and
-        // rediscover lazily on the next request that needs it.
-        if params
-            .changes
-            .iter()
-            .any(|e| UriConfigs::<jals_config::fmt::Config>::is_config_file(&e.uri))
-        {
-            self.discovery.clear();
-        }
-        if params
-            .changes
-            .iter()
-            .any(|e| UriConfigs::<jals_config::lint::Config>::is_config_file(&e.uri))
-        {
-            self.lint_discovery.clear();
-        }
-        // Only the workspaces that can see a changed file re-snapshot; an edit in one project
-        // must not reload every other open project.
-        let changed: Vec<_> = params
-            .changes
-            .iter()
-            .filter_map(|event| event.uri.to_file_path().ok())
-            .collect();
-        for workspace in &mut self.workspaces {
-            if changed
-                .iter()
-                .any(|path| path.starts_with(workspace.project_root()))
-            {
-                workspace.refresh();
-            }
-        }
-        ControlFlow::Continue(())
+        self.forward(Cmd::DidChangeWatchedFiles(params))
     }
 
     fn did_open(&mut self, params: DidOpenTextDocumentParams) -> Self::NotifyResult {
-        let doc = params.text_document;
-        let uri = doc.uri;
-        self.store.upsert(uri.clone(), doc.text, doc.version);
-        // Discover (and index, once) the `jals.toml` project this file belongs to, so cross-file
-        // resolution works without ever walking a non-project folder.
-        self.ensure_workspace_for(&uri);
-        self.refresh_workspace_overlay(&uri);
-        self.publish_diagnostics(&uri);
-        ControlFlow::Continue(())
+        self.forward(Cmd::DidOpen(params))
     }
 
     fn did_change(&mut self, params: DidChangeTextDocumentParams) -> Self::NotifyResult {
-        let uri = params.text_document.uri;
-        self.store
-            .apply_changes(&uri, &params.content_changes, params.text_document.version);
-        self.refresh_workspace_overlay(&uri);
-        self.publish_diagnostics(&uri);
-        ControlFlow::Continue(())
+        self.forward(Cmd::DidChange(params))
     }
 
     fn did_close(&mut self, params: DidCloseTextDocumentParams) -> Self::NotifyResult {
-        let uri = params.text_document.uri;
-        self.store.remove(&uri);
-        // Drop the cached semantic-tokens baseline; a reopened document starts a fresh result id.
-        self.semantic_tokens_cache.remove(&uri);
-        // Clear stale diagnostics for the now-closed document.
-        let _ = self
-            .client
-            .notify::<notification::PublishDiagnostics>(PublishDiagnosticsParams {
-                uri,
-                diagnostics: Vec::new(),
-                version: None,
-            });
-        ControlFlow::Continue(())
+        self.forward(Cmd::DidClose(params))
     }
 
     // No-op notification handlers. `async-lsp`'s `from_language_server` wires *every*
@@ -697,13 +270,9 @@ impl LanguageServer for ServerState {
         &mut self,
         params: DocumentSymbolParams,
     ) -> BoxFuture<'static, Result<Option<DocumentSymbolResponse>, Self::Error>> {
-        let doc = self.store.get(&params.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                DocumentSymbolResponse::Nested(
-                    LspHost.symbols(&doc.content, Outline::of(&doc.content.parse.syntax())),
-                )
-            }))
+        self.request(|reply| Cmd::DocumentSymbol {
+            uri: params.text_document.uri,
+            reply,
         })
     }
 
@@ -712,17 +281,11 @@ impl LanguageServer for ServerState {
         params: DocumentHighlightParams,
     ) -> BoxFuture<'static, Result<Option<Vec<DocumentHighlight>>, Self::Error>> {
         let pos = params.text_document_position_params;
-        let uri = pos.text_document.uri;
-        let position = pos.position;
-        // A file in the project index highlights cross-file type names precisely through the
-        // workspace; any other document falls back to the one-file project over the open document
-        // alone (a lexical match for such a name).
-        let highlights = self.answer(
-            &uri,
-            |workspace| workspace.document_highlight(&uri, position),
-            |doc| Some(Self::fallback_highlights(doc, position)),
-        );
-        Box::pin(async move { Ok(highlights) })
+        self.request(|reply| Cmd::DocumentHighlight {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            reply,
+        })
     }
 
     fn definition(
@@ -730,85 +293,51 @@ impl LanguageServer for ServerState {
         params: GotoDefinitionParams,
     ) -> BoxFuture<'static, Result<Option<GotoDefinitionResponse>, Self::Error>> {
         let pos = params.text_document_position_params;
-        let uri = pos.text_document.uri;
-        let position = pos.position;
-        // A file in the project index resolves cross-file (and file-locally) through the workspace.
-        // `goto_definition` returns `None` for any other document, which then falls back to
-        // one-file resolution against the open document alone.
-        let location = self.answer(
-            &uri,
-            |workspace| workspace.goto_definition(&uri, position),
-            |doc| Self::fallback_definition(doc, &uri, position),
-        );
-        Box::pin(async move { Ok(location.map(GotoDefinitionResponse::Scalar)) })
+        self.request(|reply| Cmd::Definition {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            reply,
+        })
     }
 
     fn references(
         &mut self,
         params: ReferenceParams,
     ) -> BoxFuture<'static, Result<Option<Vec<Location>>, Self::Error>> {
-        let uri = params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
+        let pos = params.text_document_position;
         let include_declaration = params.context.include_declaration;
-        // A file in an indexed project finds references project-wide through the workspace (a project
-        // type used from any source file); any other document falls back to one-file references
-        // over the open document alone.
-        let locations = self.answer(
-            &uri,
-            |workspace| workspace.references(&uri, position, include_declaration),
-            |doc| {
-                Some(Self::fallback_references(
-                    doc,
-                    &uri,
-                    position,
-                    include_declaration,
-                ))
-            },
-        );
-        Box::pin(async move { Ok(locations) })
+        self.request(|reply| Cmd::References {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            include_declaration,
+            reply,
+        })
     }
 
     fn prepare_rename(
         &mut self,
         params: TextDocumentPositionParams,
     ) -> BoxFuture<'static, Result<Option<PrepareRenameResponse>, Self::Error>> {
-        let uri = params.text_document.uri;
-        let position = params.position;
-        // A file in an indexed project validates project types project-wide through the workspace;
-        // any other document falls back to one-file renamability over the open document alone.
-        let range = self.answer(
-            &uri,
-            |workspace| workspace.prepare_rename(&uri, position),
-            |doc| Self::fallback_prepare_rename(doc, position),
-        );
-        Box::pin(async move { Ok(range.map(PrepareRenameResponse::Range)) })
+        self.request(|reply| Cmd::PrepareRename {
+            uri: params.text_document.uri,
+            position: params.position,
+            reply,
+        })
     }
 
     fn rename(
         &mut self,
         params: RenameParams,
     ) -> BoxFuture<'static, Result<Option<WorkspaceEdit>, Self::Error>> {
-        let uri = params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
-        let new_name = params.new_name;
-        // Reject a new name that is not a single legal Java identifier before producing any edit, so
-        // the editor surfaces the error instead of writing broken source.
-        if !Ident::is_valid_java_identifier(&new_name) {
-            return Box::pin(async move {
-                Err(ResponseError::new(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("`{new_name}` is not a valid Java identifier"),
-                ))
-            });
-        }
-        // A file in an indexed project renames project types project-wide through the workspace;
-        // any other document falls back to a one-file rename over the open document alone.
-        let edit = self.answer(
-            &uri,
-            |workspace| workspace.rename(&uri, position, &new_name),
-            |doc| Self::fallback_rename(doc, &uri, position, &new_name),
-        );
-        Box::pin(async move { Ok(edit) })
+        // The new-name validation (a single legal Java identifier, else `INVALID_PARAMS`) lives
+        // in the actor: the identifier lexer is part of the `!Send` analysis stack.
+        let pos = params.text_document_position;
+        self.request(|reply| Cmd::Rename {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            new_name: params.new_name,
+            reply,
+        })
     }
 
     fn completion(
@@ -816,16 +345,11 @@ impl LanguageServer for ServerState {
         params: CompletionParams,
     ) -> BoxFuture<'static, Result<Option<CompletionResponse>, Self::Error>> {
         let pos = params.text_document_position;
-        let uri = pos.text_document.uri;
-        let position = pos.position;
-        // A file in the project index completes members with cross-file type names through the
-        // workspace; any other document falls back to a one-file index of the open document.
-        let items = self.answer(
-            &uri,
-            |workspace| workspace.completions(&uri, position),
-            |doc| Some(Self::fallback_completions(doc, position)),
-        );
-        Box::pin(async move { Ok(items.map(CompletionResponse::Array)) })
+        self.request(|reply| Cmd::Completion {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            reply,
+        })
     }
 
     fn hover(
@@ -833,16 +357,11 @@ impl LanguageServer for ServerState {
         params: HoverParams,
     ) -> BoxFuture<'static, Result<Option<Hover>, Self::Error>> {
         let pos = params.text_document_position_params;
-        let uri = pos.text_document.uri;
-        let position = pos.position;
-        // A file in the project index infers with cross-file type names through the workspace; any
-        // other document falls back to one-file inference against the open document alone.
-        let hover = self.answer(
-            &uri,
-            |workspace| workspace.hover(&uri, position),
-            |doc| Self::fallback_hover(doc, position),
-        );
-        Box::pin(async move { Ok(hover) })
+        self.request(|reply| Cmd::Hover {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            reply,
+        })
     }
 
     fn signature_help(
@@ -850,64 +369,51 @@ impl LanguageServer for ServerState {
         params: SignatureHelpParams,
     ) -> BoxFuture<'static, Result<Option<SignatureHelp>, Self::Error>> {
         let pos = params.text_document_position_params;
-        let uri = pos.text_document.uri;
-        let position = pos.position;
-        // A file in the project index resolves overloads with cross-file type names through the
-        // workspace; any other document falls back to a one-file index of the open document.
-        let help = self.answer(
-            &uri,
-            |workspace| workspace.signature_help(&uri, position),
-            |doc| Self::fallback_signature_help(doc, position),
-        );
-        Box::pin(async move { Ok(help) })
+        self.request(|reply| Cmd::SignatureHelp {
+            uri: pos.text_document.uri,
+            position: pos.position,
+            reply,
+        })
     }
 
     fn formatting(
         &mut self,
         params: DocumentFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<TextEdit>>, Self::Error>> {
-        let doc = self.store.get(&params.text_document.uri);
-        let config = self.discovery.for_uri(&params.text_document.uri);
-        Box::pin(
-            async move { Ok(doc.map(|doc| Formatting::formatting_edits(&doc.content, &config))) },
-        )
+        self.request(|reply| Cmd::Formatting {
+            uri: params.text_document.uri,
+            reply,
+        })
     }
 
     fn semantic_tokens_full(
         &mut self,
         params: SemanticTokensParams,
     ) -> BoxFuture<'static, Result<Option<SemanticTokensResult>, Self::Error>> {
-        // Classifies cross-file type names by their declared kind through the owning workspace when
-        // there is one, else file-locally over the open document alone (see the response builder).
-        let result = self.semantic_tokens_full_response(&params.text_document.uri);
-        Box::pin(async move { Ok(result) })
+        self.request(|reply| Cmd::SemanticTokensFull {
+            uri: params.text_document.uri,
+            reply,
+        })
     }
 
     fn semantic_tokens_full_delta(
         &mut self,
         params: SemanticTokensDeltaParams,
     ) -> BoxFuture<'static, Result<Option<SemanticTokensFullDeltaResult>, Self::Error>> {
-        let result = self
-            .semantic_tokens_delta_response(&params.text_document.uri, &params.previous_result_id);
-        Box::pin(async move { Ok(result) })
+        self.request(|reply| Cmd::SemanticTokensFullDelta {
+            uri: params.text_document.uri,
+            previous_result_id: params.previous_result_id,
+            reply,
+        })
     }
 
     fn folding_range(
         &mut self,
         params: FoldingRangeParams,
     ) -> BoxFuture<'static, Result<Option<Vec<FoldingRange>>, Self::Error>> {
-        let doc = self.store.get(&params.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                Folds::of(
-                    &doc.content.parse.syntax(),
-                    &doc.content.text,
-                    &doc.content.line_index,
-                )
-                .into_iter()
-                .map(|fold| LspHost.fold(fold))
-                .collect()
-            }))
+        self.request(|reply| Cmd::FoldingRange {
+            uri: params.text_document.uri,
+            reply,
         })
     }
 
@@ -915,19 +421,10 @@ impl LanguageServer for ServerState {
         &mut self,
         params: SelectionRangeParams,
     ) -> BoxFuture<'static, Result<Option<Vec<SelectionRange>>, Self::Error>> {
-        let doc = self.store.get(&params.text_document.uri);
-        Box::pin(async move {
-            Ok(doc.map(|doc| {
-                let root = doc.content.parse.syntax();
-                params
-                    .positions
-                    .iter()
-                    .map(|position| {
-                        let offset = LspHost.offset(&doc.content, position);
-                        LspHost.selection(&doc.content, SelectionChains::at(&root, offset))
-                    })
-                    .collect()
-            }))
+        self.request(|reply| Cmd::SelectionRange {
+            uri: params.text_document.uri,
+            positions: params.positions,
+            reply,
         })
     }
 }
@@ -997,7 +494,18 @@ impl ServerState {
 
 #[cfg(test)]
 mod tests {
+    use async_lsp::lsp_types::Url;
+    use jals_exec::block_on_inline;
+
     use super::*;
+
+    fn frontend() -> (ServerState, mpsc::UnboundedReceiver<Cmd>) {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        (
+            ServerState::new(ClientSocket::new_closed(), commands),
+            receiver,
+        )
+    }
 
     /// A notification handler returning `ControlFlow::Break` stops `async-lsp`'s main loop,
     /// exiting the server process. The notifications we don't act on must therefore return
@@ -1006,7 +514,7 @@ mod tests {
     /// `TextDocumentSyncCapability::Kind`), which otherwise killed the server.
     #[test]
     fn ignored_notifications_continue_rather_than_break() {
-        let mut state = ServerState::new(ClientSocket::new_closed());
+        let (mut state, _receiver) = frontend();
         assert!(matches!(
             state.did_save(DidSaveTextDocumentParams {
                 text_document: async_lsp::lsp_types::TextDocumentIdentifier {
@@ -1024,65 +532,40 @@ mod tests {
         ));
     }
 
-    /// `did_open` builds at most one workspace per `jals.toml` project, reuses it for later files in
-    /// the same project, and builds none for a file under no manifest — so opening a file in a
-    /// manifestless folder never triggers a whole-tree index walk (the Helix freeze regression).
+    /// Handled notifications become queue commands (they must reach the actor, in order), and
+    /// still `Continue` the loop.
     #[test]
-    fn did_open_indexes_one_workspace_per_project() {
-        use async_lsp::lsp_types::TextDocumentItem;
+    fn handled_notifications_enqueue_commands_and_continue() {
+        let (mut state, mut receiver) = frontend();
+        let flow = state.did_open(DidOpenTextDocumentParams {
+            text_document: async_lsp::lsp_types::TextDocumentItem {
+                uri: Url::parse("file:///a/B.java").unwrap(),
+                language_id: "java".into(),
+                version: 1,
+                text: "class B {}".into(),
+            },
+        });
+        assert!(matches!(flow, ControlFlow::Continue(())));
+        assert!(matches!(receiver.try_recv(), Ok(Cmd::DidOpen(_))));
+    }
 
-        fn project(name: &str) -> tempfile::TempDir {
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(
-                dir.path().join("jals.toml"),
-                format!("[package]\nname = \"{name}\"\n[build]\nsource-dirs = [\"src\"]\n"),
-            )
-            .unwrap();
-            std::fs::create_dir(dir.path().join("src")).unwrap();
-            dir
-        }
-
-        fn open(state: &mut ServerState, path: std::path::PathBuf, text: &str) {
-            std::fs::write(&path, text).unwrap();
-            let _ = state.did_open(DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
-                    uri: Url::from_file_path(path).unwrap(),
-                    language_id: "java".into(),
-                    version: 1,
-                    text: text.into(),
+    /// A request future resolves to `INTERNAL_ERROR` — instead of hanging the client — when the
+    /// language service is gone (the actor's receiver dropped).
+    #[test]
+    fn requests_fail_cleanly_when_the_service_is_gone() {
+        let (mut state, receiver) = frontend();
+        drop(receiver);
+        let future = state.hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: async_lsp::lsp_types::TextDocumentIdentifier {
+                    uri: Url::parse("file:///a/B.java").unwrap(),
                 },
-            });
-        }
-
-        let proj_a = project("a");
-        let proj_b = project("b");
-        let no_manifest = tempfile::tempdir().unwrap();
-
-        let mut state = ServerState::new(ClientSocket::new_closed());
-
-        open(&mut state, proj_a.path().join("src/A.java"), "class A {}");
-        assert_eq!(state.workspaces.len(), 1, "first file builds one workspace");
-
-        open(&mut state, proj_a.path().join("src/A2.java"), "class A2 {}");
-        assert_eq!(
-            state.workspaces.len(),
-            1,
-            "a second file in the same project reuses the workspace"
-        );
-
-        open(&mut state, proj_b.path().join("src/B.java"), "class B {}");
-        assert_eq!(
-            state.workspaces.len(),
-            2,
-            "a file in a different project adds a second workspace"
-        );
-
-        open(&mut state, no_manifest.path().join("C.java"), "class C {}");
-        assert_eq!(
-            state.workspaces.len(),
-            2,
-            "a file under no manifest builds no workspace"
-        );
+                position: async_lsp::lsp_types::Position::new(0, 0),
+            },
+            work_done_progress_params: async_lsp::lsp_types::WorkDoneProgressParams::default(),
+        });
+        let error = block_on_inline(future).expect_err("the service is unavailable");
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
     }
 
     #[test]
@@ -1105,50 +588,6 @@ mod tests {
             options.full,
             Some(SemanticTokensFullOptions::Delta { delta: Some(true) })
         ));
-    }
-
-    #[test]
-    fn semantic_tokens_delta_reflects_edits_and_falls_back_when_stale() {
-        let mut state = ServerState::new(ClientSocket::new_closed());
-        // A path under no manifest, so no workspace is built and tokens come from the open document.
-        let uri = Url::parse("file:///no-manifest/A.java").unwrap();
-        state.store.upsert(uri.clone(), "class A {}".into(), 1);
-
-        // A full request tags the response with a result id and caches it as the delta baseline.
-        let Some(SemanticTokensResult::Tokens(first)) = state.semantic_tokens_full_response(&uri)
-        else {
-            panic!("full request returns tokens");
-        };
-        let baseline = first.result_id.expect("full response carries a result id");
-
-        // Edit the document, then ask for a delta against the baseline the client still holds.
-        state
-            .store
-            .upsert(uri.clone(), "class A { int x; }".into(), 2);
-        match state.semantic_tokens_delta_response(&uri, &baseline) {
-            Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => {
-                assert!(
-                    !delta.edits.is_empty(),
-                    "the added field changes the token stream"
-                );
-                assert_ne!(
-                    delta.result_id.as_deref(),
-                    Some(baseline.as_str()),
-                    "each response mints a fresh result id"
-                );
-            }
-            other => panic!("expected a token delta, got {other:?}"),
-        }
-
-        // A `previous_result_id` the server no longer holds falls back to a full token set.
-        assert!(matches!(
-            state.semantic_tokens_delta_response(&uri, "does-not-exist"),
-            Some(SemanticTokensFullDeltaResult::Tokens(_))
-        ));
-
-        // Closing the document drops the cached baseline.
-        state.semantic_tokens_cache.remove(&uri);
-        assert!(!state.semantic_tokens_cache.contains_key(&uri));
     }
 
     #[test]

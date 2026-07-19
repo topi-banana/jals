@@ -146,18 +146,18 @@ impl Ctx<'_> {
 
     /// Whether concatenating `a` and `b` would lex as anything other than the two tokens
     /// `a` then `b` — i.e. they must not be placed adjacent (e.g. `-` and `>` form `->`).
-    fn would_fuse(a: &str, b: &str) -> bool {
+    async fn would_fuse(a: &str, b: &str) -> bool {
         if a.is_empty() || b.is_empty() {
             return false;
         }
         let joined = format!("{a}{b}");
-        let toks = jals_syntax::Lexer::tokenize(&joined);
+        let toks = jals_syntax::Lexer::tokenize(&joined).await;
         !(toks.len() == 2 && toks[0].text == a && toks[1].text == b)
     }
 
     /// The separator document between `prev` (if any) and the token `next`. Applies the
     /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
-    pub(crate) fn sep(&self, prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
+    pub(crate) async fn sep(&self, prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
         let Some(p) = prev else {
             return Doc::nil();
         };
@@ -177,16 +177,21 @@ impl Ctx<'_> {
         } else {
             None
         };
-        let space = self.want_space(pk, nk, next_parent) || Self::would_fuse(p.text(), next.text());
+        let space =
+            self.want_space(pk, nk, next_parent) || Self::would_fuse(p.text(), next.text()).await;
         if space { Doc::text(" ") } else { Doc::nil() }
     }
 
     /// A separator that keeps two tokens tight unless they would fuse (used for unary
     /// operators, e.g. `-x` but `- -x`).
-    pub(crate) fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
-        match prev {
-            Some(p) if Self::would_fuse(p.text(), next.text()) => Doc::text(" "),
-            _ => Doc::nil(),
+    pub(crate) async fn tight_sep(prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
+        let Some(p) = prev else {
+            return Doc::nil();
+        };
+        if Self::would_fuse(p.text(), next.text()).await {
+            Doc::text(" ")
+        } else {
+            Doc::nil()
         }
     }
 }

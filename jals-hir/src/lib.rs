@@ -39,7 +39,8 @@
 //!
 //! ```
 //! use jals_hir::Resolved;
-//! let resolved = Resolved::resolve("class C { int x; int get() { return x; } }");
+//! let resolved =
+//!     jals_exec::block_on_inline(Resolved::resolve("class C { int x; int get() { return x; } }"));
 //! // The `x` in `return x;` resolves back to the field `x`.
 //! let r = resolved.references.iter().find(|r| r.name == "x").unwrap();
 //! let jals_hir::Resolution::Def(id) = r.resolution else { panic!("x should resolve") };
@@ -75,6 +76,12 @@ pub use ty::{ClassTy, Primitive, Ty};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jals_exec::block_on_inline;
+
+    /// Synchronous test-side driver for the async [`Resolved::resolve`].
+    fn resolve(src: &str) -> Resolved {
+        block_on_inline(Resolved::resolve(src))
+    }
 
     /// The `Resolution` of the first reference named `name`.
     fn resolution_of(resolved: &Resolved, name: &str) -> Resolution {
@@ -88,7 +95,7 @@ mod tests {
 
     #[test]
     fn local_resolves_to_its_declaration() {
-        let resolved = Resolved::resolve("class C { void m() { int x = 1; use(x); } }");
+        let resolved = resolve("class C { void m() { int x = 1; use(x); } }");
         let Resolution::Def(id) = resolution_of(&resolved, "x") else {
             panic!("x should resolve");
         };
@@ -97,14 +104,14 @@ mod tests {
 
     #[test]
     fn use_before_declaration_is_unresolved() {
-        let resolved = Resolved::resolve("class C { void m() { use(x); int x = 1; } }");
+        let resolved = resolve("class C { void m() { use(x); int x = 1; } }");
         assert_eq!(resolution_of(&resolved, "x"), Resolution::Unresolved);
     }
 
     #[test]
     fn field_is_visible_before_its_declaration() {
         // A method body may reference a field declared later in the class (members are hoisted).
-        let resolved = Resolved::resolve("class C { int get() { return x; } int x; }");
+        let resolved = resolve("class C { int get() { return x; } int x; }");
         let Resolution::Def(id) = resolution_of(&resolved, "x") else {
             panic!("forward field reference should resolve");
         };
@@ -113,24 +120,24 @@ mod tests {
 
     #[test]
     fn unknown_name_is_unresolved() {
-        let resolved = Resolved::resolve("class C { void m() { use(nope); } }");
+        let resolved = resolve("class C { void m() { use(nope); } }");
         assert_eq!(resolution_of(&resolved, "nope"), Resolution::Unresolved);
     }
 
     #[test]
     fn resolve_node_matches_resolve() {
         let src = "class C { void m() { int x = 1; use(x); } }";
-        let parse = jals_syntax::Parse::parse(src);
+        let parse = block_on_inline(jals_syntax::Parse::parse(src));
         assert_eq!(
-            Resolved::resolve(src),
-            Resolved::resolve_node(&parse.syntax())
+            resolve(src),
+            block_on_inline(Resolved::resolve_node(&parse.syntax()))
         );
     }
 
     #[test]
     fn arbitrary_input_does_not_panic() {
         for src in ["", "}{)(", "class", "int x = ;;;", "🦀 class C {"] {
-            let _ = Resolved::resolve(src);
+            let _ = resolve(src);
         }
     }
 }

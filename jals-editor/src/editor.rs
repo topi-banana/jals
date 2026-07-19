@@ -27,9 +27,9 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
         Self { workspace, host }
     }
 
-    /// Load a workspace over `fs` (see [`Workspace::load`]) and pair it with `host`.
-    pub fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout, host: H) -> Self {
-        Self::new(Workspace::load(storage, spec), host)
+    /// Load a workspace over `storage` (see [`Workspace::load`]) and pair it with `host`.
+    pub async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout, host: H) -> Self {
+        Self::new(Workspace::load(storage, spec).await, host)
     }
 
     /// The underlying workspace: identity/ownership queries (`file_id`, `owns_path`) and the
@@ -65,7 +65,7 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
 
     /// The canonical diagnostics of `path` under `config` (the project's feature set and index
     /// fold in automatically), rendered by the host.
-    pub fn diagnostics(
+    pub async fn diagnostics(
         &self,
         path: &FileKey,
         config: &jals_config::lint::Config,
@@ -75,6 +75,7 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
         };
         self.workspace
             .diagnostics(file, config)
+            .await
             .into_iter()
             .map(|diagnostic| self.host.diagnostic(doc, diagnostic))
             .collect()
@@ -89,14 +90,14 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
     }
 
     /// Go-to-definition at `position` in `path`.
-    pub fn definition(&self, path: &FileKey, position: &H::Position) -> Option<H::Location> {
+    pub async fn definition(&self, path: &FileKey, position: &H::Position) -> Option<H::Location> {
         let (file, offset) = self.offset(path, position)?;
-        let target = self.workspace.definition(file, offset)?;
+        let target = self.workspace.definition(file, offset).await?;
         self.location(&target)
     }
 
     /// Find-references at `position` in `path` (project-wide for a project type).
-    pub fn references(
+    pub async fn references(
         &self,
         path: &FileKey,
         position: &H::Position,
@@ -107,43 +108,45 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
         };
         self.workspace
             .references(file, offset, include_declaration)
+            .await
             .iter()
             .filter_map(|target| self.location(target))
             .collect()
     }
 
     /// The hover at `position` in `path`.
-    pub fn hover(&self, path: &FileKey, position: &H::Position) -> Option<H::Hover> {
+    pub async fn hover(&self, path: &FileKey, position: &H::Position) -> Option<H::Hover> {
         let (file, offset) = self.offset(path, position)?;
-        let markdown = self.workspace.hover_markdown(file, offset)?;
+        let markdown = self.workspace.hover_markdown(file, offset).await?;
         Some(self.host.hover(markdown))
     }
 
     /// Completions at `position` in `path`.
-    pub fn completions(&self, path: &FileKey, position: &H::Position) -> Vec<H::Completion> {
+    pub async fn completions(&self, path: &FileKey, position: &H::Position) -> Vec<H::Completion> {
         let Some((file, offset)) = self.offset(path, position) else {
             return Vec::new();
         };
         self.workspace
             .completions(file, offset)
+            .await
             .into_iter()
             .map(|completion| self.host.completion(completion))
             .collect()
     }
 
     /// Signature help at `position` in `path`.
-    pub fn signature_help(
+    pub async fn signature_help(
         &self,
         path: &FileKey,
         position: &H::Position,
     ) -> Option<H::SignatureHelp> {
         let (file, offset) = self.offset(path, position)?;
-        let help = self.workspace.signature_help(file, offset)?;
+        let help = self.workspace.signature_help(file, offset).await?;
         Some(self.host.signature_help(SignatureHelpUtf16::of(&help)))
     }
 
     /// Occurrence highlights at `position` in `path`.
-    pub fn highlights(&self, path: &FileKey, position: &H::Position) -> Vec<H::Highlight> {
+    pub async fn highlights(&self, path: &FileKey, position: &H::Position) -> Vec<H::Highlight> {
         let Some((file, offset)) = self.offset(path, position) else {
             return Vec::new();
         };
@@ -152,6 +155,7 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
         };
         self.workspace
             .highlights(file, offset)
+            .await
             .into_iter()
             .map(|highlight| self.host.highlight(doc, highlight))
             .collect()
@@ -159,9 +163,9 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
 
     /// prepareRename at `position` in `path`: the identifier's host range when it names a
     /// renamable symbol.
-    pub fn prepare_rename(&self, path: &FileKey, position: &H::Position) -> Option<H::Range> {
+    pub async fn prepare_rename(&self, path: &FileKey, position: &H::Position) -> Option<H::Range> {
         let (file, offset) = self.offset(path, position)?;
-        let range = self.workspace.prepare_rename(file, offset)?;
+        let range = self.workspace.prepare_rename(file, offset).await?;
         let doc = self.workspace.document(file)?;
         Some(self.host.range(doc, range))
     }
@@ -169,13 +173,13 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
     /// The locations a rename at `position` in `path` rewrites, or `None` when the symbol is not
     /// renamable / nothing would change. The host validates the new name
     /// ([`crate::Ident::is_valid_java_identifier`]) and shapes the edit.
-    pub fn rename_targets(
+    pub async fn rename_targets(
         &self,
         path: &FileKey,
         position: &H::Position,
     ) -> Option<Vec<H::Location>> {
         let (file, offset) = self.offset(path, position)?;
-        let targets = self.workspace.rename_targets(file, offset)?;
+        let targets = self.workspace.rename_targets(file, offset).await?;
         Some(
             targets
                 .iter()
@@ -187,11 +191,11 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
 
 impl<S: SourceBackend, C: CacheBackend, H: SemanticTokensHost> Editor<S, C, H> {
     /// The encoded semantic tokens of `path`.
-    pub fn semantic_tokens(&self, path: &FileKey) -> Option<H::SemanticTokens> {
+    pub async fn semantic_tokens(&self, path: &FileKey) -> Option<H::SemanticTokens> {
         let (file, doc) = self.doc(path)?;
         Some(
             self.host
-                .semantic_tokens(doc, self.workspace.semantic_tokens(file)),
+                .semantic_tokens(doc, self.workspace.semantic_tokens(file).await),
         )
     }
 }
@@ -203,6 +207,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::ops::Range;
 
+    use jals_exec::block_on_inline;
     use jals_storage::{CodeTree, DirKey, Entry, MemoryCache, MemorySource, MemoryStorage};
 
     use super::*;
@@ -282,7 +287,7 @@ mod tests {
         FileKey::parse(path).unwrap()
     }
 
-    fn sample_editor() -> Editor<MemorySource, MemoryCache, TupleHost> {
+    async fn sample_editor() -> Editor<MemorySource, MemoryCache, TupleHost> {
         let storage = memory(&[
             (
                 "src/Greeter.java",
@@ -298,6 +303,7 @@ mod tests {
             ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
             TupleHost,
         )
+        .await
     }
 
     /// The `(line, character)` of `needle`'s first occurrence in `text` (single-line samples).
@@ -309,86 +315,110 @@ mod tests {
 
     #[test]
     fn the_facade_sequences_path_position_query_and_rendering() {
-        let editor = sample_editor();
-        let main = "public class Main { void run() { Greeter g = new Greeter(); } }";
+        block_on_inline(async {
+            let editor = sample_editor().await;
+            let main = "public class Main { void run() { Greeter g = new Greeter(); } }";
 
-        // Definition: host position in, host location out, path already mapped.
-        let (path, _) = editor
-            .definition(&key("src/Main.java"), &pos_of(main, "Greeter g"))
-            .expect("definition");
-        assert_eq!(path, "src/Greeter.java");
+            // Definition: host position in, host location out, path already mapped.
+            let (path, _) = editor
+                .definition(&key("src/Main.java"), &pos_of(main, "Greeter g"))
+                .await
+                .expect("definition");
+            assert_eq!(path, "src/Greeter.java");
 
-        // Hover renders through the host.
-        let hover = editor
-            .hover(&key("src/Main.java"), &pos_of(main, "new Greeter"))
-            .expect("hover");
-        assert!(hover.contains("```java"), "{hover}");
+            // Hover renders through the host.
+            let hover = editor
+                .hover(&key("src/Main.java"), &pos_of(main, "new Greeter"))
+                .await
+                .expect("hover");
+            assert!(hover.contains("```java"), "{hover}");
 
-        // Outline renders bottom-up with children.
-        let outline = editor.outline(&key("src/Greeter.java"));
-        assert_eq!(outline[0].0, "Greeter");
-        assert_eq!(outline[0].1[0].0, "greet");
+            // Outline renders bottom-up with children.
+            let outline = editor.outline(&key("src/Greeter.java"));
+            assert_eq!(outline[0].0, "Greeter");
+            assert_eq!(outline[0].1[0].0, "greet");
 
-        // References map every target through the host.
-        let refs = editor.references(&key("src/Main.java"), &pos_of(main, "Greeter g"), true);
-        assert!(refs.iter().any(|(p, _)| p == "src/Greeter.java"));
+            // References map every target through the host.
+            let refs = editor
+                .references(&key("src/Main.java"), &pos_of(main, "Greeter g"), true)
+                .await;
+            assert!(refs.iter().any(|(p, _)| p == "src/Greeter.java"));
 
-        // An unknown path answers empty, never panicking.
-        assert!(editor.outline(&key("nowhere.java")).is_empty());
-        assert!(editor.definition(&key("nowhere.java"), &(0, 0)).is_none());
+            // An unknown path answers empty, never panicking.
+            assert!(editor.outline(&key("nowhere.java")).is_empty());
+            assert!(
+                editor
+                    .definition(&key("nowhere.java"), &(0, 0))
+                    .await
+                    .is_none()
+            );
+        });
     }
 
     #[test]
     fn diagnostics_render_through_the_host() {
-        let storage = memory(&[(
-            "src/Main.java",
-            "class Main { void run() { int unused = 1; } }",
-        )]);
-        let editor = Editor::load(
-            storage,
-            ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
-            TupleHost,
-        );
-        let diags =
-            editor.diagnostics(&key("src/Main.java"), &jals_config::lint::Config::default());
-        assert!(
-            diags.iter().any(|message| message.contains("unused")),
-            "{diags:?}"
-        );
+        block_on_inline(async {
+            let storage = memory(&[(
+                "src/Main.java",
+                "class Main { void run() { int unused = 1; } }",
+            )]);
+            let editor = Editor::load(
+                storage,
+                ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+                TupleHost,
+            )
+            .await;
+            let diags = editor
+                .diagnostics(&key("src/Main.java"), &jals_config::lint::Config::default())
+                .await;
+            assert!(
+                diags.iter().any(|message| message.contains("unused")),
+                "{diags:?}"
+            );
+        });
     }
 
     #[test]
     fn signature_help_arrives_in_utf16() {
-        let text = "class C { void f(int 値, int b) {} void g() { f(1, ); } }";
-        let storage = memory(&[("src/C.java", text)]);
-        let editor = Editor::load(
-            storage,
-            ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
-            TupleHost,
-        );
-        let index = LineIndex::new(text);
-        let offset = text.find("f(1, ").unwrap() + "f(1, ".len();
-        let position = index.position(text, offset);
-        let (active_signature, active_parameter) = editor
-            .signature_help(&key("src/C.java"), &(position.line, position.character))
-            .expect("signature help");
-        assert_eq!((active_signature, active_parameter), (0, 1));
+        block_on_inline(async {
+            let text = "class C { void f(int 値, int b) {} void g() { f(1, ); } }";
+            let storage = memory(&[("src/C.java", text)]);
+            let editor = Editor::load(
+                storage,
+                ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+                TupleHost,
+            )
+            .await;
+            let index = LineIndex::new(text);
+            let offset = text.find("f(1, ").unwrap() + "f(1, ".len();
+            let position = index.position(text, offset);
+            let (active_signature, active_parameter) = editor
+                .signature_help(&key("src/C.java"), &(position.line, position.character))
+                .await
+                .expect("signature help");
+            assert_eq!((active_signature, active_parameter), (0, 1));
+        });
     }
 
     #[test]
     fn rename_targets_gate_and_map() {
-        let editor = sample_editor();
-        let main = "public class Main { void run() { Greeter g = new Greeter(); } }";
-        let targets = editor
-            .rename_targets(&key("src/Main.java"), &pos_of(main, "Greeter g"))
-            .expect("renamable");
-        assert!(targets.len() >= 3, "{targets:?}");
-        // `String` is a stdlib name: not renamable.
-        let greeter = "public class Greeter { public String greet(String name) { return name; } }";
-        assert!(
-            editor
-                .rename_targets(&key("src/Greeter.java"), &pos_of(greeter, "String name"))
-                .is_none()
-        );
+        block_on_inline(async {
+            let editor = sample_editor().await;
+            let main = "public class Main { void run() { Greeter g = new Greeter(); } }";
+            let targets = editor
+                .rename_targets(&key("src/Main.java"), &pos_of(main, "Greeter g"))
+                .await
+                .expect("renamable");
+            assert!(targets.len() >= 3, "{targets:?}");
+            // `String` is a stdlib name: not renamable.
+            let greeter =
+                "public class Greeter { public String greet(String name) { return name; } }";
+            assert!(
+                editor
+                    .rename_targets(&key("src/Greeter.java"), &pos_of(greeter, "String name"))
+                    .await
+                    .is_none()
+            );
+        });
     }
 }

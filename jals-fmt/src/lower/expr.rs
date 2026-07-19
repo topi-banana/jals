@@ -99,11 +99,11 @@ impl Ctx<'_> {
     /// [`Tall`](BinopLayout::Tall) is one group — flat `a op b op c`, else *every* step on its own
     /// line; [`Compressed`](BinopLayout::Compressed) is a fill that packs as many operands per line
     /// as fit `max-width` (google-java-format's layout).
-    pub(crate) fn lower_binary(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_binary(&self, node: &SyntaxNode) -> Doc {
         let Some((first, steps)) = Self::flatten_binary(node) else {
             // Error recovery produced something other than `lhs op rhs`; emit inline with
             // canonical spacing so every token is preserved verbatim.
-            return self.lower_binary_inline(node);
+            return self.lower_binary_inline(node).await;
         };
         match self.cfg.binop_layout {
             BinopLayout::Tall => {
@@ -113,15 +113,15 @@ impl Ctx<'_> {
                     let op = Doc::concat(ops.iter().map(|t| self.tok(t)).collect());
                     match self.cfg.binop_separator {
                         BinopSeparator::Front => {
-                            tail.extend([Doc::line(), op, Doc::text(" "), self.lower(rhs)]);
+                            tail.extend([Doc::line(), op, Doc::text(" "), self.lower(rhs).await]);
                         }
                         BinopSeparator::Back => {
-                            tail.extend([Doc::text(" "), op, Doc::line(), self.lower(rhs)]);
+                            tail.extend([Doc::text(" "), op, Doc::line(), self.lower(rhs).await]);
                         }
                     }
                 }
                 Doc::group(Doc::concat(vec![
-                    self.lower(&first),
+                    self.lower(&first).await,
                     Doc::continuation_indent(Doc::concat(tail)),
                 ]))
             }
@@ -133,18 +133,22 @@ impl Ctx<'_> {
                 let mut items: Vec<Doc> = Vec::with_capacity(steps.len() + 1);
                 match self.cfg.binop_separator {
                     BinopSeparator::Front => {
-                        items.push(self.lower(&first));
+                        items.push(self.lower(&first).await);
                         for (ops, rhs) in &steps {
                             let op = Doc::concat(ops.iter().map(|t| self.tok(t)).collect());
-                            items.push(Doc::concat(vec![op, Doc::text(" "), self.lower(rhs)]));
+                            items.push(Doc::concat(vec![
+                                op,
+                                Doc::text(" "),
+                                self.lower(rhs).await,
+                            ]));
                         }
                     }
                     BinopSeparator::Back => {
-                        let mut operand = self.lower(&first);
+                        let mut operand = self.lower(&first).await;
                         for (ops, rhs) in &steps {
                             let op = Doc::concat(ops.iter().map(|t| self.tok(t)).collect());
                             items.push(Doc::concat(vec![operand, Doc::text(" "), op]));
-                            operand = self.lower(rhs);
+                            operand = self.lower(rhs).await;
                         }
                         items.push(operand);
                     }
@@ -157,14 +161,14 @@ impl Ctx<'_> {
     /// Lower a malformed binary expression inline as `lhs op rhs`, joining a run of operator
     /// tokens tightly and surrounding the whole operator with single spaces. Fallback for
     /// error-recovery shapes [`Ctx::flatten_binary`] cannot handle (e.g. a missing operand).
-    fn lower_binary_inline(&self, node: &SyntaxNode) -> Doc {
+    async fn lower_binary_inline(&self, node: &SyntaxNode) -> Doc {
         let mut parts: Vec<Doc> = Vec::new();
         let mut pending_op: Vec<Doc> = Vec::new();
 
         for el in node.children_with_tokens() {
             if let Some(child) = el.as_node() {
                 Self::flush_operator(&mut parts, &mut pending_op);
-                parts.push(self.lower(child));
+                parts.push(self.lower(child).await);
             } else if let Some(t) = el.as_token()
                 && !t.kind().is_trivia()
             {
@@ -225,9 +229,9 @@ impl Ctx<'_> {
     /// (`binop-separator = front`, the default) or trailing the broken lines (`back`). A value of
     /// `0` for the width wraps every ternary. A malformed ternary (error recovery) falls back to
     /// inline emission, byte-for-byte unchanged.
-    pub(crate) fn lower_ternary(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_ternary(&self, node: &SyntaxNode) -> Doc {
         let Some((cond, q, then, colon, els)) = Self::ternary_parts(node) else {
-            return self.lower_generic(node);
+            return self.lower_generic(node).await;
         };
         // A break point whose flat form is a space (`line`) or nothing (`softline`); both break to
         // a newline. The `?` is always space-surrounded; the `:` follows the colon-spacing config.
@@ -250,45 +254,48 @@ impl Ctx<'_> {
                 break_at(true),
                 self.tok(&q),
                 Doc::text(" "),
-                self.lower(&then),
+                self.lower(&then).await,
                 break_at(sbc),
                 self.tok(&colon),
                 colon_space(sac),
-                self.lower(&els),
+                self.lower(&els).await,
             ]),
             BinopSeparator::Back => Doc::concat(vec![
                 Doc::text(" "),
                 self.tok(&q),
                 break_at(true),
-                self.lower(&then),
+                self.lower(&then).await,
                 colon_space(sbc),
                 self.tok(&colon),
                 break_at(sac),
-                self.lower(&els),
+                self.lower(&els).await,
             ]),
         };
-        let doc = Doc::concat(vec![self.lower(&cond), Doc::continuation_indent(tail)]);
+        let doc = Doc::concat(vec![
+            self.lower(&cond).await,
+            Doc::continuation_indent(tail),
+        ]);
         Doc::group_within(doc, self.cfg.single_line_if_else_max_width)
     }
 
     /// Lower a unary expression tight (`-x`), inserting a space only when the operator and
     /// operand would otherwise fuse (`- -x`, `+ +x`).
-    pub(crate) fn lower_unary(&self, node: &SyntaxNode) -> Doc {
+    pub(crate) async fn lower_unary(&self, node: &SyntaxNode) -> Doc {
         let mut parts: Vec<Doc> = Vec::new();
         let mut prev: Option<SyntaxToken> = None;
         for el in node.children_with_tokens() {
             if let Some(child) = el.as_node() {
                 if let Some(first) = Self::first_sig_token(child) {
-                    parts.push(Self::tight_sep(prev.as_ref(), &first));
+                    parts.push(Self::tight_sep(prev.as_ref(), &first).await);
                 }
-                parts.push(self.lower(child));
+                parts.push(self.lower(child).await);
                 if let Some(last) = Self::last_sig_token(child) {
                     prev = Some(last);
                 }
             } else if let Some(t) = el.as_token()
                 && !t.kind().is_trivia()
             {
-                parts.push(Self::tight_sep(prev.as_ref(), t));
+                parts.push(Self::tight_sep(prev.as_ref(), t).await);
                 parts.push(self.tok(t));
                 prev = Some(t.clone());
             }
