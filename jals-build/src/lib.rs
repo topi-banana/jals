@@ -27,6 +27,8 @@
 //! core.
 
 #![cfg_attr(not(feature = "native"), no_std)]
+#[cfg(feature = "rhai")]
+pub mod build_script;
 #[cfg(feature = "native")]
 mod builtin;
 mod clean;

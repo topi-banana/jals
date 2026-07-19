@@ -132,6 +132,9 @@ impl Error for ResolveTargetError {}
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
     use super::*;
     use jals_config::{Bin, Manifest};
 

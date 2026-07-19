@@ -8,6 +8,7 @@
 //! inputs in one struct is what lets the same request feed a `javac` subprocess today and a wasm
 //! compiler later.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use jals_config::Manifest;
@@ -30,6 +31,10 @@ pub struct CompileRequest<'a> {
     /// Extra already-resolved classpath entries (the downloaded/local dependency jars), appended
     /// after the manifest's `[build] classpath`.
     pub extra_classpath: &'a [PathBuf],
+    /// Extra `javac` arguments, appended after the manifest's `javac_flags` and before sources.
+    pub extra_javac_args: &'a [String],
+    /// Explicit environment entries for the compiler subprocess.
+    pub compile_env: &'a BTreeMap<String, String>,
 }
 
 /// The resolved inputs for running a project's main class.
@@ -38,6 +43,8 @@ pub struct RunRequest<'a> {
     pub manifest: &'a Manifest,
     /// The project root, against which the manifest's relative paths are resolved.
     pub project_root: &'a Path,
+    /// Extra JVM arguments passed before the classpath option.
+    pub jvm_args: &'a [String],
     /// The fully-qualified main class to run.
     pub main_class: &'a str,
     /// Arguments passed to the program after the main class.
@@ -45,4 +52,6 @@ pub struct RunRequest<'a> {
     /// Extra already-resolved classpath entries (the dependency jars), appended after the manifest's
     /// classpath.
     pub extra_classpath: &'a [PathBuf],
+    /// Explicit environment entries for the runtime subprocess.
+    pub run_env: &'a BTreeMap<String, String>,
 }

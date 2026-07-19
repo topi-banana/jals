@@ -18,18 +18,27 @@ impl CleanTargets {
     /// Resolve the build-output directories that `jals clean` should remove for `manifest`, as
     /// root-relative keys the caller resolves against the project root.
     ///
-    /// This is the compiler output directory (`classes-dir`) — exactly what `javac -d` writes during
-    /// a [`build`](crate::Invocation::build), and nothing the user authored. Returning a `Vec` leaves
-    /// room for future artifacts (a packaged jar, a dependency cache) without changing the signature.
+    /// This is the compiler output directory (`classes-dir`) and, when a build script is configured,
+    /// the dedicated `target/jals/build` script-artifact root. Returning a `Vec` leaves room for
+    /// future artifacts (a packaged jar, a dependency cache) without changing the signature.
     /// The result may include paths that do not exist; the caller skips those rather than treating a
     /// never-built project as an error.
     pub fn keys(manifest: &Manifest) -> Result<Vec<DirKey>, jals_storage::PathError> {
-        Ok(vec![DirKey::parse(&manifest.build.classes_dir)?])
+        let mut keys = vec![DirKey::parse(&manifest.build.classes_dir)?];
+        if manifest.build.script.is_some() {
+            let build_root = DirKey::parse("target/jals/build")?;
+            if !keys.contains(&build_root) {
+                keys.push(build_root);
+            }
+        }
+        Ok(keys)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use jals_storage::FileKey;
+
     use super::*;
 
     #[test]
@@ -42,8 +51,39 @@ mod tests {
     #[test]
     fn honors_a_custom_classes_dir() {
         let mut m = Manifest::default();
-        m.build.classes_dir = "out".to_owned();
+        m.build.classes_dir = "out".into();
         let paths = CleanTargets::keys(&m).unwrap();
         assert_eq!(paths, vec![DirKey::parse("out").unwrap()]);
+    }
+
+    #[test]
+    fn includes_the_build_script_root_when_configured() {
+        let mut m = Manifest::default();
+        m.build.script = Some(jals_config::BuildScript::Rhai {
+            file: "build.rhai".into(),
+        });
+        assert_eq!(
+            CleanTargets::keys(&m).unwrap(),
+            vec![
+                DirKey::parse("target/classes").unwrap(),
+                DirKey::parse("target/jals/build").unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn validated_script_path_is_outside_every_clean_target() {
+        let manifest: Manifest =
+            "[build]\nscript = { type = \"rhai\", file = \"scripts/build.rhai\" }\n"
+                .parse()
+                .unwrap();
+        let script = FileKey::parse("scripts/build.rhai").unwrap();
+
+        assert!(
+            CleanTargets::keys(&manifest)
+                .unwrap()
+                .iter()
+                .all(|target| !script.path().starts_with(target.path()))
+        );
     }
 }

@@ -39,6 +39,7 @@ pub enum CacheError {
     Conflict,
     Corrupt,
     DigestMismatch,
+    TooLarge { size: u64, limit: usize },
     Io(String),
 }
 

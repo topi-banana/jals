@@ -6,37 +6,60 @@
 //! backend that plans the command (it is a command-line encoding detail, not a request input), so
 //! the result is deterministic and the functions stay unit-testable with no JDK installed.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::request::{CompileRequest, RunRequest};
 use crate::toolchain::Tool;
 
-/// A resolved command line: a program plus its argument vector. Pure data.
+/// A resolved subprocess invocation. Pure data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     /// The program to run, e.g. `"javac"` or `"java"`.
     pub program: String,
     /// The arguments, in the exact order they should be passed.
     pub args: Vec<String>,
+    /// The subprocess working directory.
+    pub working_dir: PathBuf,
+    /// Explicit subprocess environment entries. Unspecified variables remain inherited.
+    pub environment: BTreeMap<String, String>,
 }
 
 impl Invocation {
-    /// Render a human-readable, copy-pasteable command string for `--dry-run`/`-v` output.
+    /// Render a human-readable command string for `--dry-run`/`-v` output.
     ///
-    /// Arguments containing whitespace are wrapped in double quotes. This is for display only and
-    /// is not intended to be re-parsed by a shell.
+    /// Environment entries are shown in sorted order with an `env` prefix. Words containing
+    /// whitespace are wrapped in double quotes. This is display only, not a shell-escaping or
+    /// executable contract.
     pub fn display_command(&self) -> String {
-        let mut out = Self::quote(&self.program);
-        for arg in &self.args {
-            out.push(' ');
-            out.push_str(&Self::quote(arg));
+        let mut words = Vec::new();
+        if !self.environment.is_empty() {
+            words.push("env".to_owned());
+            words.extend(
+                self.environment
+                    .iter()
+                    .map(|(name, value)| Self::quote(&format!("{name}={value}"))),
+            );
         }
-        out
+        words.push(Self::quote(&self.program));
+        for arg in &self.args {
+            words.push(Self::quote(arg));
+        }
+        words.join(" ")
     }
 
-    /// Join `rel` onto `root` and render it as a string for the command line.
+    /// Resolve a manifest path for a subprocess running in `root`.
+    ///
+    /// Absolute roots produce absolute arguments. With a relative root, the subprocess working
+    /// directory already supplies that prefix, so the argument remains relative to avoid applying
+    /// the root twice.
     fn resolved(root: &Path, rel: &str) -> String {
-        root.join(rel).to_string_lossy().into_owned()
+        let path = Path::new(rel);
+        if root.is_absolute() || path.is_absolute() {
+            root.join(path).to_string_lossy().into_owned()
+        } else {
+            path.to_string_lossy().into_owned()
+        }
     }
 
     /// Render an already-resolved path as a string for the command line.
@@ -84,6 +107,8 @@ impl Invocation {
             sources,
             extra_sources,
             extra_classpath,
+            extra_javac_args,
+            compile_env,
         } = req;
         let build = &manifest.build;
         let mut args = Vec::new();
@@ -131,8 +156,9 @@ impl Invocation {
             args.push(Self::join_with(&source_path, path_sep));
         }
 
-        // Escape hatch: user flags verbatim, before the source files (which must come last).
+        // Manifest flags precede accepted build-script flags; all flags remain before sources.
         args.extend(build.javac_flags.iter().cloned());
+        args.extend(extra_javac_args.iter().cloned());
 
         // The source files, in the given order: the project's own sources, then any source-dependency
         // (`git`/`path`) `.java` compiled alongside them (order is irrelevant to `javac`).
@@ -146,6 +172,8 @@ impl Invocation {
         Self {
             program: Tool::Javac.binary_name().to_owned(),
             args,
+            working_dir: project_root.to_path_buf(),
+            environment: BTreeMap::clone(compile_env),
         }
     }
 
@@ -160,9 +188,11 @@ impl Invocation {
         let &RunRequest {
             manifest,
             project_root,
+            jvm_args,
             main_class,
             program_args,
             extra_classpath,
+            run_env,
         } = req;
         let build = &manifest.build;
 
@@ -175,16 +205,19 @@ impl Invocation {
         );
         classpath.extend(extra_classpath.iter().map(|p| Self::path_string(p)));
 
-        let mut args = vec![
+        let mut args = jvm_args.to_vec();
+        args.extend([
             "-cp".to_owned(),
             Self::join_with(&classpath, path_sep),
             main_class.to_owned(),
-        ];
+        ]);
         args.extend(program_args.iter().cloned());
 
         Self {
             program: Tool::Java.binary_name().to_owned(),
             args,
+            working_dir: project_root.to_path_buf(),
+            environment: BTreeMap::clone(run_env),
         }
     }
 }
@@ -215,6 +248,8 @@ mod tests {
                 sources,
                 extra_sources,
                 extra_classpath,
+                extra_javac_args: &[],
+                compile_env: &BTreeMap::new(),
             },
             ':',
         )
@@ -230,9 +265,11 @@ mod tests {
             &RunRequest {
                 manifest,
                 project_root: Path::new(ROOT),
+                jvm_args: &[],
                 main_class,
                 program_args,
                 extra_classpath,
+                run_env: &BTreeMap::new(),
             },
             ':',
         )
@@ -321,6 +358,38 @@ mod tests {
     }
 
     #[test]
+    fn extra_javac_args_follow_manifest_flags_and_precede_sources() {
+        let mut manifest = Manifest::default();
+        manifest.build.javac_flags = vec!["-Xlint:all".to_owned()];
+        let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
+        let extra_javac_args = vec!["-Afirst=1".to_owned(), "-Asecond=2".to_owned()];
+        let invocation = Invocation::build(
+            &CompileRequest {
+                manifest: &manifest,
+                project_root: Path::new(ROOT),
+                sources: &sources,
+                extra_sources: &[],
+                extra_classpath: &[],
+                extra_javac_args: &extra_javac_args,
+                compile_env: &BTreeMap::new(),
+            },
+            ':',
+        );
+
+        let tail = invocation
+            .args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert!(tail.ends_with(&[
+            "-Xlint:all",
+            "-Afirst=1",
+            "-Asecond=2",
+            "/proj/src/main/java/A.java",
+        ]));
+    }
+
+    #[test]
     fn full_javac_command_snapshot() {
         let mut m = Manifest::default();
         m.build.release = Some(21);
@@ -368,6 +437,79 @@ mod tests {
     }
 
     #[test]
+    fn jvm_args_precede_classpath_and_keep_their_order() {
+        let manifest = Manifest::default();
+        let jvm_args = vec!["-ea".to_owned(), "-Dmode=test".to_owned()];
+        let invocation = Invocation::run(
+            &RunRequest {
+                manifest: &manifest,
+                project_root: Path::new(ROOT),
+                jvm_args: &jvm_args,
+                main_class: "com.example.Main",
+                program_args: &[],
+                extra_classpath: &[],
+                run_env: &BTreeMap::new(),
+            },
+            ':',
+        );
+
+        assert_eq!(
+            invocation
+                .args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "-ea",
+                "-Dmode=test",
+                "-cp",
+                "/proj/target/classes",
+                "com.example.Main",
+            ]
+        );
+    }
+
+    #[test]
+    fn invocation_carries_project_root_and_phase_environment() {
+        let manifest = Manifest::default();
+        let compile_env = BTreeMap::from([
+            ("LANG".to_owned(), "C".to_owned()),
+            ("MODE".to_owned(), "compile".to_owned()),
+        ]);
+        let run_env = BTreeMap::from([("MODE".to_owned(), "run".to_owned())]);
+
+        let compile = Invocation::build(
+            &CompileRequest {
+                manifest: &manifest,
+                project_root: Path::new(ROOT),
+                sources: &[],
+                extra_sources: &[],
+                extra_classpath: &[],
+                extra_javac_args: &[],
+                compile_env: &compile_env,
+            },
+            ':',
+        );
+        let run = Invocation::run(
+            &RunRequest {
+                manifest: &manifest,
+                project_root: Path::new(ROOT),
+                jvm_args: &[],
+                main_class: "Main",
+                program_args: &[],
+                extra_classpath: &[],
+                run_env: &run_env,
+            },
+            ':',
+        );
+
+        assert_eq!(compile.working_dir, PathBuf::from(ROOT));
+        assert_eq!(compile.environment, compile_env);
+        assert_eq!(run.working_dir, PathBuf::from(ROOT));
+        assert_eq!(run.environment, run_env);
+    }
+
+    #[test]
     fn extra_classpath_appended_after_manifest_classpath() {
         let mut m = Manifest::default();
         m.build.classpath = vec!["libs/guava.jar".to_owned()];
@@ -394,6 +536,49 @@ mod tests {
     }
 
     #[test]
+    fn relative_project_root_is_not_resolved_twice_under_working_directory() {
+        let mut manifest = Manifest::default();
+        manifest.build.classpath = vec!["libs/api.jar".to_owned()];
+        let source = PathBuf::from("/workspace/project/src/main/java/Main.java");
+        let compile = Invocation::build(
+            &CompileRequest {
+                manifest: &manifest,
+                project_root: Path::new("project"),
+                sources: std::slice::from_ref(&source),
+                extra_sources: &[],
+                extra_classpath: &[],
+                extra_javac_args: &[],
+                compile_env: &BTreeMap::new(),
+            },
+            ':',
+        );
+
+        assert_eq!(compile.working_dir, PathBuf::from("project"));
+        assert!(has_pair(&compile.args, "-d", "target/classes"));
+        assert!(has_pair(&compile.args, "-classpath", "libs/api.jar"));
+        assert!(has_pair(&compile.args, "-sourcepath", "src/main/java"));
+        assert_eq!(
+            compile.args.last().map(String::as_str),
+            Some("/workspace/project/src/main/java/Main.java")
+        );
+
+        let run = Invocation::run(
+            &RunRequest {
+                manifest: &manifest,
+                project_root: Path::new("project"),
+                jvm_args: &[],
+                main_class: "Main",
+                program_args: &[],
+                extra_classpath: &[],
+                run_env: &BTreeMap::new(),
+            },
+            ':',
+        );
+        assert_eq!(run.working_dir, PathBuf::from("project"));
+        assert!(has_pair(&run.args, "-cp", "target/classes:libs/api.jar"));
+    }
+
+    #[test]
     fn extra_classpath_alone_still_emits_classpath() {
         // No manifest classpath, but extra dependency jars must still produce `-classpath`.
         let m = Manifest::default();
@@ -407,7 +592,15 @@ mod tests {
         let inv = Invocation {
             program: "javac".to_owned(),
             args: vec!["-d".to_owned(), "/has space/out".to_owned()],
+            working_dir: PathBuf::from(ROOT),
+            environment: BTreeMap::from([
+                ("Z_LAST".to_owned(), "value".to_owned()),
+                ("A_FIRST".to_owned(), "has space".to_owned()),
+            ]),
         };
-        assert_eq!(inv.display_command(), "javac -d \"/has space/out\"");
+        assert_eq!(
+            inv.display_command(),
+            "env \"A_FIRST=has space\" Z_LAST=value javac -d \"/has space/out\""
+        );
     }
 }

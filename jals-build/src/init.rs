@@ -95,11 +95,12 @@ impl ScaffoldFile {
              name = {name}\n\
              version = \"0.1.0\"\n\
              \n\
-             # Compilation settings (all keys optional; the values below are the defaults).\n\
+             # Optional compilation settings. Uncomment [build] and the keys you need.\n\
              # [build]\n\
              # source-dirs = [\"src/main/java\"]\n\
              # classes-dir = \"target/classes\"\n\
              # release = 21\n\
+             # script = {{ type = \"rhai\", file = \"build.rhai\" }}\n\
              \n\
              [run]\n\
              main-class = \"{MAIN_CLASS}\"\n",
@@ -149,6 +150,11 @@ mod tests {
         let manifest = find(&files, "jals.toml");
         assert!(manifest.contents.contains("name = \"demo\""));
         assert!(manifest.contents.contains("main-class = \"Main\""));
+        assert!(
+            manifest
+                .contents
+                .contains("# script = { type = \"rhai\", file = \"build.rhai\" }")
+        );
 
         let main = find(&files, "src/main/java/Main.java");
         assert!(main.contents.contains("public class Main"));
@@ -174,6 +180,7 @@ mod tests {
         // `[build]` is commented out, so the parsed manifest keeps the Maven defaults.
         assert_eq!(manifest.build.source_dirs, vec!["src/main/java".to_owned()]);
         assert_eq!(manifest.build.classes_dir, "target/classes");
+        assert_eq!(manifest.build.script, None);
     }
 
     #[test]

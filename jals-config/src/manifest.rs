@@ -18,9 +18,12 @@ use core::error::Error;
 use core::fmt;
 use core::str::FromStr;
 
+use jals_storage::{DirKey, FileKey};
 use serde::Deserialize;
 
 use crate::toolchain::Toolchain;
+
+const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 
 /// A parsed `jals.toml` project manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -580,6 +583,8 @@ impl FeatureSet {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Build {
+    /// Optional project build script.
+    pub script: Option<BuildScript>,
     /// Source roots, relative to the manifest directory. These feed `javac`'s `-sourcepath` and
     /// are the roots scanned for `.java` files. Defaults to `["src/main/java"]`.
     pub source_dirs: Vec<String>,
@@ -598,6 +603,26 @@ pub struct Build {
     /// Extra raw flags appended verbatim after the generated `javac` arguments (before the source
     /// files). An escape hatch for anything the manifest does not model yet.
     pub javac_flags: Vec<String>,
+}
+
+/// A project build script selected by its `type` field.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BuildScript {
+    /// A Rhai build script stored at a project-relative portable file path.
+    Rhai {
+        /// The script file, relative to the project root.
+        file: String,
+    },
+}
+
+impl BuildScript {
+    /// The value of the script's serialized `type` tag.
+    pub const fn tag_name(&self) -> &'static str {
+        match self {
+            Self::Rhai { .. } => "rhai",
+        }
+    }
 }
 
 /// Run settings (`[run]`).
@@ -629,6 +654,7 @@ pub struct Bin {
 impl Default for Build {
     fn default() -> Self {
         Self {
+            script: None,
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
             release: None,
@@ -763,11 +789,23 @@ impl Manifest {
     ///
     /// Checks the `[[bin]]` table: every bin needs a non-empty `name` and `main-class`, names must
     /// be unique, and `[package] default-run` (when set) must name a declared bin. Also applies each
-    /// `[dependencies]` entry's value-level checks (see [`Dependency::validate`]).
+    /// `[dependencies]` entry's value-level checks (see [`Dependency::validate`]) and requires a
+    /// configured build script to name a non-root portable project file outside the managed build
+    /// output root.
     ///
     /// # Errors
     /// Returns [`ValidationError`] describing the first problem found.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(BuildScript::Rhai { file }) = &self.build.script {
+            let script = FileKey::parse(file)
+                .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
+            let managed_root = DirKey::parse(MANAGED_BUILD_ROOT)
+                .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
+            if script.path().starts_with(managed_root.path()) {
+                return Err(ValidationError::BuildScriptInManagedRoot { file: file.clone() });
+            }
+        }
+
         let mut seen: Vec<&str> = Vec::with_capacity(self.bin.len());
         for bin in &self.bin {
             if bin.name.is_empty() {
@@ -904,6 +942,16 @@ impl Error for ManifestParseError {
 /// came from — the host [`ManifestParseError`] / `jals-build`'s `ManifestError` add the path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
+    /// A `[build] script.file` is not a non-root portable project file path.
+    InvalidBuildScriptFile {
+        /// The invalid script file value.
+        file: String,
+    },
+    /// A `[build] script.file` is inside `target/jals/build`, which `jals clean` owns and removes.
+    BuildScriptInManagedRoot {
+        /// The unsafe script file value.
+        file: String,
+    },
     /// Two `[[bin]]` entries share a `name`.
     DuplicateBin {
         /// The duplicated bin name.
@@ -930,6 +978,14 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidBuildScriptFile { file } => write!(
+                f,
+                "invalid `[build] script.file` `{file}`: expected a non-root portable file path"
+            ),
+            Self::BuildScriptInManagedRoot { file } => write!(
+                f,
+                "invalid `[build] script.file` `{file}`: scripts must be outside `target/jals/build`, which `jals clean` removes"
+            ),
             Self::DuplicateBin { name } => {
                 write!(f, "duplicate `[[bin]]` name `{name}`")
             }
@@ -962,6 +1018,7 @@ mod tests {
     #[test]
     fn defaults_to_maven_layout() {
         let m = Manifest::default();
+        assert_eq!(m.build.script, None);
         assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.build.release, None);
@@ -972,6 +1029,146 @@ mod tests {
         assert_eq!(m.run.main_class, None);
         assert!(m.bin.is_empty());
         assert!(m.dependencies.is_empty());
+    }
+
+    #[test]
+    fn parses_build_script_inline_and_dotted_syntax() {
+        let m: Manifest = r#"
+            [build]
+            script = { type = "rhai", file = "build.rhai" }
+            "#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            m.build.script,
+            Some(BuildScript::Rhai {
+                file: "build.rhai".to_owned(),
+            })
+        );
+
+        let m: Manifest = "build.script = { type = \"rhai\", file = \"scripts/build.rhai\" }\n"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            m.build.script,
+            Some(BuildScript::Rhai {
+                file: "scripts/build.rhai".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_build_script_table_syntax() {
+        let m: Manifest = r#"
+            [build.script]
+            type = "rhai"
+            file = "build.rhai"
+            "#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            m.build.script,
+            Some(BuildScript::Rhai {
+                file: "build.rhai".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn build_script_tag_name_matches_serde_tag() {
+        let script = BuildScript::Rhai {
+            file: "build.rhai".to_owned(),
+        };
+        assert_eq!(script.tag_name(), "rhai");
+    }
+
+    #[test]
+    fn build_script_rejects_missing_and_unknown_fields() {
+        for text in [
+            "[build]\nscript = { file = \"build.rhai\" }\n",
+            "[build]\nscript = { type = \"rhai\" }\n",
+            "[build]\nscript = { type = \"unknown\", file = \"build.rhai\" }\n",
+            "[build]\nscript = { type = \"rhai\", file = \"build.rhai\", extra = true }\n",
+            "[build.script]\ntype = \"rhai\"\nfile = \"build.rhai\"\nextra = true\n",
+        ] {
+            assert!(
+                toml::from_str::<Manifest>(text).is_err(),
+                "invalid build script parsed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_script_file_must_be_a_non_root_portable_file_key() {
+        for file in ["../build.rhai", ""] {
+            let text =
+                alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");
+            let error = text.parse::<Manifest>().unwrap_err();
+            let ManifestParseError::Invalid { source, .. } = error else {
+                panic!("invalid build script file must be a validation error");
+            };
+            assert_eq!(
+                source,
+                ValidationError::InvalidBuildScriptFile {
+                    file: file.to_owned(),
+                }
+            );
+            assert_eq!(
+                alloc::format!("{source}"),
+                alloc::format!(
+                    "invalid `[build] script.file` `{file}`: expected a non-root portable file path"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn build_script_file_must_be_outside_the_managed_build_root() {
+        for file in [
+            "target/jals/build",
+            "target/jals/build/build.rhai",
+            "target/jals/build/rhai/out/build.rhai",
+        ] {
+            let text =
+                alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");
+            let error = text.parse::<Manifest>().unwrap_err();
+            let ManifestParseError::Invalid { source, .. } = error else {
+                panic!("managed build script file must be a validation error");
+            };
+            assert_eq!(
+                source,
+                ValidationError::BuildScriptInManagedRoot {
+                    file: file.to_owned(),
+                }
+            );
+            assert!(source.to_string().contains("`jals clean` removes"));
+        }
+    }
+
+    #[test]
+    fn build_script_is_optional_for_legacy_build_configuration() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [build]
+            source-dirs = ["src", "generated"]
+            classes-dir = "out"
+            release = 21
+            source = 17
+            target = 17
+            classpath = ["lib/a.jar"]
+            javac-flags = ["-Xlint:all"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(m.build.script, None);
+        assert_eq!(m.build.source_dirs, alloc::vec!["src", "generated"]);
+        assert_eq!(m.build.classes_dir, "out");
+        assert_eq!(m.build.release, Some(21));
+        assert_eq!(m.build.source, Some(17));
+        assert_eq!(m.build.target, Some(17));
+        assert_eq!(m.build.classpath, alloc::vec!["lib/a.jar"]);
+        assert_eq!(m.build.javac_flags, alloc::vec!["-Xlint:all"]);
     }
 
     #[test]
