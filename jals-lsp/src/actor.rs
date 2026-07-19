@@ -34,7 +34,7 @@ use jals_build::{
 };
 use jals_config::{BuildScript, Dependency, FeatureSet, Manifest};
 use jals_editor::{
-    EditorHost, FoldingHost, Folds, Ident, Outline, SelectionChains, SelectionHost,
+    EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
     SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
 };
 use jals_exec::Exec;
@@ -190,6 +190,7 @@ impl ProjectWatchPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BuildScriptDiagnosticUpdate {
     script: Option<FileKey>,
+    script_text: Option<String>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -197,6 +198,7 @@ impl BuildScriptDiagnosticUpdate {
     const fn new(script: Option<FileKey>) -> Self {
         Self {
             script,
+            script_text: None,
             diagnostics: Vec::new(),
         }
     }
@@ -206,37 +208,28 @@ impl BuildScriptDiagnosticUpdate {
             BuildScriptDiagnostic::Warning(_) => DiagnosticSeverity::WARNING,
             BuildScriptDiagnostic::Error(_) => DiagnosticSeverity::ERROR,
         };
-        self.diagnostics.push(Self::diagnostic(
-            severity,
-            diagnostic.message().to_owned(),
-            None,
-        ));
+        let diagnostic = self.diagnostic(severity, diagnostic.message().to_owned(), None);
+        self.diagnostics.push(diagnostic);
     }
 
     fn push_failure(&mut self, message: String, position: Option<BuildScriptPosition>) {
-        self.diagnostics.push(Self::diagnostic(
-            DiagnosticSeverity::ERROR,
-            message,
-            position,
-        ));
+        let diagnostic = self.diagnostic(DiagnosticSeverity::ERROR, message, position);
+        self.diagnostics.push(diagnostic);
     }
 
     fn diagnostic(
+        &self,
         severity: DiagnosticSeverity,
         message: String,
         position: Option<BuildScriptPosition>,
     ) -> Diagnostic {
-        let range = position.map_or_else(
-            || Range::new(Position::new(0, 0), Position::new(0, 1)),
-            |position| {
-                let line = position.line().saturating_sub(1);
-                let character = position.column().saturating_sub(1);
-                Range::new(
-                    Position::new(line, character),
-                    Position::new(line, character.saturating_add(1)),
-                )
-            },
-        );
+        let range = position
+            .and_then(|position| {
+                self.script_text
+                    .as_deref()
+                    .and_then(|source| Self::rhai_position_range(source, position))
+            })
+            .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 1)));
         Diagnostic {
             range,
             severity: Some(severity),
@@ -244,6 +237,47 @@ impl BuildScriptDiagnosticUpdate {
             message,
             ..Diagnostic::default()
         }
+    }
+
+    fn rhai_position_range(source: &str, position: BuildScriptPosition) -> Option<Range> {
+        let line_index = position
+            .line()
+            .checked_sub(1)
+            .and_then(|line| usize::try_from(line).ok())?;
+        let character_index = position
+            .column()
+            .checked_sub(1)
+            .and_then(|column| usize::try_from(column).ok())?;
+        let mut line_start = 0;
+        let mut selected = None;
+        for (index, line_text) in source.split_inclusive('\n').enumerate() {
+            if index == line_index {
+                selected = Some(line_text.strip_suffix('\n').unwrap_or(line_text));
+                break;
+            }
+            line_start += line_text.len();
+        }
+        let line_text = selected?;
+        let relative = line_text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .nth(character_index)
+            .or_else(|| {
+                (character_index == line_text.chars().count()).then_some(line_text.len())
+            })?;
+        let start = line_start + relative;
+        let end = if start < line_start + line_text.len() {
+            start + source[start..].chars().next().map_or(0, char::len_utf8)
+        } else {
+            start
+        };
+        let index = LineIndex::new(source);
+        let start = index.position(source, start);
+        let end = index.position(source, end);
+        Some(Range::new(
+            Position::new(start.line, start.character),
+            Position::new(end.line, end.character),
+        ))
     }
 }
 
@@ -1565,8 +1599,13 @@ impl AssembledWorkspace {
                          analysis: {message}",
                         root.display()
                     );
-                    if script.is_some() {
-                        build_script_diagnostics.script = script;
+                    if let Some(script) = script {
+                        if position.is_some() {
+                            let view = storage.view();
+                            build_script_diagnostics.script_text =
+                                view.file_text(&script).ok().map(ToOwned::to_owned);
+                        }
+                        build_script_diagnostics.script = Some(script);
                     }
                     build_script_diagnostics.push_failure(message, position);
                 }
@@ -2206,6 +2245,10 @@ mod tests {
                 (
                     "let valid = 1;\nthrow \"boom\";\n",
                     Range::new(Position::new(1, 0), Position::new(1, 1)),
+                ),
+                (
+                    "let emoji = \"😀\"; throw \"boom\";\n",
+                    Range::new(Position::new(0, 18), Position::new(0, 19)),
                 ),
             ] {
                 let dir = tempfile::tempdir().unwrap();
