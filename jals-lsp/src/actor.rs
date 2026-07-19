@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use async_lsp::lsp_types::{
     CompletionItem, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentHighlight, DocumentSymbolResponse, FoldingRange,
-    GotoDefinitionResponse, Hover, Location, Position, PrepareRenameResponse,
+    DidOpenTextDocumentParams, DocumentHighlight, DocumentSymbolResponse, FileChangeType,
+    FoldingRange, GotoDefinitionResponse, Hover, Location, Position, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, SelectionRange, SemanticToken, SemanticTokens,
     SemanticTokensDelta, SemanticTokensFullDeltaResult, SemanticTokensResult, SignatureHelp,
     TextEdit, Url, WorkspaceEdit, notification,
@@ -698,7 +698,7 @@ impl Actor {
         let changed: Vec<_> = params
             .changes
             .iter()
-            .filter_map(|event| event.uri.to_file_path().ok())
+            .filter_map(|event| event.uri.to_file_path().ok().map(|path| (path, event.typ)))
             .collect();
         let actions: Vec<_> = self
             .workspaces
@@ -725,20 +725,26 @@ impl Actor {
         }
     }
 
-    /// Classify a watched-file batch for one loaded project. Every non-output project change is at
-    /// least a lightweight refresh; only the manifest and effective script inputs rebuild the
-    /// dependency plan and rerun Rhai.
+    /// Classify a watched-file batch for one loaded project. Generated writes and cache feedback
+    /// are ignored, but deleting generated output rebuilds the workspace so stale symbols cannot
+    /// survive. Every other project change is at least a lightweight refresh.
     fn watched_project_action(
         root: &Path,
         policy: Option<&ProjectWatchPolicy>,
-        changed: &[PathBuf],
+        changed: &[(PathBuf, FileChangeType)],
     ) -> WatchedProjectAction {
         let build_root = root.join("target/jals/build");
         let cache_root = root.join("target/jals/cache");
         let manifest = root.join("jals.toml");
         let mut saw_refreshable_source = false;
-        for path in changed {
-            if path.starts_with(&build_root) || path.starts_with(&cache_root) {
+        for (path, change_type) in changed {
+            if path.starts_with(&build_root) {
+                if *change_type == FileChangeType::DELETED {
+                    return WatchedProjectAction::Reassemble;
+                }
+                continue;
+            }
+            if path.starts_with(&cache_root) {
                 continue;
             }
             if *path == manifest {
@@ -1849,6 +1855,10 @@ mod tests {
         (actor, receiver, sender)
     }
 
+    fn changed(path: &Path) -> (PathBuf, FileChangeType) {
+        (path.to_path_buf(), FileChangeType::CHANGED)
+    }
+
     /// Process every command already queued (e.g. a `WorkspaceReady` from an inline assembly).
     async fn drain(actor: &mut Actor, receiver: &mut mpsc::UnboundedReceiver<Cmd>) {
         while let Ok(cmd) = receiver.try_recv() {
@@ -1981,34 +1991,26 @@ mod tests {
         };
 
         assert_eq!(
-            Actor::watched_project_action(
-                root,
-                Some(&ordinary),
-                std::slice::from_ref(&source_path),
-            ),
+            Actor::watched_project_action(root, Some(&ordinary), &[changed(&source_path)],),
             WatchedProjectAction::Refresh,
             "authored Java under a source root refreshes in place"
         );
         assert_eq!(
-            Actor::watched_project_action(root, Some(&ordinary), std::slice::from_ref(&manifest)),
+            Actor::watched_project_action(root, Some(&ordinary), &[changed(&manifest)]),
             WatchedProjectAction::Reassemble
         );
-        for changed in [classpath, source_dependency, external_dependency] {
+        for path in [classpath, source_dependency, external_dependency] {
             assert_eq!(
-                Actor::watched_project_action(
-                    root,
-                    Some(&ordinary),
-                    std::slice::from_ref(&changed),
-                ),
+                Actor::watched_project_action(root, Some(&ordinary), &[changed(&path)]),
                 WatchedProjectAction::Reassemble,
-                "classpath and source dependencies require reassembly: {changed:?}"
+                "classpath and source dependencies require reassembly: {path:?}"
             );
         }
         assert_eq!(
             Actor::watched_project_action(
                 root,
                 Some(&ordinary),
-                &[output_path.clone(), cache_path],
+                &[changed(&output_path), changed(&cache_path)],
             ),
             WatchedProjectAction::Ignore,
             "generated output and cache feedback are ignored"
@@ -2022,11 +2024,7 @@ mod tests {
             ..ordinary.clone()
         };
         assert_eq!(
-            Actor::watched_project_action(
-                root,
-                Some(&conservative),
-                std::slice::from_ref(&source_path),
-            ),
+            Actor::watched_project_action(root, Some(&conservative), &[changed(&source_path)],),
             WatchedProjectAction::Reassemble,
             "an empty rerun set conservatively watches all project files"
         );
@@ -2039,30 +2037,44 @@ mod tests {
             ..ordinary
         };
         assert_eq!(
-            Actor::watched_project_action(
-                root,
-                Some(&declared),
-                std::slice::from_ref(&script_path),
-            ),
+            Actor::watched_project_action(root, Some(&declared), &[changed(&script_path)],),
             WatchedProjectAction::Reassemble
         );
         assert_eq!(
-            Actor::watched_project_action(root, Some(&declared), std::slice::from_ref(&input_path),),
+            Actor::watched_project_action(root, Some(&declared), &[changed(&input_path)]),
             WatchedProjectAction::Reassemble
         );
         assert_eq!(
-            Actor::watched_project_action(
-                root,
-                Some(&declared),
-                std::slice::from_ref(&source_path),
-            ),
+            Actor::watched_project_action(root, Some(&declared), &[changed(&source_path)],),
             WatchedProjectAction::Refresh,
             "unrelated files do not rerun a script with declared inputs"
         );
         assert_eq!(
-            Actor::watched_project_action(root, Some(&declared), &[output_path]),
+            Actor::watched_project_action(root, Some(&declared), &[changed(&output_path)]),
             WatchedProjectAction::Ignore,
             "generated outputs do nothing"
+        );
+    }
+
+    #[test]
+    fn generated_output_deletion_reassembles_while_write_feedback_is_ignored() {
+        let root = Path::new("project");
+        let output = root.join("target/jals/build/rhai/out/Generated.java");
+        let cache = root.join("target/jals/cache/artifact");
+
+        for change_type in [FileChangeType::CREATED, FileChangeType::CHANGED] {
+            assert_eq!(
+                Actor::watched_project_action(root, None, &[(output.clone(), change_type)],),
+                WatchedProjectAction::Ignore
+            );
+        }
+        assert_eq!(
+            Actor::watched_project_action(root, None, &[(output, FileChangeType::DELETED)],),
+            WatchedProjectAction::Reassemble
+        );
+        assert_eq!(
+            Actor::watched_project_action(root, None, &[(cache, FileChangeType::DELETED)]),
+            WatchedProjectAction::Ignore
         );
     }
 
@@ -2087,15 +2099,15 @@ mod tests {
             None,
         );
 
-        for changed in [
+        for path in [
             PathBuf::from("/workspace/shared/Shared.java"),
             root.join("deps/local/Local.java"),
             root.join("lib/api.jar"),
         ] {
             assert_eq!(
-                Actor::watched_project_action(root, Some(&policy), std::slice::from_ref(&changed),),
+                Actor::watched_project_action(root, Some(&policy), &[changed(&path)]),
                 WatchedProjectAction::Reassemble,
-                "manifest-derived input must reassemble: {changed:?}"
+                "manifest-derived input must reassemble: {path:?}"
             );
         }
     }
