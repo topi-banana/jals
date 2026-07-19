@@ -16,10 +16,9 @@ extern "C" {
     #[wasm_bindgen(js_name = initMonaco)]
     pub fn init_monaco() -> js_sys::Promise;
 
-    /// Eagerly create a URI-backed model for every `[path, text]` pair, so cross-file navigation and
-    /// peek-references can reach files never opened in the editor.
-    #[wasm_bindgen(js_name = createModels)]
-    pub fn create_models(files: &js_sys::Array);
+    /// Upsert every indexed Java model and dispose models for generated files no longer indexed.
+    #[wasm_bindgen(js_name = syncModels)]
+    pub fn sync_models(files: &js_sys::Array);
 
     /// Create the editor in `el`, showing `path`'s model, calling `on_change` (debounced) on edits
     /// and `on_open` when a cross-file navigation switches the model to another file.
@@ -58,6 +57,10 @@ extern "C" {
     /// Replace the diagnostic markers on the current model.
     #[wasm_bindgen(js_name = setMarkers)]
     fn set_markers(markers: &js_sys::Array);
+
+    /// Replace markers on an existing model identified by its pseudo/project path.
+    #[wasm_bindgen(js_name = setModelMarkers)]
+    fn set_model_markers(path: &str, markers: &js_sys::Array);
 
     /// Register the Java document-formatting provider, calling `format` for the text
     /// (a Rust closure returning `Promise<string>`, awaited by the glue).
@@ -231,6 +234,22 @@ impl<'a> Marker<'a> {
             ));
         }
         set_markers(&array);
+    }
+
+    /// Replace diagnostic markers on the existing model at `path`.
+    pub fn set_diagnostics_for(path: &str, markers: impl IntoIterator<Item = Marker<'a>>) {
+        let array = js_sys::Array::new();
+        for diagnostic in markers {
+            array.push(&marker(
+                diagnostic.start_line,
+                diagnostic.start_col,
+                diagnostic.end_line,
+                diagnostic.end_col,
+                diagnostic.message,
+                diagnostic.monaco_severity(),
+            ));
+        }
+        set_model_markers(path, &array);
     }
 
     /// Map this marker's [`DiagnosticSeverity`] to a Monaco `MarkerSeverity` (Error = 8,

@@ -26,7 +26,7 @@ pub struct TreeEntry {
 /// Props for [`FileTree`].
 #[derive(Properties, PartialEq)]
 pub struct FileTreeProps {
-    /// The project configuration files (`jals.toml` / `jalsfmt.toml`), shown in their own section
+    /// The project files (`jals.toml` / `jalsfmt.toml` / `build.rhai`), shown in their own section
     /// above the workspace files. Each is a top-level, selectable [`TreeEntry`].
     pub config_entries: Vec<TreeEntry>,
     /// The workspace files, flattened pre-order (see [`TreeEntry`]).
@@ -38,7 +38,7 @@ pub struct FileTreeProps {
     pub on_select: Callback<String>,
 }
 
-/// The file-tree sidebar: a `Config` section (the editable `jals.toml` / `jalsfmt.toml`) over the
+/// The file-tree sidebar: a `Config` section (manifest, formatter config, and Rhai script) over the
 /// workspace's files rendered as a fully-expanded tree, each file row selecting the active file. The
 /// active row carries the app-shell left-edge indicator.
 pub struct FileTree;

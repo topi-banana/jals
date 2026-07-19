@@ -11,6 +11,11 @@ yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }
 jals-classpath = { path = "../jals-classpath", default-features = false, features = [
   "archive",
 ] }
+# Portable Rhai build scripts over the playground's existing `MemoryStorage`; keep the native
+# JDK/process adapters out of the wasm graph.
+jals-build = { path = "../jals-build", default-features = false, features = [
+  "rhai",
+] }
 jals-config = { workspace = true }
 jals-editor = { workspace = true }
 # The browser runtime adapter (`Exec::wasm()`): `spawn_local` tasks and macrotask-escaping yields

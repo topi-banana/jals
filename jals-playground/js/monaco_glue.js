@@ -6,6 +6,7 @@
 
 let monacoReady = null;
 let editor = null;
+let changeTimer = null;
 const models = new Map(); // path -> monaco.editor.ITextModel
 const MARKER_OWNER = "jals";
 
@@ -33,12 +34,11 @@ export function initMonaco() {
     return monacoReady;
 }
 
-// The Monaco language for `path`, by extension: the config files (`jals.toml` /
-// `jalsfmt.toml`) are plaintext (Monaco ships no TOML mode), everything else is
-// Java. Keeping config models off the `java` language also keeps the Java-only
-// providers/formatter from firing on them.
+// The Monaco language for `path`, by extension: TOML and Rhai pseudo-files are
+// plaintext, everything else is Java. Keeping pseudo-files off `java` also keeps
+// Java-only providers and formatting from firing on them.
 function langFor(path) {
-    return path.endsWith(".toml") ? "plaintext" : "java";
+    return path.endsWith(".toml") || path.endsWith(".rhai") ? "plaintext" : "java";
 }
 
 // Get-or-create the URI-backed model for `path`, seeded with `value` on first
@@ -52,10 +52,22 @@ function modelFor(path, value) {
     return model;
 }
 
-// Eagerly create a model for every `[path, text]` pair, so go-to-definition and
-// peek-references can reach files the user never opened.
-export function createModels(files) {
-    for (const [path, text] of files) modelFor(path, text);
+// Upsert all indexed Java models and remove stale generated models. Never replace
+// the currently edited model: its live text may be newer than Rust's last debounce.
+export function syncModels(files) {
+    const indexed = new Set();
+    const active = editor && editor.getModel();
+    for (const [path, text] of files) {
+        indexed.add(path);
+        const model = modelFor(path, text);
+        if (model !== active && model.getValue() !== text) model.setValue(text);
+    }
+    for (const [path, model] of models) {
+        if (path.endsWith(".java") && !indexed.has(path) && model !== active) {
+            model.dispose();
+            models.delete(path);
+        }
+    }
 }
 
 // Create the editor inside `el`, showing `path`'s model, and notify `onChange`
@@ -71,11 +83,10 @@ export function createEditor(el, path, value, onChange, onOpen) {
         fontSize: 13,
         tabSize: 4,
     });
-    let timer = null;
     editor.onDidChangeModelContent(() => {
-        if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(() => {
-            timer = null;
+        if (changeTimer !== null) clearTimeout(changeTimer);
+        changeTimer = setTimeout(() => {
+            changeTimer = null;
             onChange(editor.getValue());
         }, 250);
     });
@@ -95,6 +106,8 @@ export function createEditor(el, path, value, onChange, onOpen) {
                 const targetPath = uriToPath(input.resource);
                 if (model && targetPath) {
                     // Flush the outgoing file's live text before switching away.
+                    if (changeTimer !== null) clearTimeout(changeTimer);
+                    changeTimer = null;
                     onChange(sourceEditor.getValue());
                     sourceEditor.setModel(model);
                     const selection = input.options && input.options.selection;
@@ -115,6 +128,8 @@ export function createEditor(el, path, value, onChange, onOpen) {
 // preserving each file's own undo history and cursor position.
 export function switchModel(path, value) {
     if (!editor) return;
+    if (changeTimer !== null) clearTimeout(changeTimer);
+    changeTimer = null;
     editor.setModel(modelFor(path, value));
 }
 
@@ -144,6 +159,13 @@ export function marker(startLineNumber, startColumn, endLineNumber, endColumn, m
 export function setMarkers(markers) {
     if (!editor) return;
     const model = editor.getModel();
+    if (model) monaco.editor.setModelMarkers(model, MARKER_OWNER, markers);
+}
+
+// Replace markers on a model without switching the editor to it. Missing models
+// are left alone; selecting a pseudo-file creates it and Rust repaints then.
+export function setModelMarkers(path, markers) {
+    const model = models.get(path);
     if (model) monaco.editor.setModelMarkers(model, MARKER_OWNER, markers);
 }
 
