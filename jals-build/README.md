@@ -47,7 +47,7 @@ Four subcommands are wired through `jals-cli`:
 | --- | --- | --- | --- |
 | `jals build` | `execute_build_script` + `Invocation::build` | Run the optional pre-build script, discover `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
 | `jals run` | `execute_build_script` + `RunTarget::resolve` + invocations | Run the pre-build phase, compile, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
-| `jals clean` | `CleanTargets::keys` | Remove `classes-dir` and, when a script is configured, `target/jals/build`. A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
+| `jals clean` | `CleanTargets::keys` | Remove `classes-dir` and `target/jals/build`, including stale outputs after a script is removed. A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
 | `jals init [PATH]` | `InitOptions::scaffold` | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`. | `--name <NAME>` |
 
 Common behavior, all implemented in `jals-cli` on top of this crate:
@@ -252,9 +252,9 @@ deleted. Missing cached output, a digest mismatch, changed inputs, or invalid ca
 normal script evaluation. Failure to persist cache state becomes a warning after generated output
 has committed, not a failed build.
 
-With a configured script, `jals clean` removes both `classes-dir` and `target/jals/build`, including
-`target/jals/build/rhai/out`. It intentionally leaves the shared verified cache at
-`target/jals/cache`; the next build can safely restore matching output from it.
+`jals clean` always removes both `classes-dir` and `target/jals/build`, including stale
+`target/jals/build/rhai/out` files after a script is removed. It intentionally leaves the shared
+verified cache at `target/jals/cache`; the next build can safely restore matching output from it.
 
 #### Sandbox and WebAssembly
 
@@ -434,7 +434,7 @@ jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run the [[bin]] named "server"
 jals run -- arg1 arg2       # ...passing args to the program
 jals run --main-class com.example.Other
-jals clean                  # remove target/classes (+ target/jals/build when scripted)
+jals clean                  # remove target/classes and target/jals/build
 ```
 
 ## Library API

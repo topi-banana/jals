@@ -46,7 +46,7 @@ enum Commands {
     Build(BuildArgs),
     /// Compile and run a JALS/Java project with `java`.
     Run(RunArgs),
-    /// Remove a JALS/Java project's build output (the `classes-dir`).
+    /// Remove a project's `classes-dir` and reserved build-script outputs.
     Clean(CleanArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
     Init(InitArgs),
