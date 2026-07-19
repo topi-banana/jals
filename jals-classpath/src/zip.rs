@@ -348,6 +348,7 @@ pub(crate) struct MemberStream<R> {
     window: Box<[u8]>,
     window_start: usize,
     window_filled: usize,
+    deflate_ended: bool,
     verified: bool,
 }
 
@@ -362,7 +363,15 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
             ));
         }
         let inflater = match member.method {
-            0 => None,
+            0 => {
+                if member.compressed_size != member.uncompressed_size {
+                    return Err(format!(
+                        "stored archive member `{}` has mismatched compressed and uncompressed sizes",
+                        member.name
+                    ));
+                }
+                None
+            }
             8 => Some(InflateState::new_boxed(DataFormat::Raw)),
             method => {
                 return Err(format!(
@@ -409,6 +418,7 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
             window: vec![0u8; window].into_boxed_slice(),
             window_start: 0,
             window_filled: 0,
+            deflate_ended: false,
             verified: false,
         })
     }
@@ -428,14 +438,69 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
         Ok(())
     }
 
-    /// End-of-member verification: crc32 over everything produced must match the directory.
-    /// (The size half is implicit — production is capped at the declared uncompressed size and
-    /// a short stream errors before reaching this point.)
-    fn verify_end(&mut self) -> Result<(), IoError> {
+    async fn finish_deflate(&mut self) -> Result<(), IoError> {
+        let mut extra = [0u8; 1];
+        loop {
+            if self.deflate_ended {
+                if self.compressed_remaining == 0 && self.window_start == self.window_filled {
+                    return Ok(());
+                }
+                return Err(IoError::Failed(
+                    "archive member has trailing compressed data".into(),
+                ));
+            }
+            if self.window_start == self.window_filled && self.compressed_remaining > 0 {
+                self.refill().await?;
+            }
+            let input_done = self.window_start == self.window_filled;
+            let flush = if input_done {
+                MZFlush::Finish
+            } else {
+                MZFlush::None
+            };
+            let result = inflate(
+                self.inflater
+                    .as_mut()
+                    .expect("deflate finalization requires an inflater"),
+                &self.window[self.window_start..self.window_filled],
+                &mut extra,
+                flush,
+            );
+            self.window_start += result.bytes_consumed;
+            let status = result.status.map_err(|error| {
+                IoError::Failed(format!(
+                    "archive member deflate stream is corrupt: {error:?}"
+                ))
+            })?;
+            if result.bytes_written > 0 {
+                return Err(IoError::Failed(
+                    "archive member is longer than its directory entry".into(),
+                ));
+            }
+            if status == MZStatus::StreamEnd {
+                self.deflate_ended = true;
+                continue;
+            }
+            if input_done && result.bytes_consumed == 0 {
+                return Err(IoError::Failed(
+                    "archive member deflate stream did not reach its end".into(),
+                ));
+            }
+        }
+    }
+
+    /// Verify the codec reached the exact end of its declared input and crc32 matches.
+    async fn verify_end(&mut self) -> Result<(), IoError> {
         if self.verified {
             return Ok(());
         }
-        self.verified = true;
+        if self.inflater.is_some() {
+            self.finish_deflate().await?;
+        } else if self.compressed_remaining != 0 || self.window_start != self.window_filled {
+            return Err(IoError::Failed(
+                "stored archive member did not consume its declared data".into(),
+            ));
+        }
         let actual = self.hasher.clone().finalize();
         if actual != self.expected_crc {
             return Err(IoError::Failed(format!(
@@ -443,6 +508,7 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
                 self.expected_crc
             )));
         }
+        self.verified = true;
         Ok(())
     }
 
@@ -459,6 +525,11 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
 
     async fn read_deflate(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         loop {
+            if self.deflate_ended {
+                return Err(IoError::Failed(
+                    "archive member is shorter than its directory entry".into(),
+                ));
+            }
             if self.window_start == self.window_filled && self.compressed_remaining > 0 {
                 self.refill().await?;
             }
@@ -484,6 +555,9 @@ impl<R: sio::Read + sio::Seek> MemberStream<R> {
                     "archive member deflate stream is corrupt: {error:?}"
                 ))
             })?;
+            if status == MZStatus::StreamEnd {
+                self.deflate_ended = true;
+            }
             if result.bytes_written > 0 {
                 return Ok(result.bytes_written);
             }
@@ -508,7 +582,7 @@ impl<R: sio::Read + sio::Seek> sio::Read for MemberStream<R> {
             return Ok(0);
         }
         if self.uncompressed_remaining == 0 {
-            self.verify_end()?;
+            self.verify_end().await?;
             return Ok(0);
         }
         // Never ask for more than the member owes: producing beyond the declared size is
@@ -556,7 +630,7 @@ mod tests {
             .expect("oracle jar parses")
     }
 
-    fn read_member_bytes(archive: &[u8], member: &MemberRecord) -> Vec<u8> {
+    fn try_read_member_bytes(archive: &[u8], member: &MemberRecord) -> Result<Vec<u8>, IoError> {
         block_on_inline(async {
             let mut stream = MemberStream::open(Cursor::new(archive), member)
                 .await
@@ -564,12 +638,16 @@ mod tests {
             let mut out = Vec::new();
             let mut chunk = [0u8; 173]; // odd size to exercise partial reads
             loop {
-                match stream.read(&mut chunk).await.expect("member reads") {
-                    0 => return out,
+                match stream.read(&mut chunk).await? {
+                    0 => return Ok(out),
                     n => out.extend_from_slice(&chunk[..n]),
                 }
             }
         })
+    }
+
+    fn read_member_bytes(archive: &[u8], member: &MemberRecord) -> Vec<u8> {
+        try_read_member_bytes(archive, member).expect("member reads")
     }
 
     /// Names and byte-identical contents must match what the `zip` crate reads back from the
@@ -711,6 +789,57 @@ mod tests {
             }
         });
         assert!(outcome.is_err(), "{outcome:?}");
+    }
+
+    #[test]
+    fn rejects_stored_member_with_mismatched_sizes() {
+        let archive = oracle_jar(&[("a.bin", b"payload", zip::CompressionMethod::Stored)]);
+        let directory = parse(&archive);
+        let mut member = directory.members[0].clone();
+        member.compressed_size += 1;
+
+        let outcome = block_on_inline(MemberStream::open(Cursor::new(&archive), &member));
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn rejects_deflate_output_beyond_the_declared_size() {
+        let payload = b"payload with one byte omitted from the declared size";
+        let archive = oracle_jar(&[("a.bin", payload, zip::CompressionMethod::Deflated)]);
+        let directory = parse(&archive);
+        let mut member = directory.members[0].clone();
+        member.uncompressed_size -= 1;
+        member.crc32 = crc32fast::hash(&payload[..payload.len() - 1]);
+
+        assert!(try_read_member_bytes(&archive, &member).is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_compressed_data() {
+        let payload = b"payload";
+        let archive = oracle_jar(&[("a.bin", payload, zip::CompressionMethod::Deflated)]);
+        let directory = parse(&archive);
+        let mut member = directory.members[0].clone();
+        member.compressed_size += 1;
+
+        assert!(try_read_member_bytes(&archive, &member).is_err());
+    }
+
+    #[test]
+    fn rejects_deflate_without_a_final_block() {
+        let payload = b"payload";
+        let mut archive = oracle_jar(&[("a.bin", payload, zip::CompressionMethod::Deflated)]);
+        let directory = parse(&archive);
+        let member = &directory.members[0];
+        let header = usize::try_from(member.header_offset).unwrap();
+        let data = header
+            + LOCAL_HEADER_LEN
+            + usize::from(u16le(&archive, header + 26))
+            + usize::from(u16le(&archive, header + 28));
+        assert_eq!(archive[data] & 1, 1, "fixture must use one final block");
+        archive[data] &= !1;
+
+        assert!(try_read_member_bytes(&archive, member).is_err());
     }
 
     /// Hand-built minimal zip64 archive: sentinel EOCD fields, a zip64 locator + record, and a
