@@ -957,6 +957,21 @@ mod api {
         }
     }
 
+    #[allow(clippy::set_contains_or_insert)]
+    fn insert_host_file(
+        set: &mut BTreeSet<FileKey>,
+        key: FileKey,
+        limit: usize,
+        operation: &str,
+    ) -> RhaiResult<()> {
+        if !set.contains(&key) {
+            // Rhai errors are catchable, so validate before making a failed call observable.
+            check_host_collection(set.len(), limit, operation)?;
+            set.insert(key);
+        }
+        Ok(())
+    }
+
     fn update_host_directive_bytes(
         pending: &mut PendingOutput,
         previous: usize,
@@ -1005,14 +1020,13 @@ mod api {
             .pending
             .try_borrow_mut()
             .map_err(|_| rhai_error("reentrant build.rerun_if_changed call"))?;
-        let inserted = pending.rerun_files.insert(key);
-        if inserted && pending.rerun_files.len() > pending.limits.max_array_size {
-            return Err(rhai_error(format!(
-                "build.rerun_if_changed exceeds the collection limit of {}",
-                pending.limits.max_array_size
-            )));
-        }
-        Ok(())
+        let limit = pending.limits.max_array_size;
+        insert_host_file(
+            &mut pending.rerun_files,
+            key,
+            limit,
+            "build.rerun_if_changed",
+        )
     }
 
     fn build_rerun_env(api: &mut BuildApi, name: ImmutableString) -> RhaiResult<()> {
@@ -1037,14 +1051,13 @@ mod api {
             .pending
             .try_borrow_mut()
             .map_err(|_| rhai_error("reentrant build.add_source call"))?;
-        let inserted = pending.generated_sources.insert(key);
-        if inserted && pending.generated_sources.len() > pending.limits.max_array_size {
-            return Err(rhai_error(format!(
-                "build.add_source exceeds the collection limit of {}",
-                pending.limits.max_array_size
-            )));
-        }
-        Ok(())
+        let limit = pending.limits.max_array_size;
+        insert_host_file(
+            &mut pending.generated_sources,
+            key,
+            limit,
+            "build.add_source",
+        )
     }
 
     fn build_add_source(api: &mut BuildApi, path: &str) -> RhaiResult<()> {
@@ -1061,14 +1074,13 @@ mod api {
             .pending
             .try_borrow_mut()
             .map_err(|_| rhai_error("reentrant build.add_classpath call"))?;
-        let inserted = pending.additional_classpath.insert(key);
-        if inserted && pending.additional_classpath.len() > pending.limits.max_array_size {
-            return Err(rhai_error(format!(
-                "build.add_classpath exceeds the collection limit of {}",
-                pending.limits.max_array_size
-            )));
-        }
-        Ok(())
+        let limit = pending.limits.max_array_size;
+        insert_host_file(
+            &mut pending.additional_classpath,
+            key,
+            limit,
+            "build.add_classpath",
+        )
     }
 
     fn build_add_classpath(api: &mut BuildApi, path: &str) -> RhaiResult<()> {
@@ -2607,6 +2619,72 @@ mod tests {
                 ));
                 assert_eq!(storage.revision(), Revision::INITIAL);
             }
+        });
+    }
+
+    #[test]
+    fn caught_errors_do_not_overfill_host_collections() {
+        block_on_inline(async {
+            let script = r#"
+                let caught = 0;
+
+                build.rerun_if_changed("inputs/kept.txt");
+                build.rerun_if_changed("inputs/kept.txt");
+                try { build.rerun_if_changed("inputs/rejected-1.txt"); } catch (error) { caught += 1; }
+                try { build.rerun_if_changed("inputs/rejected-2.txt"); } catch (error) { caught += 1; }
+
+                build.add_source("src/Kept.java");
+                build.add_source("src/Kept.java");
+                try { build.add_source("src/Rejected1.java"); } catch (error) { caught += 1; }
+                try { build.add_source("src/Rejected2.java"); } catch (error) { caught += 1; }
+
+                build.add_classpath("lib/kept.jar");
+                build.add_classpath("lib/kept.jar");
+                try { build.add_classpath("lib/rejected-1.jar"); } catch (error) { caught += 1; }
+                try { build.add_classpath("lib/rejected-2.jar"); } catch (error) { caught += 1; }
+
+                if caught != 6 { throw "expected six collection-limit errors"; }
+            "#;
+            let mut storage = storage(
+                script,
+                [
+                    file("inputs/kept.txt", "kept"),
+                    file("inputs/rejected-1.txt", "rejected"),
+                    file("inputs/rejected-2.txt", "rejected"),
+                    file("src/Kept.java", "class Kept {}"),
+                    file("src/Rejected1.java", "class Rejected1 {}"),
+                    file("src/Rejected2.java", "class Rejected2 {}"),
+                    file("lib/kept.jar", "kept"),
+                    file("lib/rejected-1.jar", "rejected"),
+                    file("lib/rejected-2.jar", "rejected"),
+                ],
+            );
+            let limits = BuildScriptLimits {
+                max_array_size: 1,
+                ..BuildScriptLimits::default()
+            };
+
+            let output = run(
+                &mut storage,
+                &BuildScriptEnvironment::new(),
+                &limits,
+                &mut BuildScriptSession::new(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                output.rerun_files,
+                BTreeSet::from([FileKey::parse("inputs/kept.txt").unwrap()])
+            );
+            assert_eq!(
+                output.generated_sources,
+                BTreeSet::from([FileKey::parse("src/Kept.java").unwrap()])
+            );
+            assert_eq!(
+                output.additional_classpath,
+                BTreeSet::from([FileKey::parse("lib/kept.jar").unwrap()])
+            );
         });
     }
 
