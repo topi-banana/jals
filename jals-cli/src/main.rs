@@ -6,13 +6,17 @@
 
 mod report;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use jals_build::build_script::{
+    BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession,
+    RHAI_OUTPUT_ROOT, execute_build_script,
+};
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
@@ -425,18 +429,22 @@ impl BuildArgs {
         if let Some(name) = &self.bin {
             jals_build::RunTarget::resolve(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
         }
-        let sources = App::discover_sources(&manifest, &root)?;
+        let script = App::run_build_script(&manifest, &root, exec).await?;
+        let sources =
+            App::discover_sources(&manifest, &root, !script.generated_sources.is_empty())?;
         // Assemble the compile inputs: the resolved `[dependencies]` jars for javac's classpath, and
         // the `git`/`path` source dependencies' `.java` compiled alongside the project's own sources so
         // a project that depends on a source dependency builds. Best-effort — a failed download/clone
         // is warned and skipped, never aborting the build.
-        let inputs = App::project_inputs(
+        let mut inputs = App::project_inputs(
             &manifest,
             &root,
             jals_classpath::ProjectInputOptions::Compile,
             exec,
+            script,
         )
         .await;
+        inputs.deduplicate(&mut manifest, &root, &sources);
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
@@ -461,7 +469,7 @@ impl RunArgs {
     /// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
     /// run; `--dry-run` prints both commands without executing either.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
-        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
         let main_class: String = match &self.main_class {
@@ -470,25 +478,31 @@ impl RunArgs {
                 .map_err(|e| anyhow!("{e}"))?
                 .to_owned(),
         };
-        let sources = App::discover_sources(&manifest, &root)?;
+        let script = App::run_build_script(&manifest, &root, exec).await?;
+        let sources =
+            App::discover_sources(&manifest, &root, !script.generated_sources.is_empty())?;
         // Assemble the compile inputs once: the resolved `[dependencies]` jars go on both the compile
         // and run classpaths, and the `git`/`path` source dependencies' `.java` compile alongside the
         // project's own sources (their `.class` land in the run classpath's `classes-dir`, so the run
         // invocation is unchanged). Best-effort — a failed download/clone is warned and skipped.
-        let inputs = App::project_inputs(
+        let mut inputs = App::project_inputs(
             &manifest,
             &root,
             jals_classpath::ProjectInputOptions::Compile,
             exec,
+            script,
         )
         .await;
+        inputs.deduplicate(&mut manifest, &root, &sources);
         let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
             project_root: &root,
+            jvm_args: &inputs.jvm_args,
             main_class: &main_class,
             program_args: &self.args,
-            extra_classpath: &inputs.dependency_jars,
+            extra_classpath: &inputs.extra_classpath,
+            run_env: &inputs.run_env,
         };
         // Each step's backend is selected independently from its own `[toolchain]` enum:
         // `"builtin"` is the in-process dummy; anything else spawns `javac`/`java` per
@@ -636,6 +650,7 @@ impl ProjectLintContext {
             root,
             jals_classpath::ProjectInputOptions::Analysis,
             exec,
+            HostBuildScript::default(),
         )
         .await;
         Self {
@@ -663,10 +678,56 @@ struct App;
 
 #[derive(Default)]
 struct HostProjectInputs {
-    dependency_jars: Vec<PathBuf>,
+    extra_classpath: Vec<PathBuf>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
-    source_dep_sources: Vec<PathBuf>,
+    extra_sources: Vec<PathBuf>,
     feature_set: FeatureSet,
+    javac_args: Vec<String>,
+    jvm_args: Vec<String>,
+    compile_env: BTreeMap<String, String>,
+    run_env: BTreeMap<String, String>,
+}
+
+impl HostProjectInputs {
+    /// Keep authored sources and manifest classpath entries first, then retain each extra input's
+    /// first occurrence without disturbing the order supplied by scripts and dependency resolution.
+    fn deduplicate(&mut self, manifest: &mut Manifest, root: &Path, sources: &[PathBuf]) {
+        let mut seen_sources: HashSet<PathBuf> = sources.iter().cloned().collect();
+        self.extra_sources
+            .retain(|source| seen_sources.insert(source.clone()));
+
+        let mut seen_classpath = HashSet::new();
+        manifest
+            .build
+            .classpath
+            .retain(|entry| seen_classpath.insert(root.join(entry)));
+        self.extra_classpath
+            .retain(|entry| seen_classpath.insert(entry.clone()));
+    }
+}
+
+#[derive(Default)]
+struct HostBuildScript {
+    generated_sources: Vec<PathBuf>,
+    additional_classpath: Vec<PathBuf>,
+    javac_args: Vec<String>,
+    jvm_args: Vec<String>,
+    compile_env: BTreeMap<String, String>,
+    run_env: BTreeMap<String, String>,
+}
+
+impl From<HostBuildScript> for HostProjectInputs {
+    fn from(script: HostBuildScript) -> Self {
+        Self {
+            extra_classpath: script.additional_classpath,
+            extra_sources: script.generated_sources,
+            javac_args: script.javac_args,
+            jvm_args: script.jvm_args,
+            compile_env: script.compile_env,
+            run_env: script.run_env,
+            ..Self::default()
+        }
+    }
 }
 
 impl App {
@@ -677,12 +738,14 @@ impl App {
         root: &Path,
         options: jals_classpath::ProjectInputOptions,
         exec: &Exec,
+        script: HostBuildScript,
     ) -> HostProjectInputs {
+        let mut result = HostProjectInputs::from(script);
         let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
         let Ok(mut storage) = NativeStorage::for_project_scoped(root, scopes, exec.clone()).await
         else {
             eprintln!("warning: project storage could not be opened");
-            return HostProjectInputs::default();
+            return result;
         };
         let (inputs, _source_roots) = jals_classpath::NativeProjectPlan::assemble_native(
             manifest,
@@ -694,16 +757,16 @@ impl App {
         for warning in &inputs.warnings {
             eprintln!("warning: {}", warning.message);
         }
-        let dependency_jars = inputs
-            .dependency_jars
-            .iter()
-            .map(|key| storage.artifacts().backend().artifact_path(key))
-            .collect();
-        let mut source_dep_sources = Vec::new();
+        result.extra_classpath.extend(
+            inputs
+                .dependency_jars
+                .iter()
+                .map(|key| storage.artifacts().backend().artifact_path(key)),
+        );
         for source in &inputs.source_dep_sources {
             match source {
                 jals_classpath::SourceFile::Project(key) => {
-                    source_dep_sources.push(key.path().to_host_path(root));
+                    result.extra_sources.push(key.path().to_host_path(root));
                 }
                 jals_classpath::SourceFile::Artifact(source) => {
                     match storage
@@ -711,7 +774,7 @@ impl App {
                         .materialize_source(&source.key, &source.path)
                         .await
                     {
-                        Ok(path) => source_dep_sources.push(path),
+                        Ok(path) => result.extra_sources.push(path),
                         Err(error) => {
                             eprintln!("warning: materializing git source failed: {error:?}");
                         }
@@ -719,12 +782,87 @@ impl App {
                 }
             }
         }
-        HostProjectInputs {
-            dependency_jars,
-            classpath_classes: inputs.classpath_classes,
-            source_dep_sources,
-            feature_set: inputs.feature_set,
+        result.classpath_classes = inputs.classpath_classes;
+        result.feature_set = inputs.feature_set;
+        result
+    }
+
+    /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
+    /// supplies environment values as plain data; scripts only read and publish through typed
+    /// `jals-storage` keys.
+    async fn run_build_script(
+        manifest: &Manifest,
+        root: &Path,
+        exec: &Exec,
+    ) -> Result<HostBuildScript> {
+        if manifest.build.script.is_none() {
+            return Ok(HostBuildScript::default());
         }
+        let mut storage = NativeStorage::for_project_scoped(
+            root,
+            [NativeScope::all(RelativePath::ROOT)],
+            exec.clone(),
+        )
+        .await
+        .context("opening project storage for the build script")?;
+        let mut environment: BuildScriptEnvironment = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
+        environment.insert("JALS_MANIFEST_DIR", ".");
+        if let Some(name) = &manifest.package.name {
+            environment.insert("JALS_PACKAGE_NAME", name);
+        }
+        if let Some(version) = &manifest.package.version {
+            environment.insert("JALS_PACKAGE_VERSION", version);
+        }
+        let mut session = BuildScriptSession::new();
+        let output = execute_build_script(
+            &mut storage,
+            manifest,
+            &environment,
+            &BuildScriptLimits::default(),
+            &mut session,
+        )
+        .await
+        .map_err(|error| match error {
+            jals_build::build_script::BuildScriptError::ReportedErrors(diagnostics) => anyhow!(
+                "build script reported errors: {}",
+                diagnostics
+                    .iter()
+                    .filter_map(|diagnostic| match diagnostic {
+                        BuildScriptDiagnostic::Error(message) => Some(message.as_str()),
+                        BuildScriptDiagnostic::Warning(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            other => anyhow!(other),
+        })?;
+        let Some(output) = output else {
+            return Ok(HostBuildScript::default());
+        };
+        for diagnostic in &output.diagnostics {
+            if let BuildScriptDiagnostic::Warning(message) = diagnostic {
+                eprintln!("warning: build script: {message}");
+            }
+        }
+        Ok(HostBuildScript {
+            generated_sources: output
+                .generated_sources
+                .iter()
+                .map(|key| key.path().to_host_path(root))
+                .collect(),
+            additional_classpath: output
+                .additional_classpath
+                .iter()
+                .map(|key| key.path().to_host_path(root))
+                .collect(),
+            javac_args: output.javac_args,
+            jvm_args: output.jvm_args,
+            compile_env: output.compile_env,
+            run_env: output.run_env,
+        })
     }
 
     /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
@@ -732,7 +870,13 @@ impl App {
     /// manifest is an error, unlike the formatter/linter configs.
     async fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
         let manifest_path = if let Some(p) = explicit {
-            p.to_path_buf()
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .context("getting current dir")?
+                    .join(p)
+            }
         } else {
             let cwd = std::env::current_dir().context("getting current dir")?;
             Manifest::discover_path(&cwd)
@@ -751,15 +895,23 @@ impl App {
 
     /// Collects the `.java` files under the manifest's source directories (resolved against `root`).
     /// Each source directory must exist, and at least one source file must be found.
-    fn discover_sources(manifest: &Manifest, root: &Path) -> Result<Vec<PathBuf>> {
+    fn discover_sources(
+        manifest: &Manifest,
+        root: &Path,
+        has_generated_sources: bool,
+    ) -> Result<Vec<PathBuf>> {
         let source_roots = manifest.source_roots(root);
         for dir in &source_roots {
-            if !dir.is_dir() {
+            if !dir.is_dir() && !has_generated_sources {
                 return Err(anyhow!("source directory {} does not exist", dir.display()));
             }
         }
-        let sources = Self::collect_java_files(&source_roots)?;
-        if sources.is_empty() {
+        let existing_roots: Vec<PathBuf> = source_roots
+            .into_iter()
+            .filter(|root| root.is_dir())
+            .collect();
+        let sources = Self::collect_java_files(&existing_roots)?;
+        if sources.is_empty() && !has_generated_sources {
             return Err(anyhow!(
                 "no .java files found under {:?}",
                 manifest.build.source_dirs
@@ -782,8 +934,10 @@ impl App {
             manifest,
             project_root,
             sources,
-            extra_sources: &inputs.source_dep_sources,
-            extra_classpath: &inputs.dependency_jars,
+            extra_sources: &inputs.extra_sources,
+            extra_classpath: &inputs.extra_classpath,
+            extra_javac_args: &inputs.javac_args,
+            compile_env: &inputs.compile_env,
         }
     }
 
@@ -889,5 +1043,46 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.by_root.insert(root.to_path_buf(), config.clone());
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_inputs_are_stably_deduplicated_against_authored_inputs() {
+        let root = Path::new("/project");
+        let authored = vec![root.join("src/A.java"), root.join("src/B.java")];
+        let mut manifest = Manifest::default();
+        manifest.build.classpath = vec!["libs/base.jar".to_owned(), "libs/base.jar".to_owned()];
+        let mut inputs = HostProjectInputs {
+            extra_sources: vec![
+                authored[1].clone(),
+                root.join("generated/Z.java"),
+                authored[0].clone(),
+                root.join("generated/A.java"),
+                root.join("generated/Z.java"),
+            ],
+            extra_classpath: vec![
+                root.join("libs/z.jar"),
+                root.join("libs/base.jar"),
+                root.join("libs/a.jar"),
+                root.join("libs/z.jar"),
+            ],
+            ..HostProjectInputs::default()
+        };
+
+        inputs.deduplicate(&mut manifest, root, &authored);
+
+        assert_eq!(
+            inputs.extra_sources,
+            vec![root.join("generated/Z.java"), root.join("generated/A.java")]
+        );
+        assert_eq!(
+            inputs.extra_classpath,
+            vec![root.join("libs/z.jar"), root.join("libs/a.jar")]
+        );
+        assert_eq!(manifest.build.classpath, vec!["libs/base.jar"]);
     }
 }
