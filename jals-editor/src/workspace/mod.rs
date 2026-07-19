@@ -9,9 +9,9 @@
 //! coordinate conversion.
 //!
 //! Analysis is `async` end to end: parsing, resolution, and index assembly yield cooperatively,
-//! and a full load/refresh distributes per-file parse + fact extraction across the storage's
-//! [`Exec`] via [`Exec::fan_out`] (ordered, so ids and index inputs stay deterministic). Queries
-//! answer from cached trees; only lazily-computed per-file analysis awaits.
+//! and a full load/refresh/reload distributes per-file parse + fact extraction across the
+//! storage's [`Exec`] via [`Exec::fan_out`] (ordered, so ids and index inputs stay deterministic).
+//! Queries answer from cached trees; only lazily-computed per-file analysis awaits.
 
 mod file_id;
 
@@ -173,14 +173,17 @@ impl SourceFile {
 
 /// Everything a host resolves about a project before the workspace takes over.
 ///
-/// Where the sources live, the already-lowered classpath, the library `.java` navigation
-/// sources, and the resolved language feature set. The host owns all I/O policy behind this
-/// struct (which jars to download, which directories to walk for `.class` files); the workspace
-/// owns everything after.
+/// Where the directory and exact-file sources live, the already-lowered classpath, the library
+/// `.java` navigation sources, and the resolved language feature set. The host owns all I/O policy
+/// behind this struct (which jars to download, which directories to walk for `.class` files); the
+/// workspace owns everything after.
 #[derive(Default)]
 pub struct ProjectLayout {
     /// The directories walked for `.java` (virtual paths).
     pub source_roots: Vec<DirKey>,
+    /// Exact project source files outside (or alongside) the source-root walk. Hosts use this for
+    /// generated sources explicitly selected by identity; siblings are not implicitly included.
+    pub project_sources: Vec<FileKey>,
     /// The project's classpath `.class` files, already lowered by the host via
     /// [`ProjectIndex::lower_classpath`] — reused on every index rebuild so external library
     /// types resolve; static for the workspace's lifetime (a dependency jar does not change
@@ -209,9 +212,10 @@ impl ProjectLayout {
 
 /// A single project's symbol index plus the per-file data needed to answer cross-file queries.
 ///
-/// All project I/O goes through [`ProjectStorage`], and only during [`load`](Workspace::load) /
-/// [`refresh`](Workspace::refresh) — queries answer from the cached parsed trees. Open documents
-/// are kept current via [`set_overlay`](Workspace::set_overlay) /
+/// All project I/O goes through [`ProjectStorage`], and only during [`load`](Workspace::load),
+/// [`refresh`](Workspace::refresh), or [`reload_project_files`](Workspace::reload_project_files) —
+/// queries answer from the cached parsed trees. Open documents are kept current via
+/// [`set_overlay`](Workspace::set_overlay) /
 /// [`sync_overlay`](Workspace::sync_overlay), which swap a file's cached text for the editor's
 /// and rebuild the (in-memory, no-I/O) index. The rebuild re-walks only the changed file's CST
 /// but reassembles the whole index — linear in project size, adequate until an incremental index
@@ -222,6 +226,7 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
     exec: Exec,
     storage: ProjectStorage<S, C>,
     source_roots: Vec<DirKey>,
+    project_sources: Vec<FileKey>,
     files: Vec<SourceFile>,
     by_path: BTreeMap<FileKey, FileId>,
     /// Extracted library *source* files (the `.java` of a `[dependencies]` `sources` jar), kept
@@ -256,14 +261,18 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
 }
 
 impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
-    /// Build a workspace over `storage`: walk the spec's source roots for `.java`, read and parse
-    /// each (skipping unreadable ones), register the library / source-dependency `.java`, and
-    /// build the symbol index. Paths are visited in sorted order and per-file work fans out in
-    /// that order, so the index is deterministic. The execution context is taken from the
-    /// storage ([`ProjectStorage::exec`]) — one handle threads through the whole aggregate.
+    /// Build a workspace over `storage`: union `.java` under the spec's source roots with its exact
+    /// project sources, read and parse each (skipping unreadable ones), register library /
+    /// source-dependency `.java`, and build the symbol index. Paths are visited in sorted order and
+    /// per-file work fans out in that order, so the index is deterministic. The execution context
+    /// is taken from the storage ([`ProjectStorage::exec`]) — one handle threads through the whole
+    /// aggregate.
     pub async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
         let exec = storage.exec().clone();
         let view = storage.view();
+        let mut project_sources = spec.project_sources;
+        project_sources.sort();
+        project_sources.dedup();
 
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
@@ -283,6 +292,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             exec,
             storage,
             source_roots: spec.source_roots,
+            project_sources,
             files: Vec::new(),
             by_path: BTreeMap::new(),
             library_files,
@@ -294,17 +304,19 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts().await,
         };
-        ws.reload_project_files(&view).await;
-        ws.rebuild_index().await;
+        ws.reload_project_files().await;
         ws
     }
 
-    /// Walk the source roots for `.java`, read each (skipping unreadable ones), and register the
-    /// files in sorted path order — the one place `FileId` assignment happens, so the initial load
-    /// and every refresh stay deterministic and identical. Parsing and fact extraction fan out
-    /// per file ([`SourceFile::parse_all`]); the ordered results keep id assignment identical to
-    /// the sequential walk.
-    async fn reload_project_files(&mut self, view: &ProjectView) {
+    /// Reload project `.java` files from the aggregate's current [`ProjectView`] and rebuild the
+    /// symbol index.
+    ///
+    /// Unlike [`refresh`](Self::refresh), this does not refresh the source backend and always
+    /// rebuilds. Use it after a transaction through [`storage_mut`](Self::storage_mut), which has
+    /// already updated the aggregate's view and therefore produces no backend change on refresh.
+    /// Files are registered in sorted path order so [`FileId`] assignment stays deterministic.
+    pub async fn reload_project_files(&mut self) {
+        let view = self.storage.view();
         let mut paths: Vec<FileKey> = self
             .source_roots
             .iter()
@@ -312,6 +324,11 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             .filter(|file| file.key().has_extension("java"))
             .map(|file| file.key().clone())
             .collect();
+        paths.extend(
+            self.project_sources
+                .iter()
+                .filter_map(|path| view.tree().lookup_file(path).map(|_| path.clone())),
+        );
         paths.sort();
         paths.dedup();
         let mut inputs = Vec::new();
@@ -332,6 +349,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
                 )
             })
             .collect();
+        self.rebuild_index().await;
     }
 
     /// Rebuild the symbol index from the cached per-file facts, stubs, and classpath. No I/O.
@@ -452,6 +470,8 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         &self.storage
     }
 
+    /// Mutable access to project storage. Call [`reload_project_files`](Self::reload_project_files)
+    /// after committing a transaction that changes project Java files.
     pub const fn storage_mut(&mut self) -> &mut ProjectStorage<S, C> {
         &mut self.storage
     }
@@ -462,9 +482,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         if !outcome.changed {
             return Ok(outcome);
         }
-        let view = self.storage.view();
-        self.reload_project_files(&view).await;
-        self.rebuild_index().await;
+        self.reload_project_files().await;
         Ok(outcome)
     }
 
@@ -474,8 +492,8 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     }
 
     /// Every indexed project file with its cached document, in path order. This is the one
-    /// statement of project membership (source roots + extension, overlays included); hosts
-    /// browse this set instead of re-deriving it from the raw tree.
+    /// statement of project membership (source-root Java plus exact project sources, overlays
+    /// included); hosts browse this set instead of re-deriving it from the raw tree.
     pub fn files(&self) -> impl Iterator<Item = (&FileKey, &Document)> {
         self.by_path
             .iter()
@@ -495,10 +513,12 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         Some(&self.ws_file(id)?.doc)
     }
 
-    /// Whether `path` belongs to this workspace: a file already indexed, or a path under one of
-    /// its source roots (so a project file the editor hasn't opened yet still resolves here).
+    /// Whether `path` belongs to this workspace: indexed, selected exactly, or under a source root
+    /// (so a project file the editor hasn't opened yet still resolves here).
     pub fn owns_path(&self, path: &FileKey) -> bool {
-        self.by_path.contains_key(path) || self.under_source_root(path)
+        self.by_path.contains_key(path)
+            || self.under_source_root(path)
+            || self.project_sources.binary_search(path).is_ok()
     }
 
     /// Whether `path` lies under one of this workspace's source roots.
@@ -521,7 +541,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         if let Some(id) = self.by_path.get(path).copied() {
             self.files[id.0 as usize] = file;
         } else {
-            if !self.under_source_root(path) {
+            if !self.under_source_root(path) && self.project_sources.binary_search(path).is_err() {
                 return Ok(false);
             }
             let id = WorkspaceFileId::of_index(WorkspaceFileId::Project, self.files.len());
@@ -550,7 +570,8 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             if &*source.doc.text == text {
                 return Ok(true);
             }
-        } else if !self.under_source_root(path) {
+        } else if !self.under_source_root(path) && self.project_sources.binary_search(path).is_err()
+        {
             return Ok(false);
         }
         let doc = Document::new(text.to_owned()).await;
@@ -826,6 +847,40 @@ mod tests {
     }
 
     #[test]
+    fn exact_project_sources_are_indexed_without_widening_to_siblings() {
+        block_on_inline(async {
+            let generated = key("generated/Selected.java");
+            let sibling = key("generated/Sibling.java");
+            let storage = memory(&[
+                ("src/Main.java", "class Main { Selected value; }"),
+                ("generated/Selected.java", "class Selected { }"),
+                ("generated/Sibling.java", "class Sibling { }"),
+            ]);
+            let ws = Workspace::load(
+                storage,
+                ProjectLayout {
+                    project_sources: vec![generated.clone(), generated.clone()],
+                    ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+                },
+            )
+            .await;
+
+            assert!(ws.owns_path(&generated));
+            assert!(ws.file_id(&generated).is_some());
+            assert!(!ws.owns_path(&sibling));
+            assert!(ws.file_id(&sibling).is_none());
+
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &ws.document(main).unwrap().text;
+            let target = ws
+                .definition(main, text.find("Selected value").unwrap())
+                .await
+                .expect("the exact generated source resolves as a project type");
+            assert_eq!(ws.path_of(target.file), Some(&generated));
+        });
+    }
+
+    #[test]
     fn definition_resolves_across_files() {
         block_on_inline(async {
             let ws = sample_workspace().await;
@@ -929,6 +984,41 @@ mod tests {
                 alloc::sync::Arc::as_ptr(&ws.document(main).unwrap().parse),
                 parse_after
             );
+        });
+    }
+
+    #[test]
+    fn explicit_reload_indexes_files_added_by_a_storage_transaction() {
+        block_on_inline(async {
+            let storage = memory(&[("src/Main.java", "class Main { Generated generated; }")]);
+            let mut ws = Workspace::load(
+                storage,
+                ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+            )
+            .await;
+            let generated = key("src/Generated.java");
+
+            let revision = ws.storage().revision();
+            let mut transaction = ws.storage_mut().transaction(revision).unwrap();
+            transaction
+                .create_file(generated.clone(), b"class Generated { }".to_vec())
+                .unwrap();
+            transaction.commit().await.unwrap();
+            assert!(ws.view().file(&generated).is_ok());
+            assert!(ws.file_id(&generated).is_none());
+
+            let outcome = ws.refresh().await.unwrap();
+            assert!(!outcome.changed);
+            assert!(ws.file_id(&generated).is_none());
+
+            ws.reload_project_files().await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let text = &ws.document(main).unwrap().text;
+            let target = ws
+                .definition(main, text.find("Generated generated").unwrap())
+                .await
+                .expect("generated type resolves after explicit reload");
+            assert_eq!(ws.path_of(target.file), Some(&generated));
         });
     }
 
