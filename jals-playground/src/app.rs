@@ -1260,8 +1260,12 @@ impl Component for App {
                 self.build_diagnostics = diagnostics;
                 self.build_error = None;
                 if self.editor_ready {
-                    if self.active_config.is_none() && active_changed {
-                        monaco::switch_model(&active_path, &active_source);
+                    if self.active_config.is_none() {
+                        if active_changed {
+                            monaco::switch_model(&active_path, &active_source);
+                        } else {
+                            monaco::update_model(&active_source);
+                        }
                     }
                     Self::sync_models(&files);
                     self.set_build_diagnostics();
