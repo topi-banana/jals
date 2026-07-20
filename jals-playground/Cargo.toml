@@ -13,9 +13,7 @@ jals-classpath = { path = "../jals-classpath", default-features = false, feature
 ] }
 # Portable Rhai build scripts over the playground's existing `MemoryStorage`; keep the native
 # JDK/process adapters out of the wasm graph.
-jals-build = { workspace = true, features = [
-  "rhai",
-] }
+jals-build = { workspace = true, features = ["rhai"] }
 jals-project.workspace = true
 jals-config = { workspace = true }
 jals-editor = { workspace = true }
