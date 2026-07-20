@@ -196,11 +196,39 @@ pub struct BuildScriptEnvironment {
 }
 
 impl BuildScriptEnvironment {
+    /// The one prefix a host process may forward into a build script.
+    ///
+    /// A host environment carries credentials (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, npm and
+    /// cargo registry tokens, …), and a script that reads a value can forward it straight into a
+    /// task fetch URL. Inheriting the whole environment would therefore hand every host secret to
+    /// an untrusted `build.rhai` — including a dependency's, which the user never reviewed.
+    /// Passing host state stays possible, but only through names the user opted in by choosing
+    /// this prefix.
+    pub const HOST_PREFIX: &'static str = "JALS_";
+
     /// Construct an empty environment.
     pub const fn new() -> Self {
         Self {
             values: BTreeMap::new(),
         }
+    }
+
+    /// Build an environment from a host process's variables, keeping only the opt-in
+    /// [`Self::HOST_PREFIX`] names.
+    ///
+    /// This is the only supported way to cross the host boundary; see [`Self::HOST_PREFIX`] for
+    /// why the rest of the environment stays out.
+    pub fn from_host<I, K, V>(variables: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        variables
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .filter(|(name, _)| name.starts_with(Self::HOST_PREFIX))
+            .collect()
     }
 
     /// Derive the environment for one project, replacing host-specific project metadata.
@@ -2875,6 +2903,33 @@ mod tests {
             assert_eq!(position.line(), 2);
             assert_eq!(position.column(), 1);
         });
+    }
+
+    /// A script can forward anything `build.env` returns into a task fetch URL, so the host
+    /// environment must not cross the boundary wholesale — otherwise every credential on the
+    /// machine is readable by an unreviewed `build.rhai`, including a dependency's.
+    #[test]
+    fn from_host_keeps_only_the_opt_in_prefix() {
+        let environment = BuildScriptEnvironment::from_host([
+            ("GITHUB_TOKEN", "ghp_secret"),
+            ("AWS_SECRET_ACCESS_KEY", "aws_secret"),
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/user"),
+            ("MC_SIDE", "server"),
+            ("JALS_MC_SIDE", "client"),
+        ]);
+
+        assert_eq!(
+            environment.iter().collect::<Vec<_>>(),
+            vec![("JALS_MC_SIDE", "client")]
+        );
+        for secret in ["GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "PATH", "HOME"] {
+            assert_eq!(
+                environment.get(secret),
+                None,
+                "{secret} must not be visible"
+            );
+        }
     }
 
     #[test]

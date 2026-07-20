@@ -896,11 +896,16 @@ impl App {
     }
 
     /// Construct the explicit environment visible to both root and dependency build scripts.
+    ///
+    /// Only `JALS_`-prefixed host variables cross the boundary. The rest of the host environment
+    /// stays out: a build script can forward anything it reads into a task fetch URL, so
+    /// inheriting wholesale would expose every credential on the machine to an unreviewed
+    /// `build.rhai` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
     fn build_script_environment(manifest: &Manifest) -> BuildScriptEnvironment {
-        let inherited: BuildScriptEnvironment = std::env::vars_os()
-            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-            .collect();
-        inherited.for_project(manifest)
+        BuildScriptEnvironment::from_host(std::env::vars_os().filter_map(|(name, value)| {
+            Some((name.into_string().ok()?, value.into_string().ok()?))
+        }))
+        .for_project(manifest)
     }
 
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host

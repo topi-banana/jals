@@ -12,7 +12,7 @@ This example uses the build-task DAG to:
 
 ## Side selection
 
-| `MC_SIDE` | behaviour |
+| `JALS_MC_SIDE` | behaviour |
 |---|---|
 | unset / `server` | server bundler → nested game jar + server mappings |
 | `client` | client jar + client mappings |
@@ -22,8 +22,8 @@ This example uses the build-task DAG to:
 # First run downloads ~50 MiB and then remaps + decompiles (slow).
 cargo run -p jals-cli -- build
 
-MC_SIDE=client cargo run -p jals-cli -- build
-MC_SIDE=merged cargo run -p jals-cli -- build
+JALS_MC_SIDE=client cargo run -p jals-cli -- build
+JALS_MC_SIDE=merged cargo run -p jals-cli -- build
 
 # Subsequent runs reuse the verified SHA-256 project cache.
 cargo run -p jals-cli -- build --offline
@@ -41,7 +41,7 @@ cargo run -p jals-cli -- clean   # removes the owned publication root too
 - `tasks.merge_jars(base, overlay)` — deterministic union, overlay wins on conflict.
 - `tasks.decompile_java(jar, prefix)` — compile-oriented skeleton source tree.
 - `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the remapped game jar.
-- `build.env("MC_SIDE")` + `rerun_if_env_changed` for side switching.
+- `build.env("JALS_MC_SIDE")` + `rerun_if_env_changed` for side switching.
 
 ## Compile-safety
 

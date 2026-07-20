@@ -1,12 +1,12 @@
 // Select the Minecraft distribution: server (default), client, or merged.
-let side = build.env("MC_SIDE");
+let side = build.env("JALS_MC_SIDE");
 if side == () {
     side = "server";
 }
 if side != "server" && side != "client" && side != "merged" {
-    build.error("MC_SIDE must be server, client, or merged");
+    build.error("JALS_MC_SIDE must be server, client, or merged");
 }
-build.rerun_if_env_changed("MC_SIDE");
+build.rerun_if_env_changed("JALS_MC_SIDE");
 
 // Minecraft 1.21.1 version metadata (immutable, content-addressed by Mojang).
 let meta = tasks.fetch_json(

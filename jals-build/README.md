@@ -270,11 +270,17 @@ build.warning("generated BuildInfo.java");
 build.metadata("generator", "rhai");
 ```
 
-For CLI builds, `build.env` sees a snapshot of the host environment plus `OUT_DIR` (always
+For CLI builds, `build.env` sees only `JALS_`-prefixed host variables plus `OUT_DIR` (always
 `target/jals/build/rhai/out`), `JALS_MANIFEST_DIR` (`.`), and the optional
 `JALS_PACKAGE_NAME`/`JALS_PACKAGE_VERSION`. The fixed values replace same-named host entries. The LSP
 and playground deliberately supply only those fixed project values, not their host/browser
-environment. For the root script, `set_compile_env`/`set_run_env` contribute entries to the eventual
+environment.
+
+The rest of the host environment is withheld on purpose. A script can forward anything `build.env`
+returns into a task fetch URL, so inheriting wholesale would expose every credential on the machine
+(`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, registry tokens, …) to an unreviewed `build.rhai` —
+including a **dependency's**, which the user never looked at. Pass host state deliberately by naming
+it with the `JALS_` prefix (`JALS_MC_SIDE=client jals build`). For the root script, `set_compile_env`/`set_run_env` contribute entries to the eventual
 CLI subprocesses; dependency process directives remain node-local. The LSP/playground do not apply
 process-only flag/environment directives because they spawn no JDK tools.
 
