@@ -1114,6 +1114,16 @@ mod api {
         bytes: Vec<u8>,
     ) -> RhaiResult<BuildScriptOutputPath> {
         let relative = parse_relative(path, "output.write", &api.limits)?;
+        // An empty path is the root relative path, and `file_at` only rejects the root when the
+        // directory itself is root — here it would happily name the output root as a *file*,
+        // committing `target/jals/build/rhai/out` as a regular file. Every later `output.write`
+        // then fails against its own ancestor, with no recovery short of `jals clean`.
+        // `decode_state` already refuses that key; refuse it on the write side too.
+        if relative.is_root() {
+            return Err(rhai_error(
+                "output.write rejected an empty path: expected a path below the output root",
+            ));
+        }
         let output_root = DirKey::parse(RHAI_OUTPUT_ROOT)
             .map_err(|error| rhai_error(format!("invalid internal output root: {error:?}")))?;
         let key = output_root.file_at(&relative).map_err(|error| {
@@ -2955,6 +2965,38 @@ mod tests {
                         .next()
                         .is_none()
                 );
+            }
+        });
+    }
+
+    /// An empty path is the root relative path. `DirKey::file_at` only rejects the root when the
+    /// directory itself is root, so `output.write("")` used to name the output root as a file and
+    /// commit it — permanently breaking every later `output.write` against its own ancestor.
+    #[test]
+    fn rejects_an_empty_output_path() {
+        block_on_inline(async {
+            for script in [
+                r#"output.write_text("", "bad");"#,
+                r#"output.write("", []);"#,
+            ] {
+                let mut storage = storage(script, []);
+                let error = run(
+                    &mut storage,
+                    &BuildScriptEnvironment::new(),
+                    &BuildScriptLimits::default(),
+                    &mut BuildScriptSession::new(),
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(error, BuildScriptError::Execute { .. }));
+                // The output root must not exist as a file, and nothing may be published.
+                assert!(
+                    storage
+                        .view()
+                        .file(&FileKey::parse(RHAI_OUTPUT_ROOT).unwrap())
+                        .is_err()
+                );
+                assert_eq!(storage.revision(), Revision::INITIAL);
             }
         });
     }
