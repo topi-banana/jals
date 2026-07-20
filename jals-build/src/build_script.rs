@@ -178,8 +178,37 @@ impl BuildScriptLimits {
         if let Some((_, name)) = limits.into_iter().find(|(valid, _)| !valid) {
             return Err(BuildScriptError::InvalidLimit(name));
         }
+
+        // The recursion limits also need a ceiling. Rhai walks the AST on the native stack, so a
+        // large `max_expression_depth` lets a deeply-parenthesised script overflow it — and a
+        // stack overflow aborts the process, which no caller can catch. These fields are public,
+        // so an over-generous value is a configuration mistake rather than a script's doing, but
+        // the outcome is the same: pin them where the parser stays inside its stack.
+        let depths = [
+            (
+                self.max_call_depth <= Self::MAX_CALL_DEPTH,
+                "max_call_depth",
+            ),
+            (
+                self.max_expression_depth <= Self::MAX_EXPRESSION_DEPTH,
+                "max_expression_depth",
+            ),
+            (
+                self.max_function_expression_depth <= Self::MAX_EXPRESSION_DEPTH,
+                "max_function_expression_depth",
+            ),
+        ];
+        if let Some((_, name)) = depths.into_iter().find(|(valid, _)| !valid) {
+            return Err(BuildScriptError::InvalidLimit(name));
+        }
         Ok(())
     }
+
+    /// Ceiling on nested calls. Well above anything a build script needs, well below the depth at
+    /// which Rhai's evaluator runs out of native stack.
+    const MAX_CALL_DEPTH: usize = 256;
+    /// Ceiling on expression nesting, bounding the parser's recursion for the same reason.
+    const MAX_EXPRESSION_DEPTH: usize = 256;
 
     const fn task_plan_limits(&self) -> TaskPlanLimits {
         TaskPlanLimits {
@@ -2706,6 +2735,39 @@ mod tests {
                     .is_none()
             );
         });
+    }
+
+    /// Rhai parses and evaluates on the native stack, so an over-generous depth limit lets a
+    /// deeply nested script overflow it — and a stack overflow aborts the process, which no
+    /// caller can catch. These fields are public, so the ceiling has to be enforced here.
+    #[test]
+    fn rejects_recursion_limits_that_could_overflow_the_stack() {
+        for (name, limits) in [
+            (
+                "max_expression_depth",
+                BuildScriptLimits {
+                    max_expression_depth: 200_000,
+                    ..BuildScriptLimits::default()
+                },
+            ),
+            (
+                "max_call_depth",
+                BuildScriptLimits {
+                    max_call_depth: 200_000,
+                    ..BuildScriptLimits::default()
+                },
+            ),
+            (
+                "max_function_expression_depth",
+                BuildScriptLimits {
+                    max_function_expression_depth: 200_000,
+                    ..BuildScriptLimits::default()
+                },
+            ),
+        ] {
+            assert_eq!(limits.validate(), Err(BuildScriptError::InvalidLimit(name)));
+        }
+        assert_eq!(BuildScriptLimits::default().validate(), Ok(()));
     }
 
     /// A script that declares no inputs is fingerprinted over the whole project. Derived
