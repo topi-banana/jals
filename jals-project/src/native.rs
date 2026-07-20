@@ -26,25 +26,27 @@ use crate::graph::{
     ResolvedProjectGraph, SourceNode,
 };
 
-/// A `git` invocation that can never stop waiting for a human.
-///
-/// Dependency acquisition runs unattended — from `jals build`, but also from the language server
-/// while someone is just editing. Git's default behaviour on a private or mistyped remote is to
-/// prompt for credentials on the inherited terminal, which would hang the build (or the whole LSP
-/// session) with no visible cause. Fail fast instead.
-fn git_command() -> Command {
-    let mut command = Command::new("git");
-    command
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "")
-        .env("SSH_ASKPASS", "")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
-        .stdin(std::process::Stdio::null());
-    command
-}
-
 /// Native entry point for recursive dependency graph discovery.
 pub struct NativeProjectGraph;
+
+impl NativeProjectGraph {
+    /// A `git` invocation that can never stop waiting for a human.
+    ///
+    /// Dependency acquisition runs unattended — from `jals build`, but also from the language
+    /// server while someone is just editing. Git's default behaviour on a private or mistyped
+    /// remote is to prompt for credentials on the inherited terminal, which would hang the build
+    /// (or the whole LSP session) with no visible cause. Fail fast instead.
+    fn git_command() -> Command {
+        let mut command = Command::new("git");
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "")
+            .env("SSH_ASKPASS", "")
+            .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+            .stdin(std::process::Stdio::null());
+        command
+    }
+}
 
 /// Fully projected native root plus its preprocessed dependency graph.
 #[derive(Debug)]
@@ -520,7 +522,7 @@ impl GraphBuilder {
                 let temporary = tempfile::tempdir()
                     .map_err(|error| format!("creating temporary Git checkout: {error}"))?;
                 let checkout = temporary.path().join("checkout");
-                let clone = git_command()
+                let clone = NativeProjectGraph::git_command()
                     .current_dir(&current_directory)
                     .arg("clone")
                     .arg("--quiet")
@@ -538,7 +540,7 @@ impl GraphBuilder {
                     ));
                 }
                 if let Some(target) = checkout_arg {
-                    let output = git_command()
+                    let output = NativeProjectGraph::git_command()
                         .arg("-C")
                         .arg(&checkout)
                         .arg("checkout")
@@ -556,7 +558,7 @@ impl GraphBuilder {
                         ));
                     }
                 }
-                let head = git_command()
+                let head = NativeProjectGraph::git_command()
                     .arg("-C")
                     .arg(&checkout)
                     .arg("rev-parse")
