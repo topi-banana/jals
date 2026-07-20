@@ -439,8 +439,18 @@ impl BuildArgs {
         // Assemble the root script outputs and complete transitive dependency graph. Structural graph
         // and dependency-script failures abort before javac; lower-level classpath misses remain
         // warnings so the resolver can report all deterministic diagnostics.
-        let (sources, inputs) =
-            App::prepare_compile_inputs(&mut manifest, &root, exec, self.offline).await?;
+        let (sources, inputs) = App::prepare_compile_inputs(
+            &mut manifest,
+            &root,
+            exec,
+            self.offline,
+            if self.dry_run {
+                jals_project::SourcePublication::Skip
+            } else {
+                jals_project::SourcePublication::Apply
+            },
+        )
+        .await?;
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
@@ -476,8 +486,18 @@ impl RunArgs {
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
-        let (sources, inputs) =
-            App::prepare_compile_inputs(&mut manifest, &root, exec, self.offline).await?;
+        let (sources, inputs) = App::prepare_compile_inputs(
+            &mut manifest,
+            &root,
+            exec,
+            self.offline,
+            if self.dry_run {
+                jals_project::SourcePublication::Skip
+            } else {
+                jals_project::SourcePublication::Apply
+            },
+        )
+        .await?;
         let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
@@ -865,9 +885,12 @@ impl App {
         root: &Path,
         exec: &Exec,
         offline: bool,
+        publications: jals_project::SourcePublication,
     ) -> Result<(Vec<PathBuf>, HostProjectInputs)> {
         let environment = Self::build_script_environment(manifest);
-        let script = Self::run_build_script(manifest, root, exec, &environment, offline).await?;
+        let script =
+            Self::run_build_script(manifest, root, exec, &environment, offline, publications)
+                .await?;
         let sources = Self::discover_sources(manifest, root, !script.generated_sources.is_empty())?;
         let mut inputs = Self::project_inputs(
             manifest,
@@ -917,6 +940,7 @@ impl App {
         exec: &Exec,
         environment: &BuildScriptEnvironment,
         offline: bool,
+        publications: jals_project::SourcePublication,
     ) -> Result<HostBuildScript> {
         let mut storage = NativeStorage::for_project_scoped(
             root,
@@ -944,6 +968,7 @@ impl App {
                 network,
                 host: jals_project::BuildTaskHost::Project,
                 blocked_files: &[],
+                publications,
             },
         )
         .await

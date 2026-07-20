@@ -279,6 +279,7 @@ fn names_javac(cmd_line: &str) -> bool {
         .is_some_and(|stem| stem == "javac")
 }
 
+#[cfg(unix)]
 #[test]
 fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
     let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
@@ -310,14 +311,7 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
     let manifest_path = dir.path().join("jals.toml");
     let destination = dir.path().join("src/main/java/net/example/Generated.java");
 
-    assert!(
-        jals()
-            .args(["build", "--dry-run", "--manifest-path"])
-            .arg(&manifest_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(build_with_fake_javac(dir.path()).status.success());
     assert_eq!(std::fs::read(&destination).unwrap(), generated);
 
     std::fs::write(&destination, "user edit\n").unwrap();
@@ -326,26 +320,12 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
         "remove me",
     )
     .unwrap();
-    assert!(
-        jals()
-            .args(["build", "--dry-run", "--manifest-path"])
-            .arg(&manifest_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(build_with_fake_javac(dir.path()).status.success());
     assert_eq!(std::fs::read(&destination).unwrap(), generated);
     assert!(!destination.parent().unwrap().join("Manual.txt").exists());
 
     std::fs::write(&script, "let no_tasks = true;\n").unwrap();
-    assert!(
-        jals()
-            .args(["build", "--dry-run", "--manifest-path"])
-            .arg(&manifest_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(build_with_fake_javac(dir.path()).status.success());
     assert!(!destination.parent().unwrap().exists());
 
     std::fs::write(
@@ -357,14 +337,7 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
         "#,
     )
     .unwrap();
-    assert!(
-        jals()
-            .args(["build", "--dry-run", "--manifest-path"])
-            .arg(&manifest_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(build_with_fake_javac(dir.path()).status.success());
     assert!(destination.exists());
     assert!(
         jals()
@@ -375,6 +348,54 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
             .success()
     );
     assert!(!destination.parent().unwrap().exists());
+}
+
+/// `--dry-run` previews a command. A `replace-root` publication owns its destination completely,
+/// so applying one during a preview would delete whatever the user has there — including files
+/// they wrote by hand and never checked in. Evaluate the plan, publish managed output, and leave
+/// the source tree alone.
+#[cfg(unix)]
+#[test]
+fn build_dry_run_leaves_an_exclusive_publication_root_untouched() {
+    let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    let dir = project(manifest);
+    let jar = dir.path().join("sources.jar");
+    write_source_jar(
+        &jar,
+        &[(
+            "net/example/Generated.java",
+            b"package net.example;\npublic class Generated {}\n",
+        )],
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "net/example");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+        "#,
+    )
+    .unwrap();
+
+    // Someone's own work sits in the root the script claims.
+    let owned = dir.path().join("src/main/java/net/example");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join("Manual.txt"), "keep me").unwrap();
+
+    assert!(
+        jals()
+            .args(["build", "--dry-run", "--manifest-path"])
+            .arg(dir.path().join("jals.toml"))
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    assert_eq!(std::fs::read(owned.join("Manual.txt")).unwrap(), b"keep me");
+    assert!(
+        !owned.join("Generated.java").exists(),
+        "a preview must not publish into the source tree"
+    );
 }
 
 #[test]

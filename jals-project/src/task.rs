@@ -90,6 +90,22 @@ pub struct RootBuildScriptOutput {
     pub task_classpath: Vec<CacheKey>,
 }
 
+/// Whether a root run may apply the exclusive source-tree publications its plan declares.
+///
+/// Publications are the only part of a build script that writes *outside* `target/jals`. A
+/// `replace-root` terminal owns its destination completely: applying it removes every existing
+/// descendant, including files the user wrote by hand and never checked in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePublication {
+    /// Apply publications, replacing whatever the owned roots currently contain.
+    Apply,
+    /// Evaluate the plan, but leave the project's source tree exactly as it is.
+    ///
+    /// Managed output under `target/jals/build` is still published, so callers that only preview a
+    /// command still see the sources and flags a script contributes.
+    Skip,
+}
+
 /// Immutable inputs controlling one root build-script task execution.
 pub struct RootBuildScriptOptions<'a> {
     pub manifest: &'a Manifest,
@@ -98,6 +114,9 @@ pub struct RootBuildScriptOptions<'a> {
     pub network: NetworkPolicy,
     pub host: BuildTaskHost,
     pub blocked_files: &'a [FileKey],
+    /// Whether exclusive source-tree publications may touch the project. See
+    /// [`SourcePublication`].
+    pub publications: SourcePublication,
 }
 
 /// Root build-script preparation, task, or storage failure.
@@ -258,15 +277,21 @@ impl BuildTaskExecutor {
                 &Self::owned_publication_roots(&view, &source_roots)?,
                 options.blocked_files,
             )?;
-            let changes = Self::publication_changes(
-                &view,
-                storage.artifacts(),
-                &FileKey::parse("jals.toml").expect("manifest path is portable"),
-                &TaskPlan::new(),
-                &BuildTaskExecution::default(),
-                &source_roots,
-            )
-            .await?;
+            let changes = match options.publications {
+                SourcePublication::Apply => {
+                    Self::publication_changes(
+                        &view,
+                        storage.artifacts(),
+                        &FileKey::parse("jals.toml").expect("manifest path is portable"),
+                        &TaskPlan::new(),
+                        &BuildTaskExecution::default(),
+                        &source_roots,
+                    )
+                    .await?
+                }
+                // Dropping a script retires its owned roots, which is a removal like any other.
+                SourcePublication::Skip => Vec::new(),
+            };
             if !changes.is_empty() {
                 let mut transaction = storage.transaction(view.revision())?;
                 transaction.stage_changes(changes)?;
@@ -291,15 +316,20 @@ impl BuildTaskExecutor {
             options.host,
         )
         .await?;
-        let changes = Self::publication_changes(
-            &view,
-            storage.artifacts(),
-            prepared.script_path(),
-            &plan,
-            &execution,
-            &source_roots,
-        )
-        .await?;
+        let changes = match options.publications {
+            SourcePublication::Apply => {
+                Self::publication_changes(
+                    &view,
+                    storage.artifacts(),
+                    prepared.script_path(),
+                    &plan,
+                    &execution,
+                    &source_roots,
+                )
+                .await?
+            }
+            SourcePublication::Skip => Vec::new(),
+        };
         let task_classpath = execution.classpath;
         let script =
             publish_prepared_build_script(storage, &view, &prepared, session, changes).await?;
@@ -1107,6 +1137,7 @@ mod tests {
                     network: NetworkPolicy::Online,
                     host: BuildTaskHost::Project,
                     blocked_files: &[],
+                    publications: SourcePublication::Apply,
                 },
             )
             .await
@@ -1130,6 +1161,7 @@ mod tests {
                     network: NetworkPolicy::Offline,
                     host: BuildTaskHost::Project,
                     blocked_files: &[],
+                    publications: SourcePublication::Apply,
                 },
             )
             .await
@@ -1171,6 +1203,7 @@ mod tests {
                     network: NetworkPolicy::Online,
                     host: BuildTaskHost::ArtifactsOnly,
                     blocked_files: &[],
+                    publications: SourcePublication::Apply,
                 },
             )
             .await

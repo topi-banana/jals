@@ -21,8 +21,9 @@ rhai
 ```
 
 `jals build --dry-run` still runs the script so the displayed `javac` command includes its generated
-source and `-Xlint:all`; this can publish generated output/cache state, but it does not run `javac`.
-`jals clean` removes `target/classes` and
+source and `-Xlint:all`. It publishes managed output and cache state under `target/jals`, but it
+does not run `javac` and does not apply exclusive source-tree publications — a preview never
+rewrites or deletes anything outside `target/jals`. `jals clean` removes `target/classes` and
 `target/jals/build`, including generated script output.
 
 ## What it demonstrates

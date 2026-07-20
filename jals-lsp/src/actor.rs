@@ -1704,6 +1704,8 @@ impl AssembledWorkspace {
                 network: jals_classpath::NetworkPolicy::Online,
                 host: BuildTaskHost::Project,
                 blocked_files,
+
+                publications: jals_project::SourcePublication::Apply,
             },
         )
         .await

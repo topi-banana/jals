@@ -216,6 +216,7 @@ impl Workspace {
                         network: jals_classpath::NetworkPolicy::Online,
                         host: BuildTaskHost::NoTerminals,
                         blocked_files: &[],
+                        publications: jals_project::SourcePublication::Apply,
                     },
                 )
                 .await
