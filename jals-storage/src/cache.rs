@@ -269,12 +269,38 @@ impl<C: CacheBackend> ArtifactCache<C> {
         &self,
         key: &CacheKey,
     ) -> core::result::Result<Option<C::Reader>, CacheError> {
+        self.open_verified_bounded(key, None).await
+    }
+
+    /// [`open_verified`](Self::open_verified), refusing an artifact larger than `max_bytes`.
+    ///
+    /// The size is checked *before* the digest pass, so the bound limits the work done and not
+    /// only the memory allocated afterwards: verifying a multi-gigabyte file just to reject it
+    /// against a 64 KiB limit would make the limit an invitation rather than a defence.
+    async fn open_verified_bounded(
+        &self,
+        key: &CacheKey,
+        max_bytes: Option<usize>,
+    ) -> core::result::Result<Option<C::Reader>, CacheError> {
         fn io_failure(error: &IoError) -> CacheError {
             CacheError::Io(error.to_string())
         }
         let Some(mut reader) = self.backend.open(key).await? else {
             return Ok(None);
         };
+        if let Some(limit) = max_bytes {
+            let size = reader
+                .seek(io::SeekFrom::End(0))
+                .await
+                .map_err(|error| io_failure(&error))?;
+            if size > u64::try_from(limit).unwrap_or(u64::MAX) {
+                return Err(CacheError::TooLarge { size, limit });
+            }
+            reader
+                .seek(io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| io_failure(&error))?;
+        }
         let digest = ContentDigest::of_reader(&mut reader)
             .await
             .map_err(|error| io_failure(&error))?;
@@ -290,9 +316,9 @@ impl<C: CacheBackend> ArtifactCache<C> {
 
     /// Verified whole-buffer lookup with an allocation bound.
     ///
-    /// The artifact is first verified through [`open_verified`](Self::open_verified), which uses
-    /// fixed-size streaming memory. Its pinned reader is then measured before the output buffer is
-    /// allocated. An artifact larger than `max_bytes` returns [`CacheError::TooLarge`].
+    /// The size is checked before the artifact is verified or buffered, so `max_bytes` bounds the
+    /// work as well as the allocation. An artifact larger than it returns
+    /// [`CacheError::TooLarge`].
     pub async fn lookup_bounded(
         &self,
         key: &CacheKey,
@@ -302,19 +328,14 @@ impl<C: CacheBackend> ArtifactCache<C> {
             CacheError::Io(error.to_string())
         }
 
-        let Some(mut reader) = self.open_verified(key).await? else {
+        let Some(mut reader) = self.open_verified_bounded(key, Some(max_bytes)).await? else {
             return Ok(None);
         };
+        // The bound was already enforced against the reader's length, so this fits.
         let size = reader
             .seek(io::SeekFrom::End(0))
             .await
             .map_err(|error| io_failure(&error))?;
-        if size > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
-            return Err(CacheError::TooLarge {
-                size,
-                limit: max_bytes,
-            });
-        }
         reader
             .seek(io::SeekFrom::Start(0))
             .await
