@@ -12,8 +12,8 @@ Compiled with the JDK pinned for this repo (`javac 25`, class-file major version
 ```sh
 # Consts (M0 enrichments) / Branchy (M2 control flow) / Locals (M3 local variables) /
 # Loops (M4 loops) / Arrays (M5 array operations) / Concat + Sb (M6 string concatenation) /
-# Cmp (M7 numeric comparison conditions) / IntCarried (JVM int-carried boolean/char values) —
-# need -parameters + -g:
+# Cmp (M7 numeric comparison conditions) / IntCarried (JVM int-carried boolean/char values) /
+# InvokeSpecialCalls (non-virtual superclass/default-interface dispatch) — need -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Consts.java
 cp out/demo/Consts.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Branchy.java
@@ -29,6 +29,8 @@ javac -parameters -g -d out jals-classpath/tests/fixtures/src/Cmp.java
 cp out/demo/Cmp.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/IntCarried.java
 cp out/demo/IntCarried.class jals-classpath/tests/fixtures/
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/InvokeSpecialCalls.java
+cp out/demo/InvokeSpecialCalls.class jals-classpath/tests/fixtures/
 
 # Concat (M6 string concatenation, javac's default invokedynamic lowering) — needs -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Concat.java
@@ -60,6 +62,7 @@ package, no debug info) and its source is not committed.
 | `Sb.class` | `src/Sb.java` | M6 string concatenation via `StringBuilder` chains (`-XDstringConcat=inline`): foldable append runs (String/int/boolean, a constant char appended as an int, an empty-String anchor), plus chains that must stay calls — no `toString()`, consumed by `length()`, discarded as a statement, or appended onto a parameter |
 | `Cmp.class` | `src/Cmp.java` | M7 numeric comparison conditions: a `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` fused into the following `if<cond>` across all six operators and both NaN flavors, in `if`/`while`/`do`-`while`, plus the two bails — a NaN-inexact rendering (`!(f < g)`, `fcmpg` + `iflt`) and a `*cmp` feeding a ternary's value merge |
 | `IntCarried.class` | `src/IntCarried.java` | Type-directed recovery of JVM int-carried `boolean`/`char` values in returns, locals, fields, ordinary call arguments/results, and arrays; integer-zero tests versus boolean negation; explicit `i2c` and literal char casts, including a lone surrogate code unit |
+| `InvokeSpecialCalls.class` | `src/InvokeSpecialCalls.java` | Non-constructor `invokespecial` dispatch to a direct superclass (`super.m()`) and direct interface default (`Interface.super.m()`), plus explicit argument-bearing `super(...)` constructor delegation |
 | `Outer.class` | `Outer.java` | a top-level class with a nested static class and a nested enum (nested-type grouping) |
 | `Outer$Inner.class` | `Outer.java` | a nested static class |
 | `Outer$Color.class` | `Outer.java` | a nested enum with constants |

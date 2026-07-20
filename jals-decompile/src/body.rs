@@ -62,6 +62,17 @@ impl MethodBody {
             return None;
         }
         let owner = pool.class_name(cf.this_class)?.into_owned();
+        let owner_is_interface = cf.access_flags.is_interface();
+        let direct_superclass = if cf.super_class == 0 {
+            None
+        } else {
+            Some(pool.class_name(cf.super_class)?.into_owned())
+        };
+        let direct_interfaces = cf
+            .interfaces
+            .iter()
+            .map(|&index| pool.class_name(index).map(alloc::borrow::Cow::into_owned))
+            .collect::<Option<BTreeSet<_>>>()?;
         let is_static = method.access_flags.is_static();
         let descriptor = pool.utf8(method.descriptor_index)?;
         let method_descriptor = MethodDescriptor::parse(&descriptor).ok()?;
@@ -87,6 +98,9 @@ impl MethodBody {
             pool,
             bootstrap,
             owner,
+            owner_is_interface,
+            direct_superclass,
+            direct_interfaces,
             is_static,
             locals,
             return_type: method_descriptor.return_type,
@@ -353,6 +367,11 @@ impl ArrayKind {
     }
 }
 
+enum MethodRefKind {
+    Class,
+    Interface,
+}
+
 /// The straight-line symbolic-execution state for one basic block.
 struct Sim<'a> {
     pool: &'a ConstantPool,
@@ -360,6 +379,9 @@ struct Sim<'a> {
     bootstrap: &'a [BootstrapMethod],
     /// Internal binary name of the class being decompiled (for `this`-call vs object-creation).
     owner: &'a str,
+    owner_is_interface: bool,
+    direct_superclass: Option<&'a str>,
+    direct_interfaces: &'a BTreeSet<String>,
     is_static: bool,
     locals: &'a BTreeMap<u16, Local>,
     return_type: &'a ReturnType,
@@ -730,7 +752,7 @@ impl Sim<'_> {
     /// Emit an invocation whose receiver is already known (`recv` = `None` for a static call, which
     /// carries its owner type as its receiver expression instead).
     fn invoke(&mut self, index: u16, is_static: bool) -> Option<()> {
-        let (owner, name, descriptor) = self.method_ref(index)?;
+        let (_, owner, name, descriptor) = self.method_ref(index)?;
         let md = MethodDescriptor::parse(&descriptor).ok()?;
         if !is_static && owner == "java/lang/StringBuilder" && self.fold_builder(&name, &md)? {
             return Some(());
@@ -758,14 +780,32 @@ impl Sim<'_> {
     /// Handle `invokespecial`: a constructor chain (`super(...)` / `this(...)`), object creation
     /// (`new X(...)`), or a non-virtual instance call (a `private` / `super.m()` method).
     fn invoke_special(&mut self, index: u16) -> Option<()> {
-        let (owner, name, descriptor) = self.method_ref(index)?;
+        let (kind, owner, name, descriptor) = self.method_ref(index)?;
         let md = MethodDescriptor::parse(&descriptor).ok()?;
         let args = self.pop_call_args(&md.params)?;
         if name != "<init>" {
-            let recv = Self::reference_expr(self.pop()?)?;
+            let receiver = Self::reference_expr(self.pop()?)?;
+            let receiver = if owner == self.owner {
+                receiver
+            } else {
+                match (kind, receiver) {
+                    (MethodRefKind::Class, Expr::This)
+                        if !self.owner_is_interface
+                            && self.direct_superclass == Some(owner.as_str()) =>
+                    {
+                        Expr::Super
+                    }
+                    (MethodRefKind::Interface, Expr::This)
+                        if self.direct_interfaces.contains(&owner) =>
+                    {
+                        Expr::QualifiedSuper(JavaType::internal_to_java(&owner))
+                    }
+                    _ => return None,
+                }
+            };
             self.emit_call(
                 Expr::Call {
-                    recv: Some(Box::new(recv)),
+                    recv: Some(Box::new(receiver)),
                     name,
                     args,
                 },
@@ -993,7 +1033,7 @@ impl Sim<'_> {
         if *reference_kind != 6 {
             return None;
         }
-        let (owner, name, _) = self.method_ref(*reference_index)?;
+        let (_, owner, name, _) = self.method_ref(*reference_index)?;
         if owner != "java/lang/invoke/StringConcatFactory" {
             return None;
         }
@@ -1534,22 +1574,22 @@ impl Sim<'_> {
         }
     }
 
-    /// The `(owner-internal, name, descriptor)` a `MethodRef` / `InterfaceMethodRef` points to.
-    fn method_ref(&self, index: u16) -> Option<(String, String, String)> {
-        let (class_index, nat) = match self.pool.get(index)? {
+    /// The `(kind, owner-internal, name, descriptor)` a method reference points to.
+    fn method_ref(&self, index: u16) -> Option<(MethodRefKind, String, String, String)> {
+        let (kind, class_index, name_and_type_index) = match self.pool.get(index)? {
             ConstantPoolEntry::MethodRef {
                 class_index,
                 name_and_type_index,
-            }
-            | ConstantPoolEntry::InterfaceMethodRef {
+            } => (MethodRefKind::Class, *class_index, *name_and_type_index),
+            ConstantPoolEntry::InterfaceMethodRef {
                 class_index,
                 name_and_type_index,
-            } => (*class_index, *name_and_type_index),
+            } => (MethodRefKind::Interface, *class_index, *name_and_type_index),
             _ => return None,
         };
         let owner = self.pool.class_name(class_index)?.into_owned();
-        let (name, descriptor) = self.name_and_type(nat)?;
-        Some((owner, name, descriptor))
+        let (name, descriptor) = self.name_and_type(name_and_type_index)?;
+        Some((kind, owner, name, descriptor))
     }
 
     /// The `(name, descriptor)` of a `NameAndType` entry.
@@ -1650,6 +1690,9 @@ struct Structurer<'a> {
     pool: &'a ConstantPool,
     bootstrap: &'a [BootstrapMethod],
     owner: String,
+    owner_is_interface: bool,
+    direct_superclass: Option<String>,
+    direct_interfaces: BTreeSet<String>,
     is_static: bool,
     locals: BTreeMap<u16, Local>,
     return_type: ReturnType,
@@ -1779,6 +1822,9 @@ impl Structurer<'_> {
             pool: self.pool,
             bootstrap: self.bootstrap,
             owner: &self.owner,
+            owner_is_interface: self.owner_is_interface,
+            direct_superclass: self.direct_superclass.as_deref(),
+            direct_interfaces: &self.direct_interfaces,
             is_static: self.is_static,
             locals: &self.locals,
             return_type: &self.return_type,

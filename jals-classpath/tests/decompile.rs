@@ -102,6 +102,21 @@ fn preserves_int_carried_boolean_and_char_values() {
 }
 
 #[test]
+fn preserves_non_virtual_invokespecial_dispatch() {
+    let classes = [class(include_bytes!("fixtures/InvokeSpecialCalls.class"))];
+    let (sources, warnings) = synthesize(&classes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].0, "demo/InvokeSpecialCalls.java");
+    let text = &sources[0].1;
+    assert!(text.contains("return super.classValue(value);"), "{text}");
+    assert!(
+        text.contains("return demo.InvokeSpecialDefault.super.interfaceValue(value);"),
+        "{text}"
+    );
+}
+
+#[test]
 fn every_generated_fixture_is_valid_java() {
     let bytes: &[&[u8]] = &[
         include_bytes!("fixtures/Box.class"),
@@ -114,6 +129,7 @@ fn every_generated_fixture_is_valid_java() {
         include_bytes!("fixtures/Sb.class"),
         include_bytes!("fixtures/Cmp.class"),
         include_bytes!("fixtures/IntCarried.class"),
+        include_bytes!("fixtures/InvokeSpecialCalls.class"),
         include_bytes!("fixtures/Outer.class"),
         include_bytes!("fixtures/Outer$Inner.class"),
         include_bytes!("fixtures/Outer$Color.class"),

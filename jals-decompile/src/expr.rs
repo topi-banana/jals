@@ -15,6 +15,10 @@ use alloc::vec::Vec;
 pub(crate) enum Expr {
     /// The receiver `this`.
     This,
+    /// The non-virtual receiver `super`.
+    Super,
+    /// A qualified interface default receiver (`Interface.super`).
+    QualifiedSuper(String),
     /// A local variable / parameter, by source name.
     Local(String),
     /// A literal already rendered as Java source (`42`, `"s"`, `null`, `Foo.class`).
@@ -259,6 +263,8 @@ impl Expr {
     pub(crate) fn render(&self) -> String {
         match self {
             Self::This => "this".into(),
+            Self::Super => "super".into(),
+            Self::QualifiedSuper(qualifier) => format!("{qualifier}.super"),
             Self::Local(name) | Self::Type(name) => name.clone(),
             Self::Literal(text) => text.clone(),
             Self::Field { recv, name } => format!("{}.{name}", recv.receiver()),

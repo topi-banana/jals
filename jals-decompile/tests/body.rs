@@ -68,6 +68,12 @@ fn int_carried() -> ClassFile {
     ))
 }
 
+fn invoke_special_calls() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/InvokeSpecialCalls.class"
+    ))
+}
+
 /// The first method named `name`.
 fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
     cf.methods
@@ -90,6 +96,44 @@ fn decompiles_field_storing_constructor() {
         .expect("constructor decompiles");
     // The implicit `super()` is omitted; only the field store remains.
     assert_eq!(body, ["this.count = start;"]);
+}
+
+#[test]
+fn decompiles_explicit_super_constructor_call() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "<init>"), &cf, &["seed".to_owned()])
+        .expect("constructor decompiles");
+    assert_eq!(body, ["super(seed);"]);
+}
+
+#[test]
+fn preserves_superclass_invokespecial_dispatch() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "callSuperclass"), &cf, &["value".to_owned()])
+        .expect("superclass call decompiles");
+    assert_eq!(body, ["return super.classValue(value);"]);
+}
+
+#[test]
+fn preserves_interface_default_invokespecial_dispatch() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "callInterface"), &cf, &["value".to_owned()])
+        .expect("interface default call decompiles");
+    assert_eq!(
+        body,
+        ["return demo.InvokeSpecialDefault.super.interfaceValue(value);"]
+    );
+}
+
+#[test]
+fn non_direct_invokespecial_targets_bail() {
+    let mut cf = invoke_special_calls();
+    cf.super_class = 0;
+    assert!(decompile(method(&cf, "callSuperclass"), &cf, &["value".to_owned()]).is_none());
+
+    let mut cf = invoke_special_calls();
+    cf.interfaces.clear();
+    assert!(decompile(method(&cf, "callInterface"), &cf, &["value".to_owned()]).is_none());
 }
 
 #[test]
