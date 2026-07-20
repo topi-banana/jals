@@ -291,7 +291,11 @@ impl JarRemap {
             let (name, bytes) = if let Some((member_name, remapped_bytes)) =
                 remapped.remove(&position)
             {
-                (member_name, remapped_bytes)
+                // A multi-release jar stores the same class twice, once under
+                // `META-INF/versions/<n>/`. Both have the same `this_class`, so naming the output
+                // purely from it collides and fails the whole remap. Keep the versioned prefix.
+                let prefix = helpers::multi_release_prefix(&name);
+                (format!("{prefix}{member_name}"), remapped_bytes)
             } else {
                 let mut bytes = outcome
                     .map_err(|error| format!("failed to read archive member `{name}`: {error}"))?;
@@ -1349,6 +1353,16 @@ mod helpers {
 
     /// The owned text of the `Utf8` entry at `index`, or `None` when it is absent or not a `Utf8`.
     /// Every caller here needs an owned copy so the pool can be mutated while the text is in hand.
+    /// The `META-INF/versions/<n>/` prefix of a multi-release archive member, or `""`.
+    pub(super) fn multi_release_prefix(name: &str) -> &str {
+        const ROOT: &str = "META-INF/versions/";
+        let Some(rest) = name.strip_prefix(ROOT) else {
+            return "";
+        };
+        rest.find('/')
+            .map_or("", |end| &name[..=(ROOT.len() + end)])
+    }
+
     fn utf8_owned(pool: &ConstantPool, index: u16) -> Option<String> {
         pool.utf8(index).map(alloc::borrow::Cow::into_owned)
     }
@@ -1415,5 +1429,29 @@ impl core::ops::Deref for PoolInterner<'_> {
 impl core::ops::DerefMut for PoolInterner<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::helpers::multi_release_prefix;
+
+    /// A multi-release jar stores the same class twice — once at its plain path and once under
+    /// `META-INF/versions/<n>/` — and both copies share a `this_class`. Naming the remapped output
+    /// from `this_class` alone collides, which failed the remap of the whole archive.
+    #[test]
+    fn multi_release_members_keep_their_version_prefix() {
+        assert_eq!(
+            multi_release_prefix("META-INF/versions/11/foo/Bar.class"),
+            "META-INF/versions/11/"
+        );
+        assert_eq!(
+            multi_release_prefix("META-INF/versions/9/Baz.class"),
+            "META-INF/versions/9/"
+        );
+        assert_eq!(multi_release_prefix("foo/Bar.class"), "");
+        assert_eq!(multi_release_prefix("META-INF/MANIFEST.MF"), "");
+        // A truncated prefix names no version directory, so there is nothing to preserve.
+        assert_eq!(multi_release_prefix("META-INF/versions/11"), "");
     }
 }
