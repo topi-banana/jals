@@ -1566,7 +1566,9 @@ impl Sim<'_, '_> {
         })
     }
 
-    /// The `(owner-internal, name, descriptor)` a `FieldRef` points to.
+    /// The `(owner-internal, name, descriptor)` a `FieldRef` points to. A field name that is not a
+    /// valid Java identifier (e.g. a JVM-legal but Java-reserved keyword) bails so the body falls
+    /// back to a safe skeleton instead of emitting an unparsable `recv.class` access.
     fn field_ref(&self, index: u16) -> Option<(String, String, String)> {
         match self.pool.get(index)? {
             ConstantPoolEntry::FieldRef {
@@ -1575,13 +1577,18 @@ impl Sim<'_, '_> {
             } => {
                 let owner = self.pool.class_name(*class_index)?.into_owned();
                 let (name, descriptor) = self.name_and_type(*name_and_type_index)?;
+                if !Attrs::is_java_identifier(&name) {
+                    return None;
+                }
                 Some((owner, name, descriptor))
             }
             _ => None,
         }
     }
 
-    /// The `(kind, owner-internal, name, descriptor)` a method reference points to.
+    /// The `(kind, owner-internal, name, descriptor)` a method reference points to. A non-constructor
+    /// method name that is not a valid Java identifier bails so the body falls back to a safe
+    /// skeleton instead of emitting an unparsable `recv.class(args)` call.
     fn method_ref(&self, index: u16) -> Option<(MethodRefKind, String, String, String)> {
         let (kind, class_index, name_and_type_index) = match self.pool.get(index)? {
             ConstantPoolEntry::MethodRef {
@@ -1596,6 +1603,9 @@ impl Sim<'_, '_> {
         };
         let owner = self.pool.class_name(class_index)?.into_owned();
         let (name, descriptor) = self.name_and_type(name_and_type_index)?;
+        if name != "<init>" && !Attrs::is_java_identifier(&name) {
+            return None;
+        }
         Some((kind, owner, name, descriptor))
     }
 
