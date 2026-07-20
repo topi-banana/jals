@@ -24,6 +24,23 @@ use crate::graph::{
     ResolvedProjectGraph, SourceNode,
 };
 
+/// A `git` invocation that can never stop waiting for a human.
+///
+/// Dependency acquisition runs unattended — from `jals build`, but also from the language server
+/// while someone is just editing. Git's default behaviour on a private or mistyped remote is to
+/// prompt for credentials on the inherited terminal, which would hang the build (or the whole LSP
+/// session) with no visible cause. Fail fast instead.
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+        .stdin(std::process::Stdio::null());
+    command
+}
+
 /// Native entry point for recursive dependency graph discovery.
 pub struct NativeProjectGraph;
 
@@ -287,10 +304,17 @@ impl GraphBuilder {
             Ok(())
         };
         result?;
-        cleanup.map_err(|message| GraphError::Acquisition {
-            operation: "cleaning up dependency checkout".to_owned(),
-            message,
-        })
+        // Removing the scratch checkout is housekeeping, not part of resolving the graph. On
+        // Windows an antivirus or indexer holding a handle makes this fail routinely, and failing
+        // the whole build over a leftover temp directory leaves the user no way forward. Report it
+        // and move on; the directory is under the OS temp root either way.
+        if let Err(message) = cleanup {
+            self.warnings.push(GraphWarning::dependency(
+                dependency,
+                format!("could not remove the temporary Git checkout: {message}"),
+            ));
+        }
+        Ok(())
     }
 
     async fn visit_source_inner(
@@ -483,10 +507,13 @@ impl GraphBuilder {
                 let temporary = tempfile::tempdir()
                     .map_err(|error| format!("creating temporary Git checkout: {error}"))?;
                 let checkout = temporary.path().join("checkout");
-                let clone = Command::new("git")
+                let clone = git_command()
                     .current_dir(&current_directory)
                     .arg("clone")
                     .arg("--quiet")
+                    // `--` ends option parsing: without it a URL or path that happens to look
+                    // like a flag would be read as one.
+                    .arg("--")
                     .arg(&clone_argument)
                     .arg(&checkout)
                     .output()
@@ -498,12 +525,15 @@ impl GraphBuilder {
                     ));
                 }
                 if let Some(target) = checkout_arg {
-                    let output = Command::new("git")
+                    let output = git_command()
                         .arg("-C")
                         .arg(&checkout)
                         .arg("checkout")
                         .arg("--quiet")
                         .arg(target)
+                        // No pathspecs follow, so a ref sharing a name with a file is still
+                        // resolved as a ref.
+                        .arg("--")
                         .output()
                         .map_err(|error| format!("running git checkout: {error}"))?;
                     if !output.status.success() {
@@ -513,7 +543,7 @@ impl GraphBuilder {
                         ));
                     }
                 }
-                let head = Command::new("git")
+                let head = git_command()
                     .arg("-C")
                     .arg(&checkout)
                     .arg("rev-parse")

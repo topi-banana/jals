@@ -206,6 +206,16 @@ pub enum DependencyError {
         /// The dependency's name.
         name: String,
     },
+    /// A `git` field's value starts with `-`, so the `git` CLI would read it as an option rather
+    /// than a URL or ref.
+    OptionLike {
+        /// The dependency's name.
+        name: String,
+        /// Which field carried the bad value (`"git"`, `"branch"`, `"tag"`, or `"rev"`).
+        field: &'static str,
+        /// The offending value.
+        value: String,
+    },
 }
 
 impl fmt::Display for DependencyError {
@@ -223,6 +233,11 @@ impl fmt::Display for DependencyError {
                 f,
                 "git dependency `{name}` specifies more than one of `branch`, `tag`, `rev` \
                  (use at most one)"
+            ),
+            Self::OptionLike { name, field, value } => write!(
+                f,
+                "git dependency `{name}` has a `{field}` starting with `-` (`{value}`), which the \
+                 `git` CLI would read as an option rather than a value"
             ),
         }
     }
@@ -728,6 +743,27 @@ impl Dependency {
                         name: name.to_owned(),
                         field: "git",
                     });
+                }
+                // These values become `git` CLI arguments. A leading `-` makes the CLI read them
+                // as options instead: `branch = "-f"` turns `git checkout --quiet -f` into a
+                // no-op that *succeeds*, silently resolving the dependency to the default branch
+                // rather than the requested one. Reject the shape rather than rely on argument
+                // order downstream.
+                for (field, value) in [
+                    ("git", Some(&git.git)),
+                    ("branch", git.branch.as_ref()),
+                    ("tag", git.tag.as_ref()),
+                    ("rev", git.rev.as_ref()),
+                ] {
+                    if let Some(value) = value
+                        && value.starts_with('-')
+                    {
+                        return Err(DependencyError::OptionLike {
+                            name: name.to_owned(),
+                            field,
+                            value: value.clone(),
+                        });
+                    }
                 }
                 git.git_ref(name).map(|_| ())
             }
@@ -1708,6 +1744,41 @@ mod tests {
                 name: "r".to_owned()
             })
         );
+    }
+
+    /// These values are passed to the `git` CLI. A leading `-` makes git read them as options:
+    /// `git checkout --quiet -f` exits 0 without switching refs, so the dependency would silently
+    /// resolve to the default branch instead of the one the manifest asked for.
+    #[test]
+    fn rejects_option_like_git_values() {
+        for (field, toml) in [
+            ("git", r#"repo = { git = "--upload-pack=touch /tmp/x" }"#),
+            (
+                "branch",
+                r#"repo = { git = "https://example.invalid/r.git", branch = "-f" }"#,
+            ),
+            (
+                "tag",
+                r#"repo = { git = "https://example.invalid/r.git", tag = "--x" }"#,
+            ),
+            (
+                "rev",
+                r#"repo = { git = "https://example.invalid/r.git", rev = "-abc" }"#,
+            ),
+        ] {
+            let manifest: Manifest =
+                toml::from_str(&alloc::format!("[dependencies]\n{toml}\n")).unwrap();
+            let error = manifest
+                .dependencies
+                .get("repo")
+                .unwrap()
+                .validate("repo")
+                .unwrap_err();
+            assert!(
+                matches!(&error, DependencyError::OptionLike { field: f, .. } if *f == field),
+                "`{field}` must be rejected, got {error:?}"
+            );
+        }
     }
 
     #[test]
