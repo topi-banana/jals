@@ -836,19 +836,26 @@ impl Manifest {
     /// # Errors
     /// Returns [`ValidationError`] describing the first problem found.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        // A root `classes-dir` (`""`) parses successfully — `RelativePath::parse` maps the empty
-        // string to the project root — but `jals clean` removes this directory recursively, so
-        // accepting it would delete the whole project. Reject it structurally instead.
-        let classes_dir = DirKey::parse(&self.build.classes_dir)
-            .ok()
-            .filter(|dir| !dir.path().is_root())
-            .ok_or_else(|| ValidationError::InvalidClassesDir {
+        // `classes-dir` may legitimately be a host path (`invocation` supports an absolute one),
+        // so a value that is not a portable project path is left to the host. The one shape that
+        // must be rejected here is the project root: `RelativePath::parse` maps the empty string
+        // to it, and `jals clean` removes this directory recursively, so accepting it would
+        // delete the whole project.
+        let classes_dir = DirKey::parse(&self.build.classes_dir).ok();
+        if classes_dir.as_ref().is_some_and(|dir| dir.path().is_root()) {
+            return Err(ValidationError::InvalidClassesDir {
                 dir: self.build.classes_dir.clone(),
-            })?;
+            });
+        }
         if let Some(BuildScript::Rhai { file }) = &self.build.script {
             let script = FileKey::parse(file)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
-            if script.path().starts_with(classes_dir.path()) {
+            // A script is always a portable project path, so it cannot be inside a `classes-dir`
+            // that is not one.
+            if classes_dir
+                .as_ref()
+                .is_some_and(|dir| script.path().starts_with(dir.path()))
+            {
                 return Err(ValidationError::BuildScriptInClassesDir {
                     file: file.clone(),
                     classes_dir: self.build.classes_dir.clone(),
@@ -1240,6 +1247,21 @@ mod tests {
             }
         );
         assert!(source.to_string().contains("`jals clean` removes"));
+    }
+
+    /// `invocation` supports an absolute `classes-dir`, and `source-dirs` may reach outside the
+    /// project. Requiring a portable project path for either would break projects that worked
+    /// before build scripts existed.
+    #[test]
+    fn accepts_a_host_path_classes_dir() {
+        for dir in ["/tmp/out", "../out"] {
+            let manifest: Manifest = alloc::format!("[build]\nclasses-dir = \"{dir}\"\n")
+                .parse()
+                .unwrap_or_else(|error| {
+                    panic!("`classes-dir = {dir:?}` must stay accepted: {error}")
+                });
+            assert_eq!(manifest.build.classes_dir, dir);
+        }
     }
 
     /// Misspelling `script` used to parse cleanly and leave `script: None`, so the build script

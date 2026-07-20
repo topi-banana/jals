@@ -842,6 +842,41 @@ fn lint_warns_and_uses_default_context_when_the_dependency_graph_is_invalid() {
     assert!(stderr.contains("warning: project analysis inputs unavailable"));
 }
 
+/// Requiring a portable project path for `classes-dir` / `source-dirs` broke projects that
+/// predate build scripts: an absolute output directory and a source root outside the project both
+/// worked before, and neither has anything to do with the build-script phase.
+#[test]
+fn host_paths_in_classes_dir_and_source_dirs_still_build() {
+    let out = tempdir().unwrap();
+    let dir = project(&format!(
+        "[package]\nname = \"hosty\"\n[build]\nclasses-dir = \"{}\"\n",
+        out.path().display()
+    ));
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains(&format!("-d {}", out.path().display())));
+
+    let shared = tempdir().unwrap();
+    std::fs::create_dir_all(shared.path().join("src")).unwrap();
+    let dir = project(
+        "[package]\nname = \"external\"\n\
+         [build]\nsource-dirs = [\"../shared-src\", \"src/main/java\"]\n",
+    );
+    std::fs::create_dir_all(dir.path().join("../shared-src")).ok();
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}");
+}
+
 /// `--offline` promises to resolve from the verified cache only, but graph discovery ran its own
 /// `git clone` regardless — so an offline build still blocked on the network until it timed out.
 #[test]

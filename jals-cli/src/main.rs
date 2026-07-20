@@ -551,13 +551,14 @@ impl CleanArgs {
         )
         .await
         .context("opening project storage for build-task cleanup")?;
+        // Only portable source roots can own a publication root inside the project; one pointing
+        // outside (`../shared/src`) simply has nothing here to clean.
         let source_roots: Vec<_> = manifest
             .build
             .source_dirs
             .iter()
-            .map(|root| jals_storage::DirKey::parse(root))
-            .collect::<Result<_, _>>()
-            .map_err(|error| anyhow!("invalid source directory: {error:?}"))?;
+            .filter_map(|root| jals_storage::DirKey::parse(root).ok())
+            .collect();
         let mut keys = jals_project::BuildTaskExecutor::owned_publication_roots(
             &storage.view(),
             &source_roots,

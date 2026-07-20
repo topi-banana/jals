@@ -261,16 +261,17 @@ impl BuildTaskExecutor {
         S: SourceBackend,
         C: CacheBackend,
     {
+        // Source roots are only needed to decide where an exclusive publication may live. A root
+        // outside the project (`../shared/src`, an absolute path) cannot contain one, and `javac`
+        // still receives it through the host path plan — so skip it rather than failing the build
+        // of a project that merely reaches outside its own directory for sources.
         let source_roots: Vec<_> = options
             .manifest
             .build
             .source_dirs
             .iter()
-            .map(|root| {
-                DirKey::parse(root)
-                    .map_err(|_| RootBuildScriptError::InvalidSourceRoot(root.clone()))
-            })
-            .collect::<Result<_, _>>()?;
+            .filter_map(|root| DirKey::parse(root).ok())
+            .collect();
         let view = storage.view();
         let prepared = prepare_build_script(
             &view,
