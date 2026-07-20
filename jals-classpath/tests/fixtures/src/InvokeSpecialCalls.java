@@ -5,6 +5,8 @@ package demo;
 // delegation. Compiled with parameter names and local-variable debug information:
 //     javac -parameters -g -d out jals-classpath/tests/fixtures/src/InvokeSpecialCalls.java
 //     cp out/demo/InvokeSpecialCalls.class jals-classpath/tests/fixtures/
+//     cp out/demo/InvokeSpecialBase.class jals-classpath/tests/fixtures/
+//     cp out/demo/InvokeSpecialDefault.class jals-classpath/tests/fixtures/
 class InvokeSpecialBase {
     InvokeSpecialBase(int seed) {}
 

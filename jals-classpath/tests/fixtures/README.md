@@ -31,6 +31,21 @@ javac -parameters -g -d out jals-classpath/tests/fixtures/src/IntCarried.java
 cp out/demo/IntCarried.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/InvokeSpecialCalls.java
 cp out/demo/InvokeSpecialCalls.class jals-classpath/tests/fixtures/
+cp out/demo/InvokeSpecialBase.class jals-classpath/tests/fixtures/
+cp out/demo/InvokeSpecialDefault.class jals-classpath/tests/fixtures/
+
+# Hierarchy evolution: compile the client and all v1 supertypes, then recompile only the two evolved
+# v2 supertypes against v1. HierarchyEvolution.class always remains the old v1 client.
+mkdir -p jals-classpath/tests/fixtures/hierarchy-evolution/v1
+mkdir -p jals-classpath/tests/fixtures/hierarchy-evolution/v2
+javac -parameters -g \
+  -d jals-classpath/tests/fixtures/hierarchy-evolution/v1 \
+  jals-classpath/tests/fixtures/src/hierarchy-evolution/v1/HierarchyEvolution.java
+javac -parameters -g \
+  -cp jals-classpath/tests/fixtures/hierarchy-evolution/v1 \
+  -d jals-classpath/tests/fixtures/hierarchy-evolution/v2 \
+  jals-classpath/tests/fixtures/src/hierarchy-evolution/v2/HierarchyBase.java \
+  jals-classpath/tests/fixtures/src/hierarchy-evolution/v2/HierarchyRight.java
 
 # Concat (M6 string concatenation, javac's default invokedynamic lowering) — needs -parameters + -g:
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Concat.java
@@ -62,7 +77,10 @@ package, no debug info) and its source is not committed.
 | `Sb.class` | `src/Sb.java` | M6 string concatenation via `StringBuilder` chains (`-XDstringConcat=inline`): foldable append runs (String/int/boolean, a constant char appended as an int, an empty-String anchor), plus chains that must stay calls — no `toString()`, consumed by `length()`, discarded as a statement, or appended onto a parameter |
 | `Cmp.class` | `src/Cmp.java` | M7 numeric comparison conditions: a `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` fused into the following `if<cond>` across all six operators and both NaN flavors, in `if`/`while`/`do`-`while`, plus the two bails — a NaN-inexact rendering (`!(f < g)`, `fcmpg` + `iflt`) and a `*cmp` feeding a ternary's value merge |
 | `IntCarried.class` | `src/IntCarried.java` | Type-directed recovery of JVM int-carried `boolean`/`char` values in returns, locals, fields, ordinary call arguments/results, and arrays; integer-zero tests versus boolean negation; explicit `i2c` and literal char casts, including a lone surrogate code unit |
-| `InvokeSpecialCalls.class` | `src/InvokeSpecialCalls.java` | Non-constructor `invokespecial` dispatch to a direct superclass (`super.m()`) and direct interface default (`Interface.super.m()`), plus explicit argument-bearing `super(...)` constructor delegation |
+| `InvokeSpecialCalls.class`, `InvokeSpecialBase.class`, `InvokeSpecialDefault.class` | `src/InvokeSpecialCalls.java` | Non-constructor `invokespecial` dispatch to a direct superclass (`super.m()`) and direct interface default (`Interface.super.m()`), plus the complete hierarchy needed to prove the qualified call and explicit argument-bearing `super(...)` constructor delegation |
+| `hierarchy-evolution/v1/evolution/*.class` | `src/hierarchy-evolution/v1/HierarchyEvolution.java` | An old client with two legal interface-super calls, a shared-default diamond, and its complete original hierarchy |
+| `hierarchy-evolution/v2/evolution/HierarchyBase.class` | `src/hierarchy-evolution/v2/HierarchyBase.java` | Evolved direct superclass that now implements the qualified interface, making the old client's qualifier redundant under JLS 15.12.1 |
+| `hierarchy-evolution/v2/evolution/HierarchyRight.class` | `src/hierarchy-evolution/v2/HierarchyRight.java` | Evolved direct superinterface that contributes a distinct override of the selected ancestor default, triggering JLS 15.12.3 |
 | `Outer.class` | `Outer.java` | a top-level class with a nested static class and a nested enum (nested-type grouping) |
 | `Outer$Inner.class` | `Outer.java` | a nested static class |
 | `Outer$Color.class` | `Outer.java` | a nested enum with constants |

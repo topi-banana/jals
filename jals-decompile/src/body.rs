@@ -28,6 +28,7 @@ use jals_exec::{LocalBoxFuture, Yielder};
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
 use crate::expr::{ArrayForm, ConcatPart, Expr, Stmt};
+use crate::hierarchy::ClassHierarchy;
 use crate::literal::Literal;
 use crate::types::JavaType;
 
@@ -46,11 +47,14 @@ impl MethodBody {
     /// body reuses them (never a name the signature doesn't declare), and a mismatch between them and
     /// the descriptor's parameters (a generic signature that hides synthetic parameters, e.g. an
     /// `enum` constructor's `String, int`) makes this bail so the body can never reference a phantom
-    /// parameter.
+    /// parameter. `hierarchy` contains the class files available to prove hierarchy-sensitive source
+    /// forms; incomplete information only prevents those forms and does not disable unrelated body
+    /// reconstruction.
     pub async fn decompile(
         method: &MethodInfo,
         cf: &ClassFile,
         param_names: &[String],
+        hierarchy: &ClassHierarchy<'_>,
     ) -> Option<Vec<String>> {
         let pool = &cf.constant_pool;
         let code = method.attributes.iter().find_map(|a| match &a.body {
@@ -68,11 +72,6 @@ impl MethodBody {
         } else {
             Some(pool.class_name(cf.super_class)?.into_owned())
         };
-        let direct_interfaces = cf
-            .interfaces
-            .iter()
-            .map(|&index| pool.class_name(index).map(alloc::borrow::Cow::into_owned))
-            .collect::<Option<BTreeSet<_>>>()?;
         let is_static = method.access_flags.is_static();
         let descriptor = pool.utf8(method.descriptor_index)?;
         let method_descriptor = MethodDescriptor::parse(&descriptor).ok()?;
@@ -97,10 +96,11 @@ impl MethodBody {
             cfg: &cfg,
             pool,
             bootstrap,
+            class: cf,
+            hierarchy,
             owner,
             owner_is_interface,
             direct_superclass,
-            direct_interfaces,
             is_static,
             locals,
             return_type: method_descriptor.return_type,
@@ -373,15 +373,16 @@ enum MethodRefKind {
 }
 
 /// The straight-line symbolic-execution state for one basic block.
-struct Sim<'a> {
+struct Sim<'a, 'classes> {
     pool: &'a ConstantPool,
     /// The class's `BootstrapMethods` entries (empty when absent), resolving `invokedynamic`.
     bootstrap: &'a [BootstrapMethod],
+    class: &'a ClassFile,
+    hierarchy: &'a ClassHierarchy<'classes>,
     /// Internal binary name of the class being decompiled (for `this`-call vs object-creation).
     owner: &'a str,
     owner_is_interface: bool,
     direct_superclass: Option<&'a str>,
-    direct_interfaces: &'a BTreeSet<String>,
     is_static: bool,
     locals: &'a BTreeMap<u16, Local>,
     return_type: &'a ReturnType,
@@ -389,7 +390,7 @@ struct Sim<'a> {
     stmts: Vec<Stmt>,
 }
 
-impl Sim<'_> {
+impl Sim<'_, '_> {
     fn pop(&mut self) -> Option<StackValue> {
         Self::finalize(self.stack.pop()?)
     }
@@ -796,7 +797,13 @@ impl Sim<'_> {
                         Expr::Super
                     }
                     (MethodRefKind::Interface, Expr::This)
-                        if self.direct_interfaces.contains(&owner) =>
+                        if !self.is_static
+                            && self.hierarchy.allows_interface_super(
+                                self.class,
+                                &owner,
+                                &name,
+                                &descriptor,
+                            ) =>
                     {
                         Expr::QualifiedSuper(JavaType::internal_to_java(&owner))
                     }
@@ -1684,21 +1691,22 @@ impl Cmp {
 
 /// Recovers structured statements from a method's [`Cfg`], running each block through [`Sim`] and
 /// folding forward conditional branches into `if` / `if`-`else`.
-struct Structurer<'a> {
+struct Structurer<'a, 'classes> {
     code: &'a [Instruction],
     cfg: &'a Cfg,
     pool: &'a ConstantPool,
     bootstrap: &'a [BootstrapMethod],
+    class: &'a ClassFile,
+    hierarchy: &'a ClassHierarchy<'classes>,
     owner: String,
     owner_is_interface: bool,
     direct_superclass: Option<String>,
-    direct_interfaces: BTreeSet<String>,
     is_static: bool,
     locals: BTreeMap<u16, Local>,
     return_type: ReturnType,
 }
 
-impl Structurer<'_> {
+impl Structurer<'_, '_> {
     /// Structure the whole method, requiring every block to be emitted exactly once — a strong guard
     /// that the recovered tree matches the actual control flow (any mismatch bails to a safe body).
     async fn structure(&self) -> Option<Vec<Stmt>> {
@@ -1821,10 +1829,11 @@ impl Structurer<'_> {
         let mut sim = Sim {
             pool: self.pool,
             bootstrap: self.bootstrap,
+            class: self.class,
+            hierarchy: self.hierarchy,
             owner: &self.owner,
             owner_is_interface: self.owner_is_interface,
             direct_superclass: self.direct_superclass.as_deref(),
-            direct_interfaces: &self.direct_interfaces,
             is_static: self.is_static,
             locals: &self.locals,
             return_type: &self.return_type,
