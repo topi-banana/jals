@@ -249,8 +249,10 @@ owner or managed build inputs. Failures leave the previous tree untouched. Owner
 root before build state. Outside declared roots, files are never changed.
 
 `jals build --offline` and `jals run --offline` permit verified cache hits but no task fetch. The
-native LSP executes the same task plan and defers publication while an open document is below the
-destination. The browser playground rejects physical publication before any fetch. Immutable
+native LSP executes the same task plan, always offline: opening a folder in an editor runs whatever
+`build.rhai` it contains, and nobody reviews a repository before opening it, so the server consumes
+only what a real `jals build` already fetched and verified into the cache. It also defers
+publication while an open document is below the destination. The browser playground rejects physical publication before any fetch. Immutable
 dependency projects reject task terminals in this release. Tasks expose no shell/process API.
 
 A concise `build.rhai` that generates and registers a Java source is:

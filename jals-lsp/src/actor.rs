@@ -1701,7 +1701,13 @@ impl AssembledWorkspace {
                 manifest,
                 environment: &environment,
                 limits: &limits,
-                network: jals_classpath::NetworkPolicy::Online,
+                // Analysis consumes what the user's own build already fetched and verified into
+                // the cache; it does not fetch. Opening a folder runs whatever `build.rhai` it
+                // contains, and nobody reviews a repository before opening it in an editor —
+                // reaching the network on that signal alone would let an unread script pull (and
+                // send) whatever it likes the moment a project is opened. `jals build` populates
+                // the cache, and the server picks it up from there.
+                network: jals_classpath::NetworkPolicy::Offline,
                 host: BuildTaskHost::Project,
                 blocked_files,
 
