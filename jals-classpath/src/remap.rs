@@ -452,8 +452,9 @@ mod helpers {
 
         // Phase D: attributes (signatures, SourceFile, annotations, LVT, InnerClasses…).
         // Code-nested attributes are walked recursively inside the helper.
+        let mut pool = PoolInterner::new(&mut cf.constant_pool);
         remap_attributes_with_pool(
-            &mut cf.constant_pool,
+            &mut pool,
             &mut cf.attributes,
             mappings,
             &this_obf,
@@ -462,7 +463,7 @@ mod helpers {
         )?;
         for field in &mut cf.fields {
             remap_attributes_with_pool(
-                &mut cf.constant_pool,
+                &mut pool,
                 &mut field.attributes,
                 mappings,
                 &this_obf,
@@ -472,7 +473,7 @@ mod helpers {
         }
         for method in &mut cf.methods {
             remap_attributes_with_pool(
-                &mut cf.constant_pool,
+                &mut pool,
                 &mut method.attributes,
                 mappings,
                 &this_obf,
@@ -488,7 +489,8 @@ mod helpers {
         mappings: &Mappings,
         index: &ClassIndex,
     ) -> Result<(), String> {
-        let pool = &mut cf.constant_pool;
+        let mut interner = PoolInterner::new(&mut cf.constant_pool);
+        let pool = &mut interner;
         let end = pool.next_index();
         for i in 1..end {
             let Some(entry) = pool.get(i).cloned() else {
@@ -609,7 +611,7 @@ mod helpers {
 
     /// Remap a FieldRef/MethodRef `NameAndType`, returning a new `NaT` index when anything changes.
     fn remap_member_nat(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         mappings: &Mappings,
         index: &ClassIndex,
         class_index: u16,
@@ -656,7 +658,7 @@ mod helpers {
 
     /// Remap only the descriptor half of a Dynamic/InvokeDynamic `NameAndType` (call-site names stay).
     fn remap_dynamic_nat(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         mappings: &Mappings,
         nat_index: u16,
     ) -> Result<Option<u16>, String> {
@@ -718,7 +720,8 @@ mod helpers {
     /// recovering a package rename would mean walking the whole class map by common prefix, which
     /// is not worth the cost.
     fn remap_pool_class_entries(cf: &mut ClassFile, mappings: &Mappings) -> Result<(), String> {
-        let pool = &mut cf.constant_pool;
+        let mut interner = PoolInterner::new(&mut cf.constant_pool);
+        let pool = &mut interner;
         let end = pool.next_index();
         for i in 1..end {
             let Some(ConstantPoolEntry::Class { name_index }) = pool.get(i).cloned() else {
@@ -756,19 +759,13 @@ mod helpers {
             .remap_class(this_obf)
             .map_or_else(|| this_obf.to_owned(), str::to_owned);
 
+        let mut pool = PoolInterner::new(&mut cf.constant_pool);
         for field in &mut cf.fields {
-            remap_field_decl(
-                &mut cf.constant_pool,
-                field,
-                mappings,
-                &official_owner,
-                this_obf,
-                index,
-            )?;
+            remap_field_decl(&mut pool, field, mappings, &official_owner, this_obf, index)?;
         }
         for method in &mut cf.methods {
             remap_method_decl(
-                &mut cf.constant_pool,
+                &mut pool,
                 method,
                 mappings,
                 &official_owner,
@@ -780,7 +777,7 @@ mod helpers {
     }
 
     fn remap_field_decl(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         field: &mut FieldInfo,
         mappings: &Mappings,
         official_owner: &str,
@@ -811,7 +808,7 @@ mod helpers {
     }
 
     fn remap_method_decl(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         method: &mut MethodInfo,
         mappings: &Mappings,
         official_owner: &str,
@@ -1027,7 +1024,7 @@ mod helpers {
     /// are not Class-entry-stable: Signature, `SourceFile`, annotations, LVT, `InnerClasses` names,
     /// `EnclosingMethod` `NaT`, `MethodParameters` names, Record components.
     fn remap_attributes_with_pool(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         attrs: &mut [Attribute],
         mappings: &Mappings,
         this_obf: &str,
@@ -1161,7 +1158,7 @@ mod helpers {
     /// pass has already renamed. No `Mappings` lookup is needed: the official name is the one the
     /// pool now holds (or the unchanged obfuscated name on a mapping miss).
     fn remap_inner_class_entry(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         entry: &mut InnerClassEntry,
     ) -> Result<(), String> {
         if entry.inner_name_index == 0 {
@@ -1184,7 +1181,7 @@ mod helpers {
     }
 
     fn remap_annotation(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         anno: &mut Annotation,
         mappings: &Mappings,
         index: &ClassIndex,
@@ -1215,7 +1212,7 @@ mod helpers {
     }
 
     fn remap_type_annotation(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         anno: &mut TypeAnnotation,
         mappings: &Mappings,
         index: &ClassIndex,
@@ -1232,7 +1229,7 @@ mod helpers {
     }
 
     fn remap_element_value(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         value: &mut ElementValue,
         mappings: &Mappings,
         index: &ClassIndex,
@@ -1283,7 +1280,7 @@ mod helpers {
     }
 
     fn remap_record_component(
-        pool: &mut ConstantPool,
+        pool: &mut PoolInterner<'_>,
         component: &mut RecordComponentInfo,
         mappings: &Mappings,
         this_obf: &str,
@@ -1325,10 +1322,67 @@ mod helpers {
         pool.utf8(index).map(alloc::borrow::Cow::into_owned)
     }
 
-    fn intern_utf8(pool: &mut ConstantPool, s: &str) -> Result<u16, String> {
-        // Prefer appending fresh modified-UTF8. Growth is bounded by member counts times a small
-        // constant; class files already identify shared names via NameAndType sharing.
-        pool.add(ConstantPoolEntry::Utf8(s.as_bytes().to_vec()))
-            .ok_or_else(|| "constant pool is full".to_owned())
+    /// Intern `s` as a `Utf8` entry, reusing an existing one when the text already appears.
+    ///
+    /// Two things this must not do naively. It must encode *modified* UTF-8: writing standard
+    /// UTF-8 corrupts any name containing NUL or a supplementary character, because the decoder on
+    /// the other side reads the six-byte surrogate form. And it must deduplicate: remapping
+    /// interns a name and a descriptor for every renamed reference, so blindly appending grew the
+    /// pool by roughly three slots per changed member reference — recreating the same shared
+    /// `NameAndType` once per referrer. The pool caps at 65535 slots, so on a class with a few
+    /// thousand member references that growth made remapping fail outright.
+    fn intern_utf8(pool: &mut PoolInterner<'_>, s: &str) -> Result<u16, String> {
+        pool.intern(s)
+    }
+}
+
+/// A class's constant pool plus an index of its `Utf8` entries, so interning reuses them.
+struct PoolInterner<'a> {
+    pool: &'a mut ConstantPool,
+    utf8: BTreeMap<Vec<u8>, u16>,
+}
+
+impl<'a> PoolInterner<'a> {
+    fn new(pool: &'a mut ConstantPool) -> Self {
+        let mut utf8 = BTreeMap::new();
+        for index in 0..pool.next_index() {
+            if let Some(ConstantPoolEntry::Utf8(bytes)) = pool.get(index) {
+                // First wins: earlier indices are the ones existing references already use.
+                utf8.entry(bytes.clone()).or_insert(index);
+            }
+        }
+        Self { pool, utf8 }
+    }
+
+    fn intern(&mut self, text: &str) -> Result<u16, String> {
+        let bytes = ConstantPool::encode_modified_utf8(text);
+        if let Some(&index) = self.utf8.get(&bytes) {
+            return Ok(index);
+        }
+        let index = self
+            .pool
+            .add(ConstantPoolEntry::Utf8(bytes.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "constant pool is full; cannot intern a {}-byte name",
+                    bytes.len()
+                )
+            })?;
+        self.utf8.insert(bytes, index);
+        Ok(index)
+    }
+}
+
+impl core::ops::Deref for PoolInterner<'_> {
+    type Target = ConstantPool;
+
+    fn deref(&self) -> &Self::Target {
+        self.pool
+    }
+}
+
+impl core::ops::DerefMut for PoolInterner<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.pool
     }
 }
