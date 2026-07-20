@@ -1,0 +1,9 @@
+[package]
+name = "task-source-archive"
+version = "0.1.0"
+
+[build]
+script = { type = "rhai", file = "build.rhai" }
+
+[run]
+main-class = "Main"

@@ -82,6 +82,9 @@ pub enum CacheNamespace {
     ExternalClasspath,
     BuildScriptState,
     BuildScriptOutput,
+    BuildTaskArtifact,
+    BuildTaskSource,
+    BuildTaskState,
 }
 
 impl CacheNamespace {
@@ -97,6 +100,9 @@ impl CacheNamespace {
             Self::ExternalClasspath => "external-classpath",
             Self::BuildScriptState => "build-script-state",
             Self::BuildScriptOutput => "build-script-output",
+            Self::BuildTaskArtifact => "build-task-artifact",
+            Self::BuildTaskSource => "build-task-source",
+            Self::BuildTaskState => "build-task-state",
         }
     }
 }

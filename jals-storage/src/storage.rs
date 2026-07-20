@@ -349,6 +349,25 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
         Ok(self)
     }
 
+    /// Validate and stage one ordered batch with a single preview-tree clone.
+    ///
+    /// This is equivalent to calling the individual staging methods in order, but avoids cloning
+    /// the complete project tree once per file for large generated source trees.
+    pub fn stage_changes(
+        &mut self,
+        changes: impl IntoIterator<Item = Change>,
+    ) -> Result<&mut Self> {
+        let changes: Vec<_> = changes.into_iter().collect();
+        if changes.is_empty() {
+            return Ok(self);
+        }
+        let mut next = self.preview.clone();
+        next.apply_changes(&changes)?;
+        self.preview = next;
+        self.staged.extend(changes);
+        Ok(self)
+    }
+
     pub fn create_file(&mut self, key: FileKey, bytes: Vec<u8>) -> Result<&mut Self> {
         self.stage(Change::CreateFile(key, bytes.into()))
     }
@@ -485,6 +504,33 @@ mod tests {
     use jals_exec::block_on_inline;
 
     use super::*;
+
+    #[test]
+    fn stages_a_large_change_batch_against_one_preview() {
+        block_on_inline(async {
+            let mut storage = ProjectStorage::memory(CodeTree::default());
+            let changes = (0..1_000)
+                .map(|index| {
+                    Change::CreateFile(
+                        FileKey::parse(&format!("generated/File{index}.java")).unwrap(),
+                        Vec::from(b"class Generated {}".as_slice()).into(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut transaction = storage.transaction(storage.revision()).unwrap();
+            transaction.stage_changes(changes).unwrap();
+            transaction.commit().await.unwrap();
+
+            assert_eq!(
+                storage
+                    .view()
+                    .tree()
+                    .files_under(&DirKey::parse("generated").unwrap())
+                    .count(),
+                1_000
+            );
+        });
+    }
     use crate::Entry;
 
     fn storage() -> ProjectStorage<MemorySource, MemoryCache> {

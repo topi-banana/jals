@@ -10,6 +10,7 @@ mod graph;
 mod memory;
 #[cfg(feature = "native")]
 mod native;
+mod task;
 
 pub use assemble::{
     CompileClasspathEntry, CompileClasspathFile, CompileClasspathTree, CompileClasspathTreeMember,
@@ -22,3 +23,7 @@ pub use graph::{
 pub use memory::MemoryProjectGraph;
 #[cfg(feature = "native")]
 pub use native::{NativeProjectAssembly, NativeProjectGraph};
+pub use task::{
+    BuildTaskExecution, BuildTaskExecutor, BuildTaskHost, BuildTaskPublication, BuildTaskRunError,
+    RootBuildScriptError, RootBuildScriptOptions, RootBuildScriptOutput,
+};

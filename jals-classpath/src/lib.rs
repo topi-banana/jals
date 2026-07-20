@@ -22,13 +22,17 @@ mod zip;
 
 pub use io::Fetcher;
 pub use resolve::{
-    DependencyLocation, DependencyResolver, DependencySpec, ExternalLocator, ResolvedDependencies,
-    ResolvedJar,
+    DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
+    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, NetworkPolicy,
+    ResolvedDependencies, ResolvedJar,
 };
 pub use skeleton::{SkeletonGroup, Skeletons};
 
 #[cfg(feature = "archive")]
-pub use load::{CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction};
+pub use load::{
+    CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree, SourceTreeExtraction,
+    SourceTreeLimits,
+};
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
 #[cfg(feature = "archive")]

@@ -24,6 +24,7 @@ jals-config.workspace = true
 jals-decompile.workspace = true
 jals-exec.workspace = true
 jals-storage.workspace = true
+sha1.workspace = true
 miniz_oxide = { workspace = true, optional = true }
 crc32fast = { workspace = true, optional = true }
 # Host-only async HTTP adapter. Kept out of the no-`native` build, which injects a `Fetcher`.

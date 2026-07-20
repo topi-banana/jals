@@ -6,6 +6,18 @@ use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
 
+fn write_source_jar(path: &Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    for (name, bytes) in entries {
+        archive
+            .start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    archive.finish().unwrap();
+}
+
 fn jals() -> Command {
     Command::new(env!("CARGO_BIN_EXE_jals"))
 }
@@ -265,6 +277,104 @@ fn names_javac(cmd_line: &str) -> bool {
         .next()
         .and_then(|prog| Path::new(prog).file_stem())
         .is_some_and(|stem| stem == "javac")
+}
+
+#[test]
+fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
+    let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    let dir = project(manifest);
+    let jar = dir.path().join("sources.jar");
+    let generated = b"package net.example;\npublic class Generated {}\n";
+    write_source_jar(
+        &jar,
+        &[
+            ("net/example/Generated.java", generated),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"),
+        ],
+    );
+    let script = dir.path().join("build.rhai");
+    std::fs::write(
+        &script,
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "net/example");
+            tasks.publish_tree(
+                "example-sources",
+                sources,
+                "src/main/java/net/example",
+                "replace-root"
+            );
+        "#,
+    )
+    .unwrap();
+    let manifest_path = dir.path().join("jals.toml");
+    let destination = dir.path().join("src/main/java/net/example/Generated.java");
+
+    assert!(
+        jals()
+            .args(["build", "--dry-run", "--manifest-path"])
+            .arg(&manifest_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), generated);
+
+    std::fs::write(&destination, "user edit\n").unwrap();
+    std::fs::write(
+        destination.parent().unwrap().join("Manual.txt"),
+        "remove me",
+    )
+    .unwrap();
+    assert!(
+        jals()
+            .args(["build", "--dry-run", "--manifest-path"])
+            .arg(&manifest_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), generated);
+    assert!(!destination.parent().unwrap().join("Manual.txt").exists());
+
+    std::fs::write(&script, "let no_tasks = true;\n").unwrap();
+    assert!(
+        jals()
+            .args(["build", "--dry-run", "--manifest-path"])
+            .arg(&manifest_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!destination.parent().unwrap().exists());
+
+    std::fs::write(
+        &script,
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "net/example");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+        "#,
+    )
+    .unwrap();
+    assert!(
+        jals()
+            .args(["build", "--dry-run", "--manifest-path"])
+            .arg(&manifest_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(destination.exists());
+    assert!(
+        jals()
+            .args(["clean", "--manifest-path"])
+            .arg(&manifest_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!destination.parent().unwrap().exists());
 }
 
 #[test]

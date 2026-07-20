@@ -11,7 +11,9 @@
 //! depends on worker count), and a serial fold merges results in input order. The output is
 //! therefore byte-identical to a sequential walk on any executor.
 
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -297,6 +299,71 @@ pub struct JarExtraction<T> {
     pub warnings: Vec<Warning>,
 }
 
+/// A deterministic tree of source artifacts whose paths are relative to a requested archive prefix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceTree {
+    pub files: Vec<LibrarySource>,
+}
+
+/// Decompressed source-tree resource limits checked from the central directory before decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceTreeLimits {
+    pub max_files: usize,
+    pub max_file_bytes: usize,
+    pub max_total_bytes: usize,
+}
+
+/// Strict source-tree extraction for build tasks.
+pub struct SourceTreeExtraction;
+
+impl SourceTreeExtraction {
+    /// Extract every `.java` member below `prefix`, stripping that prefix from result paths.
+    /// Any unsafe, duplicate, corrupt, or unpublishable matching member fails the whole operation.
+    pub async fn java<C: CacheBackend>(
+        exec: &Exec,
+        cache: &mut ArtifactCache<C>,
+        jar: &CacheKey,
+        prefix: &RelativePath,
+        limits: SourceTreeLimits,
+    ) -> Result<SourceTree, String> {
+        let reader = cache
+            .open_verified(jar)
+            .await
+            .map_err(|error| format!("source jar is invalid: {error:?}"))?
+            .ok_or_else(|| "source jar is not cached".to_owned())?;
+        let members = Archive::decode_matching_bounded(exec, reader, "java", limits).await?;
+        let prefix_len = prefix.segments().len();
+        let mut files = BTreeMap::new();
+        for (name, outcome) in members {
+            let member = Archive::safe_relative(&name)
+                .ok_or_else(|| format!("unsafe Java archive member `{name}`"))?;
+            if !member.starts_with(prefix) {
+                continue;
+            }
+            let relative = RelativePath::new(member.segments().skip(prefix_len).cloned());
+            if relative.is_root() {
+                return Err(format!(
+                    "Java archive member `{name}` has no relative file name"
+                ));
+            }
+            let bytes = outcome?;
+            if files.insert(relative, (member, bytes)).is_some() {
+                return Err(format!("duplicate Java archive member `{name}`"));
+            }
+        }
+        let mut tree = SourceTree::default();
+        for (path, (member, bytes)) in files {
+            let key = Archive::member_key(CacheNamespace::BuildTaskSource, jar, &member, &bytes);
+            cache
+                .publish(&key, &bytes)
+                .await
+                .map_err(|error| format!("source member `{member}` publish failed: {error:?}"))?;
+            tree.files.push(LibrarySource { path, key });
+        }
+        Ok(tree)
+    }
+}
+
 impl<T> Default for JarExtraction<T> {
     fn default() -> Self {
         Self {
@@ -518,7 +585,59 @@ impl Archive {
         reader: R,
         wanted_extension: &'static str,
     ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
+        Self::decode_matching_bounded(
+            exec,
+            reader,
+            wanted_extension,
+            SourceTreeLimits {
+                max_files: usize::MAX,
+                max_file_bytes: usize::MAX,
+                max_total_bytes: usize::MAX,
+            },
+        )
+        .await
+    }
+
+    async fn decode_matching_bounded<R: JarReader>(
+        exec: &Exec,
+        reader: R,
+        wanted_extension: &'static str,
+        limits: SourceTreeLimits,
+    ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
         let (reader, directory) = Self::open(reader).await?;
+        let mut count = 0usize;
+        let mut total = 0usize;
+        for member in &directory.members {
+            if member.is_dir || Self::extension(&member.name) != Some(wanted_extension) {
+                continue;
+            }
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| "archive member count overflow".to_owned())?;
+            let size = usize::try_from(member.uncompressed_size())
+                .map_err(|_| format!("archive member `{}` is too large", member.name))?;
+            if size > limits.max_file_bytes {
+                return Err(format!(
+                    "archive member `{}` has {size} bytes, exceeding the limit of {}",
+                    member.name, limits.max_file_bytes
+                ));
+            }
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| "archive output size overflow".to_owned())?;
+        }
+        if count > limits.max_files {
+            return Err(format!(
+                "archive has {count} matching members, exceeding the limit of {}",
+                limits.max_files
+            ));
+        }
+        if total > limits.max_total_bytes {
+            return Err(format!(
+                "archive matching members have {total} bytes, exceeding the limit of {}",
+                limits.max_total_bytes
+            ));
+        }
         let chunks: Vec<_> = Self::chunk_ranges(directory.members.len())
             .map(|members| (reader.clone(), Arc::clone(&directory), members))
             .collect();

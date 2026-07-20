@@ -186,7 +186,8 @@ the later command. The LSP and playground run that same root adapter for analysi
 The root adapter receives a `ProjectStorage` aggregate rather than a host path. It evaluates against
 one immutable `ProjectView`, buffers generated files and directives, then commits files in one
 revision-checked transaction only after successful evaluation. Immutable dependency preparation
-uses the same evaluator without that source-storage commit. Scripts get exactly three scope objects:
+uses the same evaluator without that source-storage commit. Scripts get four scope objects; `tasks`
+records a typed DAG while the first three retain the direct APIs below:
 
 | Object | Method | Effect |
 | --- | --- | --- |
@@ -206,6 +207,46 @@ uses the same evaluator without that source-storage commit. Scripts get exactly 
 | `build` | `set_compile_env(name, value)` / `set_run_env(name, value)` | Add environment entries to the compiler or runtime request. |
 | `build` | `warning(message)` / `error(message)` | Report a non-fatal warning or a fatal diagnostic. Any error prevents publication. |
 | `build` | `metadata(key, value)` | Return deterministic host-readable metadata without changing a tool invocation. |
+
+Root scripts can use these `tasks` methods. They only record work; network/archive effects run
+asynchronously after Rhai evaluation and capability preflight succeed:
+
+| Method | Result/effect |
+| --- | --- |
+| `https_url(url)` | Typed HTTPS URL. A fetch still requires an expected digest and byte limit. |
+| `project_jar(path)` | Typed JAR from the immutable project snapshot. |
+| `sha1(hex)` / `sha256(hex)` / `bytes(n)` | Typed verification and size values. |
+| `fetch_json(url, digest, max)` / `fetch_jar(...)` | Verified cache-first artifact fetch. |
+| `json_at(json, path)` / `json_find_string(json, path, field, value)` | Typed JSON projection without exposing fetched values to Rhai. |
+| `json_url(json, path)` / `json_sha1(...)` / `json_sha256(...)` / `json_u64(...)` | Values for a dependent fetch, resolved by the host DAG executor. |
+| `extract_java(jar, prefix)` | Safe `.java` source tree below `prefix`, with the prefix stripped. |
+| `add_classpath(jar)` | Add a task-produced JAR to the root classpath. |
+| `publish_tree(owner, tree, destination, "replace-root")` | Atomically replace an exclusive physical source subtree. |
+
+For example:
+
+```rhai
+let jar = tasks.project_jar("vendor/example-sources.jar");
+let sources = tasks.extract_java(jar, "net/example");
+tasks.publish_tree(
+    "example-sources",
+    sources,
+    "src/main/java/net/example",
+    "replace-root"
+);
+```
+
+`replace-root` is deliberately explicit and destructive: after every non-empty task result succeeds,
+the complete destination is replaced, including files manually added or edited below it. The
+destination must be a strict descendant of a configured source root and may not overlap another
+owner or managed build inputs. Failures leave the previous tree untouched. Ownership is recorded at
+`target/jals/build/tasks/ownership-v1.json`; dropping an owner or running `jals clean` removes its
+root before build state. Outside declared roots, files are never changed.
+
+`jals build --offline` and `jals run --offline` permit verified cache hits but no task fetch. The
+native LSP executes the same task plan and defers publication while an open document is below the
+destination. The browser playground rejects physical publication before any fetch. Immutable
+dependency projects reject task terminals in this release. Tasks expose no shell/process API.
 
 A concise `build.rhai` that generates and registers a Java source is:
 
@@ -273,14 +314,16 @@ deleted. Missing cached output, a digest mismatch, changed inputs, or invalid ca
 normal script evaluation. Failure to persist cache state becomes a warning after generated output
 has committed, not a failed build.
 
-`jals clean` always removes both `classes-dir` and `target/jals/build`, including stale
+`jals clean` first removes exclusive task-owned source roots, then both `classes-dir` and
+`target/jals/build`, including stale
 `target/jals/build/rhai/out` files after a script is removed. It intentionally leaves the shared
 verified cache at `target/jals/cache`; the next build can safely restore matching output from it.
 
 #### Sandbox and WebAssembly
 
-The script has no API for host filesystem access, spawning processes, network requests, clock/time,
-or randomness. Project reads and output writes go only through validated storage keys; output paths
+The synchronous script has no API for host filesystem access, spawning processes, clock/time, or
+randomness. It can declare bounded, digest-verified task fetches, but cannot inspect fetched bytes or
+perform network I/O during evaluation. Project reads and output writes go only through validated storage keys; output paths
 cannot escape the dedicated root. Module loading, Rhai time support, custom syntax, `print`, and
 `debug` do not provide host capabilities (`print`/`debug` output is discarded).
 
@@ -294,7 +337,8 @@ LSP and playground never spawn that process.
 Default limits include 1 MiB script source, 1,000,000 operations, 1,024 variables, 256 functions,
 32 nested calls, expression depths of 64/32, 1 MiB strings, 65,536-item arrays, 4,096-entry maps,
 4 KiB/128-segment paths, 1 MiB aggregate directives, 256 output files, 4 MiB per output, 16 MiB
-total output, and 4 MiB cached state. Hosts may supply stricter non-zero `BuildScriptLimits`. The
+total output, 4 MiB cached state, 4,096 task nodes, 16,384 task edges, 1 MiB task literals, 256 task
+terminals, and 32 publication roots. Hosts may supply stricter non-zero `BuildScriptLimits`. The
 same bounded engine builds for `wasm32-unknown-unknown` with:
 
 ```sh
@@ -302,6 +346,8 @@ cargo check -p jals-build --no-default-features --features rhai --target wasm32-
 ```
 
 See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable project.
+[`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
+publication.
 
 ### `[run]`
 

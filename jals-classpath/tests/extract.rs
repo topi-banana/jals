@@ -1,8 +1,10 @@
 use std::io::{Cursor, Write};
 
-use jals_classpath::{JarExtraction, LibrarySource};
+use jals_classpath::{JarExtraction, LibrarySource, SourceTreeExtraction, SourceTreeLimits};
 use jals_exec::{Exec, block_on_inline};
-use jals_storage::{ArtifactCache, CacheKey, CacheNamespace, ContentDigest, MemoryCache};
+use jals_storage::{
+    ArtifactCache, CacheKey, CacheNamespace, ContentDigest, MemoryCache, RelativePath,
+};
 
 fn sources_jar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
@@ -74,5 +76,70 @@ fn extraction_is_idempotent_and_corruption_is_advisory() {
         let corrupt = JarExtraction::<LibrarySource>::sources(&exec, &mut cache, &[bogus]).await;
         assert!(corrupt.artifacts.is_empty());
         assert_eq!(corrupt.warnings.len(), 1);
+    });
+}
+
+#[test]
+fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
+    block_on_inline(async {
+        let exec = Exec::inline();
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let bytes = sources_jar(&[
+            ("net/example/A.java", b"class A {}"),
+            ("net/example/nested/B.java", b"class B {}"),
+            ("other/Ignored.java", b"class Ignored {}"),
+        ]);
+        let jar = publish(&mut cache, &bytes).await;
+        let tree = SourceTreeExtraction::java(
+            &exec,
+            &mut cache,
+            &jar,
+            &RelativePath::parse("net/example").unwrap(),
+            SourceTreeLimits {
+                max_files: 10,
+                max_file_bytes: 1024,
+                max_total_bytes: 4096,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tree.files
+                .iter()
+                .map(|file| file.path.to_string())
+                .collect::<Vec<_>>(),
+            ["A.java", "nested/B.java"]
+        );
+        let error = SourceTreeExtraction::java(
+            &exec,
+            &mut cache,
+            &jar,
+            &RelativePath::parse("net/example").unwrap(),
+            SourceTreeLimits {
+                max_files: 1,
+                max_file_bytes: 1024,
+                max_total_bytes: 4096,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("matching members"), "{error}");
+
+        let unsafe_bytes = sources_jar(&[("../Escape.java", b"bad")]);
+        let unsafe_jar = publish(&mut cache, &unsafe_bytes).await;
+        let error = SourceTreeExtraction::java(
+            &exec,
+            &mut cache,
+            &unsafe_jar,
+            &RelativePath::ROOT,
+            SourceTreeLimits {
+                max_files: 10,
+                max_file_bytes: 1024,
+                max_total_bytes: 4096,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("unsafe Java archive member"), "{error}");
     });
 }

@@ -287,6 +287,14 @@ impl ResolvedNode {
             return Ok(NodeExports::default());
         };
         let output = prepared.output(source.view.revision());
+        if !output.task_plan.is_empty() {
+            return Err(GraphError::BuildScript {
+                node: self.id.clone(),
+                message:
+                    "declarative build tasks are not supported for immutable dependency projects"
+                        .to_owned(),
+            });
+        }
         let mut exports = NodeExports::default();
         for path in &output.generated_sources {
             exports.sources.push(CapturedFile {

@@ -43,4 +43,15 @@ impl Fetcher for BrowserFetcher {
         }
         response.binary().await.map_err(|e| e.to_string())
     }
+
+    async fn fetch_bounded(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let bytes = self.fetch(url).await?;
+        if bytes.len() > max_bytes {
+            return Err(format!(
+                "response has {} bytes, exceeding the limit of {max_bytes}",
+                bytes.len()
+            ));
+        }
+        Ok(bytes)
+    }
 }

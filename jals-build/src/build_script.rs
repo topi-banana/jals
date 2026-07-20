@@ -22,8 +22,10 @@ use jals_storage::{
 };
 use serde::{Deserialize, Serialize};
 
-const BUILD_SCRIPT_API_VERSION: u32 = 3;
-const BUILD_SCRIPT_STATE_VERSION: u32 = 3;
+use crate::task::{TaskPlan, TaskPlanLimits};
+
+const BUILD_SCRIPT_API_VERSION: u32 = 4;
+const BUILD_SCRIPT_STATE_VERSION: u32 = 4;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 const MANIFEST_FILE: &str = "jals.toml";
 
@@ -92,6 +94,16 @@ pub struct BuildScriptLimits {
     pub max_total_output_size: usize,
     /// Maximum serialized bytes materialized for one persistent build-script state record.
     pub max_cache_state_size: usize,
+    /// Maximum value-producing nodes in one declarative task graph.
+    pub max_tasks: usize,
+    /// Maximum dependency edges, including terminal inputs, in one task graph.
+    pub max_task_edges: usize,
+    /// Maximum combined bytes in task literals.
+    pub max_task_literal_bytes: usize,
+    /// Maximum side-effecting terminals in one task graph.
+    pub max_task_terminals: usize,
+    /// Maximum physical source-tree publication terminals in one task graph.
+    pub max_publication_roots: usize,
 }
 
 impl Default for BuildScriptLimits {
@@ -114,6 +126,11 @@ impl Default for BuildScriptLimits {
             max_output_file_size: 4 * 1_048_576,
             max_total_output_size: 16 * 1_048_576,
             max_cache_state_size: 4 * 1_048_576,
+            max_tasks: 4_096,
+            max_task_edges: 16_384,
+            max_task_literal_bytes: 1_048_576,
+            max_task_terminals: 256,
+            max_publication_roots: 32,
         }
     }
 }
@@ -144,11 +161,28 @@ impl BuildScriptLimits {
             (self.max_output_file_size != 0, "max_output_file_size"),
             (self.max_total_output_size != 0, "max_total_output_size"),
             (self.max_cache_state_size != 0, "max_cache_state_size"),
+            (self.max_tasks != 0, "max_tasks"),
+            (self.max_task_edges != 0, "max_task_edges"),
+            (self.max_task_literal_bytes != 0, "max_task_literal_bytes"),
+            (self.max_task_terminals != 0, "max_task_terminals"),
+            (self.max_publication_roots != 0, "max_publication_roots"),
         ];
         if let Some((_, name)) = limits.into_iter().find(|(valid, _)| !valid) {
             return Err(BuildScriptError::InvalidLimit(name));
         }
         Ok(())
+    }
+
+    const fn task_plan_limits(&self) -> TaskPlanLimits {
+        TaskPlanLimits {
+            max_tasks: self.max_tasks,
+            max_edges: self.max_task_edges,
+            max_literal_bytes: self.max_task_literal_bytes,
+            max_terminals: self.max_task_terminals,
+            max_publication_roots: self.max_publication_roots,
+            max_path_bytes: self.max_path_bytes,
+            max_path_depth: self.max_path_depth,
+        }
     }
 }
 
@@ -282,6 +316,8 @@ pub struct BuildScriptOutput {
     pub diagnostics: Vec<BuildScriptDiagnostic>,
     /// Script metadata, in lexical key order.
     pub metadata: BTreeMap<String, String>,
+    /// Declarative host tasks recorded by the script.
+    pub task_plan: TaskPlan,
 }
 
 /// Canonical output-root-relative path returned by `output.write` and `output.write_text`.
@@ -336,6 +372,7 @@ struct BuildScriptStateWire {
     fingerprint: String,
     fingerprint_inputs: FingerprintInputsWire,
     outputs: Vec<OutputArtifactWire>,
+    task_plan: TaskPlan,
     generated_sources: Vec<String>,
     additional_classpath: Vec<String>,
     javac_args: Vec<String>,
@@ -405,6 +442,11 @@ struct BuildScriptLimitsWire {
     max_output_file_size: usize,
     max_total_output_size: usize,
     max_cache_state_size: usize,
+    max_tasks: usize,
+    max_task_edges: usize,
+    max_task_literal_bytes: usize,
+    max_task_terminals: usize,
+    max_publication_roots: usize,
 }
 
 impl From<&BuildScriptLimits> for BuildScriptLimitsWire {
@@ -427,6 +469,11 @@ impl From<&BuildScriptLimits> for BuildScriptLimitsWire {
             max_output_file_size: limits.max_output_file_size,
             max_total_output_size: limits.max_total_output_size,
             max_cache_state_size: limits.max_cache_state_size,
+            max_tasks: limits.max_tasks,
+            max_task_edges: limits.max_task_edges,
+            max_task_literal_bytes: limits.max_task_literal_bytes,
+            max_task_terminals: limits.max_task_terminals,
+            max_publication_roots: limits.max_publication_roots,
         }
     }
 }
@@ -650,6 +697,7 @@ struct PendingOutput {
     rerun_env: BTreeSet<String>,
     diagnostics: Vec<BuildScriptDiagnostic>,
     metadata: BTreeMap<String, String>,
+    task_plan: TaskPlan,
 }
 
 impl PendingOutput {
@@ -669,6 +717,7 @@ impl PendingOutput {
             rerun_env: BTreeSet::new(),
             diagnostics: Vec::new(),
             metadata: BTreeMap::new(),
+            task_plan: TaskPlan::new(),
         }
     }
 
@@ -686,6 +735,7 @@ impl PendingOutput {
             rerun_env: self.rerun_env.clone(),
             diagnostics: self.diagnostics.clone(),
             metadata: self.metadata.clone(),
+            task_plan: self.task_plan.clone(),
         }
     }
 }
@@ -814,8 +864,8 @@ mod api {
 
     use jals_config::{BuildScript, Manifest};
     use jals_storage::{
-        ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef,
-        FileKey, ProjectStorage, ProjectView, RelativePath, Revision, SourceBackend,
+        ArtifactCache, CacheBackend, CacheKey, CacheNamespace, Change, ContentDigest, DirKey,
+        EntryRef, FileKey, ProjectStorage, ProjectView, RelativePath, Revision, SourceBackend,
     };
     use rhai::{Array, Dynamic, Engine, EvalAltResult, INT, ImmutableString, Position, Scope};
 
@@ -829,6 +879,7 @@ mod api {
         OutputArtifactWire, PendingOutput, PreparedBuildScript, PreparedCacheState, ProjectApi,
         RHAI_OUTPUT_ROOT,
     };
+    use crate::task::{TaskPlan, TasksApi};
 
     type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 
@@ -1496,6 +1547,7 @@ mod api {
             .register_fn("warning", build_warning)
             .register_fn("error", build_error)
             .register_fn("metadata", build_metadata);
+        TasksApi::register_rhai(&mut engine);
         engine
     }
 
@@ -1540,6 +1592,7 @@ mod api {
         rerun_env: BTreeSet<String>,
         diagnostics: Vec<BuildScriptDiagnostic>,
         metadata: BTreeMap<String, String>,
+        task_plan: TaskPlan,
     }
 
     #[derive(Debug)]
@@ -1568,6 +1621,7 @@ mod api {
                 rerun_env: self.state.rerun_env,
                 diagnostics: self.state.diagnostics,
                 metadata: self.state.metadata,
+                task_plan: self.state.task_plan,
             }
         }
     }
@@ -1823,6 +1877,9 @@ mod api {
         {
             return None;
         }
+        wire.task_plan
+            .validate(task_limits_from_wire(&wire.fingerprint_inputs.limits))
+            .ok()?;
         let diagnostics = wire
             .diagnostics
             .into_iter()
@@ -1846,7 +1903,20 @@ mod api {
             rerun_env,
             diagnostics,
             metadata: wire.metadata,
+            task_plan: wire.task_plan,
         })
+    }
+
+    const fn task_limits_from_wire(wire: &BuildScriptLimitsWire) -> crate::task::TaskPlanLimits {
+        crate::task::TaskPlanLimits {
+            max_tasks: wire.max_tasks,
+            max_edges: wire.max_task_edges,
+            max_literal_bytes: wire.max_task_literal_bytes,
+            max_terminals: wire.max_task_terminals,
+            max_publication_roots: wire.max_publication_roots,
+            max_path_bytes: wire.max_path_bytes,
+            max_path_depth: wire.max_path_depth,
+        }
     }
 
     fn state_within_limits(state: &DecodedState, limits: &BuildScriptLimits) -> bool {
@@ -1917,6 +1987,7 @@ mod api {
                 .iter()
                 .all(|diagnostic| diagnostic.message().len() <= limits.max_string_size)
             && directive_bytes.is_some_and(|bytes| bytes <= limits.max_host_directive_bytes)
+            && state.task_plan.validate(limits.task_plan_limits()).is_ok()
     }
 
     async fn load_cached_build_script<C: CacheBackend>(
@@ -1984,37 +2055,20 @@ mod api {
         })
     }
 
-    async fn reconcile_outputs<S: SourceBackend, C: CacheBackend>(
-        storage: &mut ProjectStorage<S, C>,
+    fn reconcile_output_changes(
         view: &ProjectView,
         generated: &BTreeMap<FileKey, Vec<u8>>,
         known_outputs: &BTreeMap<FileKey, Vec<u8>>,
-    ) -> Result<Revision, BuildScriptError> {
-        let mut transaction =
-            storage
-                .transaction(view.revision())
-                .map_err(|error| BuildScriptError::Storage {
-                    operation: "start the output transaction",
-                    error,
-                })?;
+    ) -> Result<Vec<Change>, BuildScriptError> {
+        let mut changes = Vec::new();
         for (key, bytes) in generated {
             match view.file(key) {
                 Ok(existing) if existing.bytes() == bytes => {}
                 Ok(_) => {
-                    transaction
-                        .replace_file(key.clone(), bytes.clone())
-                        .map_err(|error| BuildScriptError::Storage {
-                            operation: "stage a replacement output",
-                            error,
-                        })?;
+                    changes.push(Change::ReplaceFile(key.clone(), bytes.clone().into()));
                 }
                 Err(jals_storage::Error::NotFoundFile(_)) => {
-                    transaction
-                        .create_file(key.clone(), bytes.clone())
-                        .map_err(|error| BuildScriptError::Storage {
-                            operation: "stage a new output",
-                            error,
-                        })?;
+                    changes.push(Change::CreateFile(key.clone(), bytes.clone().into()));
                 }
                 Err(error) => {
                     return Err(BuildScriptError::Storage {
@@ -2032,14 +2086,32 @@ mod api {
                 .file(key)
                 .is_ok_and(|current| current.bytes() == known_bytes)
             {
-                transaction.remove_file(key.clone()).map_err(|error| {
-                    BuildScriptError::Storage {
-                        operation: "stage a stale known output removal",
-                        error,
-                    }
-                })?;
+                changes.push(Change::RemoveFile(key.clone()));
             }
         }
+        Ok(changes)
+    }
+
+    async fn reconcile_outputs<S: SourceBackend, C: CacheBackend>(
+        storage: &mut ProjectStorage<S, C>,
+        view: &ProjectView,
+        generated: &BTreeMap<FileKey, Vec<u8>>,
+        known_outputs: &BTreeMap<FileKey, Vec<u8>>,
+    ) -> Result<Revision, BuildScriptError> {
+        let changes = reconcile_output_changes(view, generated, known_outputs)?;
+        let mut transaction =
+            storage
+                .transaction(view.revision())
+                .map_err(|error| BuildScriptError::Storage {
+                    operation: "start the output transaction",
+                    error,
+                })?;
+        transaction
+            .stage_changes(changes)
+            .map_err(|error| BuildScriptError::Storage {
+                operation: "stage generated outputs",
+                error,
+            })?;
         transaction
             .commit()
             .await
@@ -2088,6 +2160,7 @@ mod api {
                     digest: ContentDigest::of(bytes).to_hex(),
                 })
                 .collect(),
+            task_plan: pending.task_plan.clone(),
             generated_sources: pending
                 .generated_sources
                 .iter()
@@ -2251,6 +2324,7 @@ mod api {
             recovered_outputs = cached.generated;
         }
         let pending = Rc::new(RefCell::new(PendingOutput::new(limits.clone())));
+        let tasks = TasksApi::new(limits.task_plan_limits());
         let mut scope = Scope::new();
         scope.push(
             "project",
@@ -2259,6 +2333,7 @@ mod api {
                 limits: limits.clone(),
             },
         );
+        scope.push("tasks", tasks.clone());
         scope.push(
             "output",
             OutputApi {
@@ -2299,13 +2374,19 @@ mod api {
             })?;
 
         drop(scope);
-        let pending = Rc::try_unwrap(pending)
+        let task_plan = tasks.finish().map_err(|error| BuildScriptError::Execute {
+            script: script_key.clone(),
+            position: None,
+            message: error.to_string(),
+        })?;
+        let mut pending = Rc::try_unwrap(pending)
             .map_err(|_| BuildScriptError::Execute {
                 script: script_key.clone(),
                 position: None,
                 message: "build-script scope retained internal output state".to_owned(),
             })?
             .into_inner();
+        pending.task_plan = task_plan;
         if pending
             .diagnostics
             .iter()
@@ -2358,14 +2439,48 @@ mod api {
             return Ok(None);
         };
 
+        publish_prepared_build_script(storage, &view, &prepared, session, Vec::new()).await
+    }
+
+    /// Atomically publish one prepared script together with trusted host-planned project changes.
+    /// Cache artifacts are persisted only after the project transaction commits.
+    pub async fn publish_prepared_build_script<S: SourceBackend, C: CacheBackend>(
+        storage: &mut ProjectStorage<S, C>,
+        view: &ProjectView,
+        prepared: &PreparedBuildScript,
+        session: &mut BuildScriptSession,
+        additional_changes: Vec<Change>,
+    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
         let mut known_outputs = session.outputs.clone();
         for (key, bytes) in &prepared.recovered_outputs {
             known_outputs
                 .entry(key.clone())
                 .or_insert_with(|| bytes.clone());
         }
+        let mut changes =
+            reconcile_output_changes(view, &prepared.pending.generated, &known_outputs)?;
+        changes.extend(additional_changes);
+        let mut transaction =
+            storage
+                .transaction(view.revision())
+                .map_err(|error| BuildScriptError::Storage {
+                    operation: "start the combined output transaction",
+                    error,
+                })?;
+        transaction
+            .stage_changes(changes)
+            .map_err(|error| BuildScriptError::Storage {
+                operation: "stage combined generated outputs",
+                error,
+            })?;
         let published_revision =
-            reconcile_outputs(storage, &view, &prepared.pending.generated, &known_outputs).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| BuildScriptError::Storage {
+                    operation: "commit combined generated outputs",
+                    error,
+                })?;
         session.outputs.clone_from(&prepared.pending.generated);
         let mut output = prepared.output(published_revision);
         if let Err(message) = prepared.persist(storage.artifacts_mut()).await {
@@ -2381,7 +2496,10 @@ mod api {
     }
 }
 
-pub use api::{clear_build_script_outputs, execute_build_script, prepare_build_script};
+pub use api::{
+    clear_build_script_outputs, execute_build_script, prepare_build_script,
+    publish_prepared_build_script,
+};
 
 #[cfg(test)]
 mod tests {
@@ -3882,6 +4000,76 @@ mod tests {
 
             assert_eq!(final_key.content(), first_key.content());
             assert_eq!(final_bytes, first_bytes);
+        });
+    }
+
+    #[test]
+    fn nonempty_task_plan_round_trips_through_the_build_script_cache() {
+        block_on_inline(async {
+            let script = r#"
+                let jar = tasks.project_jar("input.jar");
+                tasks.add_classpath(jar);
+            "#;
+            let mut storage = storage(script, [file("input.jar", "fixture")]);
+            let first = run(
+                &mut storage,
+                &BuildScriptEnvironment::new(),
+                &BuildScriptLimits::default(),
+                &mut BuildScriptSession::new(),
+            )
+            .await
+            .unwrap();
+            let revision = storage.revision();
+            let second = run(
+                &mut storage,
+                &BuildScriptEnvironment::new(),
+                &BuildScriptLimits::default(),
+                &mut BuildScriptSession::new(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(first.task_plan, second.task_plan);
+            assert_eq!(second.task_plan.terminals.len(), 1);
+            assert_eq!(second.revision, revision);
+        });
+    }
+
+    #[test]
+    fn a_throw_after_task_declaration_publishes_no_task_state() {
+        block_on_inline(async {
+            let mut storage = storage(
+                r#"
+                    let jar = tasks.project_jar("input.jar");
+                    tasks.add_classpath(jar);
+                    throw "stop";
+                "#,
+                [file("input.jar", "fixture")],
+            );
+            let result = run(
+                &mut storage,
+                &BuildScriptEnvironment::new(),
+                &BuildScriptLimits::default(),
+                &mut BuildScriptSession::new(),
+            )
+            .await;
+
+            assert!(matches!(result, Err(BuildScriptError::Execute { .. })));
+            assert_eq!(storage.revision(), Revision::INITIAL);
+            assert!(
+                storage
+                    .artifacts()
+                    .indexed_key(
+                        CacheNamespace::BuildScriptState,
+                        CacheIdentity::state(
+                            BuildScriptCacheScope::ROOT,
+                            &FileKey::parse("build.rhai").unwrap(),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         });
     }
 

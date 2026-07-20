@@ -242,14 +242,18 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ```
 
 With `script` configured, `build.rhai` runs before source discovery and `javac`. It can read the
-project snapshot, publish files only below `target/jals/build/rhai/out`, and add generated sources,
-classpath entries, `javac`/JVM flags, and compile/run environment entries. It cannot access the host
-filesystem, process API, network, clock, or randomness. The CLI, LSP, and browser playground all run
-the same portable script engine; the LSP/playground use generated sources and classpath for analysis
-without running a JDK. See the runnable
+project snapshot, publish ordinary files below `target/jals/build/rhai/out`, and add generated
+sources, classpath entries, `javac`/JVM flags, and compile/run environment entries. A typed `tasks`
+DAG can also declare bounded, digest-verified downloads, JSON projections, safe source-JAR
+extraction, and explicit exclusive source-tree publication; Rhai never reads task results or invokes
+a process. `replace-root` replaces every file below its declared destination and is atomic with
+ordinary script output. The native CLI and LSP execute tasks; the LSP defers a root containing an
+open document, while the browser rejects physical publication before fetching. See the runnable
 [`examples/rhai_build_script`](examples/rhai_build_script) project and the
 [`jals-build` Rhai reference](jals-build/README.md#rhai-build-scripts) for the complete API,
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
+The source-archive task shape is shown in
+[`examples/task_source_archive`](examples/task_source_archive).
 
 The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`

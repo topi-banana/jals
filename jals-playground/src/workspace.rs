@@ -11,7 +11,7 @@
 
 use jals_build::build_script::{
     BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptOutput,
-    BuildScriptSession, clear_build_script_outputs, execute_build_script,
+    BuildScriptSession, clear_build_script_outputs,
 };
 use jals_config::fmt::Config as FmtConfig;
 use jals_config::lint::Config as LintConfig;
@@ -20,11 +20,15 @@ use jals_editor::{Editor, ProjectLayout};
 use jals_exec::Exec;
 use jals_fmt::FormatOutput;
 use jals_hir::LoweredClasspath;
+use jals_project::{
+    BuildTaskExecutor, BuildTaskHost, RootBuildScriptError, RootBuildScriptOptions,
+};
 use jals_storage::{
     ArtifactCache, CodeTree, DirKey, Entry, FileKey, MemoryCache, MemorySource, MemoryStorage,
 };
 use jals_syntax::Parse;
 
+use crate::fetcher::BrowserFetcher;
 use crate::host::{
     CompletionEntry, Highlight, MonacoHost, PlaygroundDiagnostic, SigHelp, SymbolNode, Target,
 };
@@ -200,16 +204,33 @@ impl Workspace {
                 clear_build_script_outputs(storage, &mut self.build_script_session).await?;
                 None
             } else {
-                // Rhai evaluation is synchronous, but every CPU/data dimension is bounded by the
-                // explicit playground limits while this single-owner workspace lock is held.
-                execute_build_script(
+                let root_output = BuildTaskExecutor::execute_root(
+                    &Self::exec(),
+                    &BrowserFetcher::new(String::new()),
                     storage,
-                    manifest,
-                    &environment,
-                    &BuildScriptLimits::default(),
                     &mut self.build_script_session,
+                    RootBuildScriptOptions {
+                        manifest,
+                        environment: &environment,
+                        limits: &BuildScriptLimits::default(),
+                        network: jals_classpath::NetworkPolicy::Online,
+                        host: BuildTaskHost::NoTerminals,
+                        blocked_files: &[],
+                    },
                 )
-                .await?
+                .await
+                .map_err(|error| match error {
+                    RootBuildScriptError::BuildScript(error) => error,
+                    other => BuildScriptError::Execute {
+                        script: configured_script
+                            .clone()
+                            .expect("a configured script was parsed"),
+                        position: None,
+                        message: other.to_string(),
+                    },
+                })?;
+                debug_assert!(root_output.task_classpath.is_empty());
+                root_output.script
             }
         };
         let project_sources = output.as_ref().map_or_else(Vec::new, |output| {
@@ -571,6 +592,45 @@ mod tests {
                 b"class Stable {}\n"
             );
             assert!(view.file(&partial).is_err());
+        });
+    }
+
+    #[test]
+    fn physical_task_publication_is_rejected_before_browser_fetch() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let error = ws
+                .run_build_script(
+                    &build_manifest(),
+                    BUILD_MANIFEST,
+                    r#"
+                        let jar = tasks.fetch_jar(
+                            tasks.https_url("https://example.invalid/sources.jar"),
+                            tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                            tasks.bytes(1024)
+                        );
+                        let sources = tasks.extract_java(jar, "net/example");
+                        tasks.publish_tree(
+                            "sources",
+                            sources,
+                            "src/main/java/net/example",
+                            "replace-root"
+                        );
+                    "#,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                BuildScriptError::Execute { message, .. }
+                    if message.contains("physical source-tree publication is not supported")
+            ));
+            assert!(
+                ws.storage_snapshot()
+                    .view()
+                    .file(&FileKey::parse("src/main/java/net/example/A.java").unwrap())
+                    .is_err()
+            );
         });
     }
 

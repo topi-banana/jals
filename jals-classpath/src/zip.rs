@@ -78,6 +78,10 @@ impl MemberRecord {
     const fn is_encrypted(&self) -> bool {
         self.flags & 0x0001 != 0
     }
+
+    pub(crate) const fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_size
+    }
 }
 
 /// A parsed central directory: the plain-data member table shared (behind an `Arc`) by every

@@ -28,7 +28,7 @@ use jals_build::{
     ManifestExt,
     build_script::{
         BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
-        BuildScriptOutput, BuildScriptPosition, BuildScriptSession, execute_build_script,
+        BuildScriptOutput, BuildScriptPosition, BuildScriptSession,
     },
 };
 use jals_config::{BuildScript, Dependency, FeatureSet, Manifest};
@@ -37,7 +37,10 @@ use jals_editor::{
     SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
 };
 use jals_exec::Exec;
-use jals_project::{GraphError, GraphWarning, NativeProjectAssembly, NativeProjectGraph};
+use jals_project::{
+    BuildTaskExecutor, BuildTaskHost, GraphError, GraphWarning, NativeProjectAssembly,
+    NativeProjectGraph, RootBuildScriptError, RootBuildScriptOptions,
+};
 use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
 
@@ -914,10 +917,25 @@ impl Actor {
     fn spawn_workspace_assembly(&self, root: PathBuf, generation: u64) {
         let exec = self.exec.clone();
         let commands = self.commands.clone();
+        let blocked_files: Vec<_> = self
+            .store
+            .uris()
+            .filter_map(|uri| uri.to_file_path().ok())
+            .filter_map(|path| RelativePath::from_host_path(&root, &path))
+            .filter_map(|path| FileKey::new(path).ok())
+            .collect();
         drop(self.exec.spawn(async move {
             let manifest_path = root.join("jals.toml");
             let assembled = match Manifest::from_file(&manifest_path).await {
-                Ok(manifest) => AssembledWorkspace::assemble(&manifest, &root, exec).await,
+                Ok(manifest) => {
+                    AssembledWorkspace::assemble_with_blocked(
+                        &manifest,
+                        &root,
+                        exec,
+                        &blocked_files,
+                    )
+                    .await
+                }
                 Err(error) => {
                     let message = format!(
                         "reading project manifest {} failed: {error}",
@@ -1612,10 +1630,20 @@ impl AssembledWorkspace {
     /// classpath (async HTTP through the native fetch adapter), and stage/materialize navigation
     /// sources. Runs on a spawned task, off the actor's queue; stderr is safe to log on (the LSP
     /// protocol owns stdout, not stderr).
+    #[cfg(test)]
     async fn assemble(
         manifest: &Manifest,
         root: &Path,
         exec: Exec,
+    ) -> Result<Self, WorkspaceAssemblyFailure> {
+        Self::assemble_with_blocked(manifest, root, exec, &[]).await
+    }
+
+    async fn assemble_with_blocked(
+        manifest: &Manifest,
+        root: &Path,
+        exec: Exec,
+        blocked_files: &[FileKey],
     ) -> Result<Self, WorkspaceAssemblyFailure> {
         // Scripts receive a complete project snapshot because project.read/project.walk_files can
         // address any project-relative input. Script and generated-output I/O stays entirely in
@@ -1631,9 +1659,14 @@ impl AssembledWorkspace {
         let scopes = if has_build_script {
             vec![NativeScope::all(RelativePath::ROOT)]
         } else {
-            jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root)
+            let mut scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
+            scopes.push(NativeScope::all(
+                RelativePath::parse("target/jals/build/tasks/ownership-v1.json")
+                    .expect("ownership path is portable"),
+            ));
+            scopes
         };
-        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec)
+        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
             .await
             .map_err(|error| {
                 let message = format!("opening project storage failed: {error}");
@@ -1657,17 +1690,27 @@ impl AssembledWorkspace {
             BuildScriptDiagnosticUpdate::new(configured_script.clone());
         let environment = BuildScriptEnvironment::new().for_project(manifest);
         let limits = BuildScriptLimits::default();
-        if has_build_script {
-            match execute_build_script(
-                &mut storage,
+        let mut task_classpath = Vec::new();
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
+        match BuildTaskExecutor::execute_root(
+            &exec,
+            &fetcher,
+            &mut storage,
+            &mut BuildScriptSession::new(),
+            RootBuildScriptOptions {
                 manifest,
-                &environment,
-                &limits,
-                &mut BuildScriptSession::new(),
-            )
-            .await
-            {
-                Ok(Some(output)) => {
+                environment: &environment,
+                limits: &limits,
+                network: jals_classpath::NetworkPolicy::Online,
+                host: BuildTaskHost::Project,
+                blocked_files,
+            },
+        )
+        .await
+        {
+            Ok(root_output) => {
+                task_classpath = root_output.task_classpath;
+                if let Some(output) = root_output.script {
                     for diagnostic in &output.diagnostics {
                         Self::record_build_script_diagnostic(
                             root,
@@ -1683,35 +1726,44 @@ impl AssembledWorkspace {
                     project_sources.clone_from(&output.generated_sources);
                     Self::augment_classpath(&mut effective_manifest, &output);
                 }
-                Ok(None) => {}
-                Err(BuildScriptError::ReportedErrors(diagnostics)) => {
-                    for diagnostic in &diagnostics {
-                        Self::record_build_script_diagnostic(
-                            root,
-                            &mut build_script_diagnostics,
-                            diagnostic,
-                        );
-                    }
-                }
-                Err(error) => {
-                    let script = error.script_path().cloned();
-                    let position = error.position();
-                    let message = error.to_string();
-                    eprintln!(
-                        "jals-lsp: build script for {} failed; continuing with ordinary project \
-                         analysis: {message}",
-                        root.display()
+            }
+            Err(RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(
+                diagnostics,
+            ))) => {
+                for diagnostic in &diagnostics {
+                    Self::record_build_script_diagnostic(
+                        root,
+                        &mut build_script_diagnostics,
+                        diagnostic,
                     );
-                    if let Some(script) = script {
-                        if position.is_some() {
-                            let view = storage.view();
-                            build_script_diagnostics.script_text =
-                                view.file_text(&script).ok().map(ToOwned::to_owned);
-                        }
-                        build_script_diagnostics.script = Some(script);
-                    }
-                    build_script_diagnostics.push_failure(message, position);
                 }
+            }
+            Err(RootBuildScriptError::BuildScript(error)) => {
+                let script = error.script_path().cloned();
+                let position = error.position();
+                let message = error.to_string();
+                eprintln!(
+                    "jals-lsp: build script for {} failed; continuing with ordinary project \
+                         analysis: {message}",
+                    root.display()
+                );
+                if let Some(script) = script {
+                    if position.is_some() {
+                        let view = storage.view();
+                        build_script_diagnostics.script_text =
+                            view.file_text(&script).ok().map(ToOwned::to_owned);
+                    }
+                    build_script_diagnostics.script = Some(script);
+                }
+                build_script_diagnostics.push_failure(message, position);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                eprintln!(
+                    "jals-lsp: build tasks for {} failed; continuing with existing project sources: {message}",
+                    root.display()
+                );
+                build_script_diagnostics.push_failure(message, None);
             }
         }
         let assembly = match Self::assemble_graph(
@@ -1721,6 +1773,7 @@ impl AssembledWorkspace {
             &mut storage,
             &environment,
             &limits,
+            &task_classpath,
         )
         .await
         {
@@ -1737,6 +1790,7 @@ impl AssembledWorkspace {
                     &mut storage,
                     &environment,
                     &limits,
+                    &task_classpath,
                 )
                 .await
                 {
@@ -1787,19 +1841,37 @@ impl AssembledWorkspace {
         storage: &mut NativeStorage,
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
+        task_classpath: &[jals_storage::CacheKey],
     ) -> Result<NativeProjectAssembly, GraphError> {
         let graph = NativeProjectGraph::discover(discovery_manifest, root, storage.exec()).await?;
         let graph = graph
             .preprocess(storage.artifacts_mut(), environment, limits)
             .await?;
-        Ok(graph
+        let mut assembly = graph
             .assemble_native(
                 effective_manifest,
                 root,
                 storage,
                 jals_classpath::ProjectInputOptions::Editor,
             )
-            .await)
+            .await;
+        if !task_classpath.is_empty() {
+            let entries: Vec<_> = task_classpath
+                .iter()
+                .cloned()
+                .map(jals_classpath::ClasspathEntry::Artifact)
+                .collect();
+            let load = jals_classpath::ClasspathLoad::load(
+                storage.exec(),
+                &storage.view(),
+                storage.artifacts(),
+                &entries,
+            )
+            .await;
+            assembly.inputs.classpath_classes.extend(load.classes);
+            assembly.inputs.warnings.extend(load.warnings);
+        }
+        Ok(assembly)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2737,6 +2809,49 @@ mod tests {
                     .await
                     .is_none(),
                 "an unselected generated sibling is not a project source"
+            );
+        });
+    }
+
+    #[test]
+    fn open_document_defers_exclusive_task_publication_before_fetch() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            let manifest_text = "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+            std::fs::write(dir.path().join("jals.toml"), manifest_text).unwrap();
+            std::fs::write(dir.path().join("src/Main.java"), "class Main {}\n").unwrap();
+            std::fs::write(
+                dir.path().join("build.rhai"),
+                r#"
+                    let jar = tasks.fetch_jar(
+                        tasks.https_url("https://example.invalid/sources.jar"),
+                        tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        tasks.bytes(1024)
+                    );
+                    let sources = tasks.extract_java(jar, "generated");
+                    tasks.publish_tree("sources", sources, "src/generated", "replace-root");
+                "#,
+            )
+            .unwrap();
+            let manifest: Manifest = manifest_text.parse().unwrap();
+
+            let assembled = AssembledWorkspace::assemble_with_blocked(
+                &manifest,
+                dir.path(),
+                Exec::inline(),
+                &[FileKey::parse("src/generated/A.java").unwrap()],
+            )
+            .await
+            .unwrap();
+
+            assert!(!dir.path().join("src/generated").exists());
+            assert!(
+                assembled
+                    .build_script_diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("publication is deferred"))
             );
         });
     }

@@ -15,7 +15,6 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use jals_build::build_script::{
     BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession,
-    execute_build_script,
 };
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
@@ -117,6 +116,10 @@ struct BuildArgs {
     /// always compiles all discovered sources — it only validates the name.
     #[arg(long, value_name = "NAME")]
     bin: Option<String>,
+
+    /// Resolve build-task artifacts only from the verified project cache.
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Args)]
@@ -144,6 +147,10 @@ struct RunArgs {
     /// Arguments passed to the program after `--`.
     #[arg(last = true)]
     args: Vec<String>,
+
+    /// Resolve build-task artifacts only from the verified project cache.
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Args)]
@@ -179,7 +186,7 @@ fn main() -> ExitCode {
             Commands::Lint(args) => args.run(&exec).await,
             Commands::Build(args) => args.run(&exec).await,
             Commands::Run(args) => args.run(&exec).await,
-            Commands::Clean(args) => args.run().await,
+            Commands::Clean(args) => args.run(&exec).await,
             Commands::Init(args) => args.run(&exec).await,
         }
     });
@@ -432,7 +439,8 @@ impl BuildArgs {
         // Assemble the root script outputs and complete transitive dependency graph. Structural graph
         // and dependency-script failures abort before javac; lower-level classpath misses remain
         // warnings so the resolver can report all deterministic diagnostics.
-        let (sources, inputs) = App::prepare_compile_inputs(&mut manifest, &root, exec).await?;
+        let (sources, inputs) =
+            App::prepare_compile_inputs(&mut manifest, &root, exec, self.offline).await?;
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
@@ -468,7 +476,8 @@ impl RunArgs {
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
-        let (sources, inputs) = App::prepare_compile_inputs(&mut manifest, &root, exec).await?;
+        let (sources, inputs) =
+            App::prepare_compile_inputs(&mut manifest, &root, exec, self.offline).await?;
         let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
@@ -513,10 +522,33 @@ impl CleanArgs {
     /// Removes the project's build output: discovers the manifest, resolves the artifact paths, and
     /// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
     /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
-    async fn run(&self) -> Result<ExitCode> {
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
-        let keys = jals_build::CleanTargets::keys(&manifest)
-            .map_err(|error| anyhow!("invalid classes-dir: {error:?}"))?;
+        let storage = NativeStorage::for_project_scoped(
+            &root,
+            [NativeScope::all(RelativePath::ROOT)],
+            exec.clone(),
+        )
+        .await
+        .context("opening project storage for build-task cleanup")?;
+        let source_roots: Vec<_> = manifest
+            .build
+            .source_dirs
+            .iter()
+            .map(|root| jals_storage::DirKey::parse(root))
+            .collect::<Result<_, _>>()
+            .map_err(|error| anyhow!("invalid source directory: {error:?}"))?;
+        let mut keys = jals_project::BuildTaskExecutor::owned_publication_roots(
+            &storage.view(),
+            &source_roots,
+        )
+        .map_err(|error| anyhow!(error))?;
+        keys.extend(
+            jals_build::CleanTargets::keys(&manifest)
+                .map_err(|error| anyhow!("invalid classes-dir: {error:?}"))?,
+        );
+        let mut seen = HashSet::new();
+        keys.retain(|key| seen.insert(key.clone()));
 
         for key in keys {
             // The typed key confines the target under the project root; removal itself is a host
@@ -832,9 +864,10 @@ impl App {
         manifest: &mut Manifest,
         root: &Path,
         exec: &Exec,
+        offline: bool,
     ) -> Result<(Vec<PathBuf>, HostProjectInputs)> {
         let environment = Self::build_script_environment(manifest);
-        let script = Self::run_build_script(manifest, root, exec, &environment).await?;
+        let script = Self::run_build_script(manifest, root, exec, &environment, offline).await?;
         let sources = Self::discover_sources(manifest, root, !script.generated_sources.is_empty())?;
         let mut inputs = Self::project_inputs(
             manifest,
@@ -878,10 +911,8 @@ impl App {
         root: &Path,
         exec: &Exec,
         environment: &BuildScriptEnvironment,
+        offline: bool,
     ) -> Result<HostBuildScript> {
-        if manifest.build.script.is_none() {
-            return Ok(HostBuildScript::default());
-        }
         let mut storage = NativeStorage::for_project_scoped(
             root,
             [NativeScope::all(RelativePath::ROOT)],
@@ -890,16 +921,31 @@ impl App {
         .await
         .context("opening project storage for the build script")?;
         let mut session = BuildScriptSession::new();
-        let output = execute_build_script(
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
+        let network = if offline {
+            jals_classpath::NetworkPolicy::Offline
+        } else {
+            jals_classpath::NetworkPolicy::Online
+        };
+        let root_output = jals_project::BuildTaskExecutor::execute_root(
+            exec,
+            &fetcher,
             &mut storage,
-            manifest,
-            environment,
-            &BuildScriptLimits::default(),
             &mut session,
+            jals_project::RootBuildScriptOptions {
+                manifest,
+                environment,
+                limits: &BuildScriptLimits::default(),
+                network,
+                host: jals_project::BuildTaskHost::Project,
+                blocked_files: &[],
+            },
         )
         .await
         .map_err(|error| match error {
-            jals_build::build_script::BuildScriptError::ReportedErrors(diagnostics) => anyhow!(
+            jals_project::RootBuildScriptError::BuildScript(
+                jals_build::build_script::BuildScriptError::ReportedErrors(diagnostics),
+            ) => anyhow!(
                 "build script reported errors: {}",
                 diagnostics
                     .iter()
@@ -912,7 +958,21 @@ impl App {
             ),
             other => anyhow!(other),
         })?;
-        let Some(output) = output else {
+        let mut task_classpath = Vec::new();
+        for (index, key) in root_output.task_classpath.iter().enumerate() {
+            let logical = RelativePath::parse(&format!("build-task/{index}.jar"))
+                .expect("build-task materialization path is portable");
+            task_classpath.push(
+                storage
+                    .artifacts()
+                    .materialize_file(key, &logical)
+                    .await
+                    .map_err(|error| {
+                        anyhow!("materializing build-task classpath failed: {error:?}")
+                    })?,
+            );
+        }
+        let Some(output) = root_output.script else {
             return Ok(HostBuildScript::default());
         };
         for diagnostic in &output.diagnostics {
@@ -920,17 +980,19 @@ impl App {
                 eprintln!("warning: build script: {message}");
             }
         }
+        let mut additional_classpath: Vec<_> = output
+            .additional_classpath
+            .iter()
+            .map(|key| key.path().to_host_path(root))
+            .collect();
+        additional_classpath.extend(task_classpath);
         Ok(HostBuildScript {
             generated_sources: output
                 .generated_sources
                 .iter()
                 .map(|key| key.path().to_host_path(root))
                 .collect(),
-            additional_classpath: output
-                .additional_classpath
-                .iter()
-                .map(|key| key.path().to_host_path(root))
-                .collect(),
+            additional_classpath,
             javac_args: output.javac_args,
             jvm_args: output.jvm_args,
             compile_env: output.compile_env,

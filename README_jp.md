@@ -234,13 +234,16 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ```
 
 `script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot を
-読み、`target/jals/build/rhai/out` 以下だけへ file を生成し、生成 source・classpath entry・`javac`/JVM
-flag・compile/run environment entry を追加できます。ホスト filesystem・process・network・clock・random
-にはアクセスできません。CLI・LSP・browser playground は同じ portable engine を使い、LSP/playground
-は JDK を実行せず、生成 source と classpath を解析へ取り込みます。完全な API、fingerprint/cache、
+読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、生成 source・classpath entry・`javac`/JVM
+flag・compile/run environment entry を追加できます。さらに型付き `tasks` DAG で、size/digest 検証付き
+download、JSON projection、安全な sources JAR 展開、排他的な物理 source tree の publish を宣言できます。
+Rhai は task 結果を読めず process も起動しません。`replace-root` は宣言した destination 以下を全置換し、
+通常出力と同じ transaction で publish されます。native CLI と LSP は task を実行し、LSP は destination
+内に open document があれば延期します。browser は物理 publish を fetch 前に拒否します。完全な API、fingerprint/cache、
 sandbox limit、Rust の `BuildScript` model は
 [`jals-build` の Rhai reference](jals-build/README.md#rhai-build-scripts)を、実行可能な例は
 [`examples/rhai_build_script`](examples/rhai_build_script)を参照してください。
+source archive task の形は [`examples/task_source_archive`](examples/task_source_archive) にあります。
 
 root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess
 environment directive は、後続の明示的な `jals build` / `run` による JDK process へ意図的に反映され

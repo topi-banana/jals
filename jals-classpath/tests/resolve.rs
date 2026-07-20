@@ -1,12 +1,14 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use jals_classpath::{
-    DependencyLocation, DependencyResolver, DependencySpec, ExternalLocator, Fetcher,
+    DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
+    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher, NetworkPolicy,
 };
 use jals_exec::block_on_inline;
 use jals_storage::{
     CacheKey, CacheNamespace, CodeTree, ContentDigest, Entry, FileKey, MemoryStorage, Name,
 };
+use sha1::{Digest as _, Sha1};
 
 struct MockFetcher {
     bytes: Vec<u8>,
@@ -18,6 +20,103 @@ impl Fetcher for MockFetcher {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(self.bytes.clone())
     }
+}
+
+#[test]
+fn external_artifacts_verify_sha1_and_reuse_the_sha256_cache_offline() {
+    block_on_inline(async {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        let bytes = b"verified artifact";
+        let expected = ExpectedDigest::Sha1(Sha1::digest(bytes).into());
+        let spec = ExternalArtifactSpec {
+            locator: ExternalLocator::new("https://example.invalid/artifact.jar"),
+            expected,
+            max_bytes: 1024,
+            namespace: CacheNamespace::BuildTaskArtifact,
+        };
+        let online = MockFetcher {
+            bytes: bytes.to_vec(),
+            calls: AtomicUsize::new(0),
+        };
+        let key = ExternalArtifactResolver::resolve(
+            &online,
+            storage.artifacts_mut(),
+            &spec,
+            NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
+        assert_eq!(online.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(key.content(), ContentDigest::of(bytes));
+
+        let offline = MockFetcher {
+            bytes: b"wrong".to_vec(),
+            calls: AtomicUsize::new(0),
+        };
+        let cached = ExternalArtifactResolver::resolve(
+            &offline,
+            storage.artifacts_mut(),
+            &spec,
+            NetworkPolicy::Offline,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached, key);
+        assert_eq!(offline.calls.load(Ordering::Relaxed), 0);
+    });
+}
+
+#[test]
+fn external_artifacts_reject_oversize_and_digest_mismatch_without_indexing() {
+    block_on_inline(async {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        let locator = ExternalLocator::new("https://example.invalid/artifact.jar");
+        let spec = ExternalArtifactSpec {
+            locator: locator.clone(),
+            expected: ExpectedDigest::Sha256(ContentDigest::of(b"expected")),
+            max_bytes: 4,
+            namespace: CacheNamespace::BuildTaskArtifact,
+        };
+        let fetcher = MockFetcher {
+            bytes: b"oversized".to_vec(),
+            calls: AtomicUsize::new(0),
+        };
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec,
+            NetworkPolicy::Online,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("exceeding the limit"), "{error}");
+        assert_eq!(fetcher.calls.load(Ordering::Relaxed), 1);
+
+        let mismatch = ExternalArtifactSpec {
+            max_bytes: 1024,
+            ..spec
+        };
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &mismatch,
+            NetworkPolicy::Online,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("digest mismatch"), "{error}");
+        assert!(
+            ExternalArtifactResolver::resolve(
+                &fetcher,
+                storage.artifacts_mut(),
+                &mismatch,
+                NetworkPolicy::Offline,
+            )
+            .await
+            .unwrap_err()
+            .contains("not available")
+        );
+    });
 }
 
 #[test]

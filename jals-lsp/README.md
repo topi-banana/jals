@@ -65,6 +65,10 @@ Rhai `build.warning`/`build.error` messages and compilation/runtime failures are
 configured script URI as `jals-build` diagnostics as well as logged to stderr. Compilation/runtime
 failures use Rhai's exact source position; script-reported messages use a first-line fallback range.
 A clean rerun or script removal clears the previous publication.
+Typed root build tasks are executed during workspace assembly. Exclusive physical source-tree
+publication is deferred, without fetching or writing, while an open document lies below the
+destination. Matching generated trees are no-ops, so watched-file feedback does not continuously
+regenerate them.
 
 Cross-file features (diagnostics beyond syntax + file-local lint, semantic tokens' cross-file
 classification, hover, go-to-definition, find-references, rename, completion, and signature
