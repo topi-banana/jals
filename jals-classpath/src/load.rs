@@ -29,13 +29,14 @@ use jals_storage::{
     RelativePath,
 };
 
+use crate::skeleton::{SkeletonGroup, SkeletonMode};
 use crate::zip::{CentralDirectory, MemberStream};
 use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
 
 /// What a jar-backing reader must satisfy: portable `Read + Seek` feeds the member streams, and
 /// `Clone + Send + 'static` lets a fan-out chunk carry its own reader clone to a worker, every
 /// clone reading at an independent position.
-trait JarReader: sio::Read + sio::Seek + Clone + Send + 'static {}
+pub(crate) trait JarReader: sio::Read + sio::Seek + Clone + Send + 'static {}
 impl<R: sio::Read + sio::Seek + Clone + Send + 'static> JarReader for R {}
 
 const MAX_NESTED_JAR_DEPTH: usize = 64;
@@ -362,6 +363,102 @@ impl SourceTreeExtraction {
         }
         Ok(tree)
     }
+
+    /// Decompile every `.class` member of `jar` whose internal binary name sits under `prefix`
+    /// into compile-safe skeleton `.java` sources, stripping that prefix from result paths.
+    /// Any render/parse/publish failure fails the whole operation.
+    pub async fn decompile<C: CacheBackend>(
+        exec: &Exec,
+        cache: &mut ArtifactCache<C>,
+        jar: &CacheKey,
+        prefix: &RelativePath,
+        limits: SourceTreeLimits,
+    ) -> Result<SourceTree, String> {
+        let reader = cache
+            .open_verified(jar)
+            .await
+            .map_err(|error| format!("decompile jar is invalid: {error:?}"))?
+            .ok_or_else(|| "decompile jar is not cached".to_owned())?;
+        let members = Archive::decode_matching_bounded(exec, reader, "class", limits).await?;
+
+        let mut classes = Vec::new();
+        for (name, outcome) in members {
+            let bytes = outcome
+                .map_err(|error| format!("failed to read archive member `{name}`: {error}"))?;
+            let cf = ClassFile::read(bytes.as_slice())
+                .await
+                .map_err(|error| format!("failed to parse archive member `{name}`: {error}"))?;
+            // Filter by internal binary name against the requested prefix.
+            let Some(internal) = cf.constant_pool.class_name(cf.this_class) else {
+                continue;
+            };
+            let Ok(internal_path) = RelativePath::parse(internal.as_ref()) else {
+                continue;
+            };
+            if !prefix.is_root() && !internal_path.starts_with(prefix) {
+                continue;
+            }
+            classes.push(cf);
+        }
+
+        let prefix_len = prefix.segments().len();
+        let mut files = BTreeMap::new();
+        let mut yielder = jals_exec::Yielder::every(1);
+        for group in SkeletonGroup::groups(&classes, SkeletonMode::Compile) {
+            yielder.tick().await;
+            let rel = group.rel_path();
+            let full = RelativePath::parse(&rel)
+                .map_err(|_| format!("generated source path is not portable: {rel}"))?;
+            if !prefix.is_root() && !full.starts_with(prefix) {
+                continue;
+            }
+            let relative = if prefix.is_root() {
+                full.clone()
+            } else {
+                RelativePath::new(full.segments().skip(prefix_len).cloned())
+            };
+            if relative.is_root() {
+                return Err(format!(
+                    "decompiled source `{rel}` has no relative file name under the requested prefix"
+                ));
+            }
+            let bytes = group.render().await.into_bytes();
+            if bytes.len() > limits.max_file_bytes {
+                return Err(format!(
+                    "decompiled source `{rel}` has {} bytes, exceeding the limit of {}",
+                    bytes.len(),
+                    limits.max_file_bytes
+                ));
+            }
+            if files.insert(relative, (full, bytes)).is_some() {
+                return Err(format!("duplicate decompiled source `{rel}`"));
+            }
+        }
+        if files.len() > limits.max_files {
+            return Err(format!(
+                "decompiled tree has {} files, exceeding the limit of {}",
+                files.len(),
+                limits.max_files
+            ));
+        }
+        let total: usize = files.values().map(|(_, b)| b.len()).sum();
+        if total > limits.max_total_bytes {
+            return Err(format!(
+                "decompiled tree has {total} bytes, exceeding the limit of {}",
+                limits.max_total_bytes
+            ));
+        }
+
+        let mut tree = SourceTree::default();
+        for (path, (member, bytes)) in files {
+            let key = Archive::member_key(CacheNamespace::BuildTaskSource, jar, &member, &bytes);
+            cache.publish(&key, &bytes).await.map_err(|error| {
+                format!("decompiled source `{member}` publish failed: {error:?}")
+            })?;
+            tree.files.push(LibrarySource { path, key });
+        }
+        Ok(tree)
+    }
 }
 
 impl<T> Default for JarExtraction<T> {
@@ -488,7 +585,7 @@ impl<T> JarExtraction<T> {
     }
 }
 
-struct Archive;
+pub(crate) struct Archive;
 
 impl Archive {
     /// The fixed-size chunk split of `0..len`.
@@ -604,11 +701,39 @@ impl Archive {
         wanted_extension: &'static str,
         limits: SourceTreeLimits,
     ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
+        Self::decode_bounded(exec, reader, Some(wanted_extension), limits).await
+    }
+
+    /// Fully materialize every regular member (no extension filter), decoding fixed-size member
+    /// chunks on the fan-out. Results arrive in member order as `(raw name, bytes or diagnostic)`;
+    /// the limits are checked against the central directory before any byte is decoded.
+    pub(crate) async fn decode_all_bounded<R: JarReader>(
+        exec: &Exec,
+        reader: R,
+        limits: SourceTreeLimits,
+    ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
+        Self::decode_bounded(exec, reader, None, limits).await
+    }
+
+    /// Whether `member` is a regular member the extension filter selects; `None` selects every
+    /// non-directory member. The bounds pass and the decode pass must agree on this exactly, or the
+    /// limits would be checked against a different member set than the one decoded.
+    fn member_selected(member: &crate::zip::MemberRecord, wanted_extension: Option<&str>) -> bool {
+        !member.is_dir
+            && wanted_extension.is_none_or(|ext| Self::extension(&member.name) == Some(ext))
+    }
+
+    async fn decode_bounded<R: JarReader>(
+        exec: &Exec,
+        reader: R,
+        wanted_extension: Option<&'static str>,
+        limits: SourceTreeLimits,
+    ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
         let (reader, directory) = Self::open(reader).await?;
         let mut count = 0usize;
         let mut total = 0usize;
         for member in &directory.members {
-            if member.is_dir || Self::extension(&member.name) != Some(wanted_extension) {
+            if !Self::member_selected(member, wanted_extension) {
                 continue;
             }
             count = count
@@ -645,7 +770,7 @@ impl Archive {
             .fan_out(chunks, move |(reader, directory, members)| async move {
                 let mut out = Vec::new();
                 for member in &directory.members[members] {
-                    if member.is_dir || Self::extension(&member.name) != Some(wanted_extension) {
+                    if !Self::member_selected(member, wanted_extension) {
                         continue;
                     }
                     let outcome = Self::read_member(reader.clone(), member).await;

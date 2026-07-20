@@ -20,7 +20,7 @@
 
 use alloc::borrow::{Cow, ToOwned};
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -37,6 +37,23 @@ use jals_decompile::{Attrs, JavaType, MethodBody};
 use jals_storage::{ArtifactCache, CacheBackend, CacheNamespace, RelativePath};
 
 use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
+
+/// How a skeleton file is rendered.
+///
+/// * [`Navigation`](Self::Navigation) — current default: drop synthetic members, keep field
+///   `final`, which matches the LSP go-to-definition use case.
+/// * [`Compile`](Self::Compile) — best-effort compile-safe: drop field `final` (avoids blank-
+///   final errors under fallback ctors), keep synthetic fields and non-bridge synthetic methods so
+///   cross-nesting `this$0` and accessors resolve, and emit default-typed enum-constant arguments
+///   recovered from `<clinit>` so enums with explicit ctors still parse under `javac`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkeletonMode {
+    /// LSP navigation skeletons (current default behaviour).
+    #[default]
+    Navigation,
+    /// Best-effort compile-safe output for build-task publication.
+    Compile,
+}
 
 /// Skeleton generation is resilient: invalid class names or cache failures are diagnosed and skipped.
 #[derive(Debug, Default)]
@@ -56,6 +73,8 @@ pub struct SkeletonGroup<'a> {
     top: String,
     /// The `$`-split nested path → class file for the top-level type and every nested type under it.
     members: BTreeMap<Vec<String>, &'a ClassFile>,
+    /// Rendering mode (navigation vs compile-safe).
+    mode: SkeletonMode,
 }
 
 impl SkeletonGroup<'_> {
@@ -65,9 +84,25 @@ impl SkeletonGroup<'_> {
         cache: &mut ArtifactCache<C>,
         classes: &[ClassFile],
     ) -> Skeletons {
+        Self::synthesize_with(
+            cache,
+            classes,
+            SkeletonMode::Navigation,
+            CacheNamespace::Skeleton,
+        )
+        .await
+    }
+
+    /// Render and publish one source artifact per top-level type under `namespace`, using `mode`.
+    pub async fn synthesize_with<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
+        classes: &[ClassFile],
+        mode: SkeletonMode,
+        namespace: CacheNamespace,
+    ) -> Skeletons {
         let mut out = Skeletons::default();
         let mut yielder = jals_exec::Yielder::every(1);
-        for group in Self::groups(classes) {
+        for group in Self::groups(classes, mode) {
             yielder.tick().await;
             let rel = group.rel_path();
             let Ok(path) = RelativePath::parse(&rel) else {
@@ -79,7 +114,7 @@ impl SkeletonGroup<'_> {
             };
             let bytes = group.render().await.into_bytes();
             let key = DependencyResolver::cache_key(
-                CacheNamespace::Skeleton,
+                namespace,
                 b"skeleton\0",
                 path.to_string().as_bytes(),
                 &bytes,
@@ -96,7 +131,7 @@ impl SkeletonGroup<'_> {
     }
 
     /// The typed-artifact display path: package segments plus `<TopLevel>.java`.
-    fn rel_path(&self) -> String {
+    pub(crate) fn rel_path(&self) -> String {
         let mut path = String::new();
         if !self.package.is_empty() {
             // The package is dotted (`a.b`); the on-disk layout is `/`-separated (`a/b/`).
@@ -108,8 +143,8 @@ impl SkeletonGroup<'_> {
         path
     }
 
-    /// Render this group's `.java` text: every type/member declaration, with M0 bodies.
-    async fn render(&self) -> String {
+    /// Render this group's `.java` text: every type/member declaration, with mode-driven bodies.
+    pub(crate) async fn render(&self) -> String {
         let mut text = String::new();
         if !self.package.is_empty() {
             let _ = writeln!(text, "package {};\n", self.package);
@@ -119,6 +154,7 @@ impl SkeletonGroup<'_> {
             &self.members,
             core::slice::from_ref(&self.top),
             0,
+            self.mode,
         )
         .await;
         text
@@ -130,7 +166,7 @@ impl SkeletonGroup<'_> {
     /// Classes are grouped by `(package, top-level simple name)`; each group's nested types render
     /// inline so their dotted FQNs are well-formed. A class with no present top-level enclosing type,
     /// or a module / anonymous / local / synthetic class, contributes nothing.
-    fn groups(classes: &[ClassFile]) -> Vec<SkeletonGroup<'_>> {
+    pub(crate) fn groups(classes: &[ClassFile], mode: SkeletonMode) -> Vec<SkeletonGroup<'_>> {
         // group key (package, top-level name) -> nested-path -> class file.
         let mut groups: BTreeMap<(String, String), BTreeMap<Vec<String>, &ClassFile>> =
             BTreeMap::new();
@@ -152,6 +188,7 @@ impl SkeletonGroup<'_> {
                 package,
                 top,
                 members,
+                mode,
             })
             .collect()
     }
@@ -163,6 +200,7 @@ impl SkeletonGroup<'_> {
         group: &'a BTreeMap<Vec<String>, &ClassFile>,
         path: &'a [String],
         indent: usize,
+        mode: SkeletonMode,
     ) -> LocalBoxFuture<'a, ()> {
         Box::pin(async move {
             let Some(cf) = group.get(path) else {
@@ -175,16 +213,16 @@ impl SkeletonGroup<'_> {
             let _ = writeln!(
                 out,
                 "{pad}{} {{",
-                Self::type_header(cf, simple, class_sig.as_ref(), indent == 0)
+                Self::type_header(cf, simple, class_sig.as_ref(), indent == 0, mode)
             );
-            Self::render_members(out, cf, simple, indent + 1).await;
+            Self::render_members(out, cf, simple, indent + 1, mode).await;
 
             // Nested types: the group's entries whose path extends `path` by exactly one segment.
             let child_len = path.len() + 1;
             for child_path in group.keys() {
                 if child_path.len() == child_len && child_path.starts_with(path) {
                     out.push('\n');
-                    Self::render_type(out, group, child_path, indent + 1).await;
+                    Self::render_type(out, group, child_path, indent + 1, mode).await;
                 }
             }
             let _ = writeln!(out, "{pad}}}");
@@ -198,9 +236,10 @@ impl SkeletonGroup<'_> {
         simple: &str,
         sig: Option<&ClassSignature>,
         top_level: bool,
+        mode: SkeletonMode,
     ) -> String {
         let flags = cf.access_flags;
-        let mut header = Self::tokens_prefix(&Self::class_modifiers(flags, top_level));
+        let mut header = Self::tokens_prefix(&Self::class_modifiers(flags, top_level, mode));
         header.push_str(Self::class_keyword(cf));
         header.push(' ');
         header.push_str(simple);
@@ -209,9 +248,10 @@ impl SkeletonGroup<'_> {
         }
         if !flags.is_annotation() {
             let (superclass, interfaces) = Self::supertypes(cf, sig);
-            // Only a class spells out a non-implicit superclass; an interface's superclass is always
-            // Object, so it never reaches this line.
-            if !flags.is_interface()
+            // Compile mode drops `extends` so empty constructors never need an unavailable
+            // super(...) call; interfaces and class implements stay for API shape.
+            if mode != SkeletonMode::Compile
+                && !flags.is_interface()
                 && let Some(sc) = superclass.filter(|sc| !Self::is_implicit_super(sc))
             {
                 let _ = write!(header, " extends {sc}");
@@ -248,14 +288,19 @@ impl SkeletonGroup<'_> {
     /// The keyword modifiers of a type declaration, in canonical order. `abstract`/`final` are emitted
     /// only for a plain class (they are implied or illegal for an interface / enum / annotation), and a
     /// nested type is marked `static` (the skeleton flattens any enclosing-instance capture).
-    fn class_modifiers(flags: ClassAccessFlags, top_level: bool) -> Vec<&'static str> {
+    fn class_modifiers(
+        flags: ClassAccessFlags,
+        top_level: bool,
+        mode: SkeletonMode,
+    ) -> Vec<&'static str> {
         let plain_class = !(flags.is_interface() || flags.is_annotation() || flags.is_enum());
         let mut mods = Vec::new();
         if flags.contains(ClassAccessFlags::PUBLIC) {
             mods.push("public");
         }
-        // A nested interface / enum / annotation is implicitly static; only a nested *class* spells it.
-        if !top_level && plain_class {
+        // Navigation flattens nesting as static. Compile mode keeps true outer-capture form so
+        // nested types can still reference the enclosing class's type parameters.
+        if !top_level && plain_class && mode == SkeletonMode::Navigation {
             mods.push("static");
         }
         if plain_class {
@@ -305,16 +350,37 @@ impl SkeletonGroup<'_> {
     }
 
     /// Render a type declaration's body members: enum constants, then fields, then constructors/methods.
-    async fn render_members(out: &mut String, cf: &ClassFile, simple: &str, indent: usize) {
+    async fn render_members(
+        out: &mut String,
+        cf: &ClassFile,
+        simple: &str,
+        indent: usize,
+        mode: SkeletonMode,
+    ) {
         let pool = &cf.constant_pool;
         let pad = "    ".repeat(indent);
+        let is_enum = cf.access_flags.is_enum();
+        let compile = mode == SkeletonMode::Compile;
 
-        if cf.access_flags.is_enum() {
+        if is_enum {
+            let enum_args = if compile {
+                helpers::enum_constant_default_args(cf)
+            } else {
+                BTreeMap::new()
+            };
             let constants: Vec<String> = cf
                 .fields
                 .iter()
                 .filter(|f| f.access_flags.is_enum())
-                .filter_map(|f| pool.utf8(f.name_index).map(Cow::into_owned))
+                .filter_map(|f| {
+                    let name = pool.utf8(f.name_index).map(Cow::into_owned)?;
+                    let args = enum_args.get(&name).map_or("", String::as_str);
+                    Some(if args.is_empty() {
+                        name
+                    } else {
+                        format!("{name}({args})")
+                    })
+                })
                 .collect();
             if !constants.is_empty() {
                 let _ = writeln!(out, "{pad}{};", constants.join(", "));
@@ -323,7 +389,11 @@ impl SkeletonGroup<'_> {
 
         for field in &cf.fields {
             let flags = field.access_flags;
-            if flags.is_enum() || flags.contains(FieldAccessFlags::SYNTHETIC) {
+            if flags.is_enum() {
+                continue;
+            }
+            // Navigation mode skips synthetic fields; compile mode keeps them (this$0, $VALUES, …).
+            if !compile && flags.contains(FieldAccessFlags::SYNTHETIC) {
                 continue;
             }
             let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
@@ -332,20 +402,28 @@ impl SkeletonGroup<'_> {
             let ty = Self::field_type_java(&field.attributes, field.descriptor_index, pool);
             // A `static final` field's compile-time constant becomes its initializer (`= 42`), so a
             // navigated declaration shows the value.
-            let init = Attrs::constant_value_initializer(field, pool)
+            let mut init = Attrs::constant_value_initializer(field, pool)
                 .map(|value| format!(" = {value}"))
                 .unwrap_or_default();
+            // Interface fields must be initialized; when ConstantValue is missing fraudulently,
+            // supply a type-appropriate default so compile mode still produces valid Java.
+            if compile && init.is_empty() && cf.access_flags.is_interface() {
+                init = format!(" = {}", helpers::default_value_for_java_type(&ty));
+            }
             let _ = writeln!(
                 out,
                 "{pad}{}{ty} {name}{init};",
-                Self::tokens_prefix(&Self::field_modifiers(flags))
+                Self::tokens_prefix(&Self::field_modifiers(flags, compile))
             );
         }
 
         for method in &cf.methods {
             let flags = method.access_flags;
-            if flags.contains(MethodAccessFlags::SYNTHETIC)
-                || flags.contains(MethodAccessFlags::BRIDGE)
+            // Drop bridge methods (duplicate erasure) and all synthetics. Lambda/accessors
+            // reference anonymous types (`Outer.1`) that class grouping skips, so declaring them
+            // fails javac even with placeholder bodies.
+            if flags.contains(MethodAccessFlags::BRIDGE)
+                || flags.contains(MethodAccessFlags::SYNTHETIC)
             {
                 continue;
             }
@@ -355,7 +433,11 @@ impl SkeletonGroup<'_> {
             if raw_name == "<clinit>" {
                 continue;
             }
-            Self::render_method(out, method, cf, &raw_name, simple, &pad).await;
+            // javac synthesizes values()/valueOf for enums; declaring them again is an error.
+            if is_enum && (raw_name == "values" || raw_name == "valueOf") {
+                continue;
+            }
+            Self::render_method(out, method, cf, &raw_name, simple, &pad, mode).await;
         }
     }
 
@@ -370,6 +452,7 @@ impl SkeletonGroup<'_> {
         raw_name: &str,
         simple: &str,
         pad: &str,
+        mode: SkeletonMode,
     ) {
         let pool = &cf.constant_pool;
         let flags = method.access_flags;
@@ -386,7 +469,10 @@ impl SkeletonGroup<'_> {
         } else {
             format!(" throws {}", pieces.throws.join(", "))
         };
-        let mods = Self::tokens_prefix(&Self::method_modifiers(flags));
+        let mods = Self::tokens_prefix(&Self::method_modifiers(
+            flags,
+            cf.access_flags.is_interface(),
+        ));
         let type_params = Self::space_suffix(Self::render_type_params(&pieces.type_params));
         let is_ctor = raw_name == "<init>";
         let head = if is_ctor {
@@ -396,7 +482,8 @@ impl SkeletonGroup<'_> {
             let ret = pieces.ret.as_deref().unwrap_or("void");
             format!("{pad}{mods}{type_params}{ret} {raw_name}({params}){throws}")
         };
-        let body = Self::method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad).await;
+        let body =
+            Self::method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad, mode).await;
         let _ = writeln!(out, "{head}{body}");
     }
 
@@ -404,7 +491,7 @@ impl SkeletonGroup<'_> {
     /// Otherwise, prefer the decompiled body (using the same parameter `names` the signature renders);
     /// if it cannot be reconstructed, fall back to a safe placeholder — `{}` for a `void` method /
     /// constructor, `{ throw new RuntimeException(); }` for a value-returning one (valid for any return
-    /// type, so the output always parses).
+    /// type, so the output always parses). Compile mode always uses that placeholder.
     async fn method_body(
         method: &MethodInfo,
         cf: &ClassFile,
@@ -412,10 +499,17 @@ impl SkeletonGroup<'_> {
         is_ctor: bool,
         returns_value: bool,
         pad: &str,
+        mode: SkeletonMode,
     ) -> String {
         let flags = method.access_flags;
         if flags.is_abstract() || flags.contains(MethodAccessFlags::NATIVE) {
             return ";".to_owned();
+        }
+        // Compile mode intentionally keeps bodies as safe placeholders. Real decompiled statements
+        // frequently reference anonymous types (`Outer.1`) and other non-source forms that javac
+        // rejects at Minecraft scale; declarations alone are enough for a compilable tree.
+        if mode == SkeletonMode::Compile {
+            return Self::safe_body(is_ctor, returns_value).to_owned();
         }
         if let Some(stmts) = MethodBody::decompile(method, cf, names).await {
             return Self::render_body_block(&stmts, pad);
@@ -483,8 +577,9 @@ impl SkeletonGroup<'_> {
         "java.lang.Object".to_owned()
     }
 
-    /// The keyword modifiers of a field, in canonical order.
-    fn field_modifiers(flags: FieldAccessFlags) -> Vec<&'static str> {
+    /// The keyword modifiers of a field, in canonical order. In compile mode, `final` is dropped so
+    /// fallback constructor bodies (`{}`) never leave blank finals uninitialized.
+    fn field_modifiers(flags: FieldAccessFlags, compile: bool) -> Vec<&'static str> {
         let mut mods = Vec::new();
         if flags.is_public() {
             mods.push("public");
@@ -496,7 +591,7 @@ impl SkeletonGroup<'_> {
         if flags.is_static() {
             mods.push("static");
         }
-        if flags.contains(FieldAccessFlags::FINAL) {
+        if !compile && flags.contains(FieldAccessFlags::FINAL) {
             mods.push("final");
         }
         if flags.contains(FieldAccessFlags::VOLATILE) {
@@ -508,8 +603,9 @@ impl SkeletonGroup<'_> {
         mods
     }
 
-    /// The keyword modifiers of a method, in canonical order.
-    fn method_modifiers(flags: MethodAccessFlags) -> Vec<&'static str> {
+    /// The keyword modifiers of a method, in canonical order. Interface methods with a body become
+    /// `default` rather than plain abstracts (which cannot have a body).
+    fn method_modifiers(flags: MethodAccessFlags, in_interface: bool) -> Vec<&'static str> {
         let mut mods = Vec::new();
         if flags.is_public() {
             mods.push("public");
@@ -523,6 +619,10 @@ impl SkeletonGroup<'_> {
         }
         if flags.is_abstract() {
             mods.push("abstract");
+        } else if in_interface && !flags.is_static() && !flags.contains(MethodAccessFlags::PRIVATE)
+        {
+            // Concrete interface methods are `default` in source.
+            mods.push("default");
         }
         if flags.contains(MethodAccessFlags::FINAL) {
             mods.push("final");
@@ -582,6 +682,150 @@ impl SkeletonGroup<'_> {
     /// The class's generic signature, if it has a parseable `Signature` attribute.
     fn class_signature(cf: &ClassFile) -> Option<ClassSignature> {
         ClassSignature::parse(&Attrs::signature_string(&cf.attributes, &cf.constant_pool)?).ok()
+    }
+}
+
+#[allow(clippy::wildcard_imports)]
+mod helpers {
+    use super::*;
+
+    /// A type-appropriate default for an initializer slot: `0`/`false`/`'\0'`/`null`.
+    pub(super) fn default_value_for_java_type(ty: &str) -> &'static str {
+        match ty {
+            "byte" | "short" | "int" | "long" => "0",
+            "float" => "0.0f",
+            "double" => "0.0",
+            "char" => "'\\0'",
+            "boolean" => "false",
+            _ => "null",
+        }
+    }
+
+    /// Scan `<clinit>` of an enum for each constant's ctor descriptor, and build a comma-separated
+    /// default-arg list that jumps past the synthetic `(String,int)` name/ordinal prefix. Misses leave
+    /// an empty arg list (valid when the only ctor is the implicit one).
+    pub(super) fn enum_constant_default_args(cf: &ClassFile) -> BTreeMap<String, String> {
+        use jals_classfile::{AttributeBody, Instruction};
+
+        let pool = &cf.constant_pool;
+        let Some(clinit) = cf.methods.iter().find(|m| {
+            pool.utf8(m.name_index)
+                .is_some_and(|n| n.as_ref() == "<clinit>")
+        }) else {
+            return BTreeMap::new();
+        };
+        let Some(code) = clinit.attributes.iter().find_map(|a| match &a.body {
+            AttributeBody::Code(c) => Some(c),
+            _ => None,
+        }) else {
+            return BTreeMap::new();
+        };
+
+        let enum_names: BTreeSet<String> = cf
+            .fields
+            .iter()
+            .filter(|f| f.access_flags.is_enum())
+            .filter_map(|f| pool.utf8(f.name_index).map(Cow::into_owned))
+            .collect();
+
+        // Walk instructions; when we see PUTSTATIC of an enum constant field, look backward for the
+        // matching INVOKESPECIAL <init> descriptor; emit default args for params after (String,int).
+        let mut out = BTreeMap::new();
+        let mut last_init_desc: Option<String> = None;
+        for instr in &code.code {
+            match instr {
+                Instruction::InvokeSpecial(idx) => {
+                    if let Some(desc) = invokespecial_init_desc(pool, *idx) {
+                        last_init_desc = Some(desc);
+                    }
+                }
+                Instruction::PutStatic(idx) => {
+                    if let Some(name) = fieldref_name(pool, *idx)
+                        && enum_names.contains(&name)
+                        && let Some(desc) = last_init_desc.take()
+                        && let Some(args) = default_args_for_enum_ctor(&desc)
+                    {
+                        out.insert(name, args);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn invokespecial_init_desc(pool: &jals_classfile::ConstantPool, idx: u16) -> Option<String> {
+        use jals_classfile::ConstantPoolEntry;
+        let entry = pool.get(idx)?;
+        let nat = match entry {
+            ConstantPoolEntry::MethodRef {
+                name_and_type_index,
+                ..
+            }
+            | ConstantPoolEntry::InterfaceMethodRef {
+                name_and_type_index,
+                ..
+            } => *name_and_type_index,
+            _ => return None,
+        };
+        let ConstantPoolEntry::NameAndType {
+            name_index,
+            descriptor_index,
+        } = pool.get(nat)?
+        else {
+            return None;
+        };
+        if pool.utf8(*name_index)?.as_ref() != "<init>" {
+            return None;
+        }
+        pool.utf8(*descriptor_index).map(Cow::into_owned)
+    }
+
+    fn fieldref_name(pool: &jals_classfile::ConstantPool, idx: u16) -> Option<String> {
+        use jals_classfile::ConstantPoolEntry;
+        let ConstantPoolEntry::FieldRef {
+            name_and_type_index,
+            ..
+        } = pool.get(idx)?
+        else {
+            return None;
+        };
+        let ConstantPoolEntry::NameAndType { name_index, .. } = pool.get(*name_and_type_index)?
+        else {
+            return None;
+        };
+        pool.utf8(*name_index).map(Cow::into_owned)
+    }
+
+    /// Build comma-separated default args for an enum ctor descriptor, skipping the leading
+    /// `(Ljava/lang/String;I` name/ordinal prefix the compiler injects.
+    fn default_args_for_enum_ctor(desc: &str) -> Option<String> {
+        let md = MethodDescriptor::parse(desc).ok()?;
+        // Enum ctors always start with (String name, int ordinal, …user params).
+        if md.params.len() < 2 {
+            return Some(String::new());
+        }
+        let user = &md.params[2..];
+        if user.is_empty() {
+            return Some(String::new());
+        }
+        let args: Vec<&str> = user
+            .iter()
+            .map(|p| match p {
+                FieldType::Base(b) => match b {
+                    jals_classfile::BaseType::Boolean => "false",
+                    jals_classfile::BaseType::Byte
+                    | jals_classfile::BaseType::Short
+                    | jals_classfile::BaseType::Int
+                    | jals_classfile::BaseType::Long => "0",
+                    jals_classfile::BaseType::Float => "0.0f",
+                    jals_classfile::BaseType::Double => "0.0",
+                    jals_classfile::BaseType::Char => "'\\0'",
+                },
+                _ => "null",
+            })
+            .collect();
+        Some(args.join(", "))
     }
 }
 
@@ -704,7 +948,7 @@ mod tests {
     #[test]
     fn renders_generic_class_with_members() {
         let classes = [box_class()];
-        let groups = SkeletonGroup::groups(&classes);
+        let groups = SkeletonGroup::groups(&classes, SkeletonMode::Navigation);
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         // `Box` is in the default package, so it is `Box.java` at the root.
@@ -724,16 +968,19 @@ mod tests {
     #[test]
     fn skips_synthetic_and_module_classes() {
         // The same bytes render fine as a plain class...
-        assert_eq!(SkeletonGroup::groups(&[box_class()]).len(), 1);
+        assert_eq!(
+            SkeletonGroup::groups(&[box_class()], SkeletonMode::Navigation).len(),
+            1
+        );
 
         // ...but a synthetic or module class is compiler-generated, not a navigable named type, so it
         // contributes no skeleton group.
         let mut synthetic = box_class();
         synthetic.access_flags.0 |= ClassAccessFlags::SYNTHETIC;
-        assert!(SkeletonGroup::groups(&[synthetic]).is_empty());
+        assert!(SkeletonGroup::groups(&[synthetic], SkeletonMode::Navigation).is_empty());
 
         let mut module = box_class();
         module.access_flags.0 |= ClassAccessFlags::MODULE;
-        assert!(SkeletonGroup::groups(&[module]).is_empty());
+        assert!(SkeletonGroup::groups(&[module], SkeletonMode::Navigation).is_empty());
     }
 }

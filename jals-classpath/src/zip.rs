@@ -39,6 +39,8 @@ const COMPRESSED_WINDOW: usize = 64 * 1024;
 
 /// Little-endian field accessors shared by the record parsers.
 mod le {
+    use alloc::vec::Vec;
+
     pub(super) fn u16le(bytes: &[u8], at: usize) -> u16 {
         u16::from_le_bytes([bytes[at], bytes[at + 1]])
     }
@@ -51,6 +53,14 @@ mod le {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes[at..at + 8]);
         u64::from_le_bytes(buf)
+    }
+
+    pub(super) fn put_u16(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    pub(super) fn put_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
     }
 }
 
@@ -604,6 +614,98 @@ impl<R: sio::Read + sio::Seek> sio::Read for MemberStream<R> {
     }
 }
 
+/// One member to write into a stored archive: its `/`-separated name and uncompressed bytes.
+pub(crate) struct WriteMember {
+    pub(crate) name: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// Stored-only zip writer.
+pub(crate) struct StoredZip;
+
+impl StoredZip {
+    /// Serialize a deterministic stored-only zip archive: every member uses method 0 (stored), the
+    /// crc32 is computed, and the central directory is emitted in input order with fixed (zero)
+    /// DOS time/date so two identical inputs always produce identical bytes. No zip64 records are
+    /// emitted: callers (jar remap / merge) are bounded well below the sentinels by their inputs.
+    pub(crate) fn write(members: &[WriteMember]) -> Result<Vec<u8>, String> {
+        let entry_count = u16::try_from(members.len()).map_err(|_| {
+            format!(
+                "archive has {} members, exceeding the u16 count",
+                members.len()
+            )
+        })?;
+        let mut out: Vec<u8> = Vec::new();
+        let mut central: Vec<u8> = Vec::new();
+        for member in members {
+            let name_bytes = member.name.as_bytes();
+            let name_len = u16::try_from(name_bytes.len())
+                .map_err(|_| format!("archive member `{}` has a too-long name", member.name))?;
+            let size = u32::try_from(member.bytes.len()).map_err(|_| {
+                format!(
+                    "archive member `{}` is too large for the stored encoding",
+                    member.name
+                )
+            })?;
+            let header_offset = u32::try_from(out.len())
+                .map_err(|_| "archive is too large for the stored encoding".to_owned())?;
+            let crc = crc32fast::hash(&member.bytes);
+
+            // Local file header (30 bytes + name).
+            out.extend_from_slice(&LOCAL_HEADER_SIG.to_le_bytes());
+            le::put_u16(&mut out, 20); // version needed to extract (2.0: stored)
+            le::put_u16(&mut out, 0); // general-purpose flags
+            le::put_u16(&mut out, 0); // method: stored
+            le::put_u16(&mut out, 0); // last mod time
+            le::put_u16(&mut out, 0); // last mod date
+            le::put_u32(&mut out, crc);
+            le::put_u32(&mut out, size); // compressed size == uncompressed for stored
+            le::put_u32(&mut out, size);
+            le::put_u16(&mut out, name_len);
+            le::put_u16(&mut out, 0); // extra length
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(&member.bytes);
+
+            // Central directory entry (46 bytes + name), same order.
+            central.extend_from_slice(&CENTRAL_HEADER_SIG.to_le_bytes());
+            le::put_u16(&mut central, 20); // version made by
+            le::put_u16(&mut central, 20); // version needed
+            le::put_u16(&mut central, 0); // flags
+            le::put_u16(&mut central, 0); // method: stored
+            le::put_u16(&mut central, 0); // time
+            le::put_u16(&mut central, 0); // date
+            le::put_u32(&mut central, crc);
+            le::put_u32(&mut central, size);
+            le::put_u32(&mut central, size);
+            le::put_u16(&mut central, name_len);
+            le::put_u16(&mut central, 0); // extra length
+            le::put_u16(&mut central, 0); // comment length
+            le::put_u16(&mut central, 0); // disk start
+            le::put_u16(&mut central, 0); // internal attrs
+            le::put_u32(&mut central, 0); // external attrs
+            le::put_u32(&mut central, header_offset);
+            central.extend_from_slice(name_bytes);
+        }
+
+        let cd_offset = u32::try_from(out.len())
+            .map_err(|_| "archive is too large for the stored encoding".to_owned())?;
+        let cd_size = u32::try_from(central.len())
+            .map_err(|_| "archive is too large for the stored encoding".to_owned())?;
+        out.extend_from_slice(&central);
+
+        // End of central directory (22 bytes, no comment).
+        out.extend_from_slice(&EOCD_SIG.to_le_bytes());
+        le::put_u16(&mut out, 0); // disk number
+        le::put_u16(&mut out, 0); // disk with the central directory
+        le::put_u16(&mut out, entry_count); // entries on this disk
+        le::put_u16(&mut out, entry_count); // total entries
+        le::put_u32(&mut out, cd_size);
+        le::put_u32(&mut out, cd_offset);
+        le::put_u16(&mut out, 0); // comment length
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 // The hand-built zip64 fixture writes known-small lengths into fixed-width header fields.
 #[allow(clippy::cast_possible_truncation)]
@@ -652,6 +754,64 @@ mod tests {
 
     fn read_member_bytes(archive: &[u8], member: &MemberRecord) -> Vec<u8> {
         try_read_member_bytes(archive, member).expect("member reads")
+    }
+
+    /// The stored writer must emit bytes the in-house reader and the `zip` oracle both accept, in
+    /// the declared input order, with verified member contents and a deterministic layout.
+    #[test]
+    fn writes_a_stored_archive_the_reader_and_oracle_accept() {
+        let entries: &[(&str, &[u8])] = &[
+            ("a.txt", b"stored bytes"),
+            (
+                "dir/nested/b.bin",
+                &(0u32..40_000)
+                    .flat_map(u32::to_le_bytes)
+                    .collect::<Vec<u8>>(),
+            ),
+            ("dir/c.txt", b""),
+        ];
+        let members: Vec<WriteMember> = entries
+            .iter()
+            .map(|(name, bytes)| WriteMember {
+                name: (*name).to_owned(),
+                bytes: bytes.to_vec(),
+            })
+            .collect();
+        let archive = StoredZip::write(&members).expect("stored writer succeeds");
+
+        // The in-house reader round-trips the archive byte-for-byte.
+        let directory = parse(&archive);
+        assert_eq!(directory.members.len(), entries.len());
+        for (member, (name, bytes)) in directory.members.iter().zip(entries) {
+            assert_eq!(&member.name, name);
+            assert_eq!(&read_member_bytes(&archive, member), bytes);
+        }
+
+        // The `zip` oracle independently reads every member back.
+        let mut oracle =
+            zip::ZipArchive::new(std::io::Cursor::new(&archive)).expect("oracle opens");
+        assert_eq!(oracle.len(), entries.len());
+        for (index, (name, bytes)) in entries.iter().enumerate() {
+            let mut reader = oracle.by_index(index).expect("oracle reads");
+            assert_eq!(reader.name(), *name);
+            let mut got = Vec::new();
+            std::io::copy(&mut reader, &mut got).unwrap();
+            assert_eq!(&got, bytes);
+        }
+    }
+
+    /// Two writes of the same members produce identical bytes (no timestamps, no nondeterminism).
+    #[test]
+    fn stored_writes_are_deterministic() {
+        let members: Vec<WriteMember> = (0..8)
+            .map(|n| WriteMember {
+                name: format!("pkg/f{n}.bin"),
+                bytes: format!("member {n}").into_bytes(),
+            })
+            .collect();
+        let a = StoredZip::write(&members).unwrap();
+        let b = StoredZip::write(&members).unwrap();
+        assert_eq!(a, b);
     }
 
     /// Names and byte-identical contents must match what the `zip` crate reads back from the
