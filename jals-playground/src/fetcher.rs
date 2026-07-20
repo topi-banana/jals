@@ -27,13 +27,20 @@ impl BrowserFetcher {
     }
 }
 
-impl Fetcher for BrowserFetcher {
-    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
-        let target = if self.proxy.is_empty() {
+impl BrowserFetcher {
+    /// The URL actually requested: `url`, or `url` behind the configured CORS proxy.
+    fn target(&self, url: &str) -> String {
+        if self.proxy.is_empty() {
             url.to_string()
         } else {
             format!("{}{url}", self.proxy)
-        };
+        }
+    }
+}
+
+impl Fetcher for BrowserFetcher {
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        let target = self.target(url);
         let response = Request::get(&target)
             .send()
             .await
@@ -45,7 +52,30 @@ impl Fetcher for BrowserFetcher {
     }
 
     async fn fetch_bounded(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
-        let bytes = self.fetch(url).await?;
+        let target = self.target(url);
+        let response = Request::get(&target)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.ok() {
+            return Err(format!("HTTP {} for {url}", response.status()));
+        }
+        // Refuse before reading the body where we can. The whole response lands in the wasm
+        // linear heap, so without this a jar far larger than the declared limit takes the tab
+        // down before the limit is ever consulted — the native fetcher checks `Content-Length`
+        // and streams for the same reason.
+        if let Some(declared) = response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            && declared > max_bytes
+        {
+            return Err(format!(
+                "response declares {declared} bytes, exceeding the limit of {max_bytes}"
+            ));
+        }
+        let bytes = response.binary().await.map_err(|e| e.to_string())?;
+        // A server may omit `Content-Length` (or lie), so the size is still checked afterwards.
         if bytes.len() > max_bytes {
             return Err(format!(
                 "response has {} bytes, exceeding the limit of {max_bytes}",

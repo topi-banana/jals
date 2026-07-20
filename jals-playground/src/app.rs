@@ -775,7 +775,7 @@ impl App {
                     return;
                 }
                 match ws
-                    .run_build_script(&manifest, &manifest_text, &script_text)
+                    .run_build_script_with_proxy(&manifest, &manifest_text, &script_text, &proxy)
                     .await
                 {
                     Ok(output) => {

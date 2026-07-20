@@ -151,11 +151,29 @@ impl Workspace {
     /// Stage the live manifest and Rhai buffers into this workspace's own aggregate, execute the
     /// configured script there, then reload project Java files so generated sources join analysis.
     /// Existing Java overlays remain in storage and therefore survive the reload.
+    /// [`run_build_script_with_proxy`](Self::run_build_script_with_proxy) with no CORS proxy.
+    #[cfg(test)]
     pub async fn run_build_script(
         &mut self,
         manifest: &Manifest,
         manifest_text: &str,
         script_text: &str,
+    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+        self.run_build_script_with_proxy(manifest, manifest_text, script_text, "")
+            .await
+    }
+
+    /// [`run_build_script`](Self::run_build_script), routing build-task fetches through `proxy`.
+    ///
+    /// `fetch` is same-origin restricted, so a task fetching from a host without permissive CORS
+    /// headers (Maven Central among them) fails outright without the proxy the header already
+    /// collects for dependency resolution.
+    pub async fn run_build_script_with_proxy(
+        &mut self,
+        manifest: &Manifest,
+        manifest_text: &str,
+        script_text: &str,
+        proxy: &str,
     ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
         let manifest_key = FileKey::parse(MANIFEST_PATH).expect("manifest pseudo-path is valid");
         let configured_script = match manifest.build.script.as_ref() {
@@ -219,7 +237,10 @@ impl Workspace {
             } else {
                 let root_output = BuildTaskExecutor::execute_root(
                     &Self::exec(),
-                    &BrowserFetcher::new(String::new()),
+                    // Build-task fetches go through the same CORS proxy as dependency
+                    // resolution; without it every `tasks.fetch_*` to a non-permissive host
+                    // (Maven Central among them) fails, with nothing pointing at the proxy field.
+                    &BrowserFetcher::new(proxy.to_owned()),
                     storage,
                     &mut self.build_script_session,
                     RootBuildScriptOptions {
