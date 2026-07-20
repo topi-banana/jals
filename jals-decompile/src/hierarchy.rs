@@ -326,6 +326,12 @@ impl<'a> ClassHierarchy<'a> {
                 {
                     continue;
                 }
+                if !method.access_flags.is_public()
+                    || method.access_flags.contains(MethodAccessFlags::BRIDGE)
+                    || method.access_flags.contains(MethodAccessFlags::SYNTHETIC)
+                {
+                    return None;
+                }
                 if self.is_subtype(&owner, &selected.owner)? {
                     return Some(true);
                 }
