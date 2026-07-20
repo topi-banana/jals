@@ -1880,7 +1880,15 @@ impl AssembledWorkspace {
         limits: &BuildScriptLimits,
         task_classpath: &[jals_storage::CacheKey],
     ) -> Result<NativeProjectAssembly, GraphError> {
-        let graph = NativeProjectGraph::discover(discovery_manifest, root, storage.exec()).await?;
+        // Analysis never reaches the network: opening a folder must not clone a remote the user
+        // has not asked about. Git dependencies resolve from what `jals build` already acquired.
+        let graph = NativeProjectGraph::discover(
+            discovery_manifest,
+            root,
+            storage.exec(),
+            jals_classpath::NetworkPolicy::Offline,
+        )
+        .await?;
         let graph = graph
             .preprocess(storage.artifacts_mut(), environment, limits)
             .await?;

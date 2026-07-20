@@ -52,9 +52,14 @@ fn transitive_path_graph_is_classified_in_parent_discovery_order() {
         write(project.path(), "b/src/main/java/B.java", "class B {}\n");
         let root = manifest("[dependencies]\na = { path = \"a\" }\n");
 
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         let metadata = graph.metadata();
         assert_eq!(metadata.nodes().len(), 2);
         assert_eq!(
@@ -95,9 +100,14 @@ fn native_and_memory_providers_coexist_under_native_features() {
         assert_eq!(memory_graph.metadata().nodes().len(), 1);
 
         write(project.path(), "dep/src/Native.java", "class Native {}\n");
-        let native_graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let native_graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert_eq!(native_graph.metadata().nodes().len(), 1);
     })
     .unwrap();
@@ -114,7 +124,7 @@ fn native_companion_source_archives_are_role_distinct() {
              remote = { jar = \"https://example.invalid/binary.jar\", sources = \"https://example.invalid/sources.jar\" }\n",
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
+        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
             .preprocess(
@@ -141,9 +151,14 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
         write(project.path(), "base/selected/src/S.java", "class S {}\n");
         let selected =
             manifest("[dependencies]\nselected = { path = \"base\", dir = \"selected\" }\n");
-        let graph = NativeProjectGraph::discover(&selected, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &selected,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert_eq!(graph.metadata().nodes()[0].kind, NodeKind::PlainSource);
 
         write(
@@ -151,9 +166,14 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
             "base/selected/jals.toml",
             "[build]\nsource-dirs = [\n",
         );
-        let error = NativeProjectGraph::discover(&selected, project.path(), &exec)
-            .await
-            .unwrap_err();
+        let error = NativeProjectGraph::discover(
+            &selected,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, GraphError::MalformedManifest { .. }));
 
         write(
@@ -161,9 +181,14 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
             "base/selected/jals.toml",
             "[build]\nsource-dirs = [\"src\"]\n",
         );
-        let graph = NativeProjectGraph::discover(&selected, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &selected,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert_eq!(graph.metadata().nodes()[0].kind, NodeKind::JalsSource);
     })
     .unwrap();
@@ -183,9 +208,14 @@ fn diamond_deduplicates_nodes_and_cycle_reports_edge_chain() {
         write(project.path(), "shared/src/S.java", "class S {}\n");
         let root =
             manifest("[dependencies]\nleft = { path = \"left\" }\nright = { path = \"right\" }\n");
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert_eq!(graph.metadata().nodes().len(), 3);
         assert_eq!(graph.metadata().edges().len(), 4);
 
@@ -194,9 +224,14 @@ fn diamond_deduplicates_nodes_and_cycle_reports_edge_chain() {
             "shared/jals.toml",
             "[dependencies]\nleft-again = { path = \"../left\" }\n",
         );
-        let error = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap_err();
+        let error = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap_err();
         let GraphError::Cycle { chain } = error else {
             panic!("expected cycle");
         };
@@ -226,9 +261,14 @@ fn relative_child_jar_and_classpath_become_verified_artifacts() {
         write(project.path(), "lib/dep.jar", b"jar bytes");
         let root = manifest("[dependencies]\nchild = { path = \"child\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         let graph = graph
             .preprocess(
                 root_storage.artifacts_mut(),
@@ -273,16 +313,21 @@ fn declared_classpath_directory_remains_one_compile_tree() {
         write(project.path(), "classes/pkg/internal/Impl.class", b"impl");
         let root = manifest("[dependencies]\nchild = { path = \"child\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap()
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
-            )
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(
+            root_storage.artifacts_mut(),
+            &BuildScriptEnvironment::new(),
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
 
         assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
@@ -319,16 +364,21 @@ fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
         let root =
             manifest("[dependencies]\nleft = { path = \"left\" }\nright = { path = \"right\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap()
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
-            )
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(
+            root_storage.artifacts_mut(),
+            &BuildScriptEnvironment::new(),
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
 
         assert_eq!(assembly.plan.dependencies.len(), 1);
@@ -350,16 +400,21 @@ fn mixed_local_and_remote_binary_specs_keep_first_edge_order() {
              c-remote = { jar = \"https://example.invalid/c.jar\" }\n",
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
-            )
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(
+            cache.artifacts_mut(),
+            &BuildScriptEnvironment::new(),
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap();
         let assembly = graph.assemble(cache.artifacts_mut()).await;
         assert_eq!(
             assembly
@@ -413,16 +468,21 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
              c-remote = {{ jar = \"http://{address}/c.jar\" }}\n"
         ));
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap()
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
-            )
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(
+            root_storage.artifacts_mut(),
+            &BuildScriptEnvironment::new(),
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap();
         let assembly = graph
             .assemble_native(
                 &root,
@@ -496,7 +556,7 @@ fn every_node_kind_preprocesses_and_scripts_export_only_sources_and_classpath() 
              plain = { path = \"plain\" }\nscripted = { path = \"scripted\" }\n",
         );
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
+        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap();
         assert_eq!(
@@ -565,7 +625,7 @@ fn node_tokens_isolate_identical_script_paths_and_outputs() {
             "[dependencies]\none = { path = \"one\" }\ntwo = { path = \"two\" }\n",
         );
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
+        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
             .preprocess(
@@ -641,12 +701,22 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
         );
         let root = manifest("[dependencies]\nrepo = { git = \"repository\" }\n");
 
-        let first = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
-        let second = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let first = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
+        let second = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert_eq!(first.metadata(), second.metadata());
         assert_eq!(first.metadata().nodes().len(), 2);
         assert!(
@@ -693,9 +763,14 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
                 .unwrap()
                 .success()
         );
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert_eq!(graph.metadata().nodes().len(), 1);
         assert!(
             graph
@@ -715,16 +790,21 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         write(project.path(), "src/main/java/Root.java", "class Root {}\n");
         let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap()
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
-            )
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(
+            root_storage.artifacts_mut(),
+            &BuildScriptEnvironment::new(),
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap();
         let analysis = graph
             .assemble_native(
                 &root,
@@ -775,9 +855,14 @@ fn dependency_snapshots_exclude_git_and_jals_cache_inputs() {
         write(project.path(), "dep/.git/secret", b"git");
         let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         graph
             .preprocess(
                 cache.artifacts_mut(),
@@ -809,9 +894,14 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         )
         .unwrap();
         let warning_root = manifest("[dependencies]\nwarn = { path = \"warn\" }\n");
-        let graph = NativeProjectGraph::discover(&warning_root, project.path(), &exec)
-            .await
-            .unwrap();
+        let graph = NativeProjectGraph::discover(
+            &warning_root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
         assert!(
             graph
                 .warnings()
@@ -832,7 +922,13 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         .unwrap();
         let hard_root = manifest("[dependencies]\nhard = { path = \"hard\" }\n");
         assert!(matches!(
-            NativeProjectGraph::discover(&hard_root, project.path(), &exec).await,
+            NativeProjectGraph::discover(
+                &hard_root,
+                project.path(),
+                &exec,
+                jals_classpath::NetworkPolicy::Online
+            )
+            .await,
             Err(GraphError::Acquisition { .. })
         ));
     })
@@ -877,7 +973,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             write(project.path(), path, bytes);
         }
         let mut native_cache = storage(project.path(), &exec).await;
-        let native = NativeProjectGraph::discover(&root, project.path(), &exec)
+        let native = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
             .preprocess(

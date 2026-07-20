@@ -842,6 +842,29 @@ fn lint_warns_and_uses_default_context_when_the_dependency_graph_is_invalid() {
     assert!(stderr.contains("warning: project analysis inputs unavailable"));
 }
 
+/// `--offline` promises to resolve from the verified cache only, but graph discovery ran its own
+/// `git clone` regardless — so an offline build still blocked on the network until it timed out.
+#[test]
+fn offline_does_not_clone_git_dependencies() {
+    let dir = project(
+        "[package]\nname = \"offline\"\n\
+         [dependencies]\ndep = { git = \"https://example.invalid/r.git\" }\n",
+    );
+
+    let output = jals()
+        .args(["build", "--offline", "--dry-run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("cannot be acquired offline"),
+        "stderr: {stderr}"
+    );
+}
+
 /// `Manifest::discover_path` returns a bare `jals.toml` when the manifest is in the current
 /// directory, and `Path::new("jals.toml").parent()` is `Some("")` rather than `None`. The empty
 /// root then failed to canonicalize, so the classpath and feature set were silently dropped and

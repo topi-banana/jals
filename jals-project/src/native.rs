@@ -9,7 +9,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use jals_classpath::{NativeProjectPlan, ProjectInputOptions, ProjectInputs, ReqwestFetcher};
+use jals_classpath::{
+    NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs, ReqwestFetcher,
+};
 use jals_config::{Dependency, GitDependency, Manifest, PathDependency};
 use jals_exec::{Exec, LocalBoxFuture};
 use jals_storage::{
@@ -101,6 +103,7 @@ struct StackEntry {
 
 struct GraphBuilder {
     exec: Exec,
+    network: NetworkPolicy,
     nodes: Vec<ResolvedNode>,
     seen_nodes: BTreeSet<NodeId>,
     states: BTreeMap<NodeId, VisitState>,
@@ -118,6 +121,7 @@ impl NativeProjectGraph {
         root_manifest: &Manifest,
         root_directory: &Path,
         exec: &Exec,
+        network: NetworkPolicy,
     ) -> Result<ResolvedProjectGraph, GraphError> {
         root_manifest
             .validate()
@@ -131,7 +135,7 @@ impl NativeProjectGraph {
             view: snapshot.view,
             confinement: None,
         };
-        let mut builder = GraphBuilder::new(exec.clone());
+        let mut builder = GraphBuilder::new(exec.clone(), network);
         builder.push_snapshot_warnings(None, snapshot.diagnostics);
         builder
             .visit_dependencies(None, &declaring, root_manifest)
@@ -214,9 +218,10 @@ impl PreprocessedProjectGraph {
 }
 
 impl GraphBuilder {
-    const fn new(exec: Exec) -> Self {
+    const fn new(exec: Exec, network: NetworkPolicy) -> Self {
         Self {
             exec,
+            network,
             nodes: Vec::new(),
             seen_nodes: BTreeSet::new(),
             states: BTreeMap::new(),
@@ -494,6 +499,14 @@ impl GraphBuilder {
         dependency_name: &str,
         dependency: &GitDependency,
     ) -> Result<AcquiredSource, String> {
+        // Cloning is a network operation, and it is not gated anywhere downstream. `--offline`
+        // has to stop it here, and the language server runs offline unconditionally — opening a
+        // folder in an editor must not reach out to a remote the user never asked about.
+        if self.network == NetworkPolicy::Offline {
+            return Err(format!(
+                "git dependency `{dependency_name}` cannot be acquired offline"
+            ));
+        }
         let reference = dependency
             .git_ref(dependency_name)
             .map_err(|error| error.to_string())?;

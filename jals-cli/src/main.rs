@@ -690,6 +690,8 @@ impl ProjectLintContext {
             exec,
             HostBuildScript::default(),
             &environment,
+            // Lint analyses what is already here; it does not acquire dependencies.
+            jals_classpath::NetworkPolicy::Offline,
         )
         .await
         {
@@ -786,9 +788,10 @@ impl App {
         exec: &Exec,
         script: HostBuildScript,
         environment: &BuildScriptEnvironment,
+        network: jals_classpath::NetworkPolicy,
     ) -> Result<HostProjectInputs> {
         let mut result = HostProjectInputs::from(script);
-        let graph = jals_project::NativeProjectGraph::discover(manifest, root, exec)
+        let graph = jals_project::NativeProjectGraph::discover(manifest, root, exec, network)
             .await
             .context("discovering project dependency graph")?;
         let discovery_warning_count = graph.warnings().len();
@@ -906,6 +909,11 @@ impl App {
             exec,
             script,
             &environment,
+            if offline {
+                jals_classpath::NetworkPolicy::Offline
+            } else {
+                jals_classpath::NetworkPolicy::Online
+            },
         )
         .await?;
         inputs.deduplicate(manifest, root, &sources);
