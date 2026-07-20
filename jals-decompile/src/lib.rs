@@ -15,9 +15,11 @@ mod attrs;
 mod body;
 mod cfg;
 mod expr;
+mod hierarchy;
 mod literal;
 mod types;
 
 pub use attrs::Attrs;
 pub use body::MethodBody;
+pub use hierarchy::ClassHierarchy;
 pub use types::JavaType;

@@ -1,7 +1,7 @@
 //! Method-body decompilation: reconstructing a method body from its bytecode.
 //!
 //! Two layers. The value layer ([`Sim`]) is a per-block symbolic execution: the operand stack is
-//! simulated as a stack of [`Expr`] trees, and each instruction either rewrites the stack or emits a
+//! simulated as typed [`Expr`] trees, and each instruction either rewrites the stack or emits a
 //! [`Stmt`]. The control layer ([`Structurer`]) builds a CFG ([`crate::cfg`]) and recovers structured
 //! Java from it — a straight-line method is one block, forward conditional branches become
 //! `if` / `if`-`else`, and back-edges become `while` / `do`-`while` loops. Both layers are
@@ -28,6 +28,7 @@ use jals_exec::{LocalBoxFuture, Yielder};
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
 use crate::expr::{ArrayForm, ConcatPart, Expr, Stmt};
+use crate::hierarchy::ClassHierarchy;
 use crate::literal::Literal;
 use crate::types::JavaType;
 
@@ -46,11 +47,14 @@ impl MethodBody {
     /// body reuses them (never a name the signature doesn't declare), and a mismatch between them and
     /// the descriptor's parameters (a generic signature that hides synthetic parameters, e.g. an
     /// `enum` constructor's `String, int`) makes this bail so the body can never reference a phantom
-    /// parameter.
+    /// parameter. `hierarchy` contains the class files available to prove hierarchy-sensitive source
+    /// forms; incomplete information only prevents those forms and does not disable unrelated body
+    /// reconstruction.
     pub async fn decompile(
         method: &MethodInfo,
         cf: &ClassFile,
         param_names: &[String],
+        hierarchy: &ClassHierarchy<'_>,
     ) -> Option<Vec<String>> {
         let pool = &cf.constant_pool;
         let code = method.attributes.iter().find_map(|a| match &a.body {
@@ -62,7 +66,15 @@ impl MethodBody {
             return None;
         }
         let owner = pool.class_name(cf.this_class)?.into_owned();
+        let owner_is_interface = cf.access_flags.is_interface();
+        let direct_superclass = if cf.super_class == 0 {
+            None
+        } else {
+            Some(pool.class_name(cf.super_class)?.into_owned())
+        };
         let is_static = method.access_flags.is_static();
+        let descriptor = pool.utf8(method.descriptor_index)?;
+        let method_descriptor = MethodDescriptor::parse(&descriptor).ok()?;
         // The class-level `BootstrapMethods` table, which an `invokedynamic` string-concat call
         // site resolves its recipe through (absent when the class has no dynamic call sites).
         let bootstrap = cf
@@ -73,7 +85,7 @@ impl MethodBody {
                 _ => None,
             })
             .unwrap_or(&[]);
-        let mut locals = Self::local_slots(method, pool, is_static, param_names)?;
+        let mut locals = Self::local_slots(&method_descriptor.params, is_static, param_names)?;
         // Hoist a typed declaration for every non-parameter local the method stores into, registering
         // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
         // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
@@ -84,9 +96,14 @@ impl MethodBody {
             cfg: &cfg,
             pool,
             bootstrap,
+            class: cf,
+            hierarchy,
             owner,
+            owner_is_interface,
+            direct_superclass,
             is_static,
             locals,
+            return_type: method_descriptor.return_type,
         };
         let mut stmts = decls;
         stmts.extend(structurer.structure().await?);
@@ -98,19 +115,24 @@ impl MethodBody {
     /// count differs from `param_names`, so the body cannot name a slot the signature does not
     /// declare.
     fn local_slots(
-        method: &MethodInfo,
-        pool: &ConstantPool,
+        params: &[FieldType],
         is_static: bool,
         param_names: &[String],
-    ) -> Option<BTreeMap<u16, String>> {
-        let descriptor = pool.utf8(method.descriptor_index)?;
-        let params = MethodDescriptor::parse(&descriptor).ok()?.params;
+    ) -> Option<BTreeMap<u16, Local>> {
         if params.len() != param_names.len() {
             return None;
         }
-        let map = Attrs::parameter_slots(&params, is_static)
+        let map = Attrs::parameter_slots(params, is_static)
             .zip(param_names)
-            .map(|((slot, _param), name)| (slot, name.clone()))
+            .map(|((slot, param), name)| {
+                (
+                    slot,
+                    Local {
+                        name: name.clone(),
+                        ty: param.clone(),
+                    },
+                )
+            })
             .collect();
         Some(map)
     }
@@ -125,7 +147,7 @@ impl MethodBody {
         code: &CodeAttribute,
         pool: &ConstantPool,
         is_static: bool,
-        locals: &mut BTreeMap<u16, String>,
+        locals: &mut BTreeMap<u16, Local>,
     ) -> Option<Vec<Stmt>> {
         // Slots written by a store / `iinc`, minus `this` (slot 0, instance) and the parameters —
         // `locals` holds exactly those slots here, before any hoisted local is registered.
@@ -143,50 +165,78 @@ impl MethodBody {
         for slot in stored {
             let (name, ty) = Attrs::local_variable(table, pool, slot)?;
             // A hoisted declaration must never shadow a parameter or an already-hoisted local.
-            if locals.values().any(|n| *n == name) {
+            if locals.values().any(|local| local.name == name) {
                 return None;
             }
-            locals.insert(slot, name.clone());
-            decls.push(Stmt::Declare { ty, name });
+            let rendered_ty = JavaType::render_field_type(&ty);
+            locals.insert(
+                slot,
+                Local {
+                    name: name.clone(),
+                    ty,
+                },
+            );
+            decls.push(Stmt::Declare {
+                ty: rendered_ty,
+                name,
+            });
         }
         Some(decls)
     }
 
-    /// The local slot a *store* instruction writes (a store form, its numbered shorthand, or the
-    /// `wide` form), or `None` for a non-store. The single source of truth for the store opcode set,
-    /// shared by declaration discovery ([`MethodBody::stored_slot`]) and the simulator
-    /// ([`Sim::step`]) so the two never drift. `iinc` is deliberately excluded — it read-modify-
-    /// writes and carries a delta, handled separately.
-    fn store_slot(ins: &Instruction) -> Option<u16> {
+    /// The local slot and JVM kind a *store* instruction writes (a store form, its numbered
+    /// shorthand, or the `wide` form), or `None` for a non-store. Shared by declaration discovery
+    /// ([`MethodBody::stored_slot`]) and the simulator ([`Sim::step`]) so the two never drift.
+    /// `iinc` is deliberately excluded — it read-modify-writes and carries a delta, handled
+    /// separately.
+    fn store_info(ins: &Instruction) -> Option<(u16, JvmKind)> {
         use Instruction as I;
         Some(match ins {
-            I::Istore(s) | I::Lstore(s) | I::Fstore(s) | I::Dstore(s) | I::Astore(s) => {
-                u16::from(*s)
-            }
-            I::Istore0 | I::Lstore0 | I::Fstore0 | I::Dstore0 | I::Astore0 => 0,
-            I::Istore1 | I::Lstore1 | I::Fstore1 | I::Dstore1 | I::Astore1 => 1,
-            I::Istore2 | I::Lstore2 | I::Fstore2 | I::Dstore2 | I::Astore2 => 2,
-            I::Istore3 | I::Lstore3 | I::Fstore3 | I::Dstore3 | I::Astore3 => 3,
-            I::Wide(
-                WideInstruction::Istore(s)
-                | WideInstruction::Lstore(s)
-                | WideInstruction::Fstore(s)
-                | WideInstruction::Dstore(s)
-                | WideInstruction::Astore(s),
-            ) => *s,
+            I::Istore(slot) => (u16::from(*slot), JvmKind::Int),
+            I::Lstore(slot) => (u16::from(*slot), JvmKind::Long),
+            I::Fstore(slot) => (u16::from(*slot), JvmKind::Float),
+            I::Dstore(slot) => (u16::from(*slot), JvmKind::Double),
+            I::Astore(slot) => (u16::from(*slot), JvmKind::Reference),
+            I::Istore0 => (0, JvmKind::Int),
+            I::Lstore0 => (0, JvmKind::Long),
+            I::Fstore0 => (0, JvmKind::Float),
+            I::Dstore0 => (0, JvmKind::Double),
+            I::Astore0 => (0, JvmKind::Reference),
+            I::Istore1 => (1, JvmKind::Int),
+            I::Lstore1 => (1, JvmKind::Long),
+            I::Fstore1 => (1, JvmKind::Float),
+            I::Dstore1 => (1, JvmKind::Double),
+            I::Astore1 => (1, JvmKind::Reference),
+            I::Istore2 => (2, JvmKind::Int),
+            I::Lstore2 => (2, JvmKind::Long),
+            I::Fstore2 => (2, JvmKind::Float),
+            I::Dstore2 => (2, JvmKind::Double),
+            I::Astore2 => (2, JvmKind::Reference),
+            I::Istore3 => (3, JvmKind::Int),
+            I::Lstore3 => (3, JvmKind::Long),
+            I::Fstore3 => (3, JvmKind::Float),
+            I::Dstore3 => (3, JvmKind::Double),
+            I::Astore3 => (3, JvmKind::Reference),
+            I::Wide(WideInstruction::Istore(slot)) => (*slot, JvmKind::Int),
+            I::Wide(WideInstruction::Lstore(slot)) => (*slot, JvmKind::Long),
+            I::Wide(WideInstruction::Fstore(slot)) => (*slot, JvmKind::Float),
+            I::Wide(WideInstruction::Dstore(slot)) => (*slot, JvmKind::Double),
+            I::Wide(WideInstruction::Astore(slot)) => (*slot, JvmKind::Reference),
             _ => return None,
         })
     }
 
-    /// The local slot an instruction writes — a store (via [`MethodBody::store_slot`]) or an `iinc`
+    /// The local slot an instruction writes — a store (via [`MethodBody::store_info`]) or an `iinc`
     /// (and its `wide` form) — or `None` if it writes no local. Drives declaration discovery.
     fn stored_slot(ins: &Instruction) -> Option<u16> {
         use Instruction as I;
-        Self::store_slot(ins).or_else(|| match ins {
-            I::Iinc { index, .. } => Some(u16::from(*index)),
-            I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
-            _ => None,
-        })
+        Self::store_info(ins)
+            .map(|(slot, _)| slot)
+            .or_else(|| match ins {
+                I::Iinc { index, .. } => Some(u16::from(*index)),
+                I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
+                _ => None,
+            })
     }
 
     /// Trim a trailing implicit `return;` (a `void` method's fall-off return) and render the rest.
@@ -200,21 +250,148 @@ impl MethodBody {
     }
 }
 
+#[derive(Clone)]
+struct Local {
+    name: String,
+    ty: FieldType,
+}
+
+/// The Java source type carried alongside an operand-stack expression. `null` has no single field
+/// descriptor, so it remains distinct until a reference-typed consumer accepts it.
+#[derive(Clone, PartialEq, Eq)]
+enum StackType {
+    Field(FieldType),
+    Null,
+}
+
+impl StackType {
+    const fn is_reference_compatible(&self) -> bool {
+        matches!(
+            self,
+            Self::Null | Self::Field(FieldType::Object(_) | FieldType::Array(_))
+        )
+    }
+}
+
+#[derive(Clone)]
+struct StackValue {
+    expr: Expr,
+    ty: StackType,
+}
+
+impl StackValue {
+    const fn field(expr: Expr, ty: FieldType) -> Self {
+        Self {
+            expr,
+            ty: StackType::Field(ty),
+        }
+    }
+
+    const fn base(expr: Expr, ty: BaseType) -> Self {
+        Self::field(expr, FieldType::Base(ty))
+    }
+
+    fn object(expr: Expr, internal: impl Into<String>) -> Self {
+        Self::field(expr, FieldType::Object(internal.into()))
+    }
+
+    fn int_literal(value: i32) -> Self {
+        Self::base(Expr::lit(value.to_string()), BaseType::Int)
+    }
+
+    fn int_constant(&self) -> Option<i64> {
+        if !matches!(self.ty, StackType::Field(FieldType::Base(BaseType::Int))) {
+            return None;
+        }
+        self.expr.as_int_const()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ArrayKind {
+    Int,
+    Long,
+    Float,
+    Double,
+    Reference,
+    ByteOrBoolean,
+    Char,
+    Short,
+}
+
+#[derive(Clone, Copy)]
+enum JvmKind {
+    Int,
+    Long,
+    Float,
+    Double,
+    Reference,
+}
+
+impl JvmKind {
+    const fn accepts(self, ty: &FieldType) -> bool {
+        match self {
+            Self::Int => matches!(
+                ty,
+                FieldType::Base(
+                    BaseType::Byte
+                        | BaseType::Char
+                        | BaseType::Int
+                        | BaseType::Short
+                        | BaseType::Boolean
+                )
+            ),
+            Self::Long => matches!(ty, FieldType::Base(BaseType::Long)),
+            Self::Float => matches!(ty, FieldType::Base(BaseType::Float)),
+            Self::Double => matches!(ty, FieldType::Base(BaseType::Double)),
+            Self::Reference => Sim::is_reference(ty),
+        }
+    }
+}
+
+impl ArrayKind {
+    const fn accepts(self, component: &FieldType) -> bool {
+        match self {
+            Self::Int => matches!(component, FieldType::Base(BaseType::Int)),
+            Self::Long => matches!(component, FieldType::Base(BaseType::Long)),
+            Self::Float => matches!(component, FieldType::Base(BaseType::Float)),
+            Self::Double => matches!(component, FieldType::Base(BaseType::Double)),
+            Self::Reference => Sim::is_reference(component),
+            Self::ByteOrBoolean => matches!(
+                component,
+                FieldType::Base(BaseType::Byte | BaseType::Boolean)
+            ),
+            Self::Char => matches!(component, FieldType::Base(BaseType::Char)),
+            Self::Short => matches!(component, FieldType::Base(BaseType::Short)),
+        }
+    }
+}
+
+enum MethodRefKind {
+    Class,
+    Interface,
+}
+
 /// The straight-line symbolic-execution state for one basic block.
-struct Sim<'a> {
+struct Sim<'a, 'classes> {
     pool: &'a ConstantPool,
     /// The class's `BootstrapMethods` entries (empty when absent), resolving `invokedynamic`.
     bootstrap: &'a [BootstrapMethod],
+    class: &'a ClassFile,
+    hierarchy: &'a ClassHierarchy<'classes>,
     /// Internal binary name of the class being decompiled (for `this`-call vs object-creation).
     owner: &'a str,
+    owner_is_interface: bool,
+    direct_superclass: Option<&'a str>,
     is_static: bool,
-    locals: &'a BTreeMap<u16, String>,
-    stack: Vec<Expr>,
+    locals: &'a BTreeMap<u16, Local>,
+    return_type: &'a ReturnType,
+    stack: Vec<StackValue>,
     stmts: Vec<Stmt>,
 }
 
-impl Sim<'_> {
-    fn pop(&mut self) -> Option<Expr> {
+impl Sim<'_, '_> {
+    fn pop(&mut self) -> Option<StackValue> {
         Self::finalize(self.stack.pop()?)
     }
 
@@ -225,8 +402,8 @@ impl Sim<'_> {
     /// again. The single gate that keeps the folding sentinels ([`Expr::PendingArray`] /
     /// [`Expr::PendingArrayDup`] / [`Expr::PendingBuilder`]) out of rendered output: every
     /// consumption funnels through here (via [`Sim::pop`] or the block-end sweep).
-    fn finalize(expr: Expr) -> Option<Expr> {
-        match expr {
+    fn finalize(mut value: StackValue) -> Option<StackValue> {
+        value.expr = match value.expr {
             Expr::PendingArrayDup => None,
             Expr::PendingBuilder(parts) => Some(Expr::builder_chain(parts)),
             Expr::PendingArray {
@@ -254,11 +431,12 @@ impl Sim<'_> {
                 }
             }
             e => Some(e),
-        }
+        }?;
+        Some(value)
     }
 
     /// Pop `n` operands and return them in source (left-to-right) order.
-    fn pop_args(&mut self, n: usize) -> Option<Vec<Expr>> {
+    fn pop_values(&mut self, n: usize) -> Option<Vec<StackValue>> {
         let mut args = Vec::with_capacity(n);
         for _ in 0..n {
             args.push(self.pop()?);
@@ -267,24 +445,152 @@ impl Sim<'_> {
         Some(args)
     }
 
+    /// Pop invocation operands and adapt each expression to its descriptor parameter type.
+    fn pop_call_args(&mut self, params: &[FieldType]) -> Option<Vec<Expr>> {
+        self.pop_values(params.len())?
+            .into_iter()
+            .zip(params)
+            .map(|(value, param)| Self::consume_as(value, param))
+            .collect()
+    }
+
+    const fn is_reference(ty: &FieldType) -> bool {
+        matches!(ty, FieldType::Object(_) | FieldType::Array(_))
+    }
+
+    const fn is_int_numeric(base: BaseType) -> bool {
+        matches!(
+            base,
+            BaseType::Byte | BaseType::Char | BaseType::Int | BaseType::Short
+        )
+    }
+
+    const fn widens(actual: BaseType, expected: BaseType) -> bool {
+        match actual {
+            BaseType::Byte => matches!(
+                expected,
+                BaseType::Short
+                    | BaseType::Int
+                    | BaseType::Long
+                    | BaseType::Float
+                    | BaseType::Double
+            ),
+            BaseType::Short | BaseType::Char => matches!(
+                expected,
+                BaseType::Int | BaseType::Long | BaseType::Float | BaseType::Double
+            ),
+            BaseType::Int => matches!(
+                expected,
+                BaseType::Long | BaseType::Float | BaseType::Double
+            ),
+            BaseType::Long => matches!(expected, BaseType::Float | BaseType::Double),
+            BaseType::Float => matches!(expected, BaseType::Double),
+            BaseType::Double | BaseType::Boolean => false,
+        }
+    }
+
+    /// Consume a stack value in a descriptor-typed Java context. Constants carried as JVM `int`s
+    /// regain their narrow source spelling. Other primitive widening and reference adaptation use
+    /// explicit casts so overload selection and string conversion retain the descriptor's static
+    /// type; incompatible primitive conversions bail.
+    fn consume_as(value: StackValue, expected: &FieldType) -> Option<Expr> {
+        match (&value.ty, expected) {
+            (StackType::Field(actual), expected) if actual == expected => Some(value.expr),
+            (StackType::Null, expected) if Self::is_reference(expected) => Some(Expr::Cast {
+                ty: JavaType::render_field_type(expected),
+                expr: Box::new(value.expr),
+            }),
+            (StackType::Field(actual), expected)
+                if Self::is_reference(actual) && Self::is_reference(expected) =>
+            {
+                Some(Expr::Cast {
+                    ty: JavaType::render_field_type(expected),
+                    expr: Box::new(value.expr),
+                })
+            }
+            (StackType::Field(FieldType::Base(actual)), FieldType::Base(expected))
+                if Self::widens(*actual, *expected) =>
+            {
+                Some(Expr::Cast {
+                    ty: expected.keyword().into(),
+                    expr: Box::new(value.expr),
+                })
+            }
+            (StackType::Field(FieldType::Base(BaseType::Int)), FieldType::Base(expected)) => {
+                let constant = value.int_constant()?;
+                match expected {
+                    BaseType::Boolean => match constant {
+                        0 => Some(Expr::lit("false")),
+                        1 => Some(Expr::lit("true")),
+                        _ => None,
+                    },
+                    BaseType::Char => Some(Expr::lit(Literal::char_code_unit(constant)?)),
+                    BaseType::Byte if i8::try_from(constant).is_ok() => Some(Expr::Cast {
+                        ty: "byte".into(),
+                        expr: Box::new(value.expr),
+                    }),
+                    BaseType::Short if i16::try_from(constant).is_ok() => Some(Expr::Cast {
+                        ty: "short".into(),
+                        expr: Box::new(value.expr),
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn reference_expr(value: StackValue) -> Option<Expr> {
+        match value.ty {
+            StackType::Field(ref ty) if Self::is_reference(ty) => Some(value.expr),
+            _ => None,
+        }
+    }
+
+    fn int_numeric_expr(value: StackValue) -> Option<Expr> {
+        match value.ty {
+            StackType::Field(FieldType::Base(base)) if Self::is_int_numeric(base) => {
+                Some(value.expr)
+            }
+            _ => None,
+        }
+    }
+
+    fn exact_base_expr(value: StackValue, expected: BaseType) -> Option<Expr> {
+        matches!(value.ty, StackType::Field(FieldType::Base(actual)) if actual == expected)
+            .then_some(value.expr)
+    }
+
     /// Push the value of a local slot (`this` for slot 0 of an instance method).
-    fn load(&mut self, slot: u16) -> Option<()> {
+    fn load(&mut self, slot: u16, kind: JvmKind) -> Option<()> {
         if !self.is_static && slot == 0 {
-            self.stack.push(Expr::This);
+            if !matches!(kind, JvmKind::Reference) {
+                return None;
+            }
+            self.stack.push(StackValue::object(Expr::This, self.owner));
         } else {
-            let name = self.locals.get(&slot)?;
-            self.stack.push(Expr::Local(name.clone()));
+            let local = self.locals.get(&slot)?;
+            if !kind.accepts(&local.ty) {
+                return None;
+            }
+            self.stack.push(StackValue::field(
+                Expr::Local(local.name.clone()),
+                local.ty.clone(),
+            ));
         }
         Some(())
     }
 
     /// Store the top of stack into a local: `name = value;`. The slot's name comes from the map
     /// built by [`local_declarations`] (parameters plus hoisted locals), so an unmapped slot bails.
-    fn store(&mut self, slot: u16) -> Option<()> {
-        let name = self.locals.get(&slot)?.clone();
-        let value = self.pop()?;
+    fn store(&mut self, slot: u16, kind: JvmKind) -> Option<()> {
+        let local = self.locals.get(&slot)?.clone();
+        if !kind.accepts(&local.ty) {
+            return None;
+        }
+        let value = Self::consume_as(self.pop()?, &local.ty)?;
         self.stmts.push(Stmt::Assign {
-            target: Expr::Local(name),
+            target: Expr::Local(local.name),
             value,
         });
         Some(())
@@ -293,7 +599,11 @@ impl Sim<'_> {
     /// `iinc`: `name = name + by;` (or `name - |by|;` when negative). Reads and writes the local in
     /// place — the operand stack is untouched.
     fn iinc(&mut self, slot: u16, by: i32) -> Option<()> {
-        let name = self.locals.get(&slot)?.clone();
+        let local = self.locals.get(&slot)?;
+        if local.ty != FieldType::Base(BaseType::Int) {
+            return None;
+        }
+        let name = local.name.clone();
         let op = if by < 0 { "-" } else { "+" };
         let mag = by.unsigned_abs();
         self.stmts.push(Stmt::Assign {
@@ -307,48 +617,155 @@ impl Sim<'_> {
         Some(())
     }
 
-    fn binary(&mut self, op: &'static str) -> Option<()> {
+    fn int_binary(&mut self, op: &'static str) -> Option<()> {
+        let rhs = Self::int_numeric_expr(self.pop()?)?;
+        let lhs = Self::int_numeric_expr(self.pop()?)?;
+        self.stack.push(StackValue::base(
+            Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            BaseType::Int,
+        ));
+        Some(())
+    }
+
+    fn base_binary(&mut self, op: &'static str, base: BaseType) -> Option<()> {
+        let rhs = Self::exact_base_expr(self.pop()?, base)?;
+        let lhs = Self::exact_base_expr(self.pop()?, base)?;
+        self.stack.push(StackValue::base(
+            Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            base,
+        ));
+        Some(())
+    }
+
+    fn int_bitwise(&mut self, op: &'static str) -> Option<()> {
         let rhs = self.pop()?;
         let lhs = self.pop()?;
-        self.stack.push(Expr::Binary {
-            op,
-            lhs: Box::new(lhs),
-            rhs: Box::new(rhs),
-        });
+        let boolean = matches!(
+            (&lhs.ty, &rhs.ty),
+            (
+                StackType::Field(FieldType::Base(BaseType::Boolean)),
+                StackType::Field(FieldType::Base(BaseType::Boolean))
+            )
+        );
+        let (lhs, rhs, result) = if boolean {
+            (lhs.expr, rhs.expr, BaseType::Boolean)
+        } else {
+            (
+                Self::int_numeric_expr(lhs)?,
+                Self::int_numeric_expr(rhs)?,
+                BaseType::Int,
+            )
+        };
+        self.stack.push(StackValue::base(
+            Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            result,
+        ));
         Some(())
     }
 
-    fn unary(&mut self, op: &'static str) -> Option<()> {
-        let expr = self.pop()?;
-        self.stack.push(Expr::Unary {
-            op,
-            expr: Box::new(expr),
-        });
+    fn shift(&mut self, op: &'static str, lhs_type: BaseType) -> Option<()> {
+        let rhs = Self::int_numeric_expr(self.pop()?)?;
+        let lhs = if lhs_type == BaseType::Int {
+            Self::int_numeric_expr(self.pop()?)?
+        } else {
+            Self::exact_base_expr(self.pop()?, lhs_type)?
+        };
+        self.stack.push(StackValue::base(
+            Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            lhs_type,
+        ));
         Some(())
     }
 
-    fn cast(&mut self, ty: String) -> Option<()> {
-        let expr = self.pop()?;
-        self.stack.push(Expr::Cast {
-            ty,
-            expr: Box::new(expr),
-        });
+    fn int_unary(&mut self, op: &'static str) -> Option<()> {
+        let expr = Self::int_numeric_expr(self.pop()?)?;
+        self.stack.push(StackValue::base(
+            Expr::Unary {
+                op,
+                expr: Box::new(expr),
+            },
+            BaseType::Int,
+        ));
+        Some(())
+    }
+
+    fn base_unary(&mut self, op: &'static str, base: BaseType) -> Option<()> {
+        let expr = Self::exact_base_expr(self.pop()?, base)?;
+        self.stack.push(StackValue::base(
+            Expr::Unary {
+                op,
+                expr: Box::new(expr),
+            },
+            base,
+        ));
+        Some(())
+    }
+
+    fn numeric_cast(&mut self, target: BaseType) -> Option<()> {
+        let value = self.pop()?;
+        let StackType::Field(FieldType::Base(source)) = value.ty else {
+            return None;
+        };
+        if source == BaseType::Boolean || target == BaseType::Boolean {
+            return None;
+        }
+        self.stack.push(StackValue::base(
+            Expr::Cast {
+                ty: target.keyword().into(),
+                expr: Box::new(value.expr),
+            },
+            target,
+        ));
+        Some(())
+    }
+
+    fn check_cast(&mut self, target: FieldType) -> Option<()> {
+        let value = self.pop()?;
+        if !value.ty.is_reference_compatible() {
+            return None;
+        }
+        self.stack.push(StackValue::field(
+            Expr::Cast {
+                ty: JavaType::render_field_type(&target),
+                expr: Box::new(value.expr),
+            },
+            target,
+        ));
         Some(())
     }
 
     /// Emit an invocation whose receiver is already known (`recv` = `None` for a static call, which
     /// carries its owner type as its receiver expression instead).
     fn invoke(&mut self, index: u16, is_static: bool) -> Option<()> {
-        let (owner, name, descriptor) = self.method_ref(index)?;
+        let (_, owner, name, descriptor) = self.method_ref(index)?;
         let md = MethodDescriptor::parse(&descriptor).ok()?;
         if !is_static && owner == "java/lang/StringBuilder" && self.fold_builder(&name, &md)? {
             return Some(());
         }
-        let args = self.pop_args(md.params.len())?;
+        let args = self.pop_call_args(&md.params)?;
         let recv = if is_static {
             Box::new(Expr::Type(JavaType::internal_to_java(&owner)))
         } else {
-            Box::new(self.pop()?)
+            Box::new(Self::consume_as(
+                self.pop()?,
+                &Self::internal_type(&owner)?,
+            )?)
         };
         self.emit_call(
             Expr::Call {
@@ -356,7 +773,7 @@ impl Sim<'_> {
                 name,
                 args,
             },
-            matches!(md.return_type, ReturnType::Void),
+            md.return_type,
         );
         Some(())
     }
@@ -364,22 +781,50 @@ impl Sim<'_> {
     /// Handle `invokespecial`: a constructor chain (`super(...)` / `this(...)`), object creation
     /// (`new X(...)`), or a non-virtual instance call (a `private` / `super.m()` method).
     fn invoke_special(&mut self, index: u16) -> Option<()> {
-        let (owner, name, descriptor) = self.method_ref(index)?;
+        let (kind, owner, name, descriptor) = self.method_ref(index)?;
         let md = MethodDescriptor::parse(&descriptor).ok()?;
-        let args = self.pop_args(md.params.len())?;
+        let args = self.pop_call_args(&md.params)?;
         if name != "<init>" {
-            let recv = self.pop()?;
+            let receiver = Self::reference_expr(self.pop()?)?;
+            let receiver = if owner == self.owner {
+                receiver
+            } else {
+                match (kind, receiver) {
+                    (MethodRefKind::Class, Expr::This)
+                        if !self.owner_is_interface
+                            && self.direct_superclass == Some(owner.as_str()) =>
+                    {
+                        Expr::Super
+                    }
+                    (MethodRefKind::Interface, Expr::This)
+                        if !self.is_static
+                            && self.hierarchy.allows_interface_super(
+                                self.class,
+                                &owner,
+                                &name,
+                                &descriptor,
+                            ) =>
+                    {
+                        Expr::QualifiedSuper(JavaType::internal_to_java(&owner))
+                    }
+                    _ => return None,
+                }
+            };
             self.emit_call(
                 Expr::Call {
-                    recv: Some(Box::new(recv)),
+                    recv: Some(Box::new(receiver)),
                     name,
                     args,
                 },
-                matches!(md.return_type, ReturnType::Void),
+                md.return_type,
             );
             return Some(());
         }
-        match self.pop()? {
+        if !matches!(md.return_type, ReturnType::Void) {
+            return None;
+        }
+        let receiver = self.pop()?;
+        match receiver.expr {
             // `this.<init>` — a `super(...)` / `this(...)` constructor delegation.
             Expr::This => {
                 if owner == self.owner {
@@ -391,7 +836,19 @@ impl Sim<'_> {
             }
             // `new X(...)` — the `dup`'d copy left on the stack becomes the constructed value.
             Expr::Uninitialized(ty) => {
-                if matches!(self.stack.last(), Some(Expr::Uninitialized(t)) if *t == ty) {
+                if !matches!(
+                    receiver.ty,
+                    StackType::Field(FieldType::Object(ref internal)) if *internal == owner
+                ) {
+                    return None;
+                }
+                if matches!(
+                    self.stack.last(),
+                    Some(StackValue {
+                        expr: Expr::Uninitialized(top),
+                        ..
+                    }) if *top == ty
+                ) {
                     self.stack.pop();
                 }
                 // A fresh no-arg `StringBuilder` is recognized here, where the internal name is
@@ -400,9 +857,11 @@ impl Sim<'_> {
                 // back into the original calls ([`Sim::finalize`]), so an unfolded one renders
                 // exactly as the `new` it was.
                 if owner == "java/lang/StringBuilder" && args.is_empty() {
-                    self.stack.push(Expr::PendingBuilder(Vec::new()));
+                    self.stack
+                        .push(StackValue::object(Expr::PendingBuilder(Vec::new()), owner));
                 } else {
-                    self.stack.push(Expr::New { ty, args });
+                    self.stack
+                        .push(StackValue::object(Expr::New { ty, args }, owner));
                 }
             }
             _ => return None,
@@ -411,11 +870,10 @@ impl Sim<'_> {
     }
 
     /// Push a call (value result) or emit it as a statement (`void` result).
-    fn emit_call(&mut self, call: Expr, is_void: bool) {
-        if is_void {
-            self.stmts.push(Stmt::Expr(call));
-        } else {
-            self.stack.push(call);
+    fn emit_call(&mut self, call: Expr, return_type: ReturnType) {
+        match return_type {
+            ReturnType::Void => self.stmts.push(Stmt::Expr(call)),
+            ReturnType::Type(ty) => self.stack.push(StackValue::field(call, ty)),
         }
     }
 
@@ -430,10 +888,14 @@ impl Sim<'_> {
         match name {
             "toString" if md.params.is_empty() => match self.stack.last_mut() {
                 // An empty chain stays an ordinary `new StringBuilder().toString()` call.
-                Some(Expr::PendingBuilder(parts)) if !parts.is_empty() => {
+                Some(StackValue {
+                    expr: Expr::PendingBuilder(parts),
+                    ..
+                }) if !parts.is_empty() => {
                     let parts = core::mem::take(parts);
                     self.stack.pop();
-                    self.stack.push(Expr::concat(parts));
+                    self.stack
+                        .push(StackValue::object(Expr::concat(parts), "java/lang/String"));
                     Some(true)
                 }
                 _ => Some(false),
@@ -443,15 +905,25 @@ impl Sim<'_> {
                 // collecting chain (a builder that came from a local, parameter, or field keeps
                 // its real `append` calls).
                 let receiver = self.stack.len().checked_sub(2).map(|i| &self.stack[i]);
-                if !matches!(receiver, Some(Expr::PendingBuilder(_))) {
+                if !matches!(
+                    receiver,
+                    Some(StackValue {
+                        expr: Expr::PendingBuilder(_),
+                        ..
+                    })
+                ) {
                     return Some(false);
                 }
                 let arg = self.pop()?;
                 let part = ConcatPart {
-                    expr: Self::coerce(arg, &md.params[0])?,
+                    expr: Self::consume_as(arg, &md.params[0])?,
                     stringy: Self::is_string(&md.params[0]),
                 };
-                let Some(Expr::PendingBuilder(parts)) = self.stack.last_mut() else {
+                let Some(StackValue {
+                    expr: Expr::PendingBuilder(parts),
+                    ..
+                }) = self.stack.last_mut()
+                else {
                     return None;
                 };
                 parts.push(part);
@@ -483,42 +955,6 @@ impl Sim<'_> {
         matches!(ft, FieldType::Object(internal) if internal == "java/lang/String")
     }
 
-    /// Coerce a raw stack operand to the declared type of the slot consuming it: the JVM models
-    /// `boolean` and `char` values as `int`s, so a constant flowing into a boolean/char-typed
-    /// concatenation operand must be re-rendered (`1` → `true`, `33` → `'!'`) for the source to
-    /// mean what the bytecode computed. A non-literal operand is already typed by its own source
-    /// expression and passes through, as does every other operand type.
-    fn coerce(expr: Expr, param: &FieldType) -> Option<Expr> {
-        let FieldType::Base(base @ (BaseType::Boolean | BaseType::Char)) = param else {
-            return Some(expr);
-        };
-        if !matches!(expr, Expr::Literal(_)) {
-            return Some(expr);
-        }
-        // A literal here must be an `int` constant (the JVM models `boolean`/`char` as `int`);
-        // any other literal spelling means we mis-read the operand, so bail.
-        let value = expr.as_int_const()?;
-        if matches!(base, BaseType::Boolean) {
-            return match value {
-                0 => Some(Expr::lit("false")),
-                1 => Some(Expr::lit("true")),
-                _ => None,
-            };
-        }
-        let value = u32::try_from(value).ok()?;
-        if value > 0xFFFF {
-            return None;
-        }
-        // A lone surrogate code unit has no literal spelling; a cast keeps the value exact.
-        Some(char::from_u32(value).map_or_else(
-            || Expr::Cast {
-                ty: "char".into(),
-                expr: Box::new(expr),
-            },
-            |c| Expr::lit(Literal::char_literal(c)),
-        ))
-    }
-
     /// `invokedynamic`: only the two `java.lang.invoke.StringConcatFactory` bootstraps `javac`
     /// compiles string concatenation to are modelled — `makeConcatWithConstants`, whose recipe
     /// interleaves literal chunks with the stacked operands (`\u{1}`) and trailing constants
@@ -542,7 +978,7 @@ impl Sim<'_> {
             .bootstrap
             .get(usize::from(*bootstrap_method_attr_index))?;
         let (recipe, consts) = self.concat_shape(bsm, md.params.len())?;
-        let mut args = self.pop_args(md.params.len())?.into_iter();
+        let mut args = self.pop_values(md.params.len())?.into_iter();
         let mut params = md.params.iter();
         let mut consts = consts.into_iter();
         let mut parts: Vec<ConcatPart> = Vec::new();
@@ -562,7 +998,7 @@ impl Sim<'_> {
                     flush(&mut chunk, &mut parts);
                     let (arg, param) = (args.next()?, params.next()?);
                     parts.push(ConcatPart {
-                        expr: Self::coerce(arg, param)?,
+                        expr: Self::consume_as(arg, param)?,
                         stringy: Self::is_string(param),
                     });
                 }
@@ -579,7 +1015,8 @@ impl Sim<'_> {
         if args.next().is_some() || consts.next().is_some() {
             return None;
         }
-        self.stack.push(Expr::concat(parts));
+        self.stack
+            .push(StackValue::object(Expr::concat(parts), "java/lang/String"));
         Some(())
     }
 
@@ -603,7 +1040,7 @@ impl Sim<'_> {
         if *reference_kind != 6 {
             return None;
         }
-        let (owner, name, _) = self.method_ref(*reference_index)?;
+        let (_, owner, name, _) = self.method_ref(*reference_index)?;
         if owner != "java/lang/invoke/StringConcatFactory" {
             return None;
         }
@@ -645,23 +1082,28 @@ impl Sim<'_> {
         if is_static {
             Some(Expr::Type(JavaType::internal_to_java(owner)))
         } else {
-            self.pop()
+            Self::consume_as(self.pop()?, &Self::internal_type(owner)?)
         }
     }
 
     fn field_access(&mut self, index: u16, is_static: bool) -> Option<()> {
-        let (owner, name, _) = self.field_ref(index)?;
+        let (owner, name, descriptor) = self.field_ref(index)?;
+        let ty = FieldType::parse(&descriptor).ok()?;
         let recv = self.field_receiver(&owner, is_static)?;
-        self.stack.push(Expr::Field {
-            recv: Box::new(recv),
-            name,
-        });
+        self.stack.push(StackValue::field(
+            Expr::Field {
+                recv: Box::new(recv),
+                name,
+            },
+            ty,
+        ));
         Some(())
     }
 
     fn field_store(&mut self, index: u16, is_static: bool) -> Option<()> {
-        let (owner, name, _) = self.field_ref(index)?;
-        let value = self.pop()?;
+        let (owner, name, descriptor) = self.field_ref(index)?;
+        let ty = FieldType::parse(&descriptor).ok()?;
+        let value = Self::consume_as(self.pop()?, &ty)?;
         let recv = self.field_receiver(&owner, is_static)?;
         self.stmts.push(Stmt::Assign {
             target: Expr::Field {
@@ -677,10 +1119,15 @@ impl Sim<'_> {
     /// A constant length starts a collecting [`Expr::PendingArray`] (a following `dup; <index>;
     /// <value>; Xastore` run folds into a `new T[]{…}` initializer; consumption finalizes it) — a
     /// dynamic length can never take an initializer in source, so it is final immediately.
-    fn new_array(&mut self, elem: String, empty_dims: usize) -> Option<()> {
+    fn new_array(&mut self, element_type: FieldType) -> Option<()> {
         let len = self.pop()?;
-        let constant_len = len.as_int_const().and_then(|v| usize::try_from(v).ok());
-        self.stack.push(match constant_len {
+        let constant_len = len
+            .int_constant()
+            .and_then(|value| usize::try_from(value).ok());
+        let len_expr = Self::int_numeric_expr(len)?;
+        let (elem, empty_dims) = JavaType::array_base(&element_type);
+        let array_type = FieldType::Array(Box::new(element_type));
+        let expr = match constant_len {
             Some(len) => Expr::PendingArray {
                 elem,
                 empty_dims,
@@ -690,17 +1137,17 @@ impl Sim<'_> {
             None => Expr::NewArray {
                 elem,
                 empty_dims,
-                form: ArrayForm::Sized(vec![len]),
+                form: ArrayForm::Sized(vec![len_expr]),
             },
-        });
+        };
+        self.stack.push(StackValue::field(expr, array_type));
         Some(())
     }
 
     /// `anewarray`: the pool entry names the *element* class — itself an array type (`[I`) for a
     /// `new int[n][]`-shaped creation.
     fn anew_array(&mut self, index: u16) -> Option<()> {
-        let (elem, empty_dims) = JavaType::array_base(&self.class_ref_type(index)?);
-        self.new_array(elem, empty_dims)
+        self.new_array(self.class_ref_type(index)?)
     }
 
     /// `multianewarray`: the pool entry is the full array descriptor (`[[I`); `dimensions` counts
@@ -708,53 +1155,78 @@ impl Sim<'_> {
     /// (`new int[a][b]`, `new int[a][b][]`). Never collecting — no compiler runs the initializer
     /// store pattern on one (a following `dup` bails).
     fn multi_new_array(&mut self, index: u16, dimensions: u8) -> Option<()> {
-        let (elem, depth) = JavaType::array_base(&self.class_ref_type(index)?);
+        let array_type = self.class_ref_type(index)?;
+        let (elem, depth) = JavaType::array_base(&array_type);
         let dimensions = usize::from(dimensions);
         if dimensions == 0 || dimensions > depth {
             return None;
         }
-        let dims = self.pop_args(dimensions)?;
-        self.stack.push(Expr::NewArray {
-            elem,
-            empty_dims: depth - dimensions,
-            form: ArrayForm::Sized(dims),
-        });
+        let dims = self
+            .pop_values(dimensions)?
+            .into_iter()
+            .map(Self::int_numeric_expr)
+            .collect::<Option<Vec<_>>>()?;
+        self.stack.push(StackValue::field(
+            Expr::NewArray {
+                elem,
+                empty_dims: depth - dimensions,
+                form: ArrayForm::Sized(dims),
+            },
+            array_type,
+        ));
         Some(())
     }
 
-    /// An array element read (`*aload`, all eight flavors): `array[index]`. The element type never
-    /// changes the rendered text, so the flavors are uniform.
-    fn array_load(&mut self) -> Option<()> {
-        let index = self.pop()?;
+    /// An array element read (`*aload`): the descriptor component disambiguates `baload` and keeps
+    /// the source type for later assignments, calls, returns, and branches.
+    fn array_load(&mut self, kind: ArrayKind) -> Option<()> {
+        let index = Self::int_numeric_expr(self.pop()?)?;
         let array = self.pop()?;
-        self.stack.push(Expr::Index {
-            array: Box::new(array),
-            index: Box::new(index),
-        });
+        let StackType::Field(FieldType::Array(component)) = &array.ty else {
+            return None;
+        };
+        if !kind.accepts(component) {
+            return None;
+        }
+        self.stack.push(StackValue::field(
+            Expr::Index {
+                array: Box::new(array.expr),
+                index: Box::new(index),
+            },
+            (**component).clone(),
+        ));
         Some(())
     }
 
     /// An array element write (`*astore`, all eight flavors): fold into a collecting array
     /// initializer when the array operand is the `dup`'d creation marker, else a plain
     /// `array[index] = value;` (mirroring [`Sim::field_store`]).
-    fn array_store(&mut self) -> Option<()> {
+    fn array_store(&mut self, kind: ArrayKind) -> Option<()> {
         let value = self.pop()?;
         let index = self.pop()?;
         // The array operand is popped raw: the initializer-store marker must reach `push_elem`,
         // not the finalizing `pop` (which rejects it).
-        match self.stack.pop()? {
-            Expr::PendingArrayDup => self.push_elem(&index, value),
-            array => {
-                let array = Self::finalize(array)?;
-                self.stmts.push(Stmt::Assign {
-                    target: Expr::Index {
-                        array: Box::new(array),
-                        index: Box::new(index),
-                    },
-                    value,
-                });
-                Some(())
+        let array = self.stack.pop()?;
+        if matches!(array.expr, Expr::PendingArrayDup) {
+            self.push_elem(&index, value, kind, &array.ty)
+        } else {
+            let array = Self::finalize(array)?;
+            let StackType::Field(FieldType::Array(component)) = &array.ty else {
+                return None;
+            };
+            if !kind.accepts(component) {
+                return None;
             }
+            let value = Self::consume_as(value, component)?;
+            let index = Self::int_numeric_expr(index)?;
+            self.stmts.push(Stmt::Assign {
+                target: Expr::Index {
+                    array: Box::new(array.expr),
+                    index: Box::new(index),
+                },
+                value,
+            });
+            Some(())
         }
     }
 
@@ -763,61 +1235,97 @@ impl Sim<'_> {
     /// folds — the index must be the next sequential constant from 0 and in bounds — so a partial
     /// or out-of-order fill (a default-skipping compiler) can never render a wrong-length
     /// `new T[]{…}`; anything else bails.
-    fn push_elem(&mut self, index: &Expr, value: Expr) -> Option<()> {
-        let Some(Expr::PendingArray {
-            elem,
-            empty_dims,
-            len,
-            elems,
-        }) = self.stack.last_mut()
-        else {
+    fn push_elem(
+        &mut self,
+        index: &StackValue,
+        value: StackValue,
+        kind: ArrayKind,
+        marker_type: &StackType,
+    ) -> Option<()> {
+        let position = usize::try_from(index.int_constant()?).ok()?;
+        let pending = self.stack.last_mut()?;
+        if pending.ty != *marker_type {
+            return None;
+        }
+        let StackType::Field(FieldType::Array(component)) = &pending.ty else {
             return None;
         };
-        let position = usize::try_from(index.as_int_const()?).ok()?;
+        if !kind.accepts(component) {
+            return None;
+        }
+        let value = Self::consume_as(value, component)?;
+        let Expr::PendingArray { len, elems, .. } = &mut pending.expr else {
+            return None;
+        };
         if position != elems.len() || position >= *len {
             return None;
         }
-        // `bastore` serves both `byte[]` and `boolean[]`; the collecting creation's element type
-        // pins which, so re-coerce the int constants back to boolean literals (a non-literal,
-        // e.g. a boolean-typed local or call, passes through as-is).
-        let value = if elem == "boolean" && *empty_dims == 0 {
-            Self::coerce(value, &FieldType::Base(BaseType::Boolean))?
-        } else {
-            value
-        };
         elems.push(value);
+        Some(())
+    }
+
+    fn return_value(&mut self, kind: JvmKind) -> Option<()> {
+        let ReturnType::Type(expected) = self.return_type else {
+            return None;
+        };
+        if !kind.accepts(expected) {
+            return None;
+        }
+        let value = Self::consume_as(self.pop()?, expected)?;
+        self.stmts.push(Stmt::Return(Some(value)));
         Some(())
     }
 
     fn step(&mut self, ins: &Instruction) -> Option<()> {
         use Instruction as I;
-        // Local stores (all forms) — the opcode set lives in `store_slot`, shared with declaration
-        // discovery so the simulator and the pre-pass can never drift. Handled before the `match`
-        // (a guard can't bind the slot there) so `store_slot` is computed once.
-        if let Some(slot) = MethodBody::store_slot(ins) {
-            return self.store(slot);
+        // Local stores (all forms) are decoded once for both declaration discovery and simulation.
+        // Handle them before the `match` because a guard cannot bind the slot and kind there.
+        if let Some((slot, kind)) = MethodBody::store_info(ins) {
+            return self.store(slot, kind);
         }
         match ins {
             I::Nop => {}
 
             // Constants.
-            I::AconstNull => self.stack.push(Expr::lit("null")),
-            I::IconstM1 => self.stack.push(Expr::lit("-1")),
-            I::Iconst0 => self.stack.push(Expr::lit("0")),
-            I::Iconst1 => self.stack.push(Expr::lit("1")),
-            I::Iconst2 => self.stack.push(Expr::lit("2")),
-            I::Iconst3 => self.stack.push(Expr::lit("3")),
-            I::Iconst4 => self.stack.push(Expr::lit("4")),
-            I::Iconst5 => self.stack.push(Expr::lit("5")),
-            I::Lconst0 => self.stack.push(Expr::lit("0L")),
-            I::Lconst1 => self.stack.push(Expr::lit("1L")),
-            I::Fconst0 => self.stack.push(Expr::lit(Literal::float_literal(0.0))),
-            I::Fconst1 => self.stack.push(Expr::lit(Literal::float_literal(1.0))),
-            I::Fconst2 => self.stack.push(Expr::lit(Literal::float_literal(2.0))),
-            I::Dconst0 => self.stack.push(Expr::lit(Literal::double_literal(0.0))),
-            I::Dconst1 => self.stack.push(Expr::lit(Literal::double_literal(1.0))),
-            I::Bipush(v) => self.stack.push(Expr::lit(v.to_string())),
-            I::Sipush(v) => self.stack.push(Expr::lit(v.to_string())),
+            I::AconstNull => self.stack.push(StackValue {
+                expr: Expr::lit("null"),
+                ty: StackType::Null,
+            }),
+            I::IconstM1 => self.stack.push(StackValue::int_literal(-1)),
+            I::Iconst0 => self.stack.push(StackValue::int_literal(0)),
+            I::Iconst1 => self.stack.push(StackValue::int_literal(1)),
+            I::Iconst2 => self.stack.push(StackValue::int_literal(2)),
+            I::Iconst3 => self.stack.push(StackValue::int_literal(3)),
+            I::Iconst4 => self.stack.push(StackValue::int_literal(4)),
+            I::Iconst5 => self.stack.push(StackValue::int_literal(5)),
+            I::Lconst0 => self
+                .stack
+                .push(StackValue::base(Expr::lit("0L"), BaseType::Long)),
+            I::Lconst1 => self
+                .stack
+                .push(StackValue::base(Expr::lit("1L"), BaseType::Long)),
+            I::Fconst0 => self.stack.push(StackValue::base(
+                Expr::lit(Literal::float_literal(0.0)),
+                BaseType::Float,
+            )),
+            I::Fconst1 => self.stack.push(StackValue::base(
+                Expr::lit(Literal::float_literal(1.0)),
+                BaseType::Float,
+            )),
+            I::Fconst2 => self.stack.push(StackValue::base(
+                Expr::lit(Literal::float_literal(2.0)),
+                BaseType::Float,
+            )),
+            I::Dconst0 => self.stack.push(StackValue::base(
+                Expr::lit(Literal::double_literal(0.0)),
+                BaseType::Double,
+            )),
+            I::Dconst1 => self.stack.push(StackValue::base(
+                Expr::lit(Literal::double_literal(1.0)),
+                BaseType::Double,
+            )),
+            I::Bipush(v) => self.stack.push(StackValue::int_literal(i32::from(*v))),
+            I::Sipush(v) => self.stack.push(StackValue::int_literal(i32::from(*v))),
             I::Ldc(i) => {
                 let e = self.constant(u16::from(*i))?;
                 self.stack.push(e);
@@ -828,13 +1336,31 @@ impl Sim<'_> {
             }
 
             // Loads (slot forms and the numbered shorthands).
-            I::Iload(s) | I::Lload(s) | I::Fload(s) | I::Dload(s) | I::Aload(s) => {
-                self.load(u16::from(*s))?;
-            }
-            I::Iload0 | I::Lload0 | I::Fload0 | I::Dload0 | I::Aload0 => self.load(0)?,
-            I::Iload1 | I::Lload1 | I::Fload1 | I::Dload1 | I::Aload1 => self.load(1)?,
-            I::Iload2 | I::Lload2 | I::Fload2 | I::Dload2 | I::Aload2 => self.load(2)?,
-            I::Iload3 | I::Lload3 | I::Fload3 | I::Dload3 | I::Aload3 => self.load(3)?,
+            I::Iload(s) => self.load(u16::from(*s), JvmKind::Int)?,
+            I::Lload(s) => self.load(u16::from(*s), JvmKind::Long)?,
+            I::Fload(s) => self.load(u16::from(*s), JvmKind::Float)?,
+            I::Dload(s) => self.load(u16::from(*s), JvmKind::Double)?,
+            I::Aload(s) => self.load(u16::from(*s), JvmKind::Reference)?,
+            I::Iload0 => self.load(0, JvmKind::Int)?,
+            I::Lload0 => self.load(0, JvmKind::Long)?,
+            I::Fload0 => self.load(0, JvmKind::Float)?,
+            I::Dload0 => self.load(0, JvmKind::Double)?,
+            I::Aload0 => self.load(0, JvmKind::Reference)?,
+            I::Iload1 => self.load(1, JvmKind::Int)?,
+            I::Lload1 => self.load(1, JvmKind::Long)?,
+            I::Fload1 => self.load(1, JvmKind::Float)?,
+            I::Dload1 => self.load(1, JvmKind::Double)?,
+            I::Aload1 => self.load(1, JvmKind::Reference)?,
+            I::Iload2 => self.load(2, JvmKind::Int)?,
+            I::Lload2 => self.load(2, JvmKind::Long)?,
+            I::Fload2 => self.load(2, JvmKind::Float)?,
+            I::Dload2 => self.load(2, JvmKind::Double)?,
+            I::Aload2 => self.load(2, JvmKind::Reference)?,
+            I::Iload3 => self.load(3, JvmKind::Int)?,
+            I::Lload3 => self.load(3, JvmKind::Long)?,
+            I::Fload3 => self.load(3, JvmKind::Float)?,
+            I::Dload3 => self.load(3, JvmKind::Double)?,
+            I::Aload3 => self.load(3, JvmKind::Reference)?,
 
             // `iinc` (and its wide form): a read-modify-write of a local, stack untouched.
             I::Iinc { index, value } => self.iinc(u16::from(*index), i32::from(*value))?,
@@ -843,27 +1369,51 @@ impl Sim<'_> {
             }
 
             // Arithmetic and bitwise.
-            I::Iadd | I::Ladd | I::Fadd | I::Dadd => self.binary("+")?,
-            I::Isub | I::Lsub | I::Fsub | I::Dsub => self.binary("-")?,
-            I::Imul | I::Lmul | I::Fmul | I::Dmul => self.binary("*")?,
-            I::Idiv | I::Ldiv | I::Fdiv | I::Ddiv => self.binary("/")?,
-            I::Irem | I::Lrem | I::Frem | I::Drem => self.binary("%")?,
-            I::Ineg | I::Lneg | I::Fneg | I::Dneg => self.unary("-")?,
-            I::Ishl | I::Lshl => self.binary("<<")?,
-            I::Ishr | I::Lshr => self.binary(">>")?,
-            I::Iushr | I::Lushr => self.binary(">>>")?,
-            I::Iand | I::Land => self.binary("&")?,
-            I::Ior | I::Lor => self.binary("|")?,
-            I::Ixor | I::Lxor => self.binary("^")?,
+            I::Iadd => self.int_binary("+")?,
+            I::Ladd => self.base_binary("+", BaseType::Long)?,
+            I::Fadd => self.base_binary("+", BaseType::Float)?,
+            I::Dadd => self.base_binary("+", BaseType::Double)?,
+            I::Isub => self.int_binary("-")?,
+            I::Lsub => self.base_binary("-", BaseType::Long)?,
+            I::Fsub => self.base_binary("-", BaseType::Float)?,
+            I::Dsub => self.base_binary("-", BaseType::Double)?,
+            I::Imul => self.int_binary("*")?,
+            I::Lmul => self.base_binary("*", BaseType::Long)?,
+            I::Fmul => self.base_binary("*", BaseType::Float)?,
+            I::Dmul => self.base_binary("*", BaseType::Double)?,
+            I::Idiv => self.int_binary("/")?,
+            I::Ldiv => self.base_binary("/", BaseType::Long)?,
+            I::Fdiv => self.base_binary("/", BaseType::Float)?,
+            I::Ddiv => self.base_binary("/", BaseType::Double)?,
+            I::Irem => self.int_binary("%")?,
+            I::Lrem => self.base_binary("%", BaseType::Long)?,
+            I::Frem => self.base_binary("%", BaseType::Float)?,
+            I::Drem => self.base_binary("%", BaseType::Double)?,
+            I::Ineg => self.int_unary("-")?,
+            I::Lneg => self.base_unary("-", BaseType::Long)?,
+            I::Fneg => self.base_unary("-", BaseType::Float)?,
+            I::Dneg => self.base_unary("-", BaseType::Double)?,
+            I::Ishl => self.shift("<<", BaseType::Int)?,
+            I::Lshl => self.shift("<<", BaseType::Long)?,
+            I::Ishr => self.shift(">>", BaseType::Int)?,
+            I::Lshr => self.shift(">>", BaseType::Long)?,
+            I::Iushr => self.shift(">>>", BaseType::Int)?,
+            I::Lushr => self.shift(">>>", BaseType::Long)?,
+            I::Iand => self.int_bitwise("&")?,
+            I::Land => self.base_binary("&", BaseType::Long)?,
+            I::Ior => self.int_bitwise("|")?,
+            I::Lor => self.base_binary("|", BaseType::Long)?,
+            I::Ixor => self.int_bitwise("^")?,
+            I::Lxor => self.base_binary("^", BaseType::Long)?,
 
             // Numeric conversions.
-            I::I2l | I::F2l | I::D2l => self.cast("long".into())?,
-            I::I2f | I::L2f | I::D2f => self.cast("float".into())?,
-            I::I2d | I::L2d | I::F2d => self.cast("double".into())?,
-            I::L2i | I::F2i | I::D2i => self.cast("int".into())?,
-            I::I2b => self.cast("byte".into())?,
-            I::I2c => self.cast("char".into())?,
-            I::I2s => self.cast("short".into())?,
+            I::I2l | I::F2l | I::D2l => self.numeric_cast(BaseType::Long)?,
+            I::I2f | I::L2f | I::D2f => self.numeric_cast(BaseType::Float)?,
+            I::I2d | I::L2d | I::F2d => self.numeric_cast(BaseType::Double)?,
+            I::L2i | I::F2i | I::D2i => self.numeric_cast(BaseType::Int)?,
+            I::I2b => self.numeric_cast(BaseType::Byte)?,
+            I::I2c => self.numeric_cast(BaseType::Char)?,
+            I::I2s => self.numeric_cast(BaseType::Short)?,
 
             // Field access.
             I::GetField(i) => self.field_access(*i, false)?,
@@ -879,50 +1429,66 @@ impl Sim<'_> {
 
             // Object creation.
             I::New(i) => {
-                let ty = JavaType::internal_to_java(&self.class_ref(*i)?);
-                self.stack.push(Expr::Uninitialized(ty));
+                let internal = self.class_ref(*i)?;
+                let ty = JavaType::internal_to_java(&internal);
+                self.stack
+                    .push(StackValue::object(Expr::Uninitialized(ty), internal));
             }
-            I::Dup => match self.stack.last() {
+            I::Dup => {
                 // Only two shapes are modelled — the object-creation `new; dup; …; invokespecial`
                 // and the array-initializer `newarray/anewarray; (dup; <index>; <value>;
                 // Xastore)*` — since a `dup` of any real value would duplicate a side effect;
                 // everything else bails.
-                Some(Expr::Uninitialized(ty)) => {
-                    let ty = ty.clone();
-                    self.stack.push(Expr::Uninitialized(ty));
-                }
-                Some(Expr::PendingArray { .. }) => self.stack.push(Expr::PendingArrayDup),
-                _ => return None,
-            },
+                let duplicate = match self.stack.last()? {
+                    value @ StackValue {
+                        expr: Expr::Uninitialized(_),
+                        ..
+                    } => value.clone(),
+                    StackValue {
+                        expr: Expr::PendingArray { .. },
+                        ty,
+                    } => StackValue {
+                        expr: Expr::PendingArrayDup,
+                        ty: ty.clone(),
+                    },
+                    _ => return None,
+                };
+                self.stack.push(duplicate);
+            }
             I::CheckCast(i) => {
-                let ty = JavaType::render_field_type(&self.class_ref_type(*i)?);
-                self.cast(ty)?;
+                self.check_cast(self.class_ref_type(*i)?)?;
             }
             I::ArrayLength => {
                 let array = self.pop()?;
-                self.stack.push(Expr::ArrayLength(Box::new(array)));
+                if !matches!(array.ty, StackType::Field(FieldType::Array(_))) {
+                    return None;
+                }
+                self.stack.push(StackValue::base(
+                    Expr::ArrayLength(Box::new(array.expr)),
+                    BaseType::Int,
+                ));
             }
 
             // Arrays: element reads / writes and creation.
-            I::Iaload
-            | I::Laload
-            | I::Faload
-            | I::Daload
-            | I::Aaload
-            | I::Baload
-            | I::Caload
-            | I::Saload => self.array_load()?,
-            I::Iastore
-            | I::Lastore
-            | I::Fastore
-            | I::Dastore
-            | I::Aastore
-            | I::Bastore
-            | I::Castore
-            | I::Sastore => self.array_store()?,
+            I::Iaload => self.array_load(ArrayKind::Int)?,
+            I::Laload => self.array_load(ArrayKind::Long)?,
+            I::Faload => self.array_load(ArrayKind::Float)?,
+            I::Daload => self.array_load(ArrayKind::Double)?,
+            I::Aaload => self.array_load(ArrayKind::Reference)?,
+            I::Baload => self.array_load(ArrayKind::ByteOrBoolean)?,
+            I::Caload => self.array_load(ArrayKind::Char)?,
+            I::Saload => self.array_load(ArrayKind::Short)?,
+            I::Iastore => self.array_store(ArrayKind::Int)?,
+            I::Lastore => self.array_store(ArrayKind::Long)?,
+            I::Fastore => self.array_store(ArrayKind::Float)?,
+            I::Dastore => self.array_store(ArrayKind::Double)?,
+            I::Aastore => self.array_store(ArrayKind::Reference)?,
+            I::Bastore => self.array_store(ArrayKind::ByteOrBoolean)?,
+            I::Castore => self.array_store(ArrayKind::Char)?,
+            I::Sastore => self.array_store(ArrayKind::Short)?,
             I::NewArray(atype) => {
                 let elem = BaseType::from_atype(*atype)?;
-                self.new_array(elem.keyword().into(), 0)?;
+                self.new_array(FieldType::Base(elem))?;
             }
             I::ANewArray(i) => self.anew_array(*i)?,
             I::MultiANewArray { index, dimensions } => {
@@ -930,22 +1496,31 @@ impl Sim<'_> {
             }
 
             // Returns and throw.
-            I::Ireturn | I::Lreturn | I::Freturn | I::Dreturn | I::Areturn => {
-                let value = self.pop()?;
-                self.stmts.push(Stmt::Return(Some(value)));
+            I::Ireturn => self.return_value(JvmKind::Int)?,
+            I::Lreturn => self.return_value(JvmKind::Long)?,
+            I::Freturn => self.return_value(JvmKind::Float)?,
+            I::Dreturn => self.return_value(JvmKind::Double)?,
+            I::Areturn => self.return_value(JvmKind::Reference)?,
+            I::Return => {
+                if !matches!(self.return_type, ReturnType::Void) {
+                    return None;
+                }
+                self.stmts.push(Stmt::Return(None));
             }
-            I::Return => self.stmts.push(Stmt::Return(None)),
             I::Athrow => {
                 let value = self.pop()?;
-                self.stmts.push(Stmt::Throw(value));
+                if !value.ty.is_reference_compatible() {
+                    return None;
+                }
+                self.stmts.push(Stmt::Throw(value.expr));
             }
 
             // Discard: a call (or a discarded object creation / builder chain) whose result is
             // unused becomes an expression statement.
-            I::Pop => match self.stack.last() {
+            I::Pop => match self.stack.last().map(|value| &value.expr) {
                 Some(Expr::Call { .. } | Expr::New { .. } | Expr::PendingBuilder(_)) => {
                     let call = self.pop()?;
-                    self.stmts.push(Stmt::Expr(call));
+                    self.stmts.push(Stmt::Expr(call.expr));
                 }
                 _ => {
                     self.pop()?;
@@ -963,18 +1538,29 @@ impl Sim<'_> {
         Some(())
     }
 
-    /// Resolve a constant-pool constant (for `ldc` / `ldc_w` / `ldc2_w`) to a literal expression.
-    fn constant(&self, index: u16) -> Option<Expr> {
+    /// Resolve a constant-pool constant (for `ldc` / `ldc_w` / `ldc2_w`) to a typed literal.
+    fn constant(&self, index: u16) -> Option<StackValue> {
         Some(match self.pool.get(index)? {
-            ConstantPoolEntry::Integer(v) => Expr::lit(v.to_string()),
-            ConstantPoolEntry::Long(v) => Expr::lit(format!("{v}L")),
-            ConstantPoolEntry::Float(v) => Expr::lit(Literal::float_literal(*v)),
-            ConstantPoolEntry::Double(v) => Expr::lit(Literal::double_literal(*v)),
-            ConstantPoolEntry::String { string_index } => {
-                Expr::lit(Literal::string_literal(&self.pool.utf8(*string_index)?))
+            ConstantPoolEntry::Integer(v) => StackValue::int_literal(*v),
+            ConstantPoolEntry::Long(v) => {
+                StackValue::base(Expr::lit(format!("{v}L")), BaseType::Long)
             }
-            ConstantPoolEntry::Class { name_index } => {
-                Expr::lit(Literal::class_literal(&self.pool.utf8(*name_index)?))
+            ConstantPoolEntry::Float(v) => {
+                StackValue::base(Expr::lit(Literal::float_literal(*v)), BaseType::Float)
+            }
+            ConstantPoolEntry::Double(v) => {
+                StackValue::base(Expr::lit(Literal::double_literal(*v)), BaseType::Double)
+            }
+            ConstantPoolEntry::String { string_index } => StackValue::object(
+                Expr::lit(Literal::string_literal(&self.pool.utf8(*string_index)?)),
+                "java/lang/String",
+            ),
+            ConstantPoolEntry::Class { .. } => {
+                let class_type = self.class_ref_type(index)?;
+                StackValue::object(
+                    Expr::lit(Literal::class_literal(&class_type)),
+                    "java/lang/Class",
+                )
             }
             _ => return None,
         })
@@ -995,22 +1581,22 @@ impl Sim<'_> {
         }
     }
 
-    /// The `(owner-internal, name, descriptor)` a `MethodRef` / `InterfaceMethodRef` points to.
-    fn method_ref(&self, index: u16) -> Option<(String, String, String)> {
-        let (class_index, nat) = match self.pool.get(index)? {
+    /// The `(kind, owner-internal, name, descriptor)` a method reference points to.
+    fn method_ref(&self, index: u16) -> Option<(MethodRefKind, String, String, String)> {
+        let (kind, class_index, name_and_type_index) = match self.pool.get(index)? {
             ConstantPoolEntry::MethodRef {
                 class_index,
                 name_and_type_index,
-            }
-            | ConstantPoolEntry::InterfaceMethodRef {
+            } => (MethodRefKind::Class, *class_index, *name_and_type_index),
+            ConstantPoolEntry::InterfaceMethodRef {
                 class_index,
                 name_and_type_index,
-            } => (*class_index, *name_and_type_index),
+            } => (MethodRefKind::Interface, *class_index, *name_and_type_index),
             _ => return None,
         };
         let owner = self.pool.class_name(class_index)?.into_owned();
-        let (name, descriptor) = self.name_and_type(nat)?;
-        Some((owner, name, descriptor))
+        let (name, descriptor) = self.name_and_type(name_and_type_index)?;
+        Some((kind, owner, name, descriptor))
     }
 
     /// The `(name, descriptor)` of a `NameAndType` entry.
@@ -1036,14 +1622,20 @@ impl Sim<'_> {
 
     /// The type a `Class` entry points to, as a [`FieldType`]: an array class entry holds the full
     /// field descriptor (`[I`, `[Ljava/lang/String;`), any other a plain internal name (JVMS
-    /// §4.4.1) — the ambiguity is resolved once here for every instruction that takes a class
-    /// operand (`checkcast`, `anewarray`, `multianewarray`).
+    /// §4.4.1) — the ambiguity is resolved once here for every instruction that uses a class entry
+    /// (`ldc`, `checkcast`, `anewarray`, `multianewarray`).
     fn class_ref_type(&self, index: u16) -> Option<FieldType> {
         let internal = self.class_ref(index)?;
+        Self::internal_type(&internal)
+    }
+
+    /// A constant-pool class name as a field type. Array owners use their full descriptor while
+    /// ordinary classes use an internal binary name.
+    fn internal_type(internal: &str) -> Option<FieldType> {
         if internal.starts_with('[') {
-            FieldType::parse(&internal).ok()
+            FieldType::parse(internal).ok()
         } else {
-            Some(FieldType::Object(internal))
+            Some(FieldType::Object(internal.into()))
         }
     }
 }
@@ -1054,22 +1646,31 @@ impl Sim<'_> {
 /// `*cmpg` +1; `lcmp` compares totally), which decides whether a rendered operator is faithful.
 #[derive(Clone, Copy)]
 enum Cmp {
-    /// `lcmp` — a total order, every operator is exact.
-    Total,
-    /// `fcmpl` / `dcmpl` — NaN pushes -1.
-    NanNeg,
-    /// `fcmpg` / `dcmpg` — NaN pushes +1.
-    NanPos,
+    Long,
+    FloatNanNeg,
+    FloatNanPos,
+    DoubleNanNeg,
+    DoubleNanPos,
 }
 
 impl Cmp {
     /// Classify a comparison instruction, or `None` for any other instruction.
     const fn of(ins: &Instruction) -> Option<Self> {
         match ins {
-            Instruction::Lcmp => Some(Self::Total),
-            Instruction::Fcmpl | Instruction::Dcmpl => Some(Self::NanNeg),
-            Instruction::Fcmpg | Instruction::Dcmpg => Some(Self::NanPos),
+            Instruction::Lcmp => Some(Self::Long),
+            Instruction::Fcmpl => Some(Self::FloatNanNeg),
+            Instruction::Fcmpg => Some(Self::FloatNanPos),
+            Instruction::Dcmpl => Some(Self::DoubleNanNeg),
+            Instruction::Dcmpg => Some(Self::DoubleNanPos),
             _ => None,
+        }
+    }
+
+    const fn base(self) -> BaseType {
+        match self {
+            Self::Long => BaseType::Long,
+            Self::FloatNanNeg | Self::FloatNanPos => BaseType::Float,
+            Self::DoubleNanNeg | Self::DoubleNanPos => BaseType::Double,
         }
     }
 
@@ -1081,26 +1682,31 @@ impl Cmp {
     /// `!(a < b)`, which is *true* on NaN and has no single-operator rendering) must bail.
     fn exact(self, op: &str) -> bool {
         match self {
-            Self::Total => true,
-            Self::NanNeg => !matches!(op, "<" | "<="),
-            Self::NanPos => !matches!(op, ">" | ">="),
+            Self::Long => true,
+            Self::FloatNanNeg | Self::DoubleNanNeg => !matches!(op, "<" | "<="),
+            Self::FloatNanPos | Self::DoubleNanPos => !matches!(op, ">" | ">="),
         }
     }
 }
 
 /// Recovers structured statements from a method's [`Cfg`], running each block through [`Sim`] and
 /// folding forward conditional branches into `if` / `if`-`else`.
-struct Structurer<'a> {
+struct Structurer<'a, 'classes> {
     code: &'a [Instruction],
     cfg: &'a Cfg,
     pool: &'a ConstantPool,
     bootstrap: &'a [BootstrapMethod],
+    class: &'a ClassFile,
+    hierarchy: &'a ClassHierarchy<'classes>,
     owner: String,
+    owner_is_interface: bool,
+    direct_superclass: Option<String>,
     is_static: bool,
-    locals: BTreeMap<u16, String>,
+    locals: BTreeMap<u16, Local>,
+    return_type: ReturnType,
 }
 
-impl Structurer<'_> {
+impl Structurer<'_, '_> {
     /// Structure the whole method, requiring every block to be emitted exactly once — a strong guard
     /// that the recovered tree matches the actual control flow (any mismatch bails to a safe body).
     async fn structure(&self) -> Option<Vec<Stmt>> {
@@ -1219,13 +1825,18 @@ impl Structurer<'_> {
     /// stack (the condition of a conditional-branch block; empty for every other block), and the
     /// flavor of a trailing `*cmp` fused into the block's conditional branch (its two operands are
     /// then the leftover stack, for [`Self::branch_condition`] to read back).
-    async fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<Expr>, Option<Cmp>)> {
+    async fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<StackValue>, Option<Cmp>)> {
         let mut sim = Sim {
             pool: self.pool,
             bootstrap: self.bootstrap,
+            class: self.class,
+            hierarchy: self.hierarchy,
             owner: &self.owner,
+            owner_is_interface: self.owner_is_interface,
+            direct_superclass: self.direct_superclass.as_deref(),
             is_static: self.is_static,
             locals: &self.locals,
+            return_type: &self.return_type,
             stack: Vec::new(),
             stmts: Vec::new(),
         };
@@ -1365,7 +1976,7 @@ impl Structurer<'_> {
         branch: &Instruction,
         negate: bool,
         cmp: Option<Cmp>,
-        mut stack: Vec<Expr>,
+        mut stack: Vec<StackValue>,
     ) -> Option<Expr> {
         use Instruction as I;
         // Pick the branch-taken operator, or its negation for the fall-through condition.
@@ -1378,32 +1989,43 @@ impl Structurer<'_> {
             if !cmp.exact(operator) {
                 return None;
             }
-            Self::compare(operator, &mut stack)?
+            Self::compare_base(operator, cmp.base(), &mut stack)?
         } else {
             match branch {
-                I::IfIcmpeq(_) | I::IfAcmpeq(_) => Self::compare(op("==", "!="), &mut stack)?,
-                I::IfIcmpne(_) | I::IfAcmpne(_) => Self::compare(op("!=", "=="), &mut stack)?,
-                I::IfIcmplt(_) => Self::compare(op("<", ">="), &mut stack)?,
-                I::IfIcmpge(_) => Self::compare(op(">=", "<"), &mut stack)?,
-                I::IfIcmpgt(_) => Self::compare(op(">", "<="), &mut stack)?,
-                I::IfIcmple(_) => Self::compare(op("<=", ">"), &mut stack)?,
+                I::IfIcmpeq(_) => Self::compare_int_eq(op("==", "!="), &mut stack)?,
+                I::IfIcmpne(_) => Self::compare_int_eq(op("!=", "=="), &mut stack)?,
+                I::IfAcmpeq(_) => Self::compare_ref(op("==", "!="), &mut stack)?,
+                I::IfAcmpne(_) => Self::compare_ref(op("!=", "=="), &mut stack)?,
+                I::IfIcmplt(_) => Self::compare_int(op("<", ">="), &mut stack)?,
+                I::IfIcmpge(_) => Self::compare_int(op(">=", "<"), &mut stack)?,
+                I::IfIcmpgt(_) => Self::compare_int(op(">", "<="), &mut stack)?,
+                I::IfIcmple(_) => Self::compare_int(op("<=", ">"), &mut stack)?,
                 I::Iflt(_) | I::Ifge(_) | I::Ifgt(_) | I::Ifle(_) => {
                     let (taken, negated) = Self::zero_test(branch)?;
-                    Self::compare_lit(op(taken, negated), "0", &mut stack)?
+                    Self::compare_int_zero(op(taken, negated), &mut stack)?
                 }
-                I::IfNull(_) => Self::compare_lit(op("==", "!="), "null", &mut stack)?,
-                I::IfNonNull(_) => Self::compare_lit(op("!=", "=="), "null", &mut stack)?,
-                // A bare `ifne` is taken when the value is truthy, `ifeq` when it is falsy;
-                // negating the taken test gives the fall-through condition.
+                I::IfNull(_) => Self::compare_null(op("==", "!="), &mut stack)?,
+                I::IfNonNull(_) => Self::compare_null(op("!=", "=="), &mut stack)?,
+                // `ifeq`/`ifne` carry both Java booleans and int-family zero tests. The retained
+                // descriptor type decides whether to render truth/not or an explicit comparison.
                 I::Ifne(_) | I::Ifeq(_) => {
                     let value = stack.pop()?;
-                    if matches!(branch, I::Ifne(_)) == negate {
-                        Expr::Unary {
-                            op: "!",
-                            expr: Box::new(value),
+                    if matches!(
+                        value.ty,
+                        StackType::Field(FieldType::Base(BaseType::Boolean))
+                    ) {
+                        if matches!(branch, I::Ifne(_)) == negate {
+                            Expr::Unary {
+                                op: "!",
+                                expr: Box::new(value.expr),
+                            }
+                        } else {
+                            value.expr
                         }
                     } else {
-                        value
+                        let value = Sim::int_numeric_expr(value)?;
+                        let (taken, negated) = Self::zero_test(branch)?;
+                        Self::binary_compare(op(taken, negated), value, Expr::lit("0"))
                     }
                 }
                 _ => return None,
@@ -1430,31 +2052,138 @@ impl Structurer<'_> {
         })
     }
 
-    /// Pop two operands into `lhs op rhs`.
-    fn compare(op: &'static str, stack: &mut Vec<Expr>) -> Option<Expr> {
-        let rhs = stack.pop()?;
-        let lhs = stack.pop()?;
-        Some(Expr::Binary {
+    fn binary_compare(op: &'static str, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::Binary {
             op,
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
-        })
+        }
     }
 
-    /// Pop one operand into `lhs op <literal>` (a comparison against `0` or `null`).
-    fn compare_lit(op: &'static str, literal: &str, stack: &mut Vec<Expr>) -> Option<Expr> {
+    fn compare_base(op: &'static str, base: BaseType, stack: &mut Vec<StackValue>) -> Option<Expr> {
+        let rhs = stack.pop()?;
         let lhs = stack.pop()?;
-        Some(Expr::Binary {
+        Some(Self::binary_compare(
             op,
-            lhs: Box::new(lhs),
-            rhs: Box::new(Expr::lit(literal)),
-        })
+            Sim::exact_base_expr(lhs, base)?,
+            Sim::exact_base_expr(rhs, base)?,
+        ))
+    }
+
+    fn compare_int(op: &'static str, stack: &mut Vec<StackValue>) -> Option<Expr> {
+        let rhs = Sim::int_numeric_expr(stack.pop()?)?;
+        let lhs = Sim::int_numeric_expr(stack.pop()?)?;
+        Some(Self::binary_compare(op, lhs, rhs))
+    }
+
+    fn compare_int_eq(op: &'static str, stack: &mut Vec<StackValue>) -> Option<Expr> {
+        let rhs = stack.pop()?;
+        let lhs = stack.pop()?;
+        let lhs_boolean = matches!(lhs.ty, StackType::Field(FieldType::Base(BaseType::Boolean)));
+        let rhs_boolean = matches!(rhs.ty, StackType::Field(FieldType::Base(BaseType::Boolean)));
+        let (lhs, rhs) = if lhs_boolean || rhs_boolean {
+            let boolean = FieldType::Base(BaseType::Boolean);
+            (
+                Sim::consume_as(lhs, &boolean)?,
+                Sim::consume_as(rhs, &boolean)?,
+            )
+        } else {
+            (Sim::int_numeric_expr(lhs)?, Sim::int_numeric_expr(rhs)?)
+        };
+        Some(Self::binary_compare(op, lhs, rhs))
+    }
+
+    fn compare_ref(op: &'static str, stack: &mut Vec<StackValue>) -> Option<Expr> {
+        let rhs = stack.pop()?;
+        let lhs = stack.pop()?;
+        if !lhs.ty.is_reference_compatible() || !rhs.ty.is_reference_compatible() {
+            return None;
+        }
+        let directly_comparable = matches!(lhs.ty, StackType::Null)
+            || matches!(rhs.ty, StackType::Null)
+            || lhs.ty == rhs.ty;
+        let (lhs, rhs) = if directly_comparable {
+            (lhs.expr, rhs.expr)
+        } else {
+            let cast = |expr| Expr::Cast {
+                ty: "java.lang.Object".into(),
+                expr: Box::new(expr),
+            };
+            (cast(lhs.expr), cast(rhs.expr))
+        };
+        Some(Self::binary_compare(op, lhs, rhs))
+    }
+
+    fn compare_int_zero(op: &'static str, stack: &mut Vec<StackValue>) -> Option<Expr> {
+        let lhs = Sim::int_numeric_expr(stack.pop()?)?;
+        Some(Self::binary_compare(op, lhs, Expr::lit("0")))
+    }
+
+    fn compare_null(op: &'static str, stack: &mut Vec<StackValue>) -> Option<Expr> {
+        let lhs = stack.pop()?;
+        if lhs.ty.is_reference_compatible() {
+            Some(Self::binary_compare(op, lhs.expr, Expr::lit("null")))
+        } else {
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Cmp;
+    use super::{BaseType, Cmp, Expr, FieldType, Sim, StackValue};
+
+    fn consume_int(value: i32, expected: BaseType) -> Option<String> {
+        Sim::consume_as(StackValue::int_literal(value), &FieldType::Base(expected))
+            .map(|expr| expr.render())
+    }
+
+    #[test]
+    fn int_constants_regain_narrow_source_types() {
+        assert_eq!(consume_int(0, BaseType::Boolean).as_deref(), Some("false"));
+        assert_eq!(consume_int(1, BaseType::Boolean).as_deref(), Some("true"));
+        assert_eq!(consume_int(2, BaseType::Boolean), None);
+        assert_eq!(consume_int(65, BaseType::Char).as_deref(), Some("'A'"));
+        assert_eq!(
+            consume_int(0xD800, BaseType::Char).as_deref(),
+            Some("(char) 55296")
+        );
+        assert_eq!(consume_int(-1, BaseType::Char), None);
+        assert_eq!(consume_int(0x1_0000, BaseType::Char), None);
+        assert_eq!(consume_int(1, BaseType::Byte).as_deref(), Some("(byte) 1"));
+        assert_eq!(
+            consume_int(1, BaseType::Short).as_deref(),
+            Some("(short) 1")
+        );
+    }
+
+    #[test]
+    fn descriptor_adaptation_preserves_reference_static_types() {
+        let object = Sim::consume_as(
+            StackValue::object(Expr::Local("s".into()), "java/lang/String"),
+            &FieldType::Object("java/lang/Object".into()),
+        )
+        .expect("reference cast");
+        let null = Sim::consume_as(
+            StackValue {
+                expr: Expr::lit("null"),
+                ty: super::StackType::Null,
+            },
+            &FieldType::Object("java/lang/String".into()),
+        )
+        .expect("typed null");
+        assert_eq!(object.render(), "(java.lang.Object) s");
+        assert_eq!(null.render(), "(java.lang.String) null");
+    }
+
+    #[test]
+    fn class_constants_distinguish_names_from_array_descriptors() {
+        assert_eq!(Sim::internal_type("I"), Some(FieldType::Object("I".into())));
+        assert_eq!(Sim::internal_type("[I"), FieldType::parse("[I").ok());
+        for malformed in ["[", "[V", "[Ljava/lang/String", "[I;"] {
+            assert_eq!(Sim::internal_type(malformed), None, "{malformed}");
+        }
+    }
 
     // The fixtures only cover the flavor/operator pairings `javac` emits, so the full NaN
     // faithfulness table is asserted here: an ordering operator whose true side would capture
@@ -1462,13 +2191,16 @@ mod tests {
     #[test]
     fn cmp_exactness_table() {
         for (cmp, expected) in [
-            (Cmp::Total, [true, true, true, true, true, true]),
-            (Cmp::NanNeg, [true, true, false, false, true, true]),
-            (Cmp::NanPos, [true, true, true, true, false, false]),
+            (Cmp::Long, [true, true, true, true, true, true]),
+            (Cmp::FloatNanNeg, [true, true, false, false, true, true]),
+            (Cmp::DoubleNanPos, [true, true, true, true, false, false]),
         ] {
             for (op, exact) in ["==", "!=", "<", "<=", ">", ">="].into_iter().zip(expected) {
                 assert_eq!(cmp.exact(op), exact, "{op}");
             }
         }
+        assert_eq!(Cmp::Long.base(), BaseType::Long);
+        assert_eq!(Cmp::FloatNanNeg.base(), BaseType::Float);
+        assert_eq!(Cmp::DoubleNanPos.base(), BaseType::Double);
     }
 }

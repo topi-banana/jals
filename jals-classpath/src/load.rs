@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_classfile::ClassFile;
+use jals_decompile::ClassHierarchy;
 use jals_exec::{Exec, LocalBoxFuture};
 use jals_storage::io::{self as sio, Buffered, IoError, SeekFrom};
 use jals_storage::{
@@ -403,6 +404,7 @@ impl SourceTreeExtraction {
 
         let prefix_len = prefix.segments().len();
         let mut files = BTreeMap::new();
+        let hierarchy = ClassHierarchy::new(&classes);
         let mut yielder = jals_exec::Yielder::every(1);
         for group in SkeletonGroup::groups(&classes, SkeletonMode::Compile) {
             yielder.tick().await;
@@ -422,7 +424,7 @@ impl SourceTreeExtraction {
                     "decompiled source `{rel}` has no relative file name under the requested prefix"
                 ));
             }
-            let bytes = group.render().await.into_bytes();
+            let bytes = group.render(&hierarchy).await.into_bytes();
             if bytes.len() > limits.max_file_bytes {
                 return Err(format!(
                     "decompiled source `{rel}` has {} bytes, exceeding the limit of {}",

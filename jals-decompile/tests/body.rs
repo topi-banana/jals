@@ -1,10 +1,8 @@
-//! Method-body decompilation (`MethodBody::decompile`) over a real compiled class. Uses the
-//! `Consts` fixture from `jals-classpath` (compiled with `-parameters -g`) so the straight-line
-//! reconstructions — a field-storing constructor, an arithmetic return, an empty `void`, a `throw` —
-//! are checked against actual bytecode.
+//! Method-body decompilation (`MethodBody::decompile`) over real classes compiled with
+//! `-parameters -g`, so reconstruction is checked against actual javac bytecode.
 
-use jals_classfile::{ClassFile, MethodInfo};
-use jals_decompile::MethodBody;
+use jals_classfile::{ClassAccessFlags, ClassFile, MethodAccessFlags, MethodInfo};
+use jals_decompile::{ClassHierarchy, MethodBody};
 use jals_exec::block_on_inline;
 
 fn fixture(bytes: &[u8]) -> ClassFile {
@@ -13,7 +11,18 @@ fn fixture(bytes: &[u8]) -> ClassFile {
 
 /// Synchronous test-side driver for the async [`MethodBody::decompile`].
 fn decompile(method: &MethodInfo, cf: &ClassFile, param_names: &[String]) -> Option<Vec<String>> {
-    block_on_inline(MethodBody::decompile(method, cf, param_names))
+    let hierarchy = ClassHierarchy::new(core::slice::from_ref(cf));
+    block_on_inline(MethodBody::decompile(method, cf, param_names, &hierarchy))
+}
+
+fn decompile_with_hierarchy(
+    method: &MethodInfo,
+    cf: &ClassFile,
+    param_names: &[String],
+    classes: &[ClassFile],
+) -> Option<Vec<String>> {
+    let hierarchy = ClassHierarchy::new(classes);
+    block_on_inline(MethodBody::decompile(method, cf, param_names, &hierarchy))
 }
 
 fn consts() -> ClassFile {
@@ -64,6 +73,69 @@ fn cmp() -> ClassFile {
     ))
 }
 
+fn int_carried() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/IntCarried.class"
+    ))
+}
+
+fn invoke_special_calls() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/InvokeSpecialCalls.class"
+    ))
+}
+
+fn invoke_special_classes() -> [ClassFile; 3] {
+    [
+        invoke_special_calls(),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/InvokeSpecialBase.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/InvokeSpecialDefault.class"
+        )),
+    ]
+}
+
+fn hierarchy_evolution_v1() -> [ClassFile; 6] {
+    [
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyEvolution.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyBase.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyDirect.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyRoot.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyLeft.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyRight.class"
+        )),
+    ]
+}
+
+fn hierarchy_evolution_mixed() -> [ClassFile; 6] {
+    let [client, _, direct, root, left, _] = hierarchy_evolution_v1();
+    [
+        client,
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v2/evolution/HierarchyBase.class"
+        )),
+        direct,
+        root,
+        left,
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v2/evolution/HierarchyRight.class"
+        )),
+    ]
+}
+
 /// The first method named `name`.
 fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
     cf.methods
@@ -86,6 +158,148 @@ fn decompiles_field_storing_constructor() {
         .expect("constructor decompiles");
     // The implicit `super()` is omitted; only the field store remains.
     assert_eq!(body, ["this.count = start;"]);
+}
+
+#[test]
+fn decompiles_explicit_super_constructor_call() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "<init>"), &cf, &["seed".to_owned()])
+        .expect("constructor decompiles");
+    assert_eq!(body, ["super(seed);"]);
+}
+
+#[test]
+fn preserves_superclass_invokespecial_dispatch() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "callSuperclass"), &cf, &["value".to_owned()])
+        .expect("superclass call decompiles");
+    assert_eq!(body, ["return super.classValue(value);"]);
+}
+
+#[test]
+fn preserves_interface_default_invokespecial_dispatch() {
+    let classes = invoke_special_classes();
+    let cf = &classes[0];
+    let body = decompile_with_hierarchy(
+        method(cf, "callInterface"),
+        cf,
+        &["value".to_owned()],
+        &classes,
+    )
+    .expect("interface default call decompiles");
+    assert_eq!(
+        body,
+        ["return demo.InvokeSpecialDefault.super.interfaceValue(value);"]
+    );
+}
+
+#[test]
+fn preserves_diamond_interface_super_with_one_shared_declaration() {
+    let classes = hierarchy_evolution_v1();
+    let cf = &classes[0];
+    let body =
+        decompile_with_hierarchy(method(cf, "callLeft"), cf, &["value".to_owned()], &classes)
+            .expect("shared ancestor default decompiles");
+    assert_eq!(
+        body,
+        ["return evolution.HierarchyLeft.super.rootValue(value);"]
+    );
+}
+
+#[test]
+fn evolved_interface_super_hierarchy_bails() {
+    let classes = hierarchy_evolution_mixed();
+    let cf = &classes[0];
+    for name in ["callDirect", "callLeft"] {
+        assert!(
+            decompile_with_hierarchy(method(cf, name), cf, &["value".to_owned()], &classes,)
+                .is_none(),
+            "{name} must fall back"
+        );
+    }
+}
+
+#[test]
+fn incomplete_or_ambiguous_interface_hierarchy_bails() {
+    let cf = invoke_special_calls();
+    assert!(decompile(method(&cf, "callInterface"), &cf, &["value".to_owned()]).is_none());
+
+    let mut classes = invoke_special_classes().to_vec();
+    classes.push(classes[2].clone());
+    let cf = &classes[0];
+    assert!(
+        decompile_with_hierarchy(
+            method(cf, "callInterface"),
+            cf,
+            &["value".to_owned()],
+            &classes,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn malformed_interface_hierarchy_or_target_bails() {
+    let mut classes = invoke_special_classes();
+    classes[2].access_flags.0 &= !ClassAccessFlags::INTERFACE;
+    let cf = &classes[0];
+    assert!(
+        decompile_with_hierarchy(
+            method(cf, "callInterface"),
+            cf,
+            &["value".to_owned()],
+            &classes,
+        )
+        .is_none()
+    );
+
+    let mut classes = invoke_special_classes();
+    let interface = &mut classes[2];
+    interface.interfaces.push(interface.this_class);
+    let cf = &classes[0];
+    assert!(
+        decompile_with_hierarchy(
+            method(cf, "callInterface"),
+            cf,
+            &["value".to_owned()],
+            &classes,
+        )
+        .is_none()
+    );
+
+    for flag in [MethodAccessFlags::ABSTRACT, MethodAccessFlags::STATIC] {
+        let mut classes = invoke_special_classes();
+        let interface = &mut classes[2];
+        let target = interface
+            .methods
+            .iter_mut()
+            .find(|method| {
+                interface.constant_pool.utf8(method.name_index).as_deref() == Some("interfaceValue")
+            })
+            .expect("default method");
+        target.access_flags.0 |= flag;
+        let cf = &classes[0];
+        assert!(
+            decompile_with_hierarchy(
+                method(cf, "callInterface"),
+                cf,
+                &["value".to_owned()],
+                &classes,
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn non_direct_invokespecial_targets_bail() {
+    let mut cf = invoke_special_calls();
+    cf.super_class = 0;
+    assert!(decompile(method(&cf, "callSuperclass"), &cf, &["value".to_owned()]).is_none());
+
+    let mut cf = invoke_special_calls();
+    cf.interfaces.clear();
+    assert!(decompile(method(&cf, "callInterface"), &cf, &["value".to_owned()]).is_none());
 }
 
 #[test]
@@ -346,6 +560,22 @@ fn decompiles_new_array_of_arrays() {
 }
 
 #[test]
+fn decompiles_array_class_literals() {
+    let cf = arrays();
+    for (name, expected) in [
+        ("primitiveArrayClass", "return int[].class;"),
+        ("referenceArrayClass", "return java.lang.String[].class;"),
+        (
+            "multidimensionalArrayClass",
+            "return java.lang.String[][].class;",
+        ),
+    ] {
+        let body = decompile(method(&cf, name), &cf, &[]).expect("class literal decompiles");
+        assert_eq!(body, [expected], "{name}");
+    }
+}
+
+#[test]
 fn folds_nested_array_initializer() {
     // The inner folded creations finalize as they are stored into the outer collection.
     let cf = arrays();
@@ -360,6 +590,125 @@ fn compound_element_store_bails() {
     let cf = arrays();
     let names = ["xs".to_owned(), "i".to_owned()];
     assert!(decompile(method(&cf, "bump"), &cf, &names).is_none());
+}
+
+// --- JVM int-carried boolean and char values ---
+
+#[test]
+fn recovers_boolean_and_char_returns() {
+    let cf = int_carried();
+    let boolean =
+        decompile(method(&cf, "booleanReturn"), &cf, &[]).expect("booleanReturn decompiles");
+    let character = decompile(method(&cf, "charReturn"), &cf, &[]).expect("charReturn decompiles");
+    assert_eq!(boolean, ["return true;"]);
+    assert_eq!(character, ["return 'A';"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_locals() {
+    let cf = int_carried();
+    let boolean =
+        decompile(method(&cf, "booleanLocal"), &cf, &[]).expect("booleanLocal decompiles");
+    let character = decompile(method(&cf, "charLocal"), &cf, &[]).expect("charLocal decompiles");
+    assert_eq!(
+        boolean,
+        ["boolean value;", "value = true;", "return value;"]
+    );
+    assert_eq!(character, ["char value;", "value = 'B';", "return value;"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_fields() {
+    let cf = int_carried();
+    let stores = decompile(method(&cf, "storeFields"), &cf, &[]).expect("storeFields decompiles");
+    let boolean = decompile(method(&cf, "readFlag"), &cf, &[]).expect("readFlag decompiles");
+    let character = decompile(method(&cf, "readLetter"), &cf, &[]).expect("readLetter decompiles");
+    assert_eq!(stores, ["this.flag = true;", "this.letter = 'C';"]);
+    assert_eq!(boolean, ["return this.flag;"]);
+    assert_eq!(character, ["return this.letter;"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_call_arguments_and_results() {
+    let cf = int_carried();
+    let boolean = decompile(method(&cf, "callBoolean"), &cf, &[]).expect("callBoolean decompiles");
+    let character = decompile(method(&cf, "callChar"), &cf, &[]).expect("callChar decompiles");
+    let result = decompile(method(&cf, "branchOnCall"), &cf, &["value".to_owned()])
+        .expect("branchOnCall decompiles");
+    assert_eq!(boolean, ["return this.passBoolean(true);"]);
+    assert_eq!(character, ["return this.passChar('D');"]);
+    assert_eq!(
+        result,
+        [
+            "if (!this.passBoolean(value)) {",
+            "    return 1;",
+            "}",
+            "return 2;"
+        ]
+    );
+}
+
+#[test]
+fn preserves_char_to_int_widening() {
+    let cf = int_carried();
+    let names = ["value".to_owned()];
+    let call =
+        decompile(method(&cf, "widenedCharCall"), &cf, &names).expect("widenedCharCall decompiles");
+    let concat = decompile(method(&cf, "widenedCharConcat"), &cf, &names)
+        .expect("widenedCharConcat decompiles");
+    assert_eq!(call, ["return this.charOrInt((int) value);"]);
+    assert_eq!(concat, ["return \"\" + (int) value;"]);
+}
+
+#[test]
+fn recovers_boolean_and_char_arrays() {
+    let cf = int_carried();
+    let booleans =
+        decompile(method(&cf, "booleanArray"), &cf, &[]).expect("booleanArray decompiles");
+    let characters = decompile(method(&cf, "charArray"), &cf, &[]).expect("charArray decompiles");
+    let names = ["flags".to_owned(), "letters".to_owned()];
+    let stores =
+        decompile(method(&cf, "storeArrays"), &cf, &names).expect("storeArrays decompiles");
+    let boolean_read = decompile(method(&cf, "readBoolean"), &cf, &["values".to_owned()])
+        .expect("readBoolean decompiles");
+    let char_read = decompile(method(&cf, "readChar"), &cf, &["values".to_owned()])
+        .expect("readChar decompiles");
+    assert_eq!(booleans, ["return new boolean[]{true, false};"]);
+    assert_eq!(characters, ["return new char[]{'E', (char) 55296};"]);
+    assert_eq!(stores, ["flags[0] = true;", "letters[0] = 'F';"]);
+    assert_eq!(boolean_read, ["return values[0];"]);
+    assert_eq!(char_read, ["return values[0];"]);
+}
+
+#[test]
+fn distinguishes_integer_zero_from_boolean_negation() {
+    // javac emits the same `iload; ifne` pair for both methods; the local's descriptor determines
+    // whether the source condition is an integer comparison or boolean negation.
+    let cf = int_carried();
+    let names = ["value".to_owned()];
+    let integer =
+        decompile(method(&cf, "integerZero"), &cf, &names).expect("integerZero decompiles");
+    let boolean =
+        decompile(method(&cf, "booleanNegation"), &cf, &names).expect("booleanNegation decompiles");
+    assert_eq!(
+        integer,
+        ["if (value == 0) {", "    return 1;", "}", "return 2;"]
+    );
+    assert_eq!(
+        boolean,
+        ["if (!value) {", "    return 1;", "}", "return 2;"]
+    );
+}
+
+#[test]
+fn recovers_char_casts_including_a_surrogate() {
+    let cf = int_carried();
+    let cast = decompile(method(&cf, "castChar"), &cf, &["value".to_owned()])
+        .expect("castChar decompiles");
+    let surrogate = decompile(method(&cf, "surrogate"), &cf, &[]).expect("surrogate decompiles");
+    assert_eq!(cast, ["return (char) value;"]);
+    // A lone UTF-16 surrogate is not a Unicode scalar, so preserve its code unit as a cast.
+    assert_eq!(surrogate, ["return (char) 55296;"]);
 }
 
 // --- invokedynamic makeConcatWithConstants (javac's default string-concat lowering) ---

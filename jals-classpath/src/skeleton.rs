@@ -33,7 +33,7 @@ use jals_classfile::{
     FieldType, MethodAccessFlags, MethodDescriptor, MethodInfo, MethodSignature, ResultSignature,
     ReturnType, TypeParameter, TypeSignature,
 };
-use jals_decompile::{Attrs, JavaType, MethodBody};
+use jals_decompile::{Attrs, ClassHierarchy, JavaType, MethodBody};
 use jals_storage::{ArtifactCache, CacheBackend, CacheNamespace, RelativePath};
 
 use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
@@ -53,6 +53,22 @@ pub enum SkeletonMode {
     Navigation,
     /// Best-effort compile-safe output for build-task publication.
     Compile,
+}
+
+/// What every rendering step needs beyond the declaration it is emitting: the shared class
+/// hierarchy the decompiler resolves super calls against, and the mode selecting navigation vs
+/// compile-safe output. Both are fixed for a whole render, so they travel together.
+#[derive(Clone, Copy)]
+struct RenderCtx<'a> {
+    hierarchy: &'a ClassHierarchy<'a>,
+    mode: SkeletonMode,
+}
+
+impl RenderCtx<'_> {
+    /// Whether this render targets compile-safe output.
+    const fn is_compile(self) -> bool {
+        matches!(self.mode, SkeletonMode::Compile)
+    }
 }
 
 /// Skeleton generation is resilient: invalid class names or cache failures are diagnosed and skipped.
@@ -101,6 +117,7 @@ impl SkeletonGroup<'_> {
         namespace: CacheNamespace,
     ) -> Skeletons {
         let mut out = Skeletons::default();
+        let hierarchy = ClassHierarchy::new(classes);
         let mut yielder = jals_exec::Yielder::every(1);
         for group in Self::groups(classes, mode) {
             yielder.tick().await;
@@ -112,7 +129,7 @@ impl SkeletonGroup<'_> {
                 ));
                 continue;
             };
-            let bytes = group.render().await.into_bytes();
+            let bytes = group.render(&hierarchy).await.into_bytes();
             let key = DependencyResolver::cache_key(
                 namespace,
                 b"skeleton\0",
@@ -144,17 +161,21 @@ impl SkeletonGroup<'_> {
     }
 
     /// Render this group's `.java` text: every type/member declaration, with mode-driven bodies.
-    pub(crate) async fn render(&self) -> String {
+    pub(crate) async fn render(&self, hierarchy: &ClassHierarchy<'_>) -> String {
         let mut text = String::new();
         if !self.package.is_empty() {
             let _ = writeln!(text, "package {};\n", self.package);
         }
+        let ctx = RenderCtx {
+            hierarchy,
+            mode: self.mode,
+        };
         Self::render_type(
             &mut text,
             &self.members,
+            ctx,
             core::slice::from_ref(&self.top),
             0,
-            self.mode,
         )
         .await;
         text
@@ -198,9 +219,9 @@ impl SkeletonGroup<'_> {
     fn render_type<'a>(
         out: &'a mut String,
         group: &'a BTreeMap<Vec<String>, &ClassFile>,
+        ctx: RenderCtx<'a>,
         path: &'a [String],
         indent: usize,
-        mode: SkeletonMode,
     ) -> LocalBoxFuture<'a, ()> {
         Box::pin(async move {
             let Some(cf) = group.get(path) else {
@@ -213,16 +234,16 @@ impl SkeletonGroup<'_> {
             let _ = writeln!(
                 out,
                 "{pad}{} {{",
-                Self::type_header(cf, simple, class_sig.as_ref(), indent == 0, mode)
+                Self::type_header(cf, simple, class_sig.as_ref(), indent == 0, ctx.mode)
             );
-            Self::render_members(out, cf, simple, indent + 1, mode).await;
+            Self::render_members(out, cf, simple, indent + 1, ctx).await;
 
             // Nested types: the group's entries whose path extends `path` by exactly one segment.
             let child_len = path.len() + 1;
             for child_path in group.keys() {
                 if child_path.len() == child_len && child_path.starts_with(path) {
                     out.push('\n');
-                    Self::render_type(out, group, child_path, indent + 1, mode).await;
+                    Self::render_type(out, group, ctx, child_path, indent + 1).await;
                 }
             }
             let _ = writeln!(out, "{pad}}}");
@@ -355,12 +376,12 @@ impl SkeletonGroup<'_> {
         cf: &ClassFile,
         simple: &str,
         indent: usize,
-        mode: SkeletonMode,
+        ctx: RenderCtx<'_>,
     ) {
         let pool = &cf.constant_pool;
         let pad = "    ".repeat(indent);
         let is_enum = cf.access_flags.is_enum();
-        let compile = mode == SkeletonMode::Compile;
+        let compile = ctx.is_compile();
 
         if is_enum {
             let enum_args = if compile {
@@ -437,7 +458,7 @@ impl SkeletonGroup<'_> {
             if is_enum && (raw_name == "values" || raw_name == "valueOf") {
                 continue;
             }
-            Self::render_method(out, method, cf, &raw_name, simple, &pad, mode).await;
+            Self::render_method(out, method, cf, &raw_name, simple, &pad, ctx).await;
         }
     }
 
@@ -452,7 +473,7 @@ impl SkeletonGroup<'_> {
         raw_name: &str,
         simple: &str,
         pad: &str,
-        mode: SkeletonMode,
+        ctx: RenderCtx<'_>,
     ) {
         let pool = &cf.constant_pool;
         let flags = method.access_flags;
@@ -483,7 +504,7 @@ impl SkeletonGroup<'_> {
             format!("{pad}{mods}{type_params}{ret} {raw_name}({params}){throws}")
         };
         let body =
-            Self::method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad, mode).await;
+            Self::method_body(method, cf, &names, is_ctor, pieces.ret.is_some(), pad, ctx).await;
         let _ = writeln!(out, "{head}{body}");
     }
 
@@ -499,7 +520,7 @@ impl SkeletonGroup<'_> {
         is_ctor: bool,
         returns_value: bool,
         pad: &str,
-        mode: SkeletonMode,
+        ctx: RenderCtx<'_>,
     ) -> String {
         let flags = method.access_flags;
         if flags.is_abstract() || flags.contains(MethodAccessFlags::NATIVE) {
@@ -508,10 +529,10 @@ impl SkeletonGroup<'_> {
         // Compile mode intentionally keeps bodies as safe placeholders. Real decompiled statements
         // frequently reference anonymous types (`Outer.1`) and other non-source forms that javac
         // rejects at Minecraft scale; declarations alone are enough for a compilable tree.
-        if mode == SkeletonMode::Compile {
+        if ctx.is_compile() {
             return Self::safe_body(is_ctor, returns_value).to_owned();
         }
-        if let Some(stmts) = MethodBody::decompile(method, cf, names).await {
+        if let Some(stmts) = MethodBody::decompile(method, cf, names, ctx.hierarchy).await {
             return Self::render_body_block(&stmts, pad);
         }
         Self::safe_body(is_ctor, returns_value).to_owned()
@@ -949,11 +970,12 @@ mod tests {
     fn renders_generic_class_with_members() {
         let classes = [box_class()];
         let groups = SkeletonGroup::groups(&classes, SkeletonMode::Navigation);
+        let hierarchy = ClassHierarchy::new(&classes);
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         // `Box` is in the default package, so it is `Box.java` at the root.
         assert_eq!(group.rel_path(), "Box.java");
-        let text = jals_exec::block_on_inline(group.render());
+        let text = jals_exec::block_on_inline(group.render(&hierarchy));
         // The generic type, its field, and its methods — each with its decompiled body (Box.class
         // carries no debug info, so parameters keep their `argN` fallback names).
         assert!(text.contains("public class Box<T> {"), "{text}");

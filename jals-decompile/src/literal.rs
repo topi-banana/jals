@@ -7,6 +7,8 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::Write;
 
+use jals_classfile::FieldType;
+
 use crate::types::JavaType;
 
 /// Namespace for rendering constant-pool constants as valid Java literals.
@@ -57,6 +59,13 @@ impl Literal {
         out
     }
 
+    /// Render one JVM `char` code unit. Lone UTF-16 surrogates are not Rust/Unicode scalar values,
+    /// so preserve those with an explicit Java cast instead of inventing a character literal.
+    pub(crate) fn char_code_unit(value: i64) -> Option<String> {
+        let value = u32::from(u16::try_from(value).ok()?);
+        Some(char::from_u32(value).map_or_else(|| format!("(char) {value}"), Self::char_literal))
+    }
+
     /// Render a `String` constant as an escaped Java string literal (quotes included).
     pub(crate) fn string_literal(s: &str) -> String {
         let mut out = String::with_capacity(s.len() + 2);
@@ -90,10 +99,11 @@ impl Literal {
         }
     }
 
-    /// Render a `Class` constant (internal name) as a Java class literal (`java/lang/String` →
-    /// `java.lang.String.class`).
-    pub(crate) fn class_literal(internal: &str) -> String {
-        format!("{}.class", JavaType::internal_to_java(internal))
+    /// Render a `Class` constant as a Java class literal (`[Ljava/lang/String;` →
+    /// `java.lang.String[].class`).
+    pub(crate) fn class_literal(ty: &FieldType) -> String {
+        let rendered_type = JavaType::render_field_type(ty);
+        format!("{rendered_type}.class")
     }
 }
 
@@ -124,10 +134,33 @@ mod tests {
     }
 
     #[test]
-    fn class_literals_are_dotted() {
+    fn char_code_units_preserve_surrogates() {
+        assert_eq!(Literal::char_code_unit(65).as_deref(), Some("'A'"));
         assert_eq!(
-            Literal::class_literal("java/lang/String"),
+            Literal::char_code_unit(0xD800).as_deref(),
+            Some("(char) 55296")
+        );
+        assert_eq!(Literal::char_code_unit(-1), None);
+        assert_eq!(Literal::char_code_unit(0x1_0000), None);
+    }
+
+    #[test]
+    fn class_literals_render_objects_and_arrays() {
+        assert_eq!(
+            Literal::class_literal(&FieldType::Object("java/lang/String".into())),
             "java.lang.String.class"
         );
+        assert_eq!(
+            Literal::class_literal(&FieldType::Object("I".into())),
+            "I.class"
+        );
+        for (descriptor, expected) in [
+            ("[I", "int[].class"),
+            ("[Ljava/lang/String;", "java.lang.String[].class"),
+            ("[[Ljava/lang/String;", "java.lang.String[][].class"),
+        ] {
+            let ty = FieldType::parse(descriptor).expect("valid array descriptor");
+            assert_eq!(Literal::class_literal(&ty), expected);
+        }
     }
 }
