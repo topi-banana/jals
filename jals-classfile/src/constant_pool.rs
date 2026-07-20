@@ -164,6 +164,53 @@ impl ConstantPool {
         }
     }
 
+    /// The first unassigned pool index: valid entry indices are `1..self.next_index()`.
+    ///
+    /// This equals the `constant_pool_count` the pool would serialise with right now.
+    pub const fn next_index(&self) -> u16 {
+        self.entries.len() as u16
+    }
+
+    /// Append `entry` to the pool and return its new 1-based index, or `None` when the pool has no
+    /// room (`constant_pool_count` is a `u16`, and `Long`/`Double` each need two slots).
+    ///
+    /// Appending never moves existing entries, so every index already handed out stays valid. A
+    /// remapper-style transform can therefore grow the pool while repointing existing references.
+    pub fn add(&mut self, entry: ConstantPoolEntry) -> Option<u16> {
+        let wide = matches!(
+            entry,
+            ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_)
+        );
+        let needed = if wide { 2 } else { 1 };
+        if self.entries.len() + needed > 0xFFFF {
+            return None;
+        }
+        let index = u16::try_from(self.entries.len()).ok()?;
+        self.entries.push(ConstantSlot::Entry(entry));
+        if wide {
+            self.entries.push(ConstantSlot::Gap);
+        }
+        Some(index)
+    }
+
+    /// Overwrite the entry at `index` and return the previous one, keeping every other index
+    /// stable. Returns `None` — leaving the pool untouched — when `index` does not denote an
+    /// existing entry, or when either side is a `Long`/`Double`: the two-slot layout must never
+    /// change, or every higher index would shift.
+    pub fn replace(&mut self, index: u16, entry: ConstantPoolEntry) -> Option<ConstantPoolEntry> {
+        if matches!(
+            entry,
+            ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_)
+        ) {
+            return None;
+        }
+        let slot = self.entries.get_mut(index as usize)?;
+        let ConstantSlot::Entry(previous) = slot else {
+            return None;
+        };
+        Some(core::mem::replace(previous, entry))
+    }
+
     /// The decoded text of a `Utf8` entry at `index`, or `None` if it is not a `Utf8`.
     pub fn utf8(&self, index: u16) -> Option<Cow<'_, str>> {
         match self.get(index) {
