@@ -23,6 +23,8 @@ pub enum PathError {
     Drive,
     Unc,
     FileIsRoot,
+    /// A directory key that must name a real subdirectory resolved to the project root itself.
+    DirectoryIsRoot,
     InvalidName(NameError),
 }
 

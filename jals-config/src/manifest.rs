@@ -796,11 +796,15 @@ impl Manifest {
     /// # Errors
     /// Returns [`ValidationError`] describing the first problem found.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        let classes_dir = DirKey::parse(&self.build.classes_dir).map_err(|_| {
-            ValidationError::InvalidClassesDir {
+        // A root `classes-dir` (`""`) parses successfully — `RelativePath::parse` maps the empty
+        // string to the project root — but `jals clean` removes this directory recursively, so
+        // accepting it would delete the whole project. Reject it structurally instead.
+        let classes_dir = DirKey::parse(&self.build.classes_dir)
+            .ok()
+            .filter(|dir| !dir.path().is_root())
+            .ok_or_else(|| ValidationError::InvalidClassesDir {
                 dir: self.build.classes_dir.clone(),
-            }
-        })?;
+            })?;
         if let Some(BuildScript::Rhai { file }) = &self.build.script {
             let script = FileKey::parse(file)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
@@ -953,7 +957,7 @@ impl Error for ManifestParseError {
 /// came from — the host [`ManifestParseError`] / `jals-build`'s `ManifestError` add the path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    /// `[build] classes-dir` is not a portable project directory path.
+    /// `[build] classes-dir` is not a non-root portable project directory path.
     InvalidClassesDir {
         /// The invalid compiler output directory.
         dir: String,
@@ -1003,7 +1007,7 @@ impl fmt::Display for ValidationError {
         match self {
             Self::InvalidClassesDir { dir } => write!(
                 f,
-                "invalid `[build] classes-dir` `{dir}`: expected a portable project directory path"
+                "invalid `[build] classes-dir` `{dir}`: expected a non-root portable project directory path"
             ),
             Self::InvalidBuildScriptFile { file } => write!(
                 f,
@@ -1196,6 +1200,27 @@ mod tests {
             }
         );
         assert!(source.to_string().contains("`jals clean` removes"));
+    }
+
+    /// `jals clean` removes `classes-dir` recursively, so a value resolving to the project root
+    /// would delete the entire project — including files `jals` never generated. The empty string
+    /// parses to the root, so it has to be rejected here rather than relied on to fail later.
+    #[test]
+    fn rejects_a_root_classes_dir() {
+        let error = r#"
+            [build]
+            classes-dir = ""
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("a root classes-dir must be a validation error");
+        };
+        assert_eq!(
+            source,
+            ValidationError::InvalidClassesDir { dir: String::new() }
+        );
+        assert!(source.to_string().contains("non-root"));
     }
 
     #[test]

@@ -23,8 +23,17 @@ impl CleanTargets {
     /// dependency cache) without changing the signature.
     /// The result may include paths that do not exist; the caller skips those rather than treating a
     /// never-built project as an error.
+    ///
+    /// A root `classes-dir` is rejected rather than returned. `DirKey::parse("")` resolves to the
+    /// project root, and the caller removes each key recursively, so returning it would delete the
+    /// whole project — including files `jals` never generated. [`Manifest::validate`] rejects the
+    /// same value up front; this check keeps the destructive half safe on its own.
     pub fn keys(manifest: &Manifest) -> Result<Vec<DirKey>, jals_storage::PathError> {
-        let mut keys = vec![DirKey::parse(&manifest.build.classes_dir)?];
+        let classes_dir = DirKey::parse(&manifest.build.classes_dir)?;
+        if classes_dir.path().is_root() {
+            return Err(jals_storage::PathError::DirectoryIsRoot);
+        }
+        let mut keys = vec![classes_dir];
         let build_root = DirKey::parse("target/jals/build")?;
         if !keys.contains(&build_root) {
             keys.push(build_root);
@@ -64,6 +73,24 @@ mod tests {
                 DirKey::parse("target/jals/build").unwrap(),
             ]
         );
+    }
+
+    /// `DirKey::parse("")` resolves to the project root, and the caller removes every returned key
+    /// recursively. Returning it would make `jals clean` delete the whole project, including
+    /// untracked user files, so a root `classes-dir` must be rejected rather than cleaned.
+    #[test]
+    fn rejects_a_root_classes_dir() {
+        let mut m = Manifest::default();
+        m.build.classes_dir = String::new();
+        assert_eq!(
+            CleanTargets::keys(&m),
+            Err(jals_storage::PathError::DirectoryIsRoot)
+        );
+
+        // `.` never reaches the root check: `Name` rejects it outright. Pin that too, so neither
+        // spelling of "the project root" can become a clean target.
+        m.build.classes_dir = ".".into();
+        assert!(CleanTargets::keys(&m).is_err());
     }
 
     #[test]
