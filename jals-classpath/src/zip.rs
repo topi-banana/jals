@@ -11,6 +11,7 @@
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -624,6 +625,27 @@ pub(crate) struct WriteMember {
 pub(crate) struct StoredZip;
 
 impl StoredZip {
+    /// Whether `name` is a member path that stays inside the archive when extracted.
+    ///
+    /// Mirrors the reader's extraction check: relative, `/`-separated, no `.`/`..` segment, no
+    /// backslash (which Windows would treat as a separator), no drive letter, and no NUL or
+    /// control character.
+    fn is_safe_member_name(name: &str) -> bool {
+        if name.is_empty()
+            || name.starts_with('/')
+            || name.contains('\\')
+            || name.contains('\0')
+            || name.chars().any(char::is_control)
+        {
+            return false;
+        }
+        if name.as_bytes().get(1) == Some(&b':') && name.as_bytes()[0].is_ascii_alphabetic() {
+            return false;
+        }
+        name.split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    }
+
     /// Serialize a deterministic stored-only zip archive: every member uses method 0 (stored), the
     /// crc32 is computed, and the central directory is emitted in input order with fixed (zero)
     /// DOS time/date so two identical inputs always produce identical bytes. No zip64 records are
@@ -635,6 +657,25 @@ impl StoredZip {
                 members.len()
             )
         })?;
+        // Member names reach this writer from the archives being remapped or merged, so a hostile
+        // input jar could otherwise have `../../evil.class` copied verbatim into the output and
+        // escape whatever directory the result is later extracted into. Reject unsafe and
+        // duplicate names here rather than relying on every extraction site to re-check.
+        let mut names = BTreeSet::new();
+        for member in members {
+            if !Self::is_safe_member_name(&member.name) {
+                return Err(format!(
+                    "archive member `{}` is not a safe name",
+                    member.name
+                ));
+            }
+            if !names.insert(member.name.as_str()) {
+                return Err(format!(
+                    "archive member `{}` is declared twice",
+                    member.name
+                ));
+            }
+        }
         let mut out: Vec<u8> = Vec::new();
         let mut central: Vec<u8> = Vec::new();
         for member in members {
@@ -798,6 +839,45 @@ mod tests {
             std::io::copy(&mut reader, &mut got).unwrap();
             assert_eq!(&got, bytes);
         }
+    }
+
+    /// Member names in a remapped or merged jar come from the *input* archive, so a hostile jar
+    /// could otherwise have an escaping name copied verbatim into the output and land outside the
+    /// destination when that output is later extracted.
+    #[test]
+    fn rejects_unsafe_and_duplicate_member_names() {
+        for name in [
+            "../evil.class",
+            "a/../../evil.class",
+            "/absolute.class",
+            "pkg\\windows.class",
+            "C:/drive.class",
+            "pkg//empty.class",
+            "./here.class",
+            "",
+            "nul\0byte.class",
+        ] {
+            let members = vec![WriteMember {
+                name: name.to_owned(),
+                bytes: b"x".to_vec(),
+            }];
+            assert!(
+                StoredZip::write(&members).is_err(),
+                "`{name}` must be rejected"
+            );
+        }
+
+        let duplicated = vec![
+            WriteMember {
+                name: "pkg/A.class".to_owned(),
+                bytes: b"one".to_vec(),
+            },
+            WriteMember {
+                name: "pkg/A.class".to_owned(),
+                bytes: b"two".to_vec(),
+            },
+        ];
+        assert!(StoredZip::write(&duplicated).is_err());
     }
 
     /// Two writes of the same members produce identical bytes (no timestamps, no nondeterminism).

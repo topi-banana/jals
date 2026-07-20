@@ -54,28 +54,47 @@ impl ClassIndex {
         self.supers.insert(this, (super_name, interfaces));
     }
 
-    /// Depth-first walk of `owner` and its supers/interfaces (obfuscated internal names), yielding
-    /// `owner` first and each later class at most once.
-    fn walk_hierarchy<'a>(&'a self, owner: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    /// `owner` and its supertypes (obfuscated internal names), in the order the JVM resolves a
+    /// member: the class itself, then its superclass chain, then its superinterfaces breadth-first
+    /// in declaration order. Each type is yielded at most once.
+    ///
+    /// The order decides which mapping a member reference adopts when more than one supertype
+    /// declares the same name and descriptor. Searching interfaces before the superclass — or
+    /// interfaces in reverse declaration order — picks a different mapping than the JVM picks at
+    /// run time, which silently rewires a call to a different method.
+    fn walk_hierarchy<'a>(&'a self, owner: &'a str) -> Vec<&'a str> {
         let mut seen = BTreeSet::new();
-        let mut queue = vec![owner];
-        core::iter::from_fn(move || {
-            while let Some(current) = queue.pop() {
-                if !seen.insert(current) {
-                    continue;
-                }
-                if let Some((super_name, interfaces)) = self.supers.get(current) {
-                    if let Some(s) = super_name {
-                        queue.push(s.as_str());
-                    }
-                    for iface in interfaces {
-                        queue.push(iface.as_str());
-                    }
-                }
-                return Some(current);
+        let mut out = Vec::new();
+        let mut interfaces = Vec::new();
+
+        // The class itself, then up the superclass chain.
+        let mut current = Some(owner);
+        while let Some(class) = current {
+            if !seen.insert(class) {
+                break;
             }
-            None
-        })
+            out.push(class);
+            let Some((super_name, declared)) = self.supers.get(class) else {
+                break;
+            };
+            interfaces.extend(declared.iter().map(String::as_str));
+            current = super_name.as_deref();
+        }
+
+        // Then interfaces, breadth-first, keeping declaration order within each level.
+        let mut next = 0;
+        while next < interfaces.len() {
+            let interface = interfaces[next];
+            next += 1;
+            if !seen.insert(interface) {
+                continue;
+            }
+            out.push(interface);
+            if let Some((_, declared)) = self.supers.get(interface) {
+                interfaces.extend(declared.iter().map(String::as_str));
+            }
+        }
+        out
     }
 }
 
@@ -698,7 +717,7 @@ mod helpers {
         let owners: Vec<&str> = if owner_obf.starts_with('[') {
             vec!["java/lang/Object"]
         } else {
-            index.walk_hierarchy(owner_obf).collect()
+            index.walk_hierarchy(owner_obf)
         };
         for owner in owners {
             let Some(official_owner) = mappings.remap_class(owner) else {
@@ -1056,10 +1075,14 @@ mod helpers {
                     }
                 }
                 AttributeBody::SourceFile { sourcefile_index } => {
-                    // Prefer the outermost official simple name + ".java".
+                    // `SourceFile` names the file the *outermost* class was declared in, so
+                    // `com/example/Outer$Inner` is `Outer.java`, not `Inner.java`. Strip the
+                    // package first, then take the segment before the first `$` — splitting on
+                    // both at once and taking the last segment yields the innermost name.
                     if let Some(official) = mappings.remap_class(this_obf) {
-                        let simple = official.rsplit(['/', '$']).next().unwrap_or(official);
-                        let file = format!("{simple}.java");
+                        let simple = official.rsplit('/').next().unwrap_or(official);
+                        let outermost = simple.split('$').next().unwrap_or(simple);
+                        let file = format!("{outermost}.java");
                         *sourcefile_index = intern_utf8(pool, &file)?;
                     }
                 }
