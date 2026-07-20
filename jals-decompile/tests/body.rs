@@ -350,6 +350,22 @@ fn decompiles_new_array_of_arrays() {
 }
 
 #[test]
+fn decompiles_array_class_literals() {
+    let cf = arrays();
+    for (name, expected) in [
+        ("primitiveArrayClass", "return int[].class;"),
+        ("referenceArrayClass", "return java.lang.String[].class;"),
+        (
+            "multidimensionalArrayClass",
+            "return java.lang.String[][].class;",
+        ),
+    ] {
+        let body = decompile(method(&cf, name), &cf, &[]).expect("class literal decompiles");
+        assert_eq!(body, [expected], "{name}");
+    }
+}
+
+#[test]
 fn folds_nested_array_initializer() {
     // The inner folded creations finalize as they are stored into the outer collection.
     let cf = arrays();

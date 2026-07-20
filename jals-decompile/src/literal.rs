@@ -7,6 +7,8 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::Write;
 
+use jals_classfile::FieldType;
+
 use crate::types::JavaType;
 
 /// Namespace for rendering constant-pool constants as valid Java literals.
@@ -97,10 +99,11 @@ impl Literal {
         }
     }
 
-    /// Render a `Class` constant (internal name) as a Java class literal (`java/lang/String` →
-    /// `java.lang.String.class`).
-    pub(crate) fn class_literal(internal: &str) -> String {
-        format!("{}.class", JavaType::internal_to_java(internal))
+    /// Render a `Class` constant as a Java class literal (`[Ljava/lang/String;` →
+    /// `java.lang.String[].class`).
+    pub(crate) fn class_literal(ty: &FieldType) -> String {
+        let rendered_type = JavaType::render_field_type(ty);
+        format!("{rendered_type}.class")
     }
 }
 
@@ -142,10 +145,22 @@ mod tests {
     }
 
     #[test]
-    fn class_literals_are_dotted() {
+    fn class_literals_render_objects_and_arrays() {
         assert_eq!(
-            Literal::class_literal("java/lang/String"),
+            Literal::class_literal(&FieldType::Object("java/lang/String".into())),
             "java.lang.String.class"
         );
+        assert_eq!(
+            Literal::class_literal(&FieldType::Object("I".into())),
+            "I.class"
+        );
+        for (descriptor, expected) in [
+            ("[I", "int[].class"),
+            ("[Ljava/lang/String;", "java.lang.String[].class"),
+            ("[[Ljava/lang/String;", "java.lang.String[][].class"),
+        ] {
+            let ty = FieldType::parse(descriptor).expect("valid array descriptor");
+            assert_eq!(Literal::class_literal(&ty), expected);
+        }
     }
 }

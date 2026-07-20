@@ -2,8 +2,8 @@ package demo;
 
 // Provenance for Arrays.class — exercises M5 array operations: element reads/writes (iaload /
 // iastore), newarray/anewarray/multianewarray creation, folded array initializers (int, String,
-// long, boolean, nested), an array-typed checkcast, arraylength, and a compound element store
-// (xs[i]++, which compiles to dup2) that must bail to the safe body.
+// long, boolean, nested), an array-typed checkcast, array class literals, arraylength, and a compound
+// element store (xs[i]++, which compiles to dup2) that must bail to the safe body.
 // Compiled with `javac` (JDK 25) with -parameters -g:
 //     javac -parameters -g -d out jals-classpath/tests/fixtures/src/Arrays.java
 //     cp out/demo/Arrays.class jals-classpath/tests/fixtures/
@@ -82,6 +82,19 @@ public class Arrays {
     // anewarray of an array class ([I): one sized dimension, one empty.
     public int[][] rows(int n) {
         return new int[n][];
+    }
+
+    // ldc of an array Class constant uses a field descriptor in the constant pool.
+    public Class<?> primitiveArrayClass() {
+        return int[].class;
+    }
+
+    public Class<?> referenceArrayClass() {
+        return String[].class;
+    }
+
+    public Class<?> multidimensionalArrayClass() {
+        return String[][].class;
     }
 
     // Nested initializer: anewarray [I collecting inner folded int[] values.
