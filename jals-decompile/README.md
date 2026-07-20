@@ -30,9 +30,10 @@ all I/O (reading `.class` bytes, writing the `.java` files); this crate is pure.
 **The decompiled output is always valid Java** (`jals_syntax::parse` returns no errors). A method that
 cannot be reconstructed falls back *per method* to a safe placeholder body rather than emit broken or
 mis-structured source. This is enforced by a property test over a broad fixture corpus (generics,
-enums, records, switches, annotations) that parses every rendered skeleton. Correctness beyond
-"parses" is best-effort: for the constructs the decompiler claims to handle it aims to be faithful,
-and it bails (falls back) rather than guess on anything it is unsure of.
+enums, records, switches, annotations) that parses every rendered skeleton. Hierarchy-sensitive
+`Interface.super.m()` output also has a `javac`-backed binary-evolution regression. Correctness beyond
+these checks is best-effort: for the constructs the decompiler claims to handle it aims to be
+faithful, and it bails (falls back) rather than guess on anything it is unsure of.
 
 ## Public API
 
@@ -45,8 +46,18 @@ impl MethodBody {
     // Method-body decompilation. `param_names` are the exact names the signature renders (in order);
     // the body reuses them and bails on a count mismatch (e.g. an enum ctor's synthetic `String, int`).
     // Returns indented Java statement lines, or `None` to fall back to a safe placeholder body.
-    pub fn decompile(method: &MethodInfo, cf: &ClassFile, param_names: &[String])
-        -> Option<Vec<String>>;
+    pub async fn decompile(
+        method: &MethodInfo,
+        cf: &ClassFile,
+        param_names: &[String],
+        hierarchy: &ClassHierarchy<'_>,
+    ) -> Option<Vec<String>>;
+}
+
+pub struct ClassHierarchy<'a>;
+impl<'a> ClassHierarchy<'a> {
+    // Immutable class-name, supertype, and method index shared by one decompilation pass.
+    pub fn new(classes: &'a [ClassFile]) -> Self;
 }
 
 pub struct Attrs;
@@ -78,8 +89,9 @@ impl JavaType {
 | `literal.rs` | Render constant-pool constants (`int`/`long`/`float`/`double`/`String`/`Class`) as valid Java literals, including the awkward cases (NaN / infinity → `Float.NaN` etc., control-character escaping). |
 | `attrs.rs` | Read the attributes a signature skeleton needs: `ConstantValue` (→ field initializer, a boolean's `1`→`true`), `Exceptions` (→ non-generic `throws`), `MethodParameters` / `LocalVariableTable` (→ real, slot-aware parameter names). |
 | `expr.rs` | The expression / statement IR (`Expr`, `Stmt`) and its rendering to indented Java, with conservative parenthesization so the grouping the bytecode evaluated is preserved. |
+| `hierarchy.rs` | A deterministic immutable index over loaded class files. It validates complete, cycle-free supertype closures and the JLS 15.12.1/15.12.3 conditions before permitting `Interface.super.m()`. |
 | `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators. Bails on `switch` / `jsr` / a branch to a non-instruction offset. |
-| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`) from the CFG. `decompile_method_body` is the entry point. |
+| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`) from the CFG. `MethodBody::decompile` is the entry point. |
 
 ## How a method body is reconstructed
 
@@ -331,7 +343,7 @@ Still falling back to the M0 placeholder (see roadmap): `switch`, `try`/`catch`.
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
-| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static/special), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored comparison), `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
+| Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static, same-owner private `invokespecial`, direct `super.m()`, hierarchy-proven direct `Interface.super.m()`), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored comparison), `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a non-constructor `invokespecial` outside the current/direct hierarchy or with a non-`this` super receiver, an interface-super call with missing/duplicate/cyclic/evolved/conflicting hierarchy facts or generic method-selection uncertainty, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
 | Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean) | `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a NaN-inexact fused `*cmp` (`!(a < b)`), `switch`, `try`/`catch`/`finally`, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
@@ -356,10 +368,12 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
-  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`, `IntCarried.class`) and
-  assert the recovered statements.
+  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`, `IntCarried.class`,
+  `InvokeSpecialCalls.class`, hierarchy-evolution fixtures) and assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
   `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton from the fixture corpus
-  and asserts zero syntax errors.
+  and asserts zero syntax errors. Its staged hierarchy-evolution test additionally compiles generated
+  clients with `javac`, both against the original supertypes and against evolved supertypes that force
+  safe method-body fallback.
 - Fixtures are pre-compiled `.class` files committed under `jals-classpath/tests/fixtures/` (see its
   `README.md` for provenance / how to regenerate with `javac`).

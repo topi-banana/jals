@@ -67,6 +67,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Set up JDK (for generated-source type checks)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2.83.3

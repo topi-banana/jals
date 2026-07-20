@@ -1,8 +1,8 @@
 //! Method-body decompilation (`MethodBody::decompile`) over real classes compiled with
 //! `-parameters -g`, so reconstruction is checked against actual javac bytecode.
 
-use jals_classfile::{ClassFile, MethodInfo};
-use jals_decompile::MethodBody;
+use jals_classfile::{ClassAccessFlags, ClassFile, MethodAccessFlags, MethodInfo};
+use jals_decompile::{ClassHierarchy, MethodBody};
 use jals_exec::block_on_inline;
 
 fn fixture(bytes: &[u8]) -> ClassFile {
@@ -11,7 +11,18 @@ fn fixture(bytes: &[u8]) -> ClassFile {
 
 /// Synchronous test-side driver for the async [`MethodBody::decompile`].
 fn decompile(method: &MethodInfo, cf: &ClassFile, param_names: &[String]) -> Option<Vec<String>> {
-    block_on_inline(MethodBody::decompile(method, cf, param_names))
+    let hierarchy = ClassHierarchy::new(core::slice::from_ref(cf));
+    block_on_inline(MethodBody::decompile(method, cf, param_names, &hierarchy))
+}
+
+fn decompile_with_hierarchy(
+    method: &MethodInfo,
+    cf: &ClassFile,
+    param_names: &[String],
+    classes: &[ClassFile],
+) -> Option<Vec<String>> {
+    let hierarchy = ClassHierarchy::new(classes);
+    block_on_inline(MethodBody::decompile(method, cf, param_names, &hierarchy))
 }
 
 fn consts() -> ClassFile {
@@ -68,6 +79,63 @@ fn int_carried() -> ClassFile {
     ))
 }
 
+fn invoke_special_calls() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/InvokeSpecialCalls.class"
+    ))
+}
+
+fn invoke_special_classes() -> [ClassFile; 3] {
+    [
+        invoke_special_calls(),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/InvokeSpecialBase.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/InvokeSpecialDefault.class"
+        )),
+    ]
+}
+
+fn hierarchy_evolution_v1() -> [ClassFile; 6] {
+    [
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyEvolution.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyBase.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyDirect.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyRoot.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyLeft.class"
+        )),
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyRight.class"
+        )),
+    ]
+}
+
+fn hierarchy_evolution_mixed() -> [ClassFile; 6] {
+    let [client, _, direct, root, left, _] = hierarchy_evolution_v1();
+    [
+        client,
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v2/evolution/HierarchyBase.class"
+        )),
+        direct,
+        root,
+        left,
+        fixture(include_bytes!(
+            "../../jals-classpath/tests/fixtures/hierarchy-evolution/v2/evolution/HierarchyRight.class"
+        )),
+    ]
+}
+
 /// The first method named `name`.
 fn method<'a>(cf: &'a ClassFile, name: &str) -> &'a MethodInfo {
     cf.methods
@@ -90,6 +158,148 @@ fn decompiles_field_storing_constructor() {
         .expect("constructor decompiles");
     // The implicit `super()` is omitted; only the field store remains.
     assert_eq!(body, ["this.count = start;"]);
+}
+
+#[test]
+fn decompiles_explicit_super_constructor_call() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "<init>"), &cf, &["seed".to_owned()])
+        .expect("constructor decompiles");
+    assert_eq!(body, ["super(seed);"]);
+}
+
+#[test]
+fn preserves_superclass_invokespecial_dispatch() {
+    let cf = invoke_special_calls();
+    let body = decompile(method(&cf, "callSuperclass"), &cf, &["value".to_owned()])
+        .expect("superclass call decompiles");
+    assert_eq!(body, ["return super.classValue(value);"]);
+}
+
+#[test]
+fn preserves_interface_default_invokespecial_dispatch() {
+    let classes = invoke_special_classes();
+    let cf = &classes[0];
+    let body = decompile_with_hierarchy(
+        method(cf, "callInterface"),
+        cf,
+        &["value".to_owned()],
+        &classes,
+    )
+    .expect("interface default call decompiles");
+    assert_eq!(
+        body,
+        ["return demo.InvokeSpecialDefault.super.interfaceValue(value);"]
+    );
+}
+
+#[test]
+fn preserves_diamond_interface_super_with_one_shared_declaration() {
+    let classes = hierarchy_evolution_v1();
+    let cf = &classes[0];
+    let body =
+        decompile_with_hierarchy(method(cf, "callLeft"), cf, &["value".to_owned()], &classes)
+            .expect("shared ancestor default decompiles");
+    assert_eq!(
+        body,
+        ["return evolution.HierarchyLeft.super.rootValue(value);"]
+    );
+}
+
+#[test]
+fn evolved_interface_super_hierarchy_bails() {
+    let classes = hierarchy_evolution_mixed();
+    let cf = &classes[0];
+    for name in ["callDirect", "callLeft"] {
+        assert!(
+            decompile_with_hierarchy(method(cf, name), cf, &["value".to_owned()], &classes,)
+                .is_none(),
+            "{name} must fall back"
+        );
+    }
+}
+
+#[test]
+fn incomplete_or_ambiguous_interface_hierarchy_bails() {
+    let cf = invoke_special_calls();
+    assert!(decompile(method(&cf, "callInterface"), &cf, &["value".to_owned()]).is_none());
+
+    let mut classes = invoke_special_classes().to_vec();
+    classes.push(classes[2].clone());
+    let cf = &classes[0];
+    assert!(
+        decompile_with_hierarchy(
+            method(cf, "callInterface"),
+            cf,
+            &["value".to_owned()],
+            &classes,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn malformed_interface_hierarchy_or_target_bails() {
+    let mut classes = invoke_special_classes();
+    classes[2].access_flags.0 &= !ClassAccessFlags::INTERFACE;
+    let cf = &classes[0];
+    assert!(
+        decompile_with_hierarchy(
+            method(cf, "callInterface"),
+            cf,
+            &["value".to_owned()],
+            &classes,
+        )
+        .is_none()
+    );
+
+    let mut classes = invoke_special_classes();
+    let interface = &mut classes[2];
+    interface.interfaces.push(interface.this_class);
+    let cf = &classes[0];
+    assert!(
+        decompile_with_hierarchy(
+            method(cf, "callInterface"),
+            cf,
+            &["value".to_owned()],
+            &classes,
+        )
+        .is_none()
+    );
+
+    for flag in [MethodAccessFlags::ABSTRACT, MethodAccessFlags::STATIC] {
+        let mut classes = invoke_special_classes();
+        let interface = &mut classes[2];
+        let target = interface
+            .methods
+            .iter_mut()
+            .find(|method| {
+                interface.constant_pool.utf8(method.name_index).as_deref() == Some("interfaceValue")
+            })
+            .expect("default method");
+        target.access_flags.0 |= flag;
+        let cf = &classes[0];
+        assert!(
+            decompile_with_hierarchy(
+                method(cf, "callInterface"),
+                cf,
+                &["value".to_owned()],
+                &classes,
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn non_direct_invokespecial_targets_bail() {
+    let mut cf = invoke_special_calls();
+    cf.super_class = 0;
+    assert!(decompile(method(&cf, "callSuperclass"), &cf, &["value".to_owned()]).is_none());
+
+    let mut cf = invoke_special_calls();
+    cf.interfaces.clear();
+    assert!(decompile(method(&cf, "callInterface"), &cf, &["value".to_owned()]).is_none());
 }
 
 #[test]
