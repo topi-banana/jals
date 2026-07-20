@@ -26,4 +26,5 @@ pub use native::{NativeProjectAssembly, NativeProjectGraph};
 pub use task::{
     BuildTaskExecution, BuildTaskExecutor, BuildTaskHost, BuildTaskPublication, BuildTaskRunError,
     RootBuildScriptError, RootBuildScriptOptions, RootBuildScriptOutput, SourcePublication,
+    TaskRuntime,
 };

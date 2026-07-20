@@ -23,6 +23,12 @@ pub struct TaskPlanLimits {
     pub max_publication_roots: usize,
     pub max_path_bytes: usize,
     pub max_path_depth: usize,
+    /// Ceiling on any single fetch's declared size.
+    ///
+    /// A fetch buffers up to its byte count before the digest is checked, and the count can come
+    /// from the fetched JSON itself (`tasks.json_u64`). Without a ceiling, a compromised or
+    /// mistaken upstream could name a size that exhausts memory or disk.
+    pub max_fetch_bytes: u64,
 }
 
 /// Stable index of a task node in declaration order.
@@ -429,7 +435,7 @@ impl TaskPlan {
                     return Err(TaskPlanError::InvalidDigest);
                 }
             }
-            TaskNodeKind::ByteCount { value } if *value == 0 => {
+            TaskNodeKind::ByteCount { value } if *value == 0 || *value > limits.max_fetch_bytes => {
                 return Err(TaskPlanError::InvalidByteCount);
             }
             TaskNodeKind::ExtractJava { prefix, .. }
@@ -530,7 +536,9 @@ impl fmt::Display for TaskPlanError {
             ),
             Self::InvalidHttpsUrl => f.write_str("build task requires a valid HTTPS URL"),
             Self::InvalidDigest => f.write_str("build task requires a canonical digest"),
-            Self::InvalidByteCount => f.write_str("build-task byte limit must be non-zero"),
+            Self::InvalidByteCount => {
+                f.write_str("build-task byte count must be non-zero and within the fetch limit")
+            }
             Self::InvalidJsonPath => f.write_str("build-task JSON path contains an empty segment"),
             Self::InvalidPath => f.write_str("build task contains an invalid portable path"),
             Self::InvalidOwner => f.write_str("build-task publication owner must not be empty"),
@@ -983,6 +991,7 @@ mod tests {
             max_publication_roots: 4,
             max_path_bytes: 256,
             max_path_depth: 16,
+            max_fetch_bytes: 1_048_576,
         }
     }
 
@@ -1029,6 +1038,31 @@ mod tests {
         let decoded: TaskPlan = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, plan);
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    }
+
+    /// A fetch buffers up to its declared byte count *before* the digest is checked, so an
+    /// unbounded count is an out-of-memory switch. `tasks.json_u64` can even take the number from
+    /// the fetched document, putting it under whoever serves that document.
+    #[test]
+    fn rejects_a_byte_count_over_the_fetch_limit() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let api = TasksApi::new(limits());
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api.clone());
+
+        // `limits()` allows 1 MiB.
+        engine
+            .run_with_scope(&mut scope, "tasks.bytes(1048576);")
+            .expect("a byte count at the limit is accepted");
+        let error = engine
+            .run_with_scope(&mut scope, "tasks.bytes(1048577);")
+            .unwrap_err();
+        assert!(error.to_string().contains("byte count"));
+
+        drop(scope);
+        let plan = api.finish().unwrap();
+        assert_eq!(plan.nodes.len(), 1);
     }
 
     /// Declarations are checked incrementally, so a rejected one must leave the running totals

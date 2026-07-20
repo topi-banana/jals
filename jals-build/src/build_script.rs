@@ -107,6 +107,8 @@ pub struct BuildScriptLimits {
     pub max_task_terminals: usize,
     /// Maximum physical source-tree publication terminals in one task graph.
     pub max_publication_roots: usize,
+    /// Ceiling on any single build-task fetch, including a size projected out of fetched JSON.
+    pub max_fetch_bytes: u64,
 }
 
 impl Default for BuildScriptLimits {
@@ -134,6 +136,8 @@ impl Default for BuildScriptLimits {
             max_task_literal_bytes: 1_048_576,
             max_task_terminals: 256,
             max_publication_roots: 32,
+            // Comfortably above a Minecraft client/server jar, far below "exhaust the machine".
+            max_fetch_bytes: 1_024 * 1_048_576,
         }
     }
 }
@@ -169,6 +173,7 @@ impl BuildScriptLimits {
             (self.max_task_literal_bytes != 0, "max_task_literal_bytes"),
             (self.max_task_terminals != 0, "max_task_terminals"),
             (self.max_publication_roots != 0, "max_publication_roots"),
+            (self.max_fetch_bytes != 0, "max_fetch_bytes"),
         ];
         if let Some((_, name)) = limits.into_iter().find(|(valid, _)| !valid) {
             return Err(BuildScriptError::InvalidLimit(name));
@@ -183,6 +188,7 @@ impl BuildScriptLimits {
             max_literal_bytes: self.max_task_literal_bytes,
             max_terminals: self.max_task_terminals,
             max_publication_roots: self.max_publication_roots,
+            max_fetch_bytes: self.max_fetch_bytes,
             max_path_bytes: self.max_path_bytes,
             max_path_depth: self.max_path_depth,
         }
@@ -478,6 +484,7 @@ struct BuildScriptLimitsWire {
     max_task_literal_bytes: usize,
     max_task_terminals: usize,
     max_publication_roots: usize,
+    max_fetch_bytes: u64,
 }
 
 impl From<&BuildScriptLimits> for BuildScriptLimitsWire {
@@ -505,6 +512,7 @@ impl From<&BuildScriptLimits> for BuildScriptLimitsWire {
             max_task_literal_bytes: limits.max_task_literal_bytes,
             max_task_terminals: limits.max_task_terminals,
             max_publication_roots: limits.max_publication_roots,
+            max_fetch_bytes: limits.max_fetch_bytes,
         }
     }
 }
@@ -1978,6 +1986,7 @@ mod api {
             max_literal_bytes: wire.max_task_literal_bytes,
             max_terminals: wire.max_task_terminals,
             max_publication_roots: wire.max_publication_roots,
+            max_fetch_bytes: wire.max_fetch_bytes,
             max_path_bytes: wire.max_path_bytes,
             max_path_depth: wire.max_path_depth,
         }

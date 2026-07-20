@@ -90,6 +90,15 @@ pub struct RootBuildScriptOutput {
     pub task_classpath: Vec<CacheKey>,
 }
 
+/// Runtime policy for one task-plan execution.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskRuntime {
+    pub network: NetworkPolicy,
+    /// Ceiling on any single fetch, including a size projected out of fetched JSON with
+    /// `tasks.json_u64`. A fetch buffers up to this many bytes before its digest is checked.
+    pub max_fetch_bytes: u64,
+}
+
 /// Whether a root run may apply the exclusive source-tree publications its plan declares.
 ///
 /// Publications are the only part of a build script that writes *outside* `target/jals`. A
@@ -312,7 +321,10 @@ impl BuildTaskExecutor {
             &view,
             storage.artifacts_mut(),
             &plan,
-            options.network,
+            TaskRuntime {
+                network: options.network,
+                max_fetch_bytes: options.limits.max_fetch_bytes,
+            },
             options.host,
         )
         .await?;
@@ -408,7 +420,7 @@ impl BuildTaskExecutor {
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         plan: &TaskPlan,
-        network: NetworkPolicy,
+        runtime: TaskRuntime,
         host: BuildTaskHost,
     ) -> Result<BuildTaskExecution, BuildTaskRunError> {
         if host != BuildTaskHost::Project
@@ -430,7 +442,7 @@ impl BuildTaskExecutor {
                 continue;
             }
             let value =
-                Self::execute_node(exec, fetcher, view, cache, &values, &node.kind, network)
+                Self::execute_node(exec, fetcher, view, cache, &values, &node.kind, runtime)
                     .await
                     .map_err(|message| BuildTaskRunError::Node {
                         id: node.id,
@@ -758,7 +770,7 @@ impl BuildTaskExecutor {
         cache: &mut ArtifactCache<C>,
         values: &[Option<TaskValue>],
         node: &TaskNodeKind,
-        network: NetworkPolicy,
+        runtime: TaskRuntime,
     ) -> Result<TaskValue, String> {
         match node {
             TaskNodeKind::HttpsUrl { value } => {
@@ -807,7 +819,8 @@ impl BuildTaskExecutor {
                     max_bytes,
                     namespace: CacheNamespace::BuildTaskArtifact,
                 };
-                let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec, network).await?;
+                let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec, runtime.network)
+                    .await?;
                 match kind {
                     TaskFetchKind::Jar => Ok(TaskValue::Jar(key)),
                     TaskFetchKind::Json => {
@@ -878,6 +891,15 @@ impl BuildTaskExecutor {
                         "projected JSON byte count is not an unsigned integer".to_owned()
                     })
                     .and_then(|value| {
+                        // The size comes from the fetched document, so an upstream that is
+                        // compromised or simply wrong could otherwise name a length that
+                        // exhausts memory long before any digest is checked.
+                        if value > runtime.max_fetch_bytes {
+                            return Err(format!(
+                                "projected JSON byte count {value} exceeds the {} byte fetch limit",
+                                runtime.max_fetch_bytes
+                            ));
+                        }
                         usize::try_from(value)
                             .map(TaskValue::ByteCount)
                             .map_err(|_| {
