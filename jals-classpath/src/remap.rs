@@ -22,9 +22,9 @@ use core::fmt::Write as _;
 use jals_classfile::{
     Annotation, Attribute, AttributeBody, ClassFile, ClassSignature, ClassTypeSignature,
     ConstantPool, ConstantPoolEntry, ElementValue, FieldInfo, FieldType, InnerClassEntry,
-    MethodDescriptor, MethodInfo, MethodSignature, RecordComponentInfo, ReturnType,
-    SimpleClassTypeSignature, ThrowsSignature, TypeAnnotation, TypeArgument, TypeParameter,
-    TypeSignature,
+    MethodAccessFlags, MethodDescriptor, MethodInfo, MethodSignature, RecordComponentInfo,
+    ReturnType, SimpleClassTypeSignature, ThrowsSignature, TypeAnnotation, TypeArgument,
+    TypeParameter, TypeSignature,
 };
 use jals_exec::Exec;
 use jals_storage::{ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest};
@@ -780,7 +780,7 @@ mod helpers {
 
         let mut pool = PoolInterner::new(&mut cf.constant_pool);
         for field in &mut cf.fields {
-            remap_field_decl(&mut pool, field, mappings, &official_owner, this_obf, index)?;
+            remap_field_decl(&mut pool, field, mappings, &official_owner)?;
         }
         for method in &mut cf.methods {
             remap_method_decl(
@@ -800,8 +800,6 @@ mod helpers {
         field: &mut FieldInfo,
         mappings: &Mappings,
         official_owner: &str,
-        this_obf: &str,
-        index: &ClassIndex,
     ) -> Result<(), String> {
         let Some(name_obf) = utf8_owned(pool, field.name_index) else {
             return Ok(());
@@ -809,13 +807,13 @@ mod helpers {
         let Some(desc_obf) = utf8_owned(pool, field.descriptor_index) else {
             return Ok(());
         };
-        let new_name = lookup_member(mappings, index, this_obf, &name_obf, &desc_obf, true)
-            .or_else(|| {
-                mappings
-                    .remap_field(official_owner, &name_obf, &desc_obf)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| name_obf.clone());
+        // A field declaration takes *this* class's mapping and no other. Fields are never
+        // overridden — a same-named field in a subclass hides the super's — so walking the
+        // hierarchy here would rename a synthetic like `this$0` or `$VALUES` to whatever a
+        // supertype happens to call a field with the same name and descriptor.
+        let new_name = mappings
+            .remap_field(official_owner, &name_obf, &desc_obf)
+            .map_or_else(|| name_obf.clone(), str::to_owned);
         let new_desc = remap_descriptor(&desc_obf, mappings);
         if new_name != name_obf {
             field.name_index = intern_utf8(pool, &new_name)?;
@@ -844,11 +842,21 @@ mod helpers {
         let new_name = if name_obf.starts_with('<') {
             name_obf.clone()
         } else {
-            lookup_member(mappings, index, this_obf, &name_obf, &desc_obf, false)
+            // This class's own mapping wins. Only fall back to a supertype's when the method could
+            // actually be an override that the mappings left out — a `private` or `static` method
+            // never overrides anything, so inheriting a supertype's name for one is always wrong
+            // (and would collide with the member it borrowed the name from).
+            let overridable = !method.access_flags.contains(MethodAccessFlags::PRIVATE)
+                && !method.access_flags.is_static();
+            mappings
+                .remap_method(official_owner, &name_obf, &desc_obf)
+                .map(str::to_owned)
                 .or_else(|| {
-                    mappings
-                        .remap_method(official_owner, &name_obf, &desc_obf)
-                        .map(str::to_owned)
+                    overridable
+                        .then(|| {
+                            lookup_member(mappings, index, this_obf, &name_obf, &desc_obf, false)
+                        })
+                        .flatten()
                 })
                 .unwrap_or_else(|| name_obf.clone())
         };
