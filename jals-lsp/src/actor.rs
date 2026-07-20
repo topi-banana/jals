@@ -776,8 +776,16 @@ impl Actor {
         let build_root = root.join("target/jals/build");
         let cache_root = root.join("target/jals/cache");
         let manifest = root.join("jals.toml");
+        // `NativeStorage` never snapshots `.git`, so a change there cannot affect analysis. The
+        // client watches `**/*` and VS Code's default excludes stop at `.git/objects`, so without
+        // this every `git status` / `git commit` writes `.git/index` and would trigger a full
+        // reassembly — re-running the build script for a change the workspace cannot even see.
+        let git_root = root.join(".git");
         let mut saw_refreshable_source = false;
         for (path, change_type) in changed {
+            if path.starts_with(&git_root) {
+                continue;
+            }
             if path.starts_with(&build_root) {
                 if *change_type == FileChangeType::DELETED {
                     return WatchedProjectAction::Reassemble;
@@ -928,13 +936,34 @@ impl Actor {
             let manifest_path = root.join("jals.toml");
             let assembled = match Manifest::from_file(&manifest_path).await {
                 Ok(manifest) => {
-                    AssembledWorkspace::assemble_with_blocked(
-                        &manifest,
-                        &root,
-                        exec,
-                        &blocked_files,
-                    )
-                    .await
+                    // Every other command path is wrapped in `catch_unwind`; this one is spawned
+                    // and detached, so a panic here would simply never send `WorkspaceReady`. The
+                    // slot then stays `Loading` (all queries silently degrade to single-file for
+                    // the rest of the session) or keeps a stale assembly whose rerun flag is never
+                    // cleared (no watcher event can ever reassemble it again). Turn a panic into
+                    // an ordinary failure so the slot always reaches a terminal state.
+                    let assemble =
+                        core::panic::AssertUnwindSafe(AssembledWorkspace::assemble_with_blocked(
+                            &manifest,
+                            &root,
+                            exec,
+                            &blocked_files,
+                        ));
+                    futures::FutureExt::catch_unwind(assemble)
+                        .await
+                        .unwrap_or_else(|_| {
+                            let message =
+                                format!("assembling project {} panicked", manifest_path.display());
+                            Err(WorkspaceAssemblyFailure {
+                                project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
+                                    DiagnosticSeverity::ERROR,
+                                    "project-assembly",
+                                    message.clone(),
+                                )],
+                                message,
+                                fallback: None,
+                            })
+                        })
                 }
                 Err(error) => {
                     let message = format!(
@@ -2472,6 +2501,29 @@ mod tests {
             Actor::watched_project_action(root, None, &[(cache, FileChangeType::DELETED)]),
             WatchedProjectAction::Ignore
         );
+    }
+
+    /// The client watches `**/*`, and VS Code's default excludes stop at `.git/objects`, so
+    /// `.git/index` and `.git/refs/**` reach the server. `NativeStorage` never snapshots `.git`,
+    /// so those writes cannot affect analysis — but classifying them as "unknown" made every
+    /// `git status` re-run the project's build script.
+    #[test]
+    fn git_metadata_writes_are_ignored() {
+        let root = Path::new("project");
+        for relative in [".git/index", ".git/refs/heads/main", ".git/HEAD"] {
+            let path = root.join(relative);
+            for change_type in [
+                FileChangeType::CREATED,
+                FileChangeType::CHANGED,
+                FileChangeType::DELETED,
+            ] {
+                assert_eq!(
+                    Actor::watched_project_action(root, None, &[(path.clone(), change_type)]),
+                    WatchedProjectAction::Ignore,
+                    "{relative} must not touch the workspace"
+                );
+            }
+        }
     }
 
     #[test]
