@@ -44,6 +44,7 @@ pub enum TaskValueKind {
     Digest,
     ByteCount,
     Json,
+    Text,
     Jar,
     SourceTree,
 }
@@ -71,6 +72,7 @@ impl TaskDigestAlgorithm {
 pub enum TaskFetchKind {
     Json,
     Jar,
+    Text,
 }
 
 /// One value-producing node in a task plan.
@@ -123,6 +125,22 @@ pub enum TaskNodeKind {
         jar: TaskId,
         prefix: String,
     },
+    NestedJar {
+        jar: TaskId,
+        member: String,
+    },
+    RemapJar {
+        jar: TaskId,
+        mappings: TaskId,
+    },
+    MergeJars {
+        base: TaskId,
+        overlay: TaskId,
+    },
+    DecompileJava {
+        jar: TaskId,
+        prefix: String,
+    },
 }
 
 impl TaskNodeKind {
@@ -138,11 +156,18 @@ impl TaskNodeKind {
             | Self::JsonAt { .. }
             | Self::JsonFindString { .. } => TaskValueKind::Json,
             Self::Fetch {
+                kind: TaskFetchKind::Text,
+                ..
+            } => TaskValueKind::Text,
+            Self::Fetch {
                 kind: TaskFetchKind::Jar,
                 ..
             }
-            | Self::ProjectJar { .. } => TaskValueKind::Jar,
-            Self::ExtractJava { .. } => TaskValueKind::SourceTree,
+            | Self::ProjectJar { .. }
+            | Self::RemapJar { .. }
+            | Self::MergeJars { .. }
+            | Self::NestedJar { .. } => TaskValueKind::Jar,
+            Self::ExtractJava { .. } | Self::DecompileJava { .. } => TaskValueKind::SourceTree,
         }
     }
 
@@ -167,7 +192,16 @@ impl TaskNodeKind {
             | Self::JsonUrl { json, .. }
             | Self::JsonDigest { json, .. }
             | Self::JsonU64 { json, .. } => vec![(*json, TaskValueKind::Json)],
-            Self::ExtractJava { jar, .. } => vec![(*jar, TaskValueKind::Jar)],
+            Self::ExtractJava { jar, .. } | Self::DecompileJava { jar, .. } => {
+                vec![(*jar, TaskValueKind::Jar)]
+            }
+            Self::NestedJar { jar, .. } => vec![(*jar, TaskValueKind::Jar)],
+            Self::RemapJar { jar, mappings } => {
+                vec![(*jar, TaskValueKind::Jar), (*mappings, TaskValueKind::Text)]
+            }
+            Self::MergeJars { base, overlay } => {
+                vec![(*base, TaskValueKind::Jar), (*overlay, TaskValueKind::Jar)]
+            }
         }
     }
 
@@ -181,14 +215,19 @@ impl TaskNodeKind {
             Self::HttpsUrl { value }
             | Self::ProjectJar { path: value }
             | Self::Digest { value, .. } => value.len(),
-            Self::ByteCount { .. } | Self::Fetch { .. } | Self::JsonU64 { .. } => 0,
+            Self::ByteCount { .. }
+            | Self::Fetch { .. }
+            | Self::JsonU64 { .. }
+            | Self::RemapJar { .. }
+            | Self::MergeJars { .. } => 0,
             Self::JsonAt { path, .. }
             | Self::JsonUrl { path, .. }
             | Self::JsonDigest { path, .. } => path.iter().map(String::len).sum(),
             Self::JsonFindString {
                 path, field, value, ..
             } => path.iter().map(String::len).sum::<usize>() + field.len() + value.len(),
-            Self::ExtractJava { prefix, .. } => prefix.len(),
+            Self::ExtractJava { prefix, .. } | Self::DecompileJava { prefix, .. } => prefix.len(),
+            Self::NestedJar { member, .. } => member.len(),
         }
     }
 }
@@ -215,6 +254,10 @@ pub enum TaskTerminal {
     AddClasspath {
         jar: TaskId,
     },
+    /// Expand every `.jar` member of `jar` onto the root classpath (used for library bundlers).
+    AddNestedClasspath {
+        jar: TaskId,
+    },
     PublishTree {
         owner: String,
         tree: TaskId,
@@ -226,7 +269,9 @@ pub enum TaskTerminal {
 impl TaskTerminal {
     const fn input(&self) -> (TaskId, TaskValueKind) {
         match self {
-            Self::AddClasspath { jar } => (*jar, TaskValueKind::Jar),
+            Self::AddClasspath { jar } | Self::AddNestedClasspath { jar } => {
+                (*jar, TaskValueKind::Jar)
+            }
             Self::PublishTree { tree, .. } => (*tree, TaskValueKind::SourceTree),
         }
     }
@@ -238,7 +283,7 @@ impl TaskTerminal {
 
     const fn literal_bytes(&self) -> usize {
         match self {
-            Self::AddClasspath { .. } => 0,
+            Self::AddClasspath { .. } | Self::AddNestedClasspath { .. } => 0,
             Self::PublishTree {
                 owner, destination, ..
             } => owner.len() + destination.len(),
@@ -375,8 +420,12 @@ impl TaskPlan {
             TaskNodeKind::ByteCount { value } if *value == 0 => {
                 return Err(TaskPlanError::InvalidByteCount);
             }
-            TaskNodeKind::ExtractJava { prefix, .. } => {
+            TaskNodeKind::ExtractJava { prefix, .. }
+            | TaskNodeKind::DecompileJava { prefix, .. } => {
                 Self::validate_path(prefix, limits, true)?;
+            }
+            TaskNodeKind::NestedJar { member, .. } => {
+                Self::validate_path(member, limits, false)?;
             }
             TaskNodeKind::JsonAt { path, .. }
             | TaskNodeKind::JsonFindString { path, .. }
@@ -387,7 +436,10 @@ impl TaskPlan {
                     return Err(TaskPlanError::InvalidJsonPath);
                 }
             }
-            TaskNodeKind::ByteCount { .. } | TaskNodeKind::Fetch { .. } => {}
+            TaskNodeKind::ByteCount { .. }
+            | TaskNodeKind::Fetch { .. }
+            | TaskNodeKind::RemapJar { .. }
+            | TaskNodeKind::MergeJars { .. } => {}
         }
         Ok(())
     }
@@ -492,6 +544,7 @@ handle!(UrlTask);
 handle!(DigestTask);
 handle!(ByteCountTask);
 handle!(JsonTask);
+handle!(TextTask);
 handle!(JarTask);
 handle!(SourceTreeTask);
 
@@ -657,6 +710,15 @@ impl TasksApi {
         Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Jar).map(JarTask)
     }
 
+    fn fetch_text(
+        api: &mut Self,
+        url: UrlTask,
+        digest: DigestTask,
+        max_bytes: ByteCountTask,
+    ) -> RhaiResult<TextTask> {
+        Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Text).map(TextTask)
+    }
+
     fn json_at(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<JsonTask> {
         api.push(TaskNodeKind::JsonAt {
             json: json.0.id,
@@ -744,8 +806,48 @@ impl TasksApi {
         .map(SourceTreeTask)
     }
 
+    fn nested_jar(api: &mut Self, jar: JarTask, member: ImmutableString) -> RhaiResult<JarTask> {
+        api.push(TaskNodeKind::NestedJar {
+            jar: jar.0.id,
+            member: member.into_owned(),
+        })
+        .map(JarTask)
+    }
+
+    fn remap_jar(api: &mut Self, jar: JarTask, mappings: TextTask) -> RhaiResult<JarTask> {
+        api.push(TaskNodeKind::RemapJar {
+            jar: jar.0.id,
+            mappings: mappings.0.id,
+        })
+        .map(JarTask)
+    }
+
+    fn merge_jars(api: &mut Self, base: JarTask, overlay: JarTask) -> RhaiResult<JarTask> {
+        api.push(TaskNodeKind::MergeJars {
+            base: base.0.id,
+            overlay: overlay.0.id,
+        })
+        .map(JarTask)
+    }
+
+    fn decompile_java(
+        api: &mut Self,
+        jar: JarTask,
+        prefix: ImmutableString,
+    ) -> RhaiResult<SourceTreeTask> {
+        api.push(TaskNodeKind::DecompileJava {
+            jar: jar.0.id,
+            prefix: prefix.into_owned(),
+        })
+        .map(SourceTreeTask)
+    }
+
     fn add_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
         api.terminal(TaskTerminal::AddClasspath { jar: jar.0.id })
+    }
+
+    fn add_nested_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
+        api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
     }
 
     fn publish_tree(
@@ -775,6 +877,7 @@ impl TasksApi {
             .register_type_with_name::<DigestTask>("DigestTask")
             .register_type_with_name::<ByteCountTask>("ByteCountTask")
             .register_type_with_name::<JsonTask>("JsonTask")
+            .register_type_with_name::<TextTask>("TextTask")
             .register_type_with_name::<JarTask>("JarTask")
             .register_type_with_name::<SourceTreeTask>("SourceTreeTask")
             .register_fn("https_url", Self::https_url)
@@ -784,6 +887,7 @@ impl TasksApi {
             .register_fn("bytes", Self::bytes)
             .register_fn("fetch_json", Self::fetch_json)
             .register_fn("fetch_jar", Self::fetch_jar)
+            .register_fn("fetch_text", Self::fetch_text)
             .register_fn("json_at", Self::json_at)
             .register_fn("json_find_string", Self::json_find_string)
             .register_fn("json_url", Self::json_url)
@@ -791,7 +895,12 @@ impl TasksApi {
             .register_fn("json_sha256", Self::json_sha256)
             .register_fn("json_u64", Self::json_u64)
             .register_fn("extract_java", Self::extract_java)
+            .register_fn("nested_jar", Self::nested_jar)
+            .register_fn("remap_jar", Self::remap_jar)
+            .register_fn("merge_jars", Self::merge_jars)
+            .register_fn("decompile_java", Self::decompile_java)
             .register_fn("add_classpath", Self::add_classpath)
+            .register_fn("add_nested_classpath", Self::add_nested_classpath)
             .register_fn("publish_tree", Self::publish_tree);
     }
 }

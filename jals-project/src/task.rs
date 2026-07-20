@@ -145,6 +145,7 @@ enum TaskValue {
     Digest(ExpectedDigest),
     ByteCount(usize),
     Json(Value),
+    Text(String),
     Jar(CacheKey),
     SourceTree(SourceTree),
 }
@@ -348,7 +349,7 @@ impl BuildTaskExecutor {
                 TaskTerminal::PublishTree {
                     owner, destination, ..
                 } => Some((script.to_string(), owner.clone(), destination.clone())),
-                TaskTerminal::AddClasspath { .. } => None,
+                TaskTerminal::AddClasspath { .. } | TaskTerminal::AddNestedClasspath { .. } => None,
             })
             .collect();
         declared.sort();
@@ -418,6 +419,15 @@ impl BuildTaskExecutor {
                             .clone(),
                     );
                 }
+                TaskTerminal::AddNestedClasspath { jar } => {
+                    let parent = Self::jar(&values, *jar)
+                        .map_err(BuildTaskRunError::Terminal)?
+                        .clone();
+                    let nested = jals_classpath::NestedJar::extract_all(exec, cache, &parent)
+                        .await
+                        .map_err(BuildTaskRunError::Terminal)?;
+                    output.classpath.extend(nested);
+                }
                 TaskTerminal::PublishTree {
                     owner,
                     tree,
@@ -454,7 +464,7 @@ impl BuildTaskExecutor {
             .iter()
             .filter_map(|terminal| match terminal {
                 TaskTerminal::PublishTree { destination, .. } => Some(destination),
-                TaskTerminal::AddClasspath { .. } => None,
+                TaskTerminal::AddClasspath { .. } | TaskTerminal::AddNestedClasspath { .. } => None,
             })
             .map(|destination| {
                 DirKey::parse(destination).map_err(|error| {
@@ -780,6 +790,16 @@ impl BuildTaskExecutor {
                             .map(TaskValue::Json)
                             .map_err(|error| format!("invalid JSON response: {error}"))
                     }
+                    TaskFetchKind::Text => {
+                        let bytes = cache
+                            .lookup_bounded(&key, max_bytes)
+                            .await
+                            .map_err(|error| format!("cached text is invalid: {error:?}"))?
+                            .ok_or_else(|| "cached text disappeared".to_owned())?;
+                        String::from_utf8(bytes)
+                            .map(TaskValue::Text)
+                            .map_err(|error| format!("fetched text is not UTF-8: {error}"))
+                    }
                 }
             }
             TaskNodeKind::JsonAt { json, path } => Self::json_at(Self::json(values, *json)?, path)
@@ -840,6 +860,44 @@ impl BuildTaskExecutor {
                 let prefix = RelativePath::parse(prefix)
                     .map_err(|error| format!("invalid extraction prefix: {error:?}"))?;
                 SourceTreeExtraction::java(
+                    exec,
+                    cache,
+                    &jar,
+                    &prefix,
+                    SourceTreeLimits {
+                        max_files: 100_000,
+                        max_file_bytes: 16 * 1_048_576,
+                        max_total_bytes: 1_024 * 1_048_576,
+                    },
+                )
+                .await
+                .map(TaskValue::SourceTree)
+            }
+            TaskNodeKind::NestedJar { jar, member } => {
+                let jar = Self::jar(values, *jar)?.clone();
+                jals_classpath::NestedJar::extract(exec, cache, &jar, member)
+                    .await
+                    .map(TaskValue::Jar)
+            }
+            TaskNodeKind::RemapJar { jar, mappings } => {
+                let jar = Self::jar(values, *jar)?.clone();
+                let mappings = Self::text(values, *mappings)?;
+                jals_classpath::JarRemap::remap(exec, cache, &jar, mappings)
+                    .await
+                    .map(TaskValue::Jar)
+            }
+            TaskNodeKind::MergeJars { base, overlay } => {
+                let base = Self::jar(values, *base)?.clone();
+                let overlay = Self::jar(values, *overlay)?.clone();
+                jals_classpath::JarMerge::merge(exec, cache, &base, &overlay)
+                    .await
+                    .map(TaskValue::Jar)
+            }
+            TaskNodeKind::DecompileJava { jar, prefix } => {
+                let jar = Self::jar(values, *jar)?.clone();
+                let prefix = RelativePath::parse(prefix)
+                    .map_err(|error| format!("invalid decompile prefix: {error:?}"))?;
+                SourceTreeExtraction::decompile(
                     exec,
                     cache,
                     &jar,
@@ -917,6 +975,13 @@ impl BuildTaskExecutor {
         match Self::value(values, id)? {
             TaskValue::Json(value) => Ok(value),
             _ => Err("task input is not JSON".to_owned()),
+        }
+    }
+
+    fn text(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
+        match Self::value(values, id)? {
+            TaskValue::Text(value) => Ok(value),
+            _ => Err("task input is not text".to_owned()),
         }
     }
 
