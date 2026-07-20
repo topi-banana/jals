@@ -27,6 +27,9 @@ use crate::task::{TaskPlan, TaskPlanLimits};
 const BUILD_SCRIPT_API_VERSION: u32 = 4;
 const BUILD_SCRIPT_STATE_VERSION: u32 = 4;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
+/// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
+/// dependencies. All of it is derived, so none of it is an input to a script's fingerprint.
+const MANAGED_ROOT: &str = "target/jals";
 const MANIFEST_FILE: &str = "jals.toml";
 
 /// Project directory reserved for all Rhai build-script artifacts.
@@ -903,7 +906,7 @@ mod api {
         BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptOutputPath,
         BuildScriptPosition, BuildScriptSession, BuildScriptStateWire, CacheIdentity,
         DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire,
-        FingerprintFilesModeWire, FingerprintInputsWire, MANIFEST_FILE, OutputApi,
+        FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT, MANIFEST_FILE, OutputApi,
         OutputArtifactWire, PendingOutput, PreparedBuildScript, PreparedCacheState, ProjectApi,
         RHAI_OUTPUT_ROOT,
     };
@@ -1703,6 +1706,14 @@ mod api {
         strictly_sorted(values).then(|| values.iter().cloned().collect())
     }
 
+    /// The inputs a script declared with `rerun_if_changed` / `rerun_if_env_changed`. Empty means
+    /// it declared none, and the fingerprint falls back to the whole project.
+    #[derive(Clone, Copy)]
+    struct DeclaredInputs<'a> {
+        files: &'a BTreeSet<FileKey>,
+        env: &'a BTreeSet<String>,
+    }
+
     fn fingerprint_digest(inputs: &FingerprintInputsWire) -> Option<ContentDigest> {
         serde_json::to_vec(inputs)
             .ok()
@@ -1711,25 +1722,40 @@ mod api {
 
     fn fingerprint_inputs(
         view: &ProjectView,
+        build: &jals_config::Build,
         cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
-        rerun_files: &BTreeSet<FileKey>,
-        rerun_env: &BTreeSet<String>,
+        declared: DeclaredInputs<'_>,
     ) -> Option<FingerprintInputsWire> {
+        let DeclaredInputs {
+            files: rerun_files,
+            env: rerun_env,
+        } = declared;
         let script_digest = ContentDigest::of(view.file(script).ok()?.bytes()).to_hex();
         let manifest = FileKey::parse(MANIFEST_FILE).ok()?;
         let manifest_digest = view
             .tree()
             .file(&manifest)
             .map(|file| ContentDigest::of(file.bytes()).to_hex());
-        let build_root = DirKey::parse(BUILD_ARTIFACT_ROOT).ok()?;
+        // A script that declares no inputs is fingerprinted over the whole project, so every
+        // derived directory has to be excluded or the fingerprint changes on each build and the
+        // cache never hits. Compiling writes `classes-dir`, and `target/jals` holds build
+        // artifacts, the verified cache, and acquired dependencies.
+        let managed_root = DirKey::parse(MANAGED_ROOT).ok()?;
+        let classes_dir = DirKey::parse(&build.classes_dir).ok();
+        let derived = |key: &FileKey| {
+            key.path().starts_with(managed_root.path())
+                || classes_dir
+                    .as_ref()
+                    .is_some_and(|dir| key.path().starts_with(dir.path()))
+        };
         let (files_mode, files) = if rerun_files.is_empty() {
             let files = view
                 .tree()
                 .files()
-                .filter(|file| !file.key().path().starts_with(build_root.path()))
+                .filter(|file| !derived(file.key()))
                 .map(|file| FileFingerprintWire {
                     path: file.key().to_string(),
                     digest: Some(ContentDigest::of(file.bytes()).to_hex()),
@@ -2031,6 +2057,7 @@ mod api {
     async fn load_cached_build_script<C: CacheBackend>(
         cache: &ArtifactCache<C>,
         view: &ProjectView,
+        build: &jals_config::Build,
         cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         environment: &BuildScriptEnvironment,
@@ -2050,12 +2077,15 @@ mod api {
         let state = decode_state(&state_bytes, cache_scope, script)?;
         let current_fingerprint = fingerprint_inputs(
             view,
+            build,
             cache_scope,
             script,
             environment,
             limits,
-            &state.rerun_files,
-            &state.rerun_env,
+            DeclaredInputs {
+                files: &state.rerun_files,
+                env: &state.rerun_env,
+            },
         )
         .and_then(|inputs| fingerprint_digest(&inputs));
         let fingerprint_matches = current_fingerprint == Some(state.fingerprint);
@@ -2239,6 +2269,7 @@ mod api {
 
     fn prepare_cache_state(
         view: &ProjectView,
+        build: &jals_config::Build,
         cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         environment: &BuildScriptEnvironment,
@@ -2247,12 +2278,15 @@ mod api {
     ) -> Result<PreparedCacheState, String> {
         let inputs = fingerprint_inputs(
             view,
+            build,
             cache_scope,
             script,
             environment,
             limits,
-            &pending.rerun_files,
-            &pending.rerun_env,
+            DeclaredInputs {
+                files: &pending.rerun_files,
+                env: &pending.rerun_env,
+            },
         )
         .ok_or_else(|| "could not collect post-build fingerprint inputs".to_owned())?;
         let fingerprint = fingerprint_digest(&inputs)
@@ -2346,9 +2380,16 @@ mod api {
                 error,
             })?;
         let mut recovered_outputs = BTreeMap::new();
-        if let Some(cached) =
-            load_cached_build_script(cache, view, cache_scope, &script_key, environment, limits)
-                .await
+        if let Some(cached) = load_cached_build_script(
+            cache,
+            view,
+            &manifest.build,
+            cache_scope,
+            &script_key,
+            environment,
+            limits,
+        )
+        .await
         {
             if cached.fingerprint_matches && cached.outputs_complete {
                 return Ok(Some(PreparedBuildScript {
@@ -2435,6 +2476,7 @@ mod api {
 
         let cache_state = prepare_cache_state(
             view,
+            &manifest.build,
             cache_scope,
             &script_key,
             environment,
@@ -2654,6 +2696,57 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
+        });
+    }
+
+    /// A script that declares no inputs is fingerprinted over the whole project. Derived
+    /// directories have to stay out: compiling writes `classes-dir`, so including it meant the
+    /// fingerprint changed on every build and the cache never hit again after the first compile.
+    #[test]
+    fn derived_directories_stay_out_of_the_fingerprint() {
+        block_on_inline(async {
+            let script = r#"output.write_text("g.txt", "generated");"#;
+            let mut storage = storage(script, []);
+            let scope = BuildScriptCacheScope::ROOT;
+            let environment = BuildScriptEnvironment::new();
+
+            let first = prepare(&storage, scope, &environment).await;
+            first.persist(storage.artifacts_mut()).await.unwrap();
+            let (_, state) = current_state_in_scope(&storage, scope).await;
+            let before: BuildScriptStateWire = serde_json::from_slice(&state).unwrap();
+
+            // Everything a build leaves behind: compiler output and the managed root.
+            let revision = storage.revision();
+            let mut transaction = storage.transaction(revision).unwrap();
+            transaction
+                .create_file(
+                    FileKey::parse("target/classes/Main.class").unwrap(),
+                    b"x".to_vec(),
+                )
+                .unwrap()
+                .create_file(
+                    FileKey::parse("target/jals/deps/dep.jar").unwrap(),
+                    b"y".to_vec(),
+                )
+                .unwrap();
+            transaction.commit().await.unwrap();
+
+            let second = prepare(&storage, scope, &environment).await;
+            second.persist(storage.artifacts_mut()).await.unwrap();
+            let (_, state) = current_state_in_scope(&storage, scope).await;
+            let after: BuildScriptStateWire = serde_json::from_slice(&state).unwrap();
+
+            assert_eq!(
+                before.fingerprint, after.fingerprint,
+                "build output must not invalidate the fingerprint"
+            );
+            let paths: Vec<_> = after
+                .fingerprint_inputs
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect();
+            assert_eq!(paths, vec!["build.rhai"]);
         });
     }
 
