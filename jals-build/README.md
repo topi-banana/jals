@@ -39,14 +39,20 @@ The optional `rhai` feature adds [`execute_build_script`](#rhai-build-scripts). 
 storage and its verified artifact cache, and builds for `wasm32-unknown-unknown`. The browser
 playground uses that exact configuration.
 
+Transitive project discovery is deliberately a deeper layer in `jals-project`, not this planner.
+It discovers stable path/Git/JAR graph nodes, preprocesses every unique node dependency-first, and
+projects only verified source/classpath artifacts back into the already-resolved inputs consumed
+here. This keeps command planning independent of graph acquisition and preserves the portable
+`jals-build` boundary.
+
 ## What it does today
 
 Four subcommands are wired through `jals-cli`:
 
 | Command | Backed by | What it does | Flags |
 | --- | --- | --- | --- |
-| `jals build` | `execute_build_script` + `Invocation::build` | Run the optional pre-build script, discover `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
-| `jals run` | `execute_build_script` + `RunTarget::resolve` + invocations | Run the pre-build phase, compile, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
+| `jals build` | `execute_build_script` + `jals-project` + `Invocation::build` | Run the root pre-build script, preprocess the transitive dependency graph, discover `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
+| `jals run` | `execute_build_script` + `jals-project` + `RunTarget::resolve` + invocations | Run the root and dependency pre-build phases, compile the complete source graph, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
 | `jals clean` | `CleanTargets::keys` | Remove `classes-dir` and `target/jals/build`, including stale outputs after a script is removed. A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
 | `jals init [PATH]` | `InitOptions::scaffold` | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`. | `--name <NAME>` |
 
@@ -61,9 +67,10 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
   generated sources permit an otherwise absent or empty ordinary source root. Sources are passed to
   `javac` last, in sorted order.
 - **`--dry-run`** prints the exact command(s) (via `Invocation::display_command`, which quotes
-  whitespace) and exits without compiling/running/deleting. A configured build script still runs
-  and publishes its storage output because its directives are needed to plan that exact command.
-  `-v`/`--verbose` prints the same command(s) and then runs them.
+  whitespace) and exits without compiling/running/deleting. A configured root script still runs and
+  reconciles its storage output, and dependency scripts still prepare verified artifacts, because
+  those registrations are needed to plan that exact command. `-v`/`--verbose` prints the same
+  command(s) and then runs them.
 - **JDK tool resolution** — the `SubprocessToolchain` (the crate's default-on `native` feature)
   selects `javac`/`java` per the manifest's [`[toolchain]`](#toolchain): the `$JAVAC`/`$JAVA` override
   first, then the `[toolchain] compiler`/`runtime` selection (an explicit path, or a
@@ -116,10 +123,13 @@ main-class = "com.example.Main"   # entry point for `jals run` (used only when n
 [dependencies]
 # A local jar (file:// URL or a bare path relative to the manifest dir):
 guava = { jar = "libs/guava.jar" }
-# A remote jar, downloaded into target/jals/deps and cached:
+# A remote jar, downloaded into the verified artifact cache:
 junit = { jar = "https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar" }
 # An optional companion sources jar enables go-to-definition into the library's real .java source:
 gson = { jar = "https://example.com/gson-2.11.jar", sources = "https://example.com/gson-2.11-sources.jar" }
+# Source projects can be local or Git-backed and are discovered transitively:
+shared = { path = "../shared" }
+core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ```
 
 ### `[package]`
@@ -166,18 +176,17 @@ assert_eq!(script.tag_name(), "rhai");
 ```
 
 `file` must be a non-root portable project-relative file path outside both `[build] classes-dir`
-and the managed `target/jals/build` tree, since `jals clean` removes both. The CLI executes it before
-source discovery and `javac` for both `build` and `run`. The LSP executes it while assembling a
-project, so generated Java and classpath entries participate in diagnostics, navigation, hover, and completion;
-failures are attached to the script document and ordinary project analysis continues. The browser
-playground exposes editable `jals.toml` and `build.rhai` buffers and runs the same engine entirely in
-WebAssembly. It uses generated source/classpath for analysis but, like the LSP, does not run
-`javac`/`java`.
+and the managed `target/jals/build` tree, since `jals clean` removes both. The CLI executes the root
+project's script before source discovery and `javac` for both `build` and `run`. Its complete output
+retains the existing root semantics: generated files are reconciled into root storage, and
+registered sources/classpath plus `javac`/JVM arguments and compile/run environment entries affect
+the later command. The LSP and playground run that same root adapter for analysis but do not spawn
+`javac`/`java`; root script failures are diagnosed and ordinary root analysis continues.
 
-The runner receives a `ProjectStorage` aggregate rather than a host path. It evaluates against one
-immutable `ProjectView`, buffers generated files and directives, then commits files in one
-revision-checked transaction only after successful evaluation. Scripts get exactly three scope
-objects:
+The root adapter receives a `ProjectStorage` aggregate rather than a host path. It evaluates against
+one immutable `ProjectView`, buffers generated files and directives, then commits files in one
+revision-checked transaction only after successful evaluation. Immutable dependency preparation
+uses the same evaluator without that source-storage commit. Scripts get exactly three scope objects:
 
 | Object | Method | Effect |
 | --- | --- | --- |
@@ -219,17 +228,25 @@ For CLI builds, `build.env` sees a snapshot of the host environment plus `OUT_DI
 `target/jals/build/rhai/out`), `JALS_MANIFEST_DIR` (`.`), and the optional
 `JALS_PACKAGE_NAME`/`JALS_PACKAGE_VERSION`. The fixed values replace same-named host entries. The LSP
 and playground deliberately supply only those fixed project values, not their host/browser
-environment. `set_compile_env`/`set_run_env` contribute entries to the eventual CLI subprocesses;
-the LSP/playground do not apply process-only flag/environment directives because they spawn no JDK
-tools.
+environment. For the root script, `set_compile_env`/`set_run_env` contribute entries to the eventual
+CLI subprocesses; dependency process directives remain node-local. The LSP/playground do not apply
+process-only flag/environment directives because they spawn no JDK tools.
 
-Script `javac` arguments follow manifest `javac-flags` and remain before source paths. Script JVM
-arguments precede `-cp`. Manifest classpath entries come first; script and resolved dependency
-entries are stably deduplicated while preserving their first-occurrence order. Added sources are compiled with
-ordinary project and source-dependency sources. Warnings are surfaced by each host. `build.error`, a
-Rhai compile/evaluation error, a bad path, or a limit violation publishes no partial generated
-output. Metadata is available in `BuildScriptOutput` for host integrations and is not otherwise
-interpreted by `javac` or `java`.
+Root-script `javac` arguments follow manifest `javac-flags` and remain before source paths. Root JVM
+arguments precede `-cp`. Manifest classpath entries come first; root-script and resolved dependency
+entries are stably deduplicated while preserving their first-occurrence order. Added sources compile
+with ordinary project and source-dependency sources. Warnings are surfaced by each host.
+`build.error`, a Rhai compile/evaluation error, a bad path, or a limit violation publishes no partial
+generated output. Metadata is available in `BuildScriptOutput` for host integrations and is not
+otherwise interpreted by `javac` or `java`.
+
+Manifest-backed source dependencies use the lower-level immutable preparation API instead. The
+project graph invokes every unique binary, legacy-source, and JALS-source node unconditionally in
+dependency-first order (the first two are no-ops). A dependency script exports only paths explicitly
+registered with `build.add_source` and `build.add_classpath`. Its `javac`/JVM arguments, compile/run
+environment, and metadata remain node-local and never propagate to a parent or root invocation.
+Generated bytes are read from the immutable preparation result and published as node-scoped,
+digest-verified artifacts; the dependency source snapshot and its host tree are never mutated.
 
 #### Fingerprints, cache, and clean
 
@@ -238,6 +255,10 @@ read back through digest-verified lookups. The native adapter persists them unde
 `target/jals/cache`; memory hosts retain them in their aggregate. A fingerprint covers the API/state
 versions, script path and bytes, `jals.toml`, limits, tracked project bytes, and declared environment
 values. A matching cache hit restores outputs and all directives without evaluating Rhai.
+
+The root uses the distinguished `BuildScriptCacheScope::ROOT`; each dependency uses a scope derived
+from its stable graph node identity. Identical `build.rhai` and output paths in two dependencies
+therefore cannot collide in cache state or generated artifacts.
 
 If the script calls no `rerun_if_changed`, the conservative default fingerprints every project file
 except `target/jals/build/**`. Calling it at least once narrows project-file tracking to the declared
@@ -263,11 +284,12 @@ or randomness. Project reads and output writes go only through validated storage
 cannot escape the dedicated root. Module loading, Rhai time support, custom syntax, `print`, and
 `debug` do not provide host capabilities (`print`/`debug` output is discarded).
 
-Compiler/JVM arguments, classpath entries, and compile/run environment directives are inert during
-the Rhai phase, but intentionally affect the later JDK subprocess started by an explicit CLI
-`build`/`run`. They can enable compiler plugins, annotation processors, agents, or other JDK
-features, so build scripts remain trusted project code rather than a security boundary for the
-subsequent compiler process. The LSP and playground never spawn that process.
+For the root project, compiler/JVM arguments, classpath entries, and compile/run environment
+directives are inert during the Rhai phase but intentionally affect the later JDK subprocess started
+by an explicit CLI `build`/`run`. They can enable compiler plugins, annotation processors, agents,
+or other JDK features, so root build scripts remain trusted project code rather than a security
+boundary for the subsequent compiler process. Dependency process directives do not propagate. The
+LSP and playground never spawn that process.
 
 Default limits include 1 MiB script source, 1,000,000 operations, 1,024 variables, 256 functions,
 32 nested calls, expression depths of 64/32, 1 MiB strings, 65,536-item arrays, 4,096-entry maps,
@@ -348,18 +370,18 @@ Once any `[[bin]]` exists, `[run] main-class` is ignored for selection. Duplicat
 ### `[dependencies]`
 
 A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Each entry picks exactly
-one **primary form** — `jar` (compiled classes), `git` (a checked-out source repo), or `path` (a local
-source tree) — plus form-specific options:
+one **primary form** — `jar` (compiled classes), `git` (a checked-out project repository), or `path`
+(a local project root) — plus form-specific options:
 
 | Key | Type | Form | Maps to |
 | --- | --- | --- | --- |
 | `jar` | string | jar | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir) |
 | `sources` | string | jar | *optional* companion **sources** `.jar` (the library's `.java`), located like `jar`. Editor go-to-definition only — never a compile or analysis input |
 | `recursive` | bool | jar | *optional* (default `false`) — recursively unpack the jar's **bundled jars** (`*.jar` members nested inside it, as in a fat jar's `BOOT-INF/lib/*.jar`) onto the classpath, at any depth |
-| `git` | string | git | a repository URL to clone for its `.java` source |
+| `git` | string | git | a project repository URL to clone |
 | `branch` / `tag` / `rev` | string | git | *optional*, **at most one** — which commit to check out (default: the repo's default branch) |
-| `path` | string | path | a local directory tree of `.java` source (relative to the manifest dir) |
-| `dir` | string | git, path | *optional* source root **within** the repo/dir (e.g. `core/src/main/java`); omit to auto-detect (`src/main/java` → `src` → the root) |
+| `path` | string | path | a local project root (relative to the manifest dir) |
+| `dir` | string | git, path | *optional* selected **project root** within the repository/path (e.g. `core`). Manifest probing and all child-relative paths start there. |
 
 ```toml
 [dependencies]
@@ -373,55 +395,66 @@ app   = { jar = "libs/app-all.jar", recursive = true }
 # Source directly from a git repo (pin with branch/tag/rev), or a local checkout:
 mylib = { git = "https://github.com/owner/mylib", tag = "v1.2" }
 local = { path = "../sibling-lib" }
-# A non-standard layout names its source root explicitly:
-core  = { git = "https://github.com/owner/mono", rev = "abc123", dir = "core/src/main/java" }
+# A monorepo dependency selects the project root whose exact jals.toml should be probed:
+core  = { git = "https://github.com/owner/mono", rev = "abc123", dir = "core" }
 ```
 
 A **`jar`** dependency is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via
 `jals-classpath`) and folded into the classpath for both **analysis** (`jals lint`, the LSP) and
 **compilation** (`jals build`/`run` add it to `javac`/`java`'s `-classpath`). Remote jars are
-downloaded once into `target/jals/deps` and cached. With **`recursive = true`** the host also unpacks
-the jar's **bundled jars** — the `*.jar` members a fat jar nests inside itself (e.g. a Spring-Boot
-layout's `BOOT-INF/lib/*.jar`), which the classpath loader otherwise skips — into
-`target/jals/deps/nested`, recursively (a jar-in-jar-in-jar resolves too), and adds them to the same
-classpath, so the bundled libraries are available for both analysis and compilation. Its optional
-`sources` jar is purely an **editor** aid: `jals-lsp` extracts the `.java` into
-`target/jals/deps/sources` and points go-to-definition at the real declaration; never a compile or
+downloaded into the SHA-256 verified artifact cache. With **`recursive = true`** the host also
+unpacks the jar's **bundled jars** — the `*.jar` members a fat jar nests inside itself (e.g. a
+Spring-Boot layout's `BOOT-INF/lib/*.jar`) — recursively into verified artifacts and adds them to the
+same classpath. Its optional `sources` jar is purely an **editor** aid: `jals-lsp` stages its `.java`
+from the cache and points go-to-definition at the real declaration; it is never a compile or
 analysis classpath input. When a jar ships **no** `sources` jar, `jals-lsp` still makes
-go-to-definition work: it decompiles a `.java` **skeleton** from each classpath `.class` (every type
-and member declaration, with increasingly real method bodies reconstructed from the bytecode) into
-`target/jals/deps/decompiled` and navigates there — so jump-to-definition lands on a declaration for
-*any* library type, with a real `sources` jar taking precedence when present. The decompiled output
-is always valid Java (an un-reconstructable method falls back to a safe placeholder body rather than
-emit broken source). (Editor-only; never a compile or `lint` input.)
+go-to-definition work by staging a decompiled `.java` skeleton from each classpath `.class`. The
+decompiled output is editor-only, never a compile or `lint` input, and a real `sources` jar takes
+precedence.
 
-A **`git`** / **`path`** dependency supplies `.java` **source** directly. The host clones each git repo
-(into `target/jals/deps/git`, the requested ref checked out) or reads each path in place, locates its
-`.java` source root, and uses those `.java` two ways:
+A **`git`** / **`path`** dependency selects a source-project root: the declared path or Git checkout,
+followed by `dir` when present. `jals-project` probes only `<selected-root>/jals.toml`; it never
+searches upward. An exact manifest makes the node a JALS project, so its own dependencies are
+discovered transitively and its `[build] source-dirs`, `[build] classpath`, JAR locators, and child
+path/Git locators resolve relative to that selected root. A missing manifest keeps the legacy source
+convention (`src/main/java`, then `src`, then the selected root). A present but malformed manifest and
+a dependency cycle are structural errors; `jals build`/`run` fail before `javac` rather than silently
+falling back to legacy discovery.
 
-- **compilation** (`jals build`/`run`): the located `.java` are passed to `javac` as additional
-  sources, compiled alongside the project's own into the `[build] classes-dir` — so a project that
-  depends on a source dependency builds and runs. (The dependency's `.class` land in `classes-dir`,
-  already first on the run classpath, so `jals run` needs nothing extra.)
-- **editor analysis + navigation** (`jals-lsp`): the same `.java` are folded into the LSP index as
-  library-source types, so references resolve for inference, hover, completion, and go-to-definition
-  lands in the real source.
+Stable node identities deduplicate diamonds independently of dependency aliases. Native path nodes
+use their stable selected location; Git nodes use repository identity, checked-out commit, and
+selected directory, not a temporary checkout path. Discovery snapshots each source node, runs every
+unique node's preprocessing transition exactly once in dependency-first order, and then projects its
+authored sources, registered generated sources, declared classpath, and JAR dependencies into
+node-scoped verified artifacts. Temporary Git checkouts are discarded after capture; no dependency
+source tree is used as an output directory or otherwise mutated.
 
-They are **not** a `jals lint` input, so a `jals lint` run may report unresolved types for code that
-uses a source dependency even though `jals build` compiles it.
+- **Compilation** (`jals build`/`run`) materializes the verified artifacts, passes all transitive
+  source files to `javac`, and places transitive JAR/declared classpath entries on both compile and run
+  classpaths.
+- **Lint** resolves the transitive binary and declared-classpath graph for root-file analysis, but
+  continues to lint only the source files requested by the command.
+- **LSP** indexes transitive source artifacts for inference, hover, completion, navigation, and
+  references. A hard graph error is diagnosed on the root `jals.toml`, then analysis falls back to
+  the root project without dependencies; local path roots are watched for reassembly.
+- **Playground** uses the portable `MemoryProjectGraph` over one captured in-memory `CodeTree`, so
+  path projects inside that tree and their scripts work without host paths. Browser hosts cannot
+  clone Git dependencies: each such entry produces a warning and is omitted. Remote JAR fetching is
+  separate and remains available through the browser fetch adapter.
 
 A malformed entry is rejected when the manifest loads, in two stages. `Dependency` is a
 `#[serde(untagged)]` enum whose `Jar`/`Git`/`Path` variants each `deny_unknown_fields`, so the
 **structural** errors — more than one primary form (`{ jar, git }`), no form at all (`{}`), or a field
 misplaced for its form (`branch` without `git`, `sources` with `git`) — match no variant and fail at
 **parse** time (a TOML error). The remaining **value-level** errors — an empty value, an unknown URL
-scheme, conflicting git refs (`branch` + `tag`) — are caught by `Manifest::validate`. A *runtime*
-failure (a download/clone error, a local jar/dir that does not exist) is a best-effort warning that
-skips just that dependency, never aborting. `jals-build` itself only *classifies* each spec
+scheme, conflicting git refs (`branch` + `tag`) — are caught by `Manifest::validate`. A runtime
+acquisition failure (a download/clone error, a local jar/dir that does not exist) is reported as a
+warning where recovery is possible and skips that input. `jals-build` itself only *classifies* each spec
 (`Manifest::dependency_sources` → `DependencySource`, `dependency_source_jars` → the `sources` jar,
 `dependency_source_dirs` → `SourceDependency::{Git, Path}`), staying pure — it performs no I/O.
-Maven-coordinate resolution (`group:artifact:version` + transitive download + lockfile) is still future
-work (see the roadmap §3).
+This implemented transitive JALS source-project graph is distinct from Maven-coordinate resolution:
+POM traversal, coordinate version selection, transitive Maven downloads, and `jals.lock` are still
+future work (see roadmap §3).
 
 ## Usage
 
@@ -462,9 +495,9 @@ impl InitOptions {
 ```
 
 `Invocation { program, args }` is a resolved command line as pure data; `display_command()`
-renders it for `--dry-run`/`-v`. A `CompileRequest` carries an `extra_sources` list — the
-`git`/`path` source deps' `.java`, appended after `sources` — and both requests carry an
-`extra_classpath` of already-resolved jar paths (the host's resolved `[dependencies]` jars),
+renders it for `--dry-run`/`-v`. A `CompileRequest` carries an `extra_sources` list — the project
+graph's verified transitive source artifacts, appended after `sources` — and both requests carry
+already-resolved classpath entries in `extra_classpath`,
 appended after the `[build] classpath` entries on `javac`/`java`'s `-classpath`; the classpath
 separator is supplied by the backend planning the command (the requests stay tool-agnostic).
 `RunTarget::resolve`
@@ -472,11 +505,19 @@ picks the `main-class` `jals run` should execute from `[[bin]]`/`default-run`/`[
 `InitOptions { name }.scaffold()` (for `jals init`) and `CleanTargets::keys` (for `jals clean`)
 round out the pure planning surface.
 
-With the `rhai` feature, the async `execute_build_script(storage, manifest, environment, limits,
-session)` function is the portable execution entry point. It returns `Ok(None)` when no script is
-configured or a `BuildScriptOutput` containing the committed revision, generated/source/classpath
-keys, process directives, diagnostics, rerun inputs, and metadata. `BuildScriptSession` carries
-aggregate-local verified output ownership between calls.
+With the `rhai` feature, `prepare_build_script(view, cache, cache_scope, manifest, environment,
+limits)` is the immutable execution/cache seam. It returns `Ok(None)` when no script is configured,
+or a `PreparedBuildScript` whose `output(revision)` exposes registrations/directives,
+`file_bytes(view, key)` resolves generated or existing registered files, and `persist(cache)`
+publishes generated bytes and state write-once. Preparation itself only reads the immutable view and
+verified cache: it never reconciles files, mutates a source backend, or publishes artifacts. Callers
+must use `BuildScriptCacheScope::ROOT` for the root and a stable, distinct scope for each dependency.
+
+`execute_build_script(storage, manifest, environment, limits, session)` is the root-project adapter
+over preparation. It atomically reconciles generated files into root storage, preserves all process
+directives, updates `BuildScriptSession` ownership, and then persists the cache. Dependency graph
+hosts instead consume only registered source/classpath bytes from `PreparedBuildScript` and publish
+them under the node identity without reconciling the dependency snapshot.
 
 The `ManifestExt` trait (`jals-build`'s host-side extension of `jals_config::Manifest`) adds the
 path-resolving half: `Manifest::from_file` loads, parses, and validates (`Manifest::validate`, an
@@ -491,12 +532,11 @@ each `git`/`path` entry into a `SourceDependency::{Git, Path}` (`jals_config::De
 the classification — a `#[serde(untagged)]` enum of `Jar`/`Git`/`Path` variants, each
 `deny_unknown_fields`, so serde picks the form at parse time and rejects co-occurring/missing/misplaced
 forms as a parse error; `manifest_ext.rs`'s private `DependencySource::{from_jar, from_sources}` /
-`SourceDependency::from_dependency` classifiers back the three `ManifestExt` methods above); the host
-(`jals_classpath::ProjectInputs::assemble`) resolves project bytes and external locators into a
-verified `ArtifactCache`, so `jals lint` / the LSP / `jals build` see external library types from
-named `jar` dependencies, and `jals-lsp` additionally extracts the `sources` jars and folds each
-`git`/`path` source tree into its index for go-to-definition into (and analysis of references to) library
-source.
+`SourceDependency::from_dependency` classifiers back the three `ManifestExt` methods above). The
+deeper recursive host is `jals-project`: `NativeProjectGraph` or `MemoryProjectGraph` discovers a
+`ResolvedProjectGraph`, `preprocess` consumes it into the only state that permits `assemble`, and
+assembly publishes artifact-only inputs for `jals_classpath::ProjectInputs`. The native adapter also
+returns typed compile-classpath artifacts for CLI materialization and path roots for LSP watching.
 
 ## Development
 
@@ -505,6 +545,8 @@ cargo test -p jals-build --all-features
 cargo clippy -p jals-build --all-targets --all-features -- -D warnings
 cargo check -p jals-build --no-default-features
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
+cargo check -p jals-project --all-features
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
@@ -512,7 +554,8 @@ cargo build -p jals-playground --target wasm32-unknown-unknown
 
 # Roadmap
 
-`jals-build` today is a thin, faithful `javac`/`java` wrapper with a portable Rhai pre-build phase.
+`jals-build` today is a thin, faithful `javac`/`java` wrapper with a portable Rhai pre-build phase,
+backed by the implemented transitive JALS source-project graph in `jals-project`.
 The goal is to grow it into a **Cargo-for-Java** front end: dependency management, packaging,
 testing, and richer build configuration. Each item below names its Cargo analogue (or marks a
 Java-specific extension).
@@ -533,7 +576,7 @@ fed into `Invocation::build` exactly as the discovered source list is fed in tod
 | `jals doc` | `cargo doc` | Run `javadoc` into `target/doc`; optionally open it. | a `javadoc` invocation builder, `[doc]` options |
 | `jals jar` / `jals package` | `cargo package` | Produce a runnable jar (`Main-Class` in the manifest), optionally a fat/uber jar bundling classpath deps. | a `jar`/archive plan, `[package]` metadata |
 | `jals add <coord>` / `jals remove <coord>` | `cargo add` / `cargo remove` | Edit `[dependencies]` in `jals.toml`. | manifest **writing** + Maven coordinate parsing |
-| `jals tree` | `cargo tree` | Print the resolved (transitive) dependency tree. | a dependency resolver (§3) |
+| `jals tree` | `cargo tree` | Print the implemented source-project graph plus the future resolved Maven dependency tree. | CLI presentation + a Maven dependency resolver (§3) |
 | `jals fetch` | `cargo fetch` | Download and cache dependencies without building. | a dependency resolver (§3) |
 | `jals update` | `cargo update` | Re-resolve and update locked dependency versions. | a lockfile + resolver (§3) |
 | `jals metadata` | `cargo metadata` | Emit the resolved manifest + dependency graph as JSON for external tooling. | resolver (§3) |
@@ -574,7 +617,7 @@ Making a `features` release preset also imply a default `javac --release` is sti
 
 | Section | Cargo analogue | Purpose |
 | --- | --- | --- |
-| `[dependencies]` | `[dependencies]` | **partly done**: the `{ jar = "url-or-path" }` form is wired (downloaded/local jars folded into the analysis + compile classpath, plus an optional `sources` jar for editor go-to-definition), as are the source forms `{ git = "url", branch/tag/rev, dir }` and `{ path = "...", dir }` (cloned/read `.java` folded into the LSP index for analysis + navigation **and** compiled by `jals build`/`run` as extra `javac` sources, not a `lint` input); Maven coordinates (`group:artifact:version`) + transitive resolution are §3 |
+| `[dependencies]` | `[dependencies]` | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources), and `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation. Maven coordinates, POM/version resolution, transitive Maven download, and a lockfile remain §3. |
 | `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
 | `[toolchain]` | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
 | `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
@@ -582,12 +625,13 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | `[workspace]` / `[[module]]` | `[workspace]` | multi-module builds with a shared lockfile |
 | `[lints]` | `[lints]` | wire `jals-lint` / `-Xlint` configuration |
 
-## 3. Dependency management (the largest gap)
+## 3. Maven dependency management (the largest remaining gap)
 
-Java's defining build feature, and the biggest piece missing. A `[dependencies]` table of Maven
-coordinates would be **resolved** (transitively) into the `classpath` that `Invocation::build`
-already consumes. The pure/`wasm32` split is preserved by keeping resolution's I/O in
-`jals-cli` (or a new host-only crate, e.g. `jals-resolve`):
+The transitive graph of explicit JALS path/Git source projects is implemented. The separate missing
+piece is Maven's coordinate graph: a `[dependencies]` table of Maven coordinates would be resolved
+through POMs and version selection into the `classpath` that `Invocation::build` already consumes.
+The pure/`wasm32` split is preserved by keeping resolution's I/O in `jals-cli` (or a new host-only
+crate, e.g. `jals-resolve`):
 
 - **Resolver** — parse POMs, walk the transitive graph, pick versions on conflict (nearest-wins
   or a `[patch]`/override mechanism).
@@ -596,11 +640,12 @@ already consumes. The pure/`wasm32` split is preserved by keeping resolution's I
   (drives `jals fetch` / `jals update` / `--locked` / `--frozen`).
 - **Network fetch** — download missing jars from `[repositories]`; gated by `--offline`.
 
-`jals-build` itself only needs the *result*: the resolved classpath, fed in like sources are
-today. No part of this changes the crate's purity.
+`jals-build` itself only needs the *result*: the resolved classpath, fed in like the current
+`jals-project` source/artifact projection. No part of this changes the crate's purity.
 
-**Already wired (analysis + compile side):** the *consumption* of a classpath is done, and the
-explicit-jar form of `[dependencies]` now resolves end-to-end. `Manifest::classpath_entries`
+**Already wired (analysis + compile side):** the *consumption* of a classpath is done, the
+explicit-jar form resolves end-to-end, and JALS path/Git projects recurse through their own exact
+manifests. `Manifest::classpath_entries`
 resolves the `[build] classpath` to paths, and `Manifest::dependency_sources` classifies each
 `[dependencies]` `{ jar = "..." }` into a URL or local path; the host-only `jals-classpath` crate
 reads the `.class` bytes out of typed project/cache entries (and **downloads** remote jars into the
@@ -608,7 +653,7 @@ SHA-256 verified artifact cache via `ProjectInputs::assemble`) and parses them w
 `jals-hir`'s `ProjectIndex::builder().with_classpath()` folds them in so external library types resolve in
 `jals lint` and the language server, while `jals build`/`run` put the same jars on `javac`/`java`'s
 classpath. What is still missing is the *resolver* above — turning **Maven coordinates** into those
-classpath entries (POM walking + transitive graph + version conflict resolution + lockfile). Until
+classpath entries (POM walking + coordinate version conflict resolution + lockfile). Until
 then, a project lists explicit jar URLs/paths under `[dependencies]` (or jars/dirs under
 `[build] classpath`) by hand. JDK standard-library classes are not loaded this way either; the
 embedded `java.lang`/`java.util` stubs stand in for them (reading the JDK's `jimage`/`modules` is a
@@ -657,7 +702,8 @@ By Java-user impact:
 1. **High-value `[build]` keys** — `resource-dirs`, `encoding`, `enable-preview`, `-Xlint`
    (cheap, immediately useful, no new infrastructure).
 2. **`jals test`** — JUnit integration; the first thing most projects need after `build`/`run`.
-3. **Dependency management (§3)** — `[dependencies]` + resolver + `jals.lock`. The highest
-   impact and the largest effort; unblocks `add`/`remove`/`tree`/`fetch`/`update`.
+3. **Maven dependency management (§3)** — coordinate/POM resolver + `jals.lock`. The highest
+   impact and the largest remaining effort; unblocks `add`/`remove`/`fetch`/`update` and Maven
+   entries in `tree`.
 4. **Packaging (§4)** — `jals jar`, then fat jars.
 5. **The rest** — `doc`, profiles, workspaces, `publish`, `bench`.

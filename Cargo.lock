@@ -1167,6 +1167,7 @@ dependencies = [
  "jals-hir",
  "jals-lint",
  "jals-lsp",
+ "jals-project",
  "jals-storage",
  "jals-syntax",
  "similar",
@@ -1266,6 +1267,7 @@ dependencies = [
  "jals-exec",
  "jals-fmt",
  "jals-hir",
+ "jals-project",
  "jals-storage",
  "serde_json",
  "tempfile",
@@ -1287,6 +1289,7 @@ dependencies = [
  "jals-exec",
  "jals-fmt",
  "jals-hir",
+ "jals-project",
  "jals-storage",
  "jals-syntax",
  "js-sys",
@@ -1295,6 +1298,18 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "yew",
+]
+
+[[package]]
+name = "jals-project"
+version = "0.1.0"
+dependencies = [
+ "jals-build",
+ "jals-classpath",
+ "jals-config",
+ "jals-exec",
+ "jals-storage",
+ "tempfile",
 ]
 
 [[package]]

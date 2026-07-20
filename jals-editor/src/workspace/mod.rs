@@ -277,10 +277,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
         let library_files = SourceFile::read_all(&exec, &view, &spec.library_sources, false).await;
-        let library_inputs =
-            SourceFile::file_inputs(&library_files, WorkspaceFileId::Library, |f| {
-                f.doc.parse.syntax()
-            });
+        let source_locations = Self::library_source_locations(&library_files).await;
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types
         // on every rebuild (their `FileId`s are assigned in `rebuild_index`). They are facts
@@ -299,7 +296,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             source_dep_files,
             index: ProjectIndex::builder(&[]).with_stdlib().build().await,
             classpath: spec.classpath,
-            source_locations: ProjectIndex::index_source_locations(&library_inputs).await,
+            source_locations,
             feature_set: spec.feature_set,
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts().await,
@@ -466,6 +463,66 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     pub async fn set_classpath(&mut self, classpath: LoweredClasspath) {
         self.classpath = classpath;
         self.rebuild_index().await;
+    }
+
+    /// Replace the exact dependency source files used for navigation and source-dependency
+    /// indexing. The paths are reread from the current project view; they never become editable
+    /// project files and do not widen any project source root.
+    pub async fn set_dependency_sources(
+        &mut self,
+        mut library_sources: Vec<FileKey>,
+        mut source_dep_sources: Vec<FileKey>,
+    ) {
+        library_sources.sort();
+        library_sources.dedup();
+        source_dep_sources.sort();
+        source_dep_sources.dedup();
+        let view = self.storage.view();
+        let library_files = SourceFile::read_all(&self.exec, &view, &library_sources, false).await;
+        let source_dep_files =
+            SourceFile::read_all(&self.exec, &view, &source_dep_sources, true).await;
+        self.replace_dependency_files(library_files, source_dep_files)
+            .await;
+    }
+
+    /// Replace dependency sources from owned text without adding them to the project view.
+    ///
+    /// This is the portable host path for detached cache artifacts. Keys remain available for
+    /// navigation, but the files are neither editable project inputs nor members of
+    /// [`ProjectStorage`]. Inputs are sorted and de-duplicated before parsing so file ids and index
+    /// assembly remain deterministic.
+    pub async fn set_dependency_source_texts(
+        &mut self,
+        mut library_sources: Vec<(FileKey, String)>,
+        mut source_dep_sources: Vec<(FileKey, String)>,
+    ) {
+        library_sources.sort();
+        library_sources.dedup_by(|left, right| left.0 == right.0);
+        source_dep_sources.sort();
+        source_dep_sources.dedup_by(|left, right| left.0 == right.0);
+        let library_files = SourceFile::parse_all(&self.exec, library_sources, false).await;
+        let source_dep_files = SourceFile::parse_all(&self.exec, source_dep_sources, true).await;
+        self.replace_dependency_files(library_files, source_dep_files)
+            .await;
+    }
+
+    /// Publish already-parsed dependency files as one coherent navigation/index replacement.
+    async fn replace_dependency_files(
+        &mut self,
+        library_files: Vec<SourceFile>,
+        source_dep_files: Vec<SourceFile>,
+    ) {
+        self.library_files = library_files;
+        self.source_locations = Self::library_source_locations(&self.library_files).await;
+        self.source_dep_files = source_dep_files;
+        self.rebuild_index().await;
+    }
+
+    async fn library_source_locations(files: &[SourceFile]) -> SourceLocations {
+        let inputs = SourceFile::file_inputs(files, WorkspaceFileId::Library, |file| {
+            file.doc.parse.syntax()
+        });
+        ProjectIndex::index_source_locations(&inputs).await
     }
 
     /// The file tree the workspace was loaded from, for the host's own browsing (the playground's
@@ -1170,6 +1227,124 @@ mod tests {
                     .await
                     .is_none()
             );
+        });
+    }
+
+    #[test]
+    fn dependency_source_replacement_rereads_exact_files_without_project_membership() {
+        block_on_inline(async {
+            let storage = memory(&[
+                ("src/Main.java", "class Main { First value; }"),
+                ("deps/First.java", "class First { }"),
+                ("deps/Second.java", "class Second { }"),
+            ]);
+            let mut ws = Workspace::load(
+                storage,
+                ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+            )
+            .await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+
+            ws.set_dependency_sources(Vec::new(), vec![key("deps/First.java")])
+                .await;
+            let offset = ws.document(main).unwrap().text.find("First value").unwrap();
+            let target = ws
+                .definition(main, offset)
+                .await
+                .expect("first dependency source resolves");
+            assert_eq!(ws.path_of(target.file), Some(&key("deps/First.java")));
+            assert!(ws.file_id(&key("deps/First.java")).is_none());
+            assert!(!ws.owns_path(&key("deps/First.java")));
+
+            ws.set_dependency_sources(Vec::new(), vec![key("deps/Second.java")])
+                .await;
+            assert!(
+                ws.definition(main, offset).await.is_none(),
+                "the stale dependency source must leave the index"
+            );
+            assert!(ws.file_id(&key("deps/Second.java")).is_none());
+        });
+    }
+
+    #[test]
+    fn dependency_source_replacement_refreshes_library_navigation_locations() {
+        block_on_inline(async {
+            let class = jals_classfile::ClassFile::read(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/Box.class"
+                ))
+                .as_slice(),
+            )
+            .await
+            .unwrap();
+            let storage = memory(&[("src/Main.java", "class Main { Box value; }")]);
+            let mut ws = Workspace::load(
+                storage,
+                ProjectLayout {
+                    classpath: ProjectIndex::lower_classpath(&[class]).await,
+                    ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+                },
+            )
+            .await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let offset = ws.document(main).unwrap().text.find("Box value").unwrap();
+            assert!(ws.definition(main, offset).await.is_none());
+
+            ws.set_dependency_source_texts(
+                vec![(key("deps/Box.java"), "public class Box<T> { }".to_owned())],
+                Vec::new(),
+            )
+            .await;
+            let target = ws
+                .definition(main, offset)
+                .await
+                .expect("classpath type navigates into its exact library source");
+            assert_eq!(ws.path_of(target.file), Some(&key("deps/Box.java")));
+            assert!(ws.file_id(&key("deps/Box.java")).is_none());
+            assert!(ws.view().file(&key("deps/Box.java")).is_err());
+        });
+    }
+
+    #[test]
+    fn detached_dependency_texts_never_join_storage_and_empty_replacement_removes_types() {
+        block_on_inline(async {
+            let dependency = key(".jals/source-dependency/Detached.java");
+            let storage = memory(&[("src/Main.java", "class Main { Detached value; }")]);
+            let mut ws = Workspace::load(
+                storage,
+                ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+            )
+            .await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let offset = ws
+                .document(main)
+                .unwrap()
+                .text
+                .find("Detached value")
+                .unwrap();
+
+            ws.set_dependency_source_texts(
+                Vec::new(),
+                vec![(dependency.clone(), "class Detached { }".to_owned())],
+            )
+            .await;
+            let target = ws
+                .definition(main, offset)
+                .await
+                .expect("detached dependency type resolves");
+            assert_eq!(ws.path_of(target.file), Some(&dependency));
+            assert!(ws.file_id(&dependency).is_none());
+            assert!(!ws.owns_path(&dependency));
+            assert!(ws.view().file(&dependency).is_err());
+            assert!(ws.storage().clone().view().file(&dependency).is_err());
+
+            ws.set_dependency_source_texts(Vec::new(), Vec::new()).await;
+            assert!(
+                ws.definition(main, offset).await.is_none(),
+                "an empty replacement must remove the stale dependency type"
+            );
+            assert!(ws.view().file(&dependency).is_err());
         });
     }
 

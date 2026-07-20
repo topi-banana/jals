@@ -14,6 +14,7 @@ jals-config.workspace = true
 jals-editor.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt.workspace = true
+jals-project = { workspace = true, features = ["native"] }
 jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 serde_json.workspace = true

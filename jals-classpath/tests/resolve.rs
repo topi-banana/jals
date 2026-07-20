@@ -4,7 +4,9 @@ use jals_classpath::{
     DependencyLocation, DependencyResolver, DependencySpec, ExternalLocator, Fetcher,
 };
 use jals_exec::block_on_inline;
-use jals_storage::{CodeTree, ContentDigest, Entry, FileKey, MemoryStorage, Name};
+use jals_storage::{
+    CacheKey, CacheNamespace, CodeTree, ContentDigest, Entry, FileKey, MemoryStorage, Name,
+};
 
 struct MockFetcher {
     bytes: Vec<u8>,
@@ -54,6 +56,38 @@ fn project_dependency_is_read_from_the_captured_revision() {
                 .unwrap(),
             b"jar"
         );
+    });
+}
+
+#[test]
+fn artifact_dependency_is_verified_without_fetching_or_republishing() {
+    block_on_inline(async {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        let key = CacheKey::new(
+            CacheNamespace::DependencyJar,
+            ContentDigest::of(b"project-graph"),
+            ContentDigest::of(b"jar"),
+        );
+        storage.artifacts_mut().publish(&key, b"jar").await.unwrap();
+        let fetcher = MockFetcher {
+            bytes: b"wrong".to_vec(),
+            calls: AtomicUsize::new(0),
+        };
+        let resolved = DependencyResolver::resolve(
+            &fetcher,
+            &storage.view(),
+            storage.artifacts_mut(),
+            &[DependencySpec {
+                name: Name::new("cached").unwrap(),
+                location: DependencyLocation::Artifact(key.clone()),
+                recursive: false,
+            }],
+        )
+        .await;
+
+        assert_eq!(fetcher.calls.load(Ordering::Relaxed), 0);
+        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+        assert_eq!(resolved.jars[0].key, key);
     });
 }
 

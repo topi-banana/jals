@@ -1,0 +1,26 @@
+[package]
+name = "jals-project"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["native"]
+native = [
+  "dep:tempfile",
+  "jals-classpath/native",
+  "jals-exec/tokio",
+  "jals-storage/std",
+]
+
+[dependencies]
+jals-build = { workspace = true, features = ["rhai"] }
+jals-classpath = { path = "../jals-classpath", default-features = false, features = [
+  "archive",
+] }
+jals-config.workspace = true
+jals-exec.workspace = true
+jals-storage.workspace = true
+tempfile = { version = "3", optional = true }
+
+[lints]
+workspace = true

@@ -9,10 +9,10 @@ including whitespace and comments, is preserved — and uses that tree to power 
 tooling. Today it ships a code formatter, a linter, and a language server (LSP), all
 backed by a shared semantic layer (`jals-hir`) that does name resolution, cross-file type
 indexing, and type inference/checking — including resolving types from a project's compiled
-classpath and `[dependencies]` (local, remote, and `git`/`path` jars, decompiled to readable
-Java when no source jar is available). Alongside them, a Cargo-style build front end (`jals build`
-/ `run` / `clean` / `init`) wraps the JDK's `javac` / `java` from a `jals.toml` manifest and can run
-a sandboxed Rhai build script before compilation.
+classpath and `[dependencies]` (explicit local/remote jars plus transitive `git`/`path` JALS source
+projects, with readable decompiled Java when a jar has no sources). Alongside them, a Cargo-style
+build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac` / `java` from a
+`jals.toml` manifest and can run sandboxed Rhai build scripts before compilation.
 
 > 日本語版の README は [README_jp.md](README_jp.md) にあります。
 
@@ -30,17 +30,19 @@ a sandboxed Rhai build script before compilation.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
+- **Transitive source-project graphs.** `git`/`path` dependencies can themselves be JALS projects.
+  Stable node identities deduplicate diamonds; every unique node is preprocessed dependency-first,
+  then projected into verified source/classpath artifacts without mutating dependency trees.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
   `jals-decompile`, `jals-storage`, `jals-config`) are `no_std` and build for
-  `wasm32-unknown-unknown`, and
-  `jals-classpath`'s resolution core and `jals-build`'s Rhai runner do too (host I/O sits behind
-  `native` features) — so the browser playground runs the same analysis and build-script stack
-  client-side.
+  `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
+  `jals-build`'s Rhai runner do too (host I/O sits behind `native` features). The browser playground
+  therefore runs the same analysis, project-graph, and build-script stack client-side.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of fourteen product crates, including a browser playground:
+`jals` is a Cargo workspace of sixteen product crates, including a browser playground:
 
 | Crate | Description |
 | --- | --- |
@@ -51,9 +53,11 @@ a sandboxed Rhai build script before compilation.
 | [`jals-hir`](jals-hir) | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath. |
 | [`jals-classfile`](jals-classfile) | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4). |
 | [`jals-decompile`](jals-decompile) | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode. |
-| [`jals-classpath`](jals-classpath) | Resolves and loads a project's classpath and `[dependencies]` (local/remote jars, bundled/nested jars, `git`/`path` source deps) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources. |
+| [`jals-classpath`](jals-classpath) | Resolves and loads project bytes and verified classpath artifacts (local/remote and bundled/nested jars) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources. |
 | [`jals-config`](jals-config) | The pure data model, parsing, discovery, and validation for all three config files (`jals.toml`, `jalsfmt.toml`, `jalslint.toml`). |
+| [`jals-exec`](jals-exec) | The unified current-thread execution context for native, browser, and inline hosts, including deterministic worker fan-out and runtime-free cooperative yielding. |
 | [`jals-storage`](jals-storage) | Deterministic, revisioned project storage. Portable code uses validated `FileKey`/`DirKey` values, immutable `CodeTree` snapshots, transactions, overlays, a SHA-256 verified artifact cache (whole-buffer `lookup` or streaming `open_verified` readers), and the portable `io` byte-stream traits the class-file codec parses through; memory and `std`-gated native adapters implement the same sealed contract. |
+| [`jals-project`](jals-project) | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts. |
 | [`jals-build`](jals-build) | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase. |
 | [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only. |
 | [`jals-cli`](jals-cli) | The `jals` command-line binary. |
@@ -74,7 +78,9 @@ jals/
 ├── jals-decompile/   # .class -> readable Java                  (no_std, wasm-compatible)
 ├── jals-classpath/   # classpath + dependency resolution        (no_std + wasm-compatible core)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (no_std, wasm-compatible)
+├── jals-exec/        # current-thread execution + worker fan-out (no_std, wasm-compatible)
 ├── jals-storage/     # revisioned project storage               (no_std, wasm-compatible)
+├── jals-project/     # transitive source-project graph          (no_std + wasm-compatible core)
 ├── jals-build/       # Cargo-style javac/java build planner     (no_std + wasm-compatible core)
 ├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)       (std, host-only)
 ├── jals-cli/         # `jals` binary                            (std)
@@ -224,6 +230,11 @@ release = 21                        # javac --release N
 [run]
 main-class = "com.example.Main"     # entry point for `jals run` (used when no [[bin]] exists)
 
+[dependencies]
+# Source projects are discovered transitively; `dir` selects a project inside a monorepo.
+shared = { path = "../shared" }
+core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
+
 # Or declare several named entry points and pick one with `jals run --bin <name>`:
 # [[bin]]
 # name = "server"
@@ -240,13 +251,46 @@ without running a JDK. See the runnable
 [`jals-build` Rhai reference](jals-build/README.md#rhai-build-scripts) for the complete API,
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
 
-The Rhai phase itself is capability-limited, but compiler/JVM arguments, classpath entries, and
-subprocess environment directives intentionally affect the later explicit `jals build`/`run` JDK
-process. Treat build scripts as project code and review them before building an untrusted checkout.
+The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
+and subprocess environment directives intentionally affect the later explicit `jals build`/`run`
+JDK process. Treat root build scripts as project code and review them before building an untrusted
+checkout.
 
 Outside that portable phase, `jals-build` plans commands as data and `jals-cli` owns host source
 discovery and JDK execution (resolving `javac`/`java` via `$JAVAC`/`$JAVA`, then
 `$JAVA_HOME/bin`, then `PATH`).
+
+### Transitive project dependencies
+
+For a `path` or `git` dependency, the dependency root is the declared directory/checkout followed by
+`dir` when present. `jals-project` probes exactly `<selected-root>/jals.toml` and never searches
+upward. If that file exists, the node is a JALS project: its child dependencies, `[build] classpath`,
+and `[build] source-dirs` all resolve relative to its selected root. If it is missing, the node keeps
+the legacy source convention (`src/main/java`, then `src`, then the selected root). A present but
+malformed manifest or a dependency cycle is a hard `jals build`/`run` failure.
+
+Graph nodes have stable identities, so a diamond is visited once even when dependency names differ.
+Every unique node takes the preprocessing transition unconditionally and exactly once in
+dependency-first order; binary and legacy-source nodes are no-ops, while a manifest-backed node runs
+its optional Rhai script. A dependency script exports only sources registered with
+`build.add_source` and classpath entries registered with `build.add_classpath`. Its `javac`/JVM
+arguments, compile/run environment, and metadata remain node-local and do not propagate. Outputs,
+classpath entries, and source snapshots are published under the node identity as digest-verified
+artifacts, and dependency source trees are never mutated. The root script retains the full semantics
+described above, including process arguments/environment and revision-checked root output updates.
+
+The native CLI uses this complete graph for `build`/`run`, compiling transitive sources and adding
+transitive JARs and declared classpaths. `lint` resolves its binary/classpath side while continuing to
+lint only requested files. The LSP indexes source artifacts for analysis/navigation, watches local
+path roots, and reports a hard graph error on the root manifest before falling back to root-only
+analysis. The playground runs the portable `MemoryProjectGraph` over one captured in-memory
+`CodeTree`, so in-tree path projects and their scripts work in the browser. Git acquisition is not
+available in a browser: Git entries produce warnings and are omitted; this is not browser Git
+support.
+
+This transitive JALS source-project graph is implemented now. Maven/POM coordinate resolution,
+coordinate version selection, transitive Maven downloads, and a `jals.lock` lockfile remain future
+work.
 
 ### Options
 
@@ -303,8 +347,9 @@ public class Foo {
 `jals-playground` is a small browser app ([Yew](https://yew.rs), built and served with
 [Trunk](https://trunkrs.dev)) that runs the `wasm32`-compiled syntax, formatting, analysis, and
 sandboxed Rhai build-script layers client-side, with no server round-trip — including generated
-Java sources and resolving a `jals.toml`'s `[dependencies]` in-browser so
-hover/completion/type-check see those inputs.
+Java sources, remote jars, and the portable in-memory path-project graph from a `jals.toml` so
+hover/completion/type-check see those inputs. The browser cannot clone Git dependencies; it reports
+each one as a warning rather than claiming Git support.
 
 ```sh
 # One-time setup: the wasm target and Trunk
@@ -372,6 +417,11 @@ source ──▶ lexer (hand-written) ──▶ CST parser (rowan) ──▶ typ
   tree through typed accessors instead of matching raw kinds.
 - **Formatter** (`jals-fmt`): lowers the CST into a Wadler/Prettier-style document IR, then
   renders it, choosing for each group whether it fits on one line or must break.
+- **Project graph** (`jals-project`): discovers transitive path/Git/JAR nodes with stable identities,
+  probes only the selected root's exact manifest, and makes preprocessing a required type-level
+  transition before assembly. Assembly exposes graph metadata but sends consumers only authored or
+  script-registered sources/classpath through node-scoped verified artifacts; native acquisition and
+  the portable one-`CodeTree` memory host share that deep interface.
 
 ## Development
 
@@ -392,6 +442,8 @@ cargo machete                                                 # unused dependenc
 typos                                                         # spelling
 ast-grep test --skip-snapshot-tests                           # ast-grep rule tests
 ast-grep scan --error                                         # structural lints (no-free-functions, …)
+cargo check -p jals-project --no-default-features             # portable project-graph core
+cargo check -p jals-project --all-features                    # native path/Git acquisition
 
 # wasm: the pure `no_std` crate set (built as one package set so their `std` features stay off) …
 cargo build --release --target wasm32-unknown-unknown \
@@ -399,6 +451,8 @@ cargo build --release --target wasm32-unknown-unknown \
   -p jals-fmt -p jals-lint -p jals-storage -p jals-config
 # … plus jals-classpath's wasm-compatible core (host I/O is behind its default `native` feature)
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
+# The portable in-memory project graph includes dependency-script preparation and artifact projection
+cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 # The Rhai feature remains host-I/O-free and wasm-compatible; the browser builds the same engine
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
@@ -431,7 +485,7 @@ for any change to the syntax or formatting layers:
   `jals-decompile`, `jals-storage`, and `jals-config` build for `wasm32-unknown-unknown` as
   `no_std` crates;
   `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`), as does
-  `jals-build` with its portable `rhai` feature.
+  `jals-build` with its portable `rhai` feature and `jals-project`'s in-memory graph.
 
 ## Status
 
@@ -440,9 +494,9 @@ syntax layer covers a broad slice of Java, but APIs may change. Semantic analysi
 (`jals-hir`) covers name resolution, cross-file type indexing, and type inference/checking,
 including types resolved from a project's classpath and `[dependencies]`; generic-method
 inference, richer bytecode decompilation (`switch`/`try`-`catch`/`break`/`continue`), and
-Maven-coordinate (`group:artifact:version`) dependency resolution are still open. The `jals
-build`/`run`/`clean`/`init` front end is a faithful but thin `javac`/`java` wrapper with a portable
-Rhai pre-build phase today; fuller dependency management, testing, and packaging remain on its
+Maven-coordinate (`group:artifact:version`) POM/version resolution and a lockfile are still open.
+The transitive JALS `path`/`git` source-project graph is implemented; broader Maven dependency
+management, testing, and packaging remain on the build
 [roadmap](jals-build/README.md#roadmap).
 
 ## License

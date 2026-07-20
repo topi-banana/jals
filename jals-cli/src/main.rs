@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use jals_build::build_script::{
     BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession,
-    RHAI_OUTPUT_ROOT, execute_build_script,
+    execute_build_script,
 };
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
@@ -429,22 +429,10 @@ impl BuildArgs {
         if let Some(name) = &self.bin {
             jals_build::RunTarget::resolve(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
         }
-        let script = App::run_build_script(&manifest, &root, exec).await?;
-        let sources =
-            App::discover_sources(&manifest, &root, !script.generated_sources.is_empty())?;
-        // Assemble the compile inputs: the resolved `[dependencies]` jars for javac's classpath, and
-        // the `git`/`path` source dependencies' `.java` compiled alongside the project's own sources so
-        // a project that depends on a source dependency builds. Best-effort — a failed download/clone
-        // is warned and skipped, never aborting the build.
-        let mut inputs = App::project_inputs(
-            &manifest,
-            &root,
-            jals_classpath::ProjectInputOptions::Compile,
-            exec,
-            script,
-        )
-        .await;
-        inputs.deduplicate(&mut manifest, &root, &sources);
+        // Assemble the root script outputs and complete transitive dependency graph. Structural graph
+        // and dependency-script failures abort before javac; lower-level classpath misses remain
+        // warnings so the resolver can report all deterministic diagnostics.
+        let (sources, inputs) = App::prepare_compile_inputs(&mut manifest, &root, exec).await?;
         let request = App::compile_request(&manifest, &root, &sources, &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
@@ -478,22 +466,9 @@ impl RunArgs {
                 .map_err(|e| anyhow!("{e}"))?
                 .to_owned(),
         };
-        let script = App::run_build_script(&manifest, &root, exec).await?;
-        let sources =
-            App::discover_sources(&manifest, &root, !script.generated_sources.is_empty())?;
-        // Assemble the compile inputs once: the resolved `[dependencies]` jars go on both the compile
-        // and run classpaths, and the `git`/`path` source dependencies' `.java` compile alongside the
-        // project's own sources (their `.class` land in the run classpath's `classes-dir`, so the run
-        // invocation is unchanged). Best-effort — a failed download/clone is warned and skipped.
-        let mut inputs = App::project_inputs(
-            &manifest,
-            &root,
-            jals_classpath::ProjectInputOptions::Compile,
-            exec,
-            script,
-        )
-        .await;
-        inputs.deduplicate(&mut manifest, &root, &sources);
+        // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
+        // verified graph classpath artifact is shared by the javac and java requests.
+        let (sources, inputs) = App::prepare_compile_inputs(&mut manifest, &root, exec).await?;
         let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
@@ -623,8 +598,8 @@ impl InitArgs {
 /// its lowered classpath (so the cross-file `type-mismatch` rule resolves external library types) and
 /// the resolved language feature set from `[package] features` (so feature-gated rules like
 /// `compact-source-file` run). Both come from a **single** best-effort assembly of the project's
-/// analysis inputs; a missing or malformed manifest yields an empty classpath and an empty feature
-/// set — a malformed manifest is `jals build`'s business, not lint's.
+/// analysis inputs. A missing manifest defaults silently; malformed manifests and graph failures
+/// emit a warning before falling back to an empty classpath and feature set.
 #[derive(Default)]
 struct ProjectLintContext {
     classpath: LoweredClasspath,
@@ -636,23 +611,35 @@ impl ProjectLintContext {
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
             return Self::default();
         };
-        let Ok(manifest) = Manifest::from_file(&manifest_path).await else {
-            // A malformed manifest is the business of `jals build`; lint stays best-effort.
-            return Self::default();
+        let manifest = match Manifest::from_file(&manifest_path).await {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                eprintln!("warning: project analysis inputs unavailable: {error}");
+                return Self::default();
+            }
         };
         let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
         // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
-        // `type-mismatch` index) and the `[package] features`. An unreadable entry / failed download
-        // is reported on stderr and skipped, never an error.
-        let inputs = App::project_inputs(
+        // `type-mismatch` index) and the `[package] features`. Any strict graph failure is reported and
+        // converted into the default lint context below.
+        let environment = App::build_script_environment(&manifest);
+        let inputs = match App::project_inputs(
             &manifest,
             root,
             jals_classpath::ProjectInputOptions::Analysis,
             exec,
             HostBuildScript::default(),
+            &environment,
         )
-        .await;
+        .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                eprintln!("warning: project analysis inputs unavailable: {error:#}");
+                return Self::default();
+            }
+        };
         Self {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes).await,
             feature_set: inputs.feature_set,
@@ -731,39 +718,92 @@ impl From<HostBuildScript> for HostProjectInputs {
 }
 
 impl App {
-    /// Lower host manifest locations once, then execute the portable classpath plan over one
-    /// immutable project revision and its verified native artifact cache.
+    /// Discover and preprocess the complete dependency graph, then project it together with the
+    /// root manifest over one immutable project revision and its verified native artifact cache.
     async fn project_inputs(
         manifest: &Manifest,
         root: &Path,
         options: jals_classpath::ProjectInputOptions,
         exec: &Exec,
         script: HostBuildScript,
-    ) -> HostProjectInputs {
+        environment: &BuildScriptEnvironment,
+    ) -> Result<HostProjectInputs> {
         let mut result = HostProjectInputs::from(script);
+        let graph = jals_project::NativeProjectGraph::discover(manifest, root, exec)
+            .await
+            .context("discovering project dependency graph")?;
+        let discovery_warning_count = graph.warnings().len();
+        for warning in graph.warnings() {
+            Self::print_graph_warning(warning);
+        }
+
         let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
-        let Ok(mut storage) = NativeStorage::for_project_scoped(root, scopes, exec.clone()).await
-        else {
-            eprintln!("warning: project storage could not be opened");
-            return result;
-        };
-        let (inputs, _source_roots) = jals_classpath::NativeProjectPlan::assemble_native(
-            manifest,
-            root,
-            &mut storage,
-            options,
-        )
-        .await;
-        for warning in &inputs.warnings {
+        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
+            .await
+            .context("opening project storage")?;
+        let graph = graph
+            .preprocess(
+                storage.artifacts_mut(),
+                environment,
+                &BuildScriptLimits::default(),
+            )
+            .await
+            .context("preprocessing project dependency graph")?;
+        let assembly = graph
+            .assemble_native(manifest, root, &mut storage, options)
+            .await;
+
+        for warning in assembly.warnings.iter().skip(discovery_warning_count) {
+            Self::print_graph_warning(warning);
+        }
+        for warning in &assembly.inputs.warnings {
             eprintln!("warning: {}", warning.message);
         }
-        result.extra_classpath.extend(
-            inputs
-                .dependency_jars
+        if !assembly.errors.is_empty() {
+            let messages = assembly
+                .errors
                 .iter()
-                .map(|key| storage.artifacts().backend().artifact_path(key)),
-        );
-        for source in &inputs.source_dep_sources {
+                .map(|error| {
+                    error.path.as_ref().map_or_else(
+                        || format!("{}: {}", error.node, error.message),
+                        |path| format!("{} `{path}`: {}", error.node, error.message),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(anyhow!("project dependency assembly failed: {messages}"));
+        }
+
+        for entry in &assembly.compile_classpath {
+            let path = match entry {
+                jals_project::CompileClasspathEntry::File(file) => storage
+                    .artifacts()
+                    .materialize_file(&file.key, &file.path)
+                    .await
+                    .map_err(|error| {
+                        anyhow!(
+                            "materializing dependency classpath `{}` failed: {error:?}",
+                            file.path
+                        )
+                    })?,
+                jals_project::CompileClasspathEntry::Tree(tree) => storage
+                    .artifacts()
+                    .materialize_tree(
+                        tree.members
+                            .iter()
+                            .map(|member| (&member.path, &member.key)),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow!(
+                            "materializing dependency classpath directory `{}` failed: {error:?}",
+                            tree.path
+                        )
+                    })?,
+            };
+            result.extra_classpath.push(path);
+        }
+        for source in &assembly.inputs.source_dep_sources {
             match source {
                 jals_classpath::SourceFile::Project(key) => {
                     result.extra_sources.push(key.path().to_host_path(root));
@@ -771,7 +811,7 @@ impl App {
                 jals_classpath::SourceFile::Artifact(source) => {
                     match storage
                         .artifacts()
-                        .materialize_source(&source.key, &source.path)
+                        .materialize_file(&source.key, &source.path)
                         .await
                     {
                         Ok(path) => result.extra_sources.push(path),
@@ -782,9 +822,52 @@ impl App {
                 }
             }
         }
-        result.classpath_classes = inputs.classpath_classes;
-        result.feature_set = inputs.feature_set;
-        result
+        result.classpath_classes = assembly.inputs.classpath_classes;
+        result.feature_set = assembly.inputs.feature_set;
+        Ok(result)
+    }
+
+    /// Prepare the root and transitive compile inputs shared by `build` and `run`.
+    async fn prepare_compile_inputs(
+        manifest: &mut Manifest,
+        root: &Path,
+        exec: &Exec,
+    ) -> Result<(Vec<PathBuf>, HostProjectInputs)> {
+        let environment = Self::build_script_environment(manifest);
+        let script = Self::run_build_script(manifest, root, exec, &environment).await?;
+        let sources = Self::discover_sources(manifest, root, !script.generated_sources.is_empty())?;
+        let mut inputs = Self::project_inputs(
+            manifest,
+            root,
+            jals_classpath::ProjectInputOptions::Compile,
+            exec,
+            script,
+            &environment,
+        )
+        .await?;
+        inputs.deduplicate(manifest, root, &sources);
+        Ok((sources, inputs))
+    }
+
+    fn print_graph_warning(warning: &jals_project::GraphWarning) {
+        if let Some(dependency) = &warning.dependency {
+            eprintln!(
+                "warning: project dependency `{dependency}`: {}",
+                warning.message
+            );
+        } else if let Some(node) = &warning.node {
+            eprintln!("warning: project dependency {node}: {}", warning.message);
+        } else {
+            eprintln!("warning: project dependency graph: {}", warning.message);
+        }
+    }
+
+    /// Construct the explicit environment visible to both root and dependency build scripts.
+    fn build_script_environment(manifest: &Manifest) -> BuildScriptEnvironment {
+        let inherited: BuildScriptEnvironment = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        inherited.for_project(manifest)
     }
 
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
@@ -794,6 +877,7 @@ impl App {
         manifest: &Manifest,
         root: &Path,
         exec: &Exec,
+        environment: &BuildScriptEnvironment,
     ) -> Result<HostBuildScript> {
         if manifest.build.script.is_none() {
             return Ok(HostBuildScript::default());
@@ -805,22 +889,11 @@ impl App {
         )
         .await
         .context("opening project storage for the build script")?;
-        let mut environment: BuildScriptEnvironment = std::env::vars_os()
-            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-            .collect();
-        environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
-        environment.insert("JALS_MANIFEST_DIR", ".");
-        if let Some(name) = &manifest.package.name {
-            environment.insert("JALS_PACKAGE_NAME", name);
-        }
-        if let Some(version) = &manifest.package.version {
-            environment.insert("JALS_PACKAGE_VERSION", version);
-        }
         let mut session = BuildScriptSession::new();
         let output = execute_build_script(
             &mut storage,
             manifest,
-            &environment,
+            environment,
             &BuildScriptLimits::default(),
             &mut session,
         )

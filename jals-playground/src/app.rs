@@ -22,15 +22,24 @@
 //! longer showing is dropped instead of painted on the wrong model.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::rc::Rc;
 
 use futures::lock::Mutex;
-use jals_build::build_script::{BuildScriptDiagnostic, BuildScriptError, BuildScriptOutput};
+use jals_build::build_script::{
+    BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
+    BuildScriptOutput,
+};
+use jals_classpath::{ClasspathEntry, LibrarySource, ProjectInputOptions, SourceFile};
 use jals_config::fmt::Config;
 use jals_config::{FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
-use jals_storage::{ArtifactCache, FileKey, MemoryCache, MemoryStorage};
+use jals_project::{GraphWarning, MemoryProjectGraph};
+use jals_storage::{
+    ArtifactCache, DirKey, EntryRef, FileKey, MemoryCache, MemoryStorage, Name, ProjectView,
+    RelativePath,
+};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
@@ -210,6 +219,19 @@ struct BuildInputTracker {
     last: Option<BuildInputs>,
 }
 
+struct DependencySourceTexts {
+    library: Vec<(FileKey, String)>,
+    source_deps: Vec<(FileKey, String)>,
+}
+
+pub struct ClasspathResolution {
+    classpath: LoweredClasspath,
+    feature_set: FeatureSet,
+    status: String,
+    artifacts: ArtifactCache<MemoryCache>,
+    sources: DependencySourceTexts,
+}
+
 impl BuildInputTracker {
     fn begin(&mut self, inputs: BuildInputs) -> bool {
         if self.last.as_ref() == Some(&inputs) {
@@ -333,15 +355,7 @@ pub enum Msg {
     /// (from `[package] features`) + a status line, or an error.
     ClasspathResolved {
         generation: u64,
-        result: Result<
-            (
-                LoweredClasspath,
-                FeatureSet,
-                String,
-                ArtifactCache<MemoryCache>,
-            ),
-            String,
-        >,
+        result: Result<ClasspathResolution, String>,
     },
     /// A successful Rhai execution reloaded generated Java and captured the new sidebar/model set.
     BuildFinished {
@@ -837,13 +851,9 @@ impl App {
 
             let result = Self::resolve_classpath(manifest, proxy, storage, additional_classpath)
                 .await
-                .map(|(classpath, feature_set, status, artifacts)| {
-                    (
-                        classpath,
-                        feature_set,
-                        format!("{build_status}; {status}"),
-                        artifacts,
-                    )
+                .map(|mut resolution| {
+                    resolution.status = format!("{build_status}; {}", resolution.status);
+                    resolution
                 });
             if token.is_current() {
                 link.send_message(Msg::ClasspathResolved {
@@ -883,76 +893,219 @@ impl App {
     /// human-readable status line (class/jar counts plus any warnings), or an error message.
     ///
     /// The whole resolution runs against a detached storage snapshot (on the same execution
-    /// context, cloned with it) so the workspace lock is never held across an `.await` here; only
-    /// its verified artifact cache is merged back afterwards.
+    /// context, cloned with it) so the workspace lock is never held across an `.await` here. A
+    /// successful result carries its verified cache and detached dependency source texts back as one
+    /// generation-guarded application.
     async fn resolve_classpath(
         manifest: Manifest,
         proxy: String,
         mut storage: MemoryStorage,
         additional_classpath: Vec<FileKey>,
-    ) -> Result<
-        (
-            LoweredClasspath,
-            FeatureSet,
-            String,
-            ArtifactCache<MemoryCache>,
-        ),
-        String,
-    > {
+    ) -> Result<ClasspathResolution, String> {
         let fetcher = BrowserFetcher::new(proxy);
-        let mut plan = jals_classpath::ProjectInputPlan {
-            feature_set: manifest.feature_set(),
-            ..jals_classpath::ProjectInputPlan::default()
-        };
-        plan.classpath.extend(
-            additional_classpath
-                .into_iter()
-                .map(jals_classpath::ClasspathEntry::ProjectFile),
-        );
-        // The browser has no project filesystem: every jar locator is external, fetched through
-        // the proxy. The lowering itself is the one shared with the native host.
-        let mut warnings = Vec::new();
-        plan.add_jar_dependencies(
+        let graph = MemoryProjectGraph::discover(&manifest, &storage.view())
+            .await
+            .map_err(|error| error.to_string())?;
+        let graph = graph
+            .preprocess(
+                storage.artifacts_mut(),
+                &BuildScriptEnvironment::new(),
+                &BuildScriptLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut assembly = graph.assemble(storage.artifacts_mut()).await;
+        if !assembly.errors.is_empty() {
+            return Err(assembly
+                .errors
+                .iter()
+                .map(|error| match &error.path {
+                    Some(path) => format!("dependency {} `{path}`: {}", error.node, error.message),
+                    None => format!("dependency {}: {}", error.node, error.message),
+                })
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        assembly.plan.feature_set = manifest.feature_set();
+        let graph_classpath = std::mem::take(&mut assembly.plan.classpath);
+        let (classpath_entries, root_classpath_warnings) = Self::ordered_classpath_entries(
             &manifest,
-            |locator| jals_classpath::DependencyLocation::External {
-                locator: jals_classpath::ExternalLocator::new(locator),
-                expected: None,
-            },
-            &mut warnings,
+            &storage.view(),
+            additional_classpath,
+            graph_classpath,
         );
-        let mut inputs = jals_classpath::ProjectInputs::assemble(
+        assembly.plan.classpath = classpath_entries;
+        let inputs = jals_classpath::ProjectInputs::assemble(
             &fetcher,
             &mut storage,
-            &plan,
-            jals_classpath::ProjectInputOptions::Analysis,
+            &assembly.plan,
+            ProjectInputOptions::Editor,
         )
         .await;
-        warnings.append(&mut inputs.warnings);
-        inputs.warnings = warnings;
         let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes).await;
+        let sources = Self::dependency_source_texts(&storage, &inputs).await?;
         let mut status = format!(
             "resolved {} class(es) from {} jar(s)",
             inputs.classpath_classes.len(),
             inputs.dependency_jars.len()
         );
-        if !inputs.warnings.is_empty() {
+        let mut warnings = root_classpath_warnings;
+        warnings.extend(assembly.warnings.iter().map(Self::graph_warning_message));
+        warnings.extend(inputs.warnings.into_iter().map(|warning| warning.message));
+        if !warnings.is_empty() {
             status.push_str(&format!(
                 " — {} warning(s): {}",
-                inputs.warnings.len(),
-                inputs
-                    .warnings
-                    .iter()
-                    .map(|warning| warning.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                warnings.len(),
+                warnings.join("; ")
             ));
         }
-        Ok((
+        Ok(ClasspathResolution {
             classpath,
-            inputs.feature_set,
+            feature_set: inputs.feature_set,
             status,
-            storage.into_artifacts(),
-        ))
+            artifacts: storage.into_artifacts(),
+            sources,
+        })
+    }
+
+    /// Lower root-project classpath strings and place all browser classpath groups in host order.
+    fn ordered_classpath_entries(
+        manifest: &Manifest,
+        view: &ProjectView,
+        additional_classpath: Vec<FileKey>,
+        dependency_classpath: Vec<ClasspathEntry>,
+    ) -> (Vec<ClasspathEntry>, Vec<String>) {
+        let mut entries = Vec::new();
+        let mut warnings = Vec::new();
+        for raw in &manifest.build.classpath {
+            let path = match Self::normalize_root_path(raw) {
+                Ok(path) => path,
+                Err(message) => {
+                    warnings.push(format!("root classpath `{raw}` is invalid: {message}"));
+                    continue;
+                }
+            };
+            let found = FileKey::new(path.clone())
+                .ok()
+                .as_ref()
+                .and_then(|key| view.tree().lookup_file(key))
+                .or_else(|| view.tree().lookup_dir(&DirKey::new(path)));
+            match found {
+                Some(EntryRef::File(file)) => {
+                    entries.push(ClasspathEntry::ProjectFile(file.key().clone()))
+                }
+                Some(EntryRef::Directory(directory)) => {
+                    entries.push(ClasspathEntry::ProjectDirectory(directory.clone()))
+                }
+                None => warnings.push(format!("root classpath `{raw}` is missing or invalid")),
+            }
+        }
+        entries.extend(
+            additional_classpath
+                .into_iter()
+                .map(ClasspathEntry::ProjectFile),
+        );
+        entries.extend(dependency_classpath);
+        (entries, warnings)
+    }
+
+    /// Normalize one root-relative portable path, accepting `.` while rejecting root escape.
+    fn normalize_root_path(raw: &str) -> Result<RelativePath, String> {
+        if raw.starts_with('/')
+            || raw.starts_with('\\')
+            || (raw.as_bytes().get(1) == Some(&b':') && raw.as_bytes()[0].is_ascii_alphabetic())
+        {
+            return Err("path must be relative to the project root".to_string());
+        }
+        if raw.contains('\\') {
+            return Err("path must use portable `/` separators".to_string());
+        }
+        let mut segments = Vec::new();
+        for part in raw.split('/') {
+            match part {
+                "." | "" => {}
+                ".." => {
+                    if segments.pop().is_none() {
+                        return Err("path leaves the project root".to_string());
+                    }
+                }
+                part => segments.push(
+                    Name::new(part)
+                        .map_err(|error| format!("path contains an invalid segment: {error:?}"))?,
+                ),
+            }
+        }
+        Ok(RelativePath::new(segments))
+    }
+
+    fn graph_warning_message(warning: &GraphWarning) -> String {
+        match (&warning.dependency, &warning.node) {
+            (Some(dependency), _) => format!("dependency `{dependency}`: {}", warning.message),
+            (None, Some(node)) => format!("dependency project {node}: {}", warning.message),
+            (None, None) => warning.message.clone(),
+        }
+    }
+
+    async fn dependency_source_texts(
+        storage: &MemoryStorage,
+        inputs: &jals_classpath::ProjectInputs,
+    ) -> Result<DependencySourceTexts, String> {
+        async fn read_artifact(
+            storage: &MemoryStorage,
+            root: &DirKey,
+            source: &LibrarySource,
+        ) -> Result<(FileKey, String), String> {
+            let key = root.file_at(&source.path).map_err(|error| {
+                format!(
+                    "dependency source `{}` has no valid navigation key: {error:?}",
+                    source.path
+                )
+            })?;
+            let bytes = storage
+                .artifacts()
+                .lookup(&source.key)
+                .await
+                .map_err(|error| {
+                    format!("dependency source `{}` is invalid: {error:?}", source.path)
+                })?
+                .ok_or_else(|| format!("dependency source `{}` is missing", source.path))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("dependency source `{}` is not valid UTF-8", source.path))?;
+            Ok((key, text))
+        }
+
+        let library_root =
+            DirKey::parse(".jals/library").expect("constant is a portable directory key");
+        let source_dep_root =
+            DirKey::parse(".jals/source-dependency").expect("constant is a portable directory key");
+        let view = storage.view();
+        let mut library = BTreeMap::new();
+        for source in &inputs.library_sources {
+            let (key, text) = read_artifact(storage, &library_root, source).await?;
+            library.insert(key, text);
+        }
+        let mut source_deps = BTreeMap::new();
+        for source in &inputs.source_dep_sources {
+            match source {
+                SourceFile::Project(key) => {
+                    let text = view
+                        .file_text(key)
+                        .map_err(|error| {
+                            format!("dependency source `{key}` cannot be read: {error}")
+                        })?
+                        .to_string();
+                    source_deps.insert(key.clone(), text);
+                }
+                SourceFile::Artifact(source) => {
+                    let (key, text) = read_artifact(storage, &source_dep_root, source).await?;
+                    source_deps.insert(key, text);
+                }
+            }
+        }
+        Ok(DependencySourceTexts {
+            library: library.into_iter().collect(),
+            source_deps: source_deps.into_iter().collect(),
+        })
     }
 }
 
@@ -1298,8 +1451,8 @@ impl Component for App {
                     return false;
                 }
                 match result {
-                    Ok((classpath, feature_set, status, artifacts)) => {
-                        self.deps_status = Some(status);
+                    Ok(resolution) => {
+                        self.deps_status = Some(resolution.status);
                         if let Some(workspace) = self.workspace() {
                             let link = ctx.link().clone();
                             let build_generation = Rc::clone(&self.build_generation);
@@ -1314,8 +1467,14 @@ impl Component for App {
                                 if build_generation.get() != generation {
                                     return;
                                 }
-                                ws.apply_project_inputs(classpath, feature_set, artifacts)
-                                    .await;
+                                ws.apply_project_inputs(
+                                    resolution.classpath,
+                                    resolution.feature_set,
+                                    resolution.artifacts,
+                                    resolution.sources.library,
+                                    resolution.sources.source_deps,
+                                )
+                                .await;
                                 // Re-analyse with the external types now in the index;
                                 // `MarkersComputed` drops the paint if a config model is showing.
                                 let markers = App::markers_of(&ws).await;
@@ -1392,6 +1551,7 @@ impl Component for App {
 #[cfg(test)]
 mod tests {
     use jals_exec::block_on_inline;
+    use jals_storage::{CodeTree, Entry};
 
     use super::*;
 
@@ -1474,6 +1634,199 @@ mod tests {
         assert!(!tracker.begin(inputs.clone()));
         tracker.invalidate();
         assert!(tracker.begin(inputs));
+    }
+
+    #[test]
+    fn stale_build_tokens_do_not_become_current_again() {
+        let generation = Rc::new(Cell::new(7));
+        let token = BuildToken {
+            generation: Rc::clone(&generation),
+            captured: 7,
+        };
+        assert!(token.is_current());
+        generation.set(8);
+        assert!(!token.is_current());
+    }
+
+    #[test]
+    fn root_classpath_files_directories_and_group_order_are_portable() {
+        block_on_inline(async {
+            let class = include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../jals-classpath/tests/fixtures/Box.class"
+            ));
+            let root_file = FileKey::parse("lib/Box.class").unwrap();
+            let directory_file = FileKey::parse("classes/Box.class").unwrap();
+            let script_file = FileKey::parse("generated/Script.class").unwrap();
+            let dependency_file = FileKey::parse("dependency/Graph.class").unwrap();
+            let storage = MemoryStorage::memory(
+                CodeTree::new([
+                    Entry::File(root_file.clone(), class.to_vec()),
+                    Entry::File(directory_file, class.to_vec()),
+                    Entry::File(script_file.clone(), class.to_vec()),
+                    Entry::File(dependency_file.clone(), class.to_vec()),
+                ])
+                .unwrap(),
+            );
+            let mut manifest = Manifest::default();
+            manifest.build.classpath = vec!["lib/./Box.class".to_string(), "classes".to_string()];
+
+            let (entries, warnings) = App::ordered_classpath_entries(
+                &manifest,
+                &storage.view(),
+                vec![script_file.clone()],
+                vec![ClasspathEntry::ProjectFile(dependency_file.clone())],
+            );
+
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(
+                entries,
+                vec![
+                    ClasspathEntry::ProjectFile(root_file),
+                    ClasspathEntry::ProjectDirectory(DirKey::parse("classes").unwrap()),
+                    ClasspathEntry::ProjectFile(script_file),
+                    ClasspathEntry::ProjectFile(dependency_file),
+                ],
+                "root manifest, root script, then graph dependency classpath"
+            );
+            let load = jals_classpath::ClasspathLoad::load(
+                storage.exec(),
+                &storage.view(),
+                storage.artifacts(),
+                &entries,
+            )
+            .await;
+            assert!(load.warnings.is_empty(), "{:?}", load.warnings);
+            assert_eq!(load.classes.len(), 4);
+        });
+    }
+
+    #[test]
+    fn malformed_root_classpath_warnings_are_visible_and_ordered() {
+        block_on_inline(async {
+            let mut manifest = Manifest::default();
+            manifest.build.classpath = vec![
+                "../escape.class".to_string(),
+                "bad:name.class".to_string(),
+                "missing.class".to_string(),
+            ];
+            let resolution = App::resolve_classpath(
+                manifest,
+                String::new(),
+                MemoryStorage::memory(CodeTree::default()),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+            assert!(
+                resolution.status.contains("3 warning(s)"),
+                "{}",
+                resolution.status
+            );
+            let escape = resolution.status.find("`../escape.class`").unwrap();
+            let invalid = resolution.status.find("`bad:name.class`").unwrap();
+            let missing = resolution.status.find("`missing.class`").unwrap();
+            assert!(
+                escape < invalid && invalid < missing,
+                "{}",
+                resolution.status
+            );
+            assert!(resolution.status.contains("path leaves the project root"));
+            assert!(resolution.status.contains("is missing or invalid"));
+        });
+    }
+
+    #[test]
+    fn detached_dependency_artifacts_must_be_utf8() {
+        block_on_inline(async {
+            let bytes = [0xff];
+            let key = jals_storage::CacheKey::new(
+                jals_storage::CacheNamespace::ExtractedSource,
+                jals_storage::ContentDigest::of(b"invalid source"),
+                jals_storage::ContentDigest::of(&bytes),
+            );
+            let mut storage = MemoryStorage::memory(CodeTree::default());
+            storage.artifacts_mut().publish(&key, &bytes).await.unwrap();
+            let inputs = jals_classpath::ProjectInputs {
+                library_sources: vec![LibrarySource {
+                    path: RelativePath::parse("Invalid.java").unwrap(),
+                    key,
+                }],
+                ..jals_classpath::ProjectInputs::default()
+            };
+
+            let Err(error) = App::dependency_source_texts(&storage, &inputs).await else {
+                panic!("non-UTF-8 Java sources must not reach the editor");
+            };
+            assert!(error.contains("not valid UTF-8"), "{error}");
+        });
+    }
+
+    #[test]
+    fn browser_resolution_runs_the_memory_graph_and_returns_detached_source_texts() {
+        block_on_inline(async {
+            let manifest: Manifest = "[package]\nfeatures = [\"java24\"]\n\
+                [dependencies]\nchild = { path = \"deps/child\" }\n\
+                git-dep = { git = \"https://example.invalid/repository.git\" }\n"
+                .parse()
+                .unwrap();
+            let storage = MemoryStorage::memory(
+                CodeTree::new([
+                    Entry::File(
+                        FileKey::parse("deps/child/jals.toml").unwrap(),
+                        b"[build]\nsource-dirs = [\"src\"]\nclasspath = [\"lib/Box.class\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n".to_vec(),
+                    ),
+                    Entry::File(
+                        FileKey::parse("deps/child/build.rhai").unwrap(),
+                        br#"let source = output.write_text("Generated.java", "class Generated {}"); build.add_source(source);"#.to_vec(),
+                    ),
+                    Entry::File(
+                        FileKey::parse("deps/child/src/Child.java").unwrap(),
+                        b"class Child {}".to_vec(),
+                    ),
+                    Entry::File(
+                        FileKey::parse("deps/child/lib/Box.class").unwrap(),
+                        include_bytes!(concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/../jals-classpath/tests/fixtures/Box.class"
+                        ))
+                        .to_vec(),
+                    ),
+                ])
+                .unwrap(),
+            );
+
+            let expected_features = manifest.feature_set();
+            let resolution = App::resolve_classpath(manifest, String::new(), storage, Vec::new())
+                .await
+                .unwrap();
+
+            assert_eq!(resolution.feature_set, expected_features);
+            assert!(
+                resolution
+                    .status
+                    .contains("Git dependencies cannot be acquired")
+            );
+            assert_eq!(resolution.sources.source_deps.len(), 2);
+            assert!(resolution.sources.source_deps.iter().any(|(key, text)| {
+                key.to_string().ends_with("Generated.java") && text == "class Generated {}"
+            }));
+            assert!(
+                resolution
+                    .sources
+                    .source_deps
+                    .iter()
+                    .all(|(key, _)| key.to_string().starts_with(".jals/source-dependency/"))
+            );
+            assert!(
+                resolution
+                    .sources
+                    .library
+                    .iter()
+                    .any(|(key, _)| key.to_string().starts_with(".jals/library/"))
+            );
+        });
     }
 
     #[test]

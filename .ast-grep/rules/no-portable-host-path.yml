@@ -21,6 +21,7 @@ ignores:
   - '**/examples/**/*.rs'
   - 'jals-storage/src/native.rs'
   - 'jals-classpath/src/native.rs'
+  - 'jals-project/src/native.rs'
   - 'jals-build/src/native.rs'
   - 'jals-build/src/manifest_ext.rs'
   - 'jals-build/src/request.rs'

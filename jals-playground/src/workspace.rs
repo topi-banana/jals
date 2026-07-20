@@ -11,7 +11,7 @@
 
 use jals_build::build_script::{
     BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptOutput,
-    BuildScriptSession, RHAI_OUTPUT_ROOT, clear_build_script_outputs, execute_build_script,
+    BuildScriptSession, clear_build_script_outputs, execute_build_script,
 };
 use jals_config::fmt::Config as FmtConfig;
 use jals_config::lint::Config as LintConfig;
@@ -132,10 +132,15 @@ impl Workspace {
         classpath: LoweredClasspath,
         feature_set: FeatureSet,
         artifacts: ArtifactCache<MemoryCache>,
+        library_sources: Vec<(FileKey, String)>,
+        source_dep_sources: Vec<(FileKey, String)>,
     ) {
         let workspace = self.editor.workspace_mut();
         workspace.set_feature_set(feature_set);
         workspace.storage_mut().replace_artifacts(artifacts);
+        workspace
+            .set_dependency_source_texts(library_sources, source_dep_sources)
+            .await;
         workspace.set_classpath(classpath).await;
     }
 
@@ -190,15 +195,7 @@ impl Workspace {
                     error,
                 })?;
             self.staged_script.clone_from(&configured_script);
-            let mut environment = BuildScriptEnvironment::new();
-            environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
-            environment.insert("JALS_MANIFEST_DIR", ".");
-            if let Some(name) = &manifest.package.name {
-                environment.insert("JALS_PACKAGE_NAME", name);
-            }
-            if let Some(version) = &manifest.package.version {
-                environment.insert("JALS_PACKAGE_VERSION", version);
-            }
+            let environment = BuildScriptEnvironment::new().for_project(manifest);
             if manifest.build.script.is_none() {
                 clear_build_script_outputs(storage, &mut self.build_script_session).await?;
                 None
@@ -370,6 +367,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use jals_build::build_script::RHAI_OUTPUT_ROOT;
     use jals_editor::CompletionKind;
     use jals_exec::block_on_inline;
 
@@ -985,6 +983,100 @@ mod tests {
                 !after.iter().any(|d| d.message.contains("Box")),
                 "expected `Box` to resolve once the classpath is folded, got: {:?}",
                 after.iter().map(|d| &d.message).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_sources_are_navigable_but_never_enter_project_storage() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            ws.set_active("com/example/Main.java");
+            ws.sync_active("package com.example; class Main { Dependency value; }")
+                .await;
+            let dependency =
+                FileKey::parse(".jals/source-dependency/dependencies/node/sources/Dependency.java")
+                    .unwrap();
+            ws.apply_project_inputs(
+                LoweredClasspath::default(),
+                FeatureSet::default(),
+                ArtifactCache::new(MemoryCache::default()),
+                Vec::new(),
+                vec![(
+                    dependency.clone(),
+                    "package com.example; class Dependency {}".to_string(),
+                )],
+            )
+            .await;
+
+            let source = ws.active_source();
+            let (line, col) = monaco_pos(&source, source.find("Dependency value").unwrap());
+            let target = ws
+                .goto_definition(line, col)
+                .await
+                .expect("dependency source is an index and navigation input");
+            assert_eq!(target.path, dependency.to_string());
+            assert!(ws.editor.workspace().file_id(&dependency).is_none());
+            assert!(ws.file_keys().all(|path| path != &dependency));
+            assert!(ws.editor.workspace().view().file(&dependency).is_err());
+            assert!(ws.storage_snapshot().view().file(&dependency).is_err());
+
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"if project.exists(".jals") { throw "dependency source leaked"; }"#,
+            )
+            .await
+            .expect("a later build script view excludes detached dependency sources");
+            assert!(ws.storage_snapshot().view().file(&dependency).is_err());
+
+            ws.apply_project_inputs(
+                LoweredClasspath::default(),
+                FeatureSet::default(),
+                ArtifactCache::new(MemoryCache::default()),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            assert!(ws.editor.workspace().view().file(&dependency).is_err());
+            assert!(ws.goto_definition(line, col).await.is_none());
+        });
+    }
+
+    #[test]
+    fn detached_dependency_text_never_replaces_same_key_project_bytes() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let collision = FileKey::parse(".jals/source-dependency/collision.java").unwrap();
+            let revision = ws.editor.workspace().storage().revision();
+            let mut transaction = ws
+                .editor
+                .workspace_mut()
+                .storage_mut()
+                .transaction(revision)
+                .unwrap();
+            transaction
+                .create_file(collision.clone(), b"class UserOwned {}".to_vec())
+                .unwrap();
+            transaction.commit().await.unwrap();
+
+            ws.apply_project_inputs(
+                LoweredClasspath::default(),
+                FeatureSet::default(),
+                ArtifactCache::new(MemoryCache::default()),
+                Vec::new(),
+                vec![(collision.clone(), "class DependencyOwned {}".to_string())],
+            )
+            .await;
+
+            assert_eq!(
+                ws.editor
+                    .workspace()
+                    .view()
+                    .file(&collision)
+                    .unwrap()
+                    .bytes(),
+                b"class UserOwned {}"
             );
         });
     }

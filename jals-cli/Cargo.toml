@@ -42,6 +42,7 @@ jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 jals-lint.workspace = true
 jals-lsp.workspace = true
+jals-project = { workspace = true, features = ["native"] }
 jals-syntax.workspace = true
 similar.workspace = true
 

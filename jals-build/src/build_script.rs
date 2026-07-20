@@ -5,19 +5,25 @@
 //! and build directives stay buffered until a successful evaluation is committed in one
 //! revision-checked transaction.
 
+use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::error::Error as CoreError;
 use core::fmt;
 
-use jals_storage::{ContentDigest, FileKey, ProjectView, Revision};
+use jals_config::Manifest;
+use jals_storage::{
+    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, ProjectView,
+    Revision,
+};
 use serde::{Deserialize, Serialize};
 
-const BUILD_SCRIPT_API_VERSION: u32 = 2;
-const BUILD_SCRIPT_STATE_VERSION: u32 = 2;
+const BUILD_SCRIPT_API_VERSION: u32 = 3;
+const BUILD_SCRIPT_STATE_VERSION: u32 = 3;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 const MANIFEST_FILE: &str = "jals.toml";
 
@@ -26,6 +32,28 @@ pub const RHAI_BUILD_ROOT: &str = "target/jals/build/rhai";
 
 /// Directory under [`RHAI_BUILD_ROOT`] where script-generated files are published.
 pub const RHAI_OUTPUT_ROOT: &str = "target/jals/build/rhai/out";
+
+/// Cache identity for one build-script project.
+///
+/// Dependency projects must use a scope derived from their stable content identity. The root
+/// project uses [`ROOT`](Self::ROOT). Scope values are opaque so callers cannot accidentally depend
+/// on their cache encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BuildScriptCacheScope(Option<ContentDigest>);
+
+impl BuildScriptCacheScope {
+    /// Distinguished cache scope for the root project executed by [`execute_build_script`].
+    pub const ROOT: Self = Self(None);
+
+    /// Construct an isolated dependency-project cache scope from a stable digest.
+    pub const fn new(digest: ContentDigest) -> Self {
+        Self(Some(digest))
+    }
+
+    const fn digest(self) -> Option<ContentDigest> {
+        self.0
+    }
+}
 
 /// Resource limits applied to compilation, evaluation, and generated output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +167,32 @@ impl BuildScriptEnvironment {
         Self {
             values: BTreeMap::new(),
         }
+    }
+
+    /// Derive the environment for one project, replacing host-specific project metadata.
+    #[must_use]
+    pub fn for_project(&self, manifest: &Manifest) -> Self {
+        const RESERVED: [&str; 4] = [
+            "OUT_DIR",
+            "JALS_MANIFEST_DIR",
+            "JALS_PACKAGE_NAME",
+            "JALS_PACKAGE_VERSION",
+        ];
+
+        let mut environment: Self = self
+            .iter()
+            .filter(|(name, _)| !RESERVED.contains(name))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
+        environment.insert("JALS_MANIFEST_DIR", ".");
+        if let Some(name) = &manifest.package.name {
+            environment.insert("JALS_PACKAGE_NAME", name);
+        }
+        if let Some(version) = &manifest.package.version {
+            environment.insert("JALS_PACKAGE_VERSION", version);
+        }
+        environment
     }
 
     /// Insert an explicit variable, returning its previous value.
@@ -277,6 +331,7 @@ impl BuildScriptSession {
 struct BuildScriptStateWire {
     state_version: u32,
     api_version: u32,
+    cache_scope: Option<String>,
     script_path: String,
     fingerprint: String,
     fingerprint_inputs: FingerprintInputsWire,
@@ -298,6 +353,7 @@ struct BuildScriptStateWire {
 struct FingerprintInputsWire {
     state_version: u32,
     api_version: u32,
+    cache_scope: Option<String>,
     script_path: String,
     script_digest: String,
     manifest_digest: Option<String>,
@@ -399,20 +455,43 @@ enum DiagnosticLevelWire {
 struct CacheIdentity;
 
 impl CacheIdentity {
-    fn state(script: &FileKey) -> ContentDigest {
-        ContentDigest::of(
-            alloc::format!("jals-build:build-script-state:{BUILD_SCRIPT_API_VERSION}:{script}")
-                .as_bytes(),
+    fn state(scope: BuildScriptCacheScope, script: &FileKey) -> ContentDigest {
+        Self::digest(b"jals-build:build-script-state", scope, script, None)
+    }
+
+    fn output(scope: BuildScriptCacheScope, script: &FileKey, output: &FileKey) -> ContentDigest {
+        Self::digest(
+            b"jals-build:build-script-output",
+            scope,
+            script,
+            Some(output),
         )
     }
 
-    fn output(script: &FileKey, output: &FileKey) -> ContentDigest {
-        ContentDigest::of(
-            alloc::format!(
-                "jals-build:build-script-output:{BUILD_SCRIPT_API_VERSION}:{script}\0{output}"
-            )
-            .as_bytes(),
-        )
+    fn digest(
+        domain: &[u8],
+        scope: BuildScriptCacheScope,
+        script: &FileKey,
+        output: Option<&FileKey>,
+    ) -> ContentDigest {
+        let script = ContentDigest::of(script.to_string().as_bytes());
+        let output = output.map(|key| ContentDigest::of(key.to_string().as_bytes()));
+        let mut bytes =
+            Vec::with_capacity(domain.len() + 4 + 1 + 32 + 32 + usize::from(output.is_some()) * 32);
+        bytes.extend_from_slice(domain);
+        bytes.extend_from_slice(&BUILD_SCRIPT_API_VERSION.to_be_bytes());
+        match scope.digest() {
+            None => bytes.push(0),
+            Some(digest) => {
+                bytes.push(1);
+                bytes.extend_from_slice(digest.as_bytes());
+            }
+        }
+        bytes.extend_from_slice(script.as_bytes());
+        if let Some(output) = output {
+            bytes.extend_from_slice(output.as_bytes());
+        }
+        ContentDigest::of(&bytes)
     }
 }
 
@@ -611,6 +690,118 @@ impl PendingOutput {
     }
 }
 
+#[derive(Debug)]
+struct PreparedCacheState {
+    key: CacheKey,
+    bytes: Vec<u8>,
+}
+
+/// Immutable result of build-script cache lookup or evaluation.
+///
+/// Preparation never publishes generated files or mutates project source storage. Callers may
+/// resolve registered files against the supplied view, consume directives through
+/// [`output`](Self::output), and persist cache artifacts separately through
+/// [`persist`](Self::persist).
+#[derive(Debug)]
+pub struct PreparedBuildScript {
+    cache_scope: BuildScriptCacheScope,
+    script: FileKey,
+    pending: PendingOutput,
+    recovered_outputs: BTreeMap<FileKey, Vec<u8>>,
+    cache_state: Result<Option<PreparedCacheState>, String>,
+}
+
+impl PreparedBuildScript {
+    /// Cache scope used for this preparation.
+    pub const fn cache_scope(&self) -> BuildScriptCacheScope {
+        self.cache_scope
+    }
+
+    /// Configured project-relative script path.
+    pub const fn script_path(&self) -> &FileKey {
+        &self.script
+    }
+
+    /// Generated project keys and bytes in deterministic key order.
+    pub fn generated_files(&self) -> impl ExactSizeIterator<Item = (&FileKey, &[u8])> {
+        self.pending
+            .generated
+            .iter()
+            .map(|(key, bytes)| (key, bytes.as_slice()))
+    }
+
+    /// Resolve a generated or pre-existing project file from the immutable preparation view.
+    ///
+    /// Generated bytes take precedence over stale bytes at the same key in `view`. This is the
+    /// resolution operation for paths returned in `generated_sources` and `additional_classpath`
+    /// by [`output`](Self::output).
+    pub fn file_bytes<'a>(
+        &'a self,
+        view: &'a ProjectView,
+        key: &FileKey,
+    ) -> Result<&'a [u8], jals_storage::Error> {
+        if let Some(bytes) = self.pending.generated.get(key) {
+            return Ok(bytes);
+        }
+        view.file(key).map(jals_storage::CodeFile::bytes)
+    }
+
+    /// Verified content-addressed cache key for a generated output.
+    ///
+    /// Returns `None` when `path` was not generated by this preparation. After
+    /// [`persist`](Self::persist) succeeds, the key can be consumed through the artifact cache's
+    /// verified lookup APIs.
+    pub fn generated_cache_key(&self, path: &FileKey) -> Option<CacheKey> {
+        self.pending.generated.get(path).map(|bytes| {
+            CacheKey::new(
+                CacheNamespace::BuildScriptOutput,
+                CacheIdentity::output(self.cache_scope, &self.script, path),
+                ContentDigest::of(bytes),
+            )
+        })
+    }
+
+    /// Convert the prepared registrations and directives to the existing host output shape.
+    ///
+    /// For immutable dependency preparation, callers normally pass `view.revision()`. Root
+    /// execution passes the revision returned by output reconciliation.
+    pub fn output(&self, revision: Revision) -> BuildScriptOutput {
+        self.pending.finish(revision)
+    }
+
+    /// Persist generated outputs and state to the artifact cache.
+    ///
+    /// Artifacts are published write-once. The advisory state index is updated last, after every
+    /// output and the state artifact itself are available through verified cache reads.
+    pub async fn persist<C: CacheBackend>(
+        &self,
+        cache: &mut ArtifactCache<C>,
+    ) -> Result<(), String> {
+        let state = match &self.cache_state {
+            Ok(Some(state)) => state,
+            Ok(None) => return Ok(()),
+            Err(message) => return Err(message.clone()),
+        };
+        for (path, bytes) in &self.pending.generated {
+            let key = self
+                .generated_cache_key(path)
+                .expect("key comes from prepared generated outputs");
+            cache
+                .publish(&key, bytes)
+                .await
+                .map_err(|error| format!("could not publish output `{path}`: {error:?}"))?;
+        }
+        cache
+            .publish(&state.key, &state.bytes)
+            .await
+            .map_err(|error| format!("could not publish state: {error:?}"))?;
+        cache
+            .record_index(&state.key)
+            .await
+            .map_err(|error| format!("could not record current state: {error:?}"))
+    }
+}
+
 mod api {
     use alloc::borrow::ToOwned;
     use alloc::boxed::Box;
@@ -630,12 +821,13 @@ mod api {
 
     use super::{
         BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_API_VERSION, BUILD_SCRIPT_STATE_VERSION, BuildApi,
-        BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
-        BuildScriptLimitsWire, BuildScriptOutput, BuildScriptOutputPath, BuildScriptPosition,
-        BuildScriptSession, BuildScriptStateWire, CacheIdentity, DiagnosticLevelWire,
-        DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire, FingerprintFilesModeWire,
-        FingerprintInputsWire, MANIFEST_FILE, OutputApi, OutputArtifactWire, PendingOutput,
-        ProjectApi, RHAI_OUTPUT_ROOT,
+        BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
+        BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptOutputPath,
+        BuildScriptPosition, BuildScriptSession, BuildScriptStateWire, CacheIdentity,
+        DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire,
+        FingerprintFilesModeWire, FingerprintInputsWire, MANIFEST_FILE, OutputApi,
+        OutputArtifactWire, PendingOutput, PreparedBuildScript, PreparedCacheState, ProjectApi,
+        RHAI_OUTPUT_ROOT,
     };
 
     type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
@@ -1359,10 +1551,13 @@ mod api {
     }
 
     impl CachedBuildScript {
-        fn finish(self, revision: Revision) -> BuildScriptOutput {
-            BuildScriptOutput {
-                revision,
-                generated_files: self.generated.keys().cloned().collect(),
+        fn into_pending(self, limits: BuildScriptLimits) -> PendingOutput {
+            let total_output_bytes = self.generated.values().map(Vec::len).sum();
+            PendingOutput {
+                limits,
+                generated: self.generated,
+                total_output_bytes,
+                host_directive_bytes: 0,
                 generated_sources: self.state.generated_sources,
                 additional_classpath: self.state.additional_classpath,
                 javac_args: self.state.javac_args,
@@ -1384,6 +1579,18 @@ mod api {
     fn digest_from_wire(value: &str) -> Option<ContentDigest> {
         let digest = ContentDigest::from_hex(value)?;
         (digest.to_hex() == value).then_some(digest)
+    }
+
+    fn cache_scope_wire(scope: BuildScriptCacheScope) -> Option<String> {
+        scope.digest().map(ContentDigest::to_hex)
+    }
+
+    fn cache_scope_matches(wire: Option<&str>, scope: BuildScriptCacheScope) -> bool {
+        match (wire, scope.digest()) {
+            (None, None) => true,
+            (Some(wire), Some(scope)) => digest_from_wire(wire) == Some(scope),
+            _ => false,
+        }
     }
 
     fn strictly_sorted(values: &[String]) -> bool {
@@ -1412,6 +1619,7 @@ mod api {
 
     fn fingerprint_inputs(
         view: &ProjectView,
+        cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
@@ -1461,6 +1669,7 @@ mod api {
         Some(FingerprintInputsWire {
             state_version: BUILD_SCRIPT_STATE_VERSION,
             api_version: BUILD_SCRIPT_API_VERSION,
+            cache_scope: cache_scope_wire(cache_scope),
             script_path: script.to_string(),
             script_digest,
             manifest_digest,
@@ -1473,12 +1682,14 @@ mod api {
 
     fn validate_fingerprint_inputs(
         inputs: &FingerprintInputsWire,
+        cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         rerun_files: &[String],
         rerun_env: &[String],
     ) -> Option<()> {
         if inputs.state_version != BUILD_SCRIPT_STATE_VERSION
             || inputs.api_version != BUILD_SCRIPT_API_VERSION
+            || !cache_scope_matches(inputs.cache_scope.as_deref(), cache_scope)
             || inputs.script_path != script.to_string()
             || digest_from_wire(&inputs.script_digest).is_none()
             || inputs
@@ -1556,11 +1767,16 @@ mod api {
         Some(())
     }
 
-    fn decode_state(bytes: &[u8], script: &FileKey) -> Option<DecodedState> {
+    fn decode_state(
+        bytes: &[u8],
+        cache_scope: BuildScriptCacheScope,
+        script: &FileKey,
+    ) -> Option<DecodedState> {
         let wire: BuildScriptStateWire = serde_json::from_slice(bytes).ok()?;
         if serde_json::to_vec(&wire).ok()?.as_slice() != bytes
             || wire.state_version != BUILD_SCRIPT_STATE_VERSION
             || wire.api_version != BUILD_SCRIPT_API_VERSION
+            || !cache_scope_matches(wire.cache_scope.as_deref(), cache_scope)
             || wire.script_path != script.to_string()
             || !strictly_sorted(&wire.rerun_files)
             || !strictly_sorted(&wire.rerun_env)
@@ -1569,6 +1785,7 @@ mod api {
         }
         validate_fingerprint_inputs(
             &wire.fingerprint_inputs,
+            cache_scope,
             script,
             &wire.rerun_files,
             &wire.rerun_env,
@@ -1705,6 +1922,7 @@ mod api {
     async fn load_cached_build_script<C: CacheBackend>(
         cache: &ArtifactCache<C>,
         view: &ProjectView,
+        cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
@@ -1712,7 +1930,7 @@ mod api {
         let state_key = cache
             .indexed_key(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(script),
+                CacheIdentity::state(cache_scope, script),
             )
             .await
             .ok()??;
@@ -1720,9 +1938,10 @@ mod api {
             .lookup_bounded(&state_key, limits.max_cache_state_size)
             .await
             .ok()??;
-        let state = decode_state(&state_bytes, script)?;
+        let state = decode_state(&state_bytes, cache_scope, script)?;
         let current_fingerprint = fingerprint_inputs(
             view,
+            cache_scope,
             script,
             environment,
             limits,
@@ -1737,7 +1956,7 @@ mod api {
         for (path, digest) in &state.outputs {
             let key = CacheKey::new(
                 CacheNamespace::BuildScriptOutput,
-                CacheIdentity::output(script, path),
+                CacheIdentity::output(cache_scope, script, path),
                 *digest,
             );
             match cache
@@ -1848,6 +2067,7 @@ mod api {
     }
 
     fn state_wire(
+        cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         pending: &PendingOutput,
         fingerprint_inputs: FingerprintInputsWire,
@@ -1856,6 +2076,7 @@ mod api {
         BuildScriptStateWire {
             state_version: BUILD_SCRIPT_STATE_VERSION,
             api_version: BUILD_SCRIPT_API_VERSION,
+            cache_scope: cache_scope_wire(cache_scope),
             script_path: script.to_string(),
             fingerprint: fingerprint.to_hex(),
             fingerprint_inputs,
@@ -1905,16 +2126,17 @@ mod api {
         }
     }
 
-    async fn persist_build_script<S: SourceBackend, C: CacheBackend>(
-        storage: &mut ProjectStorage<S, C>,
+    fn prepare_cache_state(
         view: &ProjectView,
+        cache_scope: BuildScriptCacheScope,
         script: &FileKey,
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
         pending: &PendingOutput,
-    ) -> Result<(), String> {
+    ) -> Result<PreparedCacheState, String> {
         let inputs = fingerprint_inputs(
             view,
+            cache_scope,
             script,
             environment,
             limits,
@@ -1924,7 +2146,7 @@ mod api {
         .ok_or_else(|| "could not collect post-build fingerprint inputs".to_owned())?;
         let fingerprint = fingerprint_digest(&inputs)
             .ok_or_else(|| "could not serialize build-script fingerprint inputs".to_owned())?;
-        let state = state_wire(script, pending, inputs, fingerprint);
+        let state = state_wire(cache_scope, script, pending, inputs, fingerprint);
         let state_bytes = serde_json::to_vec(&state)
             .map_err(|error| format!("could not serialize build-script state: {error}"))?;
         if state_bytes.len() > limits.max_cache_state_size {
@@ -1936,51 +2158,33 @@ mod api {
         }
         let state_key = CacheKey::new(
             CacheNamespace::BuildScriptState,
-            CacheIdentity::state(script),
+            CacheIdentity::state(cache_scope, script),
             ContentDigest::of(&state_bytes),
         );
-        let cache = storage.artifacts_mut();
-        for (path, bytes) in &pending.generated {
-            let output_key = CacheKey::new(
-                CacheNamespace::BuildScriptOutput,
-                CacheIdentity::output(script, path),
-                ContentDigest::of(bytes),
-            );
-            cache
-                .publish(&output_key, bytes)
-                .await
-                .map_err(|error| format!("could not publish output `{path}`: {error:?}"))?;
-        }
-        cache
-            .publish(&state_key, &state_bytes)
-            .await
-            .map_err(|error| format!("could not publish state: {error:?}"))?;
-        cache
-            .record_index(&state_key)
-            .await
-            .map_err(|error| format!("could not record current state: {error:?}"))
+        Ok(PreparedCacheState {
+            key: state_key,
+            bytes: state_bytes,
+        })
     }
 
-    /// Execute the configured Rhai build script and atomically publish its generated files.
+    /// Prepare the configured Rhai build script against an immutable project snapshot.
     ///
     /// Returns `Ok(None)` when the manifest has no build script. The explicit `environment` is the
-    /// complete input to `build.env`; no host environment is read. `session` is aggregate-local stale
-    /// output knowledge and is hydrated from verified durable state when available. A cache write
-    /// failure after project commit is reported as a warning: current-session ownership remains
-    /// authoritative, but safe stale cleanup after reopening storage is degraded until a later cache
-    /// publication succeeds.
+    /// complete input to `build.env`; no host environment is read. Cache hits are read through
+    /// verified bounded lookups. On a miss, all host calls run synchronously against `view` and
+    /// generated bytes remain buffered in the returned value.
     ///
-    /// The script is read from the immutable storage view. On a cache miss it is compiled from text,
-    /// and all host calls run synchronously against that same view. A Rhai exception, host API error,
-    /// or `build.error` returns an error before a transaction is created, so it cannot publish a
-    /// partial result.
-    pub async fn execute_build_script<S: SourceBackend, C: CacheBackend>(
-        storage: &mut ProjectStorage<S, C>,
+    /// This operation only reads `view` and `cache`: it never reconciles outputs, mutates a source
+    /// backend, or publishes cache artifacts. Use a distinct `cache_scope` for each dependency
+    /// project so scripts with the same project-relative paths cannot share state accidentally.
+    pub async fn prepare_build_script<C: CacheBackend>(
+        view: &ProjectView,
+        cache: &ArtifactCache<C>,
+        cache_scope: BuildScriptCacheScope,
         manifest: &Manifest,
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
-        session: &mut BuildScriptSession,
-    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+    ) -> Result<Option<PreparedBuildScript>, BuildScriptError> {
         let Some(BuildScript::Rhai { file }) = manifest.build.script.as_ref() else {
             return Ok(None);
         };
@@ -2009,7 +2213,6 @@ mod api {
             });
         }
 
-        let view = storage.view();
         let script_size = view
             .file(&script_key)
             .map_err(|error| BuildScriptError::Storage {
@@ -2031,19 +2234,21 @@ mod api {
                 operation: "read the configured script",
                 error,
             })?;
+        let mut recovered_outputs = BTreeMap::new();
         if let Some(cached) =
-            load_cached_build_script(storage.artifacts(), &view, &script_key, environment, limits)
+            load_cached_build_script(cache, view, cache_scope, &script_key, environment, limits)
                 .await
         {
             if cached.fingerprint_matches && cached.outputs_complete {
-                let published_revision =
-                    reconcile_outputs(storage, &view, &cached.generated, &session.outputs).await?;
-                session.outputs.clone_from(&cached.generated);
-                return Ok(Some(cached.finish(published_revision)));
+                return Ok(Some(PreparedBuildScript {
+                    cache_scope,
+                    script: script_key,
+                    pending: cached.into_pending(limits.clone()),
+                    recovered_outputs,
+                    cache_state: Ok(None),
+                }));
             }
-            for (key, bytes) in cached.generated {
-                session.outputs.entry(key).or_insert(bytes);
-            }
+            recovered_outputs = cached.generated;
         }
         let pending = Rc::new(RefCell::new(PendingOutput::new(limits.clone())));
         let mut scope = Scope::new();
@@ -2109,13 +2314,61 @@ mod api {
             return Err(BuildScriptError::ReportedErrors(pending.diagnostics));
         }
 
+        let cache_state = prepare_cache_state(
+            view,
+            cache_scope,
+            &script_key,
+            environment,
+            limits,
+            &pending,
+        )
+        .map(Some);
+        Ok(Some(PreparedBuildScript {
+            cache_scope,
+            script: script_key,
+            pending,
+            recovered_outputs,
+            cache_state,
+        }))
+    }
+
+    /// Execute the configured Rhai build script and atomically publish its generated files.
+    ///
+    /// This is the root-project adapter over [`prepare_build_script`]. It reconciles root outputs
+    /// with a revision check, updates aggregate-local ownership, then persists prepared cache
+    /// artifacts. A cache failure after source commit remains a non-fatal warning.
+    pub async fn execute_build_script<S: SourceBackend, C: CacheBackend>(
+        storage: &mut ProjectStorage<S, C>,
+        manifest: &Manifest,
+        environment: &BuildScriptEnvironment,
+        limits: &BuildScriptLimits,
+        session: &mut BuildScriptSession,
+    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+        let view = storage.view();
+        let Some(prepared) = prepare_build_script(
+            &view,
+            storage.artifacts(),
+            BuildScriptCacheScope::ROOT,
+            manifest,
+            environment,
+            limits,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let mut known_outputs = session.outputs.clone();
+        for (key, bytes) in &prepared.recovered_outputs {
+            known_outputs
+                .entry(key.clone())
+                .or_insert_with(|| bytes.clone());
+        }
         let published_revision =
-            reconcile_outputs(storage, &view, &pending.generated, &session.outputs).await?;
-        session.outputs.clone_from(&pending.generated);
-        let mut output = pending.finish(published_revision);
-        if let Err(message) =
-            persist_build_script(storage, &view, &script_key, environment, limits, &pending).await
-        {
+            reconcile_outputs(storage, &view, &prepared.pending.generated, &known_outputs).await?;
+        session.outputs.clone_from(&prepared.pending.generated);
+        let mut output = prepared.output(published_revision);
+        if let Err(message) = prepared.persist(storage.artifacts_mut()).await {
             // Project output and in-session ownership are already committed. Only durable
             // cross-session ownership/fingerprinting is degraded by this warning.
             output
@@ -2128,7 +2381,7 @@ mod api {
     }
 }
 
-pub use api::{clear_build_script_outputs, execute_build_script};
+pub use api::{clear_build_script_outputs, execute_build_script, prepare_build_script};
 
 #[cfg(test)]
 mod tests {
@@ -2179,18 +2432,201 @@ mod tests {
     }
 
     async fn current_state(storage: &MemoryStorage) -> (CacheKey, Vec<u8>) {
+        current_state_in_scope(storage, BuildScriptCacheScope::ROOT).await
+    }
+
+    async fn current_state_in_scope(
+        storage: &MemoryStorage,
+        cache_scope: BuildScriptCacheScope,
+    ) -> (CacheKey, Vec<u8>) {
         let script = FileKey::parse("build.rhai").unwrap();
         let key = storage
             .artifacts()
             .indexed_key(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(&script),
+                CacheIdentity::state(cache_scope, &script),
             )
             .await
             .unwrap()
             .unwrap();
         let bytes = storage.artifacts().lookup(&key).await.unwrap().unwrap();
         (key, bytes)
+    }
+
+    async fn prepare(
+        storage: &MemoryStorage,
+        cache_scope: BuildScriptCacheScope,
+        environment: &BuildScriptEnvironment,
+    ) -> PreparedBuildScript {
+        prepare_build_script(
+            &storage.view(),
+            storage.artifacts(),
+            cache_scope,
+            &manifest(),
+            environment,
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn preparation_does_not_mutate_project_or_cache_storage() {
+        block_on_inline(async {
+            let storage = storage(r#"output.write_text("generated.txt", "prepared");"#, []);
+            let output = FileKey::parse("target/jals/build/rhai/out/generated.txt").unwrap();
+            let script = FileKey::parse("build.rhai").unwrap();
+            let scope = BuildScriptCacheScope::new(ContentDigest::of(b"dependency"));
+
+            let prepared = prepare(&storage, scope, &BuildScriptEnvironment::new()).await;
+
+            assert_eq!(storage.revision(), Revision::INITIAL);
+            assert!(storage.view().file(&output).is_err());
+            assert_eq!(
+                prepared.file_bytes(&storage.view(), &output).unwrap(),
+                b"prepared"
+            );
+            assert!(
+                storage
+                    .artifacts()
+                    .indexed_key(
+                        CacheNamespace::BuildScriptState,
+                        CacheIdentity::state(scope, &script),
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn cache_scopes_isolate_identical_script_and_output_paths() {
+        block_on_inline(async {
+            let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
+            let output = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let first_digest = ContentDigest::of(b"dependency-one");
+            let second_digest = ContentDigest::of(b"dependency-two");
+            let first_scope = BuildScriptCacheScope::new(first_digest);
+            let second_scope = BuildScriptCacheScope::new(second_digest);
+            let mut environment = BuildScriptEnvironment::new();
+            environment.insert("VALUE", "first");
+
+            let first = prepare(&storage, first_scope, &environment).await;
+            let first_output_key = first.generated_cache_key(&output).unwrap();
+            first.persist(storage.artifacts_mut()).await.unwrap();
+            assert_eq!(
+                storage
+                    .artifacts()
+                    .lookup(&first_output_key)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                b"first"
+            );
+
+            environment.insert("VALUE", "second");
+            let second = prepare(&storage, second_scope, &environment).await;
+            let second_output_key = second.generated_cache_key(&output).unwrap();
+            assert_eq!(
+                second.file_bytes(&storage.view(), &output).unwrap(),
+                b"second"
+            );
+            assert_ne!(
+                first_output_key.provenance(),
+                second_output_key.provenance()
+            );
+            second.persist(storage.artifacts_mut()).await.unwrap();
+
+            environment.insert("VALUE", "not-fingerprinted");
+            let first_hit = prepare(&storage, first_scope, &environment).await;
+            assert_eq!(
+                first_hit.file_bytes(&storage.view(), &output).unwrap(),
+                b"first"
+            );
+
+            let (first_state_key, first_state_bytes) =
+                current_state_in_scope(&storage, first_scope).await;
+            let (second_state_key, second_state_bytes) =
+                current_state_in_scope(&storage, second_scope).await;
+            assert_ne!(first_state_key.provenance(), second_state_key.provenance());
+            let first_state: BuildScriptStateWire =
+                serde_json::from_slice(&first_state_bytes).unwrap();
+            let second_state: BuildScriptStateWire =
+                serde_json::from_slice(&second_state_bytes).unwrap();
+            assert_eq!(first_state.cache_scope, Some(first_digest.to_hex()));
+            assert_eq!(second_state.cache_scope, Some(second_digest.to_hex()));
+            assert_eq!(
+                first_state.fingerprint_inputs.cache_scope,
+                first_state.cache_scope
+            );
+            assert_eq!(
+                second_state.fingerprint_inputs.cache_scope,
+                second_state.cache_scope
+            );
+        });
+    }
+
+    #[test]
+    fn preparation_resolves_generated_and_pre_existing_registrations() {
+        block_on_inline(async {
+            let storage = storage(
+                r#"
+                    let generated_source = output.write_text("Generated.java", "class Generated {}");
+                    let generated_classpath = output.write("generated.jar", [1, 2, 3]);
+                    build.add_source(generated_source);
+                    build.add_source("src/Existing.java");
+                    build.add_classpath(generated_classpath);
+                    build.add_classpath("lib/existing.jar");
+                "#,
+                [
+                    file("src/Existing.java", "class Existing {}"),
+                    file("lib/existing.jar", "existing-jar"),
+                ],
+            );
+            let view = storage.view();
+            let prepared = prepare(
+                &storage,
+                BuildScriptCacheScope::new(ContentDigest::of(b"dependency")),
+                &BuildScriptEnvironment::new(),
+            )
+            .await;
+            let output = prepared.output(view.revision());
+            let generated_source =
+                FileKey::parse("target/jals/build/rhai/out/Generated.java").unwrap();
+            let existing_source = FileKey::parse("src/Existing.java").unwrap();
+            let generated_classpath =
+                FileKey::parse("target/jals/build/rhai/out/generated.jar").unwrap();
+            let existing_classpath = FileKey::parse("lib/existing.jar").unwrap();
+
+            assert_eq!(
+                output.generated_sources,
+                BTreeSet::from([generated_source.clone(), existing_source.clone()])
+            );
+            assert_eq!(
+                output.additional_classpath,
+                BTreeSet::from([generated_classpath.clone(), existing_classpath.clone()])
+            );
+            assert_eq!(
+                prepared.file_bytes(&view, &generated_source).unwrap(),
+                b"class Generated {}"
+            );
+            assert_eq!(
+                prepared.file_bytes(&view, &existing_source).unwrap(),
+                b"class Existing {}"
+            );
+            assert_eq!(
+                prepared.file_bytes(&view, &generated_classpath).unwrap(),
+                [1, 2, 3]
+            );
+            assert_eq!(
+                prepared.file_bytes(&view, &existing_classpath).unwrap(),
+                b"existing-jar"
+            );
+            assert!(prepared.generated_cache_key(&generated_source).is_some());
+            assert!(prepared.generated_cache_key(&existing_source).is_none());
+        });
     }
 
     #[test]
@@ -2225,6 +2661,10 @@ mod tests {
             );
             assert_eq!(output.generated_sources, BTreeSet::from([source]));
             assert_eq!(output.additional_classpath, BTreeSet::from([resource]));
+            let (_, state_bytes) = current_state(&storage).await;
+            let state: BuildScriptStateWire = serde_json::from_slice(&state_bytes).unwrap();
+            assert_eq!(state.cache_scope, None);
+            assert_eq!(state.fingerprint_inputs.cache_scope, None);
         });
     }
 
@@ -3214,7 +3654,7 @@ mod tests {
             let missing_output_state = serde_json::to_vec(&state).unwrap();
             let missing_output_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(&script_key),
+                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script_key),
                 ContentDigest::of(&missing_output_state),
             );
             storage
@@ -3241,7 +3681,7 @@ mod tests {
             let malformed = br#"{"state_version":1}"#;
             let malformed_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(&script_key),
+                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script_key),
                 ContentDigest::of(malformed),
             );
             storage
@@ -3297,7 +3737,7 @@ mod tests {
             let oversized_directive_state = serde_json::to_vec(&directive_state).unwrap();
             let oversized_directive_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(&script),
+                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script),
                 ContentDigest::of(&oversized_directive_state),
             );
             storage
@@ -3329,7 +3769,7 @@ mod tests {
             let oversized_output = b"123456789";
             let oversized_output_key = CacheKey::new(
                 CacheNamespace::BuildScriptOutput,
-                CacheIdentity::output(&script, &output_path),
+                CacheIdentity::output(BuildScriptCacheScope::ROOT, &script, &output_path),
                 ContentDigest::of(oversized_output),
             );
             storage
@@ -3341,7 +3781,7 @@ mod tests {
             let oversized_output_state = serde_json::to_vec(&state).unwrap();
             let oversized_output_state_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(&script),
+                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script),
                 ContentDigest::of(&oversized_output_state),
             );
             storage
@@ -3369,7 +3809,7 @@ mod tests {
             let oversized_state = vec![b'x'; limits.max_cache_state_size + 1];
             let oversized_state_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(&script),
+                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script),
                 ContentDigest::of(&oversized_state),
             );
             storage

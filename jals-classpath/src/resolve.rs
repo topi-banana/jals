@@ -47,6 +47,9 @@ impl ExternalLocator {
 pub enum DependencyLocation {
     /// A file in the immutable project revision.
     Project(FileKey),
+    /// An already-published artifact. Resolution verifies the existing bytes and reuses this key
+    /// without fetching or publishing them again.
+    Artifact(CacheKey),
     /// External content. Supplying a digest permits a verified cache hit without fetching.
     External {
         locator: ExternalLocator,
@@ -166,6 +169,17 @@ impl DependencyResolver {
             DependencyLocation::Project(file) => {
                 Some(Self::publish_project(view, cache, spec, file).await)
             }
+            DependencyLocation::Artifact(key) => Some(match cache.open_verified(key).await {
+                Ok(Some(_)) => Ok(key.clone()),
+                Ok(None) => Err(Warning::new(
+                    WarningOrigin::Artifact(key.clone()),
+                    format!("dependency `{}` artifact is not cached", spec.name),
+                )),
+                Err(error) => Err(Warning::new(
+                    WarningOrigin::Artifact(key.clone()),
+                    format!("dependency `{}` artifact is invalid: {error:?}", spec.name),
+                )),
+            }),
             DependencyLocation::External { locator, expected } => {
                 if let Some(content) = expected {
                     let key = Self::cache_key_for_digest(
