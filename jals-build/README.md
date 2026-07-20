@@ -216,11 +216,16 @@ asynchronously after Rhai evaluation and capability preflight succeed:
 | `https_url(url)` | Typed HTTPS URL. A fetch still requires an expected digest and byte limit. |
 | `project_jar(path)` | Typed JAR from the immutable project snapshot. |
 | `sha1(hex)` / `sha256(hex)` / `bytes(n)` | Typed verification and size values. |
-| `fetch_json(url, digest, max)` / `fetch_jar(...)` | Verified cache-first artifact fetch. |
+| `fetch_json(url, digest, max)` / `fetch_jar(...)` / `fetch_text(...)` | Verified cache-first artifact fetch (JSON, JAR, or UTF-8 text). |
 | `json_at(json, path)` / `json_find_string(json, path, field, value)` | Typed JSON projection without exposing fetched values to Rhai. |
 | `json_url(json, path)` / `json_sha1(...)` / `json_sha256(...)` / `json_u64(...)` | Values for a dependent fetch, resolved by the host DAG executor. |
 | `extract_java(jar, prefix)` | Safe `.java` source tree below `prefix`, with the prefix stripped. |
+| `nested_jar(jar, member)` | Extract one nested `.jar` member and treat it as a JAR. |
+| `remap_jar(jar, mappings)` | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware). |
+| `merge_jars(base, overlay)` | Deterministic JAR union; overlay wins path conflicts. |
+| `decompile_java(jar, prefix)` | Compile-oriented skeleton source tree below `prefix`. |
 | `add_classpath(jar)` | Add a task-produced JAR to the root classpath. |
+| `add_nested_classpath(jar)` | Expand every nested `.jar` member onto the root classpath (library bundlers). |
 | `publish_tree(owner, tree, destination, "replace-root")` | Atomically replace an exclusive physical source subtree. |
 
 For example:
@@ -347,7 +352,8 @@ cargo check -p jals-build --no-default-features --features rhai --target wasm32-
 
 See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable project.
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
-publication.
+publication. [`examples/minecraft-1.21.1-mojang-remap`](../examples/minecraft-1.21.1-mojang-remap)
+fetches, remaps, and decompiles Minecraft 1.21.1 through the task DAG.
 
 ### `[run]`
 

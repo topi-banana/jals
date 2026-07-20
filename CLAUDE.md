@@ -67,8 +67,11 @@ filesystem reads into portable interfaces.
   adapters. Only `native.rs` may use `std::path`/`std::fs`.
 - `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`.
 - `jals-classpath`: resolution over project bytes and cache artifacts. The in-house zip reader is
-  isolated in `zip.rs` behind `archive` (portable, `no_std`, over the async io seam; the `zip`
-  crate is a dev-only fixture oracle); HTTP/local locator lowering is in its native adapter.
+  isolated in `zip.rs` behind `archive` (portable, `no_std`, over the async io seam; also a
+  stored-only writer for jar remap/merge; the `zip` crate is a dev-only fixture oracle).
+  Mojang/ProGuard mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar
+  decompilation into source trees live under `archive` too. HTTP/local locator lowering is in its
+  native adapter.
 - `jals-project`: transitive path/Git/JAR project-graph discovery, stable node identity,
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
