@@ -324,6 +324,7 @@ impl SkeletonGroup<'_> {
                 .iter()
                 .filter(|f| f.access_flags.is_enum())
                 .filter_map(|f| pool.utf8(f.name_index).map(Cow::into_owned))
+                .filter(|name| Attrs::is_java_identifier(name))
                 .collect();
             if !constants.is_empty() {
                 let _ = writeln!(out, "{pad}{};", constants.join(", "));
@@ -338,6 +339,9 @@ impl SkeletonGroup<'_> {
             let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
                 continue;
             };
+            if !Attrs::is_java_identifier(&name) {
+                continue;
+            }
             let ty = Self::field_type_java(&field.attributes, field.descriptor_index, pool);
             // A `static final` field's compile-time constant becomes its initializer (`= 42`), so a
             // navigated declaration shows the value.
@@ -362,6 +366,9 @@ impl SkeletonGroup<'_> {
                 continue;
             };
             if raw_name == "<clinit>" {
+                continue;
+            }
+            if raw_name != "<init>" && !Attrs::is_java_identifier(&raw_name) {
                 continue;
             }
             Self::render_method(out, method, cf, &raw_name, simple, &pad, hierarchy).await;
