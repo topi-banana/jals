@@ -842,6 +842,34 @@ fn lint_warns_and_uses_default_context_when_the_dependency_graph_is_invalid() {
     assert!(stderr.contains("warning: project analysis inputs unavailable"));
 }
 
+/// `Manifest::discover_path` returns a bare `jals.toml` when the manifest is in the current
+/// directory, and `Path::new("jals.toml").parent()` is `Some("")` rather than `None`. The empty
+/// root then failed to canonicalize, so the classpath and feature set were silently dropped and
+/// lint ran with a weaker context than it should have.
+#[test]
+fn lint_keeps_project_context_for_a_manifest_in_the_current_directory() {
+    let dir = project("[package]\nname = \"lint-cwd\"\n");
+    std::fs::write(
+        dir.path().join("src/main/java/com/example/Main.java"),
+        "package com.example;\npublic class Main {}\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("src/main/java/com/example/Main.java")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("project analysis inputs unavailable"),
+        "project context must survive a cwd-relative manifest; stderr: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dry_run_preprocesses_dependencies_without_mutating_their_tree() {

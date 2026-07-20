@@ -670,7 +670,14 @@ impl ProjectLintContext {
                 return Self::default();
             }
         };
-        let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        // `Path::new("jals.toml").parent()` is `Some("")`, not `None`, so the fallback below only
+        // fires for a path with no parent at all. An empty root then fails to canonicalize and the
+        // whole project context — classpath and feature set — is silently dropped, weakening lint
+        // results whenever the manifest was discovered in the current directory.
+        let root = match manifest_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
         // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
         // `type-mismatch` index) and the `[package] features`. Any strict graph failure is reported and
