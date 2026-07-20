@@ -595,8 +595,12 @@ impl FeatureSet {
 }
 
 /// Compilation settings (`[build]`).
+///
+/// Unknown keys are rejected. Every nested shape here already denies them, and the failure mode
+/// without it is bad: misspelling `script` as `scripts` silently disables the build script, so the
+/// generated sources never appear and `javac` fails with an unrelated "cannot find symbol".
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Build {
     /// Optional project build script.
     pub script: Option<BuildScript>,
@@ -1236,6 +1240,22 @@ mod tests {
             }
         );
         assert!(source.to_string().contains("`jals clean` removes"));
+    }
+
+    /// Misspelling `script` used to parse cleanly and leave `script: None`, so the build script
+    /// never ran and the only symptom was `javac` failing on the sources it would have generated.
+    #[test]
+    fn rejects_an_unknown_build_key() {
+        let error = r#"
+            [build]
+            scripts = { type = "rhai", file = "build.rhai" }
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        assert!(
+            matches!(error, ManifestParseError::Parse { .. }),
+            "an unknown `[build]` key must not parse: {error:?}"
+        );
     }
 
     /// `jals clean` removes `classes-dir` recursively, so a value resolving to the project root
