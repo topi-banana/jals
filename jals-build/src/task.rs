@@ -6,7 +6,7 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
 use jals_storage::RelativePath;
@@ -322,50 +322,40 @@ impl TaskPlan {
         if self.terminals.len() > limits.max_terminals {
             return Err(TaskPlanError::Limit("terminal count"));
         }
-        let mut edges = 0usize;
-        let mut literal_bytes = 0usize;
+        let mut cost = PlanCost::default();
         for (index, node) in self.nodes.iter().enumerate() {
             if node.id.index() != index {
                 return Err(TaskPlanError::NonCanonicalNodeId);
             }
-            let inputs = node.kind.inputs();
-            edges = edges
-                .checked_add(inputs.len())
-                .ok_or(TaskPlanError::Limit("edge count"))?;
-            literal_bytes = literal_bytes
-                .checked_add(node.kind.literal_bytes())
-                .ok_or(TaskPlanError::Limit("literal bytes"))?;
-            for (input, expected) in inputs {
-                let Some(dependency) = self.node(input) else {
-                    return Err(TaskPlanError::MissingInput(input));
-                };
-                if input.index() >= index {
-                    return Err(TaskPlanError::ForwardReference(input));
-                }
-                let actual = dependency.kind.output_kind();
-                if actual != expected {
-                    return Err(TaskPlanError::TypeMismatch {
-                        task: input,
-                        expected,
-                        actual,
-                    });
-                }
-            }
-            Self::validate_node(&node.kind, limits)?;
+            cost = cost.add(self.node_cost(index, &node.kind, limits)?)?;
         }
-        let mut publication_roots = 0usize;
         for terminal in &self.terminals {
-            edges = edges
-                .checked_add(1)
-                .ok_or(TaskPlanError::Limit("edge count"))?;
-            literal_bytes = literal_bytes
-                .checked_add(terminal.literal_bytes())
-                .ok_or(TaskPlanError::Limit("literal bytes"))?;
-            let (input, expected) = terminal.input();
-            let Some(node) = self.node(input) else {
+            cost = cost.add(self.terminal_cost(terminal, limits)?)?;
+        }
+        cost.check(limits)
+    }
+
+    /// Validate the node at `index` against the nodes before it, returning what it adds to the
+    /// plan's totals.
+    ///
+    /// Split out of [`Self::validate`] so a builder can check one declaration at a time. Nodes are
+    /// append-only and may only reference earlier ones, so an already-valid prefix stays valid.
+    fn node_cost(
+        &self,
+        index: usize,
+        kind: &TaskNodeKind,
+        limits: TaskPlanLimits,
+    ) -> Result<PlanCost, TaskPlanError> {
+        let inputs = kind.inputs();
+        let edges = inputs.len();
+        for (input, expected) in inputs {
+            let Some(dependency) = self.node(input) else {
                 return Err(TaskPlanError::MissingInput(input));
             };
-            let actual = node.kind.output_kind();
+            if input.index() >= index {
+                return Err(TaskPlanError::ForwardReference(input));
+            }
+            let actual = dependency.kind.output_kind();
             if actual != expected {
                 return Err(TaskPlanError::TypeMismatch {
                     task: input,
@@ -373,27 +363,49 @@ impl TaskPlan {
                     actual,
                 });
             }
-            if let TaskTerminal::PublishTree {
-                owner, destination, ..
-            } = terminal
-            {
-                publication_roots += 1;
-                if owner.is_empty() {
-                    return Err(TaskPlanError::InvalidOwner);
-                }
-                Self::validate_path(destination, limits, false)?;
+        }
+        Self::validate_node(kind, limits)?;
+        Ok(PlanCost {
+            edges,
+            literal_bytes: kind.literal_bytes(),
+            publication_roots: 0,
+        })
+    }
+
+    /// Validate the terminal at `index`, returning what it adds to the plan's totals.
+    fn terminal_cost(
+        &self,
+        terminal: &TaskTerminal,
+        limits: TaskPlanLimits,
+    ) -> Result<PlanCost, TaskPlanError> {
+        let (input, expected) = terminal.input();
+        let Some(node) = self.node(input) else {
+            return Err(TaskPlanError::MissingInput(input));
+        };
+        let actual = node.kind.output_kind();
+        if actual != expected {
+            return Err(TaskPlanError::TypeMismatch {
+                task: input,
+                expected,
+                actual,
+            });
+        }
+        let mut publication_roots = 0;
+        if let TaskTerminal::PublishTree {
+            owner, destination, ..
+        } = terminal
+        {
+            publication_roots = 1;
+            if owner.is_empty() {
+                return Err(TaskPlanError::InvalidOwner);
             }
+            Self::validate_path(destination, limits, false)?;
         }
-        if edges > limits.max_edges {
-            return Err(TaskPlanError::Limit("edge count"));
-        }
-        if literal_bytes > limits.max_literal_bytes {
-            return Err(TaskPlanError::Limit("literal bytes"));
-        }
-        if publication_roots > limits.max_publication_roots {
-            return Err(TaskPlanError::Limit("publication root count"));
-        }
-        Ok(())
+        Ok(PlanCost {
+            edges: 1,
+            literal_bytes: terminal.literal_bytes(),
+            publication_roots,
+        })
     }
 
     fn validate_node(kind: &TaskNodeKind, limits: TaskPlanLimits) -> Result<(), TaskPlanError> {
@@ -548,11 +560,57 @@ handle!(TextTask);
 handle!(JarTask);
 handle!(SourceTreeTask);
 
+/// Running totals over a plan's nodes and terminals.
+///
+/// Keeping these lets a builder validate one declaration at a time. Re-deriving them per
+/// declaration made recording a plan quadratic: with the default 4096-task limit, a script could
+/// spend minutes of CPU inside a native call that Rhai's operation counter never sees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PlanCost {
+    edges: usize,
+    literal_bytes: usize,
+    publication_roots: usize,
+}
+
+impl PlanCost {
+    fn add(self, other: Self) -> Result<Self, TaskPlanError> {
+        Ok(Self {
+            edges: self
+                .edges
+                .checked_add(other.edges)
+                .ok_or(TaskPlanError::Limit("edge count"))?,
+            literal_bytes: self
+                .literal_bytes
+                .checked_add(other.literal_bytes)
+                .ok_or(TaskPlanError::Limit("literal bytes"))?,
+            publication_roots: self
+                .publication_roots
+                .checked_add(other.publication_roots)
+                .ok_or(TaskPlanError::Limit("publication root count"))?,
+        })
+    }
+
+    const fn check(self, limits: TaskPlanLimits) -> Result<(), TaskPlanError> {
+        if self.edges > limits.max_edges {
+            return Err(TaskPlanError::Limit("edge count"));
+        }
+        if self.literal_bytes > limits.max_literal_bytes {
+            return Err(TaskPlanError::Limit("literal bytes"));
+        }
+        if self.publication_roots > limits.max_publication_roots {
+            return Err(TaskPlanError::Limit("publication root count"));
+        }
+        Ok(())
+    }
+}
+
 /// Rhai-facing task graph builder. It records data only and never performs task effects.
 #[derive(Clone)]
 pub(crate) struct TasksApi {
     plan: Rc<RefCell<TaskPlan>>,
     limits: TaskPlanLimits,
+    /// Totals for everything already accepted, so each declaration costs O(1).
+    cost: Rc<Cell<PlanCost>>,
 }
 
 impl TasksApi {
@@ -560,6 +618,7 @@ impl TasksApi {
         Self {
             plan: Rc::new(RefCell::new(TaskPlan::new())),
             limits,
+            cost: Rc::new(Cell::new(PlanCost::default())),
         }
     }
 
@@ -585,11 +644,9 @@ impl TasksApi {
             u32::try_from(plan.nodes.len())
                 .map_err(|_| Self::rhai_error("build-task count cannot be represented"))?,
         );
+        let index = plan.nodes.len();
+        self.accept(plan.node_cost(index, &kind, self.limits))?;
         plan.nodes.push(TaskNode { id, kind });
-        if let Err(error) = plan.validate(self.limits) {
-            plan.nodes.pop();
-            return Err(Self::rhai_error(error.to_string()));
-        }
         Ok(TaskHandle { id })
     }
 
@@ -603,11 +660,19 @@ impl TasksApi {
                 "build-task terminal count exceeds its configured limit",
             ));
         }
+        self.accept(plan.terminal_cost(&terminal, self.limits))?;
         plan.terminals.push(terminal);
-        if let Err(error) = plan.validate(self.limits) {
-            plan.terminals.pop();
-            return Err(Self::rhai_error(error.to_string()));
-        }
+        Ok(())
+    }
+
+    /// Fold one declaration's cost into the running totals, leaving them unchanged if it is
+    /// rejected — a script may catch the error and keep building.
+    fn accept(&self, added: Result<PlanCost, TaskPlanError>) -> RhaiResult<()> {
+        let total = added
+            .and_then(|added| self.cost.get().add(added))
+            .and_then(|total| total.check(self.limits).map(|()| total))
+            .map_err(|error| Self::rhai_error(error.to_string()))?;
+        self.cost.set(total);
         Ok(())
     }
 }
@@ -964,5 +1029,70 @@ mod tests {
         let decoded: TaskPlan = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, plan);
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    }
+
+    /// Declarations are checked incrementally, so a rejected one must leave the running totals
+    /// untouched — a script can catch the error and keep building, and `finish` revalidates the
+    /// whole plan, so the two views have to agree.
+    #[test]
+    fn a_rejected_declaration_does_not_disturb_the_plan() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let api = TasksApi::new(limits());
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api.clone());
+        engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    let caught = 0;
+                    // Over the 4096-byte literal budget, and an escaping path: both rejected.
+                    for i in 0..8 {
+                        try { tasks.project_jar("../escape.jar"); } catch (error) { caught += 1; }
+                    }
+                    if caught != 8 { throw "expected every bad declaration to be rejected"; }
+                    let jar = tasks.project_jar("sources.jar");
+                    let sources = tasks.extract_java(jar, "net/example");
+                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root");
+                "#,
+            )
+            .unwrap();
+        drop(scope);
+
+        let plan = api.finish().unwrap();
+        assert_eq!(plan.nodes.len(), 2, "rejected nodes must not be recorded");
+        // `finish` revalidates from scratch; agreeing with it is the point of the running totals.
+        assert_eq!(plan.validate(limits()), Ok(()));
+    }
+
+    /// The per-declaration checks must reject exactly what a whole-plan validation would.
+    #[test]
+    fn incremental_limits_match_whole_plan_validation() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let tight = TaskPlanLimits {
+            max_tasks: 3,
+            ..limits()
+        };
+        let api = TasksApi::new(tight);
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api.clone());
+        let error = engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    tasks.project_jar("a.jar");
+                    tasks.project_jar("b.jar");
+                    tasks.project_jar("c.jar");
+                    tasks.project_jar("d.jar");
+                "#,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("build-task count"));
+        drop(scope);
+
+        let plan = api.finish().unwrap();
+        assert_eq!(plan.nodes.len(), 3);
+        assert_eq!(plan.validate(tight), Ok(()));
     }
 }
