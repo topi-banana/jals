@@ -56,7 +56,7 @@ jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
 jals-syntax = { path = "jals-syntax" }
-miniz_oxide = { version = "0.8", default-features = false, features = [
+miniz_oxide = { version = "0.9", default-features = false, features = [
   "with-alloc",
 ] }
 num-derive = { version = "0.4.2" }
