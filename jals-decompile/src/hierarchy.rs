@@ -309,6 +309,7 @@ impl<'a> ClassHierarchy<'a> {
             if Self::has_signature(cf) {
                 return None;
             }
+            let contributes = self.is_subtype(&owner, &selected.owner)?;
             for method in &cf.methods {
                 let method_name = cf.constant_pool.utf8(method.name_index)?;
                 if method_name.as_ref() != name {
@@ -332,7 +333,7 @@ impl<'a> ClassHierarchy<'a> {
                 {
                     return None;
                 }
-                if self.is_subtype(&owner, &selected.owner)? {
+                if contributes {
                     return Some(true);
                 }
             }
