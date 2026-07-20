@@ -169,6 +169,19 @@ impl Workspace {
             }
             None => None,
         };
+        // The script is staged as a storage overlay, and an overlay unconditionally shadows the
+        // base file. Pointing `script.file` at an indexed source (or at `jals.toml` itself) would
+        // therefore replace that file's contents with the Rhai editor buffer, and `sync_models`
+        // would then push the replacement into the user's Monaco model — losing their code.
+        if let Some(script) = &configured_script
+            && (script == &manifest_key || self.file_keys().any(|indexed| indexed == script))
+        {
+            return Err(BuildScriptError::InvalidScriptPath {
+                path: script.to_string(),
+                reason: "a build script cannot share a path with a project file".to_owned(),
+            });
+        }
+
         let script_changed = self.staged_script != configured_script;
         if script_changed {
             if let Some(old_script) = &self.staged_script {
@@ -398,6 +411,10 @@ mod tests {
     use super::*;
 
     const BUILD_MANIFEST: &str = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+
+    fn alloc_manifest(script: &str) -> String {
+        format!("[build]\nscript = {{ type = \"rhai\", file = \"{script}\" }}\n")
+    }
 
     fn build_manifest() -> Manifest {
         BUILD_MANIFEST.parse().expect("test manifest is valid")
@@ -763,6 +780,35 @@ mod tests {
             assert!(view.file(&custom_key).is_err());
             assert!(view.file(&generated).is_err());
             assert!(ws.staged_script.is_none());
+        });
+    }
+
+    /// The script buffer is staged as a storage overlay, and an overlay shadows the base file
+    /// unconditionally. A `script.file` aimed at a real source would therefore replace that
+    /// source with the Rhai buffer, and the model sync would push the replacement into the user's
+    /// editor — silently destroying their code.
+    #[test]
+    fn a_script_path_may_not_collide_with_a_project_file() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let victim = "com/example/Greeter.java";
+            let before = ws.read(&FileKey::parse(victim).unwrap());
+
+            for path in [victim, MANIFEST_PATH] {
+                let text = alloc_manifest(path);
+                let manifest: Manifest = text.parse().expect("manifest parses");
+                let error = ws
+                    .run_build_script(&manifest, &text, "let x = 1;")
+                    .await
+                    .expect_err("a colliding script path must be rejected");
+                assert!(matches!(error, BuildScriptError::InvalidScriptPath { .. }));
+            }
+
+            assert_eq!(
+                ws.read(&FileKey::parse(victim).unwrap()),
+                before,
+                "the project file must be untouched"
+            );
         });
     }
 
