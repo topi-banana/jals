@@ -155,6 +155,20 @@ impl Ctx<'_> {
         !(toks.len() == 2 && toks[0].text == a && toks[1].text == b)
     }
 
+    /// Whether `a` and `b` must stay apart even though [`Ctx::would_fuse`] accepts the pair:
+    /// their join is a strict *prefix* of a longer token, so a third token placed after it would
+    /// complete the longer munch. The fusion net is pairwise and cannot see that far — `.` `.`
+    /// lexes back as two dots, but a third `.` makes the run re-lex as one `...`, which is how a
+    /// second format pass could disagree with the first.
+    ///
+    /// `..` is the only such join in the Java token set — checked exhaustively by
+    /// `tests/invariants.rs::dot_dot_is_the_only_pairwise_safe_join_that_a_third_token_can_extend`
+    /// — and it is never valid source (two adjacent dots only arise from error recovery), so
+    /// keeping them apart is free.
+    const fn would_extend(a: S, b: S) -> bool {
+        matches!((a, b), (S::DOT, S::DOT))
+    }
+
     /// The separator document between `prev` (if any) and the token `next`. Applies the
     /// aesthetic rule, then a fusion-safety net so the output never changes operator fusion.
     pub(crate) async fn sep(&self, prev: Option<&SyntaxToken>, next: &SyntaxToken) -> Doc {
@@ -177,8 +191,9 @@ impl Ctx<'_> {
         } else {
             None
         };
-        let space =
-            self.want_space(pk, nk, next_parent) || Self::would_fuse(p.text(), next.text()).await;
+        let space = self.want_space(pk, nk, next_parent)
+            || Self::would_extend(pk, nk)
+            || Self::would_fuse(p.text(), next.text()).await;
         if space { Doc::text(" ") } else { Doc::nil() }
     }
 
@@ -188,7 +203,9 @@ impl Ctx<'_> {
         let Some(p) = prev else {
             return Doc::nil();
         };
-        if Self::would_fuse(p.text(), next.text()).await {
+        if Self::would_extend(p.kind(), next.kind())
+            || Self::would_fuse(p.text(), next.text()).await
+        {
             Doc::text(" ")
         } else {
             Doc::nil()

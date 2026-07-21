@@ -2103,3 +2103,52 @@ proptest! {
         let _ = fmt_with(&src, &param_comment_config());
     }
 }
+
+/// Every token text the formatter can emit adjacent to another, one representative per shape.
+const TOKEN_TEXTS: &[&str] = &[
+    "&", "&&", "&=", "->", "@", "!", "!=", "^", "^=", ":", "::", ",", ".", "...", "=", "==", ">",
+    "<", "<=", "<<", "<<=", "-", "-=", "--", "%", "%=", "|", "|=", "||", "+", "+=", "++", "?", "{",
+    "}", "[", "]", "(", ")", ";", "/", "/=", "*", "*=", "~", "_", "a", "1", "0x1", "\"s\"", "'c'",
+];
+
+fn lex_texts(src: &str) -> Vec<String> {
+    jals_exec::block_on_inline(jals_syntax::Lexer::tokenize(src))
+        .into_iter()
+        .map(|t| t.text.to_owned())
+        .collect()
+}
+
+/// The formatter's pairwise fusion net (`Ctx::would_fuse`): does joining `a` and `b` lex as
+/// anything other than the two tokens?
+fn pairwise_fuses(a: &str, b: &str) -> bool {
+    lex_texts(&format!("{a}{b}")) != [a, b]
+}
+
+/// `. .` is the only join that survives the pairwise fusion net but is still a strict prefix of a
+/// longer token, so a third token can complete the longer munch (`.` `.` `.` → one `...`). That is
+/// exactly the case `Ctx::would_extend` hardcodes; this test is what licenses that narrow table.
+/// If the lexer ever grows another extendable token, this fails and `would_extend` must grow too.
+#[test]
+fn dot_dot_is_the_only_pairwise_safe_join_that_a_third_token_can_extend() {
+    let mut extendable = Vec::new();
+    for a in TOKEN_TEXTS {
+        for b in TOKEN_TEXTS {
+            if pairwise_fuses(a, b) {
+                continue;
+            }
+            for c in TOKEN_TEXTS {
+                if pairwise_fuses(b, c) {
+                    continue;
+                }
+                if lex_texts(&format!("{a}{b}{c}")) != [*a, *b, *c] {
+                    extendable.push((*a, *b, *c));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        extendable,
+        vec![(".", ".", ".")],
+        "a pairwise-safe join that a third token re-lexes: `Ctx::would_extend` must cover it"
+    );
+}
