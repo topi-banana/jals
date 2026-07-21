@@ -9,19 +9,26 @@
 //! [`sync_active`](Workspace::sync_active) — a no-op when the text is unchanged, so a hover storm
 //! over an idle buffer never re-analyzes.
 
-use jals_config::FeatureSet;
+use jals_build::build_script::{
+    BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptOutput,
+    BuildScriptSession, clear_build_script_outputs,
+};
 use jals_config::fmt::Config as FmtConfig;
 use jals_config::lint::Config as LintConfig;
+use jals_config::{BuildScript, FeatureSet, Manifest};
 use jals_editor::{Editor, ProjectLayout};
 use jals_exec::Exec;
 use jals_fmt::FormatOutput;
 use jals_hir::LoweredClasspath;
+use jals_project::{
+    BuildTaskExecutor, BuildTaskHost, RootBuildScriptError, RootBuildScriptOptions,
+};
 use jals_storage::{
-    ArtifactCache, CodeTree, DirKey, Entry, EntryRef, FileKey, MemoryCache, MemorySource,
-    MemoryStorage,
+    ArtifactCache, CodeTree, DirKey, Entry, FileKey, MemoryCache, MemorySource, MemoryStorage,
 };
 use jals_syntax::Parse;
 
+use crate::fetcher::BrowserFetcher;
 use crate::host::{
     CompletionEntry, Highlight, MonacoHost, PlaygroundDiagnostic, SigHelp, SymbolNode, Target,
 };
@@ -51,6 +58,9 @@ const SAMPLE_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+pub const MANIFEST_PATH: &str = "jals.toml";
+pub const BUILD_SCRIPT_PATH: &str = "build.rhai";
+
 /// The shared editor core driven through the [`MonacoHost`], plus the path of the active file.
 ///
 /// The core's [`MemoryStorage`] is the single source of truth for files, overlays, and artifacts —
@@ -59,6 +69,10 @@ pub struct Workspace {
     editor: Editor<MemorySource, MemoryCache, MonacoHost>,
     /// Path of the active file — a key into the core's tree, and the editor's backing store.
     active: FileKey,
+    /// Aggregate-local knowledge of files published by earlier Rhai executions.
+    build_script_session: BuildScriptSession,
+    /// Configured script path whose editor buffer is currently staged as an overlay.
+    staged_script: Option<FileKey>,
 }
 
 impl Workspace {
@@ -92,9 +106,8 @@ impl Workspace {
         )
         .await
         .expect("an in-memory snapshot is immediate and infallible");
-        // The whole tree is one source root (the sample files live at its top).
-        let editor =
-            Editor::load(storage, ProjectLayout::new(vec![DirKey::ROOT]), MonacoHost).await;
+        let source_root = DirKey::parse("com/example").expect("sample source root is valid");
+        let editor = Editor::load(storage, ProjectLayout::new(vec![source_root]), MonacoHost).await;
         // The first (sorted) indexed file is active on load.
         let active = editor
             .workspace()
@@ -102,23 +115,12 @@ impl Workspace {
             .map(|(path, _)| path.clone())
             .next()
             .expect("sample contains a Java file");
-        Workspace { editor, active }
-    }
-
-    /// Replace the external classpath folded into analysis (from a resolved `[dependencies]`
-    /// spec), or clear it with `None`. The index rebuilds immediately — `Main`'s use of a library
-    /// type then resolves through the downloaded `.class` files.
-    pub async fn set_classpath(&mut self, classpath: Option<LoweredClasspath>) {
-        self.editor
-            .workspace_mut()
-            .set_classpath(classpath.unwrap_or_default())
-            .await;
-    }
-
-    /// Replace the resolved language feature set (from `[package] features`); the core folds it
-    /// into every diagnostics run, so the feature-gated lint rules fire without any host plumbing.
-    pub fn set_feature_set(&mut self, feature_set: FeatureSet) {
-        self.editor.workspace_mut().set_feature_set(feature_set);
+        Workspace {
+            editor,
+            active,
+            build_script_session: BuildScriptSession::new(),
+            staged_script: None,
+        }
     }
 
     /// Clone one immutable source revision together with its cache for an async dependency task.
@@ -126,12 +128,167 @@ impl Workspace {
         self.editor.workspace().storage().clone()
     }
 
-    /// Merge artifacts produced by a detached dependency task back into the aggregate.
-    pub fn replace_artifacts(&mut self, artifacts: ArtifactCache<MemoryCache>) {
-        self.editor
-            .workspace_mut()
-            .storage_mut()
-            .replace_artifacts(artifacts);
+    /// Install one coherent browser-resolution result. Feature metadata and verified artifacts are
+    /// visible before the async index rebuild starts; once mutation begins, the whole operation runs
+    /// to completion under the playground workspace lock.
+    pub async fn apply_project_inputs(
+        &mut self,
+        classpath: LoweredClasspath,
+        feature_set: FeatureSet,
+        artifacts: ArtifactCache<MemoryCache>,
+        library_sources: Vec<(FileKey, String)>,
+        source_dep_sources: Vec<(FileKey, String)>,
+    ) {
+        let workspace = self.editor.workspace_mut();
+        workspace.set_feature_set(feature_set);
+        workspace.storage_mut().replace_artifacts(artifacts);
+        workspace
+            .set_dependency_source_texts(library_sources, source_dep_sources)
+            .await;
+        workspace.set_classpath(classpath).await;
+    }
+
+    /// Stage the live manifest and Rhai buffers into this workspace's own aggregate, execute the
+    /// configured script there, then reload project Java files so generated sources join analysis.
+    /// Existing Java overlays remain in storage and therefore survive the reload.
+    /// [`run_build_script_with_proxy`](Self::run_build_script_with_proxy) with no CORS proxy.
+    #[cfg(test)]
+    pub async fn run_build_script(
+        &mut self,
+        manifest: &Manifest,
+        manifest_text: &str,
+        script_text: &str,
+    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+        self.run_build_script_with_proxy(manifest, manifest_text, script_text, "")
+            .await
+    }
+
+    /// [`run_build_script`](Self::run_build_script), routing build-task fetches through `proxy`.
+    ///
+    /// `fetch` is same-origin restricted, so a task fetching from a host without permissive CORS
+    /// headers (Maven Central among them) fails outright without the proxy the header already
+    /// collects for dependency resolution.
+    pub async fn run_build_script_with_proxy(
+        &mut self,
+        manifest: &Manifest,
+        manifest_text: &str,
+        script_text: &str,
+        proxy: &str,
+    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+        let manifest_key = FileKey::parse(MANIFEST_PATH).expect("manifest pseudo-path is valid");
+        let configured_script = match manifest.build.script.as_ref() {
+            Some(BuildScript::Rhai { file }) => {
+                Some(
+                    FileKey::parse(file).map_err(|error| BuildScriptError::InvalidScriptPath {
+                        path: file.clone(),
+                        reason: format!("{error:?}"),
+                    })?,
+                )
+            }
+            None => None,
+        };
+        // The script is staged as a storage overlay, and an overlay unconditionally shadows the
+        // base file. Pointing `script.file` at an indexed source (or at `jals.toml` itself) would
+        // therefore replace that file's contents with the Rhai editor buffer, and `sync_models`
+        // would then push the replacement into the user's Monaco model — losing their code.
+        if let Some(script) = &configured_script
+            && (script == &manifest_key || self.file_keys().any(|indexed| indexed == script))
+        {
+            return Err(BuildScriptError::InvalidScriptPath {
+                path: script.to_string(),
+                reason: "a build script cannot share a path with a project file".to_owned(),
+            });
+        }
+
+        let script_changed = self.staged_script != configured_script;
+        if script_changed {
+            if let Some(old_script) = &self.staged_script {
+                let workspace = self.editor.workspace_mut();
+                let storage = workspace.storage_mut();
+                storage
+                    .remove_overlay(storage.revision(), old_script)
+                    .map_err(|error| BuildScriptError::Storage {
+                        operation: "remove the previous playground script overlay",
+                        error,
+                    })?;
+            }
+            // If staging the replacement below fails, no hidden old alias remains tracked.
+            self.staged_script = None;
+        }
+        let mut overlays = vec![(manifest_key, manifest_text.as_bytes().to_vec())];
+        if let Some(script) = &configured_script {
+            overlays.push((script.clone(), script_text.as_bytes().to_vec()));
+        }
+
+        let output = {
+            let workspace = self.editor.workspace_mut();
+            let storage = workspace.storage_mut();
+            storage
+                .set_overlays(storage.revision(), overlays)
+                .map_err(|error| BuildScriptError::Storage {
+                    operation: "stage the playground manifest and script",
+                    error,
+                })?;
+            self.staged_script.clone_from(&configured_script);
+            let environment = BuildScriptEnvironment::new().for_project(manifest);
+            if manifest.build.script.is_none() {
+                clear_build_script_outputs(storage, &mut self.build_script_session).await?;
+                None
+            } else {
+                let root_output = BuildTaskExecutor::execute_root(
+                    &Self::exec(),
+                    // Build-task fetches go through the same CORS proxy as dependency
+                    // resolution; without it every `tasks.fetch_*` to a non-permissive host
+                    // (Maven Central among them) fails, with nothing pointing at the proxy field.
+                    &BrowserFetcher::new(proxy.to_owned()),
+                    storage,
+                    &mut self.build_script_session,
+                    RootBuildScriptOptions {
+                        manifest,
+                        environment: &environment,
+                        limits: &BuildScriptLimits::default(),
+                        network: jals_classpath::NetworkPolicy::Online,
+                        host: BuildTaskHost::NoTerminals,
+                        blocked_files: &[],
+                        publications: jals_project::SourcePublication::Apply,
+                    },
+                )
+                .await
+                .map_err(|error| match error {
+                    RootBuildScriptError::BuildScript(error) => error,
+                    other => BuildScriptError::Execute {
+                        script: configured_script
+                            .clone()
+                            .expect("a configured script was parsed"),
+                        position: None,
+                        message: other.to_string(),
+                    },
+                })?;
+                debug_assert!(root_output.task_classpath.is_empty());
+                root_output.script
+            }
+        };
+        let project_sources = output.as_ref().map_or_else(Vec::new, |output| {
+            output.generated_sources.iter().cloned().collect()
+        });
+        let workspace = self.editor.workspace_mut();
+        workspace.set_project_sources(project_sources);
+        workspace.reload_project_files().await;
+        self.ensure_active_indexed();
+        Ok(output)
+    }
+
+    /// Keep the active anchor inside the reloaded Java index. Generated-file cleanup falls back to
+    /// the first sorted project file, which is deterministic across runtimes.
+    fn ensure_active_indexed(&mut self) {
+        let workspace = self.editor.workspace();
+        if workspace.file_id(&self.active).is_none() {
+            self.active = workspace
+                .files()
+                .map(|(path, _)| path.clone())
+                .next()
+                .expect("the playground retains its seed Java files");
+        }
     }
 
     /// The path of the active file.
@@ -139,13 +296,16 @@ impl Workspace {
         &self.active
     }
 
-    /// Make `path` the active file, if it exists in the tree.
-    pub fn set_active(&mut self, path: &str) {
-        if let Ok(key) = FileKey::parse(path)
-            && self.editor.workspace().view().tree().file(&key).is_some()
-        {
-            self.active = key;
+    /// Make `path` the active indexed Java file. Returns whether the selection was accepted.
+    pub fn set_active(&mut self, path: &str) -> bool {
+        let Ok(key) = FileKey::parse(path) else {
+            return false;
+        };
+        if self.editor.workspace().file_id(&key).is_none() {
+            return false;
         }
+        self.active = key;
+        true
     }
 
     /// The active file's cached [`jals_editor::Document`] (the synced overlay), when indexed.
@@ -183,22 +343,9 @@ impl Workspace {
             .collect()
     }
 
-    /// The immediate children of directory `dir` as `(full path, is directory)`, sorted
-    /// (sidebar rendering).
-    pub fn read_dir(&self, dir: &str) -> Vec<(String, bool)> {
-        let Ok(dir) = DirKey::parse(dir) else {
-            return Vec::new();
-        };
-        self.editor
-            .workspace()
-            .view()
-            .tree()
-            .children(&dir)
-            .map(|child| match child {
-                EntryRef::Directory(directory) => (directory.to_string(), true),
-                EntryRef::File(file) => (file.key().to_string(), false),
-            })
-            .collect()
+    /// Indexed project paths in deterministic order, used to construct the sidebar in one pass.
+    pub fn file_keys(&self) -> impl Iterator<Item = &FileKey> {
+        self.editor.workspace().files().map(|(path, _)| path)
     }
 
     fn read(&self, path: &FileKey) -> String {
@@ -276,12 +423,27 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use jals_build::build_script::RHAI_OUTPUT_ROOT;
     use jals_editor::CompletionKind;
     use jals_exec::block_on_inline;
 
     use crate::host::MonacoRange;
 
     use super::*;
+
+    const BUILD_MANIFEST: &str = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+
+    fn alloc_manifest(script: &str) -> String {
+        format!("[build]\nscript = {{ type = \"rhai\", file = \"{script}\" }}\n")
+    }
+
+    fn build_manifest() -> Manifest {
+        BUILD_MANIFEST.parse().expect("test manifest is valid")
+    }
+
+    fn output_key(path: &str) -> FileKey {
+        FileKey::parse(&format!("{RHAI_OUTPUT_ROOT}/{path}")).expect("test output path is valid")
+    }
 
     #[test]
     fn seed_files_parse_clean() {
@@ -296,15 +458,13 @@ mod tests {
     }
 
     #[test]
-    fn tree_lists_the_package_then_the_files() {
+    fn indexed_file_keys_are_sorted() {
         let ws = block_on_inline(Workspace::new());
-        assert_eq!(ws.read_dir(""), vec![("com".to_string(), true)]);
-        assert_eq!(ws.read_dir("com"), vec![("com/example".to_string(), true)]);
         assert_eq!(
-            ws.read_dir("com/example"),
+            ws.file_keys().map(ToString::to_string).collect::<Vec<_>>(),
             vec![
-                ("com/example/Greeter.java".to_string(), false),
-                ("com/example/Main.java".to_string(), false),
+                "com/example/Greeter.java".to_string(),
+                "com/example/Main.java".to_string(),
             ]
         );
         // The first sorted file is active on load.
@@ -323,6 +483,378 @@ mod tests {
                 diags.is_empty(),
                 "seed workspace should be diagnostic-free, got: {:?}",
                 diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn only_registered_generated_java_is_indexed_and_resolves_from_unsaved_source() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            ws.set_active("com/example/Main.java");
+            ws.sync_active("package com.example;\npublic class Main { Generated value; }\n")
+                .await;
+            let generated = output_key("com/example/Generated.java");
+            let unregistered = output_key("com/example/Unregistered.java");
+
+            let output = ws
+                .run_build_script(
+                    &build_manifest(),
+                    BUILD_MANIFEST,
+                    r#"
+                        let source = output.write_text(
+                            "com/example/Generated.java",
+                            "package com.example; public class Generated {}\n"
+                        );
+                        output.write_text(
+                            "com/example/Unregistered.java",
+                            "package com.example; public class Unregistered {}\n"
+                        );
+                        build.add_source(source);
+                    "#,
+                )
+                .await
+                .expect("build script succeeds")
+                .expect("script is configured");
+
+            assert!(output.generated_sources.contains(&generated));
+            assert!(!output.generated_sources.contains(&unregistered));
+            assert!(output.generated_files.contains(&generated));
+            assert!(output.generated_files.contains(&unregistered));
+            let view = ws.editor.workspace().view();
+            assert!(view.file(&generated).is_ok());
+            assert!(view.file(&unregistered).is_ok());
+            assert!(
+                ws.file_texts()
+                    .iter()
+                    .any(|(path, _)| path == &generated.to_string())
+            );
+            assert!(
+                ws.file_texts()
+                    .iter()
+                    .all(|(path, _)| path != &unregistered.to_string())
+            );
+            assert!(ws.editor.workspace().file_id(&generated).is_some());
+            assert!(ws.editor.workspace().file_id(&unregistered).is_none());
+            assert_eq!(
+                ws.active_source(),
+                "package com.example;\npublic class Main { Generated value; }\n",
+                "reloading generated files must preserve the unsaved Java overlay"
+            );
+            let diagnostics = ws.analyze_active(&LintConfig::default()).await;
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("Generated")),
+                "generated type should resolve after reload: {:?}",
+                diagnostics
+                    .iter()
+                    .map(|diagnostic| &diagnostic.message)
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn build_script_environment_matches_host_project_metadata() {
+        block_on_inline(async {
+            let manifest_text = "[package]\nname = \"playground\"\nversion = \"1.2.3\"\n\
+                                 [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+            let manifest: Manifest = manifest_text.parse().expect("test manifest is valid");
+            let mut ws = Workspace::new().await;
+            ws.run_build_script(
+                &manifest,
+                manifest_text,
+                r#"
+                    if build.env("OUT_DIR") != "target/jals/build/rhai/out" {
+                        throw "bad OUT_DIR";
+                    }
+                    if build.env("JALS_MANIFEST_DIR") != "." {
+                        throw "bad manifest directory";
+                    }
+                    if build.env("JALS_PACKAGE_NAME") != "playground" {
+                        throw "bad package name";
+                    }
+                    if build.env("JALS_PACKAGE_VERSION") != "1.2.3" {
+                        throw "bad package version";
+                    }
+                "#,
+            )
+            .await
+            .expect("host-parity environment is visible to Rhai");
+
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"
+                    if build.env("JALS_PACKAGE_NAME") != () ||
+                       build.env("JALS_PACKAGE_VERSION") != () {
+                        throw "optional package metadata must be absent";
+                    }
+                "#,
+            )
+            .await
+            .expect("omitted package metadata stays absent");
+        });
+    }
+
+    #[test]
+    fn failed_rerun_publishes_no_partial_outputs() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let stable = output_key("Stable.java");
+            let partial = output_key("Partial.java");
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"output.write_text("Stable.java", "class Stable {}\n");"#,
+            )
+            .await
+            .expect("initial build succeeds");
+
+            let result = ws
+                .run_build_script(
+                    &build_manifest(),
+                    BUILD_MANIFEST,
+                    r#"
+                        output.write_text("Stable.java", "class Changed {}\n");
+                        output.write_text("Partial.java", "class Partial {}\n");
+                        throw "stop";
+                    "#,
+                )
+                .await;
+
+            assert!(result.is_err());
+            let view = ws.editor.workspace().view();
+            assert_eq!(
+                view.file(&stable).expect("prior output remains").bytes(),
+                b"class Stable {}\n"
+            );
+            assert!(view.file(&partial).is_err());
+        });
+    }
+
+    #[test]
+    fn physical_task_publication_is_rejected_before_browser_fetch() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let error = ws
+                .run_build_script(
+                    &build_manifest(),
+                    BUILD_MANIFEST,
+                    r#"
+                        let jar = tasks.fetch_jar(
+                            tasks.https_url("https://example.invalid/sources.jar"),
+                            tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                            tasks.bytes(1024)
+                        );
+                        let sources = tasks.extract_java(jar, "net/example");
+                        tasks.publish_tree(
+                            "sources",
+                            sources,
+                            "src/main/java/net/example",
+                            "replace-root"
+                        );
+                    "#,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                BuildScriptError::Execute { message, .. }
+                    if message.contains("physical source-tree publication is not supported")
+            ));
+            assert!(
+                ws.storage_snapshot()
+                    .view()
+                    .file(&FileKey::parse("src/main/java/net/example/A.java").unwrap())
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn rerun_replaces_outputs_and_removes_known_stale_files() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let a = output_key("A.java");
+            let b = output_key("B.java");
+            let c = output_key("C.java");
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"
+                    let a = output.write_text("A.java", "class A { int oldValue; }\n");
+                    let b = output.write_text("B.java", "class B {}\n");
+                    build.add_source(a);
+                    build.add_source(b);
+                "#,
+            )
+            .await
+            .expect("initial build succeeds");
+
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"
+                    let a = output.write_text("A.java", "class A { int newValue; }\n");
+                    let c = output.write_text("C.java", "class C {}\n");
+                    build.add_source(a);
+                    build.add_source(c);
+                "#,
+            )
+            .await
+            .expect("rerun succeeds");
+
+            let view = ws.editor.workspace().view();
+            assert_eq!(
+                view.file(&a).expect("A is replaced").bytes(),
+                b"class A { int newValue; }\n"
+            );
+            assert!(view.file(&b).is_err(), "known stale B must be removed");
+            assert_eq!(
+                view.file(&c).expect("C is generated").bytes(),
+                b"class C {}\n"
+            );
+            let indexed: Vec<_> = ws.file_texts().into_iter().map(|(path, _)| path).collect();
+            assert!(indexed.contains(&a.to_string()));
+            assert!(!indexed.contains(&b.to_string()));
+            assert!(indexed.contains(&c.to_string()));
+        });
+    }
+
+    #[test]
+    fn disabling_script_clears_outputs_and_repairs_removed_active_file() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let generated = output_key("Generated.java");
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"
+                    let generated = output.write_text("Generated.java", "class Generated {}\n");
+                    build.add_source(generated);
+                "#,
+            )
+            .await
+            .expect("generation succeeds");
+            assert!(ws.set_active(&generated.to_string()));
+
+            let output = ws
+                .run_build_script(&Manifest::default(), "", "")
+                .await
+                .expect("disabling the script clears owned output");
+
+            assert!(output.is_none());
+            assert!(ws.editor.workspace().view().file(&generated).is_err());
+            assert!(ws.file_keys().all(|path| path != &generated));
+            assert_eq!(ws.active().to_string(), "com/example/Greeter.java");
+            assert!(!ws.set_active(&generated.to_string()));
+        });
+    }
+
+    #[test]
+    fn script_overlay_moves_from_default_to_custom_then_is_removed_when_disabled() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let default_key = FileKey::parse(BUILD_SCRIPT_PATH).unwrap();
+            let custom_key = FileKey::parse("scripts/custom.rhai").unwrap();
+            let generated = output_key("Custom.java");
+            ws.run_build_script(&build_manifest(), BUILD_MANIFEST, "let first = 1;")
+                .await
+                .expect("fixed playground script path succeeds");
+            let custom_text =
+                "[build]\nscript = { type = \"rhai\", file = \"scripts/custom.rhai\" }\n";
+            let custom: Manifest = custom_text.parse().expect("custom manifest is valid");
+
+            let output = ws
+                .run_build_script(
+                    &custom,
+                    custom_text,
+                    r#"output.write_text("Custom.java", "class Custom {}\n");"#,
+                )
+                .await
+                .expect("the editor buffer executes at the custom path")
+                .expect("custom script is enabled");
+
+            let view = ws.editor.workspace().view();
+            assert!(view.file(&default_key).is_err());
+            assert_eq!(
+                view.file_text(&custom_key).unwrap(),
+                r#"output.write_text("Custom.java", "class Custom {}\n");"#
+            );
+            assert!(output.generated_files.contains(&generated));
+            assert_eq!(ws.staged_script.as_ref(), Some(&custom_key));
+
+            let error = ws
+                .run_build_script(&custom, custom_text, "let broken = ;")
+                .await
+                .expect_err("custom-path compile error is reported");
+            assert_eq!(error.script_path(), Some(&custom_key));
+
+            ws.run_build_script(&Manifest::default(), "", "")
+                .await
+                .expect("disabling clears the custom script and its outputs");
+
+            let view = ws.editor.workspace().view();
+            assert!(view.file(&default_key).is_err());
+            assert!(view.file(&custom_key).is_err());
+            assert!(view.file(&generated).is_err());
+            assert!(ws.staged_script.is_none());
+        });
+    }
+
+    /// The script buffer is staged as a storage overlay, and an overlay shadows the base file
+    /// unconditionally. A `script.file` aimed at a real source would therefore replace that
+    /// source with the Rhai buffer, and the model sync would push the replacement into the user's
+    /// editor — silently destroying their code.
+    #[test]
+    fn a_script_path_may_not_collide_with_a_project_file() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let victim = "com/example/Greeter.java";
+            let before = ws.read(&FileKey::parse(victim).unwrap());
+
+            for path in [victim, MANIFEST_PATH] {
+                let text = alloc_manifest(path);
+                let manifest: Manifest = text.parse().expect("manifest parses");
+                let error = ws
+                    .run_build_script(&manifest, &text, "let x = 1;")
+                    .await
+                    .expect_err("a colliding script path must be rejected");
+                assert!(matches!(error, BuildScriptError::InvalidScriptPath { .. }));
+            }
+
+            assert_eq!(
+                ws.read(&FileKey::parse(victim).unwrap()),
+                before,
+                "the project file must be untouched"
+            );
+        });
+    }
+
+    #[test]
+    fn staged_pseudo_files_are_not_indexed_or_listed_as_project_files() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            ws.run_build_script(&build_manifest(), BUILD_MANIFEST, "")
+                .await
+                .expect("empty script succeeds");
+
+            let view = ws.editor.workspace().view();
+            assert!(view.file(&FileKey::parse(MANIFEST_PATH).unwrap()).is_ok());
+            assert!(
+                view.file(&FileKey::parse(BUILD_SCRIPT_PATH).unwrap())
+                    .is_ok()
+            );
+            assert!(
+                ws.file_texts()
+                    .iter()
+                    .all(|(path, _)| path != MANIFEST_PATH && path != BUILD_SCRIPT_PATH)
+            );
+            assert!(
+                ws.file_keys().all(|path| path.to_string() != MANIFEST_PATH
+                    && path.to_string() != BUILD_SCRIPT_PATH)
             );
         });
     }
@@ -573,12 +1105,106 @@ mod tests {
             );
 
             // Resolved after folding `Box.class` in.
-            ws.set_classpath(Some(lowered)).await;
+            ws.editor.workspace_mut().set_classpath(lowered).await;
             let after = ws.analyze_active(&LintConfig::default()).await;
             assert!(
                 !after.iter().any(|d| d.message.contains("Box")),
                 "expected `Box` to resolve once the classpath is folded, got: {:?}",
                 after.iter().map(|d| &d.message).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_sources_are_navigable_but_never_enter_project_storage() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            ws.set_active("com/example/Main.java");
+            ws.sync_active("package com.example; class Main { Dependency value; }")
+                .await;
+            let dependency =
+                FileKey::parse(".jals/source-dependency/dependencies/node/sources/Dependency.java")
+                    .unwrap();
+            ws.apply_project_inputs(
+                LoweredClasspath::default(),
+                FeatureSet::default(),
+                ArtifactCache::new(MemoryCache::default()),
+                Vec::new(),
+                vec![(
+                    dependency.clone(),
+                    "package com.example; class Dependency {}".to_string(),
+                )],
+            )
+            .await;
+
+            let source = ws.active_source();
+            let (line, col) = monaco_pos(&source, source.find("Dependency value").unwrap());
+            let target = ws
+                .goto_definition(line, col)
+                .await
+                .expect("dependency source is an index and navigation input");
+            assert_eq!(target.path, dependency.to_string());
+            assert!(ws.editor.workspace().file_id(&dependency).is_none());
+            assert!(ws.file_keys().all(|path| path != &dependency));
+            assert!(ws.editor.workspace().view().file(&dependency).is_err());
+            assert!(ws.storage_snapshot().view().file(&dependency).is_err());
+
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                r#"if project.exists(".jals") { throw "dependency source leaked"; }"#,
+            )
+            .await
+            .expect("a later build script view excludes detached dependency sources");
+            assert!(ws.storage_snapshot().view().file(&dependency).is_err());
+
+            ws.apply_project_inputs(
+                LoweredClasspath::default(),
+                FeatureSet::default(),
+                ArtifactCache::new(MemoryCache::default()),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            assert!(ws.editor.workspace().view().file(&dependency).is_err());
+            assert!(ws.goto_definition(line, col).await.is_none());
+        });
+    }
+
+    #[test]
+    fn detached_dependency_text_never_replaces_same_key_project_bytes() {
+        block_on_inline(async {
+            let mut ws = Workspace::new().await;
+            let collision = FileKey::parse(".jals/source-dependency/collision.java").unwrap();
+            let revision = ws.editor.workspace().storage().revision();
+            let mut transaction = ws
+                .editor
+                .workspace_mut()
+                .storage_mut()
+                .transaction(revision)
+                .unwrap();
+            transaction
+                .create_file(collision.clone(), b"class UserOwned {}".to_vec())
+                .unwrap();
+            transaction.commit().await.unwrap();
+
+            ws.apply_project_inputs(
+                LoweredClasspath::default(),
+                FeatureSet::default(),
+                ArtifactCache::new(MemoryCache::default()),
+                Vec::new(),
+                vec![(collision.clone(), "class DependencyOwned {}".to_string())],
+            )
+            .await;
+
+            assert_eq!(
+                ws.editor
+                    .workspace()
+                    .view()
+                    .file(&collision)
+                    .unwrap()
+                    .bytes(),
+                b"class UserOwned {}"
             );
         });
     }

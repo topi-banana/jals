@@ -5,6 +5,7 @@
 //! runs through [`on_blocking_pool`], so the current-thread executor keeps serving tasks.
 
 use std::fs;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -87,6 +88,80 @@ impl Fetcher for ReqwestFetcher {
             .await
             .map(|bytes| bytes.to_vec())
             .map_err(|error| format!("reading response: {error}"))
+    }
+
+    async fn fetch_bounded(&self, locator: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+        if let Some(path) = locator.strip_prefix("file://") {
+            return Self::read_file_bounded(PathBuf::from(path), max_bytes).await;
+        }
+        if !ExternalLocator::is_url(locator) {
+            let path = self
+                .project_root
+                .as_deref()
+                .unwrap_or_else(|| Path::new("."))
+                .join(locator);
+            return Self::read_file_bounded(path, max_bytes).await;
+        }
+        let mut response = self
+            .client
+            .get(locator)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(format!("response exceeds the limit of {max_bytes} bytes"));
+        }
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or_default()
+                .min(max_bytes),
+        );
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| format!("reading response: {error}"))?
+        {
+            if bytes
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|length| length > max_bytes)
+            {
+                return Err(format!("response exceeds the limit of {max_bytes} bytes"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+}
+
+impl ReqwestFetcher {
+    async fn read_file_bounded(path: PathBuf, max_bytes: usize) -> Result<Vec<u8>, String> {
+        on_blocking_pool(move || {
+            let file = fs::File::open(&path)
+                .map_err(|error| format!("opening {}: {error}", path.display()))?;
+            let limit = u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            let mut bytes = Vec::new();
+            file.take(limit)
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("reading {}: {error}", path.display()))?;
+            if bytes.len() > max_bytes {
+                return Err(format!(
+                    "{} exceeds the limit of {max_bytes} bytes",
+                    path.display()
+                ));
+            }
+            Ok(bytes)
+        })
+        .await
     }
 }
 

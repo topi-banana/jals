@@ -163,6 +163,8 @@ impl SubprocessToolchain {
         on_blocking_pool(move || {
             let status = Command::new(&invocation.program)
                 .args(&invocation.args)
+                .current_dir(&invocation.working_dir)
+                .envs(&invocation.environment)
                 .status()
                 .map_err(|source| ToolchainError::Spawn {
                     program: invocation.program.clone(),
@@ -249,6 +251,8 @@ impl Runtime for SubprocessToolchain {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use jals_exec::block_on_inline;
 
     use super::*;
@@ -268,13 +272,17 @@ mod tests {
             sources: &sources,
             extra_sources: &[],
             extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &BTreeMap::new(),
         };
         let run_req = RunRequest {
             manifest: &manifest,
             project_root: root,
+            jvm_args: &[],
             main_class: "Main",
             program_args: &[],
             extra_classpath: &[],
+            run_env: &BTreeMap::new(),
         };
         let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
         assert!(
@@ -295,6 +303,8 @@ mod tests {
             sources: &sources,
             extra_sources: &[],
             extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &BTreeMap::new(),
         };
         let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
         assert!(compiler.describe_compile(&compile_req).contains("javac"));
@@ -304,9 +314,11 @@ mod tests {
         let run_req = RunRequest {
             manifest: &manifest,
             project_root: root,
+            jvm_args: &[],
             main_class: "Main",
             program_args: &[],
             extra_classpath: &[],
+            run_env: &BTreeMap::new(),
         };
         let runtime = block_on_inline(<dyn Runtime>::select(&manifest, &exec));
         assert!(runtime.describe_run(&run_req).starts_with("builtin:"));
@@ -316,6 +328,8 @@ mod tests {
             sources: &sources,
             extra_sources: &[],
             extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &BTreeMap::new(),
         };
         let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
         assert!(compiler.describe_compile(&compile_req).contains("javac"));
@@ -335,6 +349,8 @@ mod tests {
             sources: &[],
             extra_sources: &[],
             extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &BTreeMap::new(),
         };
         let program = block_on_inline(toolchain.plan_compile(&compile_req)).program;
         assert!(
@@ -345,14 +361,81 @@ mod tests {
         let run_req = RunRequest {
             manifest: &manifest,
             project_root: root,
+            jvm_args: &[],
             main_class: "Main",
             program_args: &[],
             extra_classpath: &[],
+            run_env: &BTreeMap::new(),
         };
         let program = block_on_inline(toolchain.plan_run(&run_req)).program;
         assert!(
             program.ends_with("java"),
             "runtime program should end in `java`, got {program}"
         );
+    }
+
+    #[test]
+    fn spawn_applies_working_directory_and_environment_without_clearing_inherited_variables() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let working_dir = std::fs::canonicalize(temp_dir.path()).unwrap();
+        let (inherited_name, inherited_value) = std::env::vars()
+            .find(|(name, _)| !name.starts_with("JALS_BUILD_SUBPROCESS_TEST_"))
+            .expect("the test process should have at least one inherited environment variable");
+        let environment = BTreeMap::from([
+            (
+                "JALS_BUILD_SUBPROCESS_TEST_CWD".to_owned(),
+                working_dir.to_string_lossy().into_owned(),
+            ),
+            (
+                "JALS_BUILD_SUBPROCESS_TEST_EXPLICIT".to_owned(),
+                "accepted".to_owned(),
+            ),
+            (
+                "JALS_BUILD_SUBPROCESS_TEST_INHERITED_NAME".to_owned(),
+                inherited_name,
+            ),
+            (
+                "JALS_BUILD_SUBPROCESS_TEST_INHERITED_VALUE".to_owned(),
+                inherited_value,
+            ),
+        ]);
+        let invocation = Invocation {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".to_owned(),
+                "native::tests::subprocess_observes_invocation_context".to_owned(),
+                "--quiet".to_owned(),
+            ],
+            working_dir,
+            environment,
+        };
+
+        assert!(
+            block_on_inline(SubprocessToolchain::spawn(invocation))
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn subprocess_observes_invocation_context() {
+        let Ok(expected_cwd) = std::env::var("JALS_BUILD_SUBPROCESS_TEST_CWD") else {
+            return;
+        };
+
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            PathBuf::from(expected_cwd)
+        );
+        assert_eq!(
+            std::env::var("JALS_BUILD_SUBPROCESS_TEST_EXPLICIT").unwrap(),
+            "accepted"
+        );
+        let inherited_name = std::env::var("JALS_BUILD_SUBPROCESS_TEST_INHERITED_NAME").unwrap();
+        let inherited_value = std::env::var("JALS_BUILD_SUBPROCESS_TEST_INHERITED_VALUE").unwrap();
+        assert_eq!(std::env::var(inherited_name).unwrap(), inherited_value);
     }
 }

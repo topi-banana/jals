@@ -16,13 +16,12 @@ pub struct HeaderProps {
     /// Emitted with the CORS-proxy URL as it changes — used to download the `jals.toml`
     /// `[dependencies]` jars (Maven Central needs it; CORS-permissive hosts do not).
     pub on_proxy_change: Callback<String>,
-    /// The last dependency-resolution status (resolved N classes / an error), shown beside the proxy
-    /// input; `None` before the first resolve.
+    /// The latest build-script/classpath status, shown beside the proxy input.
     pub deps_status: Option<String>,
 }
 
 /// The top application bar: the `jals playground` wordmark on the left, and — on the right — the
-/// dependency-resolution status, the CORS-proxy input, and the *Syntax tree* / *Format* actions.
+/// build/classpath status, the CORS-proxy input, and the *Syntax tree* / *Format* actions.
 /// Purely presentational — it forwards clicks and the proxy value to the root [`App`] via its
 /// [`HeaderProps`] callbacks.
 ///

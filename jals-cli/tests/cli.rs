@@ -6,8 +6,29 @@ use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
 
+fn write_source_jar(path: &Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    for (name, bytes) in entries {
+        archive
+            .start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    archive.finish().unwrap();
+}
+
 fn jals() -> Command {
     Command::new(env!("CARGO_BIN_EXE_jals"))
+}
+
+#[cfg(unix)]
+fn read_arg_lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Run `jals fmt` over stdin and return (stdout, exit code).
@@ -176,6 +197,76 @@ fn javac_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+#[cfg(unix)]
+fn fake_javac(root: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let program = root.join("fake-javac");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$JALS_CAPTURE_ARGS\"\nprintf '%s' \"$JALS_SCRIPT_ENV\" > \"$JALS_CAPTURE_ENV\"\npwd > \"$JALS_CAPTURE_CWD\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).unwrap();
+    program
+}
+
+#[cfg(unix)]
+fn fake_java(root: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let program = root.join("fake-java");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$JALS_CAPTURE_JAVA_ARGS\"\nprintf '%s' \"$JALS_RUN_ENV\" > \"$JALS_CAPTURE_RUN_ENV\"\npwd > \"$JALS_CAPTURE_JAVA_CWD\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).unwrap();
+    program
+}
+
+#[cfg(unix)]
+fn snapshot_tree(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files
+}
+
+#[cfg(unix)]
+fn build_with_fake_javac(root: &Path) -> std::process::Output {
+    jals()
+        .env("JAVAC", fake_javac(root))
+        .env("JALS_CAPTURE_ARGS", root.join("failed-javac.args"))
+        .env("JALS_CAPTURE_ENV", root.join("failed-javac.env"))
+        .env("JALS_CAPTURE_CWD", root.join("failed-javac.cwd"))
+        .args(["build", "--manifest-path"])
+        .arg(root.join("jals.toml"))
+        .output()
+        .unwrap()
+}
+
 /// Whether a dry-run compile command names `javac` as its program. The `[toolchain]` selector
 /// resolves the tool to either the bare `javac` (found on `PATH`) or an absolute path into a
 /// discovered JDK (`$JAVA_HOME/bin/javac`, `javac.exe` on Windows), so assert on the program's
@@ -186,6 +277,125 @@ fn names_javac(cmd_line: &str) -> bool {
         .next()
         .and_then(|prog| Path::new(prog).file_stem())
         .is_some_and(|stem| stem == "javac")
+}
+
+#[cfg(unix)]
+#[test]
+fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
+    let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    let dir = project(manifest);
+    let jar = dir.path().join("sources.jar");
+    let generated = b"package net.example;\npublic class Generated {}\n";
+    write_source_jar(
+        &jar,
+        &[
+            ("net/example/Generated.java", generated),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"),
+        ],
+    );
+    let script = dir.path().join("build.rhai");
+    std::fs::write(
+        &script,
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "net/example");
+            tasks.publish_tree(
+                "example-sources",
+                sources,
+                "src/main/java/net/example",
+                "replace-root"
+            );
+        "#,
+    )
+    .unwrap();
+    let manifest_path = dir.path().join("jals.toml");
+    let destination = dir.path().join("src/main/java/net/example/Generated.java");
+
+    assert!(build_with_fake_javac(dir.path()).status.success());
+    assert_eq!(std::fs::read(&destination).unwrap(), generated);
+
+    std::fs::write(&destination, "user edit\n").unwrap();
+    std::fs::write(
+        destination.parent().unwrap().join("Manual.txt"),
+        "remove me",
+    )
+    .unwrap();
+    assert!(build_with_fake_javac(dir.path()).status.success());
+    assert_eq!(std::fs::read(&destination).unwrap(), generated);
+    assert!(!destination.parent().unwrap().join("Manual.txt").exists());
+
+    std::fs::write(&script, "let no_tasks = true;\n").unwrap();
+    assert!(build_with_fake_javac(dir.path()).status.success());
+    assert!(!destination.parent().unwrap().exists());
+
+    std::fs::write(
+        &script,
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "net/example");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+        "#,
+    )
+    .unwrap();
+    assert!(build_with_fake_javac(dir.path()).status.success());
+    assert!(destination.exists());
+    assert!(
+        jals()
+            .args(["clean", "--manifest-path"])
+            .arg(&manifest_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!destination.parent().unwrap().exists());
+}
+
+/// `--dry-run` previews a command. A `replace-root` publication owns its destination completely,
+/// so applying one during a preview would delete whatever the user has there — including files
+/// they wrote by hand and never checked in. Evaluate the plan, publish managed output, and leave
+/// the source tree alone.
+#[cfg(unix)]
+#[test]
+fn build_dry_run_leaves_an_exclusive_publication_root_untouched() {
+    let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    let dir = project(manifest);
+    let jar = dir.path().join("sources.jar");
+    write_source_jar(
+        &jar,
+        &[(
+            "net/example/Generated.java",
+            b"package net.example;\npublic class Generated {}\n",
+        )],
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "net/example");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+        "#,
+    )
+    .unwrap();
+
+    // Someone's own work sits in the root the script claims.
+    let owned = dir.path().join("src/main/java/net/example");
+    std::fs::create_dir_all(&owned).unwrap();
+    std::fs::write(owned.join("Manual.txt"), "keep me").unwrap();
+
+    assert!(
+        jals()
+            .args(["build", "--dry-run", "--manifest-path"])
+            .arg(dir.path().join("jals.toml"))
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    assert_eq!(std::fs::read(owned.join("Manual.txt")).unwrap(), b"keep me");
+    assert!(
+        !owned.join("Generated.java").exists(),
+        "a preview must not publish into the source tree"
+    );
 }
 
 #[test]
@@ -204,6 +414,50 @@ fn build_dry_run_prints_javac_command() {
     assert!(stdout.contains("target/classes"), "got: {stdout}");
     assert!(stdout.contains("--release 21"), "got: {stdout}");
     assert!(stdout.contains("Main.java"), "got: {stdout}");
+}
+
+#[test]
+fn build_dry_run_executes_and_publishes_build_script_outputs() {
+    let dir = project(
+        "[package]\nname = \"dry-run-script\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let source = output.write_text(
+                "com/example/DryRunGenerated.java",
+                "package com.example; public class DryRunGenerated {}\n",
+            );
+            build.add_source(source);
+            build.add_source("src/main/java/com/example/Main.java");
+        "#,
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = dir
+        .path()
+        .join("target/jals/build/rhai/out/com/example/DryRunGenerated.java");
+    assert!(generated.is_file());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(generated.to_string_lossy().as_ref()));
+    let authored = dir.path().join("src/main/java/com/example/Main.java");
+    assert_eq!(
+        stdout.matches(authored.to_string_lossy().as_ref()).count(),
+        1
+    );
 }
 
 #[test]
@@ -284,6 +538,598 @@ fn build_compiles_when_javac_present() {
         dir.path()
             .join("target/classes/com/example/Main.class")
             .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
+    let dir = project(
+        "[package]\nname = \"generated\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let source = output.write_text(
+                "com/example/Generated.java",
+                "package com.example; public class Generated {}\n",
+            );
+            build.add_source(source);
+            build.add_javac_arg("-Agenerated=true");
+            build.set_compile_env("JALS_SCRIPT_ENV", "from-rhai");
+        "#,
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+    let captured_args = dir.path().join("javac.args");
+    let captured_env = dir.path().join("javac.env");
+    let captured_cwd = dir.path().join("javac.cwd");
+    let output = jals()
+        .env("JAVAC", fake_javac(dir.path()))
+        .env("JALS_CAPTURE_ARGS", &captured_args)
+        .env("JALS_CAPTURE_ENV", &captured_env)
+        .env("JALS_CAPTURE_CWD", &captured_cwd)
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated = dir
+        .path()
+        .join("target/jals/build/rhai/out/com/example/Generated.java");
+    assert!(generated.is_file());
+    let args = read_arg_lines(&captured_args);
+    assert!(args.iter().any(|arg| Path::new(arg) == generated));
+    assert!(args.iter().any(|arg| arg == "-Agenerated=true"));
+    assert_eq!(std::fs::read_to_string(captured_env).unwrap(), "from-rhai");
+    assert_eq!(
+        std::fs::canonicalize(std::fs::read_to_string(captured_cwd).unwrap().trim()).unwrap(),
+        std::fs::canonicalize(dir.path()).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transitive_graph_sources_and_classpath_reach_compile_and_run() {
+    let dir = project(
+        "[package]\nname = \"root\"\n\
+         [run]\nmain-class = \"com.example.Main\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n",
+    );
+    std::fs::create_dir_all(dir.path().join("child/src")).unwrap();
+    std::fs::write(dir.path().join("child/src/Child.java"), "class Child {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("child/jals.toml"),
+        "[build]\nsource-dirs = [\"src\"]\n\
+         [dependencies]\nleaf = { path = \"../leaf\" }\n",
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.path().join("leaf/src")).unwrap();
+    std::fs::create_dir_all(dir.path().join("leaf/libs")).unwrap();
+    std::fs::write(dir.path().join("leaf/src/Leaf.java"), "class Leaf {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("leaf/libs/manifest.jar"),
+        b"transitive manifest classpath",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("leaf/jals.toml"),
+        "[package]\nname = \"leaf\"\n\
+         [build]\nsource-dirs = [\"src\"]\nclasspath = [\"libs/manifest.jar\"]\n\
+         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("leaf/build.rhai"),
+        r#"
+            if build.env("JALS_PACKAGE_NAME") != "leaf" {
+                build.error("dependency did not receive its own package environment");
+            }
+            let source = output.write_text(
+                "com/example/TransitiveGenerated.java",
+                "package com.example; public class TransitiveGenerated {}\n",
+            );
+            let classpath = output.write("script.jar", [9, 8, 7]);
+            build.add_source(source);
+            build.add_classpath(classpath);
+            build.add_javac_arg("-Adependency-only=true");
+            build.add_jvm_arg("-Ddependency-only=true");
+        "#,
+    )
+    .unwrap();
+
+    let javac_args_path = dir.path().join("transitive-javac.args");
+    let java_args_path = dir.path().join("transitive-java.args");
+    let output = jals()
+        .env("JAVAC", fake_javac(dir.path()))
+        .env("JAVA", fake_java(dir.path()))
+        .env("JALS_CAPTURE_ARGS", &javac_args_path)
+        .env("JALS_CAPTURE_ENV", dir.path().join("transitive-javac.env"))
+        .env("JALS_CAPTURE_CWD", dir.path().join("transitive-javac.cwd"))
+        .env("JALS_CAPTURE_JAVA_ARGS", &java_args_path)
+        .env(
+            "JALS_CAPTURE_RUN_ENV",
+            dir.path().join("transitive-java.env"),
+        )
+        .env(
+            "JALS_CAPTURE_JAVA_CWD",
+            dir.path().join("transitive-java.cwd"),
+        )
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let javac_args = read_arg_lines(&javac_args_path);
+    assert!(
+        javac_args
+            .iter()
+            .any(|arg| arg.ends_with("TransitiveGenerated.java")),
+        "javac args: {javac_args:?}"
+    );
+    assert!(!javac_args.iter().any(|arg| arg == "-Adependency-only=true"));
+    let javac_classpath = &javac_args[javac_args
+        .iter()
+        .position(|arg| arg == "-classpath")
+        .unwrap()
+        + 1];
+
+    let java_args = read_arg_lines(&java_args_path);
+    assert!(!java_args.iter().any(|arg| arg == "-Ddependency-only=true"));
+    let java_classpath = &java_args[java_args.iter().position(|arg| arg == "-cp").unwrap() + 1];
+
+    for classpath in [javac_classpath, java_classpath] {
+        let entries: Vec<_> = classpath.split(':').map(Path::new).collect();
+        assert!(entries.iter().any(|path| {
+            std::fs::read(path).is_ok_and(|bytes| bytes == b"transitive manifest classpath")
+        }));
+        assert!(
+            entries
+                .iter()
+                .any(|path| std::fs::read(path).is_ok_and(|bytes| bytes == [9, 8, 7]))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_classpath_directory_is_passed_once_instead_of_member_classes() {
+    let dir = project(
+        "[package]\nname = \"directory-classpath\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n",
+    );
+    std::fs::create_dir_all(dir.path().join("child")).unwrap();
+    std::fs::write(
+        dir.path().join("child/jals.toml"),
+        "[build]\nclasspath = [\"../classes\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("classes/pkg")).unwrap();
+    std::fs::write(dir.path().join("classes/pkg/Api.class"), b"class bytes").unwrap();
+    let captured_args = dir.path().join("directory-javac.args");
+    let output = jals()
+        .env("JAVAC", fake_javac(dir.path()))
+        .env("JALS_CAPTURE_ARGS", &captured_args)
+        .env("JALS_CAPTURE_ENV", dir.path().join("directory-javac.env"))
+        .env("JALS_CAPTURE_CWD", dir.path().join("directory-javac.cwd"))
+        .args(["build", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args = read_arg_lines(&captured_args);
+    let classpath = &args[args.iter().position(|arg| arg == "-classpath").unwrap() + 1];
+    let entries: Vec<_> = classpath.split(':').map(Path::new).collect();
+    assert_eq!(entries.len(), 1, "classpath: {entries:?}");
+    assert!(entries[0].is_dir(), "classpath: {entries:?}");
+    assert_eq!(
+        std::fs::read(entries[0].join("pkg/Api.class")).unwrap(),
+        b"class bytes"
+    );
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .extension()
+            .is_some_and(|extension| extension == "class")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn graph_failures_prevent_javac() {
+    let malformed = project(
+        "[package]\nname = \"malformed-root\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n",
+    );
+    std::fs::create_dir_all(malformed.path().join("child")).unwrap();
+    std::fs::write(
+        malformed.path().join("child/jals.toml"),
+        "[build]\nsource-dirs = [\n",
+    )
+    .unwrap();
+
+    let cycle = project(
+        "[package]\nname = \"cycle-root\"\n\
+         [dependencies]\na = { path = \"a\" }\n",
+    );
+    std::fs::create_dir_all(cycle.path().join("a")).unwrap();
+    std::fs::create_dir_all(cycle.path().join("b")).unwrap();
+    std::fs::write(
+        cycle.path().join("a/jals.toml"),
+        "[dependencies]\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cycle.path().join("b/jals.toml"),
+        "[dependencies]\na = { path = \"../a\" }\n",
+    )
+    .unwrap();
+
+    let script = project(
+        "[package]\nname = \"script-root\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n",
+    );
+    std::fs::create_dir_all(script.path().join("child/src")).unwrap();
+    std::fs::write(
+        script.path().join("child/src/Child.java"),
+        "class Child {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        script.path().join("child/jals.toml"),
+        "[build]\nsource-dirs = [\"src\"]\n\
+         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        script.path().join("child/build.rhai"),
+        "build.error(\"dependency script failed\");\n",
+    )
+    .unwrap();
+
+    for (fixture, expected) in [
+        (&malformed, "malformed dependency manifest"),
+        (&cycle, "dependency cycle"),
+        (&script, "dependency build script"),
+    ] {
+        let output = build_with_fake_javac(fixture.path());
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(expected), "stderr: {stderr}");
+        assert!(!fixture.path().join("failed-javac.args").exists());
+    }
+}
+
+#[test]
+fn lint_warns_and_uses_default_context_when_the_dependency_graph_is_invalid() {
+    let dir = project(
+        "[package]\nname = \"lint-root\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n",
+    );
+    std::fs::create_dir_all(dir.path().join("child")).unwrap();
+    std::fs::write(
+        dir.path().join("child/jals.toml"),
+        "[build]\nsource-dirs = [\n",
+    )
+    .unwrap();
+    let source = dir.path().join("src/main/java/com/example/Main.java");
+    std::fs::write(&source, "package com.example;\npublic class Main {}\n").unwrap();
+
+    let output = jals().arg("lint").arg(source).output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("warning: project analysis inputs unavailable"));
+}
+
+/// Requiring a portable project path for `classes-dir` / `source-dirs` broke projects that
+/// predate build scripts: an absolute output directory and a source root outside the project both
+/// worked before, and neither has anything to do with the build-script phase.
+#[test]
+fn host_paths_in_classes_dir_and_source_dirs_still_build() {
+    let out = tempdir().unwrap();
+    let dir = project(&format!(
+        "[package]\nname = \"hosty\"\n[build]\nclasses-dir = \"{}\"\n",
+        out.path().display()
+    ));
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains(&format!("-d {}", out.path().display())));
+
+    let shared = tempdir().unwrap();
+    std::fs::create_dir_all(shared.path().join("src")).unwrap();
+    let dir = project(
+        "[package]\nname = \"external\"\n\
+         [build]\nsource-dirs = [\"../shared-src\", \"src/main/java\"]\n",
+    );
+    std::fs::create_dir_all(dir.path().join("../shared-src")).ok();
+    let (stdout, code) = run(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}");
+}
+
+/// `--offline` promises to resolve from the verified cache only, but graph discovery ran its own
+/// `git clone` regardless — so an offline build still blocked on the network until it timed out.
+#[test]
+fn offline_does_not_clone_git_dependencies() {
+    let dir = project(
+        "[package]\nname = \"offline\"\n\
+         [dependencies]\ndep = { git = \"https://example.invalid/r.git\" }\n",
+    );
+
+    let output = jals()
+        .args(["build", "--offline", "--dry-run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("cannot be acquired offline"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `Manifest::discover_path` returns a bare `jals.toml` when the manifest is in the current
+/// directory, and `Path::new("jals.toml").parent()` is `Some("")` rather than `None`. The empty
+/// root then failed to canonicalize, so the classpath and feature set were silently dropped and
+/// lint ran with a weaker context than it should have.
+#[test]
+fn lint_keeps_project_context_for_a_manifest_in_the_current_directory() {
+    let dir = project("[package]\nname = \"lint-cwd\"\n");
+    std::fs::write(
+        dir.path().join("src/main/java/com/example/Main.java"),
+        "package com.example;\npublic class Main {}\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("src/main/java/com/example/Main.java")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("project analysis inputs unavailable"),
+        "project context must survive a cwd-relative manifest; stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_preprocesses_dependencies_without_mutating_their_tree() {
+    let dir = project(
+        "[package]\nname = \"dry-graph\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n",
+    );
+    std::fs::create_dir_all(dir.path().join("child/src")).unwrap();
+    std::fs::write(dir.path().join("child/src/Child.java"), "class Child {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("child/jals.toml"),
+        "[build]\nsource-dirs = [\"src\"]\n\
+         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("child/build.rhai"),
+        r#"
+            let source = output.write_text("DryGenerated.java", "class DryGenerated {}\n");
+            build.add_source(source);
+        "#,
+    )
+    .unwrap();
+    let child = dir.path().join("child");
+    let before = snapshot_tree(&child);
+
+    let output = jals()
+        .env("JAVAC", fake_javac(dir.path()))
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("DryGenerated.java"), "stdout: {stdout}");
+    assert_eq!(snapshot_tree(&child), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn build_with_relative_manifest_path_uses_project_root_once() {
+    let dir = project("[package]\nname = \"relative-root\"\n");
+    let parent = dir.path().parent().unwrap();
+    let relative_manifest = dir.path().file_name().unwrap().to_owned();
+    let relative_manifest = Path::new(&relative_manifest).join("jals.toml");
+    let captured_args = dir.path().join("relative-javac.args");
+    let captured_env = dir.path().join("relative-javac.env");
+    let captured_cwd = dir.path().join("relative-javac.cwd");
+
+    let output = jals()
+        .current_dir(parent)
+        .env("JAVAC", fake_javac(dir.path()))
+        .env("JALS_CAPTURE_ARGS", &captured_args)
+        .env("JALS_CAPTURE_ENV", &captured_env)
+        .env("JALS_CAPTURE_CWD", &captured_cwd)
+        .args(["build", "--manifest-path"])
+        .arg(relative_manifest)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args = read_arg_lines(&captured_args);
+    let output_index = args.iter().position(|arg| arg == "-d").unwrap() + 1;
+    assert_eq!(
+        args[output_index],
+        dir.path().join("target/classes").to_string_lossy()
+    );
+    assert!(
+        args.iter().any(|arg| {
+            Path::new(arg) == dir.path().join("src/main/java/com/example/Main.java")
+        })
+    );
+    assert_eq!(
+        std::fs::canonicalize(std::fs::read_to_string(captured_cwd).unwrap().trim()).unwrap(),
+        std::fs::canonicalize(dir.path()).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn build_script_skips_non_unicode_environment_entries() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let dir = project(
+        "[package]\nname = \"unicode-environment\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            if build.env("JALS_UNICODE_ENV") != "visible" {
+                build.error("Unicode environment entry was not supplied");
+            }
+        "#,
+    )
+    .unwrap();
+
+    let output = jals()
+        .env("JALS_UNICODE_ENV", "visible")
+        .env(
+            OsString::from_vec(b"JALS_NON_UNICODE_\xff".to_vec()),
+            "ignored",
+        )
+        .env(
+            "JALS_NON_UNICODE_VALUE",
+            OsString::from_vec(vec![b'v', 0xff]),
+        )
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_applies_script_jvm_args_environment_and_ordered_classpath() {
+    let dir = project(
+        "[package]\nname = \"script-run\"\n\
+         [build]\n\
+         script = { type = \"rhai\", file = \"build.rhai\" }\n\
+         classpath = [\"libs/base.jar\"]\n\
+         [run]\nmain-class = \"com.example.Main\"\n\
+         [dependencies]\n\
+         alpha = { jar = \"libs/alpha.jar\" }\n\
+         beta = { jar = \"libs/beta.jar\" }\n",
+    );
+    let libs = dir.path().join("libs");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::write(libs.join("base.jar"), b"manifest").unwrap();
+    std::fs::write(libs.join("runtime.jar"), b"script").unwrap();
+    std::fs::write(libs.join("alpha.jar"), b"alpha dependency").unwrap();
+    std::fs::write(libs.join("beta.jar"), b"beta dependency").unwrap();
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            build.add_classpath("libs/base.jar");
+            build.add_classpath("libs/runtime.jar");
+            build.add_jvm_arg("-Dfrom.script=true");
+            build.set_compile_env("JALS_SCRIPT_ENV", "compile");
+            build.set_run_env("JALS_RUN_ENV", "from-rhai");
+        "#,
+    )
+    .unwrap();
+
+    let manifest = dir.path().join("jals.toml");
+    let javac_args = dir.path().join("run-javac.args");
+    let javac_env = dir.path().join("run-javac.env");
+    let javac_cwd = dir.path().join("run-javac.cwd");
+    let java_args = dir.path().join("java.args");
+    let java_env = dir.path().join("java.env");
+    let java_cwd = dir.path().join("java.cwd");
+    let output = jals()
+        .env("JAVAC", fake_javac(dir.path()))
+        .env("JAVA", fake_java(dir.path()))
+        .env("JALS_CAPTURE_ARGS", &javac_args)
+        .env("JALS_CAPTURE_ENV", &javac_env)
+        .env("JALS_CAPTURE_CWD", &javac_cwd)
+        .env("JALS_CAPTURE_JAVA_ARGS", &java_args)
+        .env("JALS_CAPTURE_RUN_ENV", &java_env)
+        .env("JALS_CAPTURE_JAVA_CWD", &java_cwd)
+        .args(["run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args = read_arg_lines(&java_args);
+    let classpath_flag = args.iter().position(|arg| arg == "-cp").unwrap();
+    assert_eq!(args[classpath_flag - 1], "-Dfrom.script=true");
+    assert_eq!(args[classpath_flag + 2], "com.example.Main");
+
+    let classpath: Vec<_> = args[classpath_flag + 1].split(':').collect();
+    assert_eq!(classpath.len(), 5, "classpath: {classpath:?}");
+    assert_eq!(Path::new(classpath[0]), dir.path().join("target/classes"));
+    assert_eq!(Path::new(classpath[1]), libs.join("base.jar"));
+    assert_eq!(Path::new(classpath[2]), libs.join("runtime.jar"));
+    assert_eq!(std::fs::read(classpath[3]).unwrap(), b"alpha dependency");
+    assert_eq!(std::fs::read(classpath[4]).unwrap(), b"beta dependency");
+    assert_eq!(std::fs::read_to_string(java_env).unwrap(), "from-rhai");
+    assert_eq!(
+        std::fs::canonicalize(std::fs::read_to_string(java_cwd).unwrap().trim()).unwrap(),
+        std::fs::canonicalize(dir.path()).unwrap()
     );
 }
 

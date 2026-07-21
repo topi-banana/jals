@@ -8,29 +8,40 @@
 //! strictly in arrival order. FIFO processing is what makes a `didChange` visible to every query
 //! enqueued after it; no locks, no shared state.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use async_lsp::lsp_types::{
-    CompletionItem, CompletionResponse, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentHighlight,
-    DocumentSymbolResponse, FoldingRange, GotoDefinitionResponse, Hover, Location, Position,
+    CompletionItem, CompletionResponse, Diagnostic, DiagnosticSeverity,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentHighlight, DocumentSymbolResponse, FileChangeType,
+    FoldingRange, GotoDefinitionResponse, Hover, Location, NumberOrString, Position,
     PrepareRenameResponse, PublishDiagnosticsParams, Range, SelectionRange, SemanticToken,
     SemanticTokens, SemanticTokensDelta, SemanticTokensFullDeltaResult, SemanticTokensResult,
     SignatureHelp, TextEdit, Url, WorkspaceEdit, notification,
 };
 use async_lsp::{ClientSocket, ErrorCode, ResponseError};
 use futures::FutureExt;
-use jals_build::ManifestExt;
-use jals_config::{FeatureSet, Manifest};
+use jals_build::{
+    ManifestExt,
+    build_script::{
+        BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
+        BuildScriptOutput, BuildScriptPosition, BuildScriptSession,
+    },
+};
+use jals_config::{BuildScript, Dependency, FeatureSet, Manifest};
 use jals_editor::{
-    EditorHost, FoldingHost, Folds, Ident, Outline, SelectionChains, SelectionHost,
+    EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
     SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
 };
 use jals_exec::Exec;
-use jals_storage::{DirKey, FileKey, NativeStorage};
+use jals_project::{
+    BuildTaskExecutor, BuildTaskHost, GraphError, GraphWarning, NativeProjectAssembly,
+    NativeProjectGraph, RootBuildScriptError, RootBuildScriptOptions,
+};
+use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::formatting::Formatting;
@@ -129,7 +140,8 @@ pub(crate) enum Cmd {
     /// bare workspace. Re-enters through the same queue so it serializes with everything else.
     WorkspaceReady {
         root: PathBuf,
-        assembled: Result<Box<AssembledWorkspace>, String>,
+        generation: u64,
+        assembled: Result<Box<AssembledWorkspace>, Box<WorkspaceAssemblyFailure>>,
     },
 }
 
@@ -138,39 +150,248 @@ pub(crate) enum Cmd {
 pub(crate) struct AssembledWorkspace {
     storage: NativeStorage,
     source_roots: Vec<DirKey>,
+    project_sources: Vec<FileKey>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
     feature_set: FeatureSet,
     library_sources: Vec<FileKey>,
     source_dep_sources: Vec<FileKey>,
     materialized: BTreeMap<FileKey, PathBuf>,
+    watch_policy: ProjectWatchPolicy,
+    build_script_diagnostics: BuildScriptDiagnosticUpdate,
+    project_diagnostics: Vec<Diagnostic>,
+}
+
+/// A hard graph or host failure. A graph-free root fallback is available when the root manifest
+/// and storage were valid; it is installed only for an initial load, never over a last-good
+/// workspace.
+pub(crate) struct WorkspaceAssemblyFailure {
+    message: String,
+    fallback: Option<Box<AssembledWorkspace>>,
+    project_diagnostics: Vec<Diagnostic>,
+}
+
+impl std::fmt::Debug for WorkspaceAssemblyFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkspaceAssemblyFailure")
+            .field("message", &self.message)
+            .field("has_fallback", &self.fallback.is_some())
+            .field("project_diagnostics", &self.project_diagnostics)
+            .finish()
+    }
+}
+
+/// Files that invalidate one successfully assembled build script. An empty rerun set means the
+/// script did not narrow its inputs, so any non-output project file remains conservative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildWatchPolicy {
+    script: FileKey,
+    rerun_files: BTreeSet<FileKey>,
+}
+
+/// Deterministic classification of host changes for one assembled project. Source roots and exact
+/// project files can be refreshed in place; classpath/dependency/external inputs require lowering
+/// and assembly again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectWatchPolicy {
+    source_roots: Vec<DirKey>,
+    project_sources: BTreeSet<FileKey>,
+    reassemble_inputs: Vec<PathBuf>,
+    build_script: Option<BuildWatchPolicy>,
+}
+
+impl ProjectWatchPolicy {
+    const fn script(&self) -> Option<&FileKey> {
+        match &self.build_script {
+            Some(policy) => Some(&policy.script),
+            None => None,
+        }
+    }
+}
+
+/// Diagnostics produced by the configured script during one assembly. `script = None` is also a
+/// meaningful update: it clears diagnostics for a script removed from the manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildScriptDiagnosticUpdate {
+    script: Option<FileKey>,
+    script_text: Option<String>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl BuildScriptDiagnosticUpdate {
+    const fn new(script: Option<FileKey>) -> Self {
+        Self {
+            script,
+            script_text: None,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn push_reported(&mut self, diagnostic: &BuildScriptDiagnostic) {
+        let severity = match diagnostic {
+            BuildScriptDiagnostic::Warning(_) => DiagnosticSeverity::WARNING,
+            BuildScriptDiagnostic::Error(_) => DiagnosticSeverity::ERROR,
+        };
+        let diagnostic = self.diagnostic(severity, diagnostic.message().to_owned(), None);
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn push_failure(&mut self, message: String, position: Option<BuildScriptPosition>) {
+        let diagnostic = self.diagnostic(DiagnosticSeverity::ERROR, message, position);
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn diagnostic(
+        &self,
+        severity: DiagnosticSeverity,
+        message: String,
+        position: Option<BuildScriptPosition>,
+    ) -> Diagnostic {
+        let range = position
+            .and_then(|position| {
+                self.script_text
+                    .as_deref()
+                    .and_then(|source| Self::rhai_position_range(source, position))
+            })
+            .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 1)));
+        Diagnostic {
+            range,
+            severity: Some(severity),
+            source: Some("jals-build".to_owned()),
+            message,
+            ..Diagnostic::default()
+        }
+    }
+
+    fn rhai_position_range(source: &str, position: BuildScriptPosition) -> Option<Range> {
+        let line_index = position
+            .line()
+            .checked_sub(1)
+            .and_then(|line| usize::try_from(line).ok())?;
+        let character_index = position
+            .column()
+            .checked_sub(1)
+            .and_then(|column| usize::try_from(column).ok())?;
+        let mut line_start = 0;
+        let mut selected = None;
+        for (index, line_text) in source.split_inclusive('\n').enumerate() {
+            if index == line_index {
+                selected = Some(line_text.strip_suffix('\n').unwrap_or(line_text));
+                break;
+            }
+            line_start += line_text.len();
+        }
+        let line_text = selected?;
+        let relative = line_text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .nth(character_index)
+            .or_else(|| {
+                (character_index == line_text.chars().count()).then_some(line_text.len())
+            })?;
+        let start = line_start + relative;
+        let end = if start < line_start + line_text.len() {
+            start + source[start..].chars().next().map_or(0, char::len_utf8)
+        } else {
+            start
+        };
+        let index = LineIndex::new(source);
+        let start = index.position(source, start);
+        let end = index.position(source, end);
+        Some(Range::new(
+            Position::new(start.line, start.character),
+            Position::new(end.line, end.character),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchedProjectAction {
+    Ignore,
+    Refresh,
+    Reassemble,
 }
 
 /// One `jals.toml` project's slot: dependency assembly still in flight (queries on its files fall
 /// back to the one-file path, exactly like a manifest-less file), or the loaded workspace.
 enum WorkspaceSlot {
-    Loading { root: PathBuf },
-    Ready(Box<ProjectWorkspace>),
+    Loading {
+        root: PathBuf,
+        assembly: WorkspaceAssembly,
+    },
+    Ready {
+        workspace: Box<ProjectWorkspace>,
+        assembly: Option<WorkspaceAssembly>,
+        watch_policy: Option<ProjectWatchPolicy>,
+    },
+}
+
+/// One project assembly currently running off the actor queue. A second watched change marks it
+/// dirty instead of starting overlapping work; completion then schedules one fresh replacement.
+#[derive(Clone, Copy)]
+struct WorkspaceAssembly {
+    generation: u64,
+    rerun_requested: bool,
 }
 
 impl WorkspaceSlot {
     fn project_root(&self) -> &Path {
         match self {
-            Self::Loading { root } => root,
-            Self::Ready(workspace) => workspace.project_root(),
+            Self::Loading { root, .. } => root,
+            Self::Ready { workspace, .. } => workspace.project_root(),
         }
     }
 
     fn ready(&self) -> Option<&ProjectWorkspace> {
         match self {
             Self::Loading { .. } => None,
-            Self::Ready(workspace) => Some(workspace),
+            Self::Ready { workspace, .. } => Some(workspace),
         }
     }
 
     fn ready_mut(&mut self) -> Option<&mut ProjectWorkspace> {
         match self {
             Self::Loading { .. } => None,
-            Self::Ready(workspace) => Some(workspace),
+            Self::Ready { workspace, .. } => Some(workspace),
+        }
+    }
+
+    /// Mark an active assembly dirty. Returns whether an assembly is already active.
+    const fn request_rerun(&mut self) -> bool {
+        let assembly = match self {
+            Self::Loading { assembly, .. } => Some(assembly),
+            Self::Ready { assembly, .. } => assembly.as_mut(),
+        };
+        if let Some(assembly) = assembly {
+            assembly.rerun_requested = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    const fn assembly(&self) -> Option<WorkspaceAssembly> {
+        match self {
+            Self::Loading { assembly, .. } => Some(*assembly),
+            Self::Ready { assembly, .. } => *assembly,
+        }
+    }
+
+    const fn replace_assembly(&mut self, assembly: WorkspaceAssembly) {
+        match self {
+            Self::Loading {
+                assembly: current, ..
+            } => *current = assembly,
+            Self::Ready {
+                assembly: current, ..
+            } => *current = Some(assembly),
+        }
+    }
+
+    const fn watch_policy(&self) -> Option<&ProjectWatchPolicy> {
+        match self {
+            Self::Loading { .. } => None,
+            Self::Ready { watch_policy, .. } => watch_policy.as_ref(),
         }
     }
 }
@@ -202,6 +423,9 @@ pub(crate) struct Actor {
     semantic_tokens_cache: HashMap<Url, (String, Vec<SemanticToken>)>,
     /// Monotonic counter minting a fresh `result_id` for each semantic-tokens response.
     semantic_tokens_result_id: u64,
+    /// Monotonic identity for workspace assembly tasks. Completions only apply to the generation
+    /// currently recorded by their project slot.
+    workspace_assembly_generation: u64,
 }
 
 impl Actor {
@@ -250,6 +474,7 @@ impl Actor {
             workspaces: Vec::new(),
             semantic_tokens_cache: HashMap::new(),
             semantic_tokens_result_id: 0,
+            workspace_assembly_generation: 0,
         }
     }
 
@@ -320,10 +545,14 @@ impl Actor {
             }
             Cmd::DidClose(params) => Self::guard(async { self.did_close(params) }).await,
             Cmd::DidChangeWatchedFiles(params) => {
-                Self::guard(self.watched_files_changed(params)).await;
+                Self::guard(self.watched_files_changed(&params)).await;
             }
-            Cmd::WorkspaceReady { root, assembled } => {
-                Self::guard(self.workspace_ready(root, assembled)).await;
+            Cmd::WorkspaceReady {
+                root,
+                generation,
+                assembled,
+            } => {
+                Self::guard(self.workspace_ready(root, generation, assembled)).await;
             }
             Cmd::DocumentSymbol { uri, reply } => {
                 Self::respond(reply, async { Ok(self.document_symbol(&uri)) }).await;
@@ -427,26 +656,68 @@ impl Actor {
     /// Reflect the (possibly coalesced) new text into the owning workspace's index and republish
     /// diagnostics.
     async fn refresh_and_publish(&mut self, uri: &Url) {
+        if self.is_assembly_diagnostic_uri(uri) {
+            return;
+        }
         self.refresh_workspace_overlay(uri).await;
         self.publish_diagnostics(uri).await;
     }
 
     fn did_close(&mut self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
+        let assembly_diagnostics_are_authoritative = self.is_assembly_diagnostic_uri(&uri);
         self.store.remove(&uri);
         // Drop the cached semantic-tokens baseline; a reopened document starts a fresh result id.
         self.semantic_tokens_cache.remove(&uri);
         // Clear stale diagnostics for the now-closed document.
-        let _ = self
-            .client
-            .notify::<notification::PublishDiagnostics>(PublishDiagnosticsParams {
-                uri,
-                diagnostics: Vec::new(),
-                version: None,
-            });
+        if !assembly_diagnostics_are_authoritative {
+            let _ =
+                self.client
+                    .notify::<notification::PublishDiagnostics>(PublishDiagnosticsParams {
+                        uri,
+                        diagnostics: Vec::new(),
+                        version: None,
+                    });
+        }
     }
 
-    async fn watched_files_changed(&mut self, params: DidChangeWatchedFilesParams) {
+    fn is_assembly_diagnostic_uri(&self, uri: &Url) -> bool {
+        self.is_script_diagnostic_uri(uri) || self.is_project_diagnostic_uri(uri)
+    }
+
+    /// Rhai files are never Java diagnostic inputs. The exact configured script is also protected
+    /// when it uses another extension, so assembly diagnostics remain authoritative while open.
+    fn is_script_diagnostic_uri(&self, uri: &Url) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("rhai"))
+        {
+            return true;
+        }
+        self.workspaces.iter().any(|slot| {
+            slot.watch_policy()
+                .and_then(ProjectWatchPolicy::script)
+                .is_some_and(|script| script.path().to_host_path(slot.project_root()) == path)
+        })
+    }
+
+    /// Project-graph diagnostics are published against the root manifest because graph node
+    /// metadata intentionally exposes no host path. Keep an open manifest's one-file Java
+    /// fallback from replacing that authoritative diagnostic set.
+    fn is_project_diagnostic_uri(&self, uri: &Url) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        self.workspaces
+            .iter()
+            .any(|slot| path == slot.project_root().join("jals.toml"))
+    }
+
+    async fn watched_files_changed(&mut self, params: &DidChangeWatchedFilesParams) {
         // A created/changed/deleted config file can affect discovery for any directory at or
         // below it (including shadowing); drop the whole memo for the affected tool and
         // rediscover lazily on the next request that needs it.
@@ -464,24 +735,137 @@ impl Actor {
         {
             self.lint_discovery.clear();
         }
-        // Only the workspaces that can see a changed file re-snapshot; an edit in one project
-        // must not reload every other open project. A still-loading slot snapshots after the
-        // change anyway.
         let changed: Vec<_> = params
             .changes
             .iter()
-            .filter_map(|event| event.uri.to_file_path().ok())
+            .filter_map(|event| event.uri.to_file_path().ok().map(|path| (path, event.typ)))
             .collect();
-        for workspace in self
+        let actions: Vec<_> = self
             .workspaces
-            .iter_mut()
-            .filter_map(WorkspaceSlot::ready_mut)
-        {
-            if changed
+            .iter()
+            .filter_map(|slot| {
+                let root = slot.project_root();
+                let action = Self::watched_project_action(root, slot.watch_policy(), &changed);
+                let action = if slot.assembly().is_some() && action == WatchedProjectAction::Refresh
+                {
+                    // A replacement may have changed its declared inputs since the old policy.
+                    WatchedProjectAction::Reassemble
+                } else {
+                    action
+                };
+                (action != WatchedProjectAction::Ignore).then(|| (root.to_path_buf(), action))
+            })
+            .collect();
+        for (root, action) in actions {
+            match action {
+                WatchedProjectAction::Ignore => {}
+                WatchedProjectAction::Refresh => self.refresh_workspace_from_disk(&root).await,
+                WatchedProjectAction::Reassemble => self.request_workspace_reassembly(&root),
+            }
+        }
+    }
+
+    /// Classify a watched-file batch for one loaded project. Generated writes and cache feedback
+    /// are ignored, but deleting generated output rebuilds the workspace so stale symbols cannot
+    /// survive. Every other project change is at least a lightweight refresh.
+    fn watched_project_action(
+        root: &Path,
+        policy: Option<&ProjectWatchPolicy>,
+        changed: &[(PathBuf, FileChangeType)],
+    ) -> WatchedProjectAction {
+        let build_root = root.join("target/jals/build");
+        let cache_root = root.join("target/jals/cache");
+        let manifest = root.join("jals.toml");
+        // `NativeStorage` never snapshots `.git`, so a change there cannot affect analysis. The
+        // client watches `**/*` and VS Code's default excludes stop at `.git/objects`, so without
+        // this every `git status` / `git commit` writes `.git/index` and would trigger a full
+        // reassembly — re-running the build script for a change the workspace cannot even see.
+        let git_root = root.join(".git");
+        let mut saw_refreshable_source = false;
+        for (path, change_type) in changed {
+            if path.starts_with(&git_root) {
+                continue;
+            }
+            if path.starts_with(&build_root) {
+                if *change_type == FileChangeType::DELETED {
+                    return WatchedProjectAction::Reassemble;
+                }
+                continue;
+            }
+            if path.starts_with(&cache_root) {
+                continue;
+            }
+            if *path == manifest {
+                return WatchedProjectAction::Reassemble;
+            }
+
+            let Some(policy) = policy else {
+                if path.starts_with(root) {
+                    return WatchedProjectAction::Reassemble;
+                }
+                continue;
+            };
+            if policy
+                .reassemble_inputs
                 .iter()
-                .any(|path| path.starts_with(workspace.project_root()))
+                .any(|input| path.starts_with(input))
             {
-                workspace.refresh().await;
+                return WatchedProjectAction::Reassemble;
+            }
+            if !path.starts_with(root) {
+                continue;
+            }
+            let key =
+                RelativePath::from_host_path(root, path).and_then(|path| FileKey::new(path).ok());
+            if let Some(build) = &policy.build_script
+                && (*path == build.script.path().to_host_path(root)
+                    || build.rerun_files.is_empty()
+                    || key
+                        .as_ref()
+                        .is_some_and(|key| build.rerun_files.contains(key)))
+            {
+                return WatchedProjectAction::Reassemble;
+            }
+            let refreshable = key.as_ref().is_some_and(|key| {
+                policy.project_sources.contains(key)
+                    || (key.has_extension("java")
+                        && policy
+                            .source_roots
+                            .iter()
+                            .any(|source| key.path().starts_with(source.path())))
+            });
+            if refreshable {
+                saw_refreshable_source = true;
+            } else {
+                // Classpath, source dependencies, and unknown/non-Java inputs require re-lowering.
+                return WatchedProjectAction::Reassemble;
+            }
+        }
+        if saw_refreshable_source {
+            WatchedProjectAction::Refresh
+        } else {
+            WatchedProjectAction::Ignore
+        }
+    }
+
+    async fn refresh_workspace_from_disk(&mut self, root: &Path) {
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|slot| slot.project_root() == root)
+        else {
+            return;
+        };
+        let WorkspaceSlot::Ready { workspace, .. } = &mut self.workspaces[index] else {
+            self.request_workspace_reassembly(root);
+            return;
+        };
+        workspace.refresh().await;
+
+        let open: Vec<Url> = self.store.uris().cloned().collect();
+        for uri in open {
+            if uri.to_file_path().is_ok_and(|path| path.starts_with(root)) {
+                self.refresh_and_publish(&uri).await;
             }
         }
     }
@@ -496,8 +880,8 @@ impl Actor {
     /// slot is inserted immediately and the dependency assembly — storage snapshot, classpath
     /// resolution over HTTP, navigation-source staging — runs on a spawned task that reports back
     /// through [`Cmd::WorkspaceReady`]; until then, queries on the project's files fall back to
-    /// the one-file path (same as manifest-less files). An unparsable manifest skips assembly and
-    /// indexes the project root as a lone source root, no classpath.
+    /// the one-file path (same as manifest-less files). Every assembly reparses the manifest; an
+    /// unparsable manifest indexes the project root as a lone source root, no classpath.
     async fn ensure_workspace_for(&mut self, uri: &Url) {
         let Some(dir) = uri
             .to_file_path()
@@ -520,79 +904,295 @@ impl Actor {
         {
             return;
         }
-        let Ok(manifest) = Manifest::from_file(&manifest_path).await else {
-            let workspace = ProjectWorkspace::bare(&root, self.exec.clone()).await;
-            self.workspaces
-                .push(WorkspaceSlot::Ready(Box::new(workspace)));
-            return;
-        };
-        self.workspaces
-            .push(WorkspaceSlot::Loading { root: root.clone() });
-        // The assembly borrows nothing from the actor: it owns the manifest, the root, an `Exec`
-        // handle, and a sender clone, so the actor stays free to serve every other command while
-        // dependencies resolve. Dropping the task handle detaches it; it always runs to
-        // completion and reports back through the queue.
+        let generation = self.next_workspace_assembly_generation();
+        self.workspaces.push(WorkspaceSlot::Loading {
+            root: root.clone(),
+            assembly: WorkspaceAssembly {
+                generation,
+                rerun_requested: false,
+            },
+        });
+        self.spawn_workspace_assembly(root, generation);
+    }
+
+    const fn next_workspace_assembly_generation(&mut self) -> u64 {
+        self.workspace_assembly_generation += 1;
+        self.workspace_assembly_generation
+    }
+
+    /// Start one detached assembly. Manifest parsing deliberately happens inside every run so a
+    /// watched jals.toml edit cannot reuse stale configuration.
+    fn spawn_workspace_assembly(&self, root: PathBuf, generation: u64) {
         let exec = self.exec.clone();
         let commands = self.commands.clone();
+        let blocked_files: Vec<_> = self
+            .store
+            .uris()
+            .filter_map(|uri| uri.to_file_path().ok())
+            .filter_map(|path| RelativePath::from_host_path(&root, &path))
+            .filter_map(|path| FileKey::new(path).ok())
+            .collect();
         drop(self.exec.spawn(async move {
-            let assembled = AssembledWorkspace::assemble(&manifest, &root, exec).await;
+            let manifest_path = root.join("jals.toml");
+            let assembled = match Manifest::from_file(&manifest_path).await {
+                Ok(manifest) => {
+                    // Every other command path is wrapped in `catch_unwind`; this one is spawned
+                    // and detached, so a panic here would simply never send `WorkspaceReady`. The
+                    // slot then stays `Loading` (all queries silently degrade to single-file for
+                    // the rest of the session) or keeps a stale assembly whose rerun flag is never
+                    // cleared (no watcher event can ever reassemble it again). Turn a panic into
+                    // an ordinary failure so the slot always reaches a terminal state.
+                    let assemble =
+                        core::panic::AssertUnwindSafe(AssembledWorkspace::assemble_with_blocked(
+                            &manifest,
+                            &root,
+                            exec,
+                            &blocked_files,
+                        ));
+                    futures::FutureExt::catch_unwind(assemble)
+                        .await
+                        .unwrap_or_else(|_| {
+                            let message =
+                                format!("assembling project {} panicked", manifest_path.display());
+                            Err(WorkspaceAssemblyFailure {
+                                project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
+                                    DiagnosticSeverity::ERROR,
+                                    "project-assembly",
+                                    message.clone(),
+                                )],
+                                message,
+                                fallback: None,
+                            })
+                        })
+                }
+                Err(error) => {
+                    let message = format!(
+                        "reading project manifest {} failed: {error}",
+                        manifest_path.display()
+                    );
+                    Err(WorkspaceAssemblyFailure {
+                        project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
+                            DiagnosticSeverity::ERROR,
+                            "project-manifest",
+                            message.clone(),
+                        )],
+                        message,
+                        fallback: None,
+                    })
+                }
+            };
             let _ = commands.send(Cmd::WorkspaceReady {
                 root,
-                assembled: assembled.map(Box::new),
+                generation,
+                assembled: assembled.map(Box::new).map_err(Box::new),
             });
         }));
     }
 
-    /// Finish a spawned assembly: build the workspace (falling back to a bare one when assembly
-    /// failed), replace the project's `Loading` slot, then replay the open documents under that
-    /// root into the fresh index and republish their diagnostics — they were answered by the
-    /// one-file fallback until now.
+    /// Queue a replacement assembly for one project. Repeated changes while one run is active are
+    /// collapsed into a single follow-up run, so script executions never overlap for a project.
+    fn request_workspace_reassembly(&mut self, root: &Path) {
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|slot| slot.project_root() == root)
+        else {
+            return;
+        };
+        if self.workspaces[index].request_rerun() {
+            return;
+        }
+        let generation = self.next_workspace_assembly_generation();
+        self.workspaces[index].replace_assembly(WorkspaceAssembly {
+            generation,
+            rerun_requested: false,
+        });
+        self.spawn_workspace_assembly(root.to_path_buf(), generation);
+    }
+
+    /// Finish a spawned assembly: reject stale results, schedule a requested follow-up, or build
+    /// and install the workspace (falling back to a bare one when assembly failed). Open documents
+    /// under the root are then replayed into the fresh index and their diagnostics republished.
     async fn workspace_ready(
         &mut self,
         root: PathBuf,
-        assembled: Result<Box<AssembledWorkspace>, String>,
+        generation: u64,
+        assembled: Result<Box<AssembledWorkspace>, Box<WorkspaceAssemblyFailure>>,
     ) {
-        let workspace = match assembled {
-            Ok(parts) => {
-                let parts = *parts;
-                ProjectWorkspace::load_storage(
-                    root.clone(),
-                    parts.storage,
-                    parts.source_roots,
-                    &parts.classpath_classes,
-                    parts.library_sources,
-                    parts.source_dep_sources,
-                    parts.materialized,
-                    parts.feature_set,
-                )
-                .await
-            }
-            Err(error) => {
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|slot| slot.project_root() == root)
+        else {
+            return;
+        };
+        let Some(active) = self.workspaces[index].assembly() else {
+            return;
+        };
+        if active.generation != generation {
+            return;
+        }
+        if active.rerun_requested {
+            let generation = self.next_workspace_assembly_generation();
+            self.workspaces[index].replace_assembly(WorkspaceAssembly {
+                generation,
+                rerun_requested: false,
+            });
+            self.spawn_workspace_assembly(root, generation);
+            return;
+        }
+
+        let previous_script = self.workspaces[index]
+            .watch_policy()
+            .and_then(ProjectWatchPolicy::script)
+            .cloned();
+        let (parts, publish_project_diagnostics) = match assembled {
+            Ok(parts) => (parts, true),
+            Err(mut failure) => {
                 eprintln!(
-                    "jals-lsp: assembling project inputs for {} failed: {error}",
-                    root.display()
+                    "jals-lsp: assembling project inputs for {} failed: {}",
+                    root.display(),
+                    failure.message
                 );
-                ProjectWorkspace::bare(&root, self.exec.clone()).await
+                let mut diagnostics = failure.project_diagnostics.clone();
+                if let Some(fallback) = &failure.fallback {
+                    diagnostics.extend(fallback.project_diagnostics.clone());
+                }
+                if let Some(params) = Self::project_diagnostic_publication(&root, diagnostics) {
+                    let _ = self
+                        .client
+                        .notify::<notification::PublishDiagnostics>(params);
+                }
+                if let WorkspaceSlot::Ready { assembly, .. } = &mut self.workspaces[index] {
+                    *assembly = None;
+                    return;
+                }
+
+                let Some(parts) = failure.fallback.take() else {
+                    let cleared = BuildScriptDiagnosticUpdate::new(None);
+                    for params in Self::build_script_diagnostic_publications(
+                        &root,
+                        previous_script.as_ref(),
+                        &cleared,
+                    ) {
+                        let _ = self
+                            .client
+                            .notify::<notification::PublishDiagnostics>(params);
+                    }
+                    let workspace = ProjectWorkspace::bare(&root, self.exec.clone()).await;
+                    return self.install_workspace(index, root, workspace, None).await;
+                };
+                (parts, false)
             }
         };
-        let slot = WorkspaceSlot::Ready(Box::new(workspace));
-        match self
-            .workspaces
-            .iter_mut()
-            .find(|slot| slot.project_root() == root)
-        {
-            Some(existing) => *existing = slot,
-            None => self.workspaces.push(slot),
+        let AssembledWorkspace {
+            storage,
+            source_roots,
+            project_sources,
+            classpath_classes,
+            feature_set,
+            library_sources,
+            source_dep_sources,
+            materialized,
+            watch_policy,
+            build_script_diagnostics,
+            project_diagnostics,
+        } = *parts;
+        for params in Self::build_script_diagnostic_publications(
+            &root,
+            previous_script.as_ref(),
+            &build_script_diagnostics,
+        ) {
+            let _ = self
+                .client
+                .notify::<notification::PublishDiagnostics>(params);
         }
+        if publish_project_diagnostics
+            && let Some(params) = Self::project_diagnostic_publication(&root, project_diagnostics)
+        {
+            let _ = self
+                .client
+                .notify::<notification::PublishDiagnostics>(params);
+        }
+        let workspace = ProjectWorkspace::load_storage(
+            root.clone(),
+            storage,
+            source_roots,
+            project_sources,
+            &classpath_classes,
+            library_sources,
+            source_dep_sources,
+            materialized,
+            feature_set,
+        )
+        .await;
+        self.install_workspace(index, root, workspace, Some(watch_policy))
+            .await;
+    }
+
+    async fn install_workspace(
+        &mut self,
+        index: usize,
+        root: PathBuf,
+        workspace: ProjectWorkspace,
+        watch_policy: Option<ProjectWatchPolicy>,
+    ) {
+        self.workspaces[index] = WorkspaceSlot::Ready {
+            workspace: Box::new(workspace),
+            assembly: None,
+            watch_policy,
+        };
         let open: Vec<Url> = self.store.uris().cloned().collect();
         for uri in open {
-            let owned_here = self
-                .workspace_for(&uri)
-                .is_some_and(|workspace| workspace.project_root() == root);
-            if owned_here {
+            if uri.to_file_path().is_ok_and(|path| path.starts_with(&root)) {
                 self.refresh_and_publish(&uri).await;
             }
         }
+    }
+
+    /// Shape the replace/clear notifications for one installed assembly. The previous script is
+    /// cleared when its path changes or the manifest removes it; the current script is always
+    /// published, including an empty vector that clears warnings/errors after a clean rerun.
+    fn build_script_diagnostic_publications(
+        root: &Path,
+        previous_script: Option<&FileKey>,
+        update: &BuildScriptDiagnosticUpdate,
+    ) -> Vec<PublishDiagnosticsParams> {
+        let mut publications = Vec::new();
+        if previous_script != update.script.as_ref()
+            && let Some(previous) = previous_script
+            && let Some(clear) =
+                Self::diagnostic_publication(previous.path().to_host_path(root), Vec::new())
+        {
+            publications.push(clear);
+        }
+        if let Some(script) = &update.script
+            && let Some(current) = Self::diagnostic_publication(
+                script.path().to_host_path(root),
+                update.diagnostics.clone(),
+            )
+        {
+            publications.push(current);
+        }
+        publications
+    }
+
+    fn project_diagnostic_publication(
+        root: &Path,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Option<PublishDiagnosticsParams> {
+        Self::diagnostic_publication(root.join("jals.toml"), diagnostics)
+    }
+
+    fn diagnostic_publication(
+        path: PathBuf,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Option<PublishDiagnosticsParams> {
+        Some(PublishDiagnosticsParams {
+            uri: Url::from_file_path(path).ok()?,
+            diagnostics,
+            version: None,
+        })
     }
 
     /// The loaded workspace that owns `uri`, if any. A still-loading slot never matches: its
@@ -1055,21 +1655,319 @@ impl Actor {
 
 impl AssembledWorkspace {
     /// Assemble one project's full analysis + navigation inputs against a fresh aggregate:
-    /// snapshot the manifest's scopes, resolve the classpath (async HTTP through the native
-    /// fetch adapter), and stage/materialize the navigation sources. Runs on a spawned task, off
-    /// the actor's queue; stderr is safe to log on (the LSP protocol owns stdout, not stderr).
-    async fn assemble(manifest: &Manifest, root: &Path, exec: Exec) -> Result<Self, String> {
-        let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
-        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec)
+    /// run its optional build script, snapshot the effective manifest's scopes, resolve the
+    /// classpath (async HTTP through the native fetch adapter), and stage/materialize navigation
+    /// sources. Runs on a spawned task, off the actor's queue; stderr is safe to log on (the LSP
+    /// protocol owns stdout, not stderr).
+    #[cfg(test)]
+    async fn assemble(
+        manifest: &Manifest,
+        root: &Path,
+        exec: Exec,
+    ) -> Result<Self, WorkspaceAssemblyFailure> {
+        Self::assemble_with_blocked(manifest, root, exec, &[]).await
+    }
+
+    async fn assemble_with_blocked(
+        manifest: &Manifest,
+        root: &Path,
+        exec: Exec,
+        blocked_files: &[FileKey],
+    ) -> Result<Self, WorkspaceAssemblyFailure> {
+        // Scripts receive a complete project snapshot because project.read/project.walk_files can
+        // address any project-relative input. Script and generated-output I/O stays entirely in
+        // jals-storage; successful output is already in this aggregate's new revision.
+        let configured_script = manifest
+            .build
+            .script
+            .as_ref()
+            .and_then(|script| match script {
+                BuildScript::Rhai { file } => FileKey::parse(file).ok(),
+            });
+        let has_build_script = configured_script.is_some();
+        let scopes = if has_build_script {
+            vec![NativeScope::all(RelativePath::ROOT)]
+        } else {
+            let mut scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
+            scopes.push(NativeScope::all(
+                RelativePath::parse("target/jals/build/tasks/ownership-v1.json")
+                    .expect("ownership path is portable"),
+            ));
+            scopes
+        };
+        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
             .await
-            .map_err(|error| error.to_string())?;
-        let (inputs, source_roots) = jals_classpath::NativeProjectPlan::assemble_native(
+            .map_err(|error| {
+                let message = format!("opening project storage failed: {error}");
+                WorkspaceAssemblyFailure {
+                    project_diagnostics: vec![Self::project_diagnostic(
+                        DiagnosticSeverity::ERROR,
+                        "project-storage",
+                        message.clone(),
+                    )],
+                    message,
+                    fallback: None,
+                }
+            })?;
+        let mut effective_manifest = manifest.clone();
+        let mut build_script_watch = configured_script.clone().map(|script| BuildWatchPolicy {
+            script,
+            rerun_files: BTreeSet::new(),
+        });
+        let mut project_sources = BTreeSet::new();
+        let mut build_script_diagnostics =
+            BuildScriptDiagnosticUpdate::new(configured_script.clone());
+        let environment = BuildScriptEnvironment::new().for_project(manifest);
+        let limits = BuildScriptLimits::default();
+        let mut task_classpath = Vec::new();
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
+        match BuildTaskExecutor::execute_root(
+            &exec,
+            &fetcher,
+            &mut storage,
+            &mut BuildScriptSession::new(),
+            RootBuildScriptOptions {
+                manifest,
+                environment: &environment,
+                limits: &limits,
+                // Analysis consumes what the user's own build already fetched and verified into
+                // the cache; it does not fetch. Opening a folder runs whatever `build.rhai` it
+                // contains, and nobody reviews a repository before opening it in an editor —
+                // reaching the network on that signal alone would let an unread script pull (and
+                // send) whatever it likes the moment a project is opened. `jals build` populates
+                // the cache, and the server picks it up from there.
+                network: jals_classpath::NetworkPolicy::Offline,
+                host: BuildTaskHost::Project,
+                blocked_files,
+
+                publications: jals_project::SourcePublication::Apply,
+            },
+        )
+        .await
+        {
+            Ok(root_output) => {
+                task_classpath = root_output.task_classpath;
+                if let Some(output) = root_output.script {
+                    for diagnostic in &output.diagnostics {
+                        Self::record_build_script_diagnostic(
+                            root,
+                            &mut build_script_diagnostics,
+                            diagnostic,
+                        );
+                    }
+                    build_script_watch
+                        .as_mut()
+                        .expect("a configured script has a watch policy")
+                        .rerun_files
+                        .clone_from(&output.rerun_files);
+                    project_sources.clone_from(&output.generated_sources);
+                    Self::augment_classpath(&mut effective_manifest, &output);
+                }
+            }
+            Err(RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(
+                diagnostics,
+            ))) => {
+                for diagnostic in &diagnostics {
+                    Self::record_build_script_diagnostic(
+                        root,
+                        &mut build_script_diagnostics,
+                        diagnostic,
+                    );
+                }
+            }
+            Err(RootBuildScriptError::BuildScript(error)) => {
+                let script = error.script_path().cloned();
+                let position = error.position();
+                let message = error.to_string();
+                eprintln!(
+                    "jals-lsp: build script for {} failed; continuing with ordinary project \
+                         analysis: {message}",
+                    root.display()
+                );
+                if let Some(script) = script {
+                    if position.is_some() {
+                        let view = storage.view();
+                        build_script_diagnostics.script_text =
+                            view.file_text(&script).ok().map(ToOwned::to_owned);
+                    }
+                    build_script_diagnostics.script = Some(script);
+                }
+                build_script_diagnostics.push_failure(message, position);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                eprintln!(
+                    "jals-lsp: build tasks for {} failed; continuing with existing project sources: {message}",
+                    root.display()
+                );
+                build_script_diagnostics.push_failure(message, None);
+            }
+        }
+        let assembly = match Self::assemble_graph(
             manifest,
+            &effective_manifest,
             root,
             &mut storage,
-            jals_classpath::ProjectInputOptions::Editor,
+            &environment,
+            &limits,
+            &task_classpath,
         )
-        .await;
+        .await
+        {
+            Ok(assembly) => assembly,
+            Err(error) => {
+                let message = error.to_string();
+                let project_diagnostics = vec![Self::graph_error_diagnostic(&error)];
+                let mut root_only = effective_manifest.clone();
+                root_only.dependencies.clear();
+                let fallback_assembly = match Self::assemble_graph(
+                    &root_only,
+                    &root_only,
+                    root,
+                    &mut storage,
+                    &environment,
+                    &limits,
+                    &task_classpath,
+                )
+                .await
+                {
+                    Ok(assembly) => assembly,
+                    Err(fallback_error) => {
+                        return Err(WorkspaceAssemblyFailure {
+                            message: format!(
+                                "{message}; root-only fallback failed: {fallback_error}"
+                            ),
+                            fallback: None,
+                            project_diagnostics,
+                        });
+                    }
+                };
+                let fallback = Self::finish_assembly(
+                    storage,
+                    &effective_manifest,
+                    root,
+                    project_sources,
+                    build_script_watch,
+                    build_script_diagnostics,
+                    fallback_assembly,
+                )
+                .await;
+                return Err(WorkspaceAssemblyFailure {
+                    message,
+                    fallback: Some(Box::new(fallback)),
+                    project_diagnostics,
+                });
+            }
+        };
+        Ok(Self::finish_assembly(
+            storage,
+            &effective_manifest,
+            root,
+            project_sources,
+            build_script_watch,
+            build_script_diagnostics,
+            assembly,
+        )
+        .await)
+    }
+
+    async fn assemble_graph(
+        discovery_manifest: &Manifest,
+        effective_manifest: &Manifest,
+        root: &Path,
+        storage: &mut NativeStorage,
+        environment: &BuildScriptEnvironment,
+        limits: &BuildScriptLimits,
+        task_classpath: &[jals_storage::CacheKey],
+    ) -> Result<NativeProjectAssembly, GraphError> {
+        // Analysis never reaches the network: opening a folder must not clone a remote the user
+        // has not asked about. Git dependencies resolve from what `jals build` already acquired.
+        let graph = NativeProjectGraph::discover(
+            discovery_manifest,
+            root,
+            storage.exec(),
+            jals_classpath::NetworkPolicy::Offline,
+        )
+        .await?;
+        let graph = graph
+            .preprocess(storage.artifacts_mut(), environment, limits)
+            .await?;
+        let mut assembly = graph
+            .assemble_native(
+                effective_manifest,
+                root,
+                storage,
+                jals_classpath::ProjectInputOptions::Editor,
+            )
+            .await;
+        if !task_classpath.is_empty() {
+            let entries: Vec<_> = task_classpath
+                .iter()
+                .cloned()
+                .map(jals_classpath::ClasspathEntry::Artifact)
+                .collect();
+            let load = jals_classpath::ClasspathLoad::load(
+                storage.exec(),
+                &storage.view(),
+                storage.artifacts(),
+                &entries,
+            )
+            .await;
+            assembly.inputs.classpath_classes.extend(load.classes);
+            assembly.inputs.warnings.extend(load.warnings);
+        }
+        Ok(assembly)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_assembly(
+        mut storage: NativeStorage,
+        effective_manifest: &Manifest,
+        root: &Path,
+        project_sources: BTreeSet<FileKey>,
+        build_script_watch: Option<BuildWatchPolicy>,
+        build_script_diagnostics: BuildScriptDiagnosticUpdate,
+        assembly: NativeProjectAssembly,
+    ) -> Self {
+        let NativeProjectAssembly {
+            mut inputs,
+            source_roots,
+            warnings,
+            errors,
+            watch_paths,
+            ..
+        } = assembly;
+        let manifest_key = FileKey::parse("jals.toml").expect("constant is a portable file key");
+        let mut project_diagnostics = Vec::new();
+        for warning in warnings {
+            let message = Self::graph_warning_message(&warning);
+            inputs.warnings.push(jals_classpath::Warning::new(
+                jals_classpath::WarningOrigin::ProjectFile(manifest_key.clone()),
+                message.clone(),
+            ));
+            project_diagnostics.push(Self::project_diagnostic(
+                DiagnosticSeverity::WARNING,
+                "dependency-resolution",
+                message,
+            ));
+        }
+        for error in errors {
+            let message = match error.path {
+                Some(path) => format!(
+                    "dependency project {} could not assemble `{path}`: {}",
+                    error.node, error.message
+                ),
+                None => format!(
+                    "dependency project {} could not assemble: {}",
+                    error.node, error.message
+                ),
+            };
+            project_diagnostics.push(Self::project_diagnostic(
+                DiagnosticSeverity::ERROR,
+                "dependency-assembly",
+                message,
+            ));
+        }
         for warning in &inputs.warnings {
             eprintln!("jals-lsp: {}", warning.message);
         }
@@ -1114,15 +2012,173 @@ impl AssembledWorkspace {
         if let Err(error) = storage.set_overlays(revision, mounts) {
             eprintln!("jals-lsp: mounting dependency sources failed: {error}");
         }
-        Ok(Self {
+        let watch_policy = Self::watch_policy(
+            effective_manifest,
+            root,
+            &source_roots,
+            &project_sources,
+            build_script_watch,
+            &watch_paths,
+        );
+        Self {
             storage,
             source_roots,
+            project_sources: project_sources.into_iter().collect(),
             classpath_classes: inputs.classpath_classes,
             feature_set: inputs.feature_set,
             library_sources,
             source_dep_sources,
             materialized,
-        })
+            watch_policy,
+            build_script_diagnostics,
+            project_diagnostics,
+        }
+    }
+
+    fn graph_warning_message(warning: &GraphWarning) -> String {
+        match (&warning.dependency, &warning.node) {
+            (Some(dependency), _) => {
+                format!("dependency `{dependency}`: {}", warning.message)
+            }
+            (None, Some(node)) => format!("dependency project {node}: {}", warning.message),
+            (None, None) => warning.message.clone(),
+        }
+    }
+
+    fn graph_error_diagnostic(error: &GraphError) -> Diagnostic {
+        let code = match error {
+            GraphError::InvalidRootManifest { .. } => "project-manifest",
+            GraphError::InvalidDependency { .. } => "dependency-invalid",
+            GraphError::MalformedManifest { .. } => "dependency-manifest",
+            GraphError::Cycle { .. } => "dependency-cycle",
+            GraphError::BuildScript { .. } => "dependency-build-script",
+            GraphError::Acquisition { .. } => "dependency-acquisition",
+        };
+        Self::project_diagnostic(DiagnosticSeverity::ERROR, code, error.to_string())
+    }
+
+    fn project_diagnostic(
+        severity: DiagnosticSeverity,
+        code: &'static str,
+        message: String,
+    ) -> Diagnostic {
+        Diagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+            severity: Some(severity),
+            code: Some(NumberOrString::String(code.to_owned())),
+            source: Some("jals-project".to_owned()),
+            message,
+            ..Diagnostic::default()
+        }
+    }
+
+    fn record_build_script_diagnostic(
+        root: &Path,
+        update: &mut BuildScriptDiagnosticUpdate,
+        diagnostic: &BuildScriptDiagnostic,
+    ) {
+        let severity = match diagnostic {
+            BuildScriptDiagnostic::Warning(_) => "warning",
+            BuildScriptDiagnostic::Error(_) => "error",
+        };
+        eprintln!(
+            "jals-lsp: build script {severity} for {}: {}",
+            root.display(),
+            diagnostic.message()
+        );
+        update.push_reported(diagnostic);
+    }
+
+    /// Feed successful classpath directives to the existing native project plan without changing
+    /// the parsed manifest retained by any other host. Generated sources stay exact identities and
+    /// are passed separately through [`ProjectLayout`].
+    fn augment_classpath(manifest: &mut Manifest, output: &BuildScriptOutput) {
+        for classpath in &output.additional_classpath {
+            let classpath = classpath.to_string();
+            if !manifest.build.classpath.contains(&classpath) {
+                manifest.build.classpath.push(classpath);
+            }
+        }
+    }
+
+    fn watch_policy(
+        manifest: &Manifest,
+        root: &Path,
+        source_roots: &[DirKey],
+        project_sources: &BTreeSet<FileKey>,
+        build_script: Option<BuildWatchPolicy>,
+        graph_watch_paths: &[PathBuf],
+    ) -> ProjectWatchPolicy {
+        fn normalize(path: &Path) -> PathBuf {
+            let mut normalized = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if normalized.pop() => {}
+                    _ => normalized.push(component.as_os_str()),
+                }
+            }
+            normalized
+        }
+
+        fn local_path(root: &Path, value: &str) -> Option<PathBuf> {
+            let path = Path::new(value);
+            if path.is_absolute() {
+                return Some(normalize(path));
+            }
+            if let Ok(url) = Url::parse(value) {
+                return (url.scheme() == "file")
+                    .then(|| url.to_file_path().ok())
+                    .flatten();
+            }
+            Some(normalize(&root.join(path)))
+        }
+
+        let mut reassemble_inputs = Vec::new();
+        for source in &manifest.build.source_dirs {
+            if let Some(path) = local_path(root, source)
+                && !path.starts_with(root)
+            {
+                reassemble_inputs.push(path);
+            }
+        }
+        reassemble_inputs.extend(
+            manifest
+                .build
+                .classpath
+                .iter()
+                .filter_map(|path| local_path(root, path)),
+        );
+        for dependency in manifest.dependencies.values() {
+            match dependency {
+                Dependency::Jar(jar) => {
+                    reassemble_inputs.extend(
+                        core::iter::once(&jar.jar)
+                            .chain(jar.sources.iter())
+                            .filter_map(|path| local_path(root, path)),
+                    );
+                }
+                Dependency::Path(path) => {
+                    if let Some(path) = local_path(root, &path.path) {
+                        reassemble_inputs.push(path);
+                    }
+                }
+                Dependency::Git(_) => {}
+            }
+        }
+        reassemble_inputs.extend(graph_watch_paths.iter().cloned());
+        reassemble_inputs.sort();
+        reassemble_inputs.dedup();
+
+        let mut source_roots = source_roots.to_vec();
+        source_roots.sort();
+        source_roots.dedup();
+        ProjectWatchPolicy {
+            source_roots,
+            project_sources: project_sources.clone(),
+            reassemble_inputs,
+            build_script,
+        }
     }
 
     /// Stage a cached navigation source for mounting into the aggregate's overlay under
@@ -1151,7 +2207,7 @@ impl AssembledWorkspace {
         // degrades navigation into this one file.
         if let Ok(target) = storage
             .artifacts()
-            .materialize_source(&source.key, &source.path)
+            .materialize_file(&source.key, &source.path)
             .await
         {
             materialized.insert(key.clone(), target);
@@ -1163,7 +2219,8 @@ impl AssembledWorkspace {
 #[cfg(test)]
 mod tests {
     use async_lsp::lsp_types::{
-        TextDocumentContentChangeEvent, TextDocumentItem, VersionedTextDocumentIdentifier,
+        FileChangeType, FileEvent, TextDocumentContentChangeEvent, TextDocumentItem,
+        VersionedTextDocumentIdentifier,
     };
     use jals_exec::block_on_inline;
 
@@ -1181,6 +2238,58 @@ mod tests {
         let (sender, receiver) = mpsc::unbounded_channel();
         let actor = Actor::new(ClientSocket::new_closed(), Exec::inline(), sender.clone());
         (actor, receiver, sender)
+    }
+
+    fn changed(path: &Path) -> (PathBuf, FileChangeType) {
+        (path.to_path_buf(), FileChangeType::CHANGED)
+    }
+
+    fn write(root: &Path, path: &str, contents: &str) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn diagnostic_code(diagnostic: &Diagnostic) -> Option<&str> {
+        match diagnostic.code.as_ref() {
+            Some(NumberOrString::String(code)) => Some(code),
+            Some(NumberOrString::Number(_)) | None => None,
+        }
+    }
+
+    fn scripted_dependency_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "jals.toml",
+            "[build]\nsource-dirs = [\"src\"]\n\
+             [dependencies]\ngenerated = { path = \"dependency\" }\n",
+        );
+        write(
+            dir.path(),
+            "dependency/jals.toml",
+            "[build]\nsource-dirs = [\"src\"]\n\
+             script = { type = \"rhai\", file = \"build.rhai\" }\n",
+        );
+        write(
+            dir.path(),
+            "dependency/build.rhai",
+            r#"
+                let source = output.write_text(
+                    "p/Generated.java",
+                    "package p; public class Generated {}\n",
+                );
+                build.add_source(source);
+                build.add_javac_arg("-dependency-directive-must-not-propagate");
+                build.add_jvm_arg("-dependency-directive-must-not-propagate");
+            "#,
+        );
+        write(
+            dir.path(),
+            "src/Main.java",
+            "package p; class Main { Generated value; }",
+        );
+        dir
     }
 
     /// Process every command already queued (e.g. a `WorkspaceReady` from an inline assembly).
@@ -1285,6 +2394,894 @@ mod tests {
                 actor.workspaces.len(),
                 2,
                 "a file under no manifest builds no workspace"
+            );
+        });
+    }
+
+    #[test]
+    fn project_watch_policy_classifies_sources_dependencies_and_cache() {
+        let root = Path::new("project");
+        let manifest = root.join("jals.toml");
+        let script_path = root.join("build.rhai");
+        let input_path = root.join("schema/model.json");
+        let source_path = root.join("src/Main.java");
+        let output_path = root.join("target/jals/build/rhai/out/Generated.java");
+        let cache_path = root.join("target/jals/cache/artifact");
+        let classpath = root.join("lib/api.jar");
+        let source_dependency = root.join("deps/lib/Lib.java");
+        let external_dependency = PathBuf::from("external/lib/External.java");
+        let script = FileKey::parse("build.rhai").unwrap();
+        let input = FileKey::parse("schema/model.json").unwrap();
+        let ordinary = ProjectWatchPolicy {
+            source_roots: vec![DirKey::parse("src").unwrap()],
+            project_sources: BTreeSet::new(),
+            reassemble_inputs: vec![
+                root.join("deps/lib"),
+                classpath.clone(),
+                PathBuf::from("external/lib"),
+            ],
+            build_script: None,
+        };
+
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&ordinary), &[changed(&source_path)],),
+            WatchedProjectAction::Refresh,
+            "authored Java under a source root refreshes in place"
+        );
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&ordinary), &[changed(&manifest)]),
+            WatchedProjectAction::Reassemble
+        );
+        for path in [classpath, source_dependency, external_dependency] {
+            assert_eq!(
+                Actor::watched_project_action(root, Some(&ordinary), &[changed(&path)]),
+                WatchedProjectAction::Reassemble,
+                "classpath and source dependencies require reassembly: {path:?}"
+            );
+        }
+        assert_eq!(
+            Actor::watched_project_action(
+                root,
+                Some(&ordinary),
+                &[changed(&output_path), changed(&cache_path)],
+            ),
+            WatchedProjectAction::Ignore,
+            "generated output and cache feedback are ignored"
+        );
+
+        let conservative = ProjectWatchPolicy {
+            build_script: Some(BuildWatchPolicy {
+                script: script.clone(),
+                rerun_files: BTreeSet::new(),
+            }),
+            ..ordinary.clone()
+        };
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&conservative), &[changed(&source_path)],),
+            WatchedProjectAction::Reassemble,
+            "an empty rerun set conservatively watches all project files"
+        );
+
+        let declared = ProjectWatchPolicy {
+            build_script: Some(BuildWatchPolicy {
+                script,
+                rerun_files: BTreeSet::from([input]),
+            }),
+            ..ordinary
+        };
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&declared), &[changed(&script_path)],),
+            WatchedProjectAction::Reassemble
+        );
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&declared), &[changed(&input_path)]),
+            WatchedProjectAction::Reassemble
+        );
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&declared), &[changed(&source_path)],),
+            WatchedProjectAction::Refresh,
+            "unrelated files do not rerun a script with declared inputs"
+        );
+        assert_eq!(
+            Actor::watched_project_action(root, Some(&declared), &[changed(&output_path)]),
+            WatchedProjectAction::Ignore,
+            "generated outputs do nothing"
+        );
+    }
+
+    #[test]
+    fn generated_output_deletion_reassembles_while_write_feedback_is_ignored() {
+        let root = Path::new("project");
+        let output = root.join("target/jals/build/rhai/out/Generated.java");
+        let cache = root.join("target/jals/cache/artifact");
+
+        for change_type in [FileChangeType::CREATED, FileChangeType::CHANGED] {
+            assert_eq!(
+                Actor::watched_project_action(root, None, &[(output.clone(), change_type)],),
+                WatchedProjectAction::Ignore
+            );
+        }
+        assert_eq!(
+            Actor::watched_project_action(root, None, &[(output, FileChangeType::DELETED)],),
+            WatchedProjectAction::Reassemble
+        );
+        assert_eq!(
+            Actor::watched_project_action(root, None, &[(cache, FileChangeType::DELETED)]),
+            WatchedProjectAction::Ignore
+        );
+    }
+
+    /// The client watches `**/*`, and VS Code's default excludes stop at `.git/objects`, so
+    /// `.git/index` and `.git/refs/**` reach the server. `NativeStorage` never snapshots `.git`,
+    /// so those writes cannot affect analysis — but classifying them as "unknown" made every
+    /// `git status` re-run the project's build script.
+    #[test]
+    fn git_metadata_writes_are_ignored() {
+        let root = Path::new("project");
+        for relative in [".git/index", ".git/refs/heads/main", ".git/HEAD"] {
+            let path = root.join(relative);
+            for change_type in [
+                FileChangeType::CREATED,
+                FileChangeType::CHANGED,
+                FileChangeType::DELETED,
+            ] {
+                assert_eq!(
+                    Actor::watched_project_action(root, None, &[(path.clone(), change_type)]),
+                    WatchedProjectAction::Ignore,
+                    "{relative} must not touch the workspace"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_watch_policy_tracks_external_path_dependencies() {
+        let root = Path::new("/workspace/project");
+        let manifest: Manifest = r#"
+            [build]
+            source-dirs = ["src"]
+            classpath = ["lib/api.jar"]
+            [dependencies]
+            shared = { path = "../shared" }
+            local = { path = "deps/local" }
+        "#
+        .parse()
+        .unwrap();
+        let policy = AssembledWorkspace::watch_policy(
+            &manifest,
+            root,
+            &[DirKey::parse("src").unwrap()],
+            &BTreeSet::new(),
+            None,
+            &[],
+        );
+
+        for path in [
+            PathBuf::from("/workspace/shared/Shared.java"),
+            root.join("deps/local/Local.java"),
+            root.join("lib/api.jar"),
+        ] {
+            assert_eq!(
+                Actor::watched_project_action(root, Some(&policy), &[changed(&path)]),
+                WatchedProjectAction::Reassemble,
+                "manifest-derived input must reassemble: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_watch_policy_tracks_transitive_local_dependency_inputs() {
+        block_on_inline(async {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("root");
+            let child = parent.path().join("child");
+            let transitive = parent.path().join("transitive");
+            write(
+                &root,
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 [dependencies]\nchild = { path = \"../child\" }\n",
+            );
+            write(&root, "src/Main.java", "class Main {}");
+            write(
+                &child,
+                "jals.toml",
+                "[dependencies]\ntransitive = { path = \"../transitive\" }\n",
+            );
+            write(&child, "src/Child.java", "class Child {}");
+            write(
+                &transitive,
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n",
+            );
+            write(&transitive, "src/Transitive.java", "class Transitive {}");
+            let manifest = Manifest::from_file(&root.join("jals.toml")).await.unwrap();
+            let assembled = AssembledWorkspace::assemble(&manifest, &root, Exec::inline())
+                .await
+                .unwrap();
+
+            let canonical_child = std::fs::canonicalize(&child).unwrap();
+            let canonical_transitive = std::fs::canonicalize(&transitive).unwrap();
+            assert!(
+                assembled
+                    .watch_policy
+                    .reassemble_inputs
+                    .contains(&canonical_child)
+            );
+            assert!(
+                assembled
+                    .watch_policy
+                    .reassemble_inputs
+                    .contains(&canonical_transitive)
+            );
+            for path in [
+                transitive.join("jals.toml"),
+                transitive.join("build.rhai"),
+                transitive.join("schema.rerun"),
+                transitive.join("src/Transitive.java"),
+                transitive.join("lib/local.jar"),
+            ] {
+                assert_eq!(
+                    Actor::watched_project_action(
+                        &root,
+                        Some(&assembled.watch_policy),
+                        &[changed(&path)],
+                    ),
+                    WatchedProjectAction::Reassemble,
+                    "local dependency input must reassemble: {path:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn build_script_diagnostics_shape_messages_and_clear_previous_state() {
+        let root = tempfile::tempdir().unwrap();
+        let script = FileKey::parse("build.rhai").unwrap();
+        let mut reported = BuildScriptDiagnosticUpdate::new(Some(script.clone()));
+        reported.push_reported(&BuildScriptDiagnostic::Warning("generated fallback".into()));
+        reported.push_reported(&BuildScriptDiagnostic::Error("generation failed".into()));
+
+        let publications =
+            Actor::build_script_diagnostic_publications(root.path(), None, &reported);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].diagnostics.len(), 2);
+        assert_eq!(
+            publications[0].diagnostics[0].severity,
+            Some(DiagnosticSeverity::WARNING)
+        );
+        assert_eq!(
+            publications[0].diagnostics[1].severity,
+            Some(DiagnosticSeverity::ERROR)
+        );
+        assert_eq!(publications[0].diagnostics[1].message, "generation failed");
+        assert_eq!(
+            publications[0].diagnostics[0].range,
+            Range::new(Position::new(0, 0), Position::new(0, 1))
+        );
+
+        let clean = BuildScriptDiagnosticUpdate::new(Some(script.clone()));
+        let publications =
+            Actor::build_script_diagnostic_publications(root.path(), Some(&script), &clean);
+        assert_eq!(publications.len(), 1);
+        assert!(publications[0].diagnostics.is_empty());
+
+        let removed = BuildScriptDiagnosticUpdate::new(None);
+        let publications =
+            Actor::build_script_diagnostic_publications(root.path(), Some(&script), &removed);
+        assert_eq!(publications.len(), 1);
+        assert!(publications[0].diagnostics.is_empty());
+
+        let mut failed = BuildScriptDiagnosticUpdate::new(Some(script));
+        failed.push_failure("could not compile build script".into(), None);
+        assert_eq!(
+            failed.diagnostics[0].severity,
+            Some(DiagnosticSeverity::ERROR)
+        );
+        assert_eq!(
+            failed.diagnostics[0].message,
+            "could not compile build script"
+        );
+    }
+
+    #[test]
+    fn open_script_keeps_build_diagnostics_authoritative() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("jals.toml"),
+                "[build]\nsource-dirs = [\".\"]\n\
+                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+            )
+            .unwrap();
+            let script = "build.warning(\"from Rhai\");\n";
+            let script_path = dir.path().join("build.rhai");
+            let script_uri = Url::from_file_path(&script_path).unwrap();
+            let (mut actor, mut receiver, _sender) = actor();
+
+            open(&mut actor, &mut receiver, script_path, script).await;
+
+            assert!(actor.is_script_diagnostic_uri(&script_uri));
+            assert_eq!(
+                actor.workspaces[0]
+                    .watch_policy()
+                    .and_then(ProjectWatchPolicy::script),
+                Some(&FileKey::parse("build.rhai").unwrap())
+            );
+            actor.refresh_and_publish(&script_uri).await;
+            assert!(
+                actor.is_script_diagnostic_uri(&script_uri),
+                "ordinary Java publication remains suppressed while the script is open"
+            );
+        });
+    }
+
+    #[test]
+    fn failed_reassembly_preserves_last_good_workspace_and_watch_state() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            std::fs::write(
+                dir.path().join("jals.toml"),
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("build.rhai"), "build.warning(\"old\");\n").unwrap();
+            let (mut actor, mut receiver, _sender) = actor();
+            open(
+                &mut actor,
+                &mut receiver,
+                dir.path().join("src/Main.java"),
+                "class Main {}",
+            )
+            .await;
+            assert!(actor.workspaces[0].watch_policy().is_some());
+
+            let generation = actor.next_workspace_assembly_generation();
+            actor.workspaces[0].replace_assembly(WorkspaceAssembly {
+                generation,
+                rerun_requested: false,
+            });
+            actor
+                .workspace_ready(
+                    dir.path().to_path_buf(),
+                    generation,
+                    Err(Box::new(WorkspaceAssemblyFailure {
+                        message: "failed".into(),
+                        fallback: None,
+                        project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
+                            DiagnosticSeverity::ERROR,
+                            "dependency-acquisition",
+                            "failed".into(),
+                        )],
+                    })),
+                )
+                .await;
+
+            assert!(
+                actor.workspaces[0].watch_policy().is_some(),
+                "a failed replacement retains the last-good script/input watches"
+            );
+            assert!(
+                actor.workspaces[0].ready().is_some(),
+                "a failed replacement retains the last-good index"
+            );
+            assert!(actor.workspaces[0].assembly().is_none());
+        });
+    }
+
+    #[test]
+    fn compile_and_runtime_diagnostics_use_exact_rhai_positions() {
+        block_on_inline(async {
+            let manifest: Manifest = r#"
+                [build]
+                script = { type = "rhai", file = "build.rhai" }
+            "#
+            .parse()
+            .unwrap();
+            for (script, expected) in [
+                (
+                    "let valid = 1;\nlet broken = ;\n",
+                    Range::new(Position::new(1, 13), Position::new(1, 14)),
+                ),
+                (
+                    "let valid = 1;\nthrow \"boom\";\n",
+                    Range::new(Position::new(1, 0), Position::new(1, 1)),
+                ),
+                (
+                    "let emoji = \"😀\"; throw \"boom\";\n",
+                    Range::new(Position::new(0, 18), Position::new(0, 19)),
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    dir.path().join("jals.toml"),
+                    "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                )
+                .unwrap();
+                std::fs::write(dir.path().join("build.rhai"), script).unwrap();
+
+                let assembled = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    assembled.build_script_diagnostics.script,
+                    Some(FileKey::parse("build.rhai").unwrap())
+                );
+                assert_eq!(assembled.build_script_diagnostics.diagnostics.len(), 1);
+                assert_eq!(
+                    assembled.build_script_diagnostics.diagnostics[0].range,
+                    expected
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn build_script_generated_java_is_indexed_on_initial_assembly() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            std::fs::write(
+                dir.path().join("jals.toml"),
+                "[package]\nname = \"generated\"\n[build]\nsource-dirs = [\"src\"]\n\
+                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.path().join("build.rhai"),
+                r#"
+                    let source = output.write_text(
+                        "p/Generated.java",
+                        "package p; public class Generated {}\n",
+                    );
+                    output.write_text(
+                        "p/Sibling.java",
+                        "package p; public class Sibling {}\n",
+                    );
+                    build.add_source(source);
+                "#,
+            )
+            .unwrap();
+            let main = "package p; class Main { Generated value; Sibling excluded; }";
+            let main_path = dir.path().join("src/Main.java");
+            let main_uri = Url::from_file_path(&main_path).unwrap();
+            let generated_uri = Url::from_file_path(
+                dir.path()
+                    .join("target/jals/build/rhai/out/p/Generated.java"),
+            )
+            .unwrap();
+
+            let (mut actor, mut receiver, _sender) = actor();
+            open(&mut actor, &mut receiver, main_path, main).await;
+
+            let location = actor
+                .workspace_for(&main_uri)
+                .expect("the project workspace loaded")
+                .goto_definition(
+                    &main_uri,
+                    Position::new(0, main.find("Generated").unwrap() as u32),
+                )
+                .await
+                .expect("the generated type resolves");
+            assert_eq!(location.uri, generated_uri);
+            assert!(
+                actor
+                    .workspace_for(&main_uri)
+                    .unwrap()
+                    .goto_definition(
+                        &main_uri,
+                        Position::new(0, main.find("Sibling").unwrap() as u32),
+                    )
+                    .await
+                    .is_none(),
+                "an unselected generated sibling is not a project source"
+            );
+        });
+    }
+
+    #[test]
+    fn open_document_defers_exclusive_task_publication_before_fetch() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            let manifest_text = "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+            std::fs::write(dir.path().join("jals.toml"), manifest_text).unwrap();
+            std::fs::write(dir.path().join("src/Main.java"), "class Main {}\n").unwrap();
+            std::fs::write(
+                dir.path().join("build.rhai"),
+                r#"
+                    let jar = tasks.fetch_jar(
+                        tasks.https_url("https://example.invalid/sources.jar"),
+                        tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        tasks.bytes(1024)
+                    );
+                    let sources = tasks.extract_java(jar, "generated");
+                    tasks.publish_tree("sources", sources, "src/generated", "replace-root");
+                "#,
+            )
+            .unwrap();
+            let manifest: Manifest = manifest_text.parse().unwrap();
+
+            let assembled = AssembledWorkspace::assemble_with_blocked(
+                &manifest,
+                dir.path(),
+                Exec::inline(),
+                &[FileKey::parse("src/generated/A.java").unwrap()],
+            )
+            .await
+            .unwrap();
+
+            assert!(!dir.path().join("src/generated").exists());
+            assert!(
+                assembled
+                    .build_script_diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("publication is deferred"))
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_generated_java_is_indexed_as_a_stable_artifact_source() {
+        block_on_inline(async {
+            let dir = scripted_dependency_project();
+            let main_path = dir.path().join("src/Main.java");
+            let main = std::fs::read_to_string(&main_path).unwrap();
+            let main_uri = Url::from_file_path(&main_path).unwrap();
+            let (mut actor, mut receiver, _sender) = actor();
+
+            open(&mut actor, &mut receiver, main_path, &main).await;
+
+            let location = actor
+                .workspace_for(&main_uri)
+                .expect("the graph-backed workspace loaded")
+                .goto_definition(
+                    &main_uri,
+                    Position::new(0, main.find("Generated").unwrap() as u32),
+                )
+                .await
+                .expect("the generated dependency type resolves");
+            let path = location.uri.to_file_path().unwrap();
+            assert!(path.ends_with("p/Generated.java"));
+            assert!(
+                path.to_string_lossy().contains("/dependencies/"),
+                "the materialized URI retains the stable node-token path: {path:?}"
+            );
+            assert!(
+                !dir.path().join("dependency/target").exists(),
+                "dependency preprocessing does not publish process-style output into its source"
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_source_identity_is_stable_across_reassembly() {
+        block_on_inline(async {
+            let dir = scripted_dependency_project();
+            let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                .await
+                .unwrap();
+
+            let first = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
+                .await
+                .unwrap();
+            let first = first
+                .source_dep_sources
+                .iter()
+                .find(|key| key.to_string().ends_with("p/Generated.java"))
+                .cloned()
+                .expect("the generated source is staged");
+            let second = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
+                .await
+                .unwrap();
+            let second = second
+                .source_dep_sources
+                .iter()
+                .find(|key| key.to_string().ends_with("p/Generated.java"))
+                .cloned()
+                .expect("the generated source is staged again");
+
+            assert_eq!(first, second);
+            assert!(
+                first
+                    .to_string()
+                    .starts_with(".jals/source-dependency/dependencies/")
+            );
+        });
+    }
+
+    #[test]
+    fn dependency_failures_are_structured_and_keep_an_initial_root_workspace() {
+        block_on_inline(async {
+            for (child_manifest, child_script, expected_code) in [
+                ("[build]\nsource-dirs = [\n", None, "dependency-manifest"),
+                (
+                    "[build]\nsource-dirs = [\"src\"]\n\
+                     script = { type = \"rhai\", file = \"build.rhai\" }\n",
+                    Some("let = ;"),
+                    "dependency-build-script",
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                write(
+                    dir.path(),
+                    "jals.toml",
+                    "[build]\nsource-dirs = [\"src\"]\n\
+                     script = { type = \"rhai\", file = \"root.rhai\" }\n\
+                     [dependencies]\nchild = { path = \"child\" }\n",
+                );
+                write(dir.path(), "root.rhai", "build.error(\"root diagnostic\");");
+                write(dir.path(), "src/Main.java", "class Main { Missing value; }");
+                write(dir.path(), "child/jals.toml", child_manifest);
+                if let Some(script) = child_script {
+                    write(dir.path(), "child/build.rhai", script);
+                }
+                let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                    .await
+                    .unwrap();
+
+                let Err(failure) =
+                    AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline()).await
+                else {
+                    panic!("dependency failure unexpectedly assembled");
+                };
+                assert_eq!(
+                    diagnostic_code(&failure.project_diagnostics[0]),
+                    Some(expected_code)
+                );
+                assert_eq!(
+                    failure.project_diagnostics[0].severity,
+                    Some(DiagnosticSeverity::ERROR)
+                );
+                let fallback = failure
+                    .fallback
+                    .as_ref()
+                    .expect("a valid root remains analyzable on initial load");
+                assert_eq!(
+                    fallback
+                        .storage
+                        .view()
+                        .file_text(&FileKey::parse("src/Main.java").unwrap()),
+                    Ok("class Main { Missing value; }")
+                );
+
+                let graph = Actor::project_diagnostic_publication(
+                    dir.path(),
+                    failure.project_diagnostics.clone(),
+                )
+                .unwrap();
+                let script = Actor::build_script_diagnostic_publications(
+                    dir.path(),
+                    None,
+                    &fallback.build_script_diagnostics,
+                );
+                assert_eq!(
+                    graph.uri,
+                    Url::from_file_path(dir.path().join("jals.toml")).unwrap()
+                );
+                assert_eq!(script.len(), 1);
+                assert_ne!(graph.uri, script[0].uri);
+                assert_ne!(
+                    graph.uri,
+                    Url::from_file_path(dir.path().join("src/Main.java")).unwrap(),
+                    "dependency diagnostics cannot replace ordinary Java diagnostics"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn dependency_cycle_is_diagnosed_without_discarding_root_analysis() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 [dependencies]\na = { path = \"a\" }\n",
+            );
+            write(
+                dir.path(),
+                "a/jals.toml",
+                "[dependencies]\nb = { path = \"../b\" }\n",
+            );
+            write(
+                dir.path(),
+                "b/jals.toml",
+                "[dependencies]\na-again = { path = \"../a\" }\n",
+            );
+            write(dir.path(), "src/Main.java", "class Main {}");
+            let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                .await
+                .unwrap();
+
+            let Err(failure) =
+                AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline()).await
+            else {
+                panic!("cycle unexpectedly assembled");
+            };
+            assert_eq!(
+                diagnostic_code(&failure.project_diagnostics[0]),
+                Some("dependency-cycle")
+            );
+            assert!(
+                failure.project_diagnostics[0]
+                    .message
+                    .contains("dependency cycle")
+            );
+            assert!(failure.fallback.is_some());
+        });
+    }
+
+    #[test]
+    fn graph_warnings_join_project_resolution_diagnostics() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 [dependencies]\nmissing = { path = \"missing\" }\n",
+            );
+            write(dir.path(), "src/Main.java", "class Main {}");
+            let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                .await
+                .unwrap();
+
+            let assembled = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
+                .await
+                .unwrap();
+            assert!(assembled.project_diagnostics.iter().any(|diagnostic| {
+                diagnostic_code(diagnostic) == Some("dependency-resolution")
+                    && diagnostic.severity == Some(DiagnosticSeverity::WARNING)
+                    && diagnostic.message.contains("missing")
+            }));
+        });
+    }
+
+    #[test]
+    fn build_script_failure_keeps_ordinary_project_analysis() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            std::fs::write(
+                dir.path().join("jals.toml"),
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("build.rhai"), "let = ;").unwrap();
+            std::fs::write(dir.path().join("src/Foo.java"), "package p; class Foo {}").unwrap();
+            let main = "package p; class Main { Foo value; }";
+            let main_path = dir.path().join("src/Main.java");
+            let main_uri = Url::from_file_path(&main_path).unwrap();
+            let foo_uri = Url::from_file_path(dir.path().join("src/Foo.java")).unwrap();
+
+            let (mut actor, mut receiver, _sender) = actor();
+            open(&mut actor, &mut receiver, main_path, main).await;
+
+            let location = actor
+                .workspace_for(&main_uri)
+                .expect("script failure did not discard the workspace")
+                .goto_definition(
+                    &main_uri,
+                    Position::new(0, main.find("Foo").unwrap() as u32),
+                )
+                .await
+                .expect("ordinary project sources still resolve");
+            assert_eq!(location.uri, foo_uri);
+        });
+    }
+
+    #[test]
+    fn watched_build_input_change_reruns_script_and_reassembles_workspace() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            std::fs::write(
+                dir.path().join("jals.toml"),
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.path().join("build.rhai"),
+                r#"
+                    let source = output.write_text(
+                        "p/Model.java",
+                        project.read_text("model.java.in"),
+                    );
+                    build.add_source(source);
+                    build.rerun_if_changed("model.java.in");
+                "#,
+            )
+            .unwrap();
+            let model_path = dir.path().join("model.java.in");
+            std::fs::write(&model_path, "package p; class First {}\n").unwrap();
+            let main = "package p; class Main { Second value; }";
+            let main_path = dir.path().join("src/Main.java");
+            let main_uri = Url::from_file_path(&main_path).unwrap();
+
+            let (mut actor, mut receiver, _sender) = actor();
+            open(&mut actor, &mut receiver, main_path.clone(), main).await;
+            let policy = actor.workspaces[0]
+                .watch_policy()
+                .and_then(|policy| policy.build_script.as_ref())
+                .expect("the successful output installs a script watch policy");
+            assert_eq!(
+                policy.rerun_files,
+                BTreeSet::from([FileKey::parse("model.java.in").unwrap()])
+            );
+            assert!(
+                actor
+                    .workspace_for(&main_uri)
+                    .unwrap()
+                    .goto_definition(
+                        &main_uri,
+                        Position::new(0, main.find("Second").unwrap() as u32),
+                    )
+                    .await
+                    .is_none(),
+                "the initial script output declares only First"
+            );
+
+            actor
+                .process(Cmd::DidChangeWatchedFiles(DidChangeWatchedFilesParams {
+                    changes: vec![FileEvent {
+                        uri: Url::from_file_path(&main_path).unwrap(),
+                        typ: FileChangeType::CHANGED,
+                    }],
+                }))
+                .await;
+            assert!(
+                receiver.try_recv().is_err(),
+                "an unrelated source change refreshes instead of reassembling"
+            );
+
+            actor.request_workspace_reassembly(dir.path());
+            actor
+                .process(Cmd::DidChangeWatchedFiles(DidChangeWatchedFilesParams {
+                    changes: vec![FileEvent {
+                        uri: Url::from_file_path(&main_path).unwrap(),
+                        typ: FileChangeType::CHANGED,
+                    }],
+                }))
+                .await;
+            assert!(
+                actor.workspaces[0]
+                    .assembly()
+                    .is_some_and(|assembly| assembly.rerun_requested),
+                "an in-flight replacement reruns for inputs unknown to its old policy"
+            );
+            drain(&mut actor, &mut receiver).await;
+
+            std::fs::write(&model_path, "package p; class Second {}\n").unwrap();
+            actor
+                .process(Cmd::DidChangeWatchedFiles(DidChangeWatchedFilesParams {
+                    changes: vec![FileEvent {
+                        uri: Url::from_file_path(&model_path).unwrap(),
+                        typ: FileChangeType::CHANGED,
+                    }],
+                }))
+                .await;
+            drain(&mut actor, &mut receiver).await;
+
+            let location = actor
+                .workspace_for(&main_uri)
+                .expect("the replacement workspace loaded")
+                .goto_definition(
+                    &main_uri,
+                    Position::new(0, main.find("Second").unwrap() as u32),
+                )
+                .await
+                .expect("the changed input reran the script");
+            assert_eq!(
+                location.uri,
+                Url::from_file_path(dir.path().join("target/jals/build/rhai/out/p/Model.java"))
+                    .unwrap()
             );
         });
     }

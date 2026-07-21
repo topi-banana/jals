@@ -9,7 +9,7 @@ use jals_exec::Yielder;
 use sha2::{Digest, Sha256};
 
 use crate::error::CacheError;
-use crate::io::{self, IoError, Seek as _};
+use crate::io::{self, IoError, Read as _, Seek as _};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentDigest([u8; 32]);
@@ -80,6 +80,11 @@ pub enum CacheNamespace {
     GitCheckout,
     PathSource,
     ExternalClasspath,
+    BuildScriptState,
+    BuildScriptOutput,
+    BuildTaskArtifact,
+    BuildTaskSource,
+    BuildTaskState,
 }
 
 impl CacheNamespace {
@@ -93,6 +98,11 @@ impl CacheNamespace {
             Self::GitCheckout => "git-checkout",
             Self::PathSource => "path-source",
             Self::ExternalClasspath => "external-classpath",
+            Self::BuildScriptState => "build-script-state",
+            Self::BuildScriptOutput => "build-script-output",
+            Self::BuildTaskArtifact => "build-task-artifact",
+            Self::BuildTaskSource => "build-task-source",
+            Self::BuildTaskState => "build-task-state",
         }
     }
 }
@@ -259,12 +269,38 @@ impl<C: CacheBackend> ArtifactCache<C> {
         &self,
         key: &CacheKey,
     ) -> core::result::Result<Option<C::Reader>, CacheError> {
+        self.open_verified_bounded(key, None).await
+    }
+
+    /// [`open_verified`](Self::open_verified), refusing an artifact larger than `max_bytes`.
+    ///
+    /// The size is checked *before* the digest pass, so the bound limits the work done and not
+    /// only the memory allocated afterwards: verifying a multi-gigabyte file just to reject it
+    /// against a 64 KiB limit would make the limit an invitation rather than a defence.
+    async fn open_verified_bounded(
+        &self,
+        key: &CacheKey,
+        max_bytes: Option<usize>,
+    ) -> core::result::Result<Option<C::Reader>, CacheError> {
         fn io_failure(error: &IoError) -> CacheError {
             CacheError::Io(error.to_string())
         }
         let Some(mut reader) = self.backend.open(key).await? else {
             return Ok(None);
         };
+        if let Some(limit) = max_bytes {
+            let size = reader
+                .seek(io::SeekFrom::End(0))
+                .await
+                .map_err(|error| io_failure(&error))?;
+            if size > u64::try_from(limit).unwrap_or(u64::MAX) {
+                return Err(CacheError::TooLarge { size, limit });
+            }
+            reader
+                .seek(io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| io_failure(&error))?;
+        }
         let digest = ContentDigest::of_reader(&mut reader)
             .await
             .map_err(|error| io_failure(&error))?;
@@ -276,6 +312,44 @@ impl<C: CacheBackend> ArtifactCache<C> {
             .await
             .map_err(|error| io_failure(&error))?;
         Ok(Some(reader))
+    }
+
+    /// Verified whole-buffer lookup with an allocation bound.
+    ///
+    /// The size is checked before the artifact is verified or buffered, so `max_bytes` bounds the
+    /// work as well as the allocation. An artifact larger than it returns
+    /// [`CacheError::TooLarge`].
+    pub async fn lookup_bounded(
+        &self,
+        key: &CacheKey,
+        max_bytes: usize,
+    ) -> core::result::Result<Option<Vec<u8>>, CacheError> {
+        fn io_failure(error: &IoError) -> CacheError {
+            CacheError::Io(error.to_string())
+        }
+
+        let Some(mut reader) = self.open_verified_bounded(key, Some(max_bytes)).await? else {
+            return Ok(None);
+        };
+        // The bound was already enforced against the reader's length, so this fits.
+        let size = reader
+            .seek(io::SeekFrom::End(0))
+            .await
+            .map_err(|error| io_failure(&error))?;
+        reader
+            .seek(io::SeekFrom::Start(0))
+            .await
+            .map_err(|error| io_failure(&error))?;
+        let len = usize::try_from(size).map_err(|_| CacheError::TooLarge {
+            size,
+            limit: max_bytes,
+        })?;
+        let mut bytes = vec![0; len];
+        reader
+            .read_exact(&mut bytes)
+            .await
+            .map_err(|error| io_failure(&error))?;
+        Ok(Some(bytes))
     }
 
     pub async fn publish(
@@ -405,6 +479,24 @@ mod tests {
                 cache.open_verified(&artifact_key).await,
                 Err(CacheError::Corrupt)
             ));
+        });
+    }
+
+    #[test]
+    fn bounded_lookup_rejects_before_materializing_oversized_artifacts() {
+        block_on_inline(async {
+            let mut cache = ArtifactCache::new(MemoryCache::default());
+            let artifact_key = key(b"oversized");
+            cache.publish(&artifact_key, b"oversized").await.unwrap();
+
+            assert_eq!(
+                cache.lookup_bounded(&artifact_key, 4).await,
+                Err(CacheError::TooLarge { size: 9, limit: 4 })
+            );
+            assert_eq!(
+                cache.lookup_bounded(&artifact_key, 9).await.unwrap(),
+                Some(b"oversized".to_vec())
+            );
         });
     }
 

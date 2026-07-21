@@ -114,8 +114,8 @@ struct ServerState {
     client: ClientSocket,
     commands: mpsc::UnboundedSender<Cmd>,
     /// Whether the client supports dynamic registration of `workspace/didChangeWatchedFiles`,
-    /// taken from the `initialize` request. Gates the config watcher registration.
-    config_watch_registration_supported: bool,
+    /// taken from the `initialize` request. Gates project/config watcher registration.
+    watch_registration_supported: bool,
 }
 
 impl ServerState {
@@ -123,7 +123,7 @@ impl ServerState {
         Self {
             client,
             commands,
-            config_watch_registration_supported: false,
+            watch_registration_supported: false,
         }
     }
 
@@ -165,7 +165,7 @@ impl LanguageServer for ServerState {
         &mut self,
         params: InitializeParams,
     ) -> BoxFuture<'static, Result<InitializeResult, Self::Error>> {
-        self.config_watch_registration_supported = params
+        self.watch_registration_supported = params
             .capabilities
             .workspace
             .and_then(|workspace| workspace.did_change_watched_files)
@@ -180,14 +180,14 @@ impl LanguageServer for ServerState {
     }
 
     fn initialized(&mut self, _params: InitializedParams) -> Self::NotifyResult {
-        if self.config_watch_registration_supported {
+        if self.watch_registration_supported {
             let client = self.client.clone();
             // Notification handlers are sync and run on the main-loop task; send the
             // client request from a spawned task so the loop stays free to deliver
             // the response. The registration future touches no `!Send` state.
             tokio::spawn(async move {
                 let _ = client
-                    .request::<request::RegisterCapability>(Self::config_watch_registration())
+                    .request::<request::RegisterCapability>(Self::watch_registration())
                     .await;
             });
         }
@@ -430,16 +430,17 @@ impl LanguageServer for ServerState {
 }
 
 impl ServerState {
-    /// Ask the client to watch `jalsfmt.toml` and `jalslint.toml` files anywhere in the
-    /// workspace, so config edits invalidate the discovery caches without a server restart.
-    fn config_watch_registration() -> RegistrationParams {
+    /// Ask the client to watch workspace files. The actor applies focused config invalidation and
+    /// per-project source/script/dependency policies; one broad glob avoids overlapping duplicate
+    /// events while still covering arbitrary `rerun_if_changed` inputs.
+    fn watch_registration() -> RegistrationParams {
         // `None` kind means create + change + delete.
         let watcher = |glob: &str| FileSystemWatcher {
             glob_pattern: GlobPattern::String(glob.into()),
             kind: None,
         };
         let options = DidChangeWatchedFilesRegistrationOptions {
-            watchers: vec![watcher("**/jalsfmt.toml"), watcher("**/jalslint.toml")],
+            watchers: vec![watcher("**/*")],
         };
         RegistrationParams {
             registrations: vec![Registration {
@@ -599,13 +600,13 @@ mod tests {
     }
 
     #[test]
-    fn config_watch_registration_targets_both_config_files() {
-        let params = ServerState::config_watch_registration();
+    fn watch_registration_uses_one_non_overlapping_project_glob() {
+        let params = ServerState::watch_registration();
         assert_eq!(params.registrations.len(), 1);
         let registration = &params.registrations[0];
         assert_eq!(registration.method, "workspace/didChangeWatchedFiles");
         let options = registration.register_options.as_ref().unwrap();
-        assert_eq!(options["watchers"][0]["globPattern"], "**/jalsfmt.toml");
-        assert_eq!(options["watchers"][1]["globPattern"], "**/jalslint.toml");
+        assert_eq!(options["watchers"].as_array().unwrap().len(), 1);
+        assert_eq!(options["watchers"][0]["globPattern"], "**/*");
     }
 }

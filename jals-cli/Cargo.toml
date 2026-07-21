@@ -32,7 +32,7 @@ ariadne.workspace = true
 clap.workspace = true
 # `native` for the host toolchain (`SubprocessToolchain`): the CLI is the consumer that actually
 # spawns `javac`/`java`. The workspace default is the pure core (`default-features = false`).
-jals-build = { workspace = true, features = ["native"] }
+jals-build = { workspace = true, features = ["native", "rhai"] }
 jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true
@@ -42,11 +42,13 @@ jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 jals-lint.workspace = true
 jals-lsp.workspace = true
+jals-project = { workspace = true, features = ["native"] }
 jals-syntax.workspace = true
 similar.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+zip.workspace = true
 
 [lints]
 workspace = true

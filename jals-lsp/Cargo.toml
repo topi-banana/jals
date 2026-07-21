@@ -7,13 +7,14 @@ edition.workspace = true
 anyhow.workspace = true
 async-lsp = { workspace = true, features = ["tokio"] }
 futures.workspace = true
-jals-build = { workspace = true, features = ["native"] }
+jals-build = { workspace = true, features = ["native", "rhai"] }
 jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true
 jals-editor.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt.workspace = true
+jals-project = { workspace = true, features = ["native"] }
 jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 serde_json.workspace = true

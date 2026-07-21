@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -793,6 +793,138 @@ impl NativeFs {
         Ok(())
     }
 
+    fn materialize_tree(
+        root: &Path,
+        members: &[(FileKey, Vec<u8>)],
+    ) -> core::result::Result<(), CacheError> {
+        match fs::symlink_metadata(root) {
+            Ok(_) => return Self::verify_materialized_tree(root, members),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Self::cache_io_error(root, &error)),
+        }
+
+        let parent = root
+            .parent()
+            .ok_or_else(|| CacheError::Io(format!("path has no parent: {}", root.display())))?;
+        fs::create_dir_all(parent).map_err(|error| Self::cache_io_error(parent, &error))?;
+        let temporary = Self::temporary_path(
+            parent,
+            root.file_name().unwrap_or_else(|| OsStr::new("tree")),
+        );
+        fs::create_dir(&temporary).map_err(|error| Self::cache_io_error(&temporary, &error))?;
+
+        let write_result = (|| {
+            for (path, bytes) in members {
+                let destination = path.path().to_host_path(&temporary);
+                let member_parent = destination.parent().ok_or_else(|| {
+                    CacheError::Io(format!("path has no parent: {}", destination.display()))
+                })?;
+                fs::create_dir_all(member_parent)
+                    .map_err(|error| Self::cache_io_error(member_parent, &error))?;
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination)
+                    .map_err(|error| Self::cache_io_error(&destination, &error))?;
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| Self::cache_io_error(&destination, &error))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(error);
+        }
+
+        match fs::rename(&temporary, root) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temporary);
+                if root.exists() {
+                    Self::verify_materialized_tree(root, members)
+                } else {
+                    Err(Self::cache_io_error(root, &error))
+                }
+            }
+        }
+    }
+
+    fn verify_materialized_tree(
+        root: &Path,
+        members: &[(FileKey, Vec<u8>)],
+    ) -> core::result::Result<(), CacheError> {
+        let metadata =
+            fs::symlink_metadata(root).map_err(|error| Self::cache_io_error(root, &error))?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(CacheError::Corrupt);
+        }
+
+        let mut expected_files = BTreeMap::new();
+        let mut expected_directories = BTreeSet::from([PathBuf::new()]);
+        for (path, bytes) in members {
+            let relative = path.path().to_host_path(Path::new(""));
+            if expected_files
+                .insert(relative.clone(), bytes.clone())
+                .is_some()
+            {
+                return Err(CacheError::Conflict);
+            }
+            expected_directories.extend(relative.ancestors().skip(1).map(Path::to_path_buf));
+        }
+        if expected_files
+            .keys()
+            .any(|path| expected_directories.contains(path))
+        {
+            return Err(CacheError::Conflict);
+        }
+
+        let mut actual_files = BTreeMap::new();
+        let mut actual_directories = BTreeSet::from([PathBuf::new()]);
+        Self::read_materialized_tree(
+            root,
+            Path::new(""),
+            &mut actual_files,
+            &mut actual_directories,
+        )?;
+        if expected_files != actual_files || expected_directories != actual_directories {
+            return Err(CacheError::Corrupt);
+        }
+        Ok(())
+    }
+
+    fn read_materialized_tree(
+        root: &Path,
+        relative: &Path,
+        files: &mut BTreeMap<PathBuf, Vec<u8>>,
+        directories: &mut BTreeSet<PathBuf>,
+    ) -> core::result::Result<(), CacheError> {
+        let directory = root.join(relative);
+        let entries =
+            fs::read_dir(&directory).map_err(|error| Self::cache_io_error(&directory, &error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| Self::cache_io_error(&directory, &error))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| Self::cache_io_error(&path, &error))?;
+            if file_type.is_symlink() {
+                return Err(CacheError::Corrupt);
+            }
+            let child = relative.join(entry.file_name());
+            if file_type.is_dir() {
+                directories.insert(child.clone());
+                Self::read_materialized_tree(root, &child, files, directories)?;
+            } else if file_type.is_file() {
+                let bytes = fs::read(&path).map_err(|error| Self::cache_io_error(&path, &error))?;
+                files.insert(child, bytes);
+            } else {
+                return Err(CacheError::Corrupt);
+            }
+        }
+        Ok(())
+    }
+
     fn temporary_path(parent: &Path, name: &OsStr) -> PathBuf {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let mut temp_name = name.to_os_string();
@@ -843,9 +975,9 @@ impl NativeCache {
 
 impl ArtifactCache<NativeCache> {
     /// Materialize a verified byte artifact under a logical file name for an OS process which
-    /// requires a meaningful extension (notably `javac` source inputs). The canonical cache entry
-    /// remains authoritative; this derived view is created atomically and re-verified on reuse.
-    pub async fn materialize_source(
+    /// requires a meaningful extension. The canonical cache entry remains authoritative; this
+    /// derived view is created atomically and re-verified on reuse.
+    pub async fn materialize_file(
         &self,
         key: &CacheKey,
         logical: &RelativePath,
@@ -869,6 +1001,50 @@ impl ArtifactCache<NativeCache> {
             Ok(path)
         })
         .await
+    }
+
+    /// Compatibility wrapper for callers materializing Java source inputs.
+    pub async fn materialize_source(
+        &self,
+        key: &CacheKey,
+        logical: &RelativePath,
+    ) -> core::result::Result<PathBuf, CacheError> {
+        self.materialize_file(key, logical).await
+    }
+
+    /// Materialize verified artifacts as one immutable classpath directory. Member paths are
+    /// sorted before hashing, so equivalent trees reuse one root regardless of caller iteration
+    /// order. Existing roots are fully checked for missing, changed, or extra entries.
+    pub async fn materialize_tree<'a>(
+        &self,
+        members: impl IntoIterator<Item = (&'a FileKey, &'a CacheKey)>,
+    ) -> core::result::Result<PathBuf, CacheError> {
+        let mut keys = BTreeMap::new();
+        for (path, key) in members {
+            if keys.insert(path.clone(), key.clone()).is_some() {
+                return Err(CacheError::Conflict);
+            }
+        }
+
+        let mut identity = b"jals-storage:materialized-tree-v1".to_vec();
+        let mut verified = Vec::with_capacity(keys.len());
+        for (path, key) in keys {
+            let bytes = self.lookup(&key).await?.ok_or(CacheError::Corrupt)?;
+            let rendered = path.to_string();
+            identity.extend_from_slice(
+                &u64::try_from(rendered.len())
+                    .expect("a path length fits in u64")
+                    .to_be_bytes(),
+            );
+            identity.extend_from_slice(rendered.as_bytes());
+            identity.extend_from_slice(key.content().as_bytes());
+            verified.push((path, bytes));
+        }
+        let digest = ContentDigest::of(&identity);
+        let root = self.backend().root.join("tree-view").join(digest.to_hex());
+        let materialized = root.clone();
+        on_blocking_pool(move || NativeFs::materialize_tree(&materialized, &verified)).await?;
+        Ok(root)
     }
 }
 
@@ -1291,6 +1467,73 @@ mod tests {
             cache.publish(&key, bytes).await.unwrap();
             fs::write(stored, b"tampered").unwrap();
             assert_eq!(cache.lookup(&key).await, Err(CacheError::Corrupt));
+        });
+    }
+
+    #[test]
+    fn generic_file_materialization_retains_the_logical_extension() {
+        run(|_exec| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let bytes = b"jar";
+            let key = CacheKey::new(
+                CacheNamespace::DependencyJar,
+                ContentDigest::of(b"materialized"),
+                ContentDigest::of(bytes),
+            );
+            let mut cache = ArtifactCache::new(NativeCache::new(dir.path().to_path_buf()));
+            cache.publish(&key, bytes).await.unwrap();
+            let logical = RelativePath::parse("dependency/library.jar").unwrap();
+            let path = cache.materialize_file(&key, &logical).await.unwrap();
+            assert_eq!(path.extension().and_then(OsStr::to_str), Some("jar"));
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        });
+    }
+
+    #[test]
+    fn classpath_tree_materialization_reuses_and_verifies_the_complete_tree() {
+        run(|_exec| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cache = ArtifactCache::new(NativeCache::new(dir.path().to_path_buf()));
+            let first = CacheKey::new(
+                CacheNamespace::ExternalClasspath,
+                ContentDigest::of(b"first"),
+                ContentDigest::of(b"first class"),
+            );
+            let second = CacheKey::new(
+                CacheNamespace::ExternalClasspath,
+                ContentDigest::of(b"second"),
+                ContentDigest::of(b"second class"),
+            );
+            cache.publish(&first, b"first class").await.unwrap();
+            cache.publish(&second, b"second class").await.unwrap();
+            let first_path = FileKey::parse("pkg/First.class").unwrap();
+            let second_path = FileKey::parse("pkg/nested/Second.class").unwrap();
+
+            let root = cache
+                .materialize_tree([(&second_path, &second), (&first_path, &first)])
+                .await
+                .unwrap();
+            let reused = cache
+                .materialize_tree([(&first_path, &first), (&second_path, &second)])
+                .await
+                .unwrap();
+            assert_eq!(root, reused);
+            assert_eq!(
+                fs::read(root.join("pkg/First.class")).unwrap(),
+                b"first class"
+            );
+            assert_eq!(
+                fs::read(root.join("pkg/nested/Second.class")).unwrap(),
+                b"second class"
+            );
+
+            fs::write(root.join("pkg/First.class"), b"corrupt").unwrap();
+            assert_eq!(
+                cache
+                    .materialize_tree([(&first_path, &first), (&second_path, &second)])
+                    .await,
+                Err(CacheError::Corrupt)
+            );
         });
     }
 

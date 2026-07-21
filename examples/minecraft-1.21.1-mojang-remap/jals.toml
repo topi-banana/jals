@@ -1,0 +1,9 @@
+[package]
+name = "minecraft-1.21.1-mojang-remap"
+version = "0.1.0"
+
+[build]
+script = { type = "rhai", file = "build.rhai" }
+
+[run]
+main-class = "Main"

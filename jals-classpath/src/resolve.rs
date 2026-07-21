@@ -1,5 +1,6 @@
 //! Deterministic dependency resolution into the project artifact cache.
 
+use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -8,6 +9,7 @@ use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, Name,
     ProjectView,
 };
+use sha1::{Digest as _, Sha1};
 
 use crate::{Fetcher, Warning, WarningOrigin};
 
@@ -47,6 +49,9 @@ impl ExternalLocator {
 pub enum DependencyLocation {
     /// A file in the immutable project revision.
     Project(FileKey),
+    /// An already-published artifact. Resolution verifies the existing bytes and reuses this key
+    /// without fetching or publishing them again.
+    Artifact(CacheKey),
     /// External content. Supplying a digest permits a verified cache hit without fetching.
     External {
         locator: ExternalLocator,
@@ -87,6 +92,146 @@ enum Classified {
 
 /// Stateless dependency resolver. Persistence belongs to [`ArtifactCache`].
 pub struct DependencyResolver;
+
+/// Whether an external-artifact resolution may use the fetch capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    Online,
+    Offline,
+}
+
+/// Expected digest supplied by an external artifact's metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedDigest {
+    Sha1([u8; 20]),
+    Sha256(ContentDigest),
+}
+
+impl ExpectedDigest {
+    pub fn from_hex(algorithm: &str, value: &str) -> Option<Self> {
+        match algorithm {
+            "sha1" => {
+                let bytes = Self::decode_hex::<20>(value)?;
+                Some(Self::Sha1(bytes))
+            }
+            "sha256" => ContentDigest::from_hex(value).map(Self::Sha256),
+            _ => None,
+        }
+    }
+
+    fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+        if value.len() != N * 2 {
+            return None;
+        }
+        let mut out = [0u8; N];
+        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+            let high = char::from(chunk[0]).to_digit(16)?;
+            let low = char::from(chunk[1]).to_digit(16)?;
+            out[index] = u8::try_from((high << 4) | low).ok()?;
+        }
+        Some(out)
+    }
+
+    fn framed_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Sha1(digest) => {
+                let mut bytes = Vec::with_capacity(21);
+                bytes.push(1);
+                bytes.extend_from_slice(&digest);
+                bytes
+            }
+            Self::Sha256(digest) => {
+                let mut bytes = Vec::with_capacity(33);
+                bytes.push(2);
+                bytes.extend_from_slice(digest.as_bytes());
+                bytes
+            }
+        }
+    }
+
+    fn matches(self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Sha1(expected) => Sha1::digest(bytes).as_slice() == expected,
+            Self::Sha256(expected) => ContentDigest::of(bytes) == expected,
+        }
+    }
+}
+
+/// One verified, bounded external artifact request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalArtifactSpec {
+    pub locator: ExternalLocator,
+    pub expected: ExpectedDigest,
+    pub max_bytes: usize,
+    pub namespace: CacheNamespace,
+}
+
+/// Cache-first resolver shared by build tasks and dependency lowering.
+pub struct ExternalArtifactResolver;
+
+impl ExternalArtifactResolver {
+    pub async fn resolve<F: Fetcher, C: CacheBackend>(
+        fetcher: &F,
+        cache: &mut ArtifactCache<C>,
+        spec: &ExternalArtifactSpec,
+        network: NetworkPolicy,
+    ) -> Result<CacheKey, String> {
+        if spec.max_bytes == 0 {
+            return Err("external artifact has a zero byte limit".to_owned());
+        }
+        let provenance = Self::provenance(spec);
+        let cached = match spec.expected {
+            ExpectedDigest::Sha256(content) => {
+                Some(CacheKey::new(spec.namespace, provenance, content))
+            }
+            ExpectedDigest::Sha1(_) => cache
+                .indexed_key(spec.namespace, provenance)
+                .await
+                .ok()
+                .flatten(),
+        };
+        if let Some(key) = cached
+            && let Ok(Some(bytes)) = cache.lookup_bounded(&key, spec.max_bytes).await
+            && spec.expected.matches(&bytes)
+        {
+            return Ok(key);
+        }
+        if network == NetworkPolicy::Offline {
+            return Err(format!(
+                "external artifact `{}` is not available in the verified cache while offline",
+                spec.locator.as_str()
+            ));
+        }
+        let bytes = fetcher
+            .fetch_bounded(spec.locator.as_str(), spec.max_bytes)
+            .await?;
+        if !spec.expected.matches(&bytes) {
+            return Err(format!(
+                "external artifact `{}` digest mismatch",
+                spec.locator.as_str()
+            ));
+        }
+        let key = CacheKey::new(spec.namespace, provenance, ContentDigest::of(&bytes));
+        cache
+            .publish(&key, &bytes)
+            .await
+            .map_err(|error| format!("external artifact cache publish failed: {error:?}"))?;
+        cache
+            .record_index(&key)
+            .await
+            .map_err(|error| format!("external artifact index update failed: {error:?}"))?;
+        Ok(key)
+    }
+
+    fn provenance(spec: &ExternalArtifactSpec) -> ContentDigest {
+        let expected = spec.expected.framed_bytes();
+        let mut bytes = Vec::with_capacity(spec.locator.as_str().len() + expected.len() + 8);
+        bytes.extend_from_slice(&(spec.locator.as_str().len() as u64).to_be_bytes());
+        bytes.extend_from_slice(spec.locator.as_str().as_bytes());
+        bytes.extend_from_slice(&expected);
+        ContentDigest::of(&bytes)
+    }
+}
 
 impl DependencyResolver {
     /// Resolve project and external jars into the cache.
@@ -166,6 +311,17 @@ impl DependencyResolver {
             DependencyLocation::Project(file) => {
                 Some(Self::publish_project(view, cache, spec, file).await)
             }
+            DependencyLocation::Artifact(key) => Some(match cache.open_verified(key).await {
+                Ok(Some(_)) => Ok(key.clone()),
+                Ok(None) => Err(Warning::new(
+                    WarningOrigin::Artifact(key.clone()),
+                    format!("dependency `{}` artifact is not cached", spec.name),
+                )),
+                Err(error) => Err(Warning::new(
+                    WarningOrigin::Artifact(key.clone()),
+                    format!("dependency `{}` artifact is invalid: {error:?}", spec.name),
+                )),
+            }),
             DependencyLocation::External { locator, expected } => {
                 if let Some(content) = expected {
                     let key = Self::cache_key_for_digest(

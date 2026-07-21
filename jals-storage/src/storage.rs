@@ -256,6 +256,21 @@ impl<S: SourceBackend, C: CacheBackend> ProjectStorage<S, C> {
         Ok(self.revision)
     }
 
+    /// Remove unsaved content, revealing the base file when one exists.
+    pub fn remove_overlay(&mut self, expected: Revision, key: &FileKey) -> Result<Revision> {
+        self.check_revision(expected)?;
+        if !self.overlay.contains_key(key) {
+            return Ok(self.revision);
+        }
+        let mut overlay = self.overlay.clone();
+        overlay.remove(key);
+        let tree = Self::build_current(&self.base, &overlay)?;
+        self.overlay = overlay;
+        self.current = Arc::new(tree);
+        self.revision = self.revision.next();
+        Ok(self.revision)
+    }
+
     pub fn transaction(&mut self, expected: Revision) -> Result<Transaction<'_, S, C>> {
         self.check_revision(expected)?;
         let preview = (*self.current).clone();
@@ -331,6 +346,25 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
         next.apply_changes(core::slice::from_ref(&change))?;
         self.preview = next;
         self.staged.push(change);
+        Ok(self)
+    }
+
+    /// Validate and stage one ordered batch with a single preview-tree clone.
+    ///
+    /// This is equivalent to calling the individual staging methods in order, but avoids cloning
+    /// the complete project tree once per file for large generated source trees.
+    pub fn stage_changes(
+        &mut self,
+        changes: impl IntoIterator<Item = Change>,
+    ) -> Result<&mut Self> {
+        let changes: Vec<_> = changes.into_iter().collect();
+        if changes.is_empty() {
+            return Ok(self);
+        }
+        let mut next = self.preview.clone();
+        next.apply_changes(&changes)?;
+        self.preview = next;
+        self.staged.extend(changes);
         Ok(self)
     }
 
@@ -470,6 +504,33 @@ mod tests {
     use jals_exec::block_on_inline;
 
     use super::*;
+
+    #[test]
+    fn stages_a_large_change_batch_against_one_preview() {
+        block_on_inline(async {
+            let mut storage = ProjectStorage::memory(CodeTree::default());
+            let changes = (0..1_000)
+                .map(|index| {
+                    Change::CreateFile(
+                        FileKey::parse(&format!("generated/File{index}.java")).unwrap(),
+                        Vec::from(b"class Generated {}".as_slice()).into(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut transaction = storage.transaction(storage.revision()).unwrap();
+            transaction.stage_changes(changes).unwrap();
+            transaction.commit().await.unwrap();
+
+            assert_eq!(
+                storage
+                    .view()
+                    .tree()
+                    .files_under(&DirKey::parse("generated").unwrap())
+                    .count(),
+                1_000
+            );
+        });
+    }
     use crate::Entry;
 
     fn storage() -> ProjectStorage<MemorySource, MemoryCache> {
@@ -664,6 +725,87 @@ mod tests {
                 .bytes(),
             b"edit"
         );
+    }
+
+    #[test]
+    fn removing_overlay_reveals_base_file() {
+        let mut storage = storage();
+        let key = FileKey::parse("A.java").unwrap();
+        let overlay_revision = storage
+            .set_overlay(storage.revision(), key.clone(), b"edit".to_vec())
+            .unwrap();
+
+        let revision = storage.remove_overlay(overlay_revision, &key).unwrap();
+
+        assert_eq!(revision.get(), overlay_revision.get() + 1);
+        assert_eq!(storage.view().file(&key).unwrap().bytes(), b"old");
+    }
+
+    #[test]
+    fn removing_overlay_only_file_removes_file() {
+        let mut storage = storage();
+        let key = FileKey::parse("B.java").unwrap();
+        let overlay_revision = storage
+            .set_overlay(storage.revision(), key.clone(), b"new".to_vec())
+            .unwrap();
+
+        let revision = storage.remove_overlay(overlay_revision, &key).unwrap();
+
+        assert_eq!(revision.get(), overlay_revision.get() + 1);
+        assert!(matches!(
+            storage.view().file(&key),
+            Err(Error::NotFoundFile(missing)) if missing == key
+        ));
+    }
+
+    #[test]
+    fn removing_overlay_rejects_stale_revision() {
+        let mut storage = storage();
+        let key = FileKey::parse("A.java").unwrap();
+        let stale = storage.revision();
+        let revision = storage
+            .set_overlay(stale, key.clone(), b"edit".to_vec())
+            .unwrap();
+
+        assert!(matches!(
+            storage.remove_overlay(stale, &key),
+            Err(Error::StaleRevision { expected, actual })
+                if expected == stale && actual == revision
+        ));
+        assert_eq!(storage.revision(), revision);
+        assert_eq!(storage.view().file(&key).unwrap().bytes(), b"edit");
+    }
+
+    #[test]
+    fn removing_missing_overlay_is_noop() {
+        let mut storage = storage();
+        let key = FileKey::parse("A.java").unwrap();
+        let revision = storage.revision();
+
+        assert_eq!(storage.remove_overlay(revision, &key).unwrap(), revision);
+        assert_eq!(storage.revision(), revision);
+        assert_eq!(storage.view().file(&key).unwrap().bytes(), b"old");
+    }
+
+    #[test]
+    fn removing_overlay_preserves_other_overlays() {
+        let mut storage = storage();
+        let first = FileKey::parse("A.java").unwrap();
+        let other = FileKey::parse("B.java").unwrap();
+        let revision = storage
+            .set_overlays(
+                storage.revision(),
+                [
+                    (first.clone(), b"first".to_vec()),
+                    (other.clone(), b"other".to_vec()),
+                ],
+            )
+            .unwrap();
+
+        storage.remove_overlay(revision, &first).unwrap();
+
+        assert_eq!(storage.view().file(&first).unwrap().bytes(), b"old");
+        assert_eq!(storage.view().file(&other).unwrap().bytes(), b"other");
     }
 
     #[test]

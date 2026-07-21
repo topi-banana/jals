@@ -18,9 +18,12 @@ use core::error::Error;
 use core::fmt;
 use core::str::FromStr;
 
+use jals_storage::{DirKey, FileKey};
 use serde::Deserialize;
 
 use crate::toolchain::Toolchain;
+
+const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 
 /// A parsed `jals.toml` project manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -203,6 +206,16 @@ pub enum DependencyError {
         /// The dependency's name.
         name: String,
     },
+    /// A `git` field's value starts with `-`, so the `git` CLI would read it as an option rather
+    /// than a URL or ref.
+    OptionLike {
+        /// The dependency's name.
+        name: String,
+        /// Which field carried the bad value (`"git"`, `"branch"`, `"tag"`, or `"rev"`).
+        field: &'static str,
+        /// The offending value.
+        value: String,
+    },
 }
 
 impl fmt::Display for DependencyError {
@@ -220,6 +233,11 @@ impl fmt::Display for DependencyError {
                 f,
                 "git dependency `{name}` specifies more than one of `branch`, `tag`, `rev` \
                  (use at most one)"
+            ),
+            Self::OptionLike { name, field, value } => write!(
+                f,
+                "git dependency `{name}` has a `{field}` starting with `-` (`{value}`), which the \
+                 `git` CLI would read as an option rather than a value"
             ),
         }
     }
@@ -577,9 +595,15 @@ impl FeatureSet {
 }
 
 /// Compilation settings (`[build]`).
+///
+/// Unknown keys are rejected. Every nested shape here already denies them, and the failure mode
+/// without it is bad: misspelling `script` as `scripts` silently disables the build script, so the
+/// generated sources never appear and `javac` fails with an unrelated "cannot find symbol".
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Build {
+    /// Optional project build script.
+    pub script: Option<BuildScript>,
     /// Source roots, relative to the manifest directory. These feed `javac`'s `-sourcepath` and
     /// are the roots scanned for `.java` files. Defaults to `["src/main/java"]`.
     pub source_dirs: Vec<String>,
@@ -598,6 +622,26 @@ pub struct Build {
     /// Extra raw flags appended verbatim after the generated `javac` arguments (before the source
     /// files). An escape hatch for anything the manifest does not model yet.
     pub javac_flags: Vec<String>,
+}
+
+/// A project build script selected by its `type` field.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BuildScript {
+    /// A Rhai build script stored at a project-relative portable file path.
+    Rhai {
+        /// The script file, relative to the project root.
+        file: String,
+    },
+}
+
+impl BuildScript {
+    /// The value of the script's serialized `type` tag.
+    pub const fn tag_name(&self) -> &'static str {
+        match self {
+            Self::Rhai { .. } => "rhai",
+        }
+    }
 }
 
 /// Run settings (`[run]`).
@@ -629,6 +673,7 @@ pub struct Bin {
 impl Default for Build {
     fn default() -> Self {
         Self {
+            script: None,
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
             release: None,
@@ -703,6 +748,27 @@ impl Dependency {
                         field: "git",
                     });
                 }
+                // These values become `git` CLI arguments. A leading `-` makes the CLI read them
+                // as options instead: `branch = "-f"` turns `git checkout --quiet -f` into a
+                // no-op that *succeeds*, silently resolving the dependency to the default branch
+                // rather than the requested one. Reject the shape rather than rely on argument
+                // order downstream.
+                for (field, value) in [
+                    ("git", Some(&git.git)),
+                    ("branch", git.branch.as_ref()),
+                    ("tag", git.tag.as_ref()),
+                    ("rev", git.rev.as_ref()),
+                ] {
+                    if let Some(value) = value
+                        && value.starts_with('-')
+                    {
+                        return Err(DependencyError::OptionLike {
+                            name: name.to_owned(),
+                            field,
+                            value: value.clone(),
+                        });
+                    }
+                }
                 git.git_ref(name).map(|_| ())
             }
             Self::Path(path) => {
@@ -763,11 +829,45 @@ impl Manifest {
     ///
     /// Checks the `[[bin]]` table: every bin needs a non-empty `name` and `main-class`, names must
     /// be unique, and `[package] default-run` (when set) must name a declared bin. Also applies each
-    /// `[dependencies]` entry's value-level checks (see [`Dependency::validate`]).
+    /// `[dependencies]` entry's value-level checks (see [`Dependency::validate`]) and requires a
+    /// configured build script to name a non-root portable project file outside every directory
+    /// removed by `jals clean`.
     ///
     /// # Errors
     /// Returns [`ValidationError`] describing the first problem found.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        // `classes-dir` may legitimately be a host path (`invocation` supports an absolute one),
+        // so a value that is not a portable project path is left to the host. The one shape that
+        // must be rejected here is the project root: `RelativePath::parse` maps the empty string
+        // to it, and `jals clean` removes this directory recursively, so accepting it would
+        // delete the whole project.
+        let classes_dir = DirKey::parse(&self.build.classes_dir).ok();
+        if classes_dir.as_ref().is_some_and(|dir| dir.path().is_root()) {
+            return Err(ValidationError::InvalidClassesDir {
+                dir: self.build.classes_dir.clone(),
+            });
+        }
+        if let Some(BuildScript::Rhai { file }) = &self.build.script {
+            let script = FileKey::parse(file)
+                .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
+            // A script is always a portable project path, so it cannot be inside a `classes-dir`
+            // that is not one.
+            if classes_dir
+                .as_ref()
+                .is_some_and(|dir| script.path().starts_with(dir.path()))
+            {
+                return Err(ValidationError::BuildScriptInClassesDir {
+                    file: file.clone(),
+                    classes_dir: self.build.classes_dir.clone(),
+                });
+            }
+            let managed_root = DirKey::parse(MANAGED_BUILD_ROOT)
+                .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
+            if script.path().starts_with(managed_root.path()) {
+                return Err(ValidationError::BuildScriptInManagedRoot { file: file.clone() });
+            }
+        }
+
         let mut seen: Vec<&str> = Vec::with_capacity(self.bin.len());
         for bin in &self.bin {
             if bin.name.is_empty() {
@@ -904,6 +1004,28 @@ impl Error for ManifestParseError {
 /// came from — the host [`ManifestParseError`] / `jals-build`'s `ManifestError` add the path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
+    /// `[build] classes-dir` is not a non-root portable project directory path.
+    InvalidClassesDir {
+        /// The invalid compiler output directory.
+        dir: String,
+    },
+    /// A `[build] script.file` is not a non-root portable project file path.
+    InvalidBuildScriptFile {
+        /// The invalid script file value.
+        file: String,
+    },
+    /// A `[build] script.file` is inside `target/jals/build`, which `jals clean` owns and removes.
+    BuildScriptInManagedRoot {
+        /// The unsafe script file value.
+        file: String,
+    },
+    /// A `[build] script.file` is inside `classes-dir`, which `jals clean` owns and removes.
+    BuildScriptInClassesDir {
+        /// The unsafe script file value.
+        file: String,
+        /// The compiler output directory containing the script.
+        classes_dir: String,
+    },
     /// Two `[[bin]]` entries share a `name`.
     DuplicateBin {
         /// The duplicated bin name.
@@ -930,6 +1052,22 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidClassesDir { dir } => write!(
+                f,
+                "invalid `[build] classes-dir` `{dir}`: expected a non-root portable project directory path"
+            ),
+            Self::InvalidBuildScriptFile { file } => write!(
+                f,
+                "invalid `[build] script.file` `{file}`: expected a non-root portable file path"
+            ),
+            Self::BuildScriptInManagedRoot { file } => write!(
+                f,
+                "invalid `[build] script.file` `{file}`: scripts must be outside `target/jals/build`, which `jals clean` removes"
+            ),
+            Self::BuildScriptInClassesDir { file, classes_dir } => write!(
+                f,
+                "invalid `[build] script.file` `{file}`: scripts must be outside `[build] classes-dir` `{classes_dir}`, which `jals clean` removes"
+            ),
             Self::DuplicateBin { name } => {
                 write!(f, "duplicate `[[bin]]` name `{name}`")
             }
@@ -962,6 +1100,7 @@ mod tests {
     #[test]
     fn defaults_to_maven_layout() {
         let m = Manifest::default();
+        assert_eq!(m.build.script, None);
         assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.build.release, None);
@@ -972,6 +1111,220 @@ mod tests {
         assert_eq!(m.run.main_class, None);
         assert!(m.bin.is_empty());
         assert!(m.dependencies.is_empty());
+    }
+
+    #[test]
+    fn parses_build_script_inline_and_dotted_syntax() {
+        let m: Manifest = r#"
+            [build]
+            script = { type = "rhai", file = "build.rhai" }
+            "#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            m.build.script,
+            Some(BuildScript::Rhai {
+                file: "build.rhai".to_owned(),
+            })
+        );
+
+        let m: Manifest = "build.script = { type = \"rhai\", file = \"scripts/build.rhai\" }\n"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            m.build.script,
+            Some(BuildScript::Rhai {
+                file: "scripts/build.rhai".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_build_script_table_syntax() {
+        let m: Manifest = r#"
+            [build.script]
+            type = "rhai"
+            file = "build.rhai"
+            "#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            m.build.script,
+            Some(BuildScript::Rhai {
+                file: "build.rhai".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn build_script_tag_name_matches_serde_tag() {
+        let script = BuildScript::Rhai {
+            file: "build.rhai".to_owned(),
+        };
+        assert_eq!(script.tag_name(), "rhai");
+    }
+
+    #[test]
+    fn build_script_rejects_missing_and_unknown_fields() {
+        for text in [
+            "[build]\nscript = { file = \"build.rhai\" }\n",
+            "[build]\nscript = { type = \"rhai\" }\n",
+            "[build]\nscript = { type = \"unknown\", file = \"build.rhai\" }\n",
+            "[build]\nscript = { type = \"rhai\", file = \"build.rhai\", extra = true }\n",
+            "[build.script]\ntype = \"rhai\"\nfile = \"build.rhai\"\nextra = true\n",
+        ] {
+            assert!(
+                toml::from_str::<Manifest>(text).is_err(),
+                "invalid build script parsed: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_script_file_must_be_a_non_root_portable_file_key() {
+        for file in ["../build.rhai", ""] {
+            let text =
+                alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");
+            let error = text.parse::<Manifest>().unwrap_err();
+            let ManifestParseError::Invalid { source, .. } = error else {
+                panic!("invalid build script file must be a validation error");
+            };
+            assert_eq!(
+                source,
+                ValidationError::InvalidBuildScriptFile {
+                    file: file.to_owned(),
+                }
+            );
+            assert_eq!(
+                alloc::format!("{source}"),
+                alloc::format!(
+                    "invalid `[build] script.file` `{file}`: expected a non-root portable file path"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn build_script_file_must_be_outside_the_managed_build_root() {
+        for file in [
+            "target/jals/build",
+            "target/jals/build/build.rhai",
+            "target/jals/build/rhai/out/build.rhai",
+        ] {
+            let text =
+                alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");
+            let error = text.parse::<Manifest>().unwrap_err();
+            let ManifestParseError::Invalid { source, .. } = error else {
+                panic!("managed build script file must be a validation error");
+            };
+            assert_eq!(
+                source,
+                ValidationError::BuildScriptInManagedRoot {
+                    file: file.to_owned(),
+                }
+            );
+            assert!(source.to_string().contains("`jals clean` removes"));
+        }
+    }
+
+    #[test]
+    fn build_script_file_must_be_outside_the_classes_dir() {
+        let error = r#"
+            [build]
+            classes-dir = "out"
+            script = { type = "rhai", file = "out/build.rhai" }
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("script inside classes-dir must be a validation error");
+        };
+        assert_eq!(
+            source,
+            ValidationError::BuildScriptInClassesDir {
+                file: "out/build.rhai".to_owned(),
+                classes_dir: "out".to_owned(),
+            }
+        );
+        assert!(source.to_string().contains("`jals clean` removes"));
+    }
+
+    /// `invocation` supports an absolute `classes-dir`, and `source-dirs` may reach outside the
+    /// project. Requiring a portable project path for either would break projects that worked
+    /// before build scripts existed.
+    #[test]
+    fn accepts_a_host_path_classes_dir() {
+        for dir in ["/tmp/out", "../out"] {
+            let manifest: Manifest = alloc::format!("[build]\nclasses-dir = \"{dir}\"\n")
+                .parse()
+                .unwrap_or_else(|error| {
+                    panic!("`classes-dir = {dir:?}` must stay accepted: {error}")
+                });
+            assert_eq!(manifest.build.classes_dir, dir);
+        }
+    }
+
+    /// Misspelling `script` used to parse cleanly and leave `script: None`, so the build script
+    /// never ran and the only symptom was `javac` failing on the sources it would have generated.
+    #[test]
+    fn rejects_an_unknown_build_key() {
+        let error = r#"
+            [build]
+            scripts = { type = "rhai", file = "build.rhai" }
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        assert!(
+            matches!(error, ManifestParseError::Parse { .. }),
+            "an unknown `[build]` key must not parse: {error:?}"
+        );
+    }
+
+    /// `jals clean` removes `classes-dir` recursively, so a value resolving to the project root
+    /// would delete the entire project — including files `jals` never generated. The empty string
+    /// parses to the root, so it has to be rejected here rather than relied on to fail later.
+    #[test]
+    fn rejects_a_root_classes_dir() {
+        let error = r#"
+            [build]
+            classes-dir = ""
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("a root classes-dir must be a validation error");
+        };
+        assert_eq!(
+            source,
+            ValidationError::InvalidClassesDir { dir: String::new() }
+        );
+        assert!(source.to_string().contains("non-root"));
+    }
+
+    #[test]
+    fn build_script_is_optional_for_legacy_build_configuration() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [build]
+            source-dirs = ["src", "generated"]
+            classes-dir = "out"
+            release = 21
+            source = 17
+            target = 17
+            classpath = ["lib/a.jar"]
+            javac-flags = ["-Xlint:all"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(m.build.script, None);
+        assert_eq!(m.build.source_dirs, alloc::vec!["src", "generated"]);
+        assert_eq!(m.build.classes_dir, "out");
+        assert_eq!(m.build.release, Some(21));
+        assert_eq!(m.build.source, Some(17));
+        assert_eq!(m.build.target, Some(17));
+        assert_eq!(m.build.classpath, alloc::vec!["lib/a.jar"]);
+        assert_eq!(m.build.javac_flags, alloc::vec!["-Xlint:all"]);
     }
 
     #[test]
@@ -1433,6 +1786,41 @@ mod tests {
                 name: "r".to_owned()
             })
         );
+    }
+
+    /// These values are passed to the `git` CLI. A leading `-` makes git read them as options:
+    /// `git checkout --quiet -f` exits 0 without switching refs, so the dependency would silently
+    /// resolve to the default branch instead of the one the manifest asked for.
+    #[test]
+    fn rejects_option_like_git_values() {
+        for (field, toml) in [
+            ("git", r#"repo = { git = "--upload-pack=touch /tmp/x" }"#),
+            (
+                "branch",
+                r#"repo = { git = "https://example.invalid/r.git", branch = "-f" }"#,
+            ),
+            (
+                "tag",
+                r#"repo = { git = "https://example.invalid/r.git", tag = "--x" }"#,
+            ),
+            (
+                "rev",
+                r#"repo = { git = "https://example.invalid/r.git", rev = "-abc" }"#,
+            ),
+        ] {
+            let manifest: Manifest =
+                toml::from_str(&alloc::format!("[dependencies]\n{toml}\n")).unwrap();
+            let error = manifest
+                .dependencies
+                .get("repo")
+                .unwrap()
+                .validate("repo")
+                .unwrap_err();
+            assert!(
+                matches!(&error, DependencyError::OptionLike { field: f, .. } if *f == field),
+                "`{field}` must be rejected, got {error:?}"
+            );
+        }
     }
 
     #[test]

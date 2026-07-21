@@ -27,6 +27,8 @@
 //! core.
 
 #![cfg_attr(not(feature = "native"), no_std)]
+#[cfg(feature = "rhai")]
+pub mod build_script;
 #[cfg(feature = "native")]
 mod builtin;
 mod clean;
@@ -38,6 +40,8 @@ mod manifest_ext;
 #[cfg(feature = "native")]
 mod request;
 mod target;
+#[cfg(feature = "rhai")]
+pub mod task;
 #[cfg(feature = "native")]
 mod toolchain;
 

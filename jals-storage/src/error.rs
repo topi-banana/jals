@@ -23,6 +23,8 @@ pub enum PathError {
     Drive,
     Unc,
     FileIsRoot,
+    /// A directory key that must name a real subdirectory resolved to the project root itself.
+    DirectoryIsRoot,
     InvalidName(NameError),
 }
 
@@ -39,6 +41,7 @@ pub enum CacheError {
     Conflict,
     Corrupt,
     DigestMismatch,
+    TooLarge { size: u64, limit: usize },
     Io(String),
 }
 

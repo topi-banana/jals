@@ -181,6 +181,7 @@ impl ProjectWorkspace {
             project_root,
             storage,
             source_roots,
+            Vec::new(),
             classfiles,
             library_sources,
             source_dep_sources,
@@ -216,6 +217,7 @@ impl ProjectWorkspace {
         project_root: PathBuf,
         storage: NativeStorage,
         source_roots: Vec<DirKey>,
+        project_sources: Vec<FileKey>,
         classfiles: &[jals_classfile::ClassFile],
         library_sources: Vec<FileKey>,
         source_dep_sources: Vec<FileKey>,
@@ -224,6 +226,7 @@ impl ProjectWorkspace {
     ) -> Self {
         let spec = ProjectLayout {
             source_roots,
+            project_sources,
             classpath: ProjectIndex::lower_classpath(classfiles).await,
             library_sources,
             source_dep_sources,
@@ -265,6 +268,7 @@ impl ProjectWorkspace {
         &self.project_root
     }
 
+    /// Publish a fresh native snapshot and rebuild the index while preserving editor overlays.
     pub(crate) async fn refresh(&mut self) {
         let _ = self.editor.workspace_mut().refresh().await;
     }

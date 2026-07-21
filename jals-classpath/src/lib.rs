@@ -13,26 +13,38 @@ mod skeleton;
 
 #[cfg(feature = "archive")]
 mod load;
+#[cfg(feature = "archive")]
+mod mappings;
 #[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "archive")]
 mod project;
 #[cfg(feature = "archive")]
+mod remap;
+#[cfg(feature = "archive")]
 mod zip;
 
 pub use io::Fetcher;
 pub use resolve::{
-    DependencyLocation, DependencyResolver, DependencySpec, ExternalLocator, ResolvedDependencies,
-    ResolvedJar,
+    DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
+    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, NetworkPolicy,
+    ResolvedDependencies, ResolvedJar,
 };
-pub use skeleton::{SkeletonGroup, Skeletons};
+pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 
 #[cfg(feature = "archive")]
-pub use load::{CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction};
+pub use load::{
+    CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree, SourceTreeExtraction,
+    SourceTreeLimits,
+};
+#[cfg(feature = "archive")]
+pub use mappings::Mappings;
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
 #[cfg(feature = "archive")]
 pub use project::{ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile};
+#[cfg(feature = "archive")]
+pub use remap::{JarMerge, JarRemap, NestedJar};
 
 use alloc::string::String;
 use jals_storage::{CacheKey, DirKey, FileKey, RelativePath};

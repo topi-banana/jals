@@ -244,11 +244,15 @@ impl Runtime for BuiltinToolchain {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use jals_config::Manifest;
     use jals_exec::block_on_inline;
     use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
     use super::*;
+
+    static EMPTY_ENV: BTreeMap<String, String> = BTreeMap::new();
 
     fn toolchain(files: &[(&str, &str)]) -> BuiltinToolchain {
         let entries = files.iter().map(|(path, text)| {
@@ -269,6 +273,8 @@ mod tests {
             sources,
             extra_sources,
             extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &EMPTY_ENV,
         }
     }
 
@@ -345,9 +351,11 @@ mod tests {
         let req = RunRequest {
             manifest: &manifest,
             project_root: Path::new("/proj"),
+            jvm_args: &[],
             main_class: "com.example.Main",
             program_args: &[],
             extra_classpath: &[],
+            run_env: &BTreeMap::new(),
         };
         assert!(block_on_inline(toolchain.run(&req)).unwrap().success());
         assert_eq!(
@@ -385,6 +393,8 @@ mod tests {
             sources: &[],
             extra_sources: &sources,
             extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &BTreeMap::new(),
         };
         let destination = BuiltinToolchain::plan_copies(&request).pop().unwrap().1;
         let toolchain = BuiltinToolchain {
