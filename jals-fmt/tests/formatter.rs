@@ -450,6 +450,27 @@ fn trailing_line_comment_on_brace_forces_break() {
 }
 
 #[test]
+fn dots_never_glue_into_an_ellipsis() {
+    // Two dots stay apart even though `..` lexes back as two dots: the pairwise fusion net cannot
+    // see a *third* dot joining the run into one `...`. Here a comment separates the last dot from
+    // the first two in the source, and hoisting it to the end of the line brings all three
+    // together — so gluing them would make the second pass read `...` and re-space it.
+    check(
+        "class{../** c */.classclassclass",
+        expect![[r"
+            class {. . .classclassclass /** c */
+        "]],
+    );
+}
+
+#[test]
+fn dots_separated_by_a_comment_are_idempotent() {
+    let once = fmt("class{../** c */.classclassclass");
+    let twice = fmt(&once);
+    assert_eq!(once, twice, "format must be idempotent");
+}
+
+#[test]
 fn binary_operators_spaced() {
     check(
         "class C{boolean b=a>>2==c&&d>=e;}",
