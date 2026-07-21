@@ -85,6 +85,12 @@ fn switches_color() -> ClassFile {
     ))
 }
 
+fn fake_ordinal() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/FakeOrdinal.class"
+    ))
+}
+
 fn int_carried() -> ClassFile {
     fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/IntCarried.class"
@@ -1249,6 +1255,26 @@ fn an_enum_switch_bails_without_the_enum_class() {
     // Without the enum in the index the ordinals cannot be named, and `switch (c.ordinal())` with
     // numeric labels is not what the source said — fall back instead.
     assert!(decompile(method(&cf, "onEnum"), &cf, &["c".to_owned()]).is_none());
+}
+
+#[test]
+fn a_non_enum_ordinal_switch_keeps_the_plain_int_reading() {
+    let cf = fake_ordinal();
+    // `ordinal()` on a class that resolves and is not an enum is just a method — the switch is an
+    // ordinary `int` one, not a lowering, so it must recover rather than decline.
+    let body = decompile(method(&cf, "onFake"), &cf, &["f".to_owned()]).expect("onFake decompiles");
+    assert_eq!(
+        body,
+        [
+            "switch (f.ordinal()) {",
+            "    case 1:",
+            "        return 1;",
+            "    case 2:",
+            "        return 2;",
+            "}",
+            "return 0;",
+        ]
+    );
 }
 
 #[test]

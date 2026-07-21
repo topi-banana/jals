@@ -73,11 +73,21 @@ impl Subject {
         }
         // `enum`: the selector is `<receiver>.ordinal()`, and the keys are ordinals.
         if let Some(owner) = last.and_then(|ins| Self::ordinal_call_owner(ins, pool)) {
-            let Expr::Call { recv, .. } = expr else {
-                return None;
-            };
-            let constants = Self::enum_constants(&owner, hierarchy)?;
-            return Some((*recv?, Labels::Enum(constants)));
+            match hierarchy.class(&owner) {
+                // A class that resolves and is *not* an enum simply has an `ordinal()` method of
+                // its own, so this is an ordinary `int` switch — keep the plain reading rather
+                // than decline a method that is perfectly recoverable.
+                Some(cf) if !cf.access_flags.is_enum() => {}
+                // An enum, or a class not in the index (which may well be one): the ordinals must
+                // be named or there is no faithful reading of the labels.
+                _ => {
+                    let Expr::Call { recv, .. } = expr else {
+                        return None;
+                    };
+                    let constants = Self::enum_constants(&owner, hierarchy)?;
+                    return Some((*recv?, Labels::Enum(constants)));
+                }
+            }
         }
         Some((expr, if is_char { Labels::Char } else { Labels::Int }))
     }
