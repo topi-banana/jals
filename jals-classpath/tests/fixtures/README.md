@@ -27,6 +27,10 @@ cp out/demo/Arrays.class jals-classpath/tests/fixtures/
 
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/Cmp.java
 cp out/demo/Cmp.class jals-classpath/tests/fixtures/
+# Switches (M8 switch structuring) — the nested enum is part of the fixture, since an enum switch's
+# case labels are recovered from the enum class:
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/Switches.java
+cp out/demo/Switches.class 'out/demo/Switches$Color.class' jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/IntCarried.java
 cp out/demo/IntCarried.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/InvokeSpecialCalls.java
@@ -76,6 +80,8 @@ package, no debug info) and its source is not committed.
 | `Concat.class` | `src/Concat.java` | M6 string concatenation via `invokedynamic makeConcatWithConstants`: recipe chunks, String/int/char/double/boolean operands, a vanished `""` operand (the `""`-seed case), a marker-bearing constant passed as a bootstrap argument (the U+0002 path), a LambdaMetafactory call site that must bail, and a discarded `new` expression statement |
 | `Sb.class` | `src/Sb.java` | M6 string concatenation via `StringBuilder` chains (`-XDstringConcat=inline`): foldable append runs (String/int/boolean, a constant char appended as an int, an empty-String anchor), plus chains that must stay calls — no `toString()`, consumed by `length()`, discarded as a statement, or appended onto a parameter |
 | `Cmp.class` | `src/Cmp.java` | M7 numeric comparison conditions: a `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` fused into the following `if<cond>` across all six operators and both NaN flavors, in `if`/`while`/`do`-`while`, plus the two bails — a NaN-inexact rendering (`!(f < g)`, `fcmpg` + `iflt`) and a `*cmp` feeding a ternary's value merge |
+| `Switches.class` | `src/Switches.java` | M8 `switch` structuring: both table encodings, stacked labels sharing one arm, a `tableswitch` gap key, deliberate fall-through, every join shape (break-derived, a `default`-less fall-out, all-arms-`return`), `default` written in the middle, an `if` and an `if`/`else` inside an arm, an arm whose inner `if` breaks while its tail `return`s (no unreachable trailing `break;`), `char` labels, an `enum` switch recovered to constant names, and a `String` switch that still falls back |
+| `Switches$Color.class` | `src/Switches.java` | The enum `Switches.onEnum` switches on — its `<clinit>` is where the `ordinal -> constant name` map comes from |
 | `IntCarried.class` | `src/IntCarried.java` | Type-directed recovery of JVM int-carried `boolean`/`char` values in returns, locals, fields, ordinary call arguments/results, and arrays; integer-zero tests versus boolean negation; explicit `i2c` and literal char casts, including a lone surrogate code unit |
 | `InvokeSpecialCalls.class`, `InvokeSpecialBase.class`, `InvokeSpecialDefault.class` | `src/InvokeSpecialCalls.java` | Non-constructor `invokespecial` dispatch to a direct superclass (`super.m()`) and direct interface default (`Interface.super.m()`), plus the complete hierarchy needed to prove the qualified call and explicit argument-bearing `super(...)` constructor delegation |
 | `hierarchy-evolution/v1/evolution/*.class` | `src/hierarchy-evolution/v1/HierarchyEvolution.java` | An old client with two legal interface-super calls, a shared-default diamond, and its complete original hierarchy |

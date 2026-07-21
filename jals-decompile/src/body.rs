@@ -4,12 +4,12 @@
 //! simulated as typed [`Expr`] trees, and each instruction either rewrites the stack or emits a
 //! [`Stmt`]. The control layer ([`Structurer`]) builds a CFG ([`crate::cfg`]) and recovers structured
 //! Java from it — a straight-line method is one block, forward conditional branches become
-//! `if` / `if`-`else`, and back-edges become `while` / `do`-`while` loops. Both layers are
-//! deliberately conservative: anything not modelled (a `switch`, a `try`/`catch`, a
-//! `break`/`continue` or nested/irreducible loop, a non-string-concat `invokedynamic`, an exotic
-//! stack shuffle, or a control-flow shape that is not a clean tree) makes the whole method fall
-//! back to the caller's safe body — so the output is always valid Java, never a half-built or
-//! mis-structured body.
+//! `if` / `if`-`else`, back-edges become `while` / `do`-`while` loops, and a multi-way branch
+//! becomes a `switch`. Both layers are deliberately conservative: anything not modelled (a
+//! `try`/`catch`, a loop `break`/`continue` or nested/irreducible loop, a non-string-concat
+//! `invokedynamic`, an exotic stack shuffle, or a control-flow shape that is not a clean tree)
+//! makes the whole method fall back to the caller's safe body — so the output is always valid
+//! Java, never a half-built or mis-structured body.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -27,9 +27,10 @@ use jals_exec::{LocalBoxFuture, Yielder};
 
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
-use crate::expr::{ArrayForm, ConcatPart, Expr, Stmt};
+use crate::expr::{ArrayForm, ConcatPart, Expr, Stmt, SwitchArm};
 use crate::hierarchy::ClassHierarchy;
 use crate::literal::Literal;
+use crate::switch::Subject;
 use crate::types::JavaType;
 
 /// Namespace for method-body decompilation: the entry point and its slot / declaration pre-passes.
@@ -1527,12 +1528,13 @@ impl Sim<'_, '_> {
                 }
             },
 
-            // Everything else — branches, switches, `jsr`/`ret`, monitors, `wide` loads, a
-            // `*cmp` not fused into its block's conditional branch (the fused form is read by
-            // `Structurer::branch_condition`, never stepped), exotic stack shuffles
-            // (`dup2`/`dup_x*`/`swap`, so compound element assignment like `arr[i]++`) — is not
-            // yet modelled. Bail so the caller keeps its safe body. (A non-string-concat
-            // `invokedynamic` bails inside `invoke_dynamic`.)
+            // Everything else — `jsr`/`ret`, monitors, `wide` loads, a `*cmp` not fused into its
+            // block's conditional branch (the fused form is read by `Structurer::branch_condition`,
+            // never stepped), exotic stack shuffles (`dup2`/`dup_x*`/`swap`, so compound element
+            // assignment like `arr[i]++`) — is not yet modelled. Bail so the caller keeps its safe
+            // body. (A non-string-concat `invokedynamic` bails inside `invoke_dynamic`. Branches
+            // and switches never reach here at all: `Block::body` strips a block's terminator, and
+            // the structurer reads it together with the operands it left on the stack.)
             _ => return None,
         }
         Some(())
@@ -1722,7 +1724,7 @@ impl Structurer<'_, '_> {
     async fn structure(&self) -> Option<Vec<Stmt>> {
         let n = self.cfg.blocks.len();
         let mut visited = vec![false; n];
-        let stmts = self.emit_region(0, n, n, &mut visited).await?;
+        let stmts = self.emit_region(0, n, n, None, &mut visited).await?;
         if visited.iter().any(|&seen| !seen) {
             return None;
         }
@@ -1736,19 +1738,27 @@ impl Structurer<'_, '_> {
         lo: usize,
         hi: usize,
         exit: usize,
+        break_target: Option<usize>,
         visited: &'a mut [bool],
     ) -> LocalBoxFuture<'a, Option<Vec<Stmt>>> {
-        Box::pin(self.emit_region(lo, hi, exit, visited))
+        Box::pin(self.emit_region(lo, hi, exit, break_target, visited))
     }
 
     /// Structure the single-entry region of blocks `[lo, hi)` (entered at `lo`), whose normal exit is
     /// block `exit` (reached by a fall-through or `goto`). Returns the statements, or `None` on any
     /// shape that is not a clean acyclic tree.
+    ///
+    /// `break_target`, when set, is the block a `goto` out of this region may reach by rendering a
+    /// `break;` — the join of the enclosing `switch`. Only [`Self::structure_switch`] sets it, for
+    /// its arm regions; an `if`'s then/else regions inherit it (a `break` inside an `if` inside an
+    /// arm does bind to the switch), but [`Self::structure_loop`] deliberately clears it, because a
+    /// bare `break` inside a loop binds to the *loop*, which is not yet recovered.
     async fn emit_region(
         &self,
         lo: usize,
         hi: usize,
         exit: usize,
+        break_target: Option<usize>,
         visited: &mut [bool],
     ) -> Option<Vec<Stmt>> {
         let mut out = Vec::new();
@@ -1769,9 +1779,15 @@ impl Structurer<'_, '_> {
             visited[b] = true;
             let (mut stmts, cond_stack, cmp) = self.run_block(b).await?;
             out.append(&mut stmts);
-            // Only a conditional-branch block may leave operands (its condition) on the stack; a
-            // leftover on any other terminator means we mis-read the block, so bail.
-            if !cond_stack.is_empty() && !matches!(self.cfg.blocks[b].term, Term::Branch { .. }) {
+            // Only a conditional-branch block (its condition) or a switch block (its selector) may
+            // leave operands on the stack; a leftover on any other terminator means we mis-read the
+            // block, so bail.
+            if !cond_stack.is_empty()
+                && !matches!(
+                    self.cfg.blocks[b].term,
+                    Term::Branch { .. } | Term::Switch { .. }
+                )
+            {
                 return None;
             }
             match &self.cfg.blocks[b].term {
@@ -1788,8 +1804,21 @@ impl Structurer<'_, '_> {
                 Term::Ret | Term::Throw => {
                     b += 1;
                 }
+                Term::Switch { .. } => {
+                    let (stmt, join) = self.structure_switch(b, hi, cond_stack, visited).await?;
+                    out.push(stmt);
+                    b = join;
+                }
                 Term::Goto(target) => {
                     if *target == exit {
+                        break;
+                    }
+                    // Inside a `switch` arm, a `goto` past the arm to the switch's join is the
+                    // arm's `break;`. Tested *after* `exit` so the last arm's trailing jump — which
+                    // already is the join — renders as plain fall-out rather than a redundant
+                    // `break;` (an unreachable statement would follow it).
+                    if Some(*target) == break_target {
+                        out.push(Stmt::Break);
                         break;
                     }
                     return None;
@@ -1801,24 +1830,44 @@ impl Structurer<'_, '_> {
                 } => {
                     let (instr, taken, fallthrough) = (*instr, *taken, *fallthrough);
                     let cond = Self::branch_condition(&self.code[instr], true, cmp, cond_stack)?;
-                    // Acyclic only: the fall-through is the next block and the taken edge is forward
-                    // and within this region. A back-edge (loop) or a jump out is not yet structured.
-                    if fallthrough != b + 1 || taken <= b || taken > hi {
+                    // Acyclic only: the fall-through is the next block and the taken edge is forward.
+                    // A back-edge (loop) is not yet structured.
+                    if fallthrough != b + 1 || taken <= b {
                         return None;
+                    }
+                    if taken > hi {
+                        // The skip lands past this region. That is structured only when it lands on
+                        // the region's own exit — an `if` that is the *tail* of a `switch` arm skips
+                        // to the switch's join, which is past the arm. The `then` is then the rest of
+                        // the region, and the region is done.
+                        if taken != exit {
+                            return None;
+                        }
+                        let then = self
+                            .emit_region_boxed(fallthrough, hi, exit, break_target, visited)
+                            .await?;
+                        out.push(Stmt::If {
+                            cond,
+                            then,
+                            els: Vec::new(),
+                        });
+                        break;
                     }
                     // If the block just before `taken` jumps forward past it, that is the `else`'s
                     // trailing skip: `taken..e` is the `else` and `e` the join; otherwise no `else`.
                     let (then, els, join) = match self.cfg.blocks[taken - 1].term {
                         Term::Goto(e) if e > taken && e <= hi => {
                             let then = self
-                                .emit_region_boxed(fallthrough, taken, e, visited)
+                                .emit_region_boxed(fallthrough, taken, e, break_target, visited)
                                 .await?;
-                            let els = self.emit_region_boxed(taken, e, e, visited).await?;
+                            let els = self
+                                .emit_region_boxed(taken, e, e, break_target, visited)
+                                .await?;
                             (then, els, e)
                         }
                         _ => {
                             let then = self
-                                .emit_region_boxed(fallthrough, taken, taken, visited)
+                                .emit_region_boxed(fallthrough, taken, taken, break_target, visited)
                                 .await?;
                             (then, Vec::new(), taken)
                         }
@@ -1884,9 +1933,16 @@ impl Structurer<'_, '_> {
     fn loop_latch(&self, header: usize) -> Option<usize> {
         let mut latch = None;
         for (b, block) in self.cfg.blocks.iter().enumerate().skip(header) {
-            let targets_header = match block.term {
-                Term::Goto(t) => t == header,
-                Term::Branch { taken, .. } => taken == header,
+            let targets_header = match &block.term {
+                Term::Goto(t) => *t == header,
+                Term::Branch { taken, .. } => *taken == header,
+                // A switch edge back to the header counts too. The point is not to *find* such a
+                // loop — `structure_loop` declines a `Switch` latch — but to see the second
+                // back-edge, so a header that a `goto` and a switch case both target is rejected as
+                // multi-latch instead of being mis-structured as a single-latch loop.
+                Term::Switch { default, cases } => {
+                    *default == header || cases.iter().any(|&(_, t)| t == header)
+                }
                 _ => false,
             };
             if targets_header {
@@ -1925,8 +1981,11 @@ impl Structurer<'_, '_> {
                 }
                 // Body: the forward region `[header, latch)` that flows into the latch, then the
                 // latch's own statements finish the body (its leftover operands are the condition).
+                // `None`: a bare `break` inside a loop binds to the loop, not to an enclosing
+                // `switch`, so an edge out of the loop to a switch join must bail (it needs a
+                // label) rather than render as `break;`.
                 let mut body = self
-                    .emit_region_boxed(header, latch, latch, visited)
+                    .emit_region_boxed(header, latch, latch, None, visited)
                     .await?;
                 Self::claim(visited, latch)?;
                 let (mut tail, cond_stack, cmp) = self.run_block(latch).await?;
@@ -1956,12 +2015,172 @@ impl Structurer<'_, '_> {
                 }
                 let cond = Self::branch_condition(&self.code[instr], true, cmp, cond_stack)?;
                 // The body `[body_start, latch]` exits back to the header (the latch's goto-back).
+                // `None` for the same reason as the `do`-`while` arm above.
                 let body = self
-                    .emit_region_boxed(body_start, latch + 1, header, visited)
+                    .emit_region_boxed(body_start, latch + 1, header, None, visited)
                     .await?;
                 Some((Stmt::While { cond, body }, exit))
             }
             _ => None,
+        }
+    }
+
+    /// Structure the multi-way branch terminating block `b` into a [`Stmt::Switch`], returning the
+    /// statement and the block to resume at (the switch's join).
+    ///
+    /// `javac` lays case bodies out contiguously in source order right after the switch, so layout
+    /// order *is* source order: the arms are the half-open block ranges between consecutive targets
+    /// and they partition `[b + 1, join)` exactly. Keys sharing a target become one arm with stacked
+    /// labels (`case 1: case 2:`) — which is also how a `tableswitch`'s gap keys vanish, since they
+    /// point at `default` rather than at a body of their own.
+    ///
+    /// Deriving the join is the delicate part, because `structure`'s "every block emitted exactly
+    /// once" guard is *asymmetric* here. A join that is too small leaves blocks unvisited and that
+    /// guard bails; a join that is too large still visits every block exactly once — just nested
+    /// inside the wrong arm, which the guard cannot see. So the join is only ever taken from an edge
+    /// the switch's own arms name, never guessed from the surrounding layout.
+    async fn structure_switch(
+        &self,
+        b: usize,
+        hi: usize,
+        mut stack: Vec<StackValue>,
+        visited: &mut [bool],
+    ) -> Option<(Stmt, usize)> {
+        let Term::Switch { default, cases } = &self.cfg.blocks[b].term else {
+            return None;
+        };
+        let default = *default;
+
+        // The selector is the single `int`-typed operand the switch instruction would have popped
+        // (`is_int_numeric` admits `byte`/`char`/`short`/`int` and excludes `boolean`), read back
+        // through the lowering `javac` applied — a `char` widening or an `enum`'s `ordinal()`.
+        let value = stack.pop()?;
+        if !stack.is_empty() {
+            return None;
+        }
+        let is_char = matches!(value.ty, StackType::Field(FieldType::Base(BaseType::Char)));
+        let expr = Sim::int_numeric_expr(value)?;
+        let last_instr = self.code[self.cfg.blocks[b].body()].last();
+        let (selector, labels) =
+            Subject::recover(expr, is_char, last_instr, self.pool, self.hierarchy)?;
+
+        let mut arm_starts: Vec<usize> = cases.iter().map(|&(_, target)| target).collect();
+        arm_starts.push(default);
+        arm_starts.sort_unstable();
+        arm_starts.dedup();
+        let (&first, &last) = (arm_starts.first()?, arm_starts.last()?);
+        // Forward only, inside this region, and entered immediately after the switch block.
+        if first != b + 1 || last > hi {
+            return None;
+        }
+
+        // Read the join off the *boundary* blocks — the last block of each non-final arm, which is
+        // where a `break` sits. A `goto` nested deeper inside an arm (an inner `if`'s skip) is never
+        // consulted, so it can never be mistaken for the switch's own exit.
+        let mut boundary_exit = None;
+        let mut boundaries_all_exit = true;
+        for pair in arm_starts.windows(2) {
+            match self.cfg.blocks[pair[1] - 1].term {
+                Term::Goto(e) => {
+                    if *boundary_exit.get_or_insert(e) != e {
+                        // Two arms disagree about where the switch ends.
+                        return None;
+                    }
+                }
+                // The arm cannot reach the join at all, so it says nothing about where it is.
+                Term::Ret | Term::Throw => {}
+                _ => boundaries_all_exit = false,
+            }
+        }
+        let join = match boundary_exit {
+            // An arm breaks out, and that edge names the join outright.
+            Some(e) => {
+                if e < last || e > hi {
+                    return None;
+                }
+                e
+            }
+            // No arm breaks. The one join nameable without guessing is the last target, and only
+            // when `default` points at it: a switch with no source `default:` is exactly the one
+            // whose default offset `javac` aims at the fall-out.
+            None if default == last && arm_starts.len() >= 2 => last,
+            // Otherwise, if every arm before the last exits outright and the region itself ends by
+            // exiting, nothing after the switch is reachable, so the last arm runs to the region
+            // end. This is the `default:`-in-the-middle shape, where the fall-out is not a target.
+            None if boundaries_all_exit
+                && matches!(self.cfg.blocks[hi - 1].term, Term::Ret | Term::Throw) =>
+            {
+                hi
+            }
+            None => return None,
+        };
+
+        // A join that coincides with the last target means that target is not an arm at all — it is
+        // the fall-out of a `default`-less switch. Dropping it drops the keys aimed at it too, which
+        // is right: they label no body.
+        if join == last {
+            if default != join {
+                return None;
+            }
+            arm_starts.pop();
+        }
+        if arm_starts.is_empty() {
+            return None;
+        }
+
+        let mut arms = Vec::with_capacity(arm_starts.len());
+        for (i, &lo) in arm_starts.iter().enumerate() {
+            // An arm spans up to the next arm's start (or the join, for the last one). Where it
+            // *leaves* is a different question: an arm whose last block falls into the next one is a
+            // source fall-through and exits there, emitting no `break`; every other arm exits at the
+            // join.
+            let arm_hi = arm_starts.get(i + 1).copied().unwrap_or(join);
+            let falls_through = matches!(self.cfg.blocks[arm_hi - 1].term, Term::Fall(_));
+            let exit = if falls_through { arm_hi } else { join };
+            let mut keys: Vec<i32> = cases
+                .iter()
+                .filter_map(|&(key, target)| (target == lo).then_some(key))
+                .collect();
+            keys.sort_unstable();
+            let is_default = default == lo;
+            if keys.is_empty() && !is_default {
+                return None;
+            }
+            let labels = keys
+                .into_iter()
+                .map(|key| labels.render(key))
+                .collect::<Option<Vec<_>>>()?;
+            let mut body = self
+                .emit_region_boxed(lo, arm_hi, exit, Some(join), visited)
+                .await?;
+            // A `break;` is needed exactly when the arm *ends* by reaching the join and another
+            // arm follows it (for the last arm, falling out of the switch *is* the break). This is
+            // read from the arm's last block rather than from the recovered statements, so an arm
+            // whose tail `return`s never gets an unreachable trailing `break;` — not even when an
+            // inner `if` breaks out along some other path.
+            if !falls_through && i + 1 < arm_starts.len() && self.reaches(arm_hi - 1, join) {
+                body.push(Stmt::Break);
+            }
+            arms.push(SwitchArm {
+                labels,
+                is_default,
+                body,
+            });
+        }
+        Some((Stmt::Switch { selector, arms }, join))
+    }
+
+    /// Whether block `from` has any control-flow edge to block `to`.
+    fn reaches(&self, from: usize, to: usize) -> bool {
+        match &self.cfg.blocks[from].term {
+            Term::Fall(next) | Term::Goto(next) => *next == to,
+            Term::Branch {
+                taken, fallthrough, ..
+            } => *taken == to || *fallthrough == to,
+            Term::Switch { default, cases } => {
+                *default == to || cases.iter().any(|&(_, target)| target == to)
+            }
+            Term::Ret | Term::Throw => false,
         }
     }
 

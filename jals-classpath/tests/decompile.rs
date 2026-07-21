@@ -300,6 +300,8 @@ fn every_generated_fixture_is_valid_java() {
         include_bytes!("fixtures/Concat.class"),
         include_bytes!("fixtures/Sb.class"),
         include_bytes!("fixtures/Cmp.class"),
+        include_bytes!("fixtures/Switches.class"),
+        include_bytes!("fixtures/Switches$Color.class"),
         include_bytes!("fixtures/IntCarried.class"),
         include_bytes!("fixtures/InvokeSpecialCalls.class"),
         include_bytes!("fixtures/InvokeSpecialBase.class"),

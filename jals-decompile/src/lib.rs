@@ -17,6 +17,7 @@ mod cfg;
 mod expr;
 mod hierarchy;
 mod literal;
+mod switch;
 mod types;
 
 pub use attrs::Attrs;
