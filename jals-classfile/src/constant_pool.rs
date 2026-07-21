@@ -528,7 +528,7 @@ mod tests {
             "",
             "plain/Ascii",
             "nul\0inside",
-            "caf\u{e9}",
+            "café",
             "\u{1F600} emoji",
             "\u{10FFFF}",
         ] {
