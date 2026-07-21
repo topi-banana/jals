@@ -2154,14 +2154,12 @@ impl Structurer<'_, '_> {
             let mut body = self
                 .emit_region_boxed(lo, arm_hi, exit, Some(join), visited)
                 .await?;
-            // A `break;` is needed exactly when the arm can reach the join and another arm follows
-            // it (for the last arm, falling out of the switch *is* the break). Whether the join is
-            // reachable is read from the arm's own edges rather than from the recovered statements,
-            // so an arm all of whose paths `return` never gets an unreachable trailing `break;`.
-            if !falls_through
-                && i + 1 < arm_starts.len()
-                && (lo..arm_hi).any(|inner| self.reaches(inner, join))
-            {
+            // A `break;` is needed exactly when the arm *ends* by reaching the join and another
+            // arm follows it (for the last arm, falling out of the switch *is* the break). This is
+            // read from the arm's last block rather than from the recovered statements, so an arm
+            // whose tail `return`s never gets an unreachable trailing `break;` — not even when an
+            // inner `if` breaks out along some other path.
+            if !falls_through && i + 1 < arm_starts.len() && self.reaches(arm_hi - 1, join) {
                 body.push(Stmt::Break);
             }
             arms.push(SwitchArm {

@@ -3,7 +3,8 @@ package demo;
 // Provenance for Switches.class — exercises the M8 switch structuring: the two table encodings,
 // stacked labels, fall-through, every join shape javac produces (a break-derived join, a
 // default-less fall-out, all-arms-return), a default written first / in the middle, nested
-// conditionals inside an arm, and the two desugared switches that must still fall back.
+// conditionals inside an arm, an arm whose paths break and return, and the two desugared switches
+// that must still fall back.
 // Compiled with `javac` (JDK 25):
 //     javac -parameters -g -d out jals-classpath/tests/fixtures/src/Switches.java
 //     cp out/demo/Switches*.class jals-classpath/tests/fixtures/
@@ -126,6 +127,24 @@ public class Switches {
                 break;
         }
         this.value = this.value + 1;
+    }
+
+    // An arm with two exits: an inner `if` that breaks out, and a tail that returns. The arm as a
+    // whole reaches the join, but its *tail* does not — so no trailing `break;` may be emitted
+    // after the `return`, which JLS 14.21 would reject as unreachable.
+    public int breakThenReturnInArm(int x, boolean y) {
+        int r = 0;
+        switch (x) {
+            case 1:
+                if (y) {
+                    r = 1;
+                    break;
+                }
+                return -1;
+            case 2:
+                r = 2;
+        }
+        return r;
     }
 
     // A switch on `char`.

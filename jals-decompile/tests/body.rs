@@ -1175,6 +1175,37 @@ fn structures_an_if_else_inside_an_arm_as_a_guard_and_a_tail() {
 }
 
 #[test]
+fn an_arm_that_breaks_from_an_if_but_returns_at_its_tail_gets_no_trailing_break() {
+    let cf = switches();
+    let body = decompile(
+        method(&cf, "breakThenReturnInArm"),
+        &cf,
+        &["x".to_owned(), "y".to_owned()],
+    )
+    .expect("breakThenReturnInArm decompiles");
+    // The arm reaches the join through the inner `if`, but its *tail* returns. A `break;` after
+    // that `return` would be an unreachable statement (JLS 14.21) and would not compile.
+    assert_eq!(
+        body,
+        [
+            "int r;",
+            "r = 0;",
+            "switch (x) {",
+            "    case 1:",
+            "        if (y) {",
+            "            r = 1;",
+            "            break;",
+            "        }",
+            "        return -1;",
+            "    case 2:",
+            "        r = 2;",
+            "}",
+            "return r;",
+        ]
+    );
+}
+
+#[test]
 fn a_char_switch_recovers_character_labels() {
     let cf = switches();
     let body = decompile(method(&cf, "vowel"), &cf, &["c".to_owned()]).expect("vowel decompiles");
