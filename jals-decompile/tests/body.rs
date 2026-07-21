@@ -73,6 +73,18 @@ fn cmp() -> ClassFile {
     ))
 }
 
+fn switches() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Switches.class"
+    ))
+}
+
+fn switches_color() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Switches$Color.class"
+    ))
+}
+
 fn int_carried() -> ClassFile {
     fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/IntCarried.class"
@@ -965,4 +977,253 @@ fn cmp_feeding_a_ternary_still_bails() {
     let cf = cmp();
     let names = ["a".to_owned(), "b".to_owned()];
     assert!(decompile(method(&cf, "least"), &cf, &names).is_none());
+}
+
+#[test]
+fn structures_a_dense_switch_with_breaks_and_no_default() {
+    let cf = switches();
+    let body = decompile(method(&cf, "dense"), &cf, &["x".to_owned()]).expect("dense decompiles");
+    // The last arm needs no `break;` — falling out of the switch is the same thing — and javac
+    // aims the default offset at the fall-out, so the join comes from the arms' break edges.
+    assert_eq!(
+        body,
+        [
+            "switch (x) {",
+            "    case 0:",
+            "        this.value = 10;",
+            "        break;",
+            "    case 1:",
+            "        this.value = 11;",
+            "        break;",
+            "    case 2:",
+            "        this.value = 12;",
+            "}",
+            "this.value = this.value + 1;",
+        ]
+    );
+}
+
+#[test]
+fn structures_a_sparse_lookupswitch_with_a_default() {
+    let cf = switches();
+    let body = decompile(method(&cf, "sparse"), &cf, &["x".to_owned()]).expect("sparse decompiles");
+    assert_eq!(
+        body,
+        [
+            "int r;",
+            "switch (x) {",
+            "    case 1:",
+            "        r = 100;",
+            "        break;",
+            "    case 100:",
+            "        r = 1;",
+            "        break;",
+            "    default:",
+            "        r = -1;",
+            "}",
+            "return r;",
+        ]
+    );
+}
+
+#[test]
+fn keys_sharing_an_arm_become_stacked_labels() {
+    let cf = switches();
+    let body =
+        decompile(method(&cf, "stacked"), &cf, &["x".to_owned()]).expect("stacked decompiles");
+    // `case 1:` and `case 2:` share one body, and the `tableswitch` gap key 3 — which only
+    // `default` covers — never becomes a label. The trailing `default: return 0;` is bytecode-
+    // identical to the same `return` sitting after the switch, so it reads back as the latter.
+    assert_eq!(
+        body,
+        [
+            "switch (x) {",
+            "    case 1:",
+            "    case 2:",
+            "        return 12;",
+            "    case 4:",
+            "        return 4;",
+            "}",
+            "return 0;",
+        ]
+    );
+}
+
+#[test]
+fn an_arm_running_into_the_next_stays_a_fall_through() {
+    let cf = switches();
+    let body = decompile(method(&cf, "fallThrough"), &cf, &["x".to_owned()])
+        .expect("fallThrough decompiles");
+    // `case 1` gets no `break;` — it really does run on into `case 2`.
+    assert_eq!(
+        body,
+        [
+            "int r;",
+            "r = 0;",
+            "switch (x) {",
+            "    case 1:",
+            "        r = r + 1;",
+            "    case 2:",
+            "        r = r + 2;",
+            "        break;",
+            "    case 3:",
+            "        r = r + 3;",
+            "}",
+            "return r;",
+        ]
+    );
+}
+
+#[test]
+fn structures_a_switch_whose_arms_all_return() {
+    let cf = switches();
+    let body =
+        decompile(method(&cf, "allReturn"), &cf, &["x".to_owned()]).expect("allReturn decompiles");
+    // No arm can reach the join, so none gets a `break;`, and the join is named by the default
+    // offset rather than by any edge out of an arm.
+    assert_eq!(
+        body,
+        [
+            "switch (x) {",
+            "    case 0:",
+            "        return 10;",
+            "    case 1:",
+            "        return 11;",
+            "}",
+            "return -1;",
+        ]
+    );
+}
+
+#[test]
+fn keeps_a_default_written_between_two_cases_in_place() {
+    let cf = switches();
+    let body = decompile(method(&cf, "defaultMiddle"), &cf, &["x".to_owned()])
+        .expect("defaultMiddle decompiles");
+    assert_eq!(
+        body,
+        [
+            "switch (x) {",
+            "    case 1:",
+            "        return 1;",
+            "    default:",
+            "        return 0;",
+            "    case 5:",
+            "        return 5;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn structures_a_plain_if_inside_an_arm() {
+    let cf = switches();
+    let body = decompile(
+        method(&cf, "ifInArm"),
+        &cf,
+        &["x".to_owned(), "y".to_owned()],
+    )
+    .expect("ifInArm decompiles");
+    // The `if` is the tail of its arm, so its skip edge lands on the switch's join rather than
+    // inside the arm.
+    assert_eq!(
+        body,
+        [
+            "switch (x) {",
+            "    case 1:",
+            "        if (y) {",
+            "            this.value = 1;",
+            "        }",
+            "        break;",
+            "    case 2:",
+            "        this.value = 2;",
+            "}",
+            "this.value = this.value + 1;",
+        ]
+    );
+}
+
+#[test]
+fn structures_an_if_else_inside_an_arm_as_a_guard_and_a_tail() {
+    let cf = switches();
+    let body = decompile(
+        method(&cf, "ifElseInArm"),
+        &cf,
+        &["x".to_owned(), "y".to_owned()],
+    )
+    .expect("ifElseInArm decompiles");
+    // javac rewrites the then-branch's exit `goto` straight to the switch join, past the arm, so
+    // the recovered shape is a guard that breaks rather than a symmetric if/else. Wordier than the
+    // source, but exactly what the bytecode does.
+    assert_eq!(
+        body,
+        [
+            "switch (x) {",
+            "    case 1:",
+            "        if (y) {",
+            "            this.value = 1;",
+            "            break;",
+            "        }",
+            "        this.value = 2;",
+            "        break;",
+            "    case 2:",
+            "        this.value = 3;",
+            "}",
+            "this.value = this.value + 1;",
+        ]
+    );
+}
+
+#[test]
+fn a_char_switch_recovers_character_labels() {
+    let cf = switches();
+    let body = decompile(method(&cf, "vowel"), &cf, &["c".to_owned()]).expect("vowel decompiles");
+    assert_eq!(
+        body,
+        [
+            "switch (c) {",
+            "    case 'a':",
+            "    case 'e':",
+            "        return 1;",
+            "}",
+            "return 0;",
+        ]
+    );
+}
+
+#[test]
+fn an_enum_switch_recovers_constant_labels() {
+    let classes = [switches(), switches_color()];
+    let cf = &classes[0];
+    let body = decompile_with_hierarchy(method(cf, "onEnum"), cf, &["c".to_owned()], &classes)
+        .expect("onEnum decompiles");
+    // javac switches on `ordinal()`; the constant names come back out of the enum's `<clinit>`.
+    assert_eq!(
+        body,
+        [
+            "switch (c) {",
+            "    case RED:",
+            "        return 1;",
+            "    case GREEN:",
+            "        return 2;",
+            "}",
+            "return 0;",
+        ]
+    );
+}
+
+#[test]
+fn an_enum_switch_bails_without_the_enum_class() {
+    let cf = switches();
+    // Without the enum in the index the ordinals cannot be named, and `switch (c.ordinal())` with
+    // numeric labels is not what the source said — fall back instead.
+    assert!(decompile(method(&cf, "onEnum"), &cf, &["c".to_owned()]).is_none());
+}
+
+#[test]
+fn a_string_switch_bails() {
+    let cf = switches();
+    // javac lowers it to a hashCode()/equals() pre-dispatch through two synthetic locals that the
+    // `LocalVariableTable` does not name, so the method has no confident reading.
+    assert!(decompile(method(&cf, "onString"), &cf, &["s".to_owned()]).is_none());
 }

@@ -90,8 +90,9 @@ impl JavaType {
 | `attrs.rs` | Read the attributes a signature skeleton needs: `ConstantValue` (→ field initializer, a boolean's `1`→`true`), `Exceptions` (→ non-generic `throws`), `MethodParameters` / `LocalVariableTable` (→ real, slot-aware parameter names). |
 | `expr.rs` | The expression / statement IR (`Expr`, `Stmt`) and its rendering to indented Java, with conservative parenthesization so the grouping the bytecode evaluated is preserved. |
 | `hierarchy.rs` | A deterministic immutable index over loaded class files. It validates complete, cycle-free supertype closures and the JLS 15.12.1/15.12.3 conditions before permitting `Interface.super.m()`. |
-| `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators. Bails on `switch` / `jsr` / a branch to a non-instruction offset. |
-| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`) from the CFG. `MethodBody::decompile` is the entry point. |
+| `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators (including the multi-way `switch`, with both table encodings normalized to `(key, target)` pairs). Bails on `jsr` / a malformed or implausibly large switch table / a branch to a non-instruction offset. |
+| `switch.rs` | What a `switch` was written *on*: reads `javac`'s selector lowerings back, so `case` labels render as `'a'` / `RED` rather than the code units and ordinals the bytecode carries. |
+| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`, `switch`) from the CFG. `MethodBody::decompile` is the entry point. |
 
 ## How a method body is reconstructed
 
@@ -100,11 +101,12 @@ impl JavaType {
 2. **Map parameter slots to names** from the signature's parameter names, bailing on a count mismatch
    so the body never references a parameter the signature does not declare.
 3. **Build the CFG** (`cfg::build`): per-instruction offsets via `Instruction::encoded_len`, leaders
-   at the entry / every branch target / after every branch or exit, then basic blocks with `Fall` /
-   `Goto` / `Branch` / `Ret` / `Throw` terminators.
+   at the entry / every branch or switch target / after every branch or exit, then basic blocks with
+   `Fall` / `Goto` / `Branch` / `Switch` / `Ret` / `Throw` terminators.
 4. **Structure the CFG** (`Structurer`): walk the blocks as a single-entry region, running each block
-   through the stack machine and folding forward conditional branches into `if` / `if`-`else` and
-   natural loops (a block targeted by a back-edge) into `while` / `do`-`while`. A forward `if`
+   through the stack machine and folding forward conditional branches into `if` / `if`-`else`,
+   natural loops (a block targeted by a back-edge) into `while` / `do`-`while`, and multi-way
+   branches into `switch` (see M8). A forward `if`
    condition is the *negation* of the branch's jump test (the branch skips the `then` body); a
    top-test `while` condition is likewise the negation of its exit branch, while a `do`-`while`
    condition is the branch's own (positive) test (it jumps back to repeat). A
@@ -337,14 +339,74 @@ public double halve(double d) {
 }
 ```
 
-Still falling back to the M0 placeholder (see roadmap): `switch`, `try`/`catch`.
+### M8 — `switch` &nbsp;✅ done
+
+Structures `tableswitch` / `lookupswitch` into a `switch` statement, in the classic colon form —
+the one that can express the fall-through the bytecode actually encodes. Keys sharing a target
+become one arm with stacked labels (`case 1: case 2:`), which is also how a `tableswitch`'s gap keys
+disappear: they point at `default`, not at a body.
+
+The delicate part is finding the switch's **join**, because the structurer's "every block emitted
+exactly once" guard is asymmetric here — a join that is too small leaves blocks unvisited and bails,
+but a join that is too large still visits every block exactly once, just nested inside the wrong
+arm. So the join is only ever taken from an edge the switch's own arms name: the `goto` at the end
+of an arm (all such edges must agree), or, when no arm breaks, the `default` target — because a
+switch with no source `default:` is exactly the one whose default offset `javac` aims at the
+fall-out. Nothing is inferred from the surrounding layout.
+
+The selector is read back through the lowering `javac` applied, so labels are spelled the way they
+were written rather than as the `int` the table dispatches on: a `char` switch recovers character
+literals, and an `enum` switch — which `javac` lowers to a switch on `ordinal()` — recovers the
+constant names from the enum class's `<clinit>`, where each constant's name and ordinal are passed
+together to its constructor. Requiring that pushed name to match the field it is stored into is what
+makes the mapping authoritative rather than an assumption about emission order.
+
+```java
+public void dense(int x) {
+    switch (x) {
+        case 0:
+            this.value = 10;
+            break;
+        case 1:
+            this.value = 11;
+            break;
+        case 2:
+            this.value = 12;
+    }
+    this.value = this.value + 1;
+}
+public int onEnum(demo.Switches.Color c) {
+    switch (c) {
+        case RED:
+            return 1;
+        case GREEN:
+            return 2;
+    }
+    return 0;
+}
+```
+
+Faithfulness notes. An arm gets a `break;` only when it can actually reach the join and another arm
+follows it — read from the arm's own edges, not from the recovered statements, so an arm all of
+whose paths `return` never gets an unreachable trailing `break;`. Because `javac` rewrites an arm's
+inner `goto`s straight to the join, an `if`/`else` inside an arm reads back as a guard that breaks
+(`if (y) { …; break; } …; break;`) rather than a symmetric `if`/`else` — wordier than the source,
+but exactly what the bytecode does. A trailing `default:` arm whose body is bytecode-identical to
+the same statements sitting *after* the switch reads back as the latter, since the two compile to
+the same code. Falling back still: a `String` switch (its two-stage `hashCode()`/`equals()`
+pre-dispatch runs through synthetic locals the `LocalVariableTable` does not name), an `enum` switch
+whose enum class is not in the index, the older `$SwitchMap$` enum lowering (its array lives in a
+synthetic class a skeleton never renders), a switch reached by a back-edge, and any arm whose shape
+is not a clean region.
+
+Still falling back to the M0 placeholder (see roadmap): `try`/`catch`.
 
 ## Supported vs. not (yet)
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
 | Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static, same-owner private `invokespecial`, direct `super.m()`, hierarchy-proven direct `Interface.super.m()`), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored comparison), `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a non-constructor `invokespecial` outside the current/direct hierarchy or with a non-`this` super receiver, an interface-super call with missing/duplicate/cyclic/evolved/conflicting hierarchy facts or generic method-selection uncertainty, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
-| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean) | `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a NaN-inexact fused `*cmp` (`!(a < b)`), `switch`, `try`/`catch`/`finally`, any other non-tree shape |
+| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean), `switch` (`tableswitch` / `lookupswitch` → colon-form arms with stacked labels, fall-through, and `char` / `enum` label recovery) | loop `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a NaN-inexact fused `*cmp` (`!(a < b)`), a `String` switch or an `enum` switch whose enum class is absent or uses the `$SwitchMap$` lowering, a switch whose join no arm names or that is reached by a back-edge, `try`/`catch`/`finally`, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
 Java, just not (yet) a real body.
@@ -355,10 +417,11 @@ Remaining milestones, roughly in priority order. Each is an independent incremen
 safe-fallback invariant. (Local variables — the old first roadmap entry — shipped as M3, and loops as
 M4 on top of it, since a loop's induction variable is itself a local.)
 
-- **`switch`** — structure `tableswitch` / `lookupswitch` into a `switch` statement.
 - **`try` / `catch` / `finally`** — structure the exception table.
 - **Richer loops** — `break` / `continue` (labeled), nested loops, and `for`-loop recovery (folding
   the init / update back into a `for` header instead of rendering as `while`).
+- **Richer `switch`** — the `String` two-stage lowering and the older `$SwitchMap$` enum lowering
+  (both still fall back), and arrow-form arms where no arm falls through.
 - **Expression polish** — ternary (`?:`) and short-circuit (`&&` / `||`) from small diamonds
   (string concatenation shipped as M6, long/float/double comparisons in conditions as M7),
   enhanced-`for`, `instanceof`, and `i++` / `i += n` / `arr[i]++` sugar (the `dup2` stack shuffles).
@@ -368,7 +431,8 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
-  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`, `IntCarried.class`,
+  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`, `Switches.class` +
+  `Switches$Color.class`, `IntCarried.class`,
   `InvokeSpecialCalls.class`, hierarchy-evolution fixtures) and assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
   `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton from the fixture corpus
