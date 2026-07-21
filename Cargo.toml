@@ -59,7 +59,7 @@ jals-syntax = { path = "jals-syntax" }
 miniz_oxide = { version = "0.9", default-features = false, features = [
   "with-alloc",
 ] }
-num-derive = { version = "0.4.2" }
+num-derive = { version = "0.5.1" }
 num-traits = { version = "0.2.19" }
 rayon = { version = "1" }
 # Host-only (jals-classpath downloads dependency jars). `rustls-tls` for pure-Rust TLS (no system
