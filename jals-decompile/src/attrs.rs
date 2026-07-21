@@ -21,6 +21,75 @@ use crate::types::JavaType;
 pub struct Attrs;
 
 impl Attrs {
+    /// Whether `s` is a word a Java parser cannot read as a declaration name: one of the 50
+    /// reserved keywords, a literal keyword (`true`/`false`/`null`), the bare `_` (reserved since
+    /// Java 9), or a restricted/contextual keyword that is unsafe in that position (`var`, `yield`,
+    /// `record`, `sealed`, `permits`, `when`).
+    fn is_java_keyword(s: &str) -> bool {
+        matches!(
+            s,
+            "_" | "abstract"
+                | "assert"
+                | "boolean"
+                | "break"
+                | "byte"
+                | "case"
+                | "catch"
+                | "char"
+                | "class"
+                | "const"
+                | "continue"
+                | "default"
+                | "do"
+                | "double"
+                | "else"
+                | "enum"
+                | "extends"
+                | "false"
+                | "final"
+                | "finally"
+                | "float"
+                | "for"
+                | "goto"
+                | "if"
+                | "implements"
+                | "import"
+                | "instanceof"
+                | "int"
+                | "interface"
+                | "long"
+                | "native"
+                | "new"
+                | "null"
+                | "package"
+                | "permits"
+                | "private"
+                | "protected"
+                | "public"
+                | "record"
+                | "return"
+                | "sealed"
+                | "short"
+                | "static"
+                | "strictfp"
+                | "super"
+                | "switch"
+                | "synchronized"
+                | "this"
+                | "throw"
+                | "throws"
+                | "transient"
+                | "true"
+                | "try"
+                | "var"
+                | "void"
+                | "volatile"
+                | "when"
+                | "while"
+                | "yield"
+        )
+    }
+
     /// A static field's `ConstantValue` rendered as a Java initializer expression (the text after
     /// `=`), or `None` if the field has no constant value or it cannot be rendered.
     ///
@@ -104,7 +173,8 @@ impl Attrs {
     }
 
     /// A method's real source parameter names, in order, or `None` if they cannot be recovered
-    /// confidently (no debug info, a count mismatch, or a name that is not a valid identifier).
+    /// confidently (no debug info, a count mismatch, a name that is not a valid identifier, or a
+    /// duplicate name — Java forbids two parameters sharing one name).
     ///
     /// `arity` is the number of source parameters the caller renders; the result, when `Some`, has
     /// that length.
@@ -141,7 +211,7 @@ impl Attrs {
                 return None;
             }
             let name = pool.utf8(entry.name_index)?.into_owned();
-            if !Self::is_java_identifier(&name) {
+            if !Self::is_java_identifier(&name) || names.contains(&name) {
                 return None;
             }
             names.push(name);
@@ -176,7 +246,7 @@ impl Attrs {
                 .find(|e| e.index == slot && e.start_pc == 0)
                 .and_then(|e| pool.utf8(e.name_index))
                 .map(alloc::borrow::Cow::into_owned)?;
-            if !Self::is_java_identifier(&name) {
+            if !Self::is_java_identifier(&name) || names.contains(&name) {
                 return None;
             }
             names.push(name);
@@ -247,8 +317,14 @@ impl Attrs {
         resolved
     }
 
-    /// A conservative Java-identifier check, so a recovered name can never break the parse.
-    pub(crate) fn is_java_identifier(s: &str) -> bool {
+    /// A conservative Java-identifier check, so a recovered name can never break the parse: the
+    /// name must pass the JLS §3.8 identifier spelling *and* not be a keyword. A JVM-legal name
+    /// that Java reserves (`class`, `null`, `var`, …) is rejected, since the caller has a safe
+    /// fallback but no way to escape it.
+    pub fn is_java_identifier(s: &str) -> bool {
+        if Self::is_java_keyword(s) {
+            return false;
+        }
         let mut chars = s.chars();
         match chars.next() {
             Some(c) if c == '_' || c == '$' || c.is_alphabetic() => {}
@@ -270,5 +346,54 @@ mod tests {
         assert!(!Attrs::is_java_identifier(""));
         assert!(!Attrs::is_java_identifier("1x"));
         assert!(!Attrs::is_java_identifier("a-b"));
+    }
+
+    #[test]
+    fn identifier_check_rejects_keywords() {
+        // Reserved, then literal, then the bare `_`, then restricted/contextual.
+        for kw in [
+            "class",
+            "int",
+            "void",
+            "return",
+            "this",
+            "super",
+            "final",
+            "enum",
+            "assert",
+            "public",
+            "static",
+            "instanceof",
+            "true",
+            "false",
+            "null",
+            "_",
+            "var",
+            "yield",
+            "record",
+            "sealed",
+            "permits",
+            "when",
+        ] {
+            assert!(!Attrs::is_java_identifier(kw), "should reject {kw:?}");
+        }
+    }
+
+    #[test]
+    fn identifier_check_accepts_keyword_prefix_identifiers() {
+        for ok in [
+            "classRoom",
+            "nullFlag",
+            "varX",
+            "myVar",
+            "returnValue",
+            "sealedBox",
+            "recordType",
+            "whenReady",
+            "yieldOnce",
+            "permitsAll",
+        ] {
+            assert!(Attrs::is_java_identifier(ok), "should accept {ok:?}");
+        }
     }
 }

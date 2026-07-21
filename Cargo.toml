@@ -58,10 +58,10 @@ jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }
-miniz_oxide = { version = "0.8", default-features = false, features = [
+miniz_oxide = { version = "0.9", default-features = false, features = [
   "with-alloc",
 ] }
-num-derive = { version = "0.4.2" }
+num-derive = { version = "0.5.1" }
 num-traits = { version = "0.2.19" }
 rayon = { version = "1" }
 # Host-only (jals-classpath downloads dependency jars). `rustls-tls` for pure-Rust TLS (no system

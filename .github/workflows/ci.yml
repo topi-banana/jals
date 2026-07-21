@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.83.4
+      - uses: taiki-e/install-action@v2.84.0
         with:
           tool: ast-grep
       - name: Run ast-grep rule tests
@@ -74,7 +74,7 @@ jobs:
           java-version: "25"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2.83.4
+      - uses: taiki-e/install-action@v2.84.0
         with:
           tool: nextest
       - run: cargo nextest run --workspace --all-features
@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.83.4
+      - uses: taiki-e/install-action@v2.84.0
         with:
           tool: cargo-machete
       - run: cargo machete
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.83.4
+      - uses: taiki-e/install-action@v2.84.0
         with:
           tool: typos
       - run: typos
@@ -246,7 +246,7 @@ jobs:
       # Installs the wasm-tools binary directly into the tool dir each run, so (unlike a
       # `cargo binstall` keyed off `.crates.toml`) the `rust-cache` step's restored install
       # metadata can't make it skip placing the binary the component-encode step needs.
-      - uses: taiki-e/install-action@v2.83.4
+      - uses: taiki-e/install-action@v2.84.0
         with:
           tool: wasm-tools
       - name: Build the extension (wasm32-wasip1 core module)

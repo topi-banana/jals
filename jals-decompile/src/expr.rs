@@ -279,7 +279,24 @@ impl Expr {
                 .map(Self::operand)
                 .collect::<Vec<_>>()
                 .join(" + "),
-            Self::Unary { op, expr } => format!("{op}{}", expr.operand()),
+            Self::Unary { op, expr } => {
+                // A prefix operator and its operand render with no separating space, so an
+                // operand that itself begins with the same operator character would merge into
+                // a different Java token: `-` + `-x` renders as `--x` (pre-decrement) and `-` +
+                // `-1` as `--1`. Parenthesize a nested unary or a negative literal so the token
+                // boundary stays explicit. (Binary/concat operands are already wrapped by
+                // `operand()`; casts begin with `(` so they cannot merge.)
+                let needs_parens = match expr.as_ref() {
+                    Self::Unary { .. } => true,
+                    Self::Literal(text) => op.chars().next().is_some_and(|c| text.starts_with(c)),
+                    _ => false,
+                };
+                if needs_parens {
+                    format!("{op}({})", expr.render())
+                } else {
+                    format!("{op}{}", expr.operand())
+                }
+            }
             Self::Cast { ty, expr } => format!("({ty}) {}", expr.operand()),
             Self::ArrayLength(a) => format!("{}.length", a.receiver()),
             Self::Index { array, index } => format!("{}[{}]", array.receiver(), index.render()),
@@ -350,5 +367,60 @@ impl Expr {
     /// Render a comma-separated argument list.
     fn render_args(args: &[Self]) -> String {
         args.iter().map(Self::render).collect::<Vec<_>>().join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn neg(expr: Expr) -> Expr {
+        Expr::Unary {
+            op: "-",
+            expr: Box::new(expr),
+        }
+    }
+
+    #[test]
+    fn nested_unary_minus_is_parenthesized() {
+        let expr = neg(neg(Expr::Local("x".into())));
+        assert_eq!(expr.render(), "-(-x)");
+    }
+
+    #[test]
+    fn negated_negative_literal_is_parenthesized() {
+        let expr = neg(Expr::lit("-1"));
+        assert_eq!(expr.render(), "-(-1)");
+    }
+
+    #[test]
+    fn simple_unary_minus_stays_bare() {
+        let expr = neg(Expr::Local("x".into()));
+        assert_eq!(expr.render(), "-x");
+    }
+
+    #[test]
+    fn negated_positive_literal_stays_bare() {
+        let expr = neg(Expr::lit("1"));
+        assert_eq!(expr.render(), "-1");
+    }
+
+    #[test]
+    fn boolean_negation_stays_bare() {
+        let expr = Expr::Unary {
+            op: "!",
+            expr: Box::new(Expr::Local("value".into())),
+        };
+        assert_eq!(expr.render(), "!value");
+    }
+
+    #[test]
+    fn negated_binary_keeps_operand_parens() {
+        let expr = neg(Expr::Binary {
+            op: "+",
+            lhs: Box::new(Expr::Local("a".into())),
+            rhs: Box::new(Expr::Local("b".into())),
+        });
+        assert_eq!(expr.render(), "-(a + b)");
     }
 }

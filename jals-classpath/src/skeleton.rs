@@ -395,6 +395,9 @@ impl SkeletonGroup<'_> {
                 .filter(|f| f.access_flags.is_enum())
                 .filter_map(|f| {
                     let name = pool.utf8(f.name_index).map(Cow::into_owned)?;
+                    if !Attrs::is_java_identifier(&name) {
+                        return None;
+                    }
                     let args = enum_args.get(&name).map_or("", String::as_str);
                     Some(if args.is_empty() {
                         name
@@ -420,6 +423,9 @@ impl SkeletonGroup<'_> {
             let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
                 continue;
             };
+            if !Attrs::is_java_identifier(&name) {
+                continue;
+            }
             let ty = Self::field_type_java(&field.attributes, field.descriptor_index, pool);
             // A `static final` field's compile-time constant becomes its initializer (`= 42`), so a
             // navigated declaration shows the value.
@@ -452,6 +458,9 @@ impl SkeletonGroup<'_> {
                 continue;
             };
             if raw_name == "<clinit>" {
+                continue;
+            }
+            if raw_name != "<init>" && !Attrs::is_java_identifier(&raw_name) {
                 continue;
             }
             // javac synthesizes values()/valueOf for enums; declaring them again is an error.
