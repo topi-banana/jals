@@ -2082,7 +2082,6 @@ impl Structurer<'_, '_> {
         for pair in arm_starts.windows(2) {
             match self.cfg.blocks[pair[1] - 1].term {
                 Term::Goto(e) => {
-                    boundaries_all_exit = false;
                     if *boundary_exit.get_or_insert(e) != e {
                         // Two arms disagree about where the switch ends.
                         return None;
