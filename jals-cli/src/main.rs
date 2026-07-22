@@ -6,7 +6,7 @@
 
 mod report;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,7 +19,7 @@ use jals_build::build_script::{
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
-use jals_config::{DiscoverableConfig, FeatureSet, Manifest};
+use jals_config::{DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 use jals_storage::{FileKey, NativeScope, NativeStorage, RelativePath};
@@ -101,7 +101,8 @@ struct LspArgs {
 /// `default` list unless `--no-default-features` is also given.
 #[derive(Args)]
 struct FeatureArgs {
-    /// Activate these `[features]` (comma separated, repeatable).
+    /// Activate these `[features]` (comma separated, repeatable). A `<dependency>/<feature>` entry
+    /// activates a feature in that dependency instead of this project.
     #[arg(long, value_name = "FEATURES", value_delimiter = ',')]
     features: Vec<String>,
 
@@ -115,8 +116,9 @@ struct FeatureArgs {
 }
 
 impl FeatureArgs {
-    /// The resolved, sorted build-feature set these flags select from `manifest`.
-    fn resolve(&self, manifest: &Manifest) -> Result<BTreeSet<String>> {
+    /// The build features these flags select from `manifest`: the root project's own sorted set,
+    /// plus what its `[features]` forwards to each dependency.
+    fn resolve(&self, manifest: &Manifest) -> Result<ResolvedBuildFeatures> {
         manifest
             .resolve_build_features(&self.features, self.all_features, self.no_default_features)
             .map_err(|e| anyhow!("{e}"))
@@ -734,7 +736,10 @@ impl ProjectLintContext {
             jals_classpath::ProjectInputOptions::Analysis,
             exec,
             HostBuildScript::default(),
-            &environment,
+            &RootScriptInputs {
+                environment: &environment,
+                features: &features,
+            },
             // Lint analyses what is already here; it does not acquire dependencies.
             jals_classpath::NetworkPolicy::Offline,
         )
@@ -823,6 +828,17 @@ impl From<HostBuildScript> for HostProjectInputs {
     }
 }
 
+/// The root project's build-script inputs, borrowed as one value.
+///
+/// The two are meaningless apart: `environment` is already scoped to the root and carries the
+/// queryable half of `features`, whose other half is what the root's `[features]` forwards into the
+/// dependency graph. Passing them together is what keeps a caller from installing one and
+/// forgetting the other.
+struct RootScriptInputs<'a> {
+    environment: &'a BuildScriptEnvironment,
+    features: &'a ResolvedBuildFeatures,
+}
+
 impl App {
     /// Discover and preprocess the complete dependency graph, then project it together with the
     /// root manifest over one immutable project revision and its verified native artifact cache.
@@ -832,7 +848,7 @@ impl App {
         options: jals_classpath::ProjectInputOptions,
         exec: &Exec,
         script: HostBuildScript,
-        environment: &BuildScriptEnvironment,
+        scripts: &RootScriptInputs<'_>,
         network: jals_classpath::NetworkPolicy,
     ) -> Result<HostProjectInputs> {
         let mut result = HostProjectInputs::from(script);
@@ -851,7 +867,8 @@ impl App {
         let graph = graph
             .preprocess(
                 storage.artifacts_mut(),
-                environment,
+                scripts.environment,
+                scripts.features,
                 &BuildScriptLimits::default(),
             )
             .await
@@ -939,7 +956,7 @@ impl App {
         manifest: &mut Manifest,
         root: &Path,
         exec: &Exec,
-        features: &BTreeSet<String>,
+        features: &ResolvedBuildFeatures,
         offline: bool,
         publications: jals_project::SourcePublication,
     ) -> Result<(jals_build::StagedTree, HostProjectInputs)> {
@@ -959,7 +976,10 @@ impl App {
             jals_classpath::ProjectInputOptions::Compile,
             exec,
             script,
-            &environment,
+            &RootScriptInputs {
+                environment: &environment,
+                features,
+            },
             if offline {
                 jals_classpath::NetworkPolicy::Offline
             } else {
@@ -1014,17 +1034,19 @@ impl App {
     /// inheriting wholesale would expose every credential on the machine to an unreviewed
     /// `build.rhai` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
     ///
-    /// `features` is the **root project's** selection. It does not reach a dependency: each
-    /// dependency node's script is given the union of the `[dependencies] features` lists aimed at
-    /// it, installed by the graph's preprocessing pass.
+    /// Only the **root project's** own queryable half of `features` is installed here. A dependency
+    /// node's script is given its own resolved set by the graph's preprocessing pass, from the
+    /// `[dependencies]` entries aimed at it and whatever a `[features]` entry forwarded — the
+    /// [`dependencies`](ResolvedBuildFeatures::dependencies) half, which never lands in an
+    /// environment the root's script can read.
     fn build_script_environment(
         manifest: &Manifest,
-        features: &BTreeSet<String>,
+        features: &ResolvedBuildFeatures,
     ) -> BuildScriptEnvironment {
         BuildScriptEnvironment::from_host(std::env::vars_os().filter_map(|(name, value)| {
             Some((name.into_string().ok()?, value.into_string().ok()?))
         }))
-        .for_project(manifest, features.clone())
+        .for_project(manifest, features.features().clone())
     }
 
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host

@@ -238,8 +238,11 @@ pub struct BuildScriptEnvironment {
     /// Resolved Cargo-style build features, queried by `build.feature("…")`.
     ///
     /// Scoped to **one project**, like Cargo: for the root project these are its own `[features]`
-    /// resolved against the command-line selection, and for a dependency they are the union of the
-    /// `[dependencies] features` lists pointing at it — never the declaring project's selection.
+    /// resolved against the command-line selection, and for a dependency they are what the
+    /// `[dependencies]` entries pointing at it asked for — their `features` lists plus whatever
+    /// those projects' `[features]` forwarded as `<dependency>/<feature>` — closed over the
+    /// dependency's own `[features]`. Never the declaring project's own set, and never a
+    /// `<dependency>/<feature>` directive, which is routed rather than enabled.
     /// [`Self::for_project`] is where the swap happens. Never inherited from the host process: they
     /// are not secrets and are authoritative, so they bypass the [`Self::HOST_PREFIX`] opt-in that
     /// guards `values`. Always folded into the build-script fingerprint so a changed selection
@@ -289,8 +292,8 @@ impl BuildScriptEnvironment {
     ///
     /// Features are per package, so they are a *required* argument rather than something carried
     /// over: the caller must say which set this project gets, and the previous project's set never
-    /// leaks across the boundary. A dependency receives the union of the `[dependencies] features`
-    /// lists aimed at it, which is unrelated to whatever the declaring project selected.
+    /// leaks across the boundary. A dependency's set is resolved from the `[dependencies]` entries
+    /// aimed at it, which is unrelated to whatever the declaring project selected for itself.
     #[must_use]
     pub fn for_project(&self, manifest: &Manifest, features: BTreeSet<String>) -> Self {
         const RESERVED: [&str; 4] = [

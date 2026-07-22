@@ -12,7 +12,7 @@ use jals_build::build_script::{
     BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits,
     prepare_build_script,
 };
-use jals_config::{Dependency, Manifest};
+use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
 use jals_storage::{ArtifactCache, CacheBackend, ContentDigest, ProjectView, RelativePath};
 
 /// Stable opaque identity of a resolved dependency node.
@@ -64,23 +64,48 @@ pub struct GraphEdge {
     /// Whether a binary dependency requests recursive nested-jar extraction.
     pub recursive: bool,
     /// The build features this edge's `[dependencies]` entry enables in the target project. Empty
-    /// for a binary node, which has no build script. One edge is not the whole story: the set a
-    /// node's script actually sees is the union over its incoming edges, computed by
-    /// [`ResolvedProjectGraph::preprocess`] (Cargo's feature unification).
+    /// for a binary node, which has no build script. Purely what the manifest declared: the entry's
+    /// `features` list and nothing else — what the declaring project's own `[features]` forwards
+    /// through a `<dependency>/<feature>` entry depends on its resolved selection, so it is applied
+    /// by [`ResolvedProjectGraph::resolve_node_features`] rather than baked in here.
     pub features: BTreeSet<String>,
+    /// Whether this edge lets the target resolve its own `[features] default` list
+    /// (`default-features`, `true` unless the entry says otherwise; always `true` for a binary
+    /// node, which receives no features at all).
+    pub default_features: bool,
 }
 
-impl GraphEdge {
-    /// One `[dependencies]` entry's declared `features` as the set its edge carries.
+/// What one `[dependencies]` entry declares about its target's build features, kept together so a
+/// builder cannot carry one half of the pair across a boundary and forget the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredEdgeFeatures {
+    pub(crate) features: BTreeSet<String>,
+    pub(crate) default_features: bool,
+}
+
+impl DeclaredEdgeFeatures {
+    /// Read one `[dependencies]` entry.
     ///
     /// Every name is already known good: both builders reach a dependency's manifest through
     /// `probe_manifest`, whose `parse` validates (and the root is validated by `discover`), so
     /// [`Dependency::validate_features`](jals_config::Dependency::validate_features) has rejected an
-    /// empty or reserved name before anything reaches here. The set is unordered on purpose — the
-    /// declaration order of a feature list means nothing, and dropping it keeps a node's union
-    /// independent of which parent was traversed first.
-    pub(crate) fn declared_features(dependency: &Dependency) -> BTreeSet<String> {
-        dependency.features().iter().cloned().collect()
+    /// empty, reserved, or cross-package name before anything reaches here. The set is unordered on
+    /// purpose — the declaration order of a feature list means nothing, and dropping it keeps a
+    /// node's union independent of which parent was traversed first.
+    pub(crate) fn of(dependency: &Dependency) -> Self {
+        Self {
+            features: dependency.features().iter().cloned().collect(),
+            default_features: dependency.default_features(),
+        }
+    }
+
+    /// What a binary edge declares: nothing. A jar contributes compiled classes and runs no build
+    /// script, so the `jar` form carries neither key at all (writing one is a parse error).
+    pub(crate) const fn binary() -> Self {
+        Self {
+            features: BTreeSet::new(),
+            default_features: true,
+        }
     }
 }
 
@@ -392,40 +417,118 @@ impl ResolvedProjectGraph {
         &self.warnings
     }
 
-    /// The build features every node receives: the union of the `features` on its incoming edges.
+    /// The build features every node resolves to, given what the root project selected.
+    ///
+    /// Two inputs reach a node, and both are written by whoever declares it: the `features` on its
+    /// incoming edges, and the `<dependency>/<feature>` entries a declaring project's own
+    /// `[features]` forwards once *its* selection is resolved. Their union is closed over the node's
+    /// own `[features]` — enables map plus, when any incoming edge allows it, its `default` list —
+    /// which is what makes the routing transitive: a mid-graph project forwards to its own
+    /// dependencies from features it merely received.
     ///
     /// Cargo's feature unification, over graph nodes: two `[dependencies]` entries reaching the same
-    /// project with different lists give it one set and one build script run, rather than splitting
-    /// it into two nodes whose classes would both land on the classpath. A node with no incoming
-    /// edge carrying features (every binary node, and any source dependency declared without the
-    /// key) is absent from the map and gets the empty set.
+    /// project give it one set and one build script run, rather than splitting it into two nodes
+    /// whose classes would both land on the classpath. `default-features` unifies the same
+    /// (additive) way — one entry asking for the defaults turns them on for the shared node. A node
+    /// nobody sends anything to (every binary node, and any source dependency declared bare) is
+    /// absent from the map and gets the empty set.
     ///
-    /// Reading this off the edges rather than tracking it during traversal is what makes it
-    /// complete: a node revisited after it is `Complete` still pushes its edge, so a second parent's
-    /// features are recorded even though the node itself is never re-entered. `BTreeSet` keeps the
-    /// result independent of traversal order.
-    fn node_features(&self) -> BTreeMap<NodeId, BTreeSet<String>> {
-        let mut features: BTreeMap<NodeId, BTreeSet<String>> = BTreeMap::new();
+    /// One pass in reverse [`order`](Self::order) suffices, with no fixpoint iteration: routing only
+    /// ever points from a project to its dependency, `order` is the discovery DFS's post-order, and
+    /// cycles are already rejected — so its reverse visits every node after every project that can
+    /// send to it. `BTreeMap`/`BTreeSet` keep the result independent of traversal order.
+    fn resolve_node_features(
+        &self,
+        root: &ResolvedBuildFeatures,
+    ) -> BTreeMap<NodeId, BTreeSet<String>> {
+        debug_assert_eq!(
+            self.order.iter().copied().collect::<BTreeSet<_>>().len(),
+            self.nodes.len(),
+            "`order` must be a permutation of the nodes for the reverse pass to be topological"
+        );
+        // Where each project's `<dependency>/<feature>` entries land. A `jar` emits *two* edges under
+        // one dependency name (the jar and its companion `sources` archive), so this index is only
+        // unambiguous because `Manifest::validate` rejects routing to a `jar` name — hence source
+        // edges only, rather than trusting that the two agree.
+        let sources: BTreeSet<&NodeId> = self
+            .nodes
+            .iter()
+            .filter(|node| node.source().is_some())
+            .map(|node| &node.id)
+            .collect();
+        let mut targets: BTreeMap<(Option<&NodeId>, &str), &NodeId> = BTreeMap::new();
+        let mut arrived: BTreeMap<NodeId, BTreeSet<String>> = BTreeMap::new();
+        let mut defaults: BTreeMap<NodeId, bool> = BTreeMap::new();
         for edge in &self.edges {
-            if edge.features.is_empty() {
-                continue;
+            if sources.contains(&edge.to) {
+                targets.insert((edge.from.as_ref(), edge.dependency.as_str()), &edge.to);
             }
-            features
+            arrived
                 .entry(edge.to.clone())
                 .or_default()
                 .extend(edge.features.iter().cloned());
+            *defaults.entry(edge.to.clone()).or_default() |= edge.default_features;
         }
+
+        let route = |from: Option<&NodeId>,
+                     resolved: &ResolvedBuildFeatures,
+                     arrived: &mut BTreeMap<NodeId, BTreeSet<String>>| {
+            for (dependency, features) in resolved.dependencies() {
+                // A dependency whose acquisition failed has no edge, only a warning; a `path` that
+                // resolved to a directory without `jals.toml` has an edge but no manifest to read
+                // them. Both are already reported, so routing simply stops here.
+                if let Some(to) = targets.get(&(from, dependency)) {
+                    arrived
+                        .entry((*to).clone())
+                        .or_default()
+                        .extend(features.iter().cloned());
+                }
+            }
+        };
+        route(None, root, &mut arrived);
+
+        let mut features: BTreeMap<NodeId, BTreeSet<String>> = BTreeMap::new();
+        for index in self.order.iter().rev() {
+            let node = &self.nodes[*index];
+            let seed = arrived.remove(&node.id).unwrap_or_default();
+            let NodeBody::JalsSource { manifest, .. } = &node.body else {
+                // No manifest: nothing to close over and no outgoing edge to forward to. A plain
+                // source node keeps what it was sent, inert until it grows a `jals.toml`.
+                if !seed.is_empty() {
+                    features.insert(node.id.clone(), seed);
+                }
+                continue;
+            };
+            let resolved = manifest
+                .expand_build_features(seed, defaults.get(&node.id).copied().unwrap_or(false));
+            route(Some(&node.id), &resolved, &mut arrived);
+            if !resolved.features().is_empty() {
+                features.insert(node.id.clone(), resolved.into_features());
+            }
+        }
+        // Every node takes its seed out, so anything left was routed to a node already past — the
+        // one way the single pass could quietly drop a feature if `order` stopped being topological.
+        debug_assert!(
+            arrived.is_empty(),
+            "a forwarded feature reached an already-resolved node"
+        );
         features
     }
 
     /// Preprocess every resolved node exactly once in dependency-first order.
+    ///
+    /// `root_features` is the root project's own resolved selection: its queryable half belongs to
+    /// the root's script (which the host runs, not this graph), and its
+    /// [`dependencies`](ResolvedBuildFeatures::dependencies) half is what the root's `[features]`
+    /// forwards into this graph.
     pub async fn preprocess<C: CacheBackend>(
         self,
         cache: &mut ArtifactCache<C>,
         environment: &BuildScriptEnvironment,
+        root_features: &ResolvedBuildFeatures,
         limits: &BuildScriptLimits,
     ) -> Result<PreprocessedProjectGraph, GraphError> {
-        let features_by_node = self.node_features();
+        let features_by_node = self.resolve_node_features(root_features);
         let mut exports = BTreeMap::new();
         for index in &self.order {
             let node = &self.nodes[*index];

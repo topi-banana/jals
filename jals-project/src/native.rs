@@ -21,9 +21,9 @@ use jals_storage::{
 
 use crate::assemble::{CompileClasspathEntry, CompileClasspathFile, ProjectAssemblyError};
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, GraphEdge, GraphError,
-    GraphMetadata, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode,
-    ResolvedProjectGraph, SourceNode,
+    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
+    GraphError, GraphMetadata, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph,
+    ResolvedNode, ResolvedProjectGraph, SourceNode,
 };
 
 /// Native entry point for recursive dependency graph discovery.
@@ -274,8 +274,8 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        let features = GraphEdge::declared_features(dependency);
-                        self.visit_source(parent.clone(), name, features, acquired)
+                        let declared = DeclaredEdgeFeatures::of(dependency);
+                        self.visit_source(parent.clone(), name, declared, acquired)
                             .await?;
                     }
                     Dependency::Git(git) => {
@@ -286,8 +286,8 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        let features = GraphEdge::declared_features(dependency);
-                        self.visit_source(parent.clone(), name, features, acquired)
+                        let declared = DeclaredEdgeFeatures::of(dependency);
+                        self.visit_source(parent.clone(), name, declared, acquired)
                             .await?;
                     }
                 }
@@ -300,12 +300,12 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
-        features: BTreeSet<String>,
+        declared: DeclaredEdgeFeatures,
         mut acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let checkout = acquired.checkout.take();
         let result = self
-            .visit_source_inner(parent, dependency, features, acquired)
+            .visit_source_inner(parent, dependency, declared, acquired)
             .await;
         let cleanup = if let Some(checkout) = checkout {
             jals_exec::tokio_rt::on_blocking_pool(move || {
@@ -335,7 +335,7 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
-        features: BTreeSet<String>,
+        declared: DeclaredEdgeFeatures,
         acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let incoming = GraphEdge {
@@ -343,7 +343,8 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: acquired.id.clone(),
             recursive: false,
-            features,
+            features: declared.features,
+            default_features: declared.default_features,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -454,14 +455,14 @@ impl GraphBuilder {
             };
             (NodeId::from_identity(identity.as_bytes()), input)
         };
+        let binary = DeclaredEdgeFeatures::binary();
         self.edges.push(GraphEdge {
             from: parent,
             dependency: dependency.to_owned(),
             to: id.clone(),
             recursive,
-            // A jar contributes compiled classes and runs no build script, so the `jar` form does
-            // not carry `features` at all (writing it is a parse error).
-            features: BTreeSet::new(),
+            features: binary.features,
+            default_features: binary.default_features,
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());
@@ -1120,6 +1121,7 @@ impl GraphBuilder {
 #[cfg(test)]
 mod tests {
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
+    use jals_config::ResolvedBuildFeatures;
     use jals_storage::{CodeTree, MemoryStorage};
 
     use super::*;
@@ -1165,6 +1167,7 @@ mod tests {
             .preprocess(
                 storage.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -1216,6 +1219,7 @@ mod tests {
                         // A root selection the dependency must not inherit.
                         &BuildScriptEnvironment::new()
                             .with_features(BTreeSet::from(["root-only".to_owned()])),
+                        &ResolvedBuildFeatures::default(),
                         &BuildScriptLimits::default(),
                     )
                     .await

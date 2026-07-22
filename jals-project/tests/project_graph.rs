@@ -6,7 +6,7 @@ use std::process::Command;
 
 use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
 use jals_classpath::{DependencyLocation, ProjectInputOptions};
-use jals_config::Manifest;
+use jals_config::{Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_project::{
     CompileClasspathEntry, GraphError, MemoryProjectGraph, NativeProjectGraph, NodeKind,
@@ -130,6 +130,7 @@ fn native_companion_source_archives_are_role_distinct() {
             .preprocess(
                 cache.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -273,6 +274,7 @@ fn relative_child_jar_and_classpath_become_verified_artifacts() {
             .preprocess(
                 root_storage.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -324,6 +326,7 @@ fn declared_classpath_directory_remains_one_compile_tree() {
         .preprocess(
             root_storage.artifacts_mut(),
             &BuildScriptEnvironment::new(),
+            &ResolvedBuildFeatures::default(),
             &BuildScriptLimits::default(),
         )
         .await
@@ -375,6 +378,7 @@ fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
         .preprocess(
             root_storage.artifacts_mut(),
             &BuildScriptEnvironment::new(),
+            &ResolvedBuildFeatures::default(),
             &BuildScriptLimits::default(),
         )
         .await
@@ -411,6 +415,7 @@ fn mixed_local_and_remote_binary_specs_keep_first_edge_order() {
         .preprocess(
             cache.artifacts_mut(),
             &BuildScriptEnvironment::new(),
+            &ResolvedBuildFeatures::default(),
             &BuildScriptLimits::default(),
         )
         .await
@@ -479,6 +484,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
         .preprocess(
             root_storage.artifacts_mut(),
             &BuildScriptEnvironment::new(),
+            &ResolvedBuildFeatures::default(),
             &BuildScriptLimits::default(),
         )
         .await
@@ -572,6 +578,7 @@ fn every_node_kind_preprocesses_and_scripts_export_only_sources_and_classpath() 
             .preprocess(
                 root_storage.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -631,6 +638,7 @@ fn node_tokens_isolate_identical_script_paths_and_outputs() {
             .preprocess(
                 root_storage.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -801,6 +809,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         .preprocess(
             root_storage.artifacts_mut(),
             &BuildScriptEnvironment::new(),
+            &ResolvedBuildFeatures::default(),
             &BuildScriptLimits::default(),
         )
         .await
@@ -867,6 +876,7 @@ fn dependency_snapshots_exclude_git_and_jals_cache_inputs() {
             .preprocess(
                 cache.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -961,6 +971,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             .preprocess(
                 memory_cache.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
@@ -979,6 +990,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             .preprocess(
                 native_cache.artifacts_mut(),
                 &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
                 &BuildScriptLimits::default(),
             )
             .await
