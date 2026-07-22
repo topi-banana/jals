@@ -38,6 +38,14 @@ impl ContentDigest {
         &self.0
     }
 
+    /// Reconstruct a digest from its raw 32 bytes.
+    ///
+    /// For decoding a digest that was written out verbatim. This asserts nothing about the
+    /// bytes it names — soundness still comes from reading through a verified lookup.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn to_hex(self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut out = String::with_capacity(64);
@@ -85,6 +93,14 @@ pub enum CacheNamespace {
     BuildTaskArtifact,
     BuildTaskSource,
     BuildTaskState,
+    /// One Java source file emitted by a compile frontend — the first of the two compile
+    /// tiers. Keyed on what the frontend was permitted to observe, so a per-file frontend
+    /// stays per-file invalidated.
+    FrontendOutput,
+    /// One class artifact emitted by a compile backend — the second compile tier. Its
+    /// provenance folds the frontend output key, so a backend or toolchain change can never
+    /// invalidate a frontend entry.
+    BackendOutput,
 }
 
 impl CacheNamespace {
@@ -103,6 +119,8 @@ impl CacheNamespace {
             Self::BuildTaskArtifact => "build-task-artifact",
             Self::BuildTaskSource => "build-task-source",
             Self::BuildTaskState => "build-task-state",
+            Self::FrontendOutput => "frontend-output",
+            Self::BackendOutput => "backend-output",
         }
     }
 }
@@ -134,6 +152,74 @@ impl CacheKey {
     }
     pub const fn content(&self) -> ContentDigest {
         self.content
+    }
+
+    /// Derive a key under the workspace-wide provenance rule: a NUL-terminated kind tag
+    /// followed by length-framed input identity. See [`ProvenanceFold`].
+    pub fn derive(
+        namespace: CacheNamespace,
+        kind: &[u8],
+        provenance: &[u8],
+        content: ContentDigest,
+    ) -> Self {
+        let mut fold = ProvenanceFold::new(kind);
+        fold.bytes(provenance);
+        Self::new(namespace, fold.finish(), content)
+    }
+}
+
+/// The workspace's universal provenance rule, as a type rather than a convention.
+///
+/// Every append is length-framed, so concatenation is never ambiguous: `("ab", "c")` and
+/// `("a", "bc")` fold to different digests. A derived artifact folds its parent's
+/// `provenance` *and* `content` via [`parent`](Self::parent), so a key identifies the whole
+/// chain that produced it, not just its immediate input.
+///
+/// Replicating this fold by hand is how two subsystems silently disagree about cache
+/// identity — reach for this type instead.
+pub struct ProvenanceFold {
+    buf: Vec<u8>,
+}
+
+impl ProvenanceFold {
+    /// Start a fold under `kind`, a NUL-terminated tag naming the derivation rule
+    /// (`b"jals.frontend\0"`). The tag subdivides a namespace without adding a variant.
+    pub fn new(kind: &[u8]) -> Self {
+        let mut buf = Vec::with_capacity(kind.len() + 64);
+        buf.extend_from_slice(kind);
+        Self { buf }
+    }
+
+    /// Fold an API version, big-endian. Bump it whenever a rule's output changes shape for
+    /// unchanged input, so stale entries miss instead of being trusted.
+    pub fn version(&mut self, version: u32) -> &mut Self {
+        self.buf.extend_from_slice(&version.to_be_bytes());
+        self
+    }
+
+    /// Fold opaque input identity, length-framed.
+    pub fn bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.buf
+            .extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        self.buf.extend_from_slice(bytes);
+        self
+    }
+
+    /// Fold an already-computed digest. Fixed width, so it needs no length frame.
+    pub fn digest(&mut self, digest: ContentDigest) -> &mut Self {
+        self.buf.extend_from_slice(digest.as_bytes());
+        self
+    }
+
+    /// Fold a parent artifact as `provenance ‖ content`, making this derivation's identity
+    /// depend on the parent's whole history rather than only its bytes.
+    pub fn parent(&mut self, key: &CacheKey) -> &mut Self {
+        self.digest(key.provenance()).digest(key.content())
+    }
+
+    #[must_use]
+    pub fn finish(&self) -> ContentDigest {
+        ContentDigest::of(&self.buf)
     }
 }
 

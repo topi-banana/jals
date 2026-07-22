@@ -15,6 +15,7 @@ mod value;
 
 pub use cache::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, MemoryCache,
+    ProvenanceFold,
 };
 pub use error::{CacheError, Diagnostic, Error, NameError, PathError, Result, TreeError};
 #[cfg(any(feature = "std", test))]
