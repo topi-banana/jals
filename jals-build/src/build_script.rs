@@ -24,8 +24,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::task::{TaskPlan, TaskPlanLimits};
 
-const BUILD_SCRIPT_API_VERSION: u32 = 4;
-const BUILD_SCRIPT_STATE_VERSION: u32 = 4;
+// Both bumped for build features: the Rhai surface gained `build.feature`/`build.features` (API),
+// and `FingerprintInputsWire` gained a required `features` field (state). The API bump is the
+// load-bearing one — it reseeds the cache key (`cache_key_seed`), so a pre-feature state is never
+// fetched and decoded in the first place.
+const BUILD_SCRIPT_API_VERSION: u32 = 5;
+const BUILD_SCRIPT_STATE_VERSION: u32 = 5;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
 /// dependencies. All of it is derived, so none of it is an input to a script's fingerprint.
@@ -231,6 +235,12 @@ impl BuildScriptLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildScriptEnvironment {
     values: BTreeMap<String, String>,
+    /// Resolved Cargo-style build features (`[build.features]`), queried by `build.feature("…")`.
+    /// Set by the host from the command-line selection; never inherited from the host process — they
+    /// are not secrets and are authoritative, so they bypass the [`Self::HOST_PREFIX`] opt-in that
+    /// guards `values`. Always folded into the build-script fingerprint so a changed selection
+    /// rebuilds even though the script never declared it as an input.
+    features: BTreeSet<String>,
 }
 
 impl BuildScriptEnvironment {
@@ -248,6 +258,7 @@ impl BuildScriptEnvironment {
     pub const fn new() -> Self {
         Self {
             values: BTreeMap::new(),
+            features: BTreeSet::new(),
         }
     }
 
@@ -279,11 +290,16 @@ impl BuildScriptEnvironment {
             "JALS_PACKAGE_VERSION",
         ];
 
-        let mut environment: Self = self
-            .iter()
-            .filter(|(name, _)| !RESERVED.contains(name))
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .collect();
+        let mut environment = Self {
+            values: self
+                .iter()
+                .filter(|(name, _)| !RESERVED.contains(name))
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            // Not host state to be re-derived: the resolved selection crosses the project boundary
+            // unchanged. Named here rather than patched in afterwards so dropping it cannot compile.
+            features: self.features.clone(),
+        };
         environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
         environment.insert("JALS_MANIFEST_DIR", ".");
         if let Some(name) = &manifest.package.name {
@@ -321,12 +337,30 @@ impl BuildScriptEnvironment {
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
+
+    /// This environment with its resolved build features set to `features`.
+    #[must_use]
+    pub fn with_features(mut self, features: BTreeSet<String>) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// Whether build feature `name` is enabled (backs `build.feature("…")`).
+    pub fn has_feature(&self, name: &str) -> bool {
+        self.features.contains(name)
+    }
+
+    /// Iterate the enabled build features in lexical order (backs `build.features()`).
+    pub fn features(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.features.iter().map(String::as_str)
+    }
 }
 
 impl FromIterator<(String, String)> for BuildScriptEnvironment {
     fn from_iter<T: IntoIterator<Item = (String, String)>>(iter: T) -> Self {
         Self {
             values: iter.into_iter().collect(),
+            features: BTreeSet::new(),
         }
     }
 }
@@ -464,6 +498,10 @@ struct FingerprintInputsWire {
     files_mode: FingerprintFilesModeWire,
     files: Vec<FileFingerprintWire>,
     environment: Vec<EnvironmentFingerprintWire>,
+    /// The resolved Cargo-style build features, sorted. An always-present fingerprint input — unlike
+    /// `environment`, which records only `rerun_if_env_changed` names — so a changed `--features`
+    /// selection deterministically rebuilds even though the script never declared it as an input.
+    features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1330,6 +1368,16 @@ mod api {
             .map_or(Dynamic::UNIT, |value| Dynamic::from(value.to_owned()))
     }
 
+    fn build_feature(api: &mut BuildApi, name: &str) -> bool {
+        api.environment.has_feature(name)
+    }
+
+    fn build_features(api: &mut BuildApi) -> RhaiResult<Array> {
+        let features: Vec<String> = api.environment.features().map(str::to_owned).collect();
+        check_array_len(features.len(), api.limits.max_array_size, "build.features")?;
+        Ok(features.into_iter().map(Dynamic::from).collect())
+    }
+
     fn build_rerun_file(api: &mut BuildApi, path: &str) -> RhaiResult<()> {
         let key = project_file(&api.view, path, "build.rerun_if_changed", &api.limits)?;
         if is_managed_build_path(&key) {
@@ -1624,6 +1672,8 @@ mod api {
             .register_fn("set_run_env", build_set_run_env)
             .register_fn("warning", build_warning)
             .register_fn("error", build_error)
+            .register_fn("feature", build_feature)
+            .register_fn("features", build_features)
             .register_fn("metadata", build_metadata);
         TasksApi::register_rhai(&mut engine);
         engine
@@ -1812,6 +1862,9 @@ mod api {
                 .collect();
             (FingerprintFilesModeWire::Declared, files)
         };
+        // Independent of the `rerun_env`/`rerun_files` mode below: the selected feature set is an
+        // input whether or not the script declares any.
+        let features: Vec<String> = environment.features().map(str::to_owned).collect();
         let environment = rerun_env
             .iter()
             .map(|name| EnvironmentFingerprintWire {
@@ -1832,6 +1885,7 @@ mod api {
             files_mode,
             files,
             environment,
+            features,
         })
     }
 
@@ -1862,6 +1916,7 @@ mod api {
                 .environment
                 .windows(2)
                 .all(|pair| pair[0].name < pair[1].name)
+            || !inputs.features.windows(2).all(|pair| pair[0] < pair[1])
         {
             return None;
         }
@@ -2705,6 +2760,78 @@ mod tests {
         .await
         .unwrap()
         .unwrap()
+    }
+
+    #[test]
+    fn for_project_preserves_build_features() {
+        // `for_project` rebuilds the environment from the host `values` alone, so the resolved
+        // features have to cross that boundary as themselves — otherwise the selection would be
+        // dropped before a project's script ever sees it.
+        let environment =
+            BuildScriptEnvironment::new().with_features(BTreeSet::from(["server".to_owned()]));
+        let derived = environment.for_project(&Manifest::default());
+        assert!(derived.has_feature("server"));
+        assert!(!derived.has_feature("client"));
+    }
+
+    #[test]
+    fn build_features_are_visible_to_the_script() {
+        block_on_inline(async {
+            let storage = storage(
+                r#"
+                    let side = if build.feature("client") { "client" } else { "server" };
+                    output.write_text("side.txt", side);
+                    output.write_text("all.txt", build.features()[0]);
+                "#,
+                [],
+            );
+            let side = FileKey::parse("target/jals/build/rhai/out/side.txt").unwrap();
+            let all = FileKey::parse("target/jals/build/rhai/out/all.txt").unwrap();
+            let environment =
+                BuildScriptEnvironment::new().with_features(BTreeSet::from(["client".to_owned()]));
+
+            let prepared = prepare(&storage, BuildScriptCacheScope::ROOT, &environment).await;
+            assert_eq!(
+                prepared.file_bytes(&storage.view(), &side).unwrap(),
+                b"client"
+            );
+            assert_eq!(
+                prepared.file_bytes(&storage.view(), &all).unwrap(),
+                b"client"
+            );
+        });
+    }
+
+    #[test]
+    fn build_features_are_fingerprinted_without_a_rerun_declaration() {
+        block_on_inline(async {
+            // The script declares no `rerun_if_env_changed`, yet the resolved feature set must still
+            // be a fingerprint input — otherwise a changed `--features` selection would silently
+            // reuse the previous build.
+            let mut storage = storage(r#"output.write_text("generated.txt", "prepared");"#, []);
+            let server =
+                BuildScriptEnvironment::new().with_features(BTreeSet::from(["server".to_owned()]));
+
+            let prepared = prepare(&storage, BuildScriptCacheScope::ROOT, &server).await;
+            prepared.persist(storage.artifacts_mut()).await.unwrap();
+            let (_, bytes) = current_state(&storage).await;
+            let state: BuildScriptStateWire = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(state.fingerprint_inputs.features, ["server"]);
+            assert!(state.rerun_env.is_empty());
+
+            // A different (additive) selection fingerprints differently.
+            let merged = BuildScriptEnvironment::new()
+                .with_features(BTreeSet::from(["client".to_owned(), "server".to_owned()]));
+            let other = prepare(&storage, BuildScriptCacheScope::ROOT, &merged).await;
+            other.persist(storage.artifacts_mut()).await.unwrap();
+            let (_, other_bytes) = current_state(&storage).await;
+            let other_state: BuildScriptStateWire = serde_json::from_slice(&other_bytes).unwrap();
+            assert_eq!(
+                other_state.fingerprint_inputs.features,
+                ["client", "server"]
+            );
+            assert_ne!(state.fingerprint, other_state.fingerprint);
+        });
     }
 
     #[test]
