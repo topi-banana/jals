@@ -28,6 +28,10 @@ const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 /// The reserved `[features]` key whose list is the build-feature set enabled when the command
 /// line selects none (Cargo's `default` feature). A resolution directive, never itself a queryable
 /// feature — [`Manifest::resolve_build_features`] expands it and drops the name from the result.
+///
+/// Reserved *everywhere* a feature can be written, not just in a `[features]` table:
+/// [`Dependency::validate_features`] rejects it in a `[dependencies] features` list too, since
+/// nothing expands such a list and the name would otherwise survive into the dependency's set.
 const DEFAULT_BUILD_FEATURE: &str = "default";
 
 /// A parsed `jals.toml` project manifest.
@@ -48,6 +52,12 @@ pub struct Manifest {
     /// [`Manifest::resolve_build_features`]. A `default`/`enables` name that is not itself a
     /// declared key is a [`ValidationError::UndeclaredBuildFeature`]. Empty when omitted, so an
     /// existing manifest keeps building exactly as before.
+    ///
+    /// Features are **per package**, as in Cargo: this table and the command-line selection over it
+    /// describe *this* project only. Nothing here crosses a dependency edge — a dependency's build
+    /// script sees the union of the [`features`](Dependency::features) lists on the
+    /// `[dependencies]` entries pointing at it, and this table is not consulted when *this* project
+    /// is somebody's dependency (neither its `default` list nor its `enables` closure).
     pub features: BTreeMap<String, Vec<String>>,
     /// Compilation settings (`[build]`).
     pub build: Build,
@@ -89,6 +99,10 @@ pub struct Manifest {
 ///   [`GitDependency`].
 /// - **`path`** — a local directory tree of `.java` source (analysis + editor navigation only). See
 ///   [`PathDependency`].
+///
+/// Both source forms also carry [`features`](Dependency::features) — the build features to enable in
+/// that dependency, Cargo's per-dependency `features = ["…"]`. A `jar` has no build script, so the
+/// field does not exist on that form and writing it is a parse error like any misplaced field.
 ///
 /// The host resolves each form differently: a [`Jar`](Dependency::Jar) is downloaded/read and put on
 /// the classpath, a [`Git`](Dependency::Git) is cloned, a [`Path`](Dependency::Path) is read in place;
@@ -148,6 +162,10 @@ pub struct GitDependency {
     /// The source root *within* the repo (e.g. `core/src/main/java`), for a non-standard layout; omit
     /// to let the host auto-detect it (`src/main/java` → `src` → the root itself).
     pub dir: Option<String>,
+    /// The **build features** to enable in this dependency (Cargo's per-dependency `features`). See
+    /// [`Dependency::features`] for the semantics, which are the same for both source forms.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// The `path` form of a [`Dependency`]: a local directory tree of `.java` source.
@@ -160,6 +178,10 @@ pub struct PathDependency {
     /// The source root *within* the directory (e.g. `core/src/main/java`), for a non-standard layout;
     /// omit to let the host auto-detect it (`src/main/java` → `src` → the root itself).
     pub dir: Option<String>,
+    /// The **build features** to enable in this dependency (Cargo's per-dependency `features`). See
+    /// [`Dependency::features`] for the semantics, which are the same for both source forms.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
@@ -234,6 +256,14 @@ pub enum DependencyError {
         /// The offending value.
         value: String,
     },
+    /// A `features` list names the reserved `default` feature, which is a declaring table's
+    /// resolution directive and never a queryable feature (see [`Dependency::validate_features`]).
+    ReservedFeature {
+        /// The dependency's name.
+        name: String,
+        /// The reserved feature name that was listed.
+        feature: String,
+    },
 }
 
 impl fmt::Display for DependencyError {
@@ -256,6 +286,11 @@ impl fmt::Display for DependencyError {
                 f,
                 "git dependency `{name}` has a `{field}` starting with `-` (`{value}`), which the \
                  `git` CLI would read as an option rather than a value"
+            ),
+            Self::ReservedFeature { name, feature } => write!(
+                f,
+                "dependency `{name}` lists the reserved feature `{feature}` in `features` \
+                 (`{feature}` is a `[features]` resolution directive, never a queryable feature)"
             ),
         }
     }
@@ -815,12 +850,13 @@ impl Dependency {
 
     /// Apply the value-level checks serde cannot express, without any I/O or path building: a `jar`'s
     /// `jar` (and optional `sources`) is a non-empty known-scheme location, a `git`'s URL is non-empty
-    /// with at most one `branch` / `tag` / `rev`, and a `path`'s directory is non-empty. `name` labels
-    /// errors.
+    /// with at most one `branch` / `tag` / `rev`, a `path`'s directory is non-empty, and — on both
+    /// source forms — every `features` name passes [`validate_features`](Dependency::validate_features).
+    /// `name` labels errors.
     ///
     /// # Errors
-    /// Returns the first [`DependencyError`] found (empty value, unsupported URL scheme, or conflicting
-    /// git refs).
+    /// Returns the first [`DependencyError`] found (empty value, unsupported URL scheme, conflicting
+    /// git refs, or a bad `features` name).
     pub fn validate(&self, name: &str) -> Result<(), DependencyError> {
         match self {
             Self::Jar(jar) => {
@@ -869,7 +905,55 @@ impl Dependency {
                 }
                 Ok(())
             }
+        }?;
+        self.validate_features(name)
+    }
+
+    /// The **build features** this entry enables in the dependency project — Cargo's per-dependency
+    /// `features = ["…"]`, declared on the `git` / `path` forms.
+    ///
+    /// Features are *per package*: this list is the whole set the dependency's build script sees
+    /// through `build.feature("…")`. The declaring project's own selection never crosses the
+    /// boundary, and the dependency's own `[features]` table is **not** consulted — neither its
+    /// `default` list nor its `enables` closure — so the names here are opaque strings validated
+    /// only by [`Dependency::validate_features`]. A `jar` has no build script, so the field does not
+    /// exist on that form at all (writing it is a parse error) and this returns an empty slice.
+    pub fn features(&self) -> &[String] {
+        match self {
+            Self::Jar(_) => &[],
+            Self::Git(git) => &git.features,
+            Self::Path(path) => &path.features,
         }
+    }
+
+    /// The value-level checks on [`features`](Dependency::features): every name is non-empty and
+    /// none is the reserved `default`.
+    ///
+    /// `default` is a resolution directive of a *declaring* `[features]` table, never a queryable
+    /// feature (see [`Manifest::resolve_build_features`], which drops it). Nothing expands a
+    /// dependency's list, so accepting the name here would be the one way to make
+    /// `build.feature("default")` true — reject it instead of letting that invariant depend on where
+    /// the name was written.
+    ///
+    /// # Errors
+    /// [`DependencyError::Empty`] for an empty name, [`DependencyError::ReservedFeature`] for
+    /// `default`.
+    pub fn validate_features(&self, name: &str) -> Result<(), DependencyError> {
+        for feature in self.features() {
+            if feature.is_empty() {
+                return Err(DependencyError::Empty {
+                    name: name.to_owned(),
+                    field: "features",
+                });
+            }
+            if feature == DEFAULT_BUILD_FEATURE {
+                return Err(DependencyError::ReservedFeature {
+                    name: name.to_owned(),
+                    feature: feature.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2022,7 +2106,7 @@ mod tests {
         let m: Manifest = toml::from_str(
             r#"
             [dependencies]
-            fromgit = { git = "https://github.com/x/y", tag = "v1.2", dir = "core/src/main/java" }
+            fromgit = { git = "https://github.com/x/y", tag = "v1.2", dir = "core/src/main/java", features = ["hello"] }
             frompath = { path = "../sibling" }
             "#,
         )
@@ -2035,6 +2119,7 @@ mod tests {
                 tag: Some("v1.2".to_owned()),
                 rev: None,
                 dir: Some("core/src/main/java".to_owned()),
+                features: vec!["hello".to_owned()],
             }))
         );
         assert_eq!(
@@ -2042,6 +2127,7 @@ mod tests {
             Some(&Dependency::Path(PathDependency {
                 path: "../sibling".to_owned(),
                 dir: None,
+                features: Vec::new(),
             }))
         );
     }
@@ -2054,6 +2140,7 @@ mod tests {
             tag,
             rev,
             dir: None,
+            features: Vec::new(),
         };
         assert_eq!(make(None, None, None).git_ref("r"), Ok(GitRef::Default));
         assert_eq!(
@@ -2217,6 +2304,7 @@ mod tests {
                     Dependency::Path(PathDependency {
                         path: "../sibling".to_owned(),
                         dir: None,
+                        features: Vec::new(),
                     }),
                 ),
             ]),
@@ -2241,6 +2329,7 @@ mod tests {
                 tag: Some("v1".to_owned()),
                 rev: None,
                 dir: None,
+                features: Vec::new(),
             }),
         );
         assert_eq!(
@@ -2264,6 +2353,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.validate(), Ok(()));
+    }
+
+    #[test]
+    fn dependency_features_are_read_off_both_source_forms() {
+        // The graph builders reach every form through this one accessor, so a `jar` — which has no
+        // build script to query them — has to answer with an empty list rather than be special-cased
+        // at each call site.
+        let m: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            g = { git = "https://github.com/x/y", features = ["hello"] }
+            p = { path = "../sibling", features = ["hello", "world"] }
+            j = { jar = "libs/x.jar" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(m.validate(), Ok(()));
+        assert_eq!(m.dependencies["g"].features(), ["hello"]);
+        assert_eq!(m.dependencies["p"].features(), ["hello", "world"]);
+        assert!(m.dependencies["j"].features().is_empty());
+    }
+
+    #[test]
+    fn jar_dependency_rejects_features_at_parse() {
+        // A jar contributes compiled classes and never runs a build script, so `features` on it
+        // could only ever be a silent no-op. `JarDependency` simply does not carry the field, which
+        // the untagged variants' `deny_unknown_fields` turns into a parse error for free.
+        let parsed: Result<Manifest, _> = toml::from_str(
+            "[dependencies]\nj = { jar = \"libs/x.jar\", features = [\"hello\"] }\n",
+        );
+        assert!(
+            parsed.is_err(),
+            "`features` on a jar dependency should not parse"
+        );
+    }
+
+    #[test]
+    fn dependency_features_reject_empty_and_reserved_names() {
+        let empty: Manifest =
+            toml::from_str("[dependencies]\np = { path = \"../s\", features = [\"\"] }\n").unwrap();
+        assert_eq!(
+            empty.validate(),
+            Err(ValidationError::Dependency(DependencyError::Empty {
+                name: "p".to_owned(),
+                field: "features",
+            }))
+        );
+
+        // Nothing expands a dependency's list, so accepting `default` here would be the one way to
+        // make `build.feature("default")` true anywhere.
+        let reserved: Manifest =
+            toml::from_str("[dependencies]\np = { path = \"../s\", features = [\"default\"] }\n")
+                .unwrap();
+        assert_eq!(
+            reserved.validate(),
+            Err(ValidationError::Dependency(
+                DependencyError::ReservedFeature {
+                    name: "p".to_owned(),
+                    feature: "default".to_owned(),
+                }
+            ))
+        );
     }
 
     #[test]
