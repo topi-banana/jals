@@ -253,7 +253,7 @@ sandbox limit、Rust の `BuildScript` model は
 [`jals-build` の Rhai reference](jals-build/README.md#rhai-build-scripts)を、実行可能な例は
 [`examples/rhai_build_script`](examples/rhai_build_script)を参照してください。
 source archive task の形は [`examples/task_source_archive`](examples/task_source_archive)、
-remap 済み Minecraft の例は [`examples/minecraft-1.21.1-mojang-remap`](examples/minecraft-1.21.1-mojang-remap)
+remap 済み Minecraft の例は [`examples/minecraft-mojang-remap`](examples/minecraft-mojang-remap)
 にあります。
 
 root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess

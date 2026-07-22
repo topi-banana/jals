@@ -263,7 +263,7 @@ open document, while the browser rejects physical publication before fetching. S
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
 The source-archive task shape is shown in
 [`examples/task_source_archive`](examples/task_source_archive); a full remapped-Minecraft example is
-[`examples/minecraft-1.21.1-mojang-remap`](examples/minecraft-1.21.1-mojang-remap).
+[`examples/minecraft-mojang-remap`](examples/minecraft-mojang-remap).
 
 The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`

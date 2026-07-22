@@ -402,8 +402,9 @@ cargo check -p jals-build --no-default-features --features rhai --target wasm32-
 
 See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable project.
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
-publication. [`examples/minecraft-1.21.1-mojang-remap`](../examples/minecraft-1.21.1-mojang-remap)
-fetches, remaps, and decompiles Minecraft 1.21.1 through the task DAG.
+publication. [`examples/minecraft-mojang-remap`](../examples/minecraft-mojang-remap)
+fetches, remaps, and decompiles a Minecraft release — selected from 39 mutually exclusive version
+`[features]` — through the task DAG.
 
 ### `[run]`
 
