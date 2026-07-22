@@ -221,7 +221,8 @@ name = "hello"
 version = "0.1.0"
 
 # Cargo-style build features a `script` reads with `build.feature("…")`. Select them with
-# `--features` / `--all-features` / `--no-default-features`; selection is additive.
+# `--features` / `--all-features` / `--no-default-features`; selection is additive. Per package,
+# as in Cargo: these never reach a dependency — see `features` under [dependencies] for that.
 # [features]
 # default = ["server"]
 # server  = []
@@ -241,6 +242,8 @@ main-class = "com.example.Main"     # entry point for `jals run` (used when no [
 # Source projects are discovered transitively; `dir` selects a project inside a monorepo.
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
+# `features` enables build features in that dependency's own build.rhai (Cargo's per-dep features).
+render = { path = "../render", features = ["vulkan"] }
 
 # Or declare several named entry points and pick one with `jals run --bin <name>`:
 # [[bin]]
