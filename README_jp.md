@@ -224,6 +224,13 @@ release = 21                        # javac --release N
 # classpath   = ["libs/guava.jar"]  # -classpath エントリ
 # script = { type = "rhai", file = "build.rhai" }
 
+# `script` が `build.feature("…")` で読む Cargo 風の build feature。
+# `--features` / `--all-features` / `--no-default-features` で選択し、選択は加法的です。
+# [build.features]
+# default = ["server"]
+# server  = []
+# client  = []
+
 [run]
 main-class = "com.example.Main"     # `jals run` のエントリポイント
 
@@ -233,8 +240,9 @@ shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ```
 
-`script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot を
-読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、生成 source・classpath entry・`javac`/JVM
+`script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot と
+選択された `[build.features]` を読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、
+生成 source・classpath entry・`javac`/JVM
 flag・compile/run environment entry を追加できます。さらに型付き `tasks` DAG で、size/digest 検証付き
 download、JSON projection、安全な sources JAR 展開、Mojang mappings による jar remap、jar merge、
 compile 向け decompile、排他的な物理 source tree の publish を宣言できます。
