@@ -27,6 +27,9 @@
 //! core.
 
 #![cfg_attr(not(feature = "native"), no_std)]
+
+extern crate alloc;
+
 #[cfg(feature = "rhai")]
 pub mod build_script;
 #[cfg(feature = "native")]

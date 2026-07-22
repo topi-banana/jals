@@ -1,10 +1,13 @@
 id: no-extern-crate-alloc
 language: Rust
 severity: error
-message: Do not declare `alloc` with `extern crate`.
+message: Do not declare `alloc` with `extern crate` outside the crate root.
 note: |
-  Import alloc types and macros with `use alloc::...`; Cargo makes the sysroot
-  `alloc` crate available to the workspace.
+  Only a `no_std` crate's `lib.rs` declares `extern crate alloc;`, once. Every other
+  module imports alloc types and macros with `use alloc::...`.
+
+ignores:
+  - '**/src/lib.rs'
 
 rule:
   kind: extern_crate_declaration

@@ -4,6 +4,8 @@
 //! The portable Interface contains only validated project-relative keys and immutable snapshots.
 //! Host paths and live filesystem I/O are confined to the `std`-gated native Adapter.
 
+extern crate alloc;
+
 mod cache;
 mod error;
 pub mod io;

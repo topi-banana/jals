@@ -47,6 +47,8 @@
 //! assert_eq!(resolved.def(id).name, "x");
 //! ```
 
+extern crate alloc;
+
 mod classpath;
 mod dead_if;
 mod def;
