@@ -18,15 +18,21 @@
 //! The one exception is the default-on **`native` feature**, which supplies the host
 //! `SubprocessToolchain` — the only piece that spawns `javac`/`java` and probes the filesystem to
 //! discover installed JDKs — plus the `<dyn Compiler>::select` / `<dyn Runtime>::select` factories
-//! that match a manifest's `[toolchain]` enums to the right boxed backend, one per step. The pure
-//! core (the [`Compiler`] / [`Runtime`] traits plus the [`CompileRequest`] / [`RunRequest`] inputs,
-//! the filesystem-free [`ToolResolver`] policy, and the [`BuiltinToolchain`] in-process backend
-//! implementing both traits — today a dummy that copies sources through [`jals_storage::ProjectStorage`]
-//! instead of compiling, the seam a real embedded compiler fills) is what a future wasm compiler
-//! would implement instead; build the crate with `--no-default-features` for that `wasm32`-only
-//! core.
+//! that match a manifest's `[toolchain]` enums to the right boxed backend, one per step.
+//!
+//! **The seam a future embedded or wasm compiler implements is [`Backend`], in the ungated
+//! [`backend`] module.** It takes a frontend's lowered tree — `(path, CacheKey)` pairs — rather
+//! than host paths, so it carries no `std::path` and compiles for `wasm32` unconditionally.
+//!
+//! [`Compiler`] / [`Runtime`] / [`CompileRequest`] / [`RunRequest`] / [`ToolResolver`] /
+//! [`BuiltinToolchain`] are **not** part of that portable core, despite what this doc used to
+//! claim: every one of them is `native`-gated and built on `std::path::PathBuf`. They remain the
+//! `javac`/`java` invocation layer, which the host backend adapter drives *beneath* [`Backend`]
+//! after materializing the lowered tree. Build with `--no-default-features` to see exactly what
+//! is portable.
 
 #![cfg_attr(not(feature = "native"), no_std)]
+pub mod backend;
 #[cfg(feature = "rhai")]
 pub mod build_script;
 #[cfg(feature = "native")]
@@ -39,6 +45,8 @@ mod invocation;
 mod manifest_ext;
 #[cfg(feature = "native")]
 mod request;
+#[cfg(feature = "native")]
+mod staging;
 mod target;
 #[cfg(feature = "rhai")]
 pub mod task;
@@ -48,6 +56,10 @@ mod toolchain;
 #[cfg(feature = "native")]
 mod native;
 
+pub use backend::{
+    Backend, BackendAbsence, BackendError, BackendFuture, BackendOptions, BackendOutcome,
+    BackendRequest, BackendSelection,
+};
 #[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
@@ -58,6 +70,8 @@ pub use invocation::Invocation;
 pub use manifest_ext::{ManifestError, ManifestExt};
 #[cfg(feature = "native")]
 pub use request::{CompileRequest, RunRequest};
+#[cfg(feature = "native")]
+pub use staging::{FRONTEND_OUT_DIR, StagedTree};
 pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub use toolchain::{

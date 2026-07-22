@@ -28,6 +28,9 @@ ignores:
   - 'jals-build/src/invocation.rs'
   - 'jals-build/src/toolchain.rs'
   - 'jals-build/src/builtin.rs'
+  # Writes a frontend's lowered tree to disk so `javac` can read it — the one place cache keys
+  # become host paths. `native`-gated; the `Backend` trait it feeds stays portable.
+  - 'jals-build/src/staging.rs'
   - 'jals-cli/src/**/*.rs'
   - 'jals-lsp/src/**/*.rs'
   - 'jals-tests/src/**/*.rs'
