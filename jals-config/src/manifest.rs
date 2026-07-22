@@ -25,6 +25,11 @@ use crate::toolchain::Toolchain;
 
 const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 
+/// The reserved `[build.features]` key whose list is the build-feature set enabled when the command
+/// line selects none (Cargo's `default` feature). A resolution directive, never itself a queryable
+/// feature — [`Manifest::resolve_build_features`] expands it and drops the name from the result.
+const DEFAULT_BUILD_FEATURE: &str = "default";
+
 /// A parsed `jals.toml` project manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -244,6 +249,34 @@ impl fmt::Display for DependencyError {
 }
 
 impl Error for DependencyError {}
+
+/// A build-feature selection that could not be resolved by [`Manifest::resolve_build_features`].
+///
+/// The value-level check the command line cannot express: a `--features` name that is not declared
+/// in `[build.features]`. Internal-consistency problems — a `default`/`enables` list that references
+/// an undeclared feature — are a [`ValidationError::UndeclaredBuildFeature`] found at manifest
+/// validation instead, so a well-formed manifest's closure never hits an undeclared name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildFeatureError {
+    /// `--features` named a feature not declared in `[build.features]`.
+    UnknownSelected {
+        /// The undeclared feature name.
+        name: String,
+    },
+}
+
+impl fmt::Display for BuildFeatureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownSelected { name } => write!(
+                f,
+                "`--features {name}` names a feature not declared in `[build.features]`"
+            ),
+        }
+    }
+}
+
+impl Error for BuildFeatureError {}
 
 /// Project metadata (`[package]`).
 ///
@@ -627,6 +660,19 @@ pub struct Build {
     /// Extra raw flags appended verbatim after the generated `javac` arguments (before the source
     /// files). An escape hatch for anything the manifest does not model yet.
     pub javac_flags: Vec<String>,
+    /// Cargo-style **build features** (`[build.features]`): named, additive build-time toggles a
+    /// build script reads to vary what it produces.
+    ///
+    /// Distinct from `[package] features` (the closed [`Feature`] enum, a language-*analysis* gate):
+    /// these are open-ended, user-defined names selected on the command line (`--features` /
+    /// `--all-features` / `--no-default-features`) and queried by the build script via
+    /// `build.feature("…")`. Each key maps to the other features it enables (the Cargo
+    /// `feature = ["…"]` form); the reserved `default` key lists the features enabled when none are
+    /// selected. Resolved additively — closed under the enables map — by
+    /// [`Manifest::resolve_build_features`]. A `default`/`enables` name that is not itself a declared
+    /// key is a [`ValidationError::UndeclaredBuildFeature`]. Empty when omitted, so an existing
+    /// manifest keeps building exactly as before.
+    pub features: BTreeMap<String, Vec<String>>,
 }
 
 /// A project build script selected by its `type` field.
@@ -722,6 +768,7 @@ impl Default for Build {
             target: None,
             classpath: Vec::new(),
             javac_flags: Vec::new(),
+            features: BTreeMap::new(),
         }
     }
 }
@@ -947,6 +994,21 @@ impl Manifest {
             dep.validate(name).map_err(ValidationError::Dependency)?;
         }
 
+        // `[build.features]`: every feature a `default`/`enables` list references must itself be a
+        // declared feature. The command-line `--features` selection is checked later against the same
+        // declared set by `resolve_build_features`; this is the manifest-internal half serde cannot
+        // express (an open-ended map has no closed variant set to reject unknown names at parse time).
+        for (feature, enables) in &self.build.features {
+            for name in enables {
+                if !self.build.features.contains_key(name) {
+                    return Err(ValidationError::UndeclaredBuildFeature {
+                        feature: feature.clone(),
+                        enables: name.clone(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -957,6 +1019,69 @@ impl Manifest {
     /// (`compact-source-file` / `module-import` fire for a feature the set lacks).
     pub fn feature_set(&self) -> FeatureSet {
         FeatureSet::resolve(&self.package.features)
+    }
+
+    /// Resolve the effective **build features** for a run: the additive closure of the selected
+    /// features over `[build.features]`.
+    ///
+    /// Mirrors Cargo's `--features` / `--all-features` / `--no-default-features`:
+    /// - the base set is every declared feature (`all`), nothing (`no_default`), or the `default`
+    ///   key's list (neither);
+    /// - the `selected` names are unioned in and the whole set is closed under the enables map to a
+    ///   fixpoint (like [`FeatureSet::resolve`]);
+    /// - `all` takes precedence over `no_default`.
+    ///
+    /// The reserved `default` key is a directive, not a feature, so it never appears in the result
+    /// (`build.feature("default")` is never true). The returned [`BTreeSet`] is sorted, so a build
+    /// script's fingerprint over it is deterministic.
+    ///
+    /// # Errors
+    /// [`BuildFeatureError::UnknownSelected`] if a `selected` name is not a declared feature. A
+    /// manifest validated by [`Manifest::validate`] guarantees every `default`/`enables` reference
+    /// is declared, so the closure itself never encounters an undeclared name.
+    pub fn resolve_build_features(
+        &self,
+        selected: &[String],
+        all: bool,
+        no_default: bool,
+    ) -> Result<BTreeSet<String>, BuildFeatureError> {
+        let declared = &self.build.features;
+        for name in selected {
+            if !declared.contains_key(name) {
+                return Err(BuildFeatureError::UnknownSelected { name: name.clone() });
+            }
+        }
+        // The base set, then the explicit selection on top: `all` wins over `no_default`, which in
+        // turn suppresses the `default` list.
+        let mut pending: Vec<String> = if all {
+            declared.keys().cloned().collect()
+        } else if no_default {
+            Vec::new()
+        } else {
+            declared
+                .get(DEFAULT_BUILD_FEATURE)
+                .cloned()
+                .unwrap_or_default()
+        };
+        pending.extend(selected.iter().cloned());
+
+        // Close over the enables map with a worklist: a name expands exactly once, when it first
+        // joins the set, so the fixpoint costs one pass per reachable feature. An undeclared name
+        // still joins and simply expands to nothing — `validate` is what rejects it.
+        let mut set = BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if set.contains(&name) {
+                continue;
+            }
+            if let Some(enables) = declared.get(&name) {
+                pending.extend(enables.iter().cloned());
+            }
+            set.insert(name);
+        }
+
+        // `default` is a resolution directive, not a queryable feature — drop it after expansion.
+        set.remove(DEFAULT_BUILD_FEATURE);
+        Ok(set)
     }
 
     /// The names of every `jar` `[dependencies]` entry that opted into recursive **bundled-jar**
@@ -1088,6 +1213,14 @@ pub enum ValidationError {
     /// or conflicting git refs. Wraps the classification [`DependencyError`] so the two layers share a
     /// single message and the variant set never drifts apart.
     Dependency(DependencyError),
+    /// A `[build.features]` entry's `default`/`enables` list references a feature that is not itself
+    /// a declared key.
+    UndeclaredBuildFeature {
+        /// The declared feature (or `default`) whose list carries the bad reference.
+        feature: String,
+        /// The referenced name that is not a declared feature.
+        enables: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -1121,6 +1254,10 @@ impl fmt::Display for ValidationError {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
             Self::Dependency(err) => write!(f, "{err}"),
+            Self::UndeclaredBuildFeature { feature, enables } => write!(
+                f,
+                "`[build.features] {feature}` enables `{enables}`, which is not a declared feature"
+            ),
         }
     }
 }
@@ -1512,6 +1649,108 @@ mod tests {
             let m: Manifest = toml::from_str(&toml).unwrap();
             assert_eq!(m.package.features, alloc::vec![feature]);
         }
+    }
+
+    #[test]
+    fn parses_build_features() {
+        // `[build.features]` is an open-ended map: feature name -> the features it enables.
+        let m: Manifest =
+            toml::from_str("[build.features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        assert_eq!(
+            m.build.features.get("default"),
+            Some(&alloc::vec!["server".to_owned()])
+        );
+        assert!(m.build.features.contains_key("server"));
+        assert!(m.build.features.contains_key("client"));
+    }
+
+    #[test]
+    fn build_features_default_selection() {
+        // No selection resolves to the `default` list, closed, with the directive name dropped.
+        let m: Manifest =
+            toml::from_str("[build.features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        let set = m.resolve_build_features(&[], false, false).unwrap();
+        assert_eq!(set, BTreeSet::from(["server".to_owned()]));
+    }
+
+    #[test]
+    fn build_features_are_additive() {
+        // `--features client` keeps the default `server` (a feature never subtracts) -> both.
+        let m: Manifest =
+            toml::from_str("[build.features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        let set = m
+            .resolve_build_features(&["client".to_owned()], false, false)
+            .unwrap();
+        assert_eq!(
+            set,
+            BTreeSet::from(["client".to_owned(), "server".to_owned()])
+        );
+    }
+
+    #[test]
+    fn build_features_all_and_no_default() {
+        let m: Manifest =
+            toml::from_str("[build.features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        // `--all-features`: every declared feature, the `default` directive dropped.
+        let all = m.resolve_build_features(&[], true, false).unwrap();
+        assert_eq!(
+            all,
+            BTreeSet::from(["client".to_owned(), "server".to_owned()])
+        );
+        // `--no-default-features --features client`: client alone.
+        let client_only = m
+            .resolve_build_features(&["client".to_owned()], false, true)
+            .unwrap();
+        assert_eq!(client_only, BTreeSet::from(["client".to_owned()]));
+        // `--all-features` overrides `--no-default-features`.
+        let both = m.resolve_build_features(&[], true, true).unwrap();
+        assert_eq!(
+            both,
+            BTreeSet::from(["client".to_owned(), "server".to_owned()])
+        );
+    }
+
+    #[test]
+    fn build_features_closure_over_enables() {
+        // A feature that enables others pulls them in transitively.
+        let m: Manifest =
+            toml::from_str("[build.features]\ndefault = []\nfull = [\"a\"]\na = [\"b\"]\nb = []\n")
+                .unwrap();
+        let set = m
+            .resolve_build_features(&["full".to_owned()], false, false)
+            .unwrap();
+        assert_eq!(
+            set,
+            BTreeSet::from(["a".to_owned(), "b".to_owned(), "full".to_owned()])
+        );
+    }
+
+    #[test]
+    fn build_features_unknown_selected_is_error() {
+        let m: Manifest = toml::from_str("[build.features]\nserver = []\n").unwrap();
+        assert_eq!(
+            m.resolve_build_features(&["client".to_owned()], false, false),
+            Err(BuildFeatureError::UnknownSelected {
+                name: "client".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn build_features_undeclared_reference_is_validate_error() {
+        // `default` references `server`, which is not itself a declared feature.
+        let m: Manifest = toml::from_str("[build.features]\ndefault = [\"server\"]\n").unwrap();
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::UndeclaredBuildFeature {
+                feature: "default".to_owned(),
+                enables: "server".to_owned(),
+            })
+        );
     }
 
     #[test]
