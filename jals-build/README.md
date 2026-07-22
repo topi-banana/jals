@@ -161,13 +161,14 @@ default = ["server"]   # enabled when the command line selects none
 server  = []
 client  = []
 full    = ["server", "client"]   # a feature may enable others; the closure is transitive
+gpu     = ["render/vulkan"]      # …or a feature of a dependency (Cargo's `serde/std` form)
 ```
 
 Select them per invocation on `jals build` / `jals run`:
 
 | Flag | Effect |
 | --- | --- |
-| `--features <a,b>` | activate these features (comma separated, repeatable) |
+| `--features <a,b>` | activate these features (comma separated, repeatable); a `<dependency>/<feature>` entry activates it in that dependency |
 | `--all-features` | activate every declared feature; takes precedence over `--no-default-features` |
 | `--no-default-features` | do not activate the `default` list |
 
@@ -178,13 +179,29 @@ is never true. A `--features` name that is not declared is an error before any w
 `default`/`enables` entry naming an undeclared feature is a manifest validation error. Omitting the
 section leaves the set empty.
 
-Features are **per package**, as in Cargo. This table and the flags above describe *this* project
-only, and nothing here crosses a dependency edge: a dependency's build script sees the features the
-[`[dependencies]`](#dependencies) entries pointing at it asked for, never the selection its
-dependents are building under. The flip side is that when this project is somebody's dependency,
-its own `[features]` table is not consulted at all — neither the `default` list nor the `enables`
-closure — so a dependency's set is exactly what its `features` key spells out. Cargo's
-`std = ["serde/std"]` form, which forwards a feature to a dependency, is not supported yet.
+#### Forwarding a feature to a dependency
+
+A list entry of the form `<dependency>/<feature>` — Cargo's `std = ["serde/std"]` — enables
+`<feature>` in that `[dependencies]` entry rather than in this project. It is a *directive*, never a
+queryable feature: `build.feature("render/vulkan")` is always false, and the name is absent from
+`build.features()`. The dependency must be a declared `git`/`path` entry; a `jar` runs no build
+script that could read a feature, and naming one — or an undeclared entry, or `dep/default` — is a
+manifest validation error. `/` is likewise rejected in a `[features]` **key** and in a
+[`[dependencies]` `features`](#dependencies) list, which names features of that dependency only.
+
+Resolution is **per package**, as in Cargo, and every project in the graph goes through the same
+step. A project's seed is what its dependents asked for — the `features` lists on the
+`[dependencies]` entries aimed at it, plus whatever their `[features]` forwarded — closed over its
+*own* table: its `enables` map, and its `default` list unless every incoming entry set
+[`default-features = false`](#dependencies). Because a dependency resolves its own table, forwarding
+is transitive: a mid-graph project forwards to *its* dependencies from features it merely received.
+Nothing crosses an edge implicitly, though — a dependency never sees the selection its dependents
+are building under, only what their manifests spelled out. Where several entries reach one project
+the inputs unify additively (see [`[dependencies]`](#dependencies)), so it still builds once.
+
+The consequence for caching is that a dependency's build-script fingerprint now *does* depend on the
+root's `--features`, but only along a path some manifest wrote: switching a feature that forwards
+nothing still leaves every dependency script cached.
 
 ### `[build]`
 
@@ -244,7 +261,7 @@ records a typed DAG while the first three retain the direct APIs below:
 | `output` | `write(path, bytes)` | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`. |
 | `output` | `write_text(path, text)` | Buffer UTF-8 text below the same output root and return an `OutputPath`. |
 | `build` | `env(name)` | Read a value from the environment map explicitly supplied by the host; returns `()` when absent. |
-| `build` | `feature(name)` | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or what its dependents' `[dependencies] features` asked for. Always fingerprinted — no `rerun_` declaration needed. |
+| `build` | `feature(name)` | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or, as a dependency, what its dependents asked for closed over its own `[features]` (see [`[features]`](#features)). A `<dependency>/<feature>` name is never enabled here; it is a forwarding directive. Always fingerprinted — no `rerun_` declaration needed. |
 | `build` | `features()` | The enabled build features for this project, in lexical order. |
 | `build` | `rerun_if_changed(path)` | Track one project file for cache invalidation. |
 | `build` | `rerun_if_env_changed(name)` | Track one supplied environment value for cache invalidation. |
@@ -494,7 +511,8 @@ one **primary form** — `jar` (compiled classes), `git` (a checked-out project 
 | `branch` / `tag` / `rev` | string | git | *optional*, **at most one** — which commit to check out (default: the repo's default branch) |
 | `path` | string | path | a local project root (relative to the manifest dir) |
 | `dir` | string | git, path | *optional* selected **project root** within the repository/path (e.g. `core`). Manifest probing and all child-relative paths start there. |
-| `features` | array of feature names | git, path | *optional* (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.rhai` reads with `build.feature("…")`. Cargo's per-dependency `features`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
+| `features` | array of feature names | git, path | *optional* (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.rhai` reads with `build.feature("…")`. Cargo's per-dependency `features`. These name features of the dependency itself, so a `<dependency>/<feature>` entry is rejected — [forwarding](#forwarding-a-feature-to-a-dependency) is written in `[features]`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
+| `default-features` | bool | git, path | *optional* (default `true`) — whether that dependency resolves its own `[features] default` list (Cargo's `default-features`). Not available on `jar`, where writing it is a parse error. |
 
 ```toml
 [dependencies]
@@ -510,8 +528,8 @@ mylib = { git = "https://github.com/owner/mylib", tag = "v1.2" }
 local = { path = "../sibling-lib" }
 # A monorepo dependency selects the project root whose exact jals.toml should be probed:
 core  = { git = "https://github.com/owner/mono", rev = "abc123", dir = "core" }
-# Enable build features in the dependency itself — its build.rhai sees exactly this set:
-render = { path = "../render", features = ["vulkan"] }
+# Enable build features in the dependency itself, and skip its own `default` list:
+render = { path = "../render", features = ["vulkan"], default-features = false }
 ```
 
 A **`jar`** dependency is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via
@@ -536,15 +554,21 @@ convention (`src/main/java`, then `src`, then the selected root). A present but 
 a dependency cycle are structural errors; `jals build`/`run` fail before `javac` rather than silently
 falling back to legacy discovery.
 
-A `git`/`path` node's **`features`** are installed when its preprocessing runs, replacing whatever
-the declaring project selected — features never cross a project boundary. Where several entries reach
-the same node, it gets their **union** and still builds once (Cargo's feature unification), so a
-diamond never splits into two nodes whose classes would both land on the classpath. Feature names are
-opaque strings: the target's own `[features]` table is not consulted, so nothing validates them and a
-typo is silently a feature nobody enabled. A node whose selected root has no `jals.toml`, or whose
-manifest declares no `script`, has no build script to read them at all. Because a node's set comes
-from the manifests rather than the command line, its build-script fingerprint is unaffected by the
-root's `--features`: switching sides at the root does not re-run dependency scripts.
+A `git`/`path` node's **`features`** are resolved when its preprocessing runs, and the result replaces
+whatever the declaring project selected — the set a node's script reads is its own, never its
+dependents'. Its seed is the `features` on every `[dependencies]` entry reaching it plus whatever
+those projects' [`[features]` forwarded](#forwarding-a-feature-to-a-dependency); the seed is then
+closed over the node's own `[features]`, including its `default` list unless every incoming entry set
+`default-features = false`. Where several entries reach the same node, all of that **unifies**
+additively and it still builds once (Cargo's feature unification), so a diamond never splits into two
+nodes whose classes would both land on the classpath — and one entry asking for the defaults turns
+them on for the shared node, whatever the others said. A seed name the node's own table does not
+declare is still queryable and simply expands to nothing, so a typo is silently a feature nobody
+reads. A node whose selected root has no `jals.toml`, or whose manifest declares no `script`, has no
+build script to read any of it at all. A node's set is a function of the manifests *and* of the
+root's selection wherever a `[features]` entry forwards along the path to it; a selection that
+forwards nothing leaves every dependency script's fingerprint — and so its cached output —
+untouched.
 
 Stable node identities deduplicate diamonds independently of dependency aliases. Native path nodes
 use their stable selected location; Git nodes use repository identity, checked-out commit, and

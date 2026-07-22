@@ -222,11 +222,13 @@ version = "0.1.0"
 
 # Cargo-style build features a `script` reads with `build.feature("…")`. Select them with
 # `--features` / `--all-features` / `--no-default-features`; selection is additive. Per package,
-# as in Cargo: these never reach a dependency — see `features` under [dependencies] for that.
+# as in Cargo: a feature reaches a dependency only where a manifest says so — `<dep>/<feature>`
+# below, or `features` under [dependencies].
 # [features]
 # default = ["server"]
 # server  = []
 # client  = []
+# gpu     = ["render/vulkan"]   # enables `vulkan` in the `render` dependency (Cargo's `serde/std`)
 
 [build]
 release = 21                        # javac --release N
@@ -242,8 +244,9 @@ main-class = "com.example.Main"     # entry point for `jals run` (used when no [
 # Source projects are discovered transitively; `dir` selects a project inside a monorepo.
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
-# `features` enables build features in that dependency's own build.rhai (Cargo's per-dep features).
-render = { path = "../render", features = ["vulkan"] }
+# `features` enables build features in that dependency's own build.rhai (Cargo's per-dep features);
+# `default-features = false` skips that dependency's own `default` list.
+render = { path = "../render", features = ["vulkan"], default-features = false }
 
 # Or declare several named entry points and pick one with `jals run --bin <name>`:
 # [[bin]]

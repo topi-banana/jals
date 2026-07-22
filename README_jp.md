@@ -219,11 +219,13 @@ version = "0.1.0"
 
 # `script` が `build.feature("…")` で読む Cargo 風の build feature。
 # `--features` / `--all-features` / `--no-default-features` で選択し、選択は加法的です。
-# Cargo と同じく package ごと: dependency には伝播しません（[dependencies] の `features` を使う）。
+# Cargo と同じく package ごと: dependency へ渡るのは manifest が明示した分だけです
+# （下の `<dep>/<feature>`、または [dependencies] の `features`）。
 # [features]
 # default = ["server"]
 # server  = []
 # client  = []
+# gpu     = ["render/vulkan"]   # dependency `render` の `vulkan` を有効化（Cargo の `serde/std`）
 
 [build]
 release = 21                        # javac --release N
@@ -239,8 +241,9 @@ main-class = "com.example.Main"     # `jals run` のエントリポイント
 # source project は transitive に探索され、`dir` で monorepo 内の project を選択する
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
-# `features` はその dependency 自身の build.rhai で有効になる build feature（Cargo と同じ）
-render = { path = "../render", features = ["vulkan"] }
+# `features` はその dependency 自身の build.rhai で有効になる build feature（Cargo と同じ）。
+# `default-features = false` でその dependency 自身の `default` リストを適用しない
+render = { path = "../render", features = ["vulkan"], default-features = false }
 ```
 
 `script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot と
