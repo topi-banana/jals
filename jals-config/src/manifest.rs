@@ -604,6 +604,11 @@ impl FeatureSet {
 pub struct Build {
     /// Optional project build script.
     pub script: Option<BuildScript>,
+    /// Which frontend lowers the project's sources to the Java that the backend compiles.
+    ///
+    /// Defaults to [`FrontendKind::Vanilla`], the identity lowering, so an existing manifest
+    /// keeps compiling exactly the sources it always did.
+    pub frontend: FrontendKind,
     /// Source roots, relative to the manifest directory. These feed `javac`'s `-sourcepath` and
     /// are the roots scanned for `.java` files. Defaults to `["src/main/java"]`.
     pub source_dirs: Vec<String>,
@@ -644,6 +649,41 @@ impl BuildScript {
     }
 }
 
+/// The compile frontend, selected by its `type` field (`[build.frontend]`).
+///
+/// A frontend turns the project's authored sources into the Java sources the backend compiles.
+/// Only the identity lowering exists today; this is the seam a macro frontend fills, and it is
+/// tagged from the start so that adding one is a new variant rather than a schema change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum FrontendKind {
+    /// Emit every source unchanged: the authored sources *are* the Java sources.
+    ///
+    /// A struct variant (`{}`) rather than a unit variant on purpose: serde's
+    /// `deny_unknown_fields` is honored for a struct variant of an internally-tagged enum but
+    /// silently ignored for a unit one, so a typo like `[build.frontend] typ = "vanilla"` would
+    /// otherwise be accepted — the very footgun `deny_unknown_fields` exists to catch.
+    Vanilla {},
+}
+
+impl Default for FrontendKind {
+    fn default() -> Self {
+        Self::Vanilla {}
+    }
+}
+
+impl FrontendKind {
+    /// The value of the frontend's serialized `type` tag.
+    ///
+    /// Also its cache identity. A stable string rather than the enum discriminant, so adding or
+    /// reordering variants can never renumber a shipped frontend's cache keys.
+    pub const fn tag_name(&self) -> &'static str {
+        match self {
+            Self::Vanilla {} => "vanilla",
+        }
+    }
+}
+
 /// Run settings (`[run]`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -674,6 +714,7 @@ impl Default for Build {
     fn default() -> Self {
         Self {
             script: None,
+            frontend: FrontendKind::Vanilla {},
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
             release: None,
@@ -1975,6 +2016,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.validate(), Ok(()));
+    }
+
+    #[test]
+    fn absent_frontend_defaults_to_vanilla() {
+        let m: Manifest = toml::from_str("[build]\nrelease = 21\n").unwrap();
+        assert_eq!(m.build.frontend, FrontendKind::Vanilla {});
+    }
+
+    #[test]
+    fn explicit_vanilla_frontend_parses() {
+        // The internally-tagged enum with `deny_unknown_fields` has serde edge cases, so the
+        // explicit stanza is exercised directly rather than assumed to inherit BuildScript's
+        // behavior.
+        let m: Manifest = toml::from_str("[build.frontend]\ntype = \"vanilla\"\n").unwrap();
+        assert_eq!(m.build.frontend, FrontendKind::Vanilla {});
+        assert_eq!(m.build.frontend.tag_name(), "vanilla");
+    }
+
+    #[test]
+    fn unknown_frontend_type_is_a_parse_error() {
+        // The closed enum is the extension seam: an unimplemented frontend must be rejected at
+        // parse, not silently accepted or defaulted.
+        let parsed: Result<Manifest, _> = toml::from_str("[build.frontend]\ntype = \"macro\"\n");
+        assert!(parsed.is_err(), "unknown frontend type should not parse");
+    }
+
+    #[test]
+    fn frontend_rejects_unknown_field() {
+        let parsed: Result<Manifest, _> =
+            toml::from_str("[build.frontend]\ntype = \"vanilla\"\nbogus = 1\n");
+        assert!(parsed.is_err(), "unknown frontend field should not parse");
     }
 
     #[test]
