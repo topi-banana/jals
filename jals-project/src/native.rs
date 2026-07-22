@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_dependencys_edge_features_reach_its_build_script() {
+    fn a_path_dependency_edge_features_reach_its_build_script() {
         // The per-node union lives in `graph.rs` and is shared, but reading `features` off a
         // `[dependencies]` entry and putting it on the edge is written once here and once in
         // `memory.rs`. Covering only the memory builder would let an omission on this side ship

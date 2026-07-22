@@ -1024,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn default_features_false_suppresses_only_the_dependencys_default_list() {
+    fn default_features_false_suppresses_only_the_dependency_default_list() {
         jals_exec::block_on_inline(async {
             // `default-features = false` drops `a`; everything the edge asked for, and everything
             // that follows from it through the dependency's own table, still applies.
