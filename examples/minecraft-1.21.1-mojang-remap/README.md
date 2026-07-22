@@ -12,18 +12,32 @@ This example uses the build-task DAG to:
 
 ## Side selection
 
-| `JALS_MC_SIDE` | behaviour |
-|---|---|
-| unset / `server` | server bundler → nested game jar + server mappings |
-| `client` | client jar + client mappings |
-| `merged` | remap both jars, then `merge_jars(server, client)` (client wins path conflicts) |
+The distribution comes from the `[build.features]` declared in `jals.toml` (`default = ["server"]`).
+Selection is **additive**, exactly like Cargo: a feature never subtracts, so `--features client`
+keeps the default `server` and therefore builds the *merged* jar. Drop `server` with
+`--no-default-features`.
+
+| selection | resolved features | behaviour |
+|---|---|---|
+| (none) | `server` | server bundler → nested game jar + server mappings |
+| `--features client` | `server`, `client` | remap both jars, then `merge_jars(server, client)` |
+| `--features server,client` | `server`, `client` | same as above |
+| `--all-features` | `server`, `client` | same as above |
+| `--no-default-features --features client` | `client` | client jar + client mappings only |
+
+`merge_jars` overlays the client onto the server, so the client wins path conflicts. A client-only
+build never enters the server bundler branch, so `add_nested_classpath` is skipped and the bundled
+libraries (brigadier, guava, netty, …) are absent from its compile classpath.
 
 ```sh
 # First run downloads ~50 MiB and then remaps + decompiles (slow).
 cargo run -p jals-cli -- build
 
-JALS_MC_SIDE=client cargo run -p jals-cli -- build
-JALS_MC_SIDE=merged cargo run -p jals-cli -- build
+# Merged: the client overlaid on the server.
+cargo run -p jals-cli -- build --features client
+
+# Client only.
+cargo run -p jals-cli -- build --no-default-features --features client
 
 # Subsequent runs reuse the verified SHA-256 project cache.
 cargo run -p jals-cli -- build --offline
@@ -41,7 +55,9 @@ cargo run -p jals-cli -- clean   # removes the owned publication root too
 - `tasks.merge_jars(base, overlay)` — deterministic union, overlay wins on conflict.
 - `tasks.decompile_java(jar, prefix)` — compile-oriented skeleton source tree.
 - `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the remapped game jar.
-- `build.env("JALS_MC_SIDE")` + `rerun_if_env_changed` for side switching.
+- `build.feature("server")` / `build.feature("client")` for `[build.features]` side switching — the
+  resolved feature set is always part of the build-script fingerprint, so no `rerun_if_env_changed`
+  is needed for it.
 
 ## Compile-safety
 

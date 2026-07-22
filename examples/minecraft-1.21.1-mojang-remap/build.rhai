@@ -1,12 +1,12 @@
-// Select the Minecraft distribution: server (default), client, or merged.
-let side = build.env("JALS_MC_SIDE");
-if side == () {
-    side = "server";
+// Select the Minecraft distribution from `[build.features]`: `server` (the default), `client`, or —
+// with both enabled — the merged jar. The resolved feature set is always part of the build-script
+// fingerprint, so changing `--features` re-runs this script without any `rerun_if_env_changed`.
+let server = build.feature("server");
+let client = build.feature("client");
+if !server && !client {
+    // `--no-default-features` with no side selected: fall back to the server distribution.
+    server = true;
 }
-if side != "server" && side != "client" && side != "merged" {
-    build.error("JALS_MC_SIDE must be server, client, or merged");
-}
-build.rerun_if_env_changed("JALS_MC_SIDE");
 
 // Minecraft 1.21.1 version metadata (immutable, content-addressed by Mojang).
 let meta = tasks.fetch_json(
@@ -17,7 +17,7 @@ let meta = tasks.fetch_json(
 
 let remapped = ();
 let bundler = ();
-if side == "server" || side == "merged" {
+if server {
     // The official server.jar is a bundler: the obfuscated game lives at
     // META-INF/versions/1.21.1/server-1.21.1.jar and libraries under META-INF/libraries/.
     bundler = tasks.fetch_jar(
@@ -25,18 +25,19 @@ if side == "server" || side == "merged" {
         tasks.json_sha1(meta, ["downloads", "server", "sha1"]),
         tasks.json_u64(meta, ["downloads", "server", "size"])
     );
-    let server = tasks.nested_jar(bundler, "META-INF/versions/1.21.1/server-1.21.1.jar");
+    let server_jar = tasks.nested_jar(bundler, "META-INF/versions/1.21.1/server-1.21.1.jar");
     let server_map = tasks.fetch_text(
         tasks.json_url(meta, ["downloads", "server_mappings", "url"]),
         tasks.json_sha1(meta, ["downloads", "server_mappings", "sha1"]),
         tasks.json_u64(meta, ["downloads", "server_mappings", "size"])
     );
-    remapped = tasks.remap_jar(server, server_map);
-    // Flatten nested library jars (brigadier, guava, netty, …) onto the compile classpath.
+    remapped = tasks.remap_jar(server_jar, server_map);
+    // Flatten nested library jars (brigadier, guava, netty, …) onto the compile classpath. A
+    // client-only build has no bundler, so those libraries are absent from its classpath.
     tasks.add_nested_classpath(bundler);
 }
-if side == "client" || side == "merged" {
-    let client = tasks.fetch_jar(
+if client {
+    let client_jar = tasks.fetch_jar(
         tasks.json_url(meta, ["downloads", "client", "url"]),
         tasks.json_sha1(meta, ["downloads", "client", "sha1"]),
         tasks.json_u64(meta, ["downloads", "client", "size"])
@@ -46,8 +47,9 @@ if side == "client" || side == "merged" {
         tasks.json_sha1(meta, ["downloads", "client_mappings", "sha1"]),
         tasks.json_u64(meta, ["downloads", "client_mappings", "size"])
     );
-    let client_remapped = tasks.remap_jar(client, client_map);
-    if side == "merged" {
+    let client_remapped = tasks.remap_jar(client_jar, client_map);
+    if server {
+        // Both sides selected: overlay the client onto the server (client wins path conflicts).
         remapped = tasks.merge_jars(remapped, client_remapped);
     } else {
         remapped = client_remapped;
