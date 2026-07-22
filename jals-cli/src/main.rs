@@ -6,7 +6,7 @@
 
 mod report;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -94,6 +94,35 @@ struct LspArgs {
     stdio: bool,
 }
 
+/// Cargo-style build-feature selection, shared by `build` and `run`.
+///
+/// `[build.features]` declares the features; these flags choose which are active for one
+/// invocation. Selection is additive — a feature never subtracts — so `--features client` keeps the
+/// `default` list unless `--no-default-features` is also given.
+#[derive(Args)]
+struct FeatureArgs {
+    /// Activate these `[build.features]` (comma separated, repeatable).
+    #[arg(long, value_name = "FEATURES", value_delimiter = ',')]
+    features: Vec<String>,
+
+    /// Activate every declared `[build.features]`. Takes precedence over `--no-default-features`.
+    #[arg(long)]
+    all_features: bool,
+
+    /// Do not activate the `default` `[build.features]` list.
+    #[arg(long)]
+    no_default_features: bool,
+}
+
+impl FeatureArgs {
+    /// The resolved, sorted build-feature set these flags select from `manifest`.
+    fn resolve(&self, manifest: &Manifest) -> Result<BTreeSet<String>> {
+        manifest
+            .resolve_build_features(&self.features, self.all_features, self.no_default_features)
+            .map_err(|e| anyhow!("{e}"))
+    }
+}
+
 #[derive(Args)]
 struct BuildArgs {
     /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
@@ -120,6 +149,9 @@ struct BuildArgs {
     /// Resolve build-task artifacts only from the verified project cache.
     #[arg(long)]
     offline: bool,
+
+    #[command(flatten)]
+    features: FeatureArgs,
 }
 
 #[derive(Args)]
@@ -151,6 +183,9 @@ struct RunArgs {
     /// Resolve build-task artifacts only from the verified project cache.
     #[arg(long)]
     offline: bool,
+
+    #[command(flatten)]
+    features: FeatureArgs,
 }
 
 #[derive(Args)]
@@ -428,6 +463,7 @@ impl BuildArgs {
     /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let features = self.features.resolve(&manifest)?;
         if let Some(out) = &self.out_dir {
             manifest.build.classes_dir = out.to_string_lossy().into_owned();
         }
@@ -443,6 +479,7 @@ impl BuildArgs {
             &mut manifest,
             &root,
             exec,
+            &features,
             self.offline,
             if self.dry_run {
                 jals_project::SourcePublication::Skip
@@ -476,6 +513,7 @@ impl RunArgs {
     /// run; `--dry-run` prints both commands without executing either.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let features = self.features.resolve(&manifest)?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
         let main_class: String = match &self.main_class {
@@ -490,6 +528,7 @@ impl RunArgs {
             &mut manifest,
             &root,
             exec,
+            &features,
             self.offline,
             if self.dry_run {
                 jals_project::SourcePublication::Skip
@@ -683,7 +722,12 @@ impl ProjectLintContext {
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
         // `type-mismatch` index) and the `[package] features`. Any strict graph failure is reported and
         // converted into the default lint context below.
-        let environment = App::build_script_environment(&manifest);
+        // The lint / editor path takes no `--features` flags, so build scripts see the manifest's
+        // default selection. With nothing selected, resolution cannot fail.
+        let features = manifest
+            .resolve_build_features(&[], false, false)
+            .unwrap_or_default();
+        let environment = App::build_script_environment(&manifest, &features);
         let inputs = match App::project_inputs(
             &manifest,
             root,
@@ -895,10 +939,11 @@ impl App {
         manifest: &mut Manifest,
         root: &Path,
         exec: &Exec,
+        features: &BTreeSet<String>,
         offline: bool,
         publications: jals_project::SourcePublication,
     ) -> Result<(jals_build::StagedTree, HostProjectInputs)> {
-        let environment = Self::build_script_environment(manifest);
+        let environment = Self::build_script_environment(manifest, features);
         let script =
             Self::run_build_script(manifest, root, exec, &environment, offline, publications)
                 .await?;
@@ -968,11 +1013,15 @@ impl App {
     /// stays out: a build script can forward anything it reads into a task fetch URL, so
     /// inheriting wholesale would expose every credential on the machine to an unreviewed
     /// `build.rhai` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
-    fn build_script_environment(manifest: &Manifest) -> BuildScriptEnvironment {
+    fn build_script_environment(
+        manifest: &Manifest,
+        features: &BTreeSet<String>,
+    ) -> BuildScriptEnvironment {
         BuildScriptEnvironment::from_host(std::env::vars_os().filter_map(|(name, value)| {
             Some((name.into_string().ok()?, value.into_string().ok()?))
         }))
         .for_project(manifest)
+        .with_features(features.clone())
     }
 
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
