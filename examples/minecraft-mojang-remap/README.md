@@ -3,10 +3,12 @@
 This example uses the build-task DAG to:
 
 1. Fetch the selected release's Minecraft version metadata (pinned SHA-1).
-2. Resolve the selected jar + official Mojang mappings through JSON projections.
+2. Resolve the selected jar — and, for an obfuscated release, the official Mojang mappings —
+   through JSON projections.
 3. For a server bundler jar (1.18+), extract `META-INF/versions/<version>/server-<version>.jar` and
    flatten nested library jars onto the classpath with `add_nested_classpath`.
-4. **Remap** the jar with those mappings (member paths renamed to official names).
+4. **Remap** the jar with those mappings (member paths renamed to official names) — skipped from
+   26.1, which ships deobfuscated and declares no mappings.
 5. **Decompile** every class under `net/minecraft` into compile-oriented Java skeletons.
 6. Publish the tree at `src/main/java/net/minecraft` (`replace-root`).
 
@@ -14,10 +16,11 @@ Both the release and the distribution come from the `[features]` declared in `ja
 
 ## Version selection
 
-Every release from **1.14.4** to **1.21.11** is a feature — 39 of them, named exactly like the
+Every release from **1.14.4** to **26.2** is a feature — 43 of them, named exactly like the
 release:
 
 ```
+26.2     26.1.2   26.1.1  26.1
 1.21.11  1.21.10  1.21.9  1.21.8  1.21.7  1.21.6  1.21.5  1.21.4  1.21.3  1.21.2  1.21.1  1.21
 1.20.6   1.20.5   1.20.4  1.20.3  1.20.2  1.20.1  1.20
 1.19.4   1.19.3   1.19.2  1.19.1  1.19
@@ -30,11 +33,11 @@ release:
 
 They are mutually **exclusive**: at most one may be active. `jals.toml` therefore keeps
 `default = ["server"]` — the default list carries only the side — and `build.rhai` falls back to
-`DEFAULT_VERSION` (1.21.11) when no version feature is selected. Selecting a version needs nothing
-else:
+`DEFAULT_VERSION` (26.2, the newest release) when no version feature is selected. Selecting a
+version needs nothing else:
 
 ```sh
-jals build                       # 1.21.11 (the fallback) + server
+jals build                       # 26.2 (the fallback) + server
 jals build --features 1.20.1     # 1.20.1 + server
 jals build --features 1.16.5,client   # 1.16.5, client overlaid on server
 ```
@@ -47,13 +50,20 @@ $ jals build --features 1.20.1,1.19.4
 error: build script reported errors: select at most one Minecraft version feature, got `1.20.1` and `1.19.4`
 ```
 
-`--all-features` therefore always fails here — it selects all 39 releases at once.
+`--all-features` therefore always fails here — it selects all 43 releases at once.
 
-Two boundaries are baked into the catalog at the top of `build.rhai`:
+Three boundaries are baked into the catalog at the top of `build.rhai`, carried by the two flags on
+each entry (`bundler?` and `obfuscated?`), which are independent of each other:
 
 - **1.14.4 is the floor.** Mojang published no official mappings before it, so earlier releases
   cannot be remapped and are not declared at all — `--features 1.14` is rejected by the CLI as an
   undeclared feature.
+- **26.1 drops the mappings.** From 26.1 Minecraft ships with its real names already in the jar, and
+  the version metadata declares no `client_mappings`/`server_mappings` download at all — projecting
+  one would not resolve. Those entries are marked `obfuscated? = false`, and the script skips both
+  the mappings `fetch_text` and `remap_jar`; everything else (bundler extraction, decompile,
+  publication) is unchanged. This is orthogonal to the layout boundary below: 26.x is still a
+  bundler.
 - **1.18 changes the server layout.** From 1.18 the server download is a *bundler*: the game jar
   sits at `META-INF/versions/<version>/server-<version>.jar` with its libraries under
   `META-INF/libraries/`, so the script pulls the game out with `nested_jar` and flattens the
@@ -73,10 +83,10 @@ keeps the default `server` and therefore builds the *merged* jar. Drop `server` 
 
 | selection | resolved features | behaviour |
 |---|---|---|
-| (none) | `server` | server jar + server mappings (1.21.11) |
-| `--features client` | `server`, `client` | remap both jars, then `merge_jars(server, client)` |
+| (none) | `server` | server jar only (26.2 — no mappings, no remap) |
+| `--features client` | `server`, `client` | remap both if obfuscated, then `merge_jars(server, client)` |
 | `--features server,client` | `server`, `client` | same as above |
-| `--no-default-features --features client` | `client` | client jar + client mappings only |
+| `--no-default-features --features client` | `client` | client jar only |
 | `--features 1.16.5` | `server`, `1.16.5` | 1.16.5 server jar + server mappings |
 | `--no-default-features --features 1.16.5` | `1.16.5` | same — no side selected falls back to `server` |
 
@@ -112,20 +122,22 @@ cargo run -p jals-cli -- clean   # removes the owned publication root too
 - `tasks.json_url` / `json_sha1` / `json_u64` projections over Mojang version metadata.
 - `tasks.nested_jar(jar, member)` — pull the game jar out of a 1.18+ server bundler.
 - `tasks.add_nested_classpath(jar)` — flatten every nested library jar onto the compile classpath.
-- `tasks.remap_jar(jar, mappings)` — hierarchy-aware Mojang mojmap deobfuscation.
+- `tasks.remap_jar(jar, mappings)` — hierarchy-aware Mojang mojmap deobfuscation. The default 26.2
+  build does not reach it; `--features 1.21.11` (or any release up to it) does.
 - `tasks.merge_jars(base, overlay)` — deterministic union, overlay wins on conflict.
 - `tasks.decompile_java(jar, prefix)` — compile-oriented skeleton source tree.
-- `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the remapped game jar.
+- `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the resolved game jar.
 - `build.feature("server")` / `build.feature("client")` for `[features]` side switching — the
   resolved feature set is always part of the build-script fingerprint, so no `rerun_if_env_changed`
   is needed for it.
 - **Mutually exclusive features on top of an additive `[features]` model**: the script scans its
   catalog with `build.feature`, rejects a second match with `build.error` (which publishes nothing
   and runs no task), and falls back to `DEFAULT_VERSION` when none matched.
-- **One version-shaped pipeline**: the same task graph serves 39 releases, with the catalog's
-  `bundler?` flag as the only structural branch and the version threaded through the metadata URL,
-  the nested member path, and the `publish_tree` owner (`minecraft-<version>`) — switching versions
-  swaps the owner of one destination and replaces the published tree wholesale.
+- **One version-shaped pipeline**: the same task graph serves 43 releases, with the catalog's
+  `bundler?` and `obfuscated?` flags as its only two structural branches — independent of each
+  other, so 26.x takes the bundler path without the remap one — and the version threaded through
+  the metadata URL, the nested member path, and the `publish_tree` owner (`minecraft-<version>`).
+  Switching versions swaps the owner of one destination and replaces the published tree wholesale.
 
 ## Compile-safety
 
@@ -146,6 +158,11 @@ full tree to report remaining errors. Full semantic recompilation of vanilla is 
 
 The demonstrated piece is the pipeline itself (fetch → nested extract → remap → decompile →
 exclusive publish); a cleanly compiling tree is best-effort.
+
+The target release also sets the JDK the optional `javac` step needs: 26.x declares
+`javaVersion.majorVersion` 25 (1.21.11 declares 21), so its class files are major version 69.
+Decompilation and publication do not care — `jals-classfile` reads the version without gating on it
+— but compiling the published tree wants a matching toolchain.
 
 ## Ownership and clean
 

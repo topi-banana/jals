@@ -12,12 +12,19 @@ version = "0.1.0"
 # selects a version without needing `--no-default-features` to drop a conflicting default. As a
 # consequence `--all-features` selects every version at once and always fails.
 #
-# The keys must be quoted: a bare `1.20.1` is a TOML dotted key, not a feature name. 1.14.4 is the
-# oldest entry because Mojang published no official mappings before it.
+# The keys must be quoted: a bare `1.20.1` is a TOML dotted key, not a feature name. Both ends of
+# the range are set by mappings: 1.14.4 is the oldest entry because Mojang published no official
+# mappings before it, and from 26.1 the game ships deobfuscated with no mappings download at all —
+# the build script simply skips its remap step there. Selecting such a release is no different from
+# any other.
 [features]
 default = ["server"]
 server = []
 client = []
+"26.2" = []
+"26.1.2" = []
+"26.1.1" = []
+"26.1" = []
 "1.21.11" = []
 "1.21.10" = []
 "1.21.9" = []
