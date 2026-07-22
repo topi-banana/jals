@@ -129,6 +129,15 @@ impl<'a> ClassHierarchy<'a> {
         }
     }
 
+    /// The unambiguously indexed class with this internal binary name.
+    ///
+    /// Reading facts out of *another* class's bytecode — an `enum`'s constant names, say — is only
+    /// sound when that name resolves to exactly one definition, so a duplicate binary name yields
+    /// `None` here just as it does for the interface-super checks.
+    pub(crate) fn class(&self, internal: &str) -> Option<&'a ClassFile> {
+        self.unique(internal)
+    }
+
     fn class_name(cf: &ClassFile) -> Option<String> {
         cf.constant_pool
             .class_name(cf.this_class)

@@ -96,8 +96,9 @@ adapter ignore only when OS identity is genuinely required.
 
 ## `no_std` and features
 
-Portable crates use `core + alloc`. Do not add source-level `extern crate alloc`; the workspace
-supplies it through `.cargo/config.toml`.
+Portable crates use `core + alloc`. Each such crate declares `extern crate alloc;` exactly once, in
+its `lib.rs`; every other module imports with `use alloc::...`. The
+`.ast-grep/rules/no-extern-crate-alloc.yml` rule rejects the declaration anywhere else.
 
 - `jals-exec --no-default-features` is `no_std + alloc`; `tokio` adds the native runtime adapter
   (current-thread bootstrap, worker pool, `on_blocking_pool`), `wasm` the browser adapter.

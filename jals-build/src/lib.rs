@@ -32,6 +32,9 @@
 //! is portable.
 
 #![cfg_attr(not(feature = "native"), no_std)]
+
+extern crate alloc;
+
 pub mod backend;
 #[cfg(feature = "rhai")]
 pub mod build_script;

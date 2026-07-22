@@ -7,6 +7,8 @@
 //! (`archive`) decodes jars in-house over the portable [`jals_storage::io`] byte streams, so it is
 //! `no_std + alloc` and wasm-safe; it still operates on bytes, never paths.
 
+extern crate alloc;
+
 mod io;
 mod resolve;
 mod skeleton;

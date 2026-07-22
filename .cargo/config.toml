@@ -1,8 +1,0 @@
-# Make the sysroot `alloc` crate available to the workspace's `no_std` crates.
-# Source files import its items with `use alloc::...` and do not need source-level
-# `extern crate alloc` declarations in each crate root.
-[target.'cfg(all())']
-rustflags = ["--extern", "alloc"]
-
-[build]
-rustdocflags = ["--extern", "alloc"]

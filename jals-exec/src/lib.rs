@@ -14,6 +14,8 @@
 //! they own (`tokio_rt::run` natively, `Exec::wasm()` in the browser, [`Exec::inline`] for tests
 //! and pure in-memory use) and thread the handle down; portable code never names a runtime.
 
+extern crate alloc;
+
 mod inline;
 mod task;
 #[cfg(any(feature = "tokio", test))]

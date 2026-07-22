@@ -5,6 +5,8 @@
 //! transition that prevents assembly before every node has been preprocessed. Host acquisition is
 //! isolated behind the `native` feature.
 
+extern crate alloc;
+
 mod assemble;
 mod graph;
 mod memory;

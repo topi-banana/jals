@@ -30,6 +30,8 @@
 //!   comment is kept.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 
+extern crate alloc;
+
 mod comments;
 mod config;
 mod doc;

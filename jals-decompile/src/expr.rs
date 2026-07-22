@@ -137,6 +137,30 @@ pub(crate) enum Stmt {
     While { cond: Expr, body: Vec<Self> },
     /// A `do { body } while (cond);` (a bottom-test loop).
     DoWhile { body: Vec<Self>, cond: Expr },
+    /// A `switch (selector) { arms }`, recovered from a `tableswitch` / `lookupswitch`. Rendered
+    /// in the classic colon form, which is the one that can express the fall-through the bytecode
+    /// actually encodes.
+    Switch {
+        selector: Expr,
+        arms: Vec<SwitchArm>,
+    },
+    /// A `break;`. Only ever emitted to leave a [`Stmt::Switch`] arm — a loop `break` is not yet
+    /// recovered (its edge bails the whole method).
+    Break,
+}
+
+/// One arm of a recovered [`Stmt::Switch`]: the labels that share it, then its statements.
+///
+/// The labels are the *source* labels. A `tableswitch`'s gap keys point at `default` rather than
+/// at a body, so they never reach here, and a `default`-less switch's keys that point past the
+/// last arm are dropped with the join.
+pub(crate) struct SwitchArm {
+    /// The `case` constants sharing this arm, ascending (`case 1: case 2:`). Empty for an arm
+    /// that is only `default:`.
+    pub labels: Vec<String>,
+    /// Whether `default:` labels this arm too (it may carry `case` labels as well).
+    pub is_default: bool,
+    pub body: Vec<Stmt>,
 }
 
 impl Stmt {
@@ -181,6 +205,24 @@ impl Stmt {
                 }
                 out.push(format!("{pad}}} while ({});", cond.render()));
             }
+            Self::Switch { selector, arms } => {
+                // Three indent levels, unlike every other block statement: the labels sit one
+                // step in from `switch`, and an arm's statements one step in from its labels.
+                let label_pad = " ".repeat(indent + 4);
+                out.push(format!("{pad}switch ({}) {{", selector.render()));
+                for arm in arms {
+                    for label in &arm.labels {
+                        out.push(format!("{label_pad}case {label}:"));
+                    }
+                    if arm.is_default {
+                        out.push(format!("{label_pad}default:"));
+                    }
+                    for s in &arm.body {
+                        s.render_into(indent + 8, out);
+                    }
+                }
+                out.push(format!("{pad}}}"));
+            }
             simple => out.push(format!("{pad}{}", simple.render_simple())),
         }
     }
@@ -198,7 +240,8 @@ impl Stmt {
             Self::Throw(e) => format!("throw {};", e.render()),
             Self::SuperCall(args) => format!("super({});", Expr::render_args(args)),
             Self::ThisCall(args) => format!("this({});", Expr::render_args(args)),
-            Self::If { .. } | Self::While { .. } | Self::DoWhile { .. } => {
+            Self::Break => "break;".to_owned(),
+            Self::If { .. } | Self::While { .. } | Self::DoWhile { .. } | Self::Switch { .. } => {
                 unreachable!("block statements are rendered by render_into")
             }
         }
@@ -372,6 +415,8 @@ impl Expr {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     fn neg(expr: Expr) -> Expr {
@@ -379,6 +424,25 @@ mod tests {
             op: "-",
             expr: Box::new(expr),
         }
+    }
+
+    fn arm(labels: &[&str], is_default: bool, body: Vec<Stmt>) -> SwitchArm {
+        SwitchArm {
+            labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+            is_default,
+            body,
+        }
+    }
+
+    fn assign(value: &str) -> Stmt {
+        Stmt::Assign {
+            target: Expr::Local("v".into()),
+            value: Expr::lit(value),
+        }
+    }
+
+    fn render(stmt: Stmt) -> Vec<String> {
+        Stmt::render_block(&[stmt])
     }
 
     #[test]
@@ -412,6 +476,105 @@ mod tests {
             expr: Box::new(Expr::Local("value".into())),
         };
         assert_eq!(expr.render(), "!value");
+    }
+
+    #[test]
+    fn switch_renders_labels_and_bodies_at_three_indent_levels() {
+        let stmt = Stmt::Switch {
+            selector: Expr::Local("x".into()),
+            arms: vec![
+                arm(&["0", "1"], false, vec![assign("1"), Stmt::Break]),
+                arm(&["2"], false, vec![assign("2"), Stmt::Break]),
+                arm(&[], true, vec![assign("-1")]),
+            ],
+        };
+        assert_eq!(
+            render(stmt),
+            [
+                "switch (x) {",
+                "    case 0:",
+                "    case 1:",
+                "        v = 1;",
+                "        break;",
+                "    case 2:",
+                "        v = 2;",
+                "        break;",
+                "    default:",
+                "        v = -1;",
+                "}",
+            ]
+        );
+    }
+
+    #[test]
+    fn switch_renders_an_arm_with_no_statements() {
+        // A `case 3:` that falls straight into the next label carries no statements of its own.
+        let stmt = Stmt::Switch {
+            selector: Expr::Local("x".into()),
+            arms: vec![
+                arm(&["3"], false, Vec::new()),
+                arm(&["4"], false, vec![assign("4")]),
+            ],
+        };
+        assert_eq!(
+            render(stmt),
+            [
+                "switch (x) {",
+                "    case 3:",
+                "    case 4:",
+                "        v = 4;",
+                "}",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_default_arm_may_also_carry_case_labels() {
+        let stmt = Stmt::Switch {
+            selector: Expr::Local("x".into()),
+            arms: vec![arm(&["7"], true, vec![assign("7")])],
+        };
+        assert_eq!(
+            render(stmt),
+            [
+                "switch (x) {",
+                "    case 7:",
+                "    default:",
+                "        v = 7;",
+                "}",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_block_statement_indents_from_its_arm() {
+        let stmt = Stmt::Switch {
+            selector: Expr::Local("x".into()),
+            arms: vec![arm(
+                &["0"],
+                false,
+                vec![
+                    Stmt::If {
+                        cond: Expr::Local("y".into()),
+                        then: vec![assign("1")],
+                        els: Vec::new(),
+                    },
+                    Stmt::Break,
+                ],
+            )],
+        };
+        assert_eq!(
+            render(stmt),
+            [
+                "switch (x) {",
+                "    case 0:",
+                "        if (y) {",
+                "            v = 1;",
+                "        }",
+                "        break;",
+                "}",
+            ]
+        );
     }
 
     #[test]
