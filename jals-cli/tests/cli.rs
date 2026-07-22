@@ -452,12 +452,20 @@ fn build_dry_run_executes_and_publishes_build_script_outputs() {
         .join("target/jals/build/rhai/out/com/example/DryRunGenerated.java");
     assert!(generated.is_file());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(generated.to_string_lossy().as_ref()));
-    let authored = dir.path().join("src/main/java/com/example/Main.java");
-    assert_eq!(
-        stdout.matches(authored.to_string_lossy().as_ref()).count(),
-        1
-    );
+    // Both the authored and the script-generated source reach javac through the frontend's
+    // staging tree, each exactly once.
+    let staged = dir.path().join("target/jals/build/frontend");
+    for source in [
+        staged.join("src/main/java/com/example/Main.java"),
+        staged.join("target/jals/build/rhai/out/com/example/DryRunGenerated.java"),
+    ] {
+        assert_eq!(
+            stdout.matches(source.to_string_lossy().as_ref()).count(),
+            1,
+            "expected {} exactly once in: {stdout}",
+            source.display()
+        );
+    }
 }
 
 #[test]
@@ -585,7 +593,19 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
         .join("target/jals/build/rhai/out/com/example/Generated.java");
     assert!(generated.is_file());
     let args = read_arg_lines(&captured_args);
-    assert!(args.iter().any(|arg| Path::new(arg) == generated));
+    // The build script's output is root project source, so it goes through the frontend like
+    // any authored file; javac sees the staged copy, not the script's own output path.
+    let staged_generated = dir
+        .path()
+        .join("target/jals/build/frontend/target/jals/build/rhai/out/com/example/Generated.java");
+    assert!(
+        args.iter().any(|arg| Path::new(arg) == staged_generated),
+        "generated source should reach javac via the frontend staging tree; args: {args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| Path::new(arg) == generated),
+        "the pre-frontend generated file must not also be passed to javac"
+    );
     assert!(args.iter().any(|arg| arg == "-Agenerated=true"));
     assert_eq!(std::fs::read_to_string(captured_env).unwrap(), "from-rhai");
     assert_eq!(
@@ -1004,10 +1024,20 @@ fn build_with_relative_manifest_path_uses_project_root_once() {
         args[output_index],
         dir.path().join("target/classes").to_string_lossy()
     );
+    // `javac` is given the frontend's staged output, never the authored file. With the default
+    // vanilla frontend the bytes are identical, so this asserts the *path* through the seam
+    // rather than any change in what gets compiled.
+    assert!(args.iter().any(|arg| {
+        Path::new(arg)
+            == dir
+                .path()
+                .join("target/jals/build/frontend/src/main/java/com/example/Main.java")
+    }));
     assert!(
-        args.iter().any(|arg| {
-            Path::new(arg) == dir.path().join("src/main/java/com/example/Main.java")
-        })
+        !args
+            .iter()
+            .any(|arg| Path::new(arg) == dir.path().join("src/main/java/com/example/Main.java")),
+        "the authored source must not reach javac; it would bypass the frontend"
     );
     assert_eq!(
         std::fs::canonicalize(std::fs::read_to_string(captured_cwd).unwrap().trim()).unwrap(),

@@ -19,6 +19,9 @@ jals-classpath = { path = "../jals-classpath", default-features = false, feature
 ] }
 jals-config.workspace = true
 jals-exec.workspace = true
+# Featureless and portable: lowering a dependency's sources happens inside the portable `assemble`
+# step, so the frontend crate must build wherever `jals-project` does (including `wasm32`).
+jals-frontend.workspace = true
 jals-storage.workspace = true
 serde_json.workspace = true
 serde.workspace = true

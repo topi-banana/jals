@@ -451,7 +451,7 @@ impl BuildArgs {
             },
         )
         .await?;
-        let request = App::compile_request(&manifest, &root, &sources, &inputs);
+        let request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
         let compiler = <dyn Compiler>::select(&manifest, exec).await;
@@ -498,7 +498,7 @@ impl RunArgs {
             },
         )
         .await?;
-        let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
+        let compile_request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
             project_root: &root,
@@ -897,12 +897,17 @@ impl App {
         exec: &Exec,
         offline: bool,
         publications: jals_project::SourcePublication,
-    ) -> Result<(Vec<PathBuf>, HostProjectInputs)> {
+    ) -> Result<(jals_build::StagedTree, HostProjectInputs)> {
         let environment = Self::build_script_environment(manifest);
         let script =
             Self::run_build_script(manifest, root, exec, &environment, offline, publications)
                 .await?;
         let sources = Self::discover_sources(manifest, root, !script.generated_sources.is_empty())?;
+        // The root build script's output is root project source, so it goes through the root
+        // frontend alongside the authored files. Dependency-contributed sources, which land in
+        // `extra_sources` further down, deliberately do not: a dependency is lowered under its
+        // own manifest's frontend, never re-expanded by whoever consumes it.
+        let generated = script.generated_sources.clone();
         let mut inputs = Self::project_inputs(
             manifest,
             root,
@@ -918,7 +923,30 @@ impl App {
         )
         .await?;
         inputs.deduplicate(manifest, root, &sources);
-        Ok((sources, inputs))
+        // Deduplication compares against the *authored* paths, so it must happen before lowering
+        // replaces them with staged ones.
+        // A build script may register a file that is *also* an authored source (`add_source` on
+        // an existing project file is legal), so the union has to be deduplicated — a tree with
+        // two entries at one path is rejected, correctly, by the frontend.
+        let mut to_lower = sources;
+        let mut seen: HashSet<PathBuf> = to_lower.iter().cloned().collect();
+        for path in &generated {
+            if seen.insert(path.clone()) {
+                to_lower.push(path.clone());
+            }
+        }
+        let staged = Self::lower_sources(manifest, root, &to_lower).await?;
+        // Whatever was lowered is now represented by its staged copy; leaving the original in
+        // `extra_sources` would hand javac the pre-frontend file as well.
+        inputs
+            .extra_sources
+            .retain(|path| !generated.contains(path));
+        // Repoint `-sourcepath` at the staged tree. Without this the compiler could resolve a
+        // type from the authored source it was never given on the command line, silently reading
+        // around the frontend — harmless while the frontend is the identity, and a correctness
+        // hole the moment one rewrites anything.
+        manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
+        Ok((staged, inputs))
     }
 
     fn print_graph_warning(warning: &jals_project::GraphWarning) {
@@ -1099,6 +1127,70 @@ impl App {
             ));
         }
         Ok(sources)
+    }
+
+    /// Run the project's frontend over the discovered sources and stage the result on disk.
+    ///
+    /// This is the frontend/backend seam. The compiler is handed the returned paths and never the
+    /// paths that went in, so whatever `javac` compiles is by construction something a frontend
+    /// emitted. With the default vanilla frontend the bytes are identical to the authored
+    /// sources, so the observable build is unchanged — the point of this release is that the
+    /// *path* now goes through the seam, not that the output differs.
+    ///
+    /// The staged tree lives under `target/jals/build/frontend`, which `jals clean` already
+    /// removes and which the build-script fingerprint rules already refuse to treat as a rerun
+    /// input.
+    async fn lower_sources(
+        manifest: &Manifest,
+        root: &Path,
+        sources: &[PathBuf],
+    ) -> Result<jals_build::StagedTree> {
+        let frontend: &dyn jals_frontend::Frontend = match manifest.build.frontend {
+            jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
+        };
+
+        let mut files = Vec::with_capacity(sources.len());
+        for path in sources {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading source {}", path.display()))?;
+            // Logical, project-relative identity. Sorting on this rather than on the filesystem
+            // walk order is what keeps cache keys identical across machines.
+            let relative = RelativePath::from_host_path(root, path)
+                .ok_or_else(|| anyhow!("source {} is outside the project root", path.display()))?;
+            files.push(jals_frontend::IrFile::new(relative, bytes.into()));
+        }
+        jals_frontend::FrontendKey::canonical_order(&mut files);
+
+        // Only the artifact cache is needed, so open it directly rather than taking a whole
+        // project snapshot: lowering reads its inputs from `files`, never from a `ProjectView`.
+        let mut cache = jals_storage::ArtifactCache::new(jals_storage::NativeCache::new(
+            root.join(NativeStorage::PROJECT_CACHE_DIR),
+        ));
+
+        let lowered = jals_frontend::Driver::lower(frontend, &mut cache, &files)
+            .await
+            .map_err(|error| anyhow!("frontend `{}` failed: {error:?}", frontend.caps().id))?;
+
+        let tree: Vec<_> = lowered
+            .tree
+            .files()
+            .iter()
+            .map(|file| (file.path.clone(), file.key.clone()))
+            .collect();
+
+        jals_build::StagedTree::write(&cache, &tree, root.join(jals_build::FRONTEND_OUT_DIR))
+            .await
+            .map_err(|error| anyhow!("staging frontend output failed: {error}"))
+    }
+
+    /// The staged tree expressed as manifest `source-dirs`, relative to the project root when
+    /// possible so the rendered `javac` command stays readable.
+    fn staged_source_dirs(root: &Path, staged: &jals_build::StagedTree) -> Vec<String> {
+        let path = staged
+            .root()
+            .strip_prefix(root)
+            .unwrap_or_else(|_| staged.root());
+        vec![path.to_string_lossy().into_owned()]
     }
 
     /// The compile inputs shared by `jals build` and `jals run`: the manifest plus its discovered

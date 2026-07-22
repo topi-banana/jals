@@ -38,6 +38,7 @@ jals-classpath.workspace = true
 jals-config.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt.workspace = true
+jals-frontend.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 jals-lint.workspace = true

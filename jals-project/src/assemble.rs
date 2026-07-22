@@ -199,37 +199,94 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
     async fn publish_source_node(&mut self, node: &crate::graph::ResolvedNode) {
         let source = node.source().expect("source node has a source payload");
-        for file in &source.authored_sources {
-            self.publish_source_file(&node.id, b"source", file).await;
-        }
+
+        // Run this dependency's own frontend over its authored and generated sources before
+        // publishing them, so a consumer's backend sees only lowered output — the same guarantee
+        // the CLI gives the root project. The frontend comes from *this node's* manifest, never
+        // the root's: a dependency is lowered under its own authority and must not be re-expanded
+        // by whoever depends on it.
+        self.publish_lowered_sources(node, source).await;
+
         for entry in &source.classpath {
             self.publish_classpath_entry(&node.id, entry).await;
         }
         if let Some(exports) = self.graph.exports.get(&node.id) {
-            for file in &exports.sources {
-                self.publish_source_file(&node.id, b"generated-source", file)
-                    .await;
-            }
             for file in &exports.classpath {
                 self.publish_classpath_file(&node.id, file).await;
             }
         }
     }
 
-    async fn publish_source_file(&mut self, node: &NodeId, category: &[u8], file: &CapturedFile) {
-        if !self
-            .published_sources
-            .insert((node.clone(), file.path.clone()))
+    /// Lower a source node's authored + generated `.java` and publish the frontend output.
+    async fn publish_lowered_sources(
+        &mut self,
+        node: &crate::graph::ResolvedNode,
+        source: &crate::graph::SourceNode,
+    ) {
+        // Authored and generated sources are the only place they merge; `preprocess` never sees
+        // the authored set. A build script may register a path that is also an authored file, so
+        // the union is deduplicated here — `LoweredTree` rejects a duplicate path, correctly.
+        let generated = self
+            .graph
+            .exports
+            .get(&node.id)
+            .map(|exports| &exports.sources);
+        let mut seen = BTreeSet::new();
+        let mut files = Vec::new();
+        for file in source
+            .authored_sources
+            .iter()
+            .chain(generated.into_iter().flatten())
         {
+            if seen.insert(file.path.clone()) {
+                files.push(jals_frontend::IrFile::new(
+                    file.path.clone(),
+                    file.bytes.as_slice().into(),
+                ));
+            }
+        }
+        if files.is_empty() {
             return;
         }
-        if let Some((path, key)) = self
-            .publish_file(node, CacheNamespace::PathSource, category, file)
-            .await
-        {
-            self.plan
-                .source_dependency_artifacts
-                .push(LibrarySource { path, key });
+        jals_frontend::FrontendKey::canonical_order(&mut files);
+
+        // The frontend comes from this node's own manifest — a JALS node's `[build.frontend]`, or
+        // the identity for a legacy source node with no manifest. Same rule as the CLI's root
+        // selection, applied at every depth of the graph.
+        let kind = match &node.body {
+            NodeBody::JalsSource { manifest, .. } => manifest.build.frontend,
+            NodeBody::PlainSource(_) | NodeBody::Binary(_) => jals_config::FrontendKind::Vanilla {},
+        };
+        let frontend: &dyn jals_frontend::Frontend = match kind {
+            jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
+        };
+        let lowered = match jals_frontend::Driver::lower(frontend, self.cache, &files).await {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                self.errors.push(ProjectAssemblyError {
+                    node: node.id.clone(),
+                    path: None,
+                    message: format!("frontend `{}` failed: {error:?}", frontend.caps().id),
+                });
+                return;
+            }
+        };
+
+        for file in lowered.tree.files() {
+            if !self
+                .published_sources
+                .insert((node.id.clone(), file.path.clone()))
+            {
+                continue;
+            }
+            // Keep the existing `dependencies/<node-hex>/sources/<path>` logical layout so a
+            // consumer materializes lowered output exactly where it materialized authored source
+            // before. Only the bytes' origin changed, not their address.
+            let path = Self::logical_path(&node.id, &file.path, b"generated-source");
+            self.plan.source_dependency_artifacts.push(LibrarySource {
+                path,
+                key: file.key.clone(),
+            });
         }
     }
 
