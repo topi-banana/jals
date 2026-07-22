@@ -2,7 +2,7 @@
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -12,7 +12,7 @@ use jals_build::build_script::{
     BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits,
     prepare_build_script,
 };
-use jals_config::Manifest;
+use jals_config::{Dependency, Manifest};
 use jals_storage::{ArtifactCache, CacheBackend, ContentDigest, ProjectView, RelativePath};
 
 /// Stable opaque identity of a resolved dependency node.
@@ -63,6 +63,25 @@ pub struct GraphEdge {
     pub to: NodeId,
     /// Whether a binary dependency requests recursive nested-jar extraction.
     pub recursive: bool,
+    /// The build features this edge's `[dependencies]` entry enables in the target project. Empty
+    /// for a binary node, which has no build script. One edge is not the whole story: the set a
+    /// node's script actually sees is the union over its incoming edges, computed by
+    /// [`ResolvedProjectGraph::preprocess`] (Cargo's feature unification).
+    pub features: BTreeSet<String>,
+}
+
+impl GraphEdge {
+    /// One `[dependencies]` entry's declared `features` as the set its edge carries.
+    ///
+    /// Every name is already known good: both builders reach a dependency's manifest through
+    /// `probe_manifest`, whose `parse` validates (and the root is validated by `discover`), so
+    /// [`Dependency::validate_features`](jals_config::Dependency::validate_features) has rejected an
+    /// empty or reserved name before anything reaches here. The set is unordered on purpose — the
+    /// declaration order of a feature list means nothing, and dropping it keeps a node's union
+    /// independent of which parent was traversed first.
+    pub(crate) fn declared_features(dependency: &Dependency) -> BTreeSet<String> {
+        dependency.features().iter().cloned().collect()
+    }
 }
 
 /// One edge in a deterministic cycle diagnostic.
@@ -260,16 +279,21 @@ impl ResolvedNode {
 
     /// The scheduler calls this method uniformly for every node kind. Binary and legacy source
     /// nodes intentionally do nothing; only a manifest-backed source node prepares a script.
+    ///
+    /// `features` is this node's own build-feature set (see
+    /// [`ResolvedProjectGraph::node_features`]), which replaces whatever the declaring project
+    /// selected — features never cross a project boundary.
     async fn preprocess<C: CacheBackend>(
         &self,
         cache: &mut ArtifactCache<C>,
         environment: &BuildScriptEnvironment,
+        features: BTreeSet<String>,
         limits: &BuildScriptLimits,
     ) -> Result<NodeExports, GraphError> {
         let NodeBody::JalsSource { source, manifest } = &self.body else {
             return Ok(NodeExports::default());
         };
-        let environment = environment.for_project(manifest);
+        let environment = environment.for_project(manifest, features);
         let prepared = prepare_build_script(
             &source.view,
             cache,
@@ -368,6 +392,32 @@ impl ResolvedProjectGraph {
         &self.warnings
     }
 
+    /// The build features every node receives: the union of the `features` on its incoming edges.
+    ///
+    /// Cargo's feature unification, over graph nodes: two `[dependencies]` entries reaching the same
+    /// project with different lists give it one set and one build script run, rather than splitting
+    /// it into two nodes whose classes would both land on the classpath. A node with no incoming
+    /// edge carrying features (every binary node, and any source dependency declared without the
+    /// key) is absent from the map and gets the empty set.
+    ///
+    /// Reading this off the edges rather than tracking it during traversal is what makes it
+    /// complete: a node revisited after it is `Complete` still pushes its edge, so a second parent's
+    /// features are recorded even though the node itself is never re-entered. `BTreeSet` keeps the
+    /// result independent of traversal order.
+    fn node_features(&self) -> BTreeMap<NodeId, BTreeSet<String>> {
+        let mut features: BTreeMap<NodeId, BTreeSet<String>> = BTreeMap::new();
+        for edge in &self.edges {
+            if edge.features.is_empty() {
+                continue;
+            }
+            features
+                .entry(edge.to.clone())
+                .or_default()
+                .extend(edge.features.iter().cloned());
+        }
+        features
+    }
+
     /// Preprocess every resolved node exactly once in dependency-first order.
     pub async fn preprocess<C: CacheBackend>(
         self,
@@ -375,10 +425,14 @@ impl ResolvedProjectGraph {
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
     ) -> Result<PreprocessedProjectGraph, GraphError> {
+        let features_by_node = self.node_features();
         let mut exports = BTreeMap::new();
         for index in &self.order {
             let node = &self.nodes[*index];
-            let output = node.preprocess(cache, environment, limits).await?;
+            let features = features_by_node.get(&node.id).cloned().unwrap_or_default();
+            let output = node
+                .preprocess(cache, environment, features, limits)
+                .await?;
             exports.insert(node.id.clone(), output);
         }
         Ok(PreprocessedProjectGraph {

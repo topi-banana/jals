@@ -235,8 +235,12 @@ impl BuildScriptLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildScriptEnvironment {
     values: BTreeMap<String, String>,
-    /// Resolved Cargo-style build features (`[features]`), queried by `build.feature("…")`.
-    /// Set by the host from the command-line selection; never inherited from the host process — they
+    /// Resolved Cargo-style build features, queried by `build.feature("…")`.
+    ///
+    /// Scoped to **one project**, like Cargo: for the root project these are its own `[features]`
+    /// resolved against the command-line selection, and for a dependency they are the union of the
+    /// `[dependencies] features` lists pointing at it — never the declaring project's selection.
+    /// [`Self::for_project`] is where the swap happens. Never inherited from the host process: they
     /// are not secrets and are authoritative, so they bypass the [`Self::HOST_PREFIX`] opt-in that
     /// guards `values`. Always folded into the build-script fingerprint so a changed selection
     /// rebuilds even though the script never declared it as an input.
@@ -280,9 +284,15 @@ impl BuildScriptEnvironment {
             .collect()
     }
 
-    /// Derive the environment for one project, replacing host-specific project metadata.
+    /// Derive the environment for one project, replacing host-specific project metadata and
+    /// installing that project's own build `features`.
+    ///
+    /// Features are per package, so they are a *required* argument rather than something carried
+    /// over: the caller must say which set this project gets, and the previous project's set never
+    /// leaks across the boundary. A dependency receives the union of the `[dependencies] features`
+    /// lists aimed at it, which is unrelated to whatever the declaring project selected.
     #[must_use]
-    pub fn for_project(&self, manifest: &Manifest) -> Self {
+    pub fn for_project(&self, manifest: &Manifest, features: BTreeSet<String>) -> Self {
         const RESERVED: [&str; 4] = [
             "OUT_DIR",
             "JALS_MANIFEST_DIR",
@@ -296,9 +306,9 @@ impl BuildScriptEnvironment {
                 .filter(|(name, _)| !RESERVED.contains(name))
                 .map(|(name, value)| (name.to_owned(), value.to_owned()))
                 .collect(),
-            // Not host state to be re-derived: the resolved selection crosses the project boundary
-            // unchanged. Named here rather than patched in afterwards so dropping it cannot compile.
-            features: self.features.clone(),
+            // Named here rather than patched in afterwards so that forgetting the caller's set is a
+            // compile error, not a silently empty feature set.
+            features,
         };
         environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
         environment.insert("JALS_MANIFEST_DIR", ".");
@@ -338,7 +348,10 @@ impl BuildScriptEnvironment {
         self.values.is_empty()
     }
 
-    /// This environment with its resolved build features set to `features`.
+    /// This environment with the current project's resolved build features set to `features`.
+    ///
+    /// [`Self::for_project`] is the usual installer; this is for building an environment that is
+    /// already scoped to one project.
     #[must_use]
     pub fn with_features(mut self, features: BTreeSet<String>) -> Self {
         self.features = features;
@@ -498,9 +511,10 @@ struct FingerprintInputsWire {
     files_mode: FingerprintFilesModeWire,
     files: Vec<FileFingerprintWire>,
     environment: Vec<EnvironmentFingerprintWire>,
-    /// The resolved Cargo-style build features, sorted. An always-present fingerprint input — unlike
-    /// `environment`, which records only `rerun_if_env_changed` names — so a changed `--features`
-    /// selection deterministically rebuilds even though the script never declared it as an input.
+    /// This project's resolved build features, sorted. An always-present fingerprint input — unlike
+    /// `environment`, which records only `rerun_if_env_changed` names — so a changed selection
+    /// deterministically rebuilds even though the script never declared it as an input. For the root
+    /// that is a changed `--features`; for a dependency, a changed `[dependencies] features` list.
     features: Vec<String>,
 }
 
@@ -2763,15 +2777,19 @@ mod tests {
     }
 
     #[test]
-    fn for_project_preserves_build_features() {
-        // `for_project` rebuilds the environment from the host `values` alone, so the resolved
-        // features have to cross that boundary as themselves — otherwise the selection would be
-        // dropped before a project's script ever sees it.
+    fn for_project_replaces_build_features() {
+        // Features are per package: crossing into a project installs *that* project's set and drops
+        // whatever the previous one selected. A carried-over feature would let a root's `--features`
+        // silently steer an unrelated dependency's script.
         let environment =
             BuildScriptEnvironment::new().with_features(BTreeSet::from(["server".to_owned()]));
-        let derived = environment.for_project(&Manifest::default());
-        assert!(derived.has_feature("server"));
-        assert!(!derived.has_feature("client"));
+        let derived =
+            environment.for_project(&Manifest::default(), BTreeSet::from(["client".to_owned()]));
+        assert!(derived.has_feature("client"));
+        assert!(
+            !derived.has_feature("server"),
+            "the previous project's selection must not leak"
+        );
     }
 
     #[test]

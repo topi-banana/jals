@@ -133,7 +133,9 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        self.visit_source(parent.clone(), name, acquired).await?;
+                        let features = GraphEdge::declared_features(dependency);
+                        self.visit_source(parent.clone(), name, features, acquired)
+                            .await?;
                     }
                     Dependency::Git(_) => self.warnings.push(GraphWarning::dependency(
                         name,
@@ -149,6 +151,7 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
+        features: BTreeSet<String>,
         acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let incoming = GraphEdge {
@@ -156,6 +159,7 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: acquired.id.clone(),
             recursive: false,
+            features,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -262,6 +266,9 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: id.clone(),
             recursive,
+            // A jar contributes compiled classes and runs no build script, so the `jar` form does
+            // not carry `features` at all (writing it is a parse error).
+            features: BTreeSet::new(),
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());
@@ -585,6 +592,7 @@ mod tests {
 
     use super::*;
     use crate::NodeKind;
+    use crate::graph::PreprocessedProjectGraph;
 
     fn manifest(text: &str) -> Manifest {
         text.parse().expect("test manifest is valid")
@@ -906,6 +914,192 @@ mod tests {
                     .warnings()
                     .iter()
                     .all(|warning| warning.message.contains("cannot be acquired"))
+            );
+        });
+    }
+
+    /// A dependency `build.rhai` that registers one source per feature it is asked about, so the
+    /// generated file names spell out the exact set the script saw.
+    const FEATURE_PROBE: &[u8] = br#"
+        for name in ["hello", "world", "root-only", "a", "b", "ok"] {
+            if build.feature(name) {
+                let source = output.write_text(name + ".java", "class X {}");
+                build.add_source(source);
+            }
+        }
+    "#;
+
+    const PROBE_MANIFEST: &[u8] = b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+
+    /// The basenames the graph's dependency scripts generated, sorted.
+    fn generated(graph: &PreprocessedProjectGraph) -> Vec<String> {
+        let mut names: Vec<String> = graph
+            .exports
+            .values()
+            .flat_map(|exports| exports.sources.iter())
+            .filter_map(|file| file.path.name().map(ToString::to_string))
+            .collect();
+        names.sort();
+        names
+    }
+
+    async fn preprocess_with(
+        root: &Manifest,
+        root_view: &ProjectView,
+        environment: &BuildScriptEnvironment,
+    ) -> PreprocessedProjectGraph {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        MemoryProjectGraph::discover(root, root_view)
+            .await
+            .unwrap()
+            .preprocess(
+                storage.artifacts_mut(),
+                environment,
+                &BuildScriptLimits::default(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn dependency_scripts_see_only_their_own_edge_features() {
+        jals_exec::block_on_inline(async {
+            // Features are per package: the declaring project's selection must not steer a
+            // dependency's script. A leaked `root-only` would mean anyone's `--features` silently
+            // rebuilds every dependency in the graph differently.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n");
+            let root_view = view(&[
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let environment = BuildScriptEnvironment::new()
+                .with_features(BTreeSet::from(["root-only".to_owned()]));
+            let graph = preprocess_with(&root, &root_view, &environment).await;
+            assert_eq!(generated(&graph), ["hello.java"]);
+        });
+    }
+
+    #[test]
+    fn a_dependencys_own_features_table_is_never_consulted() {
+        jals_exec::block_on_inline(async {
+            // The edge's list *is* the set — the dependency's `default` list and its `enables`
+            // closure are both inert, so `hello` never pulls in `b` and `default` never adds `a`.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n");
+            let root_view = view(&[
+                (
+                    "dep/jals.toml",
+                    b"[features]\ndefault = [\"a\"]\na = []\nb = []\nhello = [\"b\"]\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(generated(&graph), ["hello.java"]);
+        });
+    }
+
+    #[test]
+    fn features_unify_across_every_edge_reaching_a_node() {
+        jals_exec::block_on_inline(async {
+            // Cargo's feature unification: two entries reaching the same project give it one set and
+            // one build, rather than two nodes whose classes would both land on the classpath.
+            let root = manifest(
+                "[dependencies]\n\
+                 direct = { path = \"dep\", features = [\"hello\"] }\n\
+                 mid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\nshared = { path = \"../dep\", features = [\"world\"] }\n",
+                ),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(
+                graph
+                    .metadata()
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.kind == NodeKind::JalsSource)
+                    .count(),
+                2,
+                "the shared dependency stays one node"
+            );
+            assert_eq!(generated(&graph), ["hello.java", "world.java"]);
+        });
+    }
+
+    #[test]
+    fn a_reserved_feature_name_is_rejected_wherever_the_manifest_sits() {
+        jals_exec::block_on_inline(async {
+            // `discover` validates the root, and every dependency manifest is validated by the parse
+            // inside `probe_manifest` — so `Dependency::validate_features` reaches a transitively
+            // declared entry too, and the graph never has to re-check what an edge carries.
+            let root = manifest("[dependencies]\nmid = { path = \"mid\" }\n");
+            let root_view = view(&[
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\ndep = { path = \"../dep\", features = [\"default\"] }\n",
+                ),
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let error = MemoryProjectGraph::discover(&root, &root_view)
+                .await
+                .unwrap_err();
+            let GraphError::MalformedManifest {
+                location, message, ..
+            } = error
+            else {
+                panic!("expected a malformed dependency manifest, got {error:?}");
+            };
+            assert_eq!(location, "mid/jals.toml");
+            assert!(
+                message.contains("lists the reserved feature `default`"),
+                "{message}"
+            );
+        });
+    }
+
+    #[test]
+    fn declared_edge_features_are_visible_on_the_graph_metadata() {
+        jals_exec::block_on_inline(async {
+            // The edges are the single source of truth the per-node union reads, and they are a pure
+            // function of the manifests — nothing about the host or its selection reaches them. That
+            // is also what keeps a dependency's build-script fingerprint stable across a changed
+            // root `--features`, so switching sides no longer re-runs every dependency script.
+            let root = manifest(
+                "[dependencies]\n\
+                 src = { path = \"dep\", features = [\"hello\", \"world\"] }\n\
+                 lib = { jar = \"libs/x.jar\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+                ("libs/x.jar", b"not really a jar"),
+            ]);
+            let graph = MemoryProjectGraph::discover(&root, &root_view)
+                .await
+                .unwrap();
+            let metadata = graph.metadata();
+            let edges: Vec<(&str, Vec<&str>)> = metadata
+                .edges()
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.dependency.as_str(),
+                        edge.features.iter().map(String::as_str).collect(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                edges,
+                [("lib", vec![]), ("src", vec!["hello", "world"]),],
+                "a jar carries no features; a source edge carries exactly what it declared"
             );
         });
     }

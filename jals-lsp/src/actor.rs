@@ -1717,7 +1717,15 @@ impl AssembledWorkspace {
         let mut project_sources = BTreeSet::new();
         let mut build_script_diagnostics =
             BuildScriptDiagnosticUpdate::new(configured_script.clone());
-        let environment = BuildScriptEnvironment::new().for_project(manifest);
+        // Analysis takes no `--features` flags, so the root project gets the manifest's own
+        // `default` list — the same selection `jals lint` uses, so what the editor analyses matches
+        // what a plain `jals build` produces. With nothing selected, resolution cannot fail.
+        // Dependencies are unaffected by this: their features come from the `[dependencies]`
+        // entries pointing at them, installed per node during graph preprocessing.
+        let features = manifest
+            .resolve_build_features(&[], false, false)
+            .unwrap_or_default();
+        let environment = BuildScriptEnvironment::new().for_project(manifest, features);
         let limits = BuildScriptLimits::default();
         let mut task_classpath = Vec::new();
         let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());

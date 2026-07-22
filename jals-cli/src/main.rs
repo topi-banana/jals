@@ -1013,6 +1013,10 @@ impl App {
     /// stays out: a build script can forward anything it reads into a task fetch URL, so
     /// inheriting wholesale would expose every credential on the machine to an unreviewed
     /// `build.rhai` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
+    ///
+    /// `features` is the **root project's** selection. It does not reach a dependency: each
+    /// dependency node's script is given the union of the `[dependencies] features` lists aimed at
+    /// it, installed by the graph's preprocessing pass.
     fn build_script_environment(
         manifest: &Manifest,
         features: &BTreeSet<String>,
@@ -1020,8 +1024,7 @@ impl App {
         BuildScriptEnvironment::from_host(std::env::vars_os().filter_map(|(name, value)| {
             Some((name.into_string().ok()?, value.into_string().ok()?))
         }))
-        .for_project(manifest)
-        .with_features(features.clone())
+        .for_project(manifest, features.clone())
     }
 
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host

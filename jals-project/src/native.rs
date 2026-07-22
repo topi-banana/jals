@@ -274,7 +274,9 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        self.visit_source(parent.clone(), name, acquired).await?;
+                        let features = GraphEdge::declared_features(dependency);
+                        self.visit_source(parent.clone(), name, features, acquired)
+                            .await?;
                     }
                     Dependency::Git(git) => {
                         let acquired = match self.acquire_git(declaring, name, git).await {
@@ -284,7 +286,9 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        self.visit_source(parent.clone(), name, acquired).await?;
+                        let features = GraphEdge::declared_features(dependency);
+                        self.visit_source(parent.clone(), name, features, acquired)
+                            .await?;
                     }
                 }
             }
@@ -296,10 +300,13 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
+        features: BTreeSet<String>,
         mut acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let checkout = acquired.checkout.take();
-        let result = self.visit_source_inner(parent, dependency, acquired).await;
+        let result = self
+            .visit_source_inner(parent, dependency, features, acquired)
+            .await;
         let cleanup = if let Some(checkout) = checkout {
             jals_exec::tokio_rt::on_blocking_pool(move || {
                 checkout
@@ -328,6 +335,7 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
+        features: BTreeSet<String>,
         acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let incoming = GraphEdge {
@@ -335,6 +343,7 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: acquired.id.clone(),
             recursive: false,
+            features,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -450,6 +459,9 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: id.clone(),
             recursive,
+            // A jar contributes compiled classes and runs no build script, so the `jar` form does
+            // not carry `features` at all (writing it is a parse error).
+            features: BTreeSet::new(),
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());
@@ -1159,5 +1171,64 @@ mod tests {
             .unwrap();
             assert_eq!(graph.exports.len(), 3);
         });
+    }
+
+    #[test]
+    fn a_path_dependencys_edge_features_reach_its_build_script() {
+        // The per-node union lives in `graph.rs` and is shared, but reading `features` off a
+        // `[dependencies]` entry and putting it on the edge is written once here and once in
+        // `memory.rs`. Covering only the memory builder would let an omission on this side ship
+        // silently, since nothing else observes the difference.
+        jals_exec::tokio_rt::run(|exec| async move {
+            let project = tempfile::TempDir::new().unwrap();
+            let write = |path: &str, contents: &str| {
+                let path = project.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, contents).unwrap();
+            };
+            write(
+                "dep/jals.toml",
+                "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+            );
+            write(
+                "dep/build.rhai",
+                r#"
+                    for name in ["hello", "root-only"] {
+                        if build.feature(name) {
+                            let source = output.write_text(name + ".java", "class X {}");
+                            build.add_source(source);
+                        }
+                    }
+                "#,
+            );
+            let root: Manifest =
+                "[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n"
+                    .parse()
+                    .unwrap();
+
+            let mut storage = MemoryStorage::memory(CodeTree::default());
+            let graph =
+                NativeProjectGraph::discover(&root, project.path(), &exec, NetworkPolicy::Offline)
+                    .await
+                    .unwrap()
+                    .preprocess(
+                        storage.artifacts_mut(),
+                        // A root selection the dependency must not inherit.
+                        &BuildScriptEnvironment::new()
+                            .with_features(BTreeSet::from(["root-only".to_owned()])),
+                        &BuildScriptLimits::default(),
+                    )
+                    .await
+                    .unwrap();
+
+            let generated: Vec<String> = graph
+                .exports
+                .values()
+                .flat_map(|exports| exports.sources.iter())
+                .filter_map(|file| file.path.name().map(ToString::to_string))
+                .collect();
+            assert_eq!(generated, ["hello.java"]);
+        })
+        .unwrap();
     }
 }
