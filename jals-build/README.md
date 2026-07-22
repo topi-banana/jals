@@ -83,7 +83,8 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
 ## The manifest (`jals.toml`)
 
 Every key is optional and falls back to its default; keys are kebab-case and grouped into
-`[package]`, `[build]`, `[run]`, `[toolchain]`, the repeatable `[[bin]]`, and `[dependencies]`. The
+`[package]`, `[features]`, `[build]`, `[run]`, `[toolchain]`, the repeatable `[[bin]]`, and
+`[dependencies]`. The
 defaults encode the Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent)
 section just uses them.
 
@@ -93,6 +94,11 @@ name = "hello"
 version = "0.1.0"
 # features = ["java25"]            # language features (release presets + individual); gates analysis, not javac
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
+
+# [features]                       # build features a `script` reads with `build.feature("…")`
+# default = ["server"]             # enabled when the command line selects none
+# server  = []
+# client  = []
 
 [build]
 # script = { type = "rhai", file = "build.rhai" } # optional pre-javac phase
@@ -138,8 +144,39 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 | --- | --- | --- | --- |
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
-| `features` | array of feature names | `[]` | the language features the project enables (Cargo's `[features]`, additive-only). A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no feature gate. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. |
+| `features` | array of feature names | `[]` | the language features the project enables — additive-only, but a **closed** set, and not the top-level [`[features]`](#features) map. A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no feature gate. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. |
 | `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
+
+### `[features]`
+
+Cargo's `[features]`, at the same top level: an open-ended map from a **build feature** name to the
+other features it enables. These are user-defined build-time toggles a [build script](#rhai-build-scripts)
+reads with `build.feature("…")` / `build.features()` to vary what it produces — distinct from
+[`[package] features`](#package), which is a closed enum gating *language* analysis and is never
+selected on the command line.
+
+```toml
+[features]
+default = ["server"]   # enabled when the command line selects none
+server  = []
+client  = []
+full    = ["server", "client"]   # a feature may enable others; the closure is transitive
+```
+
+Select them per invocation on `jals build` / `jals run`:
+
+| Flag | Effect |
+| --- | --- |
+| `--features <a,b>` | activate these features (comma separated, repeatable) |
+| `--all-features` | activate every declared feature; takes precedence over `--no-default-features` |
+| `--no-default-features` | do not activate the `default` list |
+
+Selection is **additive** — a feature never subtracts — so `--features client` keeps the `default`
+list unless `--no-default-features` is also given. The reserved `default` key is a resolution
+directive, not a queryable feature: it is expanded and then dropped, so `build.feature("default")`
+is never true. A `--features` name that is not declared is an error before any work starts; a
+`default`/`enables` entry naming an undeclared feature is a manifest validation error. Omitting the
+section leaves the set empty.
 
 ### `[build]`
 
@@ -199,8 +236,8 @@ records a typed DAG while the first three retain the direct APIs below:
 | `output` | `write(path, bytes)` | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`. |
 | `output` | `write_text(path, text)` | Buffer UTF-8 text below the same output root and return an `OutputPath`. |
 | `build` | `env(name)` | Read a value from the environment map explicitly supplied by the host; returns `()` when absent. |
-| `build` | `feature(name)` | Whether the `[build.features]` feature `name` is enabled for this invocation. Always fingerprinted — no `rerun_` declaration needed. |
-| `build` | `features()` | The enabled `[build.features]`, in lexical order. |
+| `build` | `feature(name)` | Whether the `[features]` feature `name` is enabled for this invocation. Always fingerprinted — no `rerun_` declaration needed. |
+| `build` | `features()` | The enabled `[features]`, in lexical order. |
 | `build` | `rerun_if_changed(path)` | Track one project file for cache invalidation. |
 | `build` | `rerun_if_env_changed(name)` | Track one supplied environment value for cache invalidation. |
 | `build` | `add_source(path)` | Add a project file or returned `OutputPath` to the later source set. |
@@ -310,7 +347,7 @@ Successful state and generated bytes are published write-once to the storage art
 read back through digest-verified lookups. The native adapter persists them under
 `target/jals/cache`; memory hosts retain them in their aggregate. A fingerprint covers the API/state
 versions, script path and bytes, `jals.toml`, limits, tracked project bytes, declared environment
-values, and the resolved `[build.features]` selection. A matching cache hit restores outputs and all
+values, and the resolved `[features]` selection. A matching cache hit restores outputs and all
 directives without evaluating Rhai.
 
 The root uses the distinguished `BuildScriptCacheScope::ROOT`; each dependency uses a scope derived

@@ -12,7 +12,7 @@ This example uses the build-task DAG to:
 
 ## Side selection
 
-The distribution comes from the `[build.features]` declared in `jals.toml` (`default = ["server"]`).
+The distribution comes from the `[features]` declared in `jals.toml` (`default = ["server"]`).
 Selection is **additive**, exactly like Cargo: a feature never subtracts, so `--features client`
 keeps the default `server` and therefore builds the *merged* jar. Drop `server` with
 `--no-default-features`.
@@ -55,7 +55,7 @@ cargo run -p jals-cli -- clean   # removes the owned publication root too
 - `tasks.merge_jars(base, overlay)` — deterministic union, overlay wins on conflict.
 - `tasks.decompile_java(jar, prefix)` — compile-oriented skeleton source tree.
 - `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the remapped game jar.
-- `build.feature("server")` / `build.feature("client")` for `[build.features]` side switching — the
+- `build.feature("server")` / `build.feature("client")` for `[features]` side switching — the
   resolved feature set is always part of the build-script fingerprint, so no `rerun_if_env_changed`
   is needed for it.
 

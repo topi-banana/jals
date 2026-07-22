@@ -1,4 +1,4 @@
-// Select the Minecraft distribution from `[build.features]`: `server` (the default), `client`, or —
+// Select the Minecraft distribution from `[features]`: `server` (the default), `client`, or —
 // with both enabled — the merged jar. The resolved feature set is always part of the build-script
 // fingerprint, so changing `--features` re-runs this script without any `rerun_if_env_changed`.
 let server = build.feature("server");

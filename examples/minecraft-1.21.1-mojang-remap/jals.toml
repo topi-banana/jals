@@ -2,16 +2,16 @@
 name = "minecraft-1.21.1-mojang-remap"
 version = "0.1.0"
 
-[build]
-script = { type = "rhai", file = "build.rhai" }
-
 # Which Minecraft distribution the build script fetches and remaps. Enabling both produces the
 # merged jar. Selection is additive, so `--features client` keeps the default `server` (and thus
 # merges) unless `--no-default-features` is given.
-[build.features]
+[features]
 default = ["server"]
 server = []
 client = []
+
+[build]
+script = { type = "rhai", file = "build.rhai" }
 
 [run]
 main-class = "Main"

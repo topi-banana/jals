@@ -220,19 +220,19 @@ A minimal `jals.toml` — every key is optional and defaults to the Maven-style
 name = "hello"
 version = "0.1.0"
 
+# Cargo-style build features a `script` reads with `build.feature("…")`. Select them with
+# `--features` / `--all-features` / `--no-default-features`; selection is additive.
+# [features]
+# default = ["server"]
+# server  = []
+# client  = []
+
 [build]
 release = 21                        # javac --release N
 # source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
 # classes-dir = "target/classes"    # javac -d
 # classpath   = ["libs/guava.jar"]  # -classpath entries
 # script = { type = "rhai", file = "build.rhai" }
-
-# Cargo-style build features a `script` reads with `build.feature("…")`. Select them with
-# `--features` / `--all-features` / `--no-default-features`; selection is additive.
-# [build.features]
-# default = ["server"]
-# server  = []
-# client  = []
 
 [run]
 main-class = "com.example.Main"     # entry point for `jals run` (used when no [[bin]] exists)
@@ -249,7 +249,7 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ```
 
 With `script` configured, `build.rhai` runs before source discovery and `javac`. It can read the
-project snapshot and the selected `[build.features]`, publish ordinary files below
+project snapshot and the selected `[features]`, publish ordinary files below
 `target/jals/build/rhai/out`, and add generated
 sources, classpath entries, `javac`/JVM flags, and compile/run environment entries. A typed `tasks`
 DAG can also declare bounded, digest-verified downloads, JSON projections, safe source-JAR

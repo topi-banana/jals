@@ -96,20 +96,20 @@ struct LspArgs {
 
 /// Cargo-style build-feature selection, shared by `build` and `run`.
 ///
-/// `[build.features]` declares the features; these flags choose which are active for one
+/// `[features]` declares the features; these flags choose which are active for one
 /// invocation. Selection is additive — a feature never subtracts — so `--features client` keeps the
 /// `default` list unless `--no-default-features` is also given.
 #[derive(Args)]
 struct FeatureArgs {
-    /// Activate these `[build.features]` (comma separated, repeatable).
+    /// Activate these `[features]` (comma separated, repeatable).
     #[arg(long, value_name = "FEATURES", value_delimiter = ',')]
     features: Vec<String>,
 
-    /// Activate every declared `[build.features]`. Takes precedence over `--no-default-features`.
+    /// Activate every declared `[features]`. Takes precedence over `--no-default-features`.
     #[arg(long)]
     all_features: bool,
 
-    /// Do not activate the `default` `[build.features]` list.
+    /// Do not activate the `default` `[features]` list.
     #[arg(long)]
     no_default_features: bool,
 }

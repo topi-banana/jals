@@ -235,7 +235,7 @@ impl BuildScriptLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildScriptEnvironment {
     values: BTreeMap<String, String>,
-    /// Resolved Cargo-style build features (`[build.features]`), queried by `build.feature("…")`.
+    /// Resolved Cargo-style build features (`[features]`), queried by `build.feature("…")`.
     /// Set by the host from the command-line selection; never inherited from the host process — they
     /// are not secrets and are authoritative, so they bypass the [`Self::HOST_PREFIX`] opt-in that
     /// guards `values`. Always folded into the build-script fingerprint so a changed selection
