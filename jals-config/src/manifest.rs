@@ -737,6 +737,44 @@ impl Feature {
         }
     }
 
+    /// Whether this is a **jals dialect** feature: a construct no Java release defines, which
+    /// compiles only because the jals compile frontend desugars it away before `javac` runs.
+    ///
+    /// The distinction a release gate cannot express. A release-gated feature is real Java that a
+    /// project may simply not have opted into describing, so a project declaring no
+    /// `[package] features` opting out of the gate is harmless. A dialect construct is never valid
+    /// Java at any release, so the same silence would leave the user with no jals-side signal at
+    /// all and a raw `javac` syntax error — which is why [`FeatureSet::permits`] does not extend
+    /// its empty-set exemption here.
+    ///
+    /// Exhaustive with no `_` arm, like the release facts above: a new [`Feature`] has to decide
+    /// which side of this line it falls on rather than defaulting to "Java".
+    pub const fn is_dialect(self) -> bool {
+        match self {
+            Self::GroupedImports => true,
+            Self::Java8
+            | Self::Java9
+            | Self::Java10
+            | Self::Java11
+            | Self::Java12
+            | Self::Java13
+            | Self::Java14
+            | Self::Java15
+            | Self::Java16
+            | Self::Java17
+            | Self::Java18
+            | Self::Java19
+            | Self::Java20
+            | Self::Java21
+            | Self::Java22
+            | Self::Java23
+            | Self::Java24
+            | Self::Java25
+            | Self::ModuleImports
+            | Self::CompactSourceFiles => false,
+        }
+    }
+
     /// The features this one directly *implies* — the edges [`FeatureSet::resolve`] closes over.
     ///
     /// A release preset implies its [`predecessor`](Feature::predecessor) preset plus every
@@ -872,10 +910,19 @@ impl FeatureSet {
     }
 
     /// Whether a use of `feature` is permitted: an [`empty`](FeatureSet::is_empty) set permits
-    /// everything (a project that declares no `[package] features` opts out of feature gating),
-    /// otherwise the feature must be enabled. The single owner of the empty-set exemption every
-    /// feature-gate consumer (the gated lint rules) relies on.
+    /// every *Java* feature (a project that declares no `[package] features` opts out of
+    /// release-based feature gating), otherwise the feature must be enabled. The single owner of
+    /// the empty-set exemption every feature-gate consumer (the gated lint rules) relies on.
+    ///
+    /// A [`dialect`](Feature::is_dialect) feature is exempt from the exemption: it must be
+    /// [`contain`](FeatureSet::contains)ed, empty set or not. Silence there would be a lie —
+    /// nothing else would report the construct either, because the build path keys the desugaring
+    /// off `contains`, so an undeclared dialect construct reaches `javac` verbatim and fails as a
+    /// plain syntax error.
     pub const fn permits(self, feature: Feature) -> bool {
+        if feature.is_dialect() {
+            return self.contains(feature);
+        }
         self.is_empty() || self.contains(feature)
     }
 }
@@ -2128,6 +2175,38 @@ mod tests {
         assert!(fs.contains(Feature::GroupedImports));
         assert!(fs.contains(Feature::ModuleImports));
         assert!(fs.contains(Feature::CompactSourceFiles));
+    }
+
+    #[test]
+    fn empty_feature_set_does_not_permit_a_dialect_feature() {
+        // The empty-set exemption covers Java features only. A project that declares no
+        // `[package] features` still cannot compile a dialect construct — the build path keys
+        // desugaring off `contains`, so `javac` would see the raw syntax — and staying silent
+        // would leave that with no jals-side report at all.
+        let empty = FeatureSet::resolve(&[]);
+        assert!(empty.is_empty());
+        assert!(!empty.permits(Feature::GroupedImports));
+        // Java features keep the exemption.
+        assert!(empty.permits(Feature::ModuleImports));
+        assert!(empty.permits(Feature::CompactSourceFiles));
+
+        // Opting in permits it, and a non-empty set that lacks it still does not.
+        assert!(FeatureSet::resolve(&[Feature::GroupedImports]).permits(Feature::GroupedImports));
+        assert!(!FeatureSet::resolve(&[Feature::Java25]).permits(Feature::GroupedImports));
+    }
+
+    #[test]
+    fn only_jals_constructs_are_dialect_features() {
+        // Every Java release preset and release-gated feature is Java; `grouped-imports` is the
+        // one construct javac has never heard of.
+        for feature in Feature::ALL {
+            assert_eq!(
+                feature.is_dialect(),
+                feature == Feature::GroupedImports,
+                "unexpected dialect classification for `{}`",
+                feature.config_name()
+            );
+        }
     }
 
     #[test]

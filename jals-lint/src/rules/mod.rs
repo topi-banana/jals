@@ -128,8 +128,10 @@ pub(crate) enum Checker {
     /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
     /// names the [`Feature`] it guards, and the driver runs `find` only when the set does not
     /// [`permit`](jals_config::FeatureSet::permits) that feature (threaded from the host via
-    /// [`Config::features`](crate::Config::features)) — so an empty set (no `[package] features`
-    /// declared) never fires. The driver builds the shared gate message
+    /// [`Config::features`](crate::Config::features)) — so for a Java feature an empty set (no
+    /// `[package] features` declared) never fires, while a
+    /// [`dialect`](jals_config::Feature::is_dialect) feature fires until it is explicitly listed,
+    /// because nothing but jals can report its syntax. The driver builds the shared gate message
     /// ([`FeatureGate::preview_message`] from `feature` + `subject`) and stamps it on each flagged
     /// node, so the detector is pure syntax location.
     Gated {
