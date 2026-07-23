@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use jals_storage::{ArtifactCache, CacheBackend, CacheError, CacheNamespace, RelativePath};
 
 use crate::frontend::{Frontend, FrontendError};
-use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree};
+use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree, Severity};
 use crate::key::FrontendKey;
 
 /// A completed lowering.
@@ -29,6 +29,29 @@ pub enum LowerError {
 impl From<CacheError> for LowerError {
     fn from(error: CacheError) -> Self {
         Self::Cache(error)
+    }
+}
+
+impl core::fmt::Display for LowerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Frontend(error) => write!(f, "{error}"),
+            Self::Cache(error) => write!(f, "{error}"),
+            Self::DuplicatePath(path) => write!(f, "frontend emitted `{path}` more than once"),
+            Self::Rejected(diagnostics) => {
+                f.write_str("frontend rejected its input")?;
+                for diagnostic in diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                {
+                    match &diagnostic.file {
+                        Some(file) => write!(f, "\n  {file}: {}", diagnostic.message)?,
+                        None => write!(f, "\n  {}", diagnostic.message)?,
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 }
 

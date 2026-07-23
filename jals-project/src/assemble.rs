@@ -266,7 +266,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 self.errors.push(ProjectAssemblyError {
                     node: node.id.clone(),
                     path: None,
-                    message: format!("frontend `{}` failed: {error:?}", frontend.caps().id),
+                    message: format!("frontend `{}` failed: {error}", frontend.caps().id),
                 });
                 return;
             }

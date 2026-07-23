@@ -1243,7 +1243,7 @@ impl App {
 
         let lowered = jals_frontend::Driver::lower(frontend, &mut cache, &files)
             .await
-            .map_err(|error| anyhow!("frontend `{}` failed: {error:?}", frontend.caps().id))?;
+            .map_err(|error| anyhow!("frontend `{}` failed: {error}", frontend.caps().id))?;
 
         let tree: Vec<_> = lowered
             .tree

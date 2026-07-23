@@ -45,6 +45,27 @@ pub enum CacheError {
     Io(String),
 }
 
+impl fmt::Display for CacheError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Conflict => {
+                f.write_str("a concurrent write conflicted with this cache operation")
+            }
+            Self::Corrupt => f.write_str("a cached artifact is corrupt"),
+            Self::DigestMismatch => {
+                f.write_str("a cached artifact failed its content-digest check")
+            }
+            Self::TooLarge { size, limit } => {
+                write!(
+                    f,
+                    "artifact is {size} bytes, over the cache's {limit}-byte limit"
+                )
+            }
+            Self::Io(message) => write!(f, "cache I/O failed: {message}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Diagnostic {
     ExternalChangeShadowed(FileKey),

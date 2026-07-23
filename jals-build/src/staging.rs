@@ -50,7 +50,7 @@ impl StagedTree {
             let bytes = cache
                 .lookup(key)
                 .await
-                .map_err(|error| BackendError::Io(format!("{error:?}")))?
+                .map_err(|error| BackendError::Io(format!("{error}")))?
                 .ok_or_else(|| BackendError::MissingArtifact(path.clone()))?;
 
             let mut destination = root.clone();
