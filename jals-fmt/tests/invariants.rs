@@ -225,6 +225,9 @@ fn javaish() -> impl Strategy<Value = String> {
             Just("->"),
             Just("::"),
             Just("@"),
+            // jals attributes: a whole one, and a bare `#` to stress error recovery.
+            Just("#[cfg(feature = \"s\")]"),
+            Just("#"),
             Just("x"),
             Just("Foo"),
             Just("y"),

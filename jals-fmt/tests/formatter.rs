@@ -5834,3 +5834,84 @@ fn blank_line_at_block_start_is_idempotent() {
     let twice = fmt_blank_line_at_block_start(&once);
     assert_eq!(once, twice, "blank-line-at-block-start must be idempotent");
 }
+
+// ===== jals attributes =====
+
+#[test]
+fn attribute_formats_to_normalized_spacing() {
+    // `#[`, `cfg(`, and `)]` are tight; `=` inside a meta pair is spaced; the attribute is
+    // separated from the declaration by a single space under the default (compact) placement.
+    check(
+        "#[cfg(feature=\"x\")]class C{}",
+        expect![[r##"
+            #[cfg(feature = "x")] class C {}
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_nested_predicates_space_after_commas() {
+    check(
+        "#[cfg(any(feature=\"a\",not(feature=\"b\")))]class C{}",
+        expect![[r##"
+            #[cfg(any(feature = "a", not(feature = "b")))] class C {}
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_on_member_import_and_statement() {
+    check(
+        "#[cfg(feature=\"x\")]import a.B;class C{#[cfg(feature=\"x\")]void m(){#[cfg(feature=\"y\")]f();#[cfg(feature=\"y\")]final int v=1;}}",
+        expect![[r##"
+            #[cfg(feature = "x")] import a.B;
+            class C {
+                #[cfg(feature = "x")] void m() {
+                    #[cfg(feature = "y")] f();
+                    #[cfg(feature = "y")] final int v = 1;
+                }
+            }
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_formatting_is_idempotent() {
+    let once = fmt(
+        "#[cfg(any(feature=\"a\",not(feature=\"b\")))]\nclass C { #[x] void m() { #[y] f(); } }\n",
+    );
+    assert_eq!(fmt(&once), once);
+}
+
+#[test]
+fn reorder_modifiers_hoists_attributes_to_front() {
+    // An attribute ranks like an annotation (`None`): hoisted to the front, relative order kept.
+    // (A late attribute is a parse error under the strict-leading rule, but the formatter still
+    // lays it out canonically.)
+    check_reorder_mods(
+        "class C{public #[x] static int f;}",
+        expect![[r#"
+            class C {
+                #[x] public static int f;
+            }
+        "#]],
+    );
+    let once = fmt_reorder_mods("class C{public #[x] static int f;}");
+    assert_eq!(fmt_reorder_mods(&once), once);
+}
+
+#[test]
+fn annotation_placement_expanded_breaks_attributes() {
+    check_expanded(
+        "#[cfg(feature=\"x\")]@Foo public class C{#[y]@Override public void m(){}}",
+        expect![[r##"
+            #[cfg(feature = "x")]
+            @Foo
+            public class C {
+                #[y]
+                @Override
+                public void m() {}
+            }
+        "##]],
+    );
+}
