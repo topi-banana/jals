@@ -31,7 +31,7 @@ use jals_storage::ContentDigest;
 use jals_syntax::ast::{AstNode, ImportDecl, ImportGroup, SourceFile};
 use jals_syntax::{Parse, SyntaxElement, SyntaxKind};
 
-use crate::attr::{self, AttrPlan};
+use crate::attr::AttrPlan;
 use crate::frontend::{Frontend, FrontendCaps, FrontendFuture};
 use crate::ir::{FrontendDiagnostic, FrontendOutput, Ir, Severity};
 use crate::level::IrLevel;
@@ -188,7 +188,7 @@ impl DialectFrontend {
             return Desugared::Unchanged;
         };
         let attr_plan = if flags.attributes {
-            attr::plan(&parse, text, &flags.build_features)
+            AttrPlan::compute(&parse, text, &flags.build_features)
         } else {
             AttrPlan::default()
         };
@@ -212,7 +212,7 @@ impl DialectFrontend {
                 let Some((start, end)) = Self::import_span(&import) else {
                     // No `;` at all, so there is no span to replace.
                     let line = Self::keyword_start(&import)
-                        .map_or(1, |offset| attr::line_of(text, offset));
+                        .map_or(1, |offset| AttrPlan::line_of(text, offset));
                     errors.push(malformed(line, "missing `;`"));
                     continue;
                 };
@@ -226,7 +226,7 @@ impl DialectFrontend {
                     usize::from(error.range().start()) < end
                         && start < usize::from(error.range().end())
                 }) {
-                    errors.push(malformed(attr::line_of(text, start), error.message()));
+                    errors.push(malformed(AttrPlan::line_of(text, start), error.message()));
                     continue;
                 }
                 splices.push((
