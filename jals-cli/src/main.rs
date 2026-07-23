@@ -1234,7 +1234,17 @@ impl App {
         root: &Path,
         sources: &[PathBuf],
     ) -> Result<jals_build::StagedTree> {
+        // Enabling a jals dialect feature (`[package] features`) drives the build to desugar it,
+        // so it compiles without a separate `[build.frontend]` selection. When no dialect feature
+        // is on, fall back to vanilla so the cache identity of ordinary projects is unchanged.
+        let dialect_flags = jals_frontend::DialectFlags {
+            grouped_imports: manifest
+                .feature_set()
+                .contains(jals_config::Feature::GroupedImports),
+        };
+        let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
         let frontend: &dyn jals_frontend::Frontend = match manifest.build.frontend {
+            jals_config::FrontendKind::Vanilla {} if dialect_flags.any() => &dialect,
             jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
         };
 

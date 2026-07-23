@@ -289,11 +289,26 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         // The frontend comes from this node's own manifest — a JALS node's `[build.frontend]`, or
         // the identity for a legacy source node with no manifest. Same rule as the CLI's root
         // selection, applied at every depth of the graph.
-        let kind = match &node.body {
-            NodeBody::JalsSource { manifest, .. } => manifest.build.frontend,
-            NodeBody::PlainSource(_) | NodeBody::Binary(_) => jals_config::FrontendKind::Vanilla {},
+        // A node's dialect features (its own manifest's `[package] features`) drive whether its
+        // sources are desugared, so a dialect feature compiles without a separate frontend
+        // selection. Legacy source/binary nodes have no manifest, so no dialect.
+        let (kind, dialect_flags) = match &node.body {
+            NodeBody::JalsSource { manifest, .. } => (
+                manifest.build.frontend,
+                jals_frontend::DialectFlags {
+                    grouped_imports: manifest
+                        .feature_set()
+                        .contains(jals_config::Feature::GroupedImports),
+                },
+            ),
+            NodeBody::PlainSource(_) | NodeBody::Binary(_) => (
+                jals_config::FrontendKind::Vanilla {},
+                jals_frontend::DialectFlags::default(),
+            ),
         };
+        let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
         let frontend: &dyn jals_frontend::Frontend = match kind {
+            jals_config::FrontendKind::Vanilla {} if dialect_flags.any() => &dialect,
             jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
         };
         let lowered = match jals_frontend::Driver::lower(frontend, self.cache, &files).await {

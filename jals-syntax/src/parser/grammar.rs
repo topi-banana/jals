@@ -34,9 +34,9 @@ use crate::syntax_kind::SyntaxKind::{
     EXPORTS_DIRECTIVE, EXPORTS_KW, EXPR_STMT, EXTENDS_CLAUSE, EXTENDS_KW, FALSE_KW, FIELD_ACCESS,
     FIELD_DECL, FINAL_KW, FINALLY_CLAUSE, FINALLY_KW, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT,
     FOR_KW, FOR_STMT, GT, GUARD, IDENT, IF_KW, IF_STMT, IMPLEMENTS_CLAUSE, IMPLEMENTS_KW,
-    IMPORT_DECL, IMPORT_KW, INDEX_EXPR, INITIALIZER, INSTANCEOF_KW, INT_KW, INT_LITERAL,
-    INTERFACE_DECL, INTERFACE_KW, LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LBRACE, LBRACK,
-    LITERAL, LOCAL_VAR_DECL, LONG_KW, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, METHOD_DECL,
+    IMPORT_DECL, IMPORT_GROUP, IMPORT_KW, INDEX_EXPR, INITIALIZER, INSTANCEOF_KW, INT_KW,
+    INT_LITERAL, INTERFACE_DECL, INTERFACE_KW, LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LBRACE,
+    LBRACK, LITERAL, LOCAL_VAR_DECL, LONG_KW, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, METHOD_DECL,
     METHOD_REF_EXPR, MINUS, MINUS_EQ, MINUS_MINUS, MODIFIERS, MODULE_BODY, MODULE_DECL, MODULE_KW,
     NAME_REF, NATIVE_KW, NEW_EXPR, NEW_KW, NON_SEALED_KW, NULL_KW, OPEN_KW, OPENS_DIRECTIVE,
     OPENS_KW, PACKAGE_DECL, PACKAGE_KW, PARAM, PARAM_LIST, PAREN_EXPR, PERCENT, PERCENT_EQ,
@@ -239,9 +239,36 @@ impl Parser<'_> {
         } else {
             self.eat(STATIC_KW);
             self.qualified_name(true).await;
+            // jals grouped import: `import java.util.{HashMap, ArrayList};`. `qualified_name`
+            // consumed the prefix and stopped on `.` because `nth(1)` is `{`, so the DOT is
+            // still current. Only hooked here (not the `module` branch): `import module M.{…}`
+            // is invalid and flows to the `expect(SEMICOLON)` error + top-level recovery.
+            if self.at(DOT) && self.nth_at(1, LBRACE) {
+                self.import_group().await;
+            }
         }
         self.expect(SEMICOLON);
         m.complete(self, IMPORT_DECL);
+    }
+
+    /// jals grouped import members: `.{ A, B, regex.*, ... }`. Members reuse `qualified_name`
+    /// (with `allow_star`), so nested and wildcard members parse for free.
+    async fn import_group(&mut self) {
+        let m = self.start();
+        self.bump(DOT);
+        self.bump(LBRACE);
+        while !self.at(RBRACE) && !self.at_eof() {
+            let before = self.pos();
+            self.qualified_name(true).await;
+            if self.pos() == before {
+                self.err_and_bump("expected an imported member");
+            }
+            if !self.eat(COMMA) {
+                break;
+            }
+        }
+        self.expect(RBRACE);
+        m.complete(self, IMPORT_GROUP);
     }
 
     /// Dotted name. If `allow_star` is true, allows a trailing `.*` (for imports).

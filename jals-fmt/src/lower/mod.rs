@@ -119,6 +119,7 @@ impl<'a> Ctx<'a> {
             S::UNARY_EXPR => self.lower_unary(node).await,
             S::CALL_EXPR | S::FIELD_ACCESS => self.lower_chain(node).await,
             S::NON_SEALED_KW => self.lower_non_sealed(node),
+            S::IMPORT_GROUP => self.lower_import_group(node).await,
             _ => self.lower_generic(node).await,
         }
     }
@@ -133,6 +134,54 @@ impl<'a> Ctx<'a> {
             .filter(|t| !t.kind().is_trivia())
             .map(|t| self.tok(&t))
             .collect();
+        Doc::concat(parts)
+    }
+
+    /// Lower a jals grouped import's `.{ ... }` to the canonical compact form `.{A, B}`: no padding
+    /// inside the braces, exactly one space after each separating comma, and **no trailing comma**.
+    /// Members are emitted in authored order (the enclosing import run's reordering keys off the
+    /// shared prefix, not the members). Comments attached to any delimiter are preserved via
+    /// [`Ctx::tok`].
+    ///
+    /// Dropping the trailing comma is the formatter's one *unconditional* departure from the
+    /// significant-token invariant (see the crate docs) — every other exception is an opt-in config
+    /// flag, off by default. It is confined to this node kind, where the comma separates nothing:
+    /// the group is always laid out flat, so there is no vertical form for a trailing comma to
+    /// serve, and the desugarer already ignores it.
+    ///
+    /// Unlike [`TrailingCommaRule`](crate::rules::trailing_comma), a *commented* trailing comma is
+    /// not kept: only the comma's own text is dropped, while its comments are still emitted
+    /// through [`CommentMap::token`](crate::comments::CommentMap::token). Keeping the comma alive
+    /// because of its comment would cost idempotency — the comment re-anchors elsewhere in the
+    /// output, so the second pass would find a comment-free comma and drop it after all.
+    async fn lower_import_group(&self, node: &SyntaxNode) -> Doc {
+        let els: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|el| !el.as_token().is_some_and(|t| t.kind().is_trivia()))
+            .collect();
+        // A comma past the last member separates nothing — that is the group's trailing comma.
+        // Found by position rather than by "is the next token `}`" so that error-recovery debris
+        // between the two (an `ERROR` node) cannot disguise it as a separator.
+        let last_member = els
+            .iter()
+            .rposition(|el| el.as_node().is_some_and(|n| n.kind() == S::QUALIFIED_NAME));
+        let mut parts: Vec<Doc> = Vec::new();
+        for (index, el) in els.iter().enumerate() {
+            if let Some(child) = el.as_node() {
+                parts.push(self.lower(child).await);
+            } else if let Some(t) = el.as_token() {
+                if t.kind() == S::COMMA && last_member.is_none_or(|last| index > last) {
+                    // Emit the token's comments with an empty body: the comma's text goes, its
+                    // comments stay.
+                    parts.push(self.comments.token(t, Doc::nil()));
+                    continue;
+                }
+                parts.push(self.tok(t));
+                if t.kind() == S::COMMA {
+                    parts.push(Doc::text(" "));
+                }
+            }
+        }
         Doc::concat(parts)
     }
 }

@@ -168,6 +168,63 @@ fn module_named_package_is_ordinary_import() {
 }
 
 #[test]
+fn grouped_import() {
+    // jals grouped import: prefix `java.util`, then `.{ ... }` as an IMPORT_GROUP child.
+    check(
+        "import java.util.{HashMap, ArrayList};\n",
+        expect![[r#"
+            SOURCE_FILE@0..39
+              IMPORT_DECL@0..38
+                IMPORT_KW@0..6 "import"
+                QUALIFIED_NAME@6..16
+                  WHITESPACE@6..7 " "
+                  IDENT@7..11 "java"
+                  DOT@11..12 "."
+                  IDENT@12..16 "util"
+                IMPORT_GROUP@16..37
+                  DOT@16..17 "."
+                  LBRACE@17..18 "{"
+                  QUALIFIED_NAME@18..25
+                    IDENT@18..25 "HashMap"
+                  COMMA@25..26 ","
+                  QUALIFIED_NAME@26..36
+                    WHITESPACE@26..27 " "
+                    IDENT@27..36 "ArrayList"
+                  RBRACE@36..37 "}"
+                SEMICOLON@37..38 ";"
+              NEWLINE@38..39 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn grouped_import_variants_are_lossless() {
+    // Nested and wildcard members reuse `qualified_name`.
+    assert_lossless("import java.util.{HashMap, regex.Pattern, concurrent.*};\n");
+    // Static grouped import.
+    assert_lossless("import static java.lang.Math.{PI, E};\n");
+    // Single member.
+    assert_lossless("import a.{B};\n");
+    // Multi-line group (feeds the desugar line-preservation test).
+    assert_lossless("import java.util.{\n    HashMap,\n    ArrayList\n};\n");
+    // `import module M.{X}` is NOT a group: the module branch does not hook the group, so this
+    // records an error but still reconstructs the source.
+    assert_lossless("import module java.base.{X};\n");
+}
+
+#[test]
+fn grouped_import_malformed_is_lossless() {
+    // Empty group.
+    assert_lossless("import java.util.{};\n");
+    // Trailing comma.
+    assert_lossless("import java.util.{HashMap,};\n");
+    // Missing closing brace.
+    assert_lossless("import java.util.{HashMap, ArrayList;\n");
+    // Double comma exercises the no-progress `err_and_bump` branch.
+    assert_lossless("import java.util.{A,,B};\n");
+}
+
+#[test]
 fn module_info_directives() {
     check(
         "open module a.b {\n  requires transitive java.base;\n  exports p.q to m.n;\n  uses p.S;\n  provides p.S with p.Impl;\n}\n",

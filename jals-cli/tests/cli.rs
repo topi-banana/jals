@@ -549,6 +549,52 @@ fn build_compiles_when_javac_present() {
     );
 }
 
+/// The headline acceptance test: a grouped import desugars through the real frontend + `javac`, and
+/// a runtime exception's stack trace names the *original* source line. This is the whole point of
+/// preserving line numbers during expansion; the fast desugar unit tests are only a proxy for it.
+#[test]
+fn grouped_import_preserves_stack_trace_line_through_real_javac() {
+    if !javac_available() {
+        // No JDK on this machine/CI; the desugar unit tests cover line preservation as a proxy.
+        return;
+    }
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"hello\"\nfeatures = [\"grouped-imports\"]\n\
+         [run]\nmain-class = \"com.example.Main\"\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    // The grouped import is on line 2; the `throw` is on line 6. Desugaring `.{List, Map}` into two
+    // plain imports must stay on line 2 so the throw keeps line 6.
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\n\
+         import java.util.{List, Map};\n\
+         public class Main {\n\
+         \x20\x20\x20\x20public static void main(String[] a) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20List<String> xs = new java.util.ArrayList<>();\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20throw new RuntimeException(\"boom\" + xs + Map.class);\n\
+         \x20\x20\x20\x20}\n\
+         }\n",
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+    let (_stdout, stderr, code) = run_full(&["run", "--manifest-path", manifest.to_str().unwrap()]);
+    // The program throws, so the run exits non-zero and the JVM prints a stack trace. The frame
+    // must name the original throw line (6); a shifted line would mean expansion broke the mapping.
+    assert_ne!(
+        code, 0,
+        "expected the thrown exception to fail the run; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Main.java:6"),
+        "stack trace should name the original throw line 6; stderr: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn build_runs_rhai_and_passes_generated_inputs_to_javac() {

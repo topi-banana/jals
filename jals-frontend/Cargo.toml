@@ -12,6 +12,9 @@ edition.workspace = true
 # `no_std`. This crate must never depend on `jals-build`, whose compile half is `native`-gated.
 [dependencies]
 jals-storage.workspace = true
+# The dialect frontend parses each file to locate grouped imports. `jals-syntax` is `no_std +
+# alloc` and wasm-safe, so it does not regress this crate's portability.
+jals-syntax.workspace = true
 
 # Test-only: the crate itself takes no execution parameter — cooperative yielding is
 # runtime-free — so `jals-exec` is needed just to drive the futures in `src/tests.rs`.

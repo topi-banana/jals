@@ -303,6 +303,10 @@ pub enum SyntaxKind {
     USES_DIRECTIVE,
     /// `provides TypeName with TypeName, ... ;`.
     PROVIDES_DIRECTIVE,
+
+    // --- jals dialect ---
+    /// A jals grouped import (`.{ A, B }`).
+    IMPORT_GROUP,
 }
 
 impl SyntaxKind {

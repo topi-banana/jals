@@ -49,6 +49,33 @@ fn specific_import_ok() {
     check("import java.util.List;", expect![""]);
 }
 
+#[test]
+fn wildcard_group_member_flagged() {
+    // A jals grouped import hides its star one level down: the declaration's own name is the
+    // shared prefix `java.util`, so the member is what carries the wildcard. `jals-hir` records
+    // `java.util.concurrent` as an on-demand import here, so the rule must see it too. The finding
+    // spans the member, not the whole declaration — `HashMap` beside it is fine — and starts at
+    // the name, not at the space the member's node begins with.
+    expect![[r"
+        wildcard-import:27..39: avoid wildcard imports; import the specific types you use
+    "]]
+    .assert_eq(&lint_with_features(
+        "import java.util.{HashMap, concurrent.*};",
+        &[Feature::GroupedImports],
+    ));
+}
+
+#[test]
+fn grouped_import_without_a_wildcard_member_ok() {
+    assert_eq!(
+        lint_with_features(
+            "import java.util.{HashMap, regex.Pattern};",
+            &[Feature::GroupedImports],
+        ),
+        ""
+    );
+}
+
 // ===== empty-catch =====
 
 #[test]
@@ -453,5 +480,64 @@ fn module_import_respects_allow_config() {
         out.diagnostics.iter().all(|d| d.rule != "module-import"),
         "expected the rule to be suppressed: {:?}",
         out.diagnostics
+    );
+}
+
+// ===== grouped-import =====
+
+#[test]
+fn grouped_import_flagged_without_the_dialect_feature() {
+    // A non-empty feature set that lacks `grouped-imports` (a jals dialect feature no release
+    // preset implies) gates the syntax, with the dialect-flavored "add it to features" hint.
+    expect![[r#"
+        grouped-import:0..38: grouped imports (`import a.b.{X, Y};`) are a jals dialect feature; to use them, add `"grouped-imports"` to `[package] features`
+    "#]]
+    .assert_eq(&lint_with_features(
+        "import java.util.{HashMap, ArrayList};",
+        &[Feature::Java25],
+    ));
+}
+
+#[test]
+fn grouped_import_allowed_with_the_feature() {
+    assert_eq!(
+        lint_with_features(
+            "import java.util.{HashMap, ArrayList};",
+            &[Feature::GroupedImports],
+        ),
+        ""
+    );
+}
+
+#[test]
+fn grouped_import_flagged_even_without_declared_features() {
+    // The empty-set exemption covers Java features only. Grouped imports are not valid Java at any
+    // release, so a project that declares no `[package] features` has not "opted out of gating" —
+    // it simply cannot compile the syntax: the build keys desugaring off the feature being
+    // present, so `javac` would see the raw `.{...}`. Staying silent here would leave that with no
+    // report at all.
+    expect![[r#"
+        grouped-import:0..38: grouped imports (`import a.b.{X, Y};`) are a jals dialect feature; to use them, add `"grouped-imports"` to `[package] features`
+    "#]]
+    .assert_eq(&lint_with_features(
+        "import java.util.{HashMap, ArrayList};",
+        &[],
+    ));
+}
+
+#[test]
+fn java_feature_gates_keep_the_empty_set_exemption() {
+    // The counterpart: `module-imports` is real Java, so an undeclared feature set still opts out
+    // of *its* gate. Narrowing the exemption for dialect features must not narrow it for these.
+    assert_eq!(lint_with_features("import module java.base;", &[]), "");
+    assert_eq!(lint_with_features("void main() {}", &[]), "");
+}
+
+#[test]
+fn ordinary_import_is_not_a_grouped_import() {
+    // A plain import has no group, so it is never flagged by `grouped-import`.
+    assert_eq!(
+        lint_with_features("import java.util.List;", &[Feature::Java25]),
+        ""
     );
 }

@@ -598,6 +598,23 @@ impl ProjectIndex {
             let Some(name) = import.name() else {
                 continue;
             };
+            // jals grouped import: each member resolves relative to the shared prefix, exactly as
+            // if it had been written as a separate single/on-demand import.
+            if let Some(group) = import.group() {
+                let prefix = name.text();
+                for member in group.members() {
+                    if member.is_wildcard() {
+                        let pkg = member.qualifier().map_or_else(
+                            || prefix.clone(),
+                            |qualifier| format!("{prefix}.{qualifier}"),
+                        );
+                        on_demand.push(pkg);
+                    } else if let Some(simple) = member.last_segment() {
+                        single_imports.push((simple, format!("{prefix}.{}", member.text())));
+                    }
+                }
+                continue;
+            }
             if name.is_wildcard() {
                 if let Some(pkg) = name.qualifier() {
                     on_demand.push(pkg);
@@ -1708,6 +1725,24 @@ mod tests {
         let src = "package p; import a.B; class C<T> extends B { T get() { return null; } }";
         let root = parse_root(src);
         assert_eq!(extract(&root), extract(&root));
+    }
+
+    /// A jals grouped import resolves member-by-member: each member is prefix-qualified and lands in
+    /// `single_imports`/`on_demand` exactly as the equivalent separate imports would.
+    #[test]
+    fn grouped_import_members_extract_as_single_and_on_demand() {
+        let root =
+            parse_root("import java.util.{HashMap, regex.Pattern, concurrent.*}; class C {}");
+        let meta = extract(&root).meta.expect("source file has meta");
+        assert!(
+            meta.single_imports
+                .contains(&("HashMap".to_owned(), "java.util.HashMap".to_owned()))
+        );
+        assert!(
+            meta.single_imports
+                .contains(&("Pattern".to_owned(), "java.util.regex.Pattern".to_owned()))
+        );
+        assert!(meta.on_demand.contains(&"java.util.concurrent".to_owned()));
     }
 
     /// Re-extracting a single file's facts and reassembling — reusing the other files' cached facts,

@@ -309,7 +309,8 @@ impl SwitchExpr {
 mod tests {
     use super::AstNode;
     use crate::ast::{
-        CatchClause, FieldDecl, LocalVarDecl, QualifiedName, Resource, SwitchExpr, Type,
+        CatchClause, FieldDecl, ImportDecl, ImportGroup, LocalVarDecl, QualifiedName, Resource,
+        SwitchExpr, Type,
     };
     use crate::parser::Parse;
 
@@ -408,6 +409,32 @@ mod tests {
         assert_eq!(qn.last_segment().as_deref(), Some("Foo"));
         assert_eq!(qn.qualifier().as_deref(), Some("a.b"));
         assert!(!qn.is_wildcard());
+    }
+
+    #[test]
+    fn grouped_import_exposes_prefix_and_members() {
+        // The prefix is `ImportDecl::name()` (a direct child); members live under the group.
+        let decl: ImportDecl = first("import java.util.{HashMap, regex.Pattern, concurrent.*};");
+        assert_eq!(decl.name().unwrap().text(), "java.util");
+        assert!(!decl.is_static());
+        let group: ImportGroup = decl.group().expect("grouped import has a group");
+        let members: Vec<String> = group.members().map(|m| m.text()).collect();
+        assert_eq!(members, ["HashMap", "regex.Pattern", "concurrent.*"]);
+    }
+
+    #[test]
+    fn static_grouped_import_keeps_static_flag() {
+        let decl: ImportDecl = first("import static java.lang.Math.{PI, E};");
+        assert!(decl.is_static());
+        assert_eq!(decl.name().unwrap().text(), "java.lang.Math");
+        let members: Vec<String> = decl.group().unwrap().members().map(|m| m.text()).collect();
+        assert_eq!(members, ["PI", "E"]);
+    }
+
+    #[test]
+    fn ordinary_import_has_no_group() {
+        let decl: ImportDecl = first("import java.util.List;");
+        assert!(decl.group().is_none());
     }
 
     #[test]

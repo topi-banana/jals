@@ -61,13 +61,46 @@ fn comment_skeleton(src: &str) -> String {
         .collect()
 }
 
-/// The sequence of non-trivia tokens (kind + text) of `src`.
+/// Whether `token` is the trailing comma of a jals grouped import — a comma directly inside an
+/// `IMPORT_GROUP` with no member left after it (`import a.{B,};`).
+fn is_group_trailing_comma(token: &jals_syntax::SyntaxToken) -> bool {
+    if token.kind() != SyntaxKind::COMMA {
+        return false;
+    }
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    if parent.kind() != SyntaxKind::IMPORT_GROUP {
+        return false;
+    }
+    let elements: Vec<SyntaxElement> = parent.children_with_tokens().collect();
+    let Some(index) = elements
+        .iter()
+        .position(|el| el.as_token().is_some_and(|t| t == token))
+    else {
+        return false;
+    };
+    !elements[index + 1..].iter().any(|el| {
+        el.as_node()
+            .is_some_and(|n| n.kind() == SyntaxKind::QUALIFIED_NAME)
+    })
+}
+
+/// The sequence of non-trivia tokens (kind + text) of `src`, minus the trailing comma of any jals
+/// grouped import.
+///
+/// That comma is the formatter's single *unconditional* token-level normalization (see the crate
+/// docs): `import a.{B,};` formats to `import a.{B};`. Dropping it on **both** sides is what keeps
+/// every other token — including every other comma — compared exactly, instead of weakening the
+/// comparison globally the way a "commas modulo" helper would. The normalization itself is pinned
+/// by `grouped_import_drops_its_trailing_comma` in `formatter.rs`, not here.
 fn sig_tokens(src: &str) -> Vec<(SyntaxKind, String)> {
     jals_exec::block_on_inline(Parse::parse(src))
         .syntax()
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .filter(|t| !t.kind().is_trivia())
+        .filter(|t| !is_group_trailing_comma(t))
         .map(|t| (t.kind(), t.text().to_owned()))
         .collect()
 }
@@ -2122,6 +2155,31 @@ fn lex_texts(src: &str) -> Vec<String> {
 /// anything other than the two tokens?
 fn pairwise_fuses(a: &str, b: &str) -> bool {
     lex_texts(&format!("{a}{b}")) != [a, b]
+}
+
+/// The token-preservation comparison above is filtered — but only by exactly one comma per grouped
+/// import. This pins that the filter is narrow: every other comma in the same file, including an
+/// array initializer's trailing comma (which the default `trailing-comma = preserve` keeps), is
+/// still compared. Without it a broken filter would silently weaken every `sig_tokens` property
+/// test above, and only a rare generated grouped import would ever notice.
+#[test]
+fn only_a_grouped_imports_trailing_comma_is_filtered_from_the_comparison() {
+    let src = "import a.{B,};\nimport c.{D, E,};\nclass K { int[] xs = {1, 2,}; }\n";
+    let out = fmt(src);
+    assert_eq!(sig_tokens(src), sig_tokens(&out));
+    assert!(out.contains("import a.{B};"), "{out}");
+    assert!(out.contains("import c.{D, E};"), "{out}");
+
+    // Five commas are written; the filter removes the two trailing group commas and leaves the
+    // `D, E` separator plus both of the initializer's.
+    let commas = |src: &str| {
+        sig_tokens(src)
+            .iter()
+            .filter(|(kind, _)| *kind == SyntaxKind::COMMA)
+            .count()
+    };
+    assert_eq!(commas(src), 3);
+    assert_eq!(commas(&out), 3);
 }
 
 /// `. .` is the only join that survives the pairwise fusion net but is still a strict prefix of a

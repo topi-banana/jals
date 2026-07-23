@@ -8,8 +8,10 @@ use alloc::vec::Vec;
 use jals_exec::block_on_inline;
 use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
 
+use crate::dialect::{DialectFlags, DialectFrontend};
 use crate::driver::Driver;
-use crate::ir::{IrFile, LoweredFile, LoweredTree};
+use crate::frontend::Frontend;
+use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree};
 use crate::key::FrontendKey;
 use crate::vanilla::VanillaFrontend;
 
@@ -198,6 +200,199 @@ fn editing_one_file_leaves_the_other_key_unchanged() {
         untouched.key, untouched_after.key,
         "a Bytes-level frontend must not be invalidated by a sibling edit"
     );
+}
+
+// ===== Dialect frontend: grouped-import desugaring =====
+
+/// Test helpers, grouped in a module (like the parser tests) so they are not free functions.
+mod helpers {
+    use super::*;
+
+    /// Run the dialect frontend (grouped imports on) over one source and return the emitted bytes.
+    pub(super) fn desugar(src: &str) -> Vec<u8> {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(DialectFlags {
+            grouped_imports: true,
+        });
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(
+            !output.has_errors(),
+            "unexpected desugar error: {:?}",
+            output.diagnostics
+        );
+        assert_eq!(output.files.len(), 1);
+        output.files.into_iter().next().unwrap().1
+    }
+
+    /// Run the dialect frontend and return the emitted source as a string.
+    pub(super) fn desugar_str(src: &str) -> alloc::string::String {
+        alloc::string::String::from_utf8(desugar(src)).unwrap()
+    }
+
+    /// Run the dialect frontend over a source expected to fail, returning its diagnostics and the
+    /// bytes it emitted.
+    pub(super) fn desugar_failing(src: &str) -> (Vec<FrontendDiagnostic>, Vec<u8>) {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(DialectFlags {
+            grouped_imports: true,
+        });
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(output.has_errors());
+        assert_eq!(output.files.len(), 1);
+        let bytes = output.files.into_iter().next().unwrap().1;
+        (output.diagnostics, bytes)
+    }
+
+    pub(super) fn newlines(text: &str) -> usize {
+        text.matches('\n').count()
+    }
+
+    /// 1-based line of the first occurrence of `needle` in `text`.
+    pub(super) fn line_of(text: &str, needle: &str) -> usize {
+        let offset = text.find(needle).expect("needle present");
+        1 + text[..offset].matches('\n').count()
+    }
+}
+
+use helpers::{desugar_failing, desugar_str, line_of, newlines};
+
+#[test]
+fn desugars_single_line_group_onto_one_line() {
+    // The headline case: 0 newlines in, 0 newlines out, one physical line.
+    let out = desugar_str("import java.util.{HashMap, ArrayList};\n");
+    assert_eq!(
+        out,
+        "import java.util.HashMap; import java.util.ArrayList;\n"
+    );
+}
+
+#[test]
+fn single_member_and_trailing_comma_produce_one_statement() {
+    assert_eq!(desugar_str("import a.{B};\n"), "import a.B;\n");
+    assert_eq!(desugar_str("import a.{B,};\n"), "import a.B;\n");
+}
+
+#[test]
+fn nested_and_wildcard_members_concatenate_correctly() {
+    let out = desugar_str("import java.util.{HashMap, regex.Pattern, concurrent.*};\n");
+    assert_eq!(
+        out,
+        "import java.util.HashMap; import java.util.regex.Pattern; \
+         import java.util.concurrent.*;\n"
+    );
+}
+
+#[test]
+fn static_group_puts_static_on_every_member() {
+    let out = desugar_str("import static java.lang.Math.{PI, E};\n");
+    assert_eq!(
+        out,
+        "import static java.lang.Math.PI; import static java.lang.Math.E;\n"
+    );
+}
+
+#[test]
+fn empty_group_expands_to_nothing_but_keeps_the_line() {
+    let src = "package p;\nimport a.{};\nclass C {}\n";
+    let out = desugar_str(src);
+    // The import line collapses to blank, but `class C {}` stays on line 3.
+    assert_eq!(newlines(&out), newlines(src));
+    assert_eq!(line_of(&out, "class C {}"), 3);
+}
+
+#[test]
+fn multiline_group_reproduces_the_original_newline_count() {
+    let src = "import java.util.{\n    HashMap,\n    ArrayList\n};\nclass C {}\n";
+    let out = desugar_str(src);
+    // The significant span held 3 newlines; the replacement must too, so `class C {}` — which was
+    // on line 5 — is still on line 5.
+    assert_eq!(newlines(&out), newlines(src));
+    assert_eq!(line_of(src, "class C {}"), 5);
+    assert_eq!(line_of(&out, "class C {}"), 5);
+    assert!(out.contains("import java.util.HashMap;"));
+    assert!(out.contains("import java.util.ArrayList;"));
+}
+
+#[test]
+fn body_lines_keep_their_numbers_after_expansion() {
+    // The core requirement: expansion never shifts following lines (Java stack-trace fidelity).
+    let src = "package p;\n\
+               import java.util.{HashMap, ArrayList};\n\
+               public class Foo {\n\
+               \x20\x20\x20\x20void m() { throw new RuntimeException(\"x\"); }\n\
+               }\n";
+    let out = desugar_str(src);
+    assert!(out.contains("import java.util.HashMap;"));
+    assert!(out.contains("import java.util.ArrayList;"));
+    assert_eq!(newlines(&out), newlines(src));
+    assert_eq!(line_of(&out, "public class Foo"), 3);
+    assert_eq!(line_of(&out, "throw new RuntimeException"), 4);
+}
+
+#[test]
+fn ungrouped_and_grouped_imports_mix_without_touching_the_plain_one() {
+    let src = "import java.io.IOException;\nimport java.util.{List, Map};\n";
+    let out = desugar_str(src);
+    // The plain import's bytes are untouched.
+    assert!(out.starts_with("import java.io.IOException;\n"));
+    assert!(out.contains("import java.util.List; import java.util.Map;"));
+}
+
+#[test]
+fn source_without_groups_is_emitted_unchanged() {
+    let src = "import java.util.List;\nclass C {}\n";
+    assert_eq!(desugar_str(src), src);
+}
+
+#[test]
+fn malformed_group_is_emitted_verbatim_with_an_error() {
+    let src = "import java.util.{HashMap, ArrayList;\nclass C {}\n";
+    let (_diagnostics, bytes) = desugar_failing(src);
+    // The output keeps one entry per input even though the driver will reject the lowering, so
+    // `FrontendOutput` never describes a half-emitted tree.
+    assert_eq!(bytes, src.as_bytes());
+}
+
+#[test]
+fn malformed_group_diagnostic_names_the_line_and_the_parse_error() {
+    // The lowering is rejected, so `javac` never runs and nothing downstream restates the error:
+    // the diagnostic is the only report the user gets and must locate the group on its own.
+    let src = "package p;\n\nimport java.util.{HashMap, ArrayList;\nclass C {}\n";
+    let (diagnostics, _bytes) = desugar_failing(src);
+    let message = &diagnostics[0].message;
+    assert!(
+        message.contains("on line 3"),
+        "diagnostic should name the group's line: {message}"
+    );
+    assert!(
+        message.contains("RBRACE"),
+        "diagnostic should carry the parser's own message: {message}"
+    );
+}
+
+#[test]
+fn group_without_a_semicolon_is_diagnosed_at_its_own_line() {
+    // No `;` at all: there is no span to replace, so the fallback anchor is the `import` keyword.
+    let src = "package p;\nimport a.{B}\nclass C {}\n";
+    let (diagnostics, bytes) = desugar_failing(src);
+    assert_eq!(bytes, src.as_bytes());
+    let message = &diagnostics[0].message;
+    assert!(
+        message.contains("on line 2") && message.contains("missing `;`"),
+        "unexpected diagnostic: {message}"
+    );
+}
+
+#[test]
+fn config_digest_distinguishes_enabled_flags() {
+    let on = DialectFrontend::new(DialectFlags {
+        grouped_imports: true,
+    });
+    let off = DialectFrontend::new(DialectFlags {
+        grouped_imports: false,
+    });
+    assert_ne!(on.config_digest(), off.config_digest());
+    assert!(on.caps().type_stable);
 }
 
 // Frozen provenance digests for `sources()` under the vanilla frontend. Deliberately literals

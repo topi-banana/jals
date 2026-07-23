@@ -617,8 +617,11 @@ pub enum Feature {
     /// JEP 512: compact source files and instance `main` methods (top-level members), permanent in
     /// Java 25 (a preview before). Gated by the linter's `compact-source-file` rule.
     CompactSourceFiles,
-    // A jals-specific dialect feature would be added here with `stabilized_in` = `None`: on only when
-    // explicitly listed in `[package] features`, never implied by a release preset.
+    /// jals dialect: grouped imports (`import java.util.{HashMap, ArrayList};`). Not valid Java at
+    /// any release (`stabilized_in` = `None`) — on only when explicitly listed in `[package]
+    /// features`. Gated by the linter's `grouped-import` rule; the compile frontend desugars it to
+    /// plain imports.
+    GroupedImports,
 }
 
 impl Feature {
@@ -628,7 +631,7 @@ impl Feature {
     /// [`predecessor`](Feature::predecessor) / [`stabilized_in`](Feature::stabilized_in) /
     /// [`config_name`](Feature::config_name) already force a stop for a new variant). The
     /// declaration-order invariant is const-asserted below.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Java8,
         Self::Java9,
         Self::Java10,
@@ -649,6 +652,7 @@ impl Feature {
         Self::Java25,
         Self::ModuleImports,
         Self::CompactSourceFiles,
+        Self::GroupedImports,
     ];
 
     /// Every feature's [`config_name`](Feature::config_name), parallel to [`ALL`](Feature::ALL) —
@@ -693,7 +697,9 @@ impl Feature {
             Self::Java23 => Some(Self::Java22),
             Self::Java24 => Some(Self::Java23),
             Self::Java25 => Some(Self::Java24),
-            Self::Java8 | Self::ModuleImports | Self::CompactSourceFiles => None,
+            Self::Java8 | Self::ModuleImports | Self::CompactSourceFiles | Self::GroupedImports => {
+                None
+            }
         }
     }
 
@@ -707,6 +713,8 @@ impl Feature {
     pub const fn stabilized_in(self) -> Option<Self> {
         match self {
             Self::ModuleImports | Self::CompactSourceFiles => Some(Self::Java25),
+            // A release preset itself, and `GroupedImports` — a jals dialect feature no Java release
+            // stabilizes — all return `None`.
             Self::Java8
             | Self::Java9
             | Self::Java10
@@ -724,7 +732,46 @@ impl Feature {
             | Self::Java22
             | Self::Java23
             | Self::Java24
-            | Self::Java25 => None,
+            | Self::Java25
+            | Self::GroupedImports => None,
+        }
+    }
+
+    /// Whether this is a **jals dialect** feature: a construct no Java release defines, which
+    /// compiles only because the jals compile frontend desugars it away before `javac` runs.
+    ///
+    /// The distinction a release gate cannot express. A release-gated feature is real Java that a
+    /// project may simply not have opted into describing, so a project declaring no
+    /// `[package] features` opting out of the gate is harmless. A dialect construct is never valid
+    /// Java at any release, so the same silence would leave the user with no jals-side signal at
+    /// all and a raw `javac` syntax error — which is why [`FeatureSet::permits`] does not extend
+    /// its empty-set exemption here.
+    ///
+    /// Exhaustive with no `_` arm, like the release facts above: a new [`Feature`] has to decide
+    /// which side of this line it falls on rather than defaulting to "Java".
+    pub const fn is_dialect(self) -> bool {
+        match self {
+            Self::GroupedImports => true,
+            Self::Java8
+            | Self::Java9
+            | Self::Java10
+            | Self::Java11
+            | Self::Java12
+            | Self::Java13
+            | Self::Java14
+            | Self::Java15
+            | Self::Java16
+            | Self::Java17
+            | Self::Java18
+            | Self::Java19
+            | Self::Java20
+            | Self::Java21
+            | Self::Java22
+            | Self::Java23
+            | Self::Java24
+            | Self::Java25
+            | Self::ModuleImports
+            | Self::CompactSourceFiles => false,
         }
     }
 
@@ -773,6 +820,7 @@ impl Feature {
             Self::Java25 => "java25",
             Self::ModuleImports => "module-imports",
             Self::CompactSourceFiles => "compact-source-files",
+            Self::GroupedImports => "grouped-imports",
         }
     }
 }
@@ -862,10 +910,19 @@ impl FeatureSet {
     }
 
     /// Whether a use of `feature` is permitted: an [`empty`](FeatureSet::is_empty) set permits
-    /// everything (a project that declares no `[package] features` opts out of feature gating),
-    /// otherwise the feature must be enabled. The single owner of the empty-set exemption every
-    /// feature-gate consumer (the gated lint rules) relies on.
+    /// every *Java* feature (a project that declares no `[package] features` opts out of
+    /// release-based feature gating), otherwise the feature must be enabled. The single owner of
+    /// the empty-set exemption every feature-gate consumer (the gated lint rules) relies on.
+    ///
+    /// A [`dialect`](Feature::is_dialect) feature is exempt from the exemption: it must be
+    /// [`contain`](FeatureSet::contains)ed, empty set or not. Silence there would be a lie —
+    /// nothing else would report the construct either, because the build path keys the desugaring
+    /// off `contains`, so an undeclared dialect construct reaches `javac` verbatim and fails as a
+    /// plain syntax error.
     pub const fn permits(self, feature: Feature) -> bool {
+        if feature.is_dialect() {
+            return self.contains(feature);
+        }
         self.is_empty() || self.contains(feature)
     }
 }
@@ -2098,6 +2155,58 @@ mod tests {
         let fs = m.feature_set();
         assert!(fs.contains(Feature::CompactSourceFiles));
         assert!(!fs.contains(Feature::ModuleImports));
+    }
+
+    #[test]
+    fn grouped_imports_is_an_independent_dialect_feature() {
+        // Enabled only by explicit opt-in; no release preset implies it (`stabilized_in` = None).
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"grouped-imports\"]\n").unwrap();
+        assert!(m.feature_set().contains(Feature::GroupedImports));
+
+        // The newest release preset does NOT pull it in — it is not part of any Java version.
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"java25\"]\n").unwrap();
+        assert!(!m.feature_set().contains(Feature::GroupedImports));
+        assert_eq!(Feature::GroupedImports.stabilized_in(), None);
+
+        // Combinable with any other feature (the bitset unions them; nothing is implied away).
+        let m: Manifest =
+            toml::from_str("[package]\nfeatures = [\"java25\", \"grouped-imports\"]\n").unwrap();
+        let fs = m.feature_set();
+        assert!(fs.contains(Feature::GroupedImports));
+        assert!(fs.contains(Feature::ModuleImports));
+        assert!(fs.contains(Feature::CompactSourceFiles));
+    }
+
+    #[test]
+    fn empty_feature_set_does_not_permit_a_dialect_feature() {
+        // The empty-set exemption covers Java features only. A project that declares no
+        // `[package] features` still cannot compile a dialect construct — the build path keys
+        // desugaring off `contains`, so `javac` would see the raw syntax — and staying silent
+        // would leave that with no jals-side report at all.
+        let empty = FeatureSet::resolve(&[]);
+        assert!(empty.is_empty());
+        assert!(!empty.permits(Feature::GroupedImports));
+        // Java features keep the exemption.
+        assert!(empty.permits(Feature::ModuleImports));
+        assert!(empty.permits(Feature::CompactSourceFiles));
+
+        // Opting in permits it, and a non-empty set that lacks it still does not.
+        assert!(FeatureSet::resolve(&[Feature::GroupedImports]).permits(Feature::GroupedImports));
+        assert!(!FeatureSet::resolve(&[Feature::Java25]).permits(Feature::GroupedImports));
+    }
+
+    #[test]
+    fn only_jals_constructs_are_dialect_features() {
+        // Every Java release preset and release-gated feature is Java; `grouped-imports` is the
+        // one construct javac has never heard of.
+        for feature in Feature::ALL {
+            assert_eq!(
+                feature.is_dialect(),
+                feature == Feature::GroupedImports,
+                "unexpected dialect classification for `{}`",
+                feature.config_name()
+            );
+        }
     }
 
     #[test]

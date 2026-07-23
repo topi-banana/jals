@@ -22,6 +22,7 @@ use crate::diagnostic::Severity;
 mod compact_source_file;
 mod constant_condition;
 mod empty_catch;
+mod grouped_import;
 mod missing_braces;
 mod module_import;
 mod naming;
@@ -52,6 +53,17 @@ impl Finding {
         let range = node.text_range();
         Self {
             range: usize::from(range.start())..usize::from(range.end()),
+            message: message.into(),
+            ..Self::default()
+        }
+    }
+
+    /// A finding spanning an explicit byte range, for a span no single node or token covers —
+    /// e.g. one member of a jals grouped import without the leading trivia rowan parks inside the
+    /// member's own node.
+    pub(crate) fn at_range(range: Range<usize>, message: impl Into<String>) -> Self {
+        Self {
+            range,
             message: message.into(),
             ..Self::default()
         }
@@ -127,8 +139,10 @@ pub(crate) enum Checker {
     /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
     /// names the [`Feature`] it guards, and the driver runs `find` only when the set does not
     /// [`permit`](jals_config::FeatureSet::permits) that feature (threaded from the host via
-    /// [`Config::features`](crate::Config::features)) — so an empty set (no `[package] features`
-    /// declared) never fires. The driver builds the shared gate message
+    /// [`Config::features`](crate::Config::features)) — so for a Java feature an empty set (no
+    /// `[package] features` declared) never fires, while a
+    /// [`dialect`](jals_config::Feature::is_dialect) feature fires until it is explicitly listed,
+    /// because nothing but jals can report its syntax. The driver builds the shared gate message
     /// ([`FeatureGate::preview_message`] from `feature` + `subject`) and stamps it on each flagged
     /// node, so the detector is pure syntax location.
     Gated {
@@ -159,6 +173,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     missing_braces::RULE,
     compact_source_file::RULE,
     module_import::RULE,
+    grouped_import::RULE,
     constant_condition::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
