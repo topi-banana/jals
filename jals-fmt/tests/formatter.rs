@@ -2291,6 +2291,46 @@ fn grouped_import_formats_to_compact_form() {
 }
 
 #[test]
+fn grouped_import_drops_its_trailing_comma() {
+    // The canonical form has no trailing separator: the comma separates nothing, the group is
+    // always flat (so no vertical layout needs it), and the dialect desugaring ignores it. This is
+    // the formatter's one unconditional token-level normalization — see the crate docs.
+    check(
+        "import a.{B,};class C{}",
+        expect![[r"
+            import a.{B};
+            class C {}
+        "]],
+    );
+    // Only the *trailing* one: separating commas are untouched.
+    check(
+        "import a.{B,C,};class C{}",
+        expect![[r"
+            import a.{B, C};
+            class C {}
+        "]],
+    );
+}
+
+#[test]
+fn grouped_import_trailing_comma_keeps_its_comment() {
+    // Only the comma's text is dropped; the comment anchored to it is still emitted, so
+    // "comments are never dropped" holds. Keeping the *comma* alive because of the comment
+    // (as `trailing-comma` does for array initializers) would break idempotency instead: the
+    // comment re-anchors in the output, so a second pass would drop the comma anyway.
+    check(
+        "import a.{B,/*keep*/};class C{}",
+        expect![[r"
+            import a.{B}; /*keep*/
+            class C {}
+        "]],
+    );
+    // …and that output is a fixed point.
+    let once = fmt("import a.{B,/*keep*/};\nclass C {}\n");
+    assert_eq!(fmt(&once), once);
+}
+
+#[test]
 fn grouped_import_is_idempotent() {
     // The canonical form is a fixed point: formatting it again changes nothing.
     let once = fmt("import java.util.{HashMap, ArrayList};\nclass C {}\n");

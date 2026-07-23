@@ -9,7 +9,13 @@
 //! Invariants the formatter upholds:
 //! - **Significant tokens are preserved.** The sequence of non-trivia tokens of the output
 //!   equals that of the input (only whitespace/comment layout changes), with seven opt-in
-//!   exceptions, each off by default: [`Config::reorder_imports`] may reorder import
+//!   exceptions — each off by default — and one unconditional one, all enumerated here.
+//!   The unconditional exception: the trailing comma of a **jals grouped import**
+//!   (`import a.{B,};` → `import a.{B};`) is dropped. It is not configurable because it separates
+//!   nothing and cannot come back: a group is always laid out flat, so there is no vertical form
+//!   for a trailing comma to serve, and the dialect desugaring ignores it either way. A trailing
+//!   comma carrying a comment is kept verbatim, so no comment is lost. The opt-in exceptions:
+//!   [`Config::reorder_imports`] may reorder import
 //!   declarations (the token *multiset* is still preserved), [`Config::group_imports`] may
 //!   reorder imports into prefix-defined groups (multiset preserved; it overrides
 //!   `reorder_imports`), [`Config::reorder_modifiers`] may reorder a declaration's modifiers
