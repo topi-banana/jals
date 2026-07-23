@@ -49,6 +49,33 @@ fn specific_import_ok() {
     check("import java.util.List;", expect![""]);
 }
 
+#[test]
+fn wildcard_group_member_flagged() {
+    // A jals grouped import hides its star one level down: the declaration's own name is the
+    // shared prefix `java.util`, so the member is what carries the wildcard. `jals-hir` records
+    // `java.util.concurrent` as an on-demand import here, so the rule must see it too. The finding
+    // spans the member, not the whole declaration — `HashMap` beside it is fine — and starts at
+    // the name, not at the space the member's node begins with.
+    expect![[r"
+        wildcard-import:27..39: avoid wildcard imports; import the specific types you use
+    "]]
+    .assert_eq(&lint_with_features(
+        "import java.util.{HashMap, concurrent.*};",
+        &[Feature::GroupedImports],
+    ));
+}
+
+#[test]
+fn grouped_import_without_a_wildcard_member_ok() {
+    assert_eq!(
+        lint_with_features(
+            "import java.util.{HashMap, regex.Pattern};",
+            &[Feature::GroupedImports],
+        ),
+        ""
+    );
+}
+
 // ===== empty-catch =====
 
 #[test]

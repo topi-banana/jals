@@ -58,6 +58,17 @@ impl Finding {
         }
     }
 
+    /// A finding spanning an explicit byte range, for a span no single node or token covers —
+    /// e.g. one member of a jals grouped import without the leading trivia rowan parks inside the
+    /// member's own node.
+    pub(crate) fn at_range(range: Range<usize>, message: impl Into<String>) -> Self {
+        Self {
+            range,
+            message: message.into(),
+            ..Self::default()
+        }
+    }
+
     /// A finding spanning `token`.
     pub(crate) fn at_token(token: &SyntaxToken, message: impl Into<String>) -> Self {
         let range = token.text_range();
