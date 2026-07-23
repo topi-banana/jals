@@ -299,6 +299,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                     grouped_imports: manifest
                         .feature_set()
                         .contains(jals_config::Feature::GroupedImports),
+                    ..jals_frontend::DialectFlags::default()
                 },
             ),
             NodeBody::PlainSource(_) | NodeBody::Binary(_) => (
@@ -306,9 +307,10 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 jals_frontend::DialectFlags::default(),
             ),
         };
+        let use_dialect = dialect_flags.any();
         let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
         let frontend: &dyn jals_frontend::Frontend = match kind {
-            jals_config::FrontendKind::Vanilla {} if dialect_flags.any() => &dialect,
+            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
             jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
         };
         let lowered = match jals_frontend::Driver::lower(frontend, self.cache, &files).await {

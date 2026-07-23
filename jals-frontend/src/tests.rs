@@ -213,6 +213,7 @@ mod helpers {
         let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(DialectFlags {
             grouped_imports: true,
+            ..DialectFlags::default()
         });
         let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
         assert!(
@@ -235,6 +236,7 @@ mod helpers {
         let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(DialectFlags {
             grouped_imports: true,
+            ..DialectFlags::default()
         });
         let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
         assert!(output.has_errors());
@@ -387,9 +389,11 @@ fn group_without_a_semicolon_is_diagnosed_at_its_own_line() {
 fn config_digest_distinguishes_enabled_flags() {
     let on = DialectFrontend::new(DialectFlags {
         grouped_imports: true,
+        ..DialectFlags::default()
     });
     let off = DialectFrontend::new(DialectFlags {
         grouped_imports: false,
+        ..DialectFlags::default()
     });
     assert_ne!(on.config_digest(), off.config_digest());
     assert!(on.caps().type_stable);
@@ -402,3 +406,286 @@ const FROZEN_MAIN_PROVENANCE: &str =
     "29b0dd5f77ef9e58f4574247179eade0c6d89d19a376ac61bc4ab126fa842ee8";
 const FROZEN_UTIL_PROVENANCE: &str =
     "70b703a32c04a480bde53777192b0cf9d11048625ff104ef450f6b6beac094e4";
+
+// ===== Dialect frontend: attributes and `cfg` conditional compilation =====
+
+/// Attribute-test helpers, mirroring the grouped-import ones.
+mod attr_helpers {
+    use super::*;
+
+    pub(super) fn attr_flags(features: &[&str]) -> DialectFlags {
+        DialectFlags {
+            attributes: true,
+            build_features: features.iter().map(|f| (*f).to_owned()).collect(),
+            ..DialectFlags::default()
+        }
+    }
+
+    /// Run the dialect frontend (attributes on, grouped imports off) over one source with the
+    /// given enabled build features and return the emitted source.
+    pub(super) fn strip(src: &str, features: &[&str]) -> alloc::string::String {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(attr_flags(features));
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(
+            !output.has_errors(),
+            "unexpected attribute error: {:?}",
+            output.diagnostics
+        );
+        assert_eq!(output.files.len(), 1);
+        alloc::string::String::from_utf8(output.files.into_iter().next().unwrap().1).unwrap()
+    }
+
+    /// Run the dialect frontend over a source expected to fail, returning the error messages and
+    /// the emitted bytes.
+    pub(super) fn strip_failing(
+        src: &str,
+        features: &[&str],
+    ) -> (Vec<alloc::string::String>, Vec<u8>) {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(attr_flags(features));
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(
+            output.has_errors(),
+            "expected an error: {:?}",
+            output.diagnostics
+        );
+        assert_eq!(output.files.len(), 1);
+        let bytes = output.files.into_iter().next().unwrap().1;
+        let messages = output
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect();
+        (messages, bytes)
+    }
+}
+
+use attr_helpers::{attr_flags, strip, strip_failing};
+
+#[test]
+fn enabled_attribute_is_blanked_in_place() {
+    // Length-preserving: the attribute's bytes become spaces, everything else is verbatim.
+    let src = "#[cfg(feature = \"x\")]\nclass C {}\n";
+    let out = strip(src, &["x"]);
+    assert_eq!(out, "                     \nclass C {}\n");
+    assert_eq!(out.len(), src.len());
+}
+
+#[test]
+fn false_cfg_blanks_the_whole_member_and_keeps_line_numbers() {
+    let src = "class C {\n    #[cfg(feature = \"x\")]\n    void gone() {\n        f();\n    }\n    void kept() {}\n}\n";
+    let out = strip(src, &[]);
+    assert_eq!(out.len(), src.len());
+    assert_eq!(newlines(&out), newlines(src));
+    assert!(!out.contains("gone"));
+    assert!(!out.contains("f();"));
+    // `kept` was on line 6 and still is.
+    assert_eq!(line_of(src, "void kept"), 6);
+    assert_eq!(line_of(&out, "void kept"), 6);
+}
+
+#[test]
+fn true_cfg_keeps_the_member_and_strips_only_the_attribute() {
+    let src = "class C {\n    #[cfg(feature = \"x\")]\n    void kept() {}\n}\n";
+    let out = strip(src, &["x"]);
+    assert!(out.contains("void kept() {}"));
+    assert!(!out.contains("#["));
+    assert_eq!(line_of(&out, "void kept"), 3);
+}
+
+#[test]
+fn predicate_combinators_evaluate_like_rust_cfg() {
+    let src =
+        |pred: &str| alloc::format!("class C {{\n    #[cfg({pred})]\n    void m() {{}}\n}}\n");
+    let on = |pred: &str, features: &[&str]| strip(&src(pred), features).contains("void m");
+    assert!(on("all(feature = \"a\", feature = \"b\")", &["a", "b"]));
+    assert!(!on("all(feature = \"a\", feature = \"b\")", &["a"]));
+    assert!(on("all()", &[]));
+    assert!(on("any(feature = \"a\", feature = \"b\")", &["b"]));
+    assert!(!on("any()", &["a"]));
+    assert!(on("not(feature = \"a\")", &[]));
+    assert!(!on("not(feature = \"a\")", &["a"]));
+    assert!(on(
+        "any(all(feature = \"a\"), not(feature = \"b\"))",
+        &["c"]
+    ));
+}
+
+#[test]
+fn unknown_feature_name_is_simply_false() {
+    // Features are additive (Cargo semantics): testing an undeclared name is not an error.
+    let src = "class C {\n    #[cfg(feature = \"nope\")]\n    void m() {}\n}\n";
+    let out = strip(src, &["other"]);
+    assert!(!out.contains("void m"));
+}
+
+#[test]
+fn structural_errors_fail_the_file_verbatim() {
+    for (src, needle) in [
+        ("#[foo]\nclass C {}\n", "unknown attribute `foo` on line 1"),
+        (
+            "#[cfg]\nclass C {}\n",
+            "malformed `cfg` attribute on line 1",
+        ),
+        (
+            "#[cfg(feature = \"a\", feature = \"b\")]\nclass C {}\n",
+            "malformed `cfg` attribute on line 1",
+        ),
+        (
+            "#[cfg(wibble = \"a\")]\nclass C {}\n",
+            "malformed `cfg` attribute on line 1",
+        ),
+        (
+            "class C {\n    #[cfg(feature = 1)]\n    void m() {}\n}\n",
+            "feature name on line 2",
+        ),
+        (
+            "#[cfg(feature = \"a\\nb\")]\nclass C {}\n",
+            "must be a plain string literal",
+        ),
+        (
+            "class C { void m(#[cfg(feature = \"x\")] int p) {} }\n",
+            "not supported on this construct",
+        ),
+        (
+            "class C { public #[cfg(feature = \"x\")] void m() {} }\n",
+            "must come before modifiers",
+        ),
+        // A for-init attribute never even becomes an ATTRIBUTE node (the header's error
+        // recovery shreds it), so the stray-`#` net catches it.
+        (
+            "class C { void m() { for (#[cfg(feature = \"x\")] int i = 0;;) {} } }\n",
+            "does not begin an attribute",
+        ),
+        (
+            "class C { void m() { a # b; } }\n",
+            "does not begin an attribute",
+        ),
+    ] {
+        let (messages, bytes) = strip_failing(src, &["x", "a", "b"]);
+        assert_eq!(
+            bytes,
+            src.as_bytes(),
+            "failing file must emit verbatim: {src:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains(needle)),
+            "expected {needle:?} in {messages:?} for {src:?}"
+        );
+    }
+}
+
+#[test]
+fn attributes_inside_a_disabled_host_are_not_validated() {
+    // `#[wat]` would be an error, but its enclosing class is cfg'd out (Rust parity).
+    let src = "#[cfg(feature = \"x\")]\nclass Gone {\n    #[wat]\n    void m() {}\n}\n";
+    let out = strip(src, &[]);
+    assert!(!out.contains("wat"));
+    assert!(!out.contains("Gone"));
+}
+
+#[test]
+fn any_false_attribute_among_several_disables_the_host() {
+    let src =
+        "class C {\n    #[cfg(feature = \"a\")]\n    #[cfg(feature = \"b\")]\n    void m() {}\n}\n";
+    assert!(!strip(src, &["a"]).contains("void m"));
+    assert!(strip(src, &["a", "b"]).contains("void m"));
+}
+
+#[test]
+fn cfg_on_imports_and_statements() {
+    let src = "#[cfg(feature = \"x\")] import a.B;\nclass C {\n    void m() {\n        #[cfg(feature = \"x\")] f();\n        g();\n    }\n}\n";
+    let with = strip(src, &["x"]);
+    assert!(with.contains("import a.B;"));
+    assert!(with.contains("f();"));
+    let without = strip(src, &[]);
+    assert!(!without.contains("import a.B;"));
+    assert!(!without.contains("f()"));
+    assert!(without.contains("g();"));
+    assert_eq!(line_of(&without, "g();"), 5);
+}
+
+#[test]
+fn stripped_sole_body_statement_leaves_a_semicolon() {
+    let src = "class C {\n    void m() {\n        if (c) #[cfg(feature = \"x\")] f();\n        while (c) #[cfg(feature = \"x\")] g();\n    }\n}\n";
+    let out = strip(src, &[]);
+    assert!(out.contains("if (c) ;"));
+    assert!(out.contains("while (c) ;"));
+    assert_eq!(out.len(), src.len());
+}
+
+#[test]
+fn cfg_false_grouped_import_is_blanked_not_expanded() {
+    let src = "#[cfg(feature = \"x\")] import java.util.{HashMap, ArrayList};\nclass C {}\n";
+    let frontend = DialectFrontend::new(DialectFlags {
+        grouped_imports: true,
+        ..attr_flags(&[])
+    });
+    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+    let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+    assert!(!output.has_errors(), "{:?}", output.diagnostics);
+    let out = alloc::string::String::from_utf8(output.files.into_iter().next().unwrap().1).unwrap();
+    assert!(!out.contains("import"));
+    assert_eq!(out.len(), src.len());
+    assert_eq!(line_of(&out, "class C {}"), 2);
+}
+
+#[test]
+fn grouped_import_and_attribute_rewrite_in_one_pass() {
+    let src = "#[cfg(feature = \"x\")] import java.util.{HashMap, ArrayList};\nclass C {}\n";
+    let frontend = DialectFrontend::new(DialectFlags {
+        grouped_imports: true,
+        ..attr_flags(&["x"])
+    });
+    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+    let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+    assert!(!output.has_errors(), "{:?}", output.diagnostics);
+    let out = alloc::string::String::from_utf8(output.files.into_iter().next().unwrap().1).unwrap();
+    // The attribute is blanked and the group is expanded, in the same output.
+    assert!(!out.contains("#["));
+    assert!(out.contains("import java.util.HashMap; import java.util.ArrayList;"));
+    assert_eq!(line_of(&out, "class C {}"), 2);
+}
+
+#[test]
+fn cfg_false_on_the_only_type_leaves_a_blank_unit() {
+    let src = "package p;\n#[cfg(feature = \"x\")]\nclass Only {}\n";
+    let out = strip(src, &[]);
+    assert!(out.starts_with("package p;\n"));
+    assert!(!out.contains("Only"));
+    assert_eq!(newlines(&out), newlines(src));
+    assert_eq!(out.len(), src.len());
+}
+
+#[test]
+fn attribute_config_digest_tracks_features_canonically() {
+    let digest = |flags: DialectFlags| DialectFrontend::new(flags).config_digest();
+    // Same set, same digest (BTreeSet canonicalizes insertion order).
+    assert_eq!(
+        digest(attr_flags(&["a", "b"])),
+        digest(attr_flags(&["b", "a"]))
+    );
+    // Different sets and different flags differ.
+    assert_ne!(digest(attr_flags(&["a"])), digest(attr_flags(&["b"])));
+    assert_ne!(digest(attr_flags(&[])), digest(DialectFlags::default()));
+    // Two names must not collide across the separator.
+    assert_ne!(digest(attr_flags(&["ab"])), digest(attr_flags(&["a", "b"])));
+    // Attributes flip type stability (a false cfg can remove whole types).
+    assert!(!DialectFrontend::new(attr_flags(&[])).caps().type_stable);
+}
+
+#[test]
+fn attributes_off_passes_attribute_syntax_through() {
+    // With only grouped imports on, attribute syntax is not this frontend's concern (the lint
+    // gate reports it; javac would reject it) — bytes pass through untouched.
+    let src = "#[cfg(feature = \"x\")]\nclass C {}\n";
+    let frontend = DialectFrontend::new(DialectFlags {
+        grouped_imports: true,
+        ..DialectFlags::default()
+    });
+    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+    let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+    assert!(!output.has_errors());
+    assert_eq!(output.files[0].1, src.as_bytes());
+}

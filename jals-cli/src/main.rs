@@ -1241,10 +1241,12 @@ impl App {
             grouped_imports: manifest
                 .feature_set()
                 .contains(jals_config::Feature::GroupedImports),
+            ..jals_frontend::DialectFlags::default()
         };
+        let use_dialect = dialect_flags.any();
         let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
         let frontend: &dyn jals_frontend::Frontend = match manifest.build.frontend {
-            jals_config::FrontendKind::Vanilla {} if dialect_flags.any() => &dialect,
+            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
             jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
         };
 

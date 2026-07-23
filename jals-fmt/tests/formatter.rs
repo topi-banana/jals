@@ -5843,9 +5843,9 @@ fn attribute_formats_to_normalized_spacing() {
     // separated from the declaration by a single space under the default (compact) placement.
     check(
         "#[cfg(feature=\"x\")]class C{}",
-        expect![[r##"
+        expect![[r#"
             #[cfg(feature = "x")] class C {}
-        "##]],
+        "#]],
     );
 }
 
@@ -5853,9 +5853,9 @@ fn attribute_formats_to_normalized_spacing() {
 fn attribute_nested_predicates_space_after_commas() {
     check(
         "#[cfg(any(feature=\"a\",not(feature=\"b\")))]class C{}",
-        expect![[r##"
+        expect![[r#"
             #[cfg(any(feature = "a", not(feature = "b")))] class C {}
-        "##]],
+        "#]],
     );
 }
 
@@ -5863,7 +5863,7 @@ fn attribute_nested_predicates_space_after_commas() {
 fn attribute_on_member_import_and_statement() {
     check(
         "#[cfg(feature=\"x\")]import a.B;class C{#[cfg(feature=\"x\")]void m(){#[cfg(feature=\"y\")]f();#[cfg(feature=\"y\")]final int v=1;}}",
-        expect![[r##"
+        expect![[r#"
             #[cfg(feature = "x")] import a.B;
             class C {
                 #[cfg(feature = "x")] void m() {
@@ -5871,7 +5871,7 @@ fn attribute_on_member_import_and_statement() {
                     #[cfg(feature = "y")] final int v = 1;
                 }
             }
-        "##]],
+        "#]],
     );
 }
 
@@ -5890,11 +5890,11 @@ fn reorder_modifiers_hoists_attributes_to_front() {
     // lays it out canonically.)
     check_reorder_mods(
         "class C{public #[x] static int f;}",
-        expect![[r#"
+        expect![[r"
             class C {
                 #[x] public static int f;
             }
-        "#]],
+        "]],
     );
     let once = fmt_reorder_mods("class C{public #[x] static int f;}");
     assert_eq!(fmt_reorder_mods(&once), once);
@@ -5904,7 +5904,7 @@ fn reorder_modifiers_hoists_attributes_to_front() {
 fn annotation_placement_expanded_breaks_attributes() {
     check_expanded(
         "#[cfg(feature=\"x\")]@Foo public class C{#[y]@Override public void m(){}}",
-        expect![[r##"
+        expect![[r#"
             #[cfg(feature = "x")]
             @Foo
             public class C {
@@ -5912,6 +5912,6 @@ fn annotation_placement_expanded_breaks_attributes() {
                 @Override
                 public void m() {}
             }
-        "##]],
+        "#]],
     );
 }
