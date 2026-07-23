@@ -100,6 +100,7 @@ pub enum CacheNamespace {
     /// One class artifact emitted by a compile backend — the second compile tier. Its
     /// provenance folds the frontend output key, so a backend or toolchain change can never
     /// invalidate a frontend entry.
+    // TODO(backend-tier): unused until the backend compile tier lands; see `jals_build::backend`.
     BackendOutput,
 }
 
@@ -156,6 +157,8 @@ impl CacheKey {
 
     /// Derive a key under the workspace-wide provenance rule: a NUL-terminated kind tag
     /// followed by length-framed input identity. See [`ProvenanceFold`].
+    // TODO(backend-tier): no callers yet — consumed only by the deferred backend compile tier; see
+    // `jals_build::backend`.
     pub fn derive(
         namespace: CacheNamespace,
         kind: &[u8],
