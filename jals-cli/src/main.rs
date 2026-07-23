@@ -867,9 +867,16 @@ impl App {
         let graph = graph
             .preprocess(
                 storage.artifacts_mut(),
-                scripts.environment,
-                scripts.features,
-                &BuildScriptLimits::default(),
+                jals_project::GraphPreprocess {
+                    exec,
+                    // A dependency's build tasks fetch under the same policy as the root's, from
+                    // the same project cache — `--offline` means offline for the whole graph.
+                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    environment: scripts.environment,
+                    root_features: scripts.features,
+                    limits: &BuildScriptLimits::default(),
+                    network,
+                },
             )
             .await
             .context("preprocessing project dependency graph")?;

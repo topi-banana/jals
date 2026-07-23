@@ -1,5 +1,6 @@
 //! Assembly of classpath inputs from one revisioned project storage aggregate.
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -28,6 +29,11 @@ pub struct ProjectInputPlan {
     pub source_dependency_roots: Vec<DirKey>,
     /// Source files already published by a host adapter, such as a native Git checkout.
     pub source_dependency_artifacts: Vec<LibrarySource>,
+    /// Navigation-only sources already published into the verified cache, such as a dependency
+    /// build task's `publish_tree` output. Unlike
+    /// [`source_dependency_artifacts`](Self::source_dependency_artifacts) these are never handed to
+    /// the compiler — they exist so a reader can open the real source behind a classpath type.
+    pub library_source_artifacts: Vec<LibrarySource>,
     pub feature_set: FeatureSet,
 }
 
@@ -147,6 +153,10 @@ impl ProjectInputs {
                     .await;
             warnings.extend(extracted.warnings);
             library_sources.extend(extracted.artifacts);
+            // Already-published navigation sources sit between the real `sources` jars above and
+            // the synthesized skeletons below, which is exactly their standing: closer to the
+            // truth than a rendered skeleton, further from it than the library's own `.java`.
+            library_sources.extend(plan.library_source_artifacts.iter().cloned());
         }
 
         let source_dep_sources = if want_source_deps {
@@ -198,6 +208,15 @@ impl ProjectInputs {
             warnings.extend(skeletons.warnings);
             library_sources.extend(skeletons.sources);
         }
+        // One navigation path, one artifact. The three producers above all address a type by the
+        // same package-relative path, so a class carried by more than one of them arrives more than
+        // once; a host that mounts them (the LSP overlays each at `.jals/library/<path>`) would
+        // otherwise resolve the collision by mount order, which is not a decision worth leaving to
+        // whichever `set_overlays` call happens to run last. Keeping the first occurrence fixes the
+        // precedence to the collection order: a library's own `.java`, then a published tree, then
+        // a synthesized skeleton.
+        let mut seen = BTreeSet::new();
+        library_sources.retain(|source| seen.insert(source.path.clone()));
 
         Self {
             dependency_jars,

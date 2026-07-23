@@ -12,8 +12,17 @@ use jals_build::build_script::{
     BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits,
     prepare_build_script,
 };
+use jals_build::task::TaskPlan;
+use jals_classpath::{Fetcher, LibrarySource, NetworkPolicy};
 use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
-use jals_storage::{ArtifactCache, CacheBackend, ContentDigest, ProjectView, RelativePath};
+use jals_exec::Exec;
+use jals_storage::{
+    ArtifactCache, CacheBackend, CacheKey, ContentDigest, DirKey, ProjectView, RelativePath,
+};
+
+use crate::task::{
+    BuildTaskExecution, BuildTaskExecutor, BuildTaskPublication, SnapshotTaskOptions, TaskRuntime,
+};
 
 /// Stable opaque identity of a resolved dependency node.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -203,6 +212,9 @@ pub enum GraphError {
     },
     BuildScript {
         node: NodeId,
+        /// The node's [`location`](ResolvedNode::location) — a digest alone tells a reader nothing
+        /// about which of their dependencies to go and look at.
+        location: String,
         message: String,
     },
     Acquisition {
@@ -230,8 +242,10 @@ impl fmt::Display for GraphError {
                 }
                 Ok(())
             }
-            Self::BuildScript { node, message } => {
-                write!(f, "dependency build script for {node} failed: {message}")
+            Self::BuildScript {
+                location, message, ..
+            } => {
+                write!(f, "dependency build script `{location}` failed: {message}")
             }
             Self::Acquisition { operation, message } => write!(f, "{operation}: {message}"),
         }
@@ -283,6 +297,10 @@ pub(crate) enum NodeBody {
 #[derive(Debug)]
 pub(crate) struct ResolvedNode {
     pub(crate) id: NodeId,
+    /// Where this node came from, in whatever terms its host used to acquire it: a declaring-
+    /// relative path, a host directory, a clone URL. Diagnostics only — node identity is
+    /// [`id`](Self::id), and two hosts may well describe one node differently.
+    pub(crate) location: String,
     pub(crate) body: NodeBody,
 }
 
@@ -308,51 +326,40 @@ impl ResolvedNode {
     /// `features` is this node's own build-feature set (see
     /// [`ResolvedProjectGraph::node_features`]), which replaces whatever the declaring project
     /// selected — features never cross a project boundary.
-    async fn preprocess<C: CacheBackend>(
+    async fn preprocess<F: Fetcher, C: CacheBackend>(
         &self,
         cache: &mut ArtifactCache<C>,
-        environment: &BuildScriptEnvironment,
         features: BTreeSet<String>,
-        limits: &BuildScriptLimits,
+        options: &GraphPreprocess<'_, F>,
     ) -> Result<NodeExports, GraphError> {
         let NodeBody::JalsSource { source, manifest } = &self.body else {
             return Ok(NodeExports::default());
         };
-        let environment = environment.for_project(manifest, features);
+        let environment = options.environment.for_project(manifest, features.clone());
         let prepared = prepare_build_script(
             &source.view,
             cache,
             BuildScriptCacheScope::new(self.id.digest()),
             manifest,
             &environment,
-            limits,
+            options.limits,
         )
         .await
-        .map_err(|error| GraphError::BuildScript {
-            node: self.id.clone(),
-            message: error.to_string(),
-        })?;
+        .map_err(|error| self.script_error(error.to_string()))?;
         let Some(prepared) = prepared else {
             return Ok(NodeExports::default());
         };
         let output = prepared.output(source.view.revision());
-        if !output.task_plan.is_empty() {
-            return Err(GraphError::BuildScript {
-                node: self.id.clone(),
-                message:
-                    "declarative build tasks are not supported for immutable dependency projects"
-                        .to_owned(),
-            });
-        }
         let mut exports = NodeExports::default();
         for path in &output.generated_sources {
             exports.sources.push(CapturedFile {
                 path: path.path().clone(),
                 bytes: prepared
                     .file_bytes(&source.view, path)
-                    .map_err(|error| GraphError::BuildScript {
-                        node: self.id.clone(),
-                        message: format!("registered source `{path}` cannot be read: {error}"),
+                    .map_err(|error| {
+                        self.script_error(format!(
+                            "registered source `{path}` cannot be read: {error}"
+                        ))
                     })?
                     .to_vec(),
             });
@@ -362,12 +369,20 @@ impl ResolvedNode {
                 path: path.path().clone(),
                 bytes: prepared
                     .file_bytes(&source.view, path)
-                    .map_err(|error| GraphError::BuildScript {
-                        node: self.id.clone(),
-                        message: format!("registered classpath `{path}` cannot be read: {error}"),
+                    .map_err(|error| {
+                        self.script_error(format!(
+                            "registered classpath `{path}` cannot be read: {error}"
+                        ))
                     })?
                     .to_vec(),
             });
+        }
+        if !output.task_plan.is_empty() {
+            let execution = self
+                .run_task_plan(cache, &output.task_plan, &features, options, &source.view)
+                .await?;
+            exports.task_classpath = execution.classpath;
+            exports.library_sources = self.navigation_sources(manifest, &execution.publications)?;
         }
         exports
             .warnings
@@ -387,12 +402,108 @@ impl ResolvedNode {
         }
         Ok(exports)
     }
+
+    /// Run this node's declarative task plan against its own immutable snapshot.
+    ///
+    /// Nothing here writes to the dependency: the executor runs under
+    /// [`BuildTaskHost::Snapshot`](crate::BuildTaskHost::Snapshot), so the JARs it produces stay in
+    /// the *consumer's* verified cache and the source trees it declares come back as values rather
+    /// than as edits to a project the consumer does not own. That is the whole reason a dependency
+    /// may declare tasks at all — the snapshot it was captured from is byte-identical afterwards.
+    async fn run_task_plan<F: Fetcher, C: CacheBackend>(
+        &self,
+        cache: &mut ArtifactCache<C>,
+        plan: &TaskPlan,
+        features: &BTreeSet<String>,
+        options: &GraphPreprocess<'_, F>,
+        view: &ProjectView,
+    ) -> Result<BuildTaskExecution, GraphError> {
+        BuildTaskExecutor::execute_snapshot(
+            options.exec,
+            options.fetcher,
+            view,
+            cache,
+            plan,
+            SnapshotTaskOptions {
+                identity: self.id.digest(),
+                features,
+                runtime: TaskRuntime {
+                    network: options.network,
+                    max_fetch_bytes: options.limits.max_fetch_bytes,
+                },
+            },
+        )
+        .await
+        .map_err(|error| self.script_error(error.to_string()))
+    }
+
+    /// Published trees readdressed the way a consumer sees library sources: by package.
+    ///
+    /// A destination is written project-relative (`src/main/java/net/minecraft`) because that is
+    /// where a *root* project would physically publish it. A consumer never sees the dependency's
+    /// directory layout, only its types, so the source root is stripped and what remains is the
+    /// package path — which is exactly how extracted `sources` jars and synthesized skeletons are
+    /// addressed, so all three agree on where a class lives.
+    fn navigation_sources(
+        &self,
+        manifest: &Manifest,
+        publications: &[BuildTaskPublication],
+    ) -> Result<Vec<LibrarySource>, GraphError> {
+        let mut sources = Vec::new();
+        for publication in publications {
+            let prefix = self.package_prefix(manifest, &publication.destination)?;
+            sources.extend(publication.tree.files.iter().map(|file| LibrarySource {
+                path: prefix.concat(&file.path),
+                key: file.key.clone(),
+            }));
+        }
+        Ok(sources)
+    }
+
+    /// The package prefix a publication destination lies at, or an error if it lies outside every
+    /// declared source root — where a consumer has no way to address it.
+    fn package_prefix(
+        &self,
+        manifest: &Manifest,
+        destination: &DirKey,
+    ) -> Result<RelativePath, GraphError> {
+        manifest
+            .build
+            .source_dirs
+            .iter()
+            .filter_map(|root| RelativePath::parse(root).ok())
+            .filter_map(|root| destination.path().strip_prefix(&root))
+            .find(|relative| !relative.is_root())
+            .ok_or_else(|| {
+                self.script_error(format!(
+                    "publication destination `{destination}` must be a strict descendant of a \
+                     `[build] source-dirs` entry"
+                ))
+            })
+    }
+
+    fn script_error(&self, message: String) -> GraphError {
+        GraphError::BuildScript {
+            node: self.id.clone(),
+            location: self.location.clone(),
+            message,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct NodeExports {
     pub(crate) sources: Vec<CapturedFile>,
     pub(crate) classpath: Vec<CapturedFile>,
+    /// JARs a build *task* put on the classpath (`tasks.add_classpath` / `add_nested_classpath`).
+    ///
+    /// Kept as cache keys rather than bytes: the executor already published them into the same
+    /// verified cache assembly reads from, so materializing a remapped game JAR back into memory to
+    /// re-publish it under a second key would double the work and the storage for no gain.
+    pub(crate) task_classpath: Vec<CacheKey>,
+    /// Navigation-only sources a build task published (`tasks.publish_tree`), addressed
+    /// package-relative like every other library source. Never a compile input.
+    pub(crate) library_sources: Vec<LibrarySource>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -406,6 +517,21 @@ pub struct ResolvedProjectGraph {
     pub(crate) warnings: Vec<GraphWarning>,
     #[cfg(feature = "native")]
     pub(crate) native: crate::native::NativeGraphState,
+}
+
+/// Everything [`ResolvedProjectGraph::preprocess`] needs beyond the cache it writes to.
+///
+/// A dependency's build script may declare a task plan, and running one needs a fetch capability,
+/// an execution context, and a network policy — which is why they travel with the script inputs
+/// rather than being reachable from the graph itself. A host that cannot fetch still passes its own
+/// `Fetcher`; `network` is what actually decides whether one is used.
+pub struct GraphPreprocess<'a, F: Fetcher> {
+    pub exec: &'a Exec,
+    pub fetcher: &'a F,
+    pub environment: &'a BuildScriptEnvironment,
+    pub root_features: &'a ResolvedBuildFeatures,
+    pub limits: &'a BuildScriptLimits,
+    pub network: NetworkPolicy,
 }
 
 /// A direct `[dependencies] features` name that its target's `[features]` table does not declare.
@@ -571,16 +697,14 @@ impl ResolvedProjectGraph {
 
     /// Preprocess every resolved node exactly once in dependency-first order.
     ///
-    /// `root_features` is the root project's own resolved selection: its queryable half belongs to
-    /// the root's script (which the host runs, not this graph), and its
+    /// `options.root_features` is the root project's own resolved selection: its queryable half
+    /// belongs to the root's script (which the host runs, not this graph), and its
     /// [`dependencies`](ResolvedBuildFeatures::dependencies) half is what the root's `[features]`
     /// forwards into this graph.
-    pub async fn preprocess<C: CacheBackend>(
+    pub async fn preprocess<F: Fetcher, C: CacheBackend>(
         self,
         cache: &mut ArtifactCache<C>,
-        environment: &BuildScriptEnvironment,
-        root_features: &ResolvedBuildFeatures,
-        limits: &BuildScriptLimits,
+        options: GraphPreprocess<'_, F>,
     ) -> Result<PreprocessedProjectGraph, GraphError> {
         // A `[dependencies] features` name the target does not declare is a mistake, not an empty
         // selection: reject it before any build script runs, the way Cargo does, rather than letting
@@ -597,14 +721,12 @@ impl ResolvedProjectGraph {
             });
         }
 
-        let features_by_node = self.resolve_node_features(root_features);
+        let features_by_node = self.resolve_node_features(options.root_features);
         let mut exports = BTreeMap::new();
         for index in &self.order {
             let node = &self.nodes[*index];
             let features = features_by_node.get(&node.id).cloned().unwrap_or_default();
-            let output = node
-                .preprocess(cache, environment, features, limits)
-                .await?;
+            let output = node.preprocess(cache, features, &options).await?;
             exports.insert(node.id.clone(), output);
         }
         Ok(PreprocessedProjectGraph {

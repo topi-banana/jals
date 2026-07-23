@@ -9,9 +9,43 @@ use jals_classpath::{DependencyLocation, ProjectInputOptions};
 use jals_config::{Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_project::{
-    CompileClasspathEntry, GraphError, MemoryProjectGraph, NativeProjectGraph, NodeKind,
+    CompileClasspathEntry, GraphError, GraphPreprocess, MemoryProjectGraph, NativeProjectGraph,
+    NodeKind,
 };
 use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
+
+/// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
+struct UnreachableFetcher;
+
+impl jals_classpath::Fetcher for UnreachableFetcher {
+    async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+        panic!("this graph must not fetch, but asked for `{locator}`")
+    }
+}
+
+/// Preprocessing inputs for a graph under test, defaulting everything a task plan would need.
+///
+/// A macro rather than a helper function because the borrowed defaults have to outlive the call and
+/// nothing here owns them; as temporaries in the calling statement they live exactly long enough.
+macro_rules! inert {
+    () => {
+        inert!(
+            &BuildScriptEnvironment::new(),
+            &ResolvedBuildFeatures::default(),
+            &BuildScriptLimits::default()
+        )
+    };
+    ($environment:expr, $features:expr, $limits:expr) => {
+        GraphPreprocess {
+            exec: &Exec::inline(),
+            fetcher: &UnreachableFetcher,
+            environment: $environment,
+            root_features: $features,
+            limits: $limits,
+            network: jals_classpath::NetworkPolicy::Offline,
+        }
+    };
+}
 
 fn write(root: &Path, path: &str, contents: impl AsRef<[u8]>) {
     let path = root.join(path);
@@ -127,12 +161,7 @@ fn native_companion_source_archives_are_role_distinct() {
         let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(cache.artifacts_mut(), inert!())
             .await
             .unwrap();
         let assembly = graph.assemble(cache.artifacts_mut()).await;
@@ -271,12 +300,7 @@ fn relative_child_jar_and_classpath_become_verified_artifacts() {
         .await
         .unwrap();
         let graph = graph
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(root_storage.artifacts_mut(), inert!())
             .await
             .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
@@ -323,12 +347,7 @@ fn declared_classpath_directory_remains_one_compile_tree() {
         )
         .await
         .unwrap()
-        .preprocess(
-            root_storage.artifacts_mut(),
-            &BuildScriptEnvironment::new(),
-            &ResolvedBuildFeatures::default(),
-            &BuildScriptLimits::default(),
-        )
+        .preprocess(root_storage.artifacts_mut(), inert!())
         .await
         .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
@@ -375,12 +394,7 @@ fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
         )
         .await
         .unwrap()
-        .preprocess(
-            root_storage.artifacts_mut(),
-            &BuildScriptEnvironment::new(),
-            &ResolvedBuildFeatures::default(),
-            &BuildScriptLimits::default(),
-        )
+        .preprocess(root_storage.artifacts_mut(), inert!())
         .await
         .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
@@ -412,12 +426,7 @@ fn mixed_local_and_remote_binary_specs_keep_first_edge_order() {
         )
         .await
         .unwrap()
-        .preprocess(
-            cache.artifacts_mut(),
-            &BuildScriptEnvironment::new(),
-            &ResolvedBuildFeatures::default(),
-            &BuildScriptLimits::default(),
-        )
+        .preprocess(cache.artifacts_mut(), inert!())
         .await
         .unwrap();
         let assembly = graph.assemble(cache.artifacts_mut()).await;
@@ -481,12 +490,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
         )
         .await
         .unwrap()
-        .preprocess(
-            root_storage.artifacts_mut(),
-            &BuildScriptEnvironment::new(),
-            &ResolvedBuildFeatures::default(),
-            &BuildScriptLimits::default(),
-        )
+        .preprocess(root_storage.artifacts_mut(), inert!())
         .await
         .unwrap();
         let assembly = graph
@@ -575,12 +579,7 @@ fn every_node_kind_preprocesses_and_scripts_export_only_sources_and_classpath() 
             [NodeKind::Binary, NodeKind::PlainSource, NodeKind::JalsSource]
         );
         let graph = graph
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(root_storage.artifacts_mut(), inert!())
             .await
             .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
@@ -635,12 +634,7 @@ fn node_tokens_isolate_identical_script_paths_and_outputs() {
         let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
-            .preprocess(
-                root_storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(root_storage.artifacts_mut(), inert!())
             .await
             .unwrap();
         let assembly = graph.assemble(root_storage.artifacts_mut()).await;
@@ -806,12 +800,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         )
         .await
         .unwrap()
-        .preprocess(
-            root_storage.artifacts_mut(),
-            &BuildScriptEnvironment::new(),
-            &ResolvedBuildFeatures::default(),
-            &BuildScriptLimits::default(),
-        )
+        .preprocess(root_storage.artifacts_mut(), inert!())
         .await
         .unwrap();
         let analysis = graph
@@ -873,12 +862,7 @@ fn dependency_snapshots_exclude_git_and_jals_cache_inputs() {
         .await
         .unwrap();
         graph
-            .preprocess(
-                cache.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(cache.artifacts_mut(), inert!())
             .await
             .unwrap();
     })
@@ -968,12 +952,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
         let memory = MemoryProjectGraph::discover(&root, &memory_storage.view())
             .await
             .unwrap()
-            .preprocess(
-                memory_cache.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(memory_cache.artifacts_mut(), inert!())
             .await
             .unwrap()
             .assemble(memory_cache.artifacts_mut())
@@ -987,12 +966,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
         let native = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
-            .preprocess(
-                native_cache.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
-            )
+            .preprocess(native_cache.artifacts_mut(), inert!())
             .await
             .unwrap()
             .assemble(native_cache.artifacts_mut())
@@ -1010,4 +984,433 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
         }
     })
     .unwrap();
+}
+
+/// A stored-only jar holding exactly `entries`.
+fn jar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut bytes = Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut bytes);
+    for (name, contents) in entries {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(contents).unwrap();
+    }
+    zip.finish().unwrap();
+    bytes.into_inner()
+}
+
+/// A root project with one path dependency that runs `script`, plus whatever extra `files` it needs.
+///
+/// An entry in `files` replaces the default at the same path, so a test that needs a different
+/// dependency manifest just writes one.
+fn task_dependency(script: &str, files: &[(&str, &[u8])]) -> (Manifest, MemoryStorage) {
+    let defaults: [(&str, &[u8]); 3] = [
+        (
+            "dep/jals.toml",
+            b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+        ),
+        ("dep/build.rhai", script.as_bytes()),
+        // A source root the dependency actually has, so capturing it emits no warning.
+        ("dep/src/main/java/Seed.java", b"class Seed {}"),
+    ];
+    let entries: std::collections::BTreeMap<_, _> = defaults
+        .iter()
+        .chain(files)
+        .map(|(path, bytes)| ((*path).to_owned(), bytes.to_vec()))
+        .collect();
+    let storage = MemoryStorage::memory(
+        CodeTree::new(
+            entries
+                .into_iter()
+                .map(|(path, bytes)| Entry::File(FileKey::parse(&path).unwrap(), bytes)),
+        )
+        .unwrap(),
+    );
+    (
+        manifest("[dependencies]\ndep = { path = \"dep\" }\n"),
+        storage,
+    )
+}
+
+/// Counts fetches so a test can tell a cache hit from a network round trip.
+struct CountingFetcher {
+    responses: std::collections::BTreeMap<String, Vec<u8>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingFetcher {
+    fn new(responses: &[(&str, &[u8])]) -> Self {
+        Self {
+            responses: responses
+                .iter()
+                .map(|(url, bytes)| ((*url).to_owned(), bytes.to_vec()))
+                .collect(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl jals_classpath::Fetcher for CountingFetcher {
+    async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.responses
+            .get(locator)
+            .cloned()
+            .ok_or_else(|| format!("unexpected fetch `{locator}`"))
+    }
+}
+
+#[test]
+fn a_dependency_build_task_puts_its_jar_on_the_consumer_classpath() {
+    jals_exec::block_on_inline(async {
+        let game = jar(&[("pkg/Api.class", b"api")]);
+        let script = format!(
+            r#"
+                let game = tasks.fetch_jar(
+                    tasks.https_url("https://example.invalid/game.jar"),
+                    tasks.sha256("{}"),
+                    tasks.bytes(4096)
+                );
+                tasks.add_classpath(game);
+            "#,
+            jals_storage::ContentDigest::of(&game).to_hex()
+        );
+        let (root, view_storage) = task_dependency(&script, &[]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let fetcher = CountingFetcher::new(&[("https://example.invalid/game.jar", &game)]);
+
+        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(
+                cache.artifacts_mut(),
+                GraphPreprocess {
+                    exec: &Exec::inline(),
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: jals_classpath::NetworkPolicy::Online,
+                },
+            )
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+        assert_eq!(fetcher.calls(), 1);
+        // The consumer compiles and analyses against the task's JAR, exactly as it would against a
+        // `jar` dependency — that is the whole point of letting a dependency declare tasks.
+        assert!(
+            assembly
+                .compile_classpath
+                .iter()
+                .any(|entry| classpath_contains(entry, "build-task/0.jar")),
+            "{:?}",
+            assembly.compile_classpath
+        );
+        assert!(assembly.plan.classpath.iter().any(|entry| matches!(
+            entry,
+            jals_classpath::ClasspathEntry::ArtifactFile { path, .. }
+                if path.to_string().ends_with("build-task/0.jar")
+        )));
+    });
+}
+
+#[test]
+fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snapshot() {
+    jals_exec::block_on_inline(async {
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let script = format!(
+            r#"
+                let archive = tasks.fetch_jar(
+                    tasks.https_url("https://example.invalid/sources.jar"),
+                    tasks.sha256("{}"),
+                    tasks.bytes(4096)
+                );
+                let tree = tasks.extract_java(archive, "net/example");
+                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+            "#,
+            jals_storage::ContentDigest::of(&sources).to_hex()
+        );
+        let (root, view_storage) = task_dependency(&script, &[]);
+        let before = view_storage.view();
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
+
+        let assembly = MemoryProjectGraph::discover(&root, &before)
+            .await
+            .unwrap()
+            .preprocess(
+                cache.artifacts_mut(),
+                GraphPreprocess {
+                    exec: &Exec::inline(),
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: jals_classpath::NetworkPolicy::Online,
+                },
+            )
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+        // Package-relative, like every other library source, so one type resolves to one artifact
+        // however many producers offer it.
+        assert_eq!(
+            assembly
+                .plan
+                .library_source_artifacts
+                .iter()
+                .map(|source| source.path.to_string())
+                .collect::<Vec<_>>(),
+            ["net/example/Api.java"]
+        );
+        // Navigation only: handing a decompiled skeleton to `javac` alongside the classpath JAR
+        // that already defines the same types is how a working build turns into duplicate-class
+        // errors.
+        assert!(
+            assembly
+                .plan
+                .source_dependency_artifacts
+                .iter()
+                .all(|source| !source.path.to_string().ends_with("Api.java"))
+        );
+        // The dependency is a snapshot, not a workspace: publication may not reach it.
+        assert_eq!(view_storage.view().revision(), before.revision());
+        assert!(
+            view_storage
+                .view()
+                .file(&FileKey::parse("dep/src/main/java/net/example/Api.java").unwrap())
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn a_dependency_publication_outside_a_source_root_is_rejected() {
+    jals_exec::block_on_inline(async {
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let script = format!(
+            r#"
+                let archive = tasks.fetch_jar(
+                    tasks.https_url("https://example.invalid/sources.jar"),
+                    tasks.sha256("{}"),
+                    tasks.bytes(4096)
+                );
+                let tree = tasks.extract_java(archive, "net/example");
+                tasks.publish_tree("api", tree, "generated/net/example", "replace-root");
+            "#,
+            jals_storage::ContentDigest::of(&sources).to_hex()
+        );
+        let (root, view_storage) = task_dependency(&script, &[]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
+
+        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(
+                cache.artifacts_mut(),
+                GraphPreprocess {
+                    exec: &Exec::inline(),
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: jals_classpath::NetworkPolicy::Online,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        let GraphError::BuildScript {
+            location, message, ..
+        } = &error
+        else {
+            panic!("expected a build-script error, got {error:?}");
+        };
+        // The digest alone would not tell a reader which dependency to go and look at.
+        assert_eq!(location, "dep");
+        assert!(message.contains("source-dirs"), "{message}");
+    });
+}
+
+#[test]
+fn a_dependency_task_execution_is_memoized_across_preprocessing() {
+    jals_exec::block_on_inline(async {
+        // `project_jar` reads the dependency's own snapshot, so removing that file between runs
+        // makes the plan impossible to execute a second time. If the second preprocess still
+        // succeeds with the same result, it can only have come from the recorded execution.
+        let script = r#"
+            let vendor = tasks.project_jar("vendor/lib.jar");
+            tasks.add_classpath(vendor);
+        "#;
+        let library = jar(&[("pkg/Api.class", b"api")]);
+        let (root, with_jar) = task_dependency(script, &[("dep/vendor/lib.jar", &library)]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+
+        let first = MemoryProjectGraph::discover(&root, &with_jar.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(first.compile_classpath.len(), 1);
+
+        let (root, without_jar) = task_dependency(script, &[]);
+        let second = MemoryProjectGraph::discover(&root, &without_jar.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!(second.compile_classpath, first.compile_classpath);
+    });
+}
+
+#[test]
+fn a_memoized_dependency_execution_is_keyed_on_its_build_features() {
+    jals_exec::block_on_inline(async {
+        // Two feature selections produce two plans. Sharing one record between them would serve
+        // whichever ran first, silently building the wrong thing.
+        let script = r#"
+            let name = if build.feature("wide") { "wide" } else { "narrow" };
+            let vendor = tasks.project_jar("vendor/" + name + ".jar");
+            tasks.add_classpath(vendor);
+        "#;
+        let narrow = jar(&[("pkg/Narrow.class", b"narrow")]);
+        let wide = jar(&[("pkg/Wide.class", b"wide")]);
+        let files: [(&str, &[u8]); 3] = [
+            (
+                "dep/jals.toml",
+                b"[features]\nwide = []\n\
+                  [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+            ),
+            ("dep/vendor/narrow.jar", &narrow),
+            ("dep/vendor/wide.jar", &wide),
+        ];
+        let (_, view_storage) = task_dependency(script, &files);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+
+        let mut keys = Vec::new();
+        for entry in [
+            "dep = { path = \"dep\" }",
+            "dep = { path = \"dep\", features = [\"wide\"] }",
+        ] {
+            let root = manifest(&format!("[dependencies]\n{entry}\n"));
+            let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(cache.artifacts_mut(), inert!())
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
+            assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+            let [CompileClasspathEntry::File(file)] = assembly.compile_classpath.as_slice() else {
+                panic!("expected exactly the task JAR");
+            };
+            keys.push(file.key.clone());
+        }
+        assert_ne!(keys[0], keys[1]);
+    });
+}
+
+#[test]
+fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
+    jals_exec::block_on_inline(async {
+        // The producing half is asserted above on `plan.library_source_artifacts`; this is the
+        // consuming half — that a host actually sees those sources, and only in the mode meant for
+        // a reader.
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let script = format!(
+            r#"
+                let archive = tasks.fetch_jar(
+                    tasks.https_url("https://example.invalid/sources.jar"),
+                    tasks.sha256("{}"),
+                    tasks.bytes(4096)
+                );
+                tasks.add_classpath(archive);
+                let tree = tasks.extract_java(archive, "net/example");
+                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+            "#,
+            jals_storage::ContentDigest::of(&sources).to_hex()
+        );
+        let (root, view_storage) = task_dependency(&script, &[]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
+
+        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(
+                cache.artifacts_mut(),
+                GraphPreprocess {
+                    exec: &Exec::inline(),
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: jals_classpath::NetworkPolicy::Online,
+                },
+            )
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        let editor = jals_classpath::ProjectInputs::assemble(
+            &fetcher,
+            &mut cache,
+            &assembly.plan,
+            ProjectInputOptions::Editor,
+        )
+        .await;
+        assert!(
+            editor
+                .library_sources
+                .iter()
+                .any(|source| source.path.to_string() == "net/example/Api.java"),
+            "{:?}",
+            editor
+                .library_sources
+                .iter()
+                .map(|source| source.path.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        let compile = jals_classpath::ProjectInputs::assemble(
+            &fetcher,
+            &mut cache,
+            &assembly.plan,
+            ProjectInputOptions::Compile,
+        )
+        .await;
+        assert!(compile.library_sources.is_empty());
+        assert!(
+            compile
+                .source_dep_sources
+                .iter()
+                .all(|source| !format!("{source:?}").contains("Api.java"))
+        );
+    });
 }

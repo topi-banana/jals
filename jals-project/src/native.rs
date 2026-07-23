@@ -390,6 +390,7 @@ impl GraphBuilder {
         self.seen_nodes.insert(acquired.id.clone());
         self.nodes.push(ResolvedNode {
             id: acquired.id.clone(),
+            location: Self::node_location(&acquired),
             body,
         });
         self.states
@@ -410,6 +411,15 @@ impl GraphBuilder {
             .insert(acquired.id.clone(), VisitState::Complete);
         self.order.push(index);
         Ok(())
+    }
+
+    /// How a diagnostic names this node. A Git dependency lives in a temporary checkout whose path
+    /// means nothing to a reader, so it is named by the repository it was cloned from instead.
+    fn node_location(acquired: &AcquiredSource) -> String {
+        acquired.confinement.as_ref().map_or_else(
+            || acquired.root.display().to_string(),
+            |confinement| confinement.stable_repository.clone(),
+        )
     }
 
     async fn visit_binary(
@@ -470,6 +480,7 @@ impl GraphBuilder {
         let index = self.nodes.len();
         self.nodes.push(ResolvedNode {
             id,
+            location: locator.to_owned(),
             body: NodeBody::Binary(input),
         });
         self.order.push(index);
@@ -1126,6 +1137,15 @@ mod tests {
 
     use super::*;
 
+    /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
+    struct UnreachableFetcher;
+
+    impl jals_classpath::Fetcher for UnreachableFetcher {
+        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+            panic!("this graph must not fetch, but asked for `{locator}`")
+        }
+    }
+
     #[test]
     fn scheduler_invokes_every_node_kind_once() {
         jals_exec::block_on_inline(async {
@@ -1139,22 +1159,26 @@ mod tests {
             let nodes = vec![
                 ResolvedNode {
                     id: NodeId::from_identity(b"binary"),
+                    location: "https://example.invalid/dependency.jar".to_owned(),
                     body: NodeBody::Binary(BinaryInput::External {
                         locator: "https://example.invalid/dependency.jar".to_owned(),
                     }),
                 },
                 ResolvedNode {
                     id: NodeId::from_identity(b"plain"),
+                    location: "plain".to_owned(),
                     body: NodeBody::PlainSource(source()),
                 },
                 ResolvedNode {
                     id: NodeId::from_identity(b"jals"),
+                    location: "jals".to_owned(),
                     body: NodeBody::JalsSource {
                         source: source(),
                         manifest: Box::new(Manifest::default()),
                     },
                 },
             ];
+            let exec = Exec::inline();
             let graph = ResolvedProjectGraph {
                 nodes,
                 edges: Vec::new(),
@@ -1166,9 +1190,14 @@ mod tests {
             }
             .preprocess(
                 storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &ResolvedBuildFeatures::default(),
-                &BuildScriptLimits::default(),
+                crate::graph::GraphPreprocess {
+                    exec: &exec,
+                    fetcher: &UnreachableFetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: NetworkPolicy::Offline,
+                },
             )
             .await
             .unwrap();
@@ -1217,11 +1246,16 @@ mod tests {
                     .unwrap()
                     .preprocess(
                         storage.artifacts_mut(),
-                        // A root selection the dependency must not inherit.
-                        &BuildScriptEnvironment::new()
-                            .with_features(BTreeSet::from(["root-only".to_owned()])),
-                        &ResolvedBuildFeatures::default(),
-                        &BuildScriptLimits::default(),
+                        crate::graph::GraphPreprocess {
+                            exec: &exec,
+                            fetcher: &UnreachableFetcher,
+                            // A root selection the dependency must not inherit.
+                            environment: &BuildScriptEnvironment::new()
+                                .with_features(BTreeSet::from(["root-only".to_owned()])),
+                            root_features: &ResolvedBuildFeatures::default(),
+                            limits: &BuildScriptLimits::default(),
+                            network: NetworkPolicy::Offline,
+                        },
                     )
                     .await
                     .unwrap();

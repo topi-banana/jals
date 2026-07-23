@@ -1912,12 +1912,20 @@ impl AssembledWorkspace {
             jals_classpath::NetworkPolicy::Offline,
         )
         .await?;
+        // A dependency's build tasks run under the same offline rule, for the same reason: opening
+        // a folder must consume only what a real `jals build` already fetched and verified.
+        let exec = storage.exec().clone();
         let graph = graph
             .preprocess(
                 storage.artifacts_mut(),
-                scripts.environment,
-                scripts.features,
-                scripts.limits,
+                jals_project::GraphPreprocess {
+                    exec: &exec,
+                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    environment: scripts.environment,
+                    root_features: scripts.features,
+                    limits: scripts.limits,
+                    network: jals_classpath::NetworkPolicy::Offline,
+                },
             )
             .await?;
         let mut assembly = graph
