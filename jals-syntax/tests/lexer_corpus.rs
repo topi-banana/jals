@@ -106,7 +106,7 @@ const CRLF_BETWEEN_IDENTS: &str = "a\r\nb";
 const CR_THEN_CRLF: &str = "\r\r\n";
 /// A lone CR is a NEWLINE on its own.
 const LONE_CR: &str = "\r";
-/// `#` is not a Java token.
+/// `#` is not a Java token, but is the jals dialect's attribute opener.
 const HASH_BETWEEN_IDENTS: &str = "a#b";
 /// Backtick is not a Java token.
 const LONE_BACKTICK: &str = "`";
@@ -668,15 +668,19 @@ fn newline_variants() {
 }
 
 #[test]
-fn error_bytes_mixed_with_code() {
+fn hash_is_a_jals_dialect_token() {
     check(
         HASH_BETWEEN_IDENTS,
         expect![[r##"
         IDENT "a"
-        ERROR "#"
+        HASH "#"
         IDENT "b"
     "##]],
     );
+}
+
+#[test]
+fn error_bytes_mixed_with_code() {
     check(
         LONE_BACKTICK,
         expect![[r#"

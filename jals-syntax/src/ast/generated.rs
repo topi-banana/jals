@@ -10,20 +10,20 @@ use super::AstSupport;
 use crate::language::{JavaLanguage, SyntaxNode};
 use crate::syntax_kind::SyntaxKind::{
     self, ANNOTATION, ANNOTATION_ARG_LIST, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, ARG_LIST,
-    ARRAY_INIT, ASSERT_STMT, ASSIGNMENT_EXPR, BINARY_EXPR, BLOCK, BREAK_STMT, CALL_EXPR, CAST_EXPR,
-    CATCH_CLAUSE, CLASS_BODY, CLASS_DECL, CLASS_LITERAL, CONSTRUCTOR_DECL, CONTINUE_STMT,
-    DEFAULT_KW, DO_WHILE_STMT, EMPTY_STMT, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, EXPORTS_DIRECTIVE,
-    EXPR_STMT, EXTENDS_CLAUSE, FIELD_ACCESS, FIELD_DECL, FINALLY_CLAUSE, FOR_EACH_STMT, FOR_STMT,
-    GUARD, IF_STMT, IMPLEMENTS_CLAUSE, IMPORT_DECL, IMPORT_GROUP, INDEX_EXPR, INITIALIZER,
-    INTERFACE_DECL, LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LITERAL, LOCAL_VAR_DECL, METHOD_DECL,
-    METHOD_REF_EXPR, MODIFIERS, MODULE_BODY, MODULE_DECL, MODULE_KW, NAME_REF, NEW_EXPR, OPEN_KW,
-    OPENS_DIRECTIVE, PACKAGE_DECL, PARAM, PARAM_LIST, PAREN_EXPR, PERMITS_CLAUSE, POSTFIX_EXPR,
-    PROVIDES_DIRECTIVE, QUALIFIED_NAME, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER,
-    RECORD_PATTERN, REQUIRES_DIRECTIVE, RESOURCE, RESOURCE_LIST, RETURN_STMT, SEALED_KW,
-    SOURCE_FILE, STAR, STATIC_KW, SWITCH_BLOCK, SWITCH_EXPR, SWITCH_GROUP, SWITCH_LABEL,
-    SWITCH_RULE, SWITCH_STMT, SYNCHRONIZED_STMT, TERNARY_EXPR, THROW_STMT, THROWS_CLAUSE,
-    TRANSITIVE_KW, TRY_STMT, TYPE, TYPE_ARGS, TYPE_PARAM, TYPE_PARAMS, TYPE_PATTERN, UNARY_EXPR,
-    UNNAMED_PATTERN, USES_DIRECTIVE, WHILE_STMT, YIELD_STMT,
+    ARRAY_INIT, ASSERT_STMT, ASSIGNMENT_EXPR, ATTR_ARG_LIST, ATTR_META, ATTRIBUTE, BINARY_EXPR,
+    BLOCK, BREAK_STMT, CALL_EXPR, CAST_EXPR, CATCH_CLAUSE, CLASS_BODY, CLASS_DECL, CLASS_LITERAL,
+    CONSTRUCTOR_DECL, CONTINUE_STMT, DEFAULT_KW, DO_WHILE_STMT, EMPTY_STMT, ENUM_BODY,
+    ENUM_CONSTANT, ENUM_DECL, EXPORTS_DIRECTIVE, EXPR_STMT, EXTENDS_CLAUSE, FIELD_ACCESS,
+    FIELD_DECL, FINALLY_CLAUSE, FOR_EACH_STMT, FOR_STMT, GUARD, IF_STMT, IMPLEMENTS_CLAUSE,
+    IMPORT_DECL, IMPORT_GROUP, INDEX_EXPR, INITIALIZER, INTERFACE_DECL, LABELED_STMT, LAMBDA_EXPR,
+    LAMBDA_PARAMS, LITERAL, LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, MODIFIERS, MODULE_BODY,
+    MODULE_DECL, MODULE_KW, NAME_REF, NEW_EXPR, OPEN_KW, OPENS_DIRECTIVE, PACKAGE_DECL, PARAM,
+    PARAM_LIST, PAREN_EXPR, PERMITS_CLAUSE, POSTFIX_EXPR, PROVIDES_DIRECTIVE, QUALIFIED_NAME,
+    RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, RECORD_PATTERN, REQUIRES_DIRECTIVE, RESOURCE,
+    RESOURCE_LIST, RETURN_STMT, SEALED_KW, SOURCE_FILE, STAR, STATIC_KW, SWITCH_BLOCK, SWITCH_EXPR,
+    SWITCH_GROUP, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT, SYNCHRONIZED_STMT, TERNARY_EXPR,
+    THROW_STMT, THROWS_CLAUSE, TRANSITIVE_KW, TRY_STMT, TYPE, TYPE_ARGS, TYPE_PARAM, TYPE_PARAMS,
+    TYPE_PATTERN, UNARY_EXPR, UNNAMED_PATTERN, USES_DIRECTIVE, WHILE_STMT, YIELD_STMT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -100,6 +100,9 @@ pub struct ImportDecl {
 }
 
 impl ImportDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn is_static(&self) -> bool {
         support::token(&self.syntax, STATIC_KW).is_some()
     }
@@ -251,6 +254,35 @@ impl AstNode for QualifiedName {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
+pub struct Attribute {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl Attribute {
+    pub fn meta(&self) -> Option<AttrMeta> {
+        support::child(&self.syntax)
+    }
+}
+
+impl AstNode for Attribute {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == ATTRIBUTE
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct ImportGroup {
     pub(crate) syntax: SyntaxNode,
 }
@@ -280,11 +312,128 @@ impl AstNode for ImportGroup {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
+pub struct AttrMeta {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl AttrMeta {
+    pub fn name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+    pub fn args(&self) -> Option<AttrArgList> {
+        support::child(&self.syntax)
+    }
+    pub fn value(&self) -> Option<Literal> {
+        support::child(&self.syntax)
+    }
+}
+
+impl AstNode for AttrMeta {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == ATTR_META
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct AttrArgList {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl AttrArgList {
+    pub fn args(&self) -> AstChildren<AttrArg> {
+        support::children(&self.syntax)
+    }
+}
+
+impl AstNode for AttrArgList {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == ATTR_ARG_LIST
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct Literal {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl AstNode for Literal {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == LITERAL
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AttrArg {
+    AttrMeta(AttrMeta),
+    Literal(Literal),
+}
+
+impl AstNode for AttrArg {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(kind, ATTR_META | LITERAL)
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        let res = match syntax.kind() {
+            ATTR_META => Self::AttrMeta(AttrMeta { syntax }),
+            LITERAL => Self::Literal(Literal { syntax }),
+            _ => return None,
+        };
+        Some(res)
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Self::AttrMeta(it) => it.syntax(),
+            Self::Literal(it) => it.syntax(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct Modifiers {
     pub(crate) syntax: SyntaxNode,
 }
 
 impl Modifiers {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn annotations(&self) -> AstChildren<Annotation> {
         support::children(&self.syntax)
     }
@@ -540,6 +689,9 @@ pub struct ClassDecl {
 }
 
 impl ClassDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn modifiers(&self) -> Option<Modifiers> {
         support::child(&self.syntax)
     }
@@ -587,6 +739,9 @@ pub struct InterfaceDecl {
 }
 
 impl InterfaceDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn modifiers(&self) -> Option<Modifiers> {
         support::child(&self.syntax)
     }
@@ -631,6 +786,9 @@ pub struct EnumDecl {
 }
 
 impl EnumDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn modifiers(&self) -> Option<Modifiers> {
         support::child(&self.syntax)
     }
@@ -669,6 +827,9 @@ pub struct RecordDecl {
 }
 
 impl RecordDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn modifiers(&self) -> Option<Modifiers> {
         support::child(&self.syntax)
     }
@@ -713,6 +874,9 @@ pub struct AnnotationTypeDecl {
 }
 
 impl AnnotationTypeDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn modifiers(&self) -> Option<Modifiers> {
         support::child(&self.syntax)
     }
@@ -1574,6 +1738,9 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn stmts(&self) -> AstChildren<Stmt> {
         support::children(&self.syntax)
     }
@@ -1766,6 +1933,9 @@ pub struct LocalVarDecl {
 }
 
 impl LocalVarDecl {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn modifiers(&self) -> Option<Modifiers> {
         support::child(&self.syntax)
     }
@@ -1804,6 +1974,9 @@ pub struct ExprStmt {
 }
 
 impl ExprStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn expr(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -1833,6 +2006,9 @@ pub struct ReturnStmt {
 }
 
 impl ReturnStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn expr(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -1862,6 +2038,9 @@ pub struct IfStmt {
 }
 
 impl IfStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn condition(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -1894,6 +2073,9 @@ pub struct WhileStmt {
 }
 
 impl WhileStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn condition(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -1926,6 +2108,9 @@ pub struct DoWhileStmt {
 }
 
 impl DoWhileStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn body(&self) -> Option<Stmt> {
         support::child(&self.syntax)
     }
@@ -1957,6 +2142,12 @@ pub struct ForStmt {
     pub(crate) syntax: SyntaxNode,
 }
 
+impl ForStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
+}
+
 impl AstNode for ForStmt {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -1981,6 +2172,9 @@ pub struct ForEachStmt {
 }
 
 impl ForEachStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn ty(&self) -> Option<Type> {
         support::child(&self.syntax)
     }
@@ -2018,6 +2212,12 @@ pub struct BreakStmt {
     pub(crate) syntax: SyntaxNode,
 }
 
+impl BreakStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
+}
+
 impl AstNode for BreakStmt {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -2039,6 +2239,12 @@ impl AstNode for BreakStmt {
 #[repr(transparent)]
 pub struct ContinueStmt {
     pub(crate) syntax: SyntaxNode,
+}
+
+impl ContinueStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
 }
 
 impl AstNode for ContinueStmt {
@@ -2065,6 +2271,9 @@ pub struct ThrowStmt {
 }
 
 impl ThrowStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn expr(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -2094,6 +2303,9 @@ pub struct YieldStmt {
 }
 
 impl YieldStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn expr(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -2122,6 +2334,12 @@ pub struct AssertStmt {
     pub(crate) syntax: SyntaxNode,
 }
 
+impl AssertStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
+}
+
 impl AstNode for AssertStmt {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
@@ -2146,6 +2364,9 @@ pub struct SynchronizedStmt {
 }
 
 impl SynchronizedStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn lock(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -2178,6 +2399,9 @@ pub struct TryStmt {
 }
 
 impl TryStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn resources(&self) -> Option<ResourceList> {
         support::child(&self.syntax)
     }
@@ -2216,6 +2440,9 @@ pub struct SwitchStmt {
 }
 
 impl SwitchStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn selector(&self) -> Option<Expr> {
         support::child(&self.syntax)
     }
@@ -2248,6 +2475,9 @@ pub struct LabeledStmt {
 }
 
 impl LabeledStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
     pub fn label(&self) -> Option<String> {
         AstSupport::name_text(&self.syntax)
     }
@@ -2277,6 +2507,12 @@ impl AstNode for LabeledStmt {
 #[repr(transparent)]
 pub struct EmptyStmt {
     pub(crate) syntax: SyntaxNode,
+}
+
+impl EmptyStmt {
+    pub fn attrs(&self) -> AstChildren<Attribute> {
+        support::children(&self.syntax)
+    }
 }
 
 impl AstNode for EmptyStmt {
@@ -2667,29 +2903,6 @@ impl AstNode for UnnamedPattern {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
         kind == UNNAMED_PATTERN
-    }
-    fn cast(syntax: SyntaxNode) -> Option<Self> {
-        if Self::can_cast(syntax.kind()) {
-            Some(Self { syntax })
-        } else {
-            None
-        }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct Literal {
-    pub(crate) syntax: SyntaxNode,
-}
-
-impl AstNode for Literal {
-    type Language = JavaLanguage;
-    fn can_cast(kind: SyntaxKind) -> bool {
-        kind == LITERAL
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {

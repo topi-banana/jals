@@ -26,36 +26,38 @@ use crate::syntax_kind::SyntaxKind;
 use crate::syntax_kind::SyntaxKind::{
     ABSTRACT_KW, AMP, AMP_AMP, AMP_EQ, ANNOTATION, ANNOTATION_ARG_LIST, ANNOTATION_DEFAULT,
     ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, ARG_LIST, ARRAY_INIT, ARROW, ASSERT_KW, ASSERT_STMT,
-    ASSIGNMENT_EXPR, AT, BANG, BANG_EQ, BINARY_EXPR, BLOCK, BOOLEAN_KW, BREAK_KW, BREAK_STMT,
-    BYTE_KW, CALL_EXPR, CARET, CARET_EQ, CASE_KW, CAST_EXPR, CATCH_CLAUSE, CATCH_KW, CHAR_KW,
-    CHAR_LITERAL, CLASS_BODY, CLASS_DECL, CLASS_KW, CLASS_LITERAL, COLON, COLON_COLON, COMMA,
-    CONSTRUCTOR_DECL, CONTINUE_KW, CONTINUE_STMT, DEFAULT_KW, DO_KW, DO_WHILE_STMT, DOT, DOUBLE_KW,
-    ELLIPSIS, ELSE_KW, EMPTY_STMT, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, ENUM_KW, EOF, EQ, EQ_EQ,
-    EXPORTS_DIRECTIVE, EXPORTS_KW, EXPR_STMT, EXTENDS_CLAUSE, EXTENDS_KW, FALSE_KW, FIELD_ACCESS,
-    FIELD_DECL, FINAL_KW, FINALLY_CLAUSE, FINALLY_KW, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT,
-    FOR_KW, FOR_STMT, GT, GUARD, IDENT, IF_KW, IF_STMT, IMPLEMENTS_CLAUSE, IMPLEMENTS_KW,
-    IMPORT_DECL, IMPORT_GROUP, IMPORT_KW, INDEX_EXPR, INITIALIZER, INSTANCEOF_KW, INT_KW,
-    INT_LITERAL, INTERFACE_DECL, INTERFACE_KW, LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LBRACE,
-    LBRACK, LITERAL, LOCAL_VAR_DECL, LONG_KW, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, METHOD_DECL,
-    METHOD_REF_EXPR, MINUS, MINUS_EQ, MINUS_MINUS, MODIFIERS, MODULE_BODY, MODULE_DECL, MODULE_KW,
-    NAME_REF, NATIVE_KW, NEW_EXPR, NEW_KW, NON_SEALED_KW, NULL_KW, OPEN_KW, OPENS_DIRECTIVE,
-    OPENS_KW, PACKAGE_DECL, PACKAGE_KW, PARAM, PARAM_LIST, PAREN_EXPR, PERCENT, PERCENT_EQ,
-    PERMITS_CLAUSE, PERMITS_KW, PIPE, PIPE_EQ, PIPE_PIPE, PLUS, PLUS_EQ, PLUS_PLUS, POSTFIX_EXPR,
-    PRIVATE_KW, PROTECTED_KW, PROVIDES_DIRECTIVE, PROVIDES_KW, PUBLIC_KW, QUALIFIED_NAME, QUESTION,
-    RBRACE, RBRACK, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, RECORD_KW, RECORD_PATTERN,
-    REQUIRES_DIRECTIVE, REQUIRES_KW, RESOURCE, RESOURCE_LIST, RETURN_KW, RETURN_STMT, RPAREN,
-    SEALED_KW, SEMICOLON, SHORT_KW, SLASH, SLASH_EQ, SOURCE_FILE, STAR, STAR_EQ, STATIC_KW,
-    STRICTFP_KW, STRING_LITERAL, SUPER_KW, SWITCH_BLOCK, SWITCH_EXPR, SWITCH_GROUP, SWITCH_KW,
-    SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT, SYNCHRONIZED_KW, SYNCHRONIZED_STMT, TERNARY_EXPR,
-    TEXT_BLOCK, THIS_KW, THROW_KW, THROW_STMT, THROWS_CLAUSE, THROWS_KW, TILDE, TO_KW,
-    TRANSIENT_KW, TRANSITIVE_KW, TRUE_KW, TRY_KW, TRY_STMT, TYPE, TYPE_ARGS, TYPE_PARAM,
-    TYPE_PARAMS, TYPE_PATTERN, UNARY_EXPR, UNDERSCORE, UNNAMED_PATTERN, USES_DIRECTIVE, USES_KW,
-    VAR_KW, VOID_KW, VOLATILE_KW, WHEN_KW, WHILE_KW, WHILE_STMT, WITH_KW, YIELD_KW, YIELD_STMT,
+    ASSIGNMENT_EXPR, AT, ATTR_ARG_LIST, ATTR_META, ATTRIBUTE, BANG, BANG_EQ, BINARY_EXPR, BLOCK,
+    BOOLEAN_KW, BREAK_KW, BREAK_STMT, BYTE_KW, CALL_EXPR, CARET, CARET_EQ, CASE_KW, CAST_EXPR,
+    CATCH_CLAUSE, CATCH_KW, CHAR_KW, CHAR_LITERAL, CLASS_BODY, CLASS_DECL, CLASS_KW, CLASS_LITERAL,
+    COLON, COLON_COLON, COMMA, CONSTRUCTOR_DECL, CONTINUE_KW, CONTINUE_STMT, DEFAULT_KW, DO_KW,
+    DO_WHILE_STMT, DOT, DOUBLE_KW, ELLIPSIS, ELSE_KW, EMPTY_STMT, ENUM_BODY, ENUM_CONSTANT,
+    ENUM_DECL, ENUM_KW, EOF, EQ, EQ_EQ, EXPORTS_DIRECTIVE, EXPORTS_KW, EXPR_STMT, EXTENDS_CLAUSE,
+    EXTENDS_KW, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FINAL_KW, FINALLY_CLAUSE, FINALLY_KW, FLOAT_KW,
+    FLOAT_LITERAL, FOR_EACH_STMT, FOR_KW, FOR_STMT, GT, GUARD, HASH, IDENT, IF_KW, IF_STMT,
+    IMPLEMENTS_CLAUSE, IMPLEMENTS_KW, IMPORT_DECL, IMPORT_GROUP, IMPORT_KW, INDEX_EXPR,
+    INITIALIZER, INSTANCEOF_KW, INT_KW, INT_LITERAL, INTERFACE_DECL, INTERFACE_KW, LABELED_STMT,
+    LAMBDA_EXPR, LAMBDA_PARAMS, LBRACE, LBRACK, LITERAL, LOCAL_VAR_DECL, LONG_KW, LPAREN, LSHIFT,
+    LSHIFT_EQ, LT, LT_EQ, METHOD_DECL, METHOD_REF_EXPR, MINUS, MINUS_EQ, MINUS_MINUS, MODIFIERS,
+    MODULE_BODY, MODULE_DECL, MODULE_KW, NAME_REF, NATIVE_KW, NEW_EXPR, NEW_KW, NON_SEALED_KW,
+    NULL_KW, OPEN_KW, OPENS_DIRECTIVE, OPENS_KW, PACKAGE_DECL, PACKAGE_KW, PARAM, PARAM_LIST,
+    PAREN_EXPR, PERCENT, PERCENT_EQ, PERMITS_CLAUSE, PERMITS_KW, PIPE, PIPE_EQ, PIPE_PIPE, PLUS,
+    PLUS_EQ, PLUS_PLUS, POSTFIX_EXPR, PRIVATE_KW, PROTECTED_KW, PROVIDES_DIRECTIVE, PROVIDES_KW,
+    PUBLIC_KW, QUALIFIED_NAME, QUESTION, RBRACE, RBRACK, RECORD_COMPONENT, RECORD_DECL,
+    RECORD_HEADER, RECORD_KW, RECORD_PATTERN, REQUIRES_DIRECTIVE, REQUIRES_KW, RESOURCE,
+    RESOURCE_LIST, RETURN_KW, RETURN_STMT, RPAREN, SEALED_KW, SEMICOLON, SHORT_KW, SLASH, SLASH_EQ,
+    SOURCE_FILE, STAR, STAR_EQ, STATIC_KW, STRICTFP_KW, STRING_LITERAL, SUPER_KW, SWITCH_BLOCK,
+    SWITCH_EXPR, SWITCH_GROUP, SWITCH_KW, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT, SYNCHRONIZED_KW,
+    SYNCHRONIZED_STMT, TERNARY_EXPR, TEXT_BLOCK, THIS_KW, THROW_KW, THROW_STMT, THROWS_CLAUSE,
+    THROWS_KW, TILDE, TO_KW, TRANSIENT_KW, TRANSITIVE_KW, TRUE_KW, TRY_KW, TRY_STMT, TYPE,
+    TYPE_ARGS, TYPE_PARAM, TYPE_PARAMS, TYPE_PATTERN, UNARY_EXPR, UNDERSCORE, UNNAMED_PATTERN,
+    USES_DIRECTIVE, USES_KW, VAR_KW, VOID_KW, VOLATILE_KW, WHEN_KW, WHILE_KW, WHILE_STMT, WITH_KW,
+    YIELD_KW, YIELD_STMT,
 };
 
 /// Tokens that can begin a class body member (used for recovery).
 const MEMBER_RECOVERY: TokenSet = TokenSet::new(&[
     AT,
+    HASH,
     PUBLIC_KW,
     PROTECTED_KW,
     PRIVATE_KW,
@@ -76,6 +78,7 @@ const MEMBER_RECOVERY: TokenSet = TokenSet::new(&[
 
 /// Tokens that can begin a statement (used for recovery).
 const STMT_RECOVERY: TokenSet = TokenSet::new(&[
+    HASH,
     LBRACE,
     RBRACE,
     SEMICOLON,
@@ -205,12 +208,13 @@ impl Parser<'_> {
         if self.at(PACKAGE_KW) {
             self.package_decl().await;
         }
-        while self.at(IMPORT_KW) {
+        while self.at(IMPORT_KW) || self.at_attributed_import() {
             self.import_decl().await;
         }
         while !self.at_eof() {
             let before = self.pos();
-            self.type_decl().await;
+            let decl = self.start();
+            self.type_decl(decl).await;
             // Progress guarantee (last-resort safeguard).
             if self.pos() == before {
                 self.err_and_bump("unexpected token");
@@ -229,7 +233,13 @@ impl Parser<'_> {
 
     async fn import_decl(&mut self) {
         let m = self.start();
-        self.bump(IMPORT_KW);
+        // jals attributes on an import (`#[cfg(...)] import a.B;`). The lookahead in `root`
+        // promised `import` past the attributes, but a malformed attribute can make the
+        // structured parse stop short of it, so the keyword is `expect`ed, not `bump`ed.
+        while self.at_attribute() {
+            self.attribute().await;
+        }
+        self.expect(IMPORT_KW);
         // `import module M;` (JEP 511). `module` is a restricted keyword (lexed as `IDENT`);
         // it starts a module import only when a name follows it, so `import module.foo.Bar;`
         // and `import module;` remain ordinary type imports of a package/type named `module`.
@@ -303,9 +313,10 @@ impl Parser<'_> {
 
     /// Top-level declaration: a type declaration (class / interface / enum / record /
     /// `@interface` / module) or, in a compact source file (JEP 512), a top-level field
-    /// or method declaration belonging to the file's implicit class.
-    async fn type_decl(&mut self) {
-        let m = self.start();
+    /// or method declaration belonging to the file's implicit class. `m` is the enclosing
+    /// start marker (statement-position declarations open it before their leading jals
+    /// attributes, so the attributes stay inside the declaration's node).
+    async fn type_decl(&mut self, m: Marker) {
         self.modifiers().await;
         match self.current() {
             CLASS_KW => self.class_rest(m).await,
@@ -448,9 +459,14 @@ impl Parser<'_> {
         m.complete(self, node);
     }
 
-    /// Modifier sequence (annotations, modifier keywords, `sealed`, `non-sealed`). Always creates a node.
+    /// Modifier sequence (jals attributes, annotations, modifier keywords, `sealed`,
+    /// `non-sealed`). Always creates a node. jals attributes are strictly leading
+    /// (Rust-style); a late one still parses losslessly but is diagnosed.
     async fn modifiers(&mut self) {
         let m = self.start();
+        while self.at_attribute() {
+            self.attribute().await;
+        }
         loop {
             self.yielder.tick().await;
             if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
@@ -461,6 +477,9 @@ impl Parser<'_> {
                 self.non_sealed();
             } else if self.at_contextual_kw("sealed") {
                 self.bump_remap(SEALED_KW);
+            } else if self.at_attribute() {
+                self.error("attributes must come before modifiers and annotations");
+                self.attribute().await;
             } else {
                 break;
             }
@@ -534,6 +553,112 @@ impl Parser<'_> {
         }
         self.expect(RBRACE);
         m.complete(self, ARRAY_INIT);
+    }
+
+    // ===== jals attributes =====
+
+    /// Whether the parser is at the start of a jals attribute (`#[`).
+    fn at_attribute(&self) -> bool {
+        self.at(HASH) && self.nth_at(1, LBRACK)
+    }
+
+    /// jals attribute (`#[cfg(feature = "x")]`). Callers guarantee [`Self::at_attribute`].
+    async fn attribute(&mut self) {
+        let m = self.start();
+        self.bump(HASH);
+        self.bump(LBRACK);
+        self.attr_meta().await;
+        self.expect(RBRACK);
+        m.complete(self, ATTRIBUTE);
+    }
+
+    /// Attribute meta item: `name`, `name(args)`, or `name = literal`. Recursive through the
+    /// argument list (`all(feature = "a", not(feature = "b"))`), so boxed at the back-edge.
+    fn attr_meta(&mut self) -> LocalBoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.yielder.tick().await;
+            let m = self.start();
+            self.qualified_name(false).await;
+            if self.at(LPAREN) {
+                self.attr_arg_list().await;
+            } else if self.eat(EQ) {
+                self.attr_literal();
+            }
+            m.complete(self, ATTR_META);
+        })
+    }
+
+    /// A literal value inside an attribute (`"x"` in `feature = "x"`), wrapped in a LITERAL node.
+    fn attr_literal(&mut self) {
+        if self.at_ts(LITERAL_TOKEN) {
+            let m = self.start();
+            self.bump_any();
+            m.complete(self, LITERAL);
+        } else {
+            self.error("expected a literal");
+        }
+    }
+
+    /// Attribute argument list: `(meta | literal, ...)`.
+    async fn attr_arg_list(&mut self) {
+        let m = self.start();
+        self.bump(LPAREN);
+        while !self.at(RPAREN) && !self.at_eof() {
+            let before = self.pos();
+            if self.at(IDENT) {
+                self.attr_meta().await;
+            } else if self.at_ts(LITERAL_TOKEN) {
+                self.attr_literal();
+            } else {
+                self.err_and_bump("expected an attribute argument");
+            }
+            if self.pos() == before {
+                self.err_and_bump("unexpected token");
+            }
+            if !self.eat(COMMA) {
+                break;
+            }
+        }
+        self.expect(RPAREN);
+        m.complete(self, ATTR_ARG_LIST);
+    }
+
+    /// Skips a single attribute (`#[...]`, bracket-depth scan) whose `#` is at offset `i`,
+    /// returning the offset just past its closing `]` — the attribute analogue of
+    /// [`Self::skip_one_annotation_lookahead`]. Fuel-free and bounded by the input length.
+    fn skip_one_attribute_lookahead(&self, i: usize) -> usize {
+        let mut i = i + 1; // `#`
+        let mut depth = 0i32;
+        loop {
+            match self.nth_nofuel(i) {
+                LBRACK => {
+                    depth += 1;
+                    i += 1;
+                }
+                RBRACK => {
+                    depth -= 1;
+                    i += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                EOF => return i,
+                _ => i += 1,
+            }
+        }
+        i
+    }
+
+    /// Whether a run of jals attributes leads an import declaration (`#[...] import a.B;`).
+    fn at_attributed_import(&self) -> bool {
+        if !self.at_attribute() {
+            return false;
+        }
+        let mut i = 0;
+        while self.nth_nofuel(i) == HASH && self.nth_nofuel(i + 1) == LBRACK {
+            i = self.skip_one_attribute_lookahead(i);
+        }
+        self.nth_nofuel(i) == IMPORT_KW
     }
 
     /// Detects `non-sealed` (`IDENT("non") MINUS IDENT("sealed")` adjacent).
@@ -1158,6 +1283,12 @@ impl Parser<'_> {
 
     async fn block(&mut self) {
         let m = self.start();
+        self.block_with(m).await;
+    }
+
+    /// Block body given an already-open marker (a statement-position block keeps its leading
+    /// jals attributes inside its node). Callers guarantee the parser is at `{`.
+    async fn block_with(&mut self, m: Marker) {
         self.bump(LBRACE);
         while !self.at(RBRACE) && !self.at_eof() {
             let before = self.pos();
@@ -1174,52 +1305,58 @@ impl Parser<'_> {
     fn stmt(&mut self) -> LocalBoxFuture<'_, ()> {
         Box::pin(async move {
             self.yielder.tick().await;
+            let m = self.start();
+            // jals attributes lead any statement (`#[cfg(x)] foo();`) and become leading
+            // children of the statement's own node; a declaration statement dispatched
+            // below keeps them there too (its `modifiers()` then holds none).
+            while self.at_attribute() {
+                self.attribute().await;
+            }
             match self.current() {
-                LBRACE => self.block().await,
+                LBRACE => self.block_with(m).await,
                 SEMICOLON => {
-                    let m = self.start();
                     self.bump(SEMICOLON);
                     m.complete(self, EMPTY_STMT);
                 }
-                IF_KW => self.if_stmt().await,
-                WHILE_KW => self.while_stmt().await,
-                DO_KW => self.do_while_stmt().await,
-                FOR_KW => self.for_stmt().await,
-                RETURN_KW => self.return_stmt().await,
-                THROW_KW => self.throw_stmt().await,
-                BREAK_KW => self.break_or_continue(BREAK_KW, BREAK_STMT),
-                CONTINUE_KW => self.break_or_continue(CONTINUE_KW, CONTINUE_STMT),
-                ASSERT_KW => self.assert_stmt().await,
-                SYNCHRONIZED_KW => self.synchronized_stmt().await,
-                TRY_KW => self.try_stmt().await,
-                SWITCH_KW => self.switch_stmt().await,
-                CLASS_KW | INTERFACE_KW | ENUM_KW => self.type_decl().await,
-                AT if self.nth_at(1, INTERFACE_KW) => self.type_decl().await,
+                IF_KW => self.if_stmt(m).await,
+                WHILE_KW => self.while_stmt(m).await,
+                DO_KW => self.do_while_stmt(m).await,
+                FOR_KW => self.for_stmt(m).await,
+                RETURN_KW => self.return_stmt(m).await,
+                THROW_KW => self.throw_stmt(m).await,
+                BREAK_KW => self.break_or_continue(m, BREAK_KW, BREAK_STMT),
+                CONTINUE_KW => self.break_or_continue(m, CONTINUE_KW, CONTINUE_STMT),
+                ASSERT_KW => self.assert_stmt(m).await,
+                SYNCHRONIZED_KW => self.synchronized_stmt(m).await,
+                TRY_KW => self.try_stmt(m).await,
+                SWITCH_KW => self.switch_stmt(m).await,
+                CLASS_KW | INTERFACE_KW | ENUM_KW => self.type_decl(m).await,
+                AT if self.nth_at(1, INTERFACE_KW) => self.type_decl(m).await,
                 _ => {
                     // Labeled statement (`label:`). Distinguishable from ternary `?:` by the absence of `?`.
                     if self.at(IDENT) && self.nth_at(1, COLON) {
-                        return self.labeled_stmt().await;
+                        return self.labeled_stmt(m).await;
                     }
                     // Local record declaration.
                     if self.at_record_decl() {
-                        return self.type_decl().await;
+                        return self.type_decl(m).await;
                     }
                     // yield statement (inside a switch expression).
                     if self.at_yield_stmt() {
-                        return self.yield_stmt().await;
+                        return self.yield_stmt(m).await;
                     }
                     // Local type declaration with modifiers/annotations.
                     if (self.at_ts(MODIFIER_KW) || self.at(AT)) && self.at_local_type_decl() {
-                        return self.type_decl().await;
+                        return self.type_decl(m).await;
                     }
                     if self.at_local_var_decl() {
-                        self.local_var_decl().await;
+                        self.local_var_decl(m).await;
                     } else if self.at_expr_start() {
-                        let m = self.start();
                         self.expr().await;
                         self.expect(SEMICOLON);
                         m.complete(self, EXPR_STMT);
                     } else {
+                        m.abandon(self);
                         self.err_recover("expected a statement", STMT_RECOVERY);
                     }
                 }
@@ -1227,16 +1364,14 @@ impl Parser<'_> {
         })
     }
 
-    async fn labeled_stmt(&mut self) {
-        let m = self.start();
+    async fn labeled_stmt(&mut self, m: Marker) {
         self.bump(IDENT);
         self.bump(COLON);
         self.stmt().await;
         m.complete(self, LABELED_STMT);
     }
 
-    async fn return_stmt(&mut self) {
-        let m = self.start();
+    async fn return_stmt(&mut self, m: Marker) {
         self.bump(RETURN_KW);
         if !self.at(SEMICOLON) {
             self.expr().await;
@@ -1245,16 +1380,14 @@ impl Parser<'_> {
         m.complete(self, RETURN_STMT);
     }
 
-    async fn throw_stmt(&mut self) {
-        let m = self.start();
+    async fn throw_stmt(&mut self, m: Marker) {
         self.bump(THROW_KW);
         self.expr().await;
         self.expect(SEMICOLON);
         m.complete(self, THROW_STMT);
     }
 
-    fn break_or_continue(&mut self, kw: SyntaxKind, node: SyntaxKind) {
-        let m = self.start();
+    fn break_or_continue(&mut self, m: Marker, kw: SyntaxKind, node: SyntaxKind) {
         self.bump(kw);
         if self.at(IDENT) {
             self.bump(IDENT); // label.
@@ -1263,8 +1396,7 @@ impl Parser<'_> {
         m.complete(self, node);
     }
 
-    async fn assert_stmt(&mut self) {
-        let m = self.start();
+    async fn assert_stmt(&mut self, m: Marker) {
         self.bump(ASSERT_KW);
         self.expr().await;
         if self.eat(COLON) {
@@ -1274,8 +1406,7 @@ impl Parser<'_> {
         m.complete(self, ASSERT_STMT);
     }
 
-    async fn synchronized_stmt(&mut self) {
-        let m = self.start();
+    async fn synchronized_stmt(&mut self, m: Marker) {
         self.bump(SYNCHRONIZED_KW);
         self.expect(LPAREN);
         self.expr().await;
@@ -1286,16 +1417,14 @@ impl Parser<'_> {
         m.complete(self, SYNCHRONIZED_STMT);
     }
 
-    async fn yield_stmt(&mut self) {
-        let m = self.start();
+    async fn yield_stmt(&mut self, m: Marker) {
         self.bump_remap(YIELD_KW);
         self.expr().await;
         self.expect(SEMICOLON);
         m.complete(self, YIELD_STMT);
     }
 
-    async fn try_stmt(&mut self) {
-        let m = self.start();
+    async fn try_stmt(&mut self, m: Marker) {
         self.bump(TRY_KW);
         if self.at(LPAREN) {
             self.resource_list().await;
@@ -1429,8 +1558,7 @@ impl Parser<'_> {
         }
     }
 
-    async fn if_stmt(&mut self) {
-        let m = self.start();
+    async fn if_stmt(&mut self, m: Marker) {
         self.bump(IF_KW);
         self.expect(LPAREN);
         self.expr().await;
@@ -1443,8 +1571,7 @@ impl Parser<'_> {
         m.complete(self, IF_STMT);
     }
 
-    async fn while_stmt(&mut self) {
-        let m = self.start();
+    async fn while_stmt(&mut self, m: Marker) {
         self.bump(WHILE_KW);
         self.expect(LPAREN);
         self.expr().await;
@@ -1453,8 +1580,7 @@ impl Parser<'_> {
         m.complete(self, WHILE_STMT);
     }
 
-    async fn do_while_stmt(&mut self) {
-        let m = self.start();
+    async fn do_while_stmt(&mut self, m: Marker) {
         self.bump(DO_KW);
         self.stmt().await;
         self.expect(WHILE_KW);
@@ -1465,8 +1591,7 @@ impl Parser<'_> {
         m.complete(self, DO_WHILE_STMT);
     }
 
-    async fn for_stmt(&mut self) {
-        let m = self.start();
+    async fn for_stmt(&mut self, m: Marker) {
         self.bump(FOR_KW);
         self.expect(LPAREN);
         if self.at_for_each() {
@@ -1541,7 +1666,8 @@ impl Parser<'_> {
         }
         if (self.at_ts(MODIFIER_KW) || self.at(AT)) && self.at_local_type_decl() {
             // A local type in for-init is unusual, but treat it as a declaration if it appears.
-            self.type_decl().await;
+            let m = self.start();
+            self.type_decl(m).await;
             return;
         }
         if self.at_local_var_decl() {
@@ -1658,8 +1784,7 @@ impl Parser<'_> {
             && self.nth_nofuel(self.skip_annotations_lookahead(0)) == LBRACK
     }
 
-    async fn local_var_decl(&mut self) {
-        let m = self.start();
+    async fn local_var_decl(&mut self, m: Marker) {
         self.var_decl_inner().await;
         self.expect(SEMICOLON);
         m.complete(self, LOCAL_VAR_DECL);
@@ -1675,8 +1800,7 @@ impl Parser<'_> {
 
     // ===== switch (shared body for statement and expression) =====
 
-    async fn switch_stmt(&mut self) {
-        let m = self.start();
+    async fn switch_stmt(&mut self, m: Marker) {
         self.bump(SWITCH_KW);
         self.expect(LPAREN);
         self.expr().await;
@@ -1715,7 +1839,8 @@ impl Parser<'_> {
             if self.at(LBRACE) {
                 self.block().await;
             } else if self.at(THROW_KW) {
-                self.throw_stmt().await;
+                let t = self.start();
+                self.throw_stmt(t).await;
             } else {
                 self.expr().await;
                 self.expect(SEMICOLON);
