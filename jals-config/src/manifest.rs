@@ -617,8 +617,11 @@ pub enum Feature {
     /// JEP 512: compact source files and instance `main` methods (top-level members), permanent in
     /// Java 25 (a preview before). Gated by the linter's `compact-source-file` rule.
     CompactSourceFiles,
-    // A jals-specific dialect feature would be added here with `stabilized_in` = `None`: on only when
-    // explicitly listed in `[package] features`, never implied by a release preset.
+    /// jals dialect: grouped imports (`import java.util.{HashMap, ArrayList};`). Not valid Java at
+    /// any release (`stabilized_in` = `None`) — on only when explicitly listed in `[package]
+    /// features`. Gated by the linter's `grouped-import` rule; the compile frontend desugars it to
+    /// plain imports.
+    GroupedImports,
 }
 
 impl Feature {
@@ -628,7 +631,7 @@ impl Feature {
     /// [`predecessor`](Feature::predecessor) / [`stabilized_in`](Feature::stabilized_in) /
     /// [`config_name`](Feature::config_name) already force a stop for a new variant). The
     /// declaration-order invariant is const-asserted below.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Java8,
         Self::Java9,
         Self::Java10,
@@ -649,6 +652,7 @@ impl Feature {
         Self::Java25,
         Self::ModuleImports,
         Self::CompactSourceFiles,
+        Self::GroupedImports,
     ];
 
     /// Every feature's [`config_name`](Feature::config_name), parallel to [`ALL`](Feature::ALL) —
@@ -693,7 +697,9 @@ impl Feature {
             Self::Java23 => Some(Self::Java22),
             Self::Java24 => Some(Self::Java23),
             Self::Java25 => Some(Self::Java24),
-            Self::Java8 | Self::ModuleImports | Self::CompactSourceFiles => None,
+            Self::Java8 | Self::ModuleImports | Self::CompactSourceFiles | Self::GroupedImports => {
+                None
+            }
         }
     }
 
@@ -707,6 +713,8 @@ impl Feature {
     pub const fn stabilized_in(self) -> Option<Self> {
         match self {
             Self::ModuleImports | Self::CompactSourceFiles => Some(Self::Java25),
+            // A release preset itself, and `GroupedImports` — a jals dialect feature no Java release
+            // stabilizes — all return `None`.
             Self::Java8
             | Self::Java9
             | Self::Java10
@@ -724,7 +732,8 @@ impl Feature {
             | Self::Java22
             | Self::Java23
             | Self::Java24
-            | Self::Java25 => None,
+            | Self::Java25
+            | Self::GroupedImports => None,
         }
     }
 
@@ -773,6 +782,7 @@ impl Feature {
             Self::Java25 => "java25",
             Self::ModuleImports => "module-imports",
             Self::CompactSourceFiles => "compact-source-files",
+            Self::GroupedImports => "grouped-imports",
         }
     }
 }
@@ -2098,6 +2108,26 @@ mod tests {
         let fs = m.feature_set();
         assert!(fs.contains(Feature::CompactSourceFiles));
         assert!(!fs.contains(Feature::ModuleImports));
+    }
+
+    #[test]
+    fn grouped_imports_is_an_independent_dialect_feature() {
+        // Enabled only by explicit opt-in; no release preset implies it (`stabilized_in` = None).
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"grouped-imports\"]\n").unwrap();
+        assert!(m.feature_set().contains(Feature::GroupedImports));
+
+        // The newest release preset does NOT pull it in — it is not part of any Java version.
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"java25\"]\n").unwrap();
+        assert!(!m.feature_set().contains(Feature::GroupedImports));
+        assert_eq!(Feature::GroupedImports.stabilized_in(), None);
+
+        // Combinable with any other feature (the bitset unions them; nothing is implied away).
+        let m: Manifest =
+            toml::from_str("[package]\nfeatures = [\"java25\", \"grouped-imports\"]\n").unwrap();
+        let fs = m.feature_set();
+        assert!(fs.contains(Feature::GroupedImports));
+        assert!(fs.contains(Feature::ModuleImports));
+        assert!(fs.contains(Feature::CompactSourceFiles));
     }
 
     #[test]
