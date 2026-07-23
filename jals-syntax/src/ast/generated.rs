@@ -14,8 +14,8 @@ use crate::syntax_kind::SyntaxKind::{
     CATCH_CLAUSE, CLASS_BODY, CLASS_DECL, CLASS_LITERAL, CONSTRUCTOR_DECL, CONTINUE_STMT,
     DEFAULT_KW, DO_WHILE_STMT, EMPTY_STMT, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, EXPORTS_DIRECTIVE,
     EXPR_STMT, EXTENDS_CLAUSE, FIELD_ACCESS, FIELD_DECL, FINALLY_CLAUSE, FOR_EACH_STMT, FOR_STMT,
-    GUARD, IF_STMT, IMPLEMENTS_CLAUSE, IMPORT_DECL, INDEX_EXPR, INITIALIZER, INTERFACE_DECL,
-    LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LITERAL, LOCAL_VAR_DECL, METHOD_DECL,
+    GUARD, IF_STMT, IMPLEMENTS_CLAUSE, IMPORT_DECL, IMPORT_GROUP, INDEX_EXPR, INITIALIZER,
+    INTERFACE_DECL, LABELED_STMT, LAMBDA_EXPR, LAMBDA_PARAMS, LITERAL, LOCAL_VAR_DECL, METHOD_DECL,
     METHOD_REF_EXPR, MODIFIERS, MODULE_BODY, MODULE_DECL, MODULE_KW, NAME_REF, NEW_EXPR, OPEN_KW,
     OPENS_DIRECTIVE, PACKAGE_DECL, PARAM, PARAM_LIST, PAREN_EXPR, PERMITS_CLAUSE, POSTFIX_EXPR,
     PROVIDES_DIRECTIVE, QUALIFIED_NAME, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER,
@@ -107,6 +107,9 @@ impl ImportDecl {
         support::token(&self.syntax, MODULE_KW).is_some()
     }
     pub fn name(&self) -> Option<QualifiedName> {
+        support::child(&self.syntax)
+    }
+    pub fn group(&self) -> Option<ImportGroup> {
         support::child(&self.syntax)
     }
 }
@@ -233,6 +236,35 @@ impl AstNode for QualifiedName {
     type Language = JavaLanguage;
     fn can_cast(kind: SyntaxKind) -> bool {
         kind == QUALIFIED_NAME
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self { syntax })
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ImportGroup {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl ImportGroup {
+    pub fn members(&self) -> AstChildren<QualifiedName> {
+        support::children(&self.syntax)
+    }
+}
+
+impl AstNode for ImportGroup {
+    type Language = JavaLanguage;
+    fn can_cast(kind: SyntaxKind) -> bool {
+        kind == IMPORT_GROUP
     }
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         if Self::can_cast(syntax.kind()) {

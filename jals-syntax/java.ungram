@@ -34,7 +34,13 @@ PackageDecl =
   'package' name:QualifiedName ';'
 
 ImportDecl =
-  'import' is_static:'static'? is_module:'module'? name:QualifiedName ';'
+  'import' is_static:'static'? is_module:'module'? name:QualifiedName group:ImportGroup? ';'
+
+// A jals grouped import: `.{ Member, Member, ... }` after the shared prefix
+// (`import java.util.{HashMap, ArrayList};`). Each member is a QualifiedName, so
+// nested (`regex.Pattern`) and wildcard (`regex.*`) members come for free.
+ImportGroup =
+  '.' '{' members:(QualifiedName (',' QualifiedName)*)? '}'
 
 QualifiedName =
   'ident' ('.' 'ident')* ('.' is_wildcard:'*')?
