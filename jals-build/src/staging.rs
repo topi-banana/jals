@@ -91,7 +91,11 @@ impl StagedTree {
                 };
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() {
+                    // `read_dir` file types do not follow symlinks, unlike `Path::is_dir`. A
+                    // symlinked directory under this root must be unlinked as an unwanted entry,
+                    // never walked — recursing would delete files outside the staging tree, which
+                    // is exactly the "someone wrote that" case this pruning is allowed to skip.
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                         walk(&path, keep)?;
                         // Prune directories this pass emptied. A still-populated directory fails,
                         // which is the intended no-op.
