@@ -131,6 +131,17 @@ impl RelativePath {
         self.0.len() >= prefix.0.len() && self.0[..prefix.0.len()] == prefix.0
     }
 
+    /// This path with `prefix` removed, or `None` when `prefix` is not one.
+    ///
+    /// The inverse of [`concat`](Self::concat), and the one place the rebasing rule lives: several
+    /// subsystems address the same bytes relative to different roots (a source directory, an archive
+    /// prefix, a publication destination), and a hand-rolled `skip(prefix.len())` beside a
+    /// `starts_with` is how two of them quietly disagree about where a file is.
+    pub fn strip_prefix(&self, prefix: &Self) -> Option<Self> {
+        self.starts_with(prefix)
+            .then(|| Self(self.0[prefix.0.len()..].to_vec()))
+    }
+
     pub fn name(&self) -> Option<&Name> {
         self.0.last()
     }
