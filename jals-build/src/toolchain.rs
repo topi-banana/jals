@@ -350,6 +350,13 @@ pub enum ToolchainError {
         /// The underlying OS error.
         source: std::io::Error,
     },
+    /// Writing the argument file an over-long command line is spilled into failed.
+    ArgumentFile {
+        /// The argument file that could not be written.
+        path: String,
+        /// The underlying OS error.
+        source: std::io::Error,
+    },
     /// This backend does not support the requested step (e.g. a wasm compiler asked to *run*).
     Unsupported(&'static str),
     /// A project-storage step of an in-process backend failed (for example reading a source or
@@ -360,11 +367,19 @@ pub enum ToolchainError {
 impl std::fmt::Display for ToolchainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Spawn { program, .. } => {
-                write!(
-                    f,
-                    "failed to spawn `{program}` (is a JDK installed and on PATH?)"
-                )
+            // The OS error is part of the message, not just the `source` chain: a caller that
+            // flattens this to its `Display` (`jals-cli` does) would otherwise report a permission
+            // error, an over-long command line, and a genuinely absent JDK identically. Only a
+            // `NotFound` earns the "is a JDK installed" hint.
+            Self::Spawn { program, source } => {
+                write!(f, "failed to spawn `{program}`: {source}")?;
+                if source.kind() == std::io::ErrorKind::NotFound {
+                    write!(f, " (is a JDK installed and on PATH?)")?;
+                }
+                Ok(())
+            }
+            Self::ArgumentFile { path, source } => {
+                write!(f, "failed to write the argument file `{path}`: {source}")
             }
             Self::Unsupported(what) => write!(f, "toolchain does not support {what}"),
             Self::Fs(source) => write!(f, "builtin toolchain I/O failed: {source}"),
@@ -375,7 +390,7 @@ impl std::fmt::Display for ToolchainError {
 impl std::error::Error for ToolchainError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn { source, .. } => Some(source),
+            Self::Spawn { source, .. } | Self::ArgumentFile { source, .. } => Some(source),
             Self::Unsupported(_) => None,
             Self::Fs(source) => Some(source),
         }
