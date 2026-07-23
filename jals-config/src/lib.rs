@@ -30,8 +30,8 @@ pub mod toolchain;
 pub use lint::Severity;
 pub use loader::{ConfigError, DiscoverableConfig};
 pub use manifest::{
-    Bin, Build, BuildScript, Dependency, DependencyError, Feature, FeatureSet, GitDependency,
-    GitRef, JarDependency, Manifest, ManifestParseError, Package, PathDependency, Run,
-    ValidationError,
+    Bin, Build, BuildFeatureError, BuildScript, Dependency, DependencyError, Feature, FeatureRef,
+    FeatureRefError, FeatureSet, FrontendKind, GitDependency, GitRef, JarDependency, Manifest,
+    ManifestParseError, Package, PathDependency, ResolvedBuildFeatures, Run, ValidationError,
 };
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

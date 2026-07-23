@@ -19,7 +19,7 @@ use jals_build::build_script::{
 use jals_build::{Compiler, ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
-use jals_config::{DiscoverableConfig, FeatureSet, Manifest};
+use jals_config::{DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_hir::{FileId, LoweredClasspath, ProjectIndex};
 use jals_storage::{FileKey, NativeScope, NativeStorage, RelativePath};
@@ -94,6 +94,37 @@ struct LspArgs {
     stdio: bool,
 }
 
+/// Cargo-style build-feature selection, shared by `build` and `run`.
+///
+/// `[features]` declares the features; these flags choose which are active for one
+/// invocation. Selection is additive — a feature never subtracts — so `--features client` keeps the
+/// `default` list unless `--no-default-features` is also given.
+#[derive(Args)]
+struct FeatureArgs {
+    /// Activate these `[features]` (comma separated, repeatable). A `<dependency>/<feature>` entry
+    /// activates a feature in that dependency instead of this project.
+    #[arg(long, value_name = "FEATURES", value_delimiter = ',')]
+    features: Vec<String>,
+
+    /// Activate every declared `[features]`. Takes precedence over `--no-default-features`.
+    #[arg(long)]
+    all_features: bool,
+
+    /// Do not activate the `default` `[features]` list.
+    #[arg(long)]
+    no_default_features: bool,
+}
+
+impl FeatureArgs {
+    /// The build features these flags select from `manifest`: the root project's own sorted set,
+    /// plus what its `[features]` forwards to each dependency.
+    fn resolve(&self, manifest: &Manifest) -> Result<ResolvedBuildFeatures> {
+        manifest
+            .resolve_build_features(&self.features, self.all_features, self.no_default_features)
+            .map_err(|e| anyhow!("{e}"))
+    }
+}
+
 #[derive(Args)]
 struct BuildArgs {
     /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
@@ -120,6 +151,9 @@ struct BuildArgs {
     /// Resolve build-task artifacts only from the verified project cache.
     #[arg(long)]
     offline: bool,
+
+    #[command(flatten)]
+    features: FeatureArgs,
 }
 
 #[derive(Args)]
@@ -151,6 +185,9 @@ struct RunArgs {
     /// Resolve build-task artifacts only from the verified project cache.
     #[arg(long)]
     offline: bool,
+
+    #[command(flatten)]
+    features: FeatureArgs,
 }
 
 #[derive(Args)]
@@ -428,6 +465,7 @@ impl BuildArgs {
     /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let features = self.features.resolve(&manifest)?;
         if let Some(out) = &self.out_dir {
             manifest.build.classes_dir = out.to_string_lossy().into_owned();
         }
@@ -443,6 +481,7 @@ impl BuildArgs {
             &mut manifest,
             &root,
             exec,
+            &features,
             self.offline,
             if self.dry_run {
                 jals_project::SourcePublication::Skip
@@ -451,7 +490,7 @@ impl BuildArgs {
             },
         )
         .await?;
-        let request = App::compile_request(&manifest, &root, &sources, &inputs);
+        let request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
         let compiler = <dyn Compiler>::select(&manifest, exec).await;
@@ -476,6 +515,7 @@ impl RunArgs {
     /// run; `--dry-run` prints both commands without executing either.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let features = self.features.resolve(&manifest)?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
         let main_class: String = match &self.main_class {
@@ -490,6 +530,7 @@ impl RunArgs {
             &mut manifest,
             &root,
             exec,
+            &features,
             self.offline,
             if self.dry_run {
                 jals_project::SourcePublication::Skip
@@ -498,7 +539,7 @@ impl RunArgs {
             },
         )
         .await?;
-        let compile_request = App::compile_request(&manifest, &root, &sources, &inputs);
+        let compile_request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
             project_root: &root,
@@ -683,14 +724,22 @@ impl ProjectLintContext {
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
         // `type-mismatch` index) and the `[package] features`. Any strict graph failure is reported and
         // converted into the default lint context below.
-        let environment = App::build_script_environment(&manifest);
+        // The lint / editor path takes no `--features` flags, so build scripts see the manifest's
+        // default selection. With nothing selected, resolution cannot fail.
+        let features = manifest
+            .resolve_build_features(&[], false, false)
+            .unwrap_or_default();
+        let environment = App::build_script_environment(&manifest, &features);
         let inputs = match App::project_inputs(
             &manifest,
             root,
             jals_classpath::ProjectInputOptions::Analysis,
             exec,
             HostBuildScript::default(),
-            &environment,
+            &RootScriptInputs {
+                environment: &environment,
+                features: &features,
+            },
             // Lint analyses what is already here; it does not acquire dependencies.
             jals_classpath::NetworkPolicy::Offline,
         )
@@ -779,6 +828,17 @@ impl From<HostBuildScript> for HostProjectInputs {
     }
 }
 
+/// The root project's build-script inputs, borrowed as one value.
+///
+/// The two are meaningless apart: `environment` is already scoped to the root and carries the
+/// queryable half of `features`, whose other half is what the root's `[features]` forwards into the
+/// dependency graph. Passing them together is what keeps a caller from installing one and
+/// forgetting the other.
+struct RootScriptInputs<'a> {
+    environment: &'a BuildScriptEnvironment,
+    features: &'a ResolvedBuildFeatures,
+}
+
 impl App {
     /// Discover and preprocess the complete dependency graph, then project it together with the
     /// root manifest over one immutable project revision and its verified native artifact cache.
@@ -788,7 +848,7 @@ impl App {
         options: jals_classpath::ProjectInputOptions,
         exec: &Exec,
         script: HostBuildScript,
-        environment: &BuildScriptEnvironment,
+        scripts: &RootScriptInputs<'_>,
         network: jals_classpath::NetworkPolicy,
     ) -> Result<HostProjectInputs> {
         let mut result = HostProjectInputs::from(script);
@@ -807,8 +867,16 @@ impl App {
         let graph = graph
             .preprocess(
                 storage.artifacts_mut(),
-                environment,
-                &BuildScriptLimits::default(),
+                jals_project::GraphPreprocess {
+                    exec,
+                    // A dependency's build tasks fetch under the same policy as the root's, from
+                    // the same project cache — `--offline` means offline for the whole graph.
+                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    environment: scripts.environment,
+                    root_features: scripts.features,
+                    limits: &BuildScriptLimits::default(),
+                    network,
+                },
             )
             .await
             .context("preprocessing project dependency graph")?;
@@ -895,21 +963,30 @@ impl App {
         manifest: &mut Manifest,
         root: &Path,
         exec: &Exec,
+        features: &ResolvedBuildFeatures,
         offline: bool,
         publications: jals_project::SourcePublication,
-    ) -> Result<(Vec<PathBuf>, HostProjectInputs)> {
-        let environment = Self::build_script_environment(manifest);
+    ) -> Result<(jals_build::StagedTree, HostProjectInputs)> {
+        let environment = Self::build_script_environment(manifest, features);
         let script =
             Self::run_build_script(manifest, root, exec, &environment, offline, publications)
                 .await?;
         let sources = Self::discover_sources(manifest, root, !script.generated_sources.is_empty())?;
+        // The root build script's output is root project source, so it goes through the root
+        // frontend alongside the authored files. Dependency-contributed sources, which land in
+        // `extra_sources` further down, deliberately do not: a dependency is lowered under its
+        // own manifest's frontend, never re-expanded by whoever consumes it.
+        let generated = script.generated_sources.clone();
         let mut inputs = Self::project_inputs(
             manifest,
             root,
             jals_classpath::ProjectInputOptions::Compile,
             exec,
             script,
-            &environment,
+            &RootScriptInputs {
+                environment: &environment,
+                features,
+            },
             if offline {
                 jals_classpath::NetworkPolicy::Offline
             } else {
@@ -918,7 +995,38 @@ impl App {
         )
         .await?;
         inputs.deduplicate(manifest, root, &sources);
-        Ok((sources, inputs))
+        // Deduplication compares against the *authored* paths, so it must happen before lowering
+        // replaces them with staged ones.
+        // A build script may register a file that is *also* an authored source (`add_source` on
+        // an existing project file is legal), so the union has to be deduplicated — a tree with
+        // two entries at one path is rejected, correctly, by the frontend.
+        let mut to_lower = sources;
+        let mut seen: HashSet<PathBuf> = to_lower.iter().cloned().collect();
+        for path in &generated {
+            if seen.insert(path.clone()) {
+                to_lower.push(path.clone());
+            }
+        }
+        let staged = Self::lower_sources(manifest, root, &to_lower).await?;
+        // Whatever was lowered is now represented by its staged copy; leaving the original in
+        // `extra_sources` would hand javac the pre-frontend file as well.
+        inputs
+            .extra_sources
+            .retain(|path| !generated.contains(path));
+        // Replace `-sourcepath` with the staged tree so the authored source dirs leave it
+        // entirely. Without this the compiler could resolve a type from the authored source it was
+        // never given on the command line, silently reading around the frontend — harmless while
+        // the frontend is the identity, and a correctness hole the moment one rewrites anything.
+        //
+        // This only *excludes* the authored roots; it does not repoint resolution at the staged
+        // copies. The staging root is not a package root — staged files keep their full
+        // project-relative path beneath it (`<root>/src/main/java/com/example/Main.java`), so
+        // implicit lookup of `com.example.Foo` probes `<root>/com/example/Foo.java` and always
+        // misses. That is fine today because every source is passed to javac explicitly; a future
+        // rewriting frontend that relies on implicit resolution would have to stage under the
+        // original source-dir prefix instead.
+        manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
+        Ok((staged, inputs))
     }
 
     fn print_graph_warning(warning: &jals_project::GraphWarning) {
@@ -940,11 +1048,20 @@ impl App {
     /// stays out: a build script can forward anything it reads into a task fetch URL, so
     /// inheriting wholesale would expose every credential on the machine to an unreviewed
     /// `build.rhai` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
-    fn build_script_environment(manifest: &Manifest) -> BuildScriptEnvironment {
+    ///
+    /// Only the **root project's** own queryable half of `features` is installed here. A dependency
+    /// node's script is given its own resolved set by the graph's preprocessing pass, from the
+    /// `[dependencies]` entries aimed at it and whatever a `[features]` entry forwarded — the
+    /// [`dependencies`](ResolvedBuildFeatures::dependencies) half, which never lands in an
+    /// environment the root's script can read.
+    fn build_script_environment(
+        manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
+    ) -> BuildScriptEnvironment {
         BuildScriptEnvironment::from_host(std::env::vars_os().filter_map(|(name, value)| {
             Some((name.into_string().ok()?, value.into_string().ok()?))
         }))
-        .for_project(manifest)
+        .for_project(manifest, features.features().clone())
     }
 
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
@@ -1099,6 +1216,75 @@ impl App {
             ));
         }
         Ok(sources)
+    }
+
+    /// Run the project's frontend over the discovered sources and stage the result on disk.
+    ///
+    /// This is the frontend/backend seam. The compiler is handed the returned paths and never the
+    /// paths that went in, so whatever `javac` compiles is by construction something a frontend
+    /// emitted. With the default vanilla frontend the bytes are identical to the authored
+    /// sources, so the observable build is unchanged — the point of this release is that the
+    /// *path* now goes through the seam, not that the output differs.
+    ///
+    /// The staged tree lives under `target/jals/build/frontend`, which `jals clean` already
+    /// removes and which the build-script fingerprint rules already refuse to treat as a rerun
+    /// input.
+    async fn lower_sources(
+        manifest: &Manifest,
+        root: &Path,
+        sources: &[PathBuf],
+    ) -> Result<jals_build::StagedTree> {
+        let frontend: &dyn jals_frontend::Frontend = match manifest.build.frontend {
+            jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
+        };
+
+        let mut files = Vec::with_capacity(sources.len());
+        for path in sources {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading source {}", path.display()))?;
+            // Logical, project-relative identity. Sorting on this rather than on the filesystem
+            // walk order is what keeps cache keys identical across machines.
+            let relative = RelativePath::from_host_path(root, path)
+                .ok_or_else(|| anyhow!("source {} is outside the project root", path.display()))?;
+            files.push(jals_frontend::IrFile::new(relative, bytes.into()));
+        }
+        jals_frontend::FrontendKey::canonical_order(&mut files);
+
+        // Only the artifact cache is needed, so open it directly rather than taking a whole
+        // project snapshot: lowering reads its inputs from `files`, never from a `ProjectView`.
+        let mut cache = jals_storage::ArtifactCache::new(jals_storage::NativeCache::new(
+            root.join(NativeStorage::PROJECT_CACHE_DIR),
+        ));
+
+        let lowered = jals_frontend::Driver::lower(frontend, &mut cache, &files)
+            .await
+            .map_err(|error| anyhow!("frontend `{}` failed: {error}", frontend.caps().id))?;
+
+        let tree: Vec<_> = lowered
+            .tree
+            .files()
+            .iter()
+            .map(|file| (file.path.clone(), file.key.clone()))
+            .collect();
+
+        jals_build::StagedTree::write(&cache, &tree, root.join(jals_build::FRONTEND_OUT_DIR))
+            .await
+            .map_err(|error| anyhow!("staging frontend output failed: {error}"))
+    }
+
+    /// The staged tree expressed as manifest `source-dirs`, relative to the project root when
+    /// possible so the rendered `javac` command stays readable.
+    ///
+    /// This is the staging *root*, not a package root: staged files keep their full
+    /// project-relative path beneath it, so setting `-sourcepath` to it resolves nothing
+    /// implicitly. It is retained only to replace — and thereby exclude — the authored source
+    /// dirs; every source is passed to javac explicitly.
+    fn staged_source_dirs(root: &Path, staged: &jals_build::StagedTree) -> Vec<String> {
+        let path = staged
+            .root()
+            .strip_prefix(root)
+            .unwrap_or_else(|_| staged.root());
+        vec![path.to_string_lossy().into_owned()]
     }
 
     /// The compile inputs shared by `jals build` and `jals run`: the manifest plus its discovered

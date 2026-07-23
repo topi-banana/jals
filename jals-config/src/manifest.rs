@@ -3,7 +3,7 @@
 //! A `jals.toml` describes a Java project the way `Cargo.toml` describes a Rust crate. Every key is
 //! optional; omitted keys fall back to [`Manifest::default`], which encodes the Maven-style
 //! `src/main/java` -> `target/classes` layout. Keys are kebab-case and grouped into `[package]`,
-//! `[build]`, `[run]`, and `[toolchain]` sections.
+//! `[features]`, `[build]`, `[run]`, and `[toolchain]` sections.
 //!
 //! This module owns the pure, `no_std` half: the serde model, structural [`validate`](Manifest::validate),
 //! the [`FromStr`] parse-from-text entry point, and the pure classified type [`GitRef`]. The host-only,
@@ -25,12 +25,54 @@ use crate::toolchain::Toolchain;
 
 const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 
+/// The reserved `[features]` key whose list is the build-feature set enabled when the command
+/// line selects none (Cargo's `default` feature). A resolution directive, never itself a queryable
+/// feature — [`Manifest::resolve_build_features`] expands it and drops the name from the result.
+///
+/// Reserved *everywhere* a feature can be written, not just in a `[features]` table:
+/// [`Dependency::validate_features`] rejects it in a `[dependencies] features` list too, and
+/// [`FeatureRef::parse`] rejects `dep/default`, so the name can never reach a resolved set by any
+/// route. Whether a dependency's own `default` list applies is said with
+/// [`default-features`](Dependency::default_features), never by naming the directive.
+const DEFAULT_BUILD_FEATURE: &str = "default";
+
+/// The separator of the cross-package `<dependency>/<feature>` form (Cargo's `serde/std`).
+///
+/// Reserved in a feature *name*: a `[features]` key carrying it would be unreachable, since every
+/// list entry containing it is read as a cross-package reference instead (see [`FeatureRef`]).
+const FEATURE_SEPARATOR: char = '/';
+
 /// A parsed `jals.toml` project manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Manifest {
     /// Project metadata (`[package]`). Informational for now.
     pub package: Package,
+    /// Cargo-style **build features** (`[features]`): named, additive build-time toggles a build
+    /// script reads to vary what it produces.
+    ///
+    /// Top-level like Cargo's `[features]`, and distinct from `[package] features` (the closed
+    /// [`Feature`] enum, a language-*analysis* gate): these are open-ended, user-defined names
+    /// selected on the command line (`--features` / `--all-features` / `--no-default-features`) and
+    /// queried by the build script via `build.feature("…")`. Each key maps to the other features it
+    /// enables (the Cargo `feature = ["…"]` form); the reserved `default` key lists the features
+    /// enabled when none are selected. Resolved additively — closed under the enables map — by
+    /// [`Manifest::resolve_build_features`]. A `default`/`enables` name that is not itself a
+    /// declared key is a [`ValidationError::UndeclaredBuildFeature`]. Empty when omitted, so an
+    /// existing manifest keeps building exactly as before.
+    ///
+    /// A list entry may also be Cargo's cross-package `<dependency>/<feature>` form (see
+    /// [`FeatureRef`]): enabling the declaring feature then enables `<feature>` in the
+    /// `[dependencies]` entry `<dependency>`. Such an entry is *routed*, never queryable — it is
+    /// absent from this project's own resolved set, and
+    /// [`ResolvedBuildFeatures::dependencies`] is where it comes out. The named dependency must be
+    /// a declared `git`/`path` entry: a `jar` runs no build script that could read the feature.
+    ///
+    /// A feature reaches a dependency by exactly two routes — a
+    /// [`features`](Dependency::features) list on the `[dependencies]` entry, and a cross-package
+    /// entry here — and both are written in *this* manifest. The declaring project's own selection
+    /// never leaks implicitly.
+    pub features: BTreeMap<String, Vec<String>>,
     /// Compilation settings (`[build]`).
     pub build: Build,
     /// Run settings (`[run]`).
@@ -71,6 +113,12 @@ pub struct Manifest {
 ///   [`GitDependency`].
 /// - **`path`** — a local directory tree of `.java` source (analysis + editor navigation only). See
 ///   [`PathDependency`].
+///
+/// Both source forms also carry [`features`](Dependency::features) — the build features to enable in
+/// that dependency, Cargo's per-dependency `features = ["…"]` — and
+/// [`default-features`](Dependency::default_features), which suppresses that dependency's own
+/// `[features] default` list. A `jar` has no build script, so neither field exists on that form and
+/// writing one is a parse error like any misplaced field.
 ///
 /// The host resolves each form differently: a [`Jar`](Dependency::Jar) is downloaded/read and put on
 /// the classpath, a [`Git`](Dependency::Git) is cloned, a [`Path`](Dependency::Path) is read in place;
@@ -130,6 +178,14 @@ pub struct GitDependency {
     /// The source root *within* the repo (e.g. `core/src/main/java`), for a non-standard layout; omit
     /// to let the host auto-detect it (`src/main/java` → `src` → the root itself).
     pub dir: Option<String>,
+    /// The **build features** to enable in this dependency (Cargo's per-dependency `features`). See
+    /// [`Dependency::features`] for the semantics, which are the same for both source forms.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Whether this dependency resolves its own `[features] default` list (Cargo's
+    /// `default-features`). See [`Dependency::default_features`], which reads the `None` default.
+    #[serde(default)]
+    pub default_features: Option<bool>,
 }
 
 /// The `path` form of a [`Dependency`]: a local directory tree of `.java` source.
@@ -142,6 +198,14 @@ pub struct PathDependency {
     /// The source root *within* the directory (e.g. `core/src/main/java`), for a non-standard layout;
     /// omit to let the host auto-detect it (`src/main/java` → `src` → the root itself).
     pub dir: Option<String>,
+    /// The **build features** to enable in this dependency (Cargo's per-dependency `features`). See
+    /// [`Dependency::features`] for the semantics, which are the same for both source forms.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Whether this dependency resolves its own `[features] default` list (Cargo's
+    /// `default-features`). See [`Dependency::default_features`], which reads the `None` default.
+    #[serde(default)]
+    pub default_features: Option<bool>,
 }
 
 /// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
@@ -216,6 +280,22 @@ pub enum DependencyError {
         /// The offending value.
         value: String,
     },
+    /// A `features` list names the reserved `default` feature, which is a declaring table's
+    /// resolution directive and never a queryable feature (see [`Dependency::validate_features`]).
+    ReservedFeature {
+        /// The dependency's name.
+        name: String,
+        /// The reserved feature name that was listed.
+        feature: String,
+    },
+    /// A `features` list names a cross-package `<dependency>/<feature>` reference, which belongs in
+    /// a `[features]` table (see [`Dependency::validate_features`]).
+    CrossFeature {
+        /// The dependency's name.
+        name: String,
+        /// The offending entry, as written.
+        feature: String,
+    },
 }
 
 impl fmt::Display for DependencyError {
@@ -239,11 +319,205 @@ impl fmt::Display for DependencyError {
                 "git dependency `{name}` has a `{field}` starting with `-` (`{value}`), which the \
                  `git` CLI would read as an option rather than a value"
             ),
+            Self::ReservedFeature { name, feature } => write!(
+                f,
+                "dependency `{name}` lists the reserved feature `{feature}` in `features` \
+                 (`{feature}` is a `[features]` resolution directive, never a queryable feature; \
+                 use `default-features`)"
+            ),
+            Self::CrossFeature { name, feature } => write!(
+                f,
+                "dependency `{name}` lists `{feature}` in `features`, which names features of \
+                 `{name}` itself (write a `<dependency>/<feature>` reference in `[features]`)"
+            ),
         }
     }
 }
 
 impl Error for DependencyError {}
+
+/// One entry of a build-feature list, classified: a feature of the package that wrote the list, or
+/// Cargo's cross-package `<dependency>/<feature>` form (`serde/std`).
+///
+/// The single place the `/` form is read. Every list that can carry one — a `[features]` value and
+/// the command-line selection — classifies through [`parse`](FeatureRef::parse), so the shape rules
+/// cannot drift apart between where a manifest is validated and where a selection is resolved.
+/// A `[dependencies] features` list is deliberately *not* one of them: those name features of that
+/// dependency only, as in Cargo, and [`Dependency::validate_features`] rejects a `/` outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureRef<'a> {
+    /// A feature of the package whose list this is.
+    Local(&'a str),
+    /// `<dependency>/<feature>`: enable `feature` in the `[dependencies]` entry `dependency`.
+    Dependency {
+        /// The `[dependencies]` key the feature is enabled in.
+        dependency: &'a str,
+        /// The feature to enable there.
+        feature: &'a str,
+    },
+}
+
+impl<'a> FeatureRef<'a> {
+    /// Classify one feature-list entry by its shape alone.
+    ///
+    /// Pure name analysis: whether the named dependency exists is a whole-manifest question
+    /// ([`Manifest::validate`]), and whether a local name is declared is deliberately *not* checked
+    /// at all here — a dependency node receives opaque names it may not declare.
+    ///
+    /// # Errors
+    /// [`FeatureRefError`] for an empty entry or side, a second `/`, or `dep/default` — the
+    /// reserved directive is never enableable by name (see [`DEFAULT_BUILD_FEATURE`]).
+    pub fn parse(entry: &'a str) -> Result<Self, FeatureRefError> {
+        if entry.is_empty() {
+            return Err(FeatureRefError::Empty);
+        }
+        let Some((dependency, feature)) = entry.split_once(FEATURE_SEPARATOR) else {
+            return Ok(Self::Local(entry));
+        };
+        if dependency.is_empty() || feature.is_empty() {
+            return Err(FeatureRefError::Empty);
+        }
+        if feature.contains(FEATURE_SEPARATOR) {
+            return Err(FeatureRefError::NestedSeparator);
+        }
+        if feature == DEFAULT_BUILD_FEATURE {
+            return Err(FeatureRefError::ReservedFeature);
+        }
+        Ok(Self::Dependency {
+            dependency,
+            feature,
+        })
+    }
+}
+
+/// A feature-list entry whose *shape* is not a valid [`FeatureRef`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureRefError {
+    /// The entry, or one side of its `/`, is empty.
+    Empty,
+    /// A second `/`: a cross-package reference names exactly one dependency and one feature, and
+    /// forwarding through an intermediate package is written in *that* package's `[features]`.
+    NestedSeparator,
+    /// The dependency-side feature is the reserved `default`, which is a resolution directive
+    /// rather than an enableable feature; use `default-features` to control it.
+    ReservedFeature,
+}
+
+impl fmt::Display for FeatureRefError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("expected `<feature>` or `<dependency>/<feature>`"),
+            Self::NestedSeparator => {
+                f.write_str("expected at most one `/` (`<dependency>/<feature>`)")
+            }
+            Self::ReservedFeature => write!(
+                f,
+                "`{DEFAULT_BUILD_FEATURE}` is a resolution directive, never an enableable feature \
+                 (use `default-features` on the `[dependencies]` entry)"
+            ),
+        }
+    }
+}
+
+impl Error for FeatureRefError {}
+
+/// A build-feature selection that could not be resolved by [`Manifest::resolve_build_features`].
+///
+/// The value-level checks the command line cannot express: a `--features` name that is not declared
+/// in `[features]`, or a `--features dep/feat` whose dependency cannot receive one. Internal-consistency
+/// problems — a `default`/`enables` list that references an undeclared feature or dependency — are a
+/// [`ValidationError`] found at manifest validation instead, so a well-formed manifest's closure
+/// never hits an undeclared name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildFeatureError {
+    /// `--features` named a feature not declared in `[features]`.
+    UnknownSelected {
+        /// The undeclared feature name.
+        name: String,
+    },
+    /// `--features dep/feat` named a dependency that is not a declared `git`/`path` entry (a `jar`
+    /// runs no build script that could read a feature).
+    UnknownSelectedDependency {
+        /// The whole selection entry, as written.
+        name: String,
+        /// The dependency half that could not receive a feature.
+        dependency: String,
+    },
+    /// `--features` carried an entry whose shape is neither a feature name nor a well-formed
+    /// `<dependency>/<feature>` reference.
+    InvalidSelected {
+        /// The whole selection entry, as written.
+        name: String,
+        /// Why the shape was rejected.
+        reason: FeatureRefError,
+    },
+}
+
+impl fmt::Display for BuildFeatureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownSelected { name } => write!(
+                f,
+                "`--features {name}` names a feature not declared in `[features]`"
+            ),
+            Self::UnknownSelectedDependency { name, dependency } => write!(
+                f,
+                "`--features {name}` names `{dependency}`, which is not a declared `git`/`path` \
+                 `[dependencies]` entry"
+            ),
+            Self::InvalidSelected { name, reason } => {
+                write!(f, "`--features {name}` is malformed: {reason}")
+            }
+        }
+    }
+}
+
+impl Error for BuildFeatureError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidSelected { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// The build features one project resolved to: the set its own build script queries, plus what it
+/// forwards to each dependency.
+///
+/// The two halves are deliberately separate values rather than one set of strings. A cross-package
+/// `<dependency>/<feature>` entry is *routed*, never queryable — keeping it out of
+/// [`features`](Self::features) is what makes `build.feature("render/vulkan")` false by construction
+/// instead of by a filter someone has to remember. Both halves are ordered, so a build script's
+/// fingerprint over either is deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedBuildFeatures {
+    features: BTreeSet<String>,
+    dependencies: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ResolvedBuildFeatures {
+    /// The features this project's own build script queries with `build.feature("…")`.
+    pub const fn features(&self) -> &BTreeSet<String> {
+        &self.features
+    }
+
+    /// Consume this resolution for its own queryable set, dropping what it forwards.
+    pub fn into_features(self) -> BTreeSet<String> {
+        self.features
+    }
+
+    /// The features forwarded to one `[dependencies]` entry, or `None` when it receives none here.
+    pub fn dependency(&self, name: &str) -> Option<&BTreeSet<String>> {
+        self.dependencies.get(name)
+    }
+
+    /// Every `[dependencies]` entry this project forwards features to, in name order.
+    pub fn dependencies(&self) -> impl ExactSizeIterator<Item = (&str, &BTreeSet<String>)> {
+        self.dependencies
+            .iter()
+            .map(|(name, features)| (name.as_str(), features))
+    }
+}
 
 /// Project metadata (`[package]`).
 ///
@@ -262,7 +536,9 @@ pub struct Package {
     pub default_run: Option<String>,
     /// The language [`Feature`]s the project enables (`[package] features = ["…"]`).
     ///
-    /// The Cargo `[features]` analogue, additive-only. A Java **release preset** (`"java25"`, …)
+    /// Additive-only, but a **closed** set — not the top-level [`[features]`](Manifest::features)
+    /// map, which is the open-ended Cargo `[features]` analogue selected on the command line and
+    /// read by the build script. A Java **release preset** (`"java25"`, …)
     /// selects everything that release stabilized — each preset implies the one before it, so
     /// `java25 ⊇ java24 ⊇ …` holds with nothing else declared — while an **individual feature**
     /// name (`"module-imports"`, …) turns on a single otherwise-preview construct, the Java
@@ -604,6 +880,11 @@ impl FeatureSet {
 pub struct Build {
     /// Optional project build script.
     pub script: Option<BuildScript>,
+    /// Which frontend lowers the project's sources to the Java that the backend compiles.
+    ///
+    /// Defaults to [`FrontendKind::Vanilla`], the identity lowering, so an existing manifest
+    /// keeps compiling exactly the sources it always did.
+    pub frontend: FrontendKind,
     /// Source roots, relative to the manifest directory. These feed `javac`'s `-sourcepath` and
     /// are the roots scanned for `.java` files. Defaults to `["src/main/java"]`.
     pub source_dirs: Vec<String>,
@@ -644,6 +925,41 @@ impl BuildScript {
     }
 }
 
+/// The compile frontend, selected by its `type` field (`[build.frontend]`).
+///
+/// A frontend turns the project's authored sources into the Java sources the backend compiles.
+/// Only the identity lowering exists today; this is the seam a macro frontend fills, and it is
+/// tagged from the start so that adding one is a new variant rather than a schema change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum FrontendKind {
+    /// Emit every source unchanged: the authored sources *are* the Java sources.
+    ///
+    /// A struct variant (`{}`) rather than a unit variant on purpose: serde's
+    /// `deny_unknown_fields` is honored for a struct variant of an internally-tagged enum but
+    /// silently ignored for a unit one, so a typo like `[build.frontend] typ = "vanilla"` would
+    /// otherwise be accepted — the very footgun `deny_unknown_fields` exists to catch.
+    Vanilla {},
+}
+
+impl Default for FrontendKind {
+    fn default() -> Self {
+        Self::Vanilla {}
+    }
+}
+
+impl FrontendKind {
+    /// The value of the frontend's serialized `type` tag.
+    ///
+    /// Also its cache identity. A stable string rather than the enum discriminant, so adding or
+    /// reordering variants can never renumber a shipped frontend's cache keys.
+    pub const fn tag_name(&self) -> &'static str {
+        match self {
+            Self::Vanilla {} => "vanilla",
+        }
+    }
+}
+
 /// Run settings (`[run]`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -674,6 +990,7 @@ impl Default for Build {
     fn default() -> Self {
         Self {
             script: None,
+            frontend: FrontendKind::Vanilla {},
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
             release: None,
@@ -726,12 +1043,13 @@ impl Dependency {
 
     /// Apply the value-level checks serde cannot express, without any I/O or path building: a `jar`'s
     /// `jar` (and optional `sources`) is a non-empty known-scheme location, a `git`'s URL is non-empty
-    /// with at most one `branch` / `tag` / `rev`, and a `path`'s directory is non-empty. `name` labels
-    /// errors.
+    /// with at most one `branch` / `tag` / `rev`, a `path`'s directory is non-empty, and — on both
+    /// source forms — every `features` name passes [`validate_features`](Dependency::validate_features).
+    /// `name` labels errors.
     ///
     /// # Errors
-    /// Returns the first [`DependencyError`] found (empty value, unsupported URL scheme, or conflicting
-    /// git refs).
+    /// Returns the first [`DependencyError`] found (empty value, unsupported URL scheme, conflicting
+    /// git refs, or a bad `features` name).
     pub fn validate(&self, name: &str) -> Result<(), DependencyError> {
         match self {
             Self::Jar(jar) => {
@@ -780,7 +1098,90 @@ impl Dependency {
                 }
                 Ok(())
             }
+        }?;
+        self.validate_features(name)
+    }
+
+    /// The **build features** this entry enables in the dependency project — Cargo's per-dependency
+    /// `features = ["…"]`, declared on the `git` / `path` forms.
+    ///
+    /// Features are *per package*: these are names of features **of the dependency**, exactly as in
+    /// Cargo, so the cross-package `<dependency>/<feature>` form is rejected here
+    /// ([`Dependency::validate_features`]) — routing a feature onward is written in the receiving
+    /// project's own `[features]`. They are one of the two inputs to that project's resolution; the
+    /// other is whatever a [`[features]`](Manifest::features) entry of this manifest forwards to it.
+    /// A `jar` has no build script, so the field does not exist on that form at all (writing it is a
+    /// parse error) and this returns an empty slice.
+    pub fn features(&self) -> &[String] {
+        match self {
+            Self::Jar(_) => &[],
+            Self::Git(git) => &git.features,
+            Self::Path(path) => &path.features,
         }
+    }
+
+    /// Whether this entry lets the dependency resolve its own `[features] default` list (Cargo's
+    /// `default-features`, defaulting to `true`).
+    ///
+    /// Only *this* edge's answer. Where several entries reach one project, the sets unify and so
+    /// does this flag — additively, as in Cargo: one entry asking for the defaults turns them on for
+    /// the shared node, whatever the others said. A `jar` receives no features at all, so its answer
+    /// is never read.
+    pub fn default_features(&self) -> bool {
+        match self {
+            Self::Jar(_) => true,
+            Self::Git(git) => git.default_features.unwrap_or(true),
+            Self::Path(path) => path.default_features.unwrap_or(true),
+        }
+    }
+
+    /// Whether a `<dependency>/<feature>` reference may name this entry: only a source form, since
+    /// a `jar` contributes compiled classes and runs no build script that could read a feature.
+    ///
+    /// The single spelling of that rule, asked once where a manifest is validated and once where a
+    /// `--features` selection is resolved. Exhaustive on purpose: a future dependency form has to
+    /// answer here rather than inherit whichever side of the question the two callers assumed.
+    const fn accepts_features(&self) -> bool {
+        match self {
+            Self::Jar(_) => false,
+            Self::Git(_) | Self::Path(_) => true,
+        }
+    }
+
+    /// The value-level checks on [`features`](Dependency::features): every name is non-empty, none
+    /// is the reserved `default`, and none carries the cross-package `/`.
+    ///
+    /// `default` is a resolution directive, never a queryable feature (see
+    /// [`Manifest::resolve_build_features`], which drops it); `default-features` is how this entry
+    /// says whether the dependency resolves its own list. A `/` is rejected because this list names
+    /// features of the dependency itself — `a/b` here would read as a package the dependency's own
+    /// manifest never mentions, so the name is a mistake rather than a route.
+    ///
+    /// # Errors
+    /// [`DependencyError::Empty`] for an empty name, [`DependencyError::ReservedFeature`] for
+    /// `default`, [`DependencyError::CrossFeature`] for a name containing `/`.
+    pub fn validate_features(&self, name: &str) -> Result<(), DependencyError> {
+        for feature in self.features() {
+            if feature.is_empty() {
+                return Err(DependencyError::Empty {
+                    name: name.to_owned(),
+                    field: "features",
+                });
+            }
+            if feature == DEFAULT_BUILD_FEATURE {
+                return Err(DependencyError::ReservedFeature {
+                    name: name.to_owned(),
+                    feature: feature.clone(),
+                });
+            }
+            if feature.contains(FEATURE_SEPARATOR) {
+                return Err(DependencyError::CrossFeature {
+                    name: name.to_owned(),
+                    feature: feature.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -906,7 +1307,66 @@ impl Manifest {
             dep.validate(name).map_err(ValidationError::Dependency)?;
         }
 
+        // `[features]`: every local name a `default`/`enables` list references must itself be a
+        // declared feature, and every `<dependency>/<feature>` entry must name a dependency that can
+        // actually receive one. The command-line `--features` selection is checked later against the
+        // same declared set by `resolve_build_features`; this is the manifest-internal half serde
+        // cannot express (an open-ended map has no closed variant set to reject unknown names at
+        // parse time).
+        for (feature, enables) in &self.features {
+            // A key containing `/` could never be enabled: every list entry carrying one is read as
+            // a cross-package reference, so the feature would be declared and unreachable.
+            if feature.contains(FEATURE_SEPARATOR) {
+                return Err(ValidationError::InvalidBuildFeatureName {
+                    feature: feature.clone(),
+                });
+            }
+            for entry in enables {
+                self.validate_feature_entry(feature, entry)?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Check one `[features]` list entry of the declared feature `feature` against what this
+    /// manifest declares: a local name must be a declared feature, and a cross-package reference
+    /// must name a dependency that can receive one.
+    fn validate_feature_entry(&self, feature: &str, entry: &str) -> Result<(), ValidationError> {
+        let reference =
+            FeatureRef::parse(entry).map_err(|reason| ValidationError::InvalidFeatureRef {
+                feature: feature.to_owned(),
+                entry: entry.to_owned(),
+                reason,
+            })?;
+        match reference {
+            FeatureRef::Local(name) => {
+                if self.features.contains_key(name) {
+                    Ok(())
+                } else {
+                    Err(ValidationError::UndeclaredBuildFeature {
+                        feature: feature.to_owned(),
+                        enables: name.to_owned(),
+                    })
+                }
+            }
+            // Routing to something with no build script is always a mistake, and the graph relies
+            // on it: a `jar` name reaching the router would be ambiguous, since a jar with a
+            // companion `sources` archive contributes two edges under one name.
+            FeatureRef::Dependency { dependency, .. } => match self.dependencies.get(dependency) {
+                Some(dep) if dep.accepts_features() => Ok(()),
+                Some(_) => Err(ValidationError::BinaryFeatureDependency {
+                    feature: feature.to_owned(),
+                    entry: entry.to_owned(),
+                    dependency: dependency.to_owned(),
+                }),
+                None => Err(ValidationError::UndeclaredFeatureDependency {
+                    feature: feature.to_owned(),
+                    entry: entry.to_owned(),
+                    dependency: dependency.to_owned(),
+                }),
+            },
+        }
     }
 
     /// The project's resolved language [`FeatureSet`] — the `[package] features` list closed under
@@ -916,6 +1376,129 @@ impl Manifest {
     /// (`compact-source-file` / `module-import` fire for a feature the set lacks).
     pub fn feature_set(&self) -> FeatureSet {
         FeatureSet::resolve(&self.package.features)
+    }
+
+    /// Resolve the effective **build features** of this project from an already-chosen `seed`: the
+    /// additive closure of `seed` over `[features]`, with cross-package entries routed out.
+    ///
+    /// The one closure every project goes through, whoever chose the seed. At the root that is the
+    /// command line ([`resolve_build_features`](Self::resolve_build_features), which calls this);
+    /// for a dependency it is what the `[dependencies]` entries aimed at it asked for, unioned with
+    /// what their `[features]` tables forwarded. `defaults` says whether this project's own
+    /// `default` list joins the seed — the root's `--no-default-features`, and a dependency's
+    /// [`default-features`](Dependency::default_features).
+    ///
+    /// A `<dependency>/<feature>` entry lands in [`ResolvedBuildFeatures::dependencies`] instead of
+    /// the queryable set, so `build.feature("render/vulkan")` is false by construction. The reserved
+    /// `default` key is a directive, not a feature, so it never appears in the result either. A seed
+    /// name this manifest does not declare stays queryable and simply expands to nothing: a
+    /// dependency legitimately receives names from a project that knows more about it than its own
+    /// (possibly absent) `[features]` table does.
+    pub fn expand_build_features<I>(&self, seed: I, defaults: bool) -> ResolvedBuildFeatures
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let declared = &self.features;
+        let mut pending: Vec<String> = seed.into_iter().collect();
+        if defaults && let Some(list) = declared.get(DEFAULT_BUILD_FEATURE) {
+            pending.extend(list.iter().cloned());
+        }
+
+        // Close over the enables map with a worklist: a name expands exactly once, when it first
+        // joins the set, so the fixpoint costs one pass per reachable feature. An undeclared name
+        // still joins and simply expands to nothing.
+        let mut resolved = ResolvedBuildFeatures::default();
+        while let Some(entry) = pending.pop() {
+            // A malformed entry cannot route anywhere, and `validate` has already rejected every
+            // shape a manifest can write, so treat the leftovers as opaque local names rather than
+            // inventing a failure mode a dependency's arriving set would have to handle.
+            if let Ok(FeatureRef::Dependency {
+                dependency,
+                feature,
+            }) = FeatureRef::parse(&entry)
+            {
+                resolved
+                    .dependencies
+                    .entry(dependency.to_owned())
+                    .or_default()
+                    .insert(feature.to_owned());
+                continue;
+            }
+            if resolved.features.contains(&entry) {
+                continue;
+            }
+            if let Some(enables) = declared.get(&entry) {
+                pending.extend(enables.iter().cloned());
+            }
+            resolved.features.insert(entry);
+        }
+
+        // `default` is a resolution directive, not a queryable feature — drop it after expansion.
+        resolved.features.remove(DEFAULT_BUILD_FEATURE);
+        resolved
+    }
+
+    /// Resolve the **root** project's build features for a run: the command-line selection, closed
+    /// over `[features]` by [`expand_build_features`](Self::expand_build_features).
+    ///
+    /// Mirrors Cargo's `--features` / `--all-features` / `--no-default-features`:
+    /// - the base set is every declared feature (`all`) or nothing, plus the `default` key's list
+    ///   unless `no_default`;
+    /// - the `selected` entries are unioned in and the whole is closed to a fixpoint (like
+    ///   [`FeatureSet::resolve`]);
+    /// - `all` takes precedence over `no_default` — `default` is itself a declared key, so its list
+    ///   expands from the base set even when the directive is suppressed.
+    ///
+    /// A `selected` entry may be a cross-package `<dependency>/<feature>` reference, as in Cargo's
+    /// `--features serde/std`; it is routed rather than enabled here.
+    ///
+    /// # Errors
+    /// [`BuildFeatureError::UnknownSelected`] if a `selected` feature is not declared,
+    /// [`BuildFeatureError::UnknownSelectedDependency`] if a cross-package entry names something
+    /// other than a `git`/`path` dependency, [`BuildFeatureError::InvalidSelected`] for a malformed
+    /// entry. A manifest validated by [`Manifest::validate`] guarantees every `default`/`enables`
+    /// reference is sound, so the closure itself never encounters a bad name.
+    pub fn resolve_build_features(
+        &self,
+        selected: &[String],
+        all: bool,
+        no_default: bool,
+    ) -> Result<ResolvedBuildFeatures, BuildFeatureError> {
+        for name in selected {
+            match FeatureRef::parse(name) {
+                Ok(FeatureRef::Local(local)) => {
+                    if !self.features.contains_key(local) {
+                        return Err(BuildFeatureError::UnknownSelected { name: name.clone() });
+                    }
+                }
+                Ok(FeatureRef::Dependency { dependency, .. }) => {
+                    if !self
+                        .dependencies
+                        .get(dependency)
+                        .is_some_and(Dependency::accepts_features)
+                    {
+                        return Err(BuildFeatureError::UnknownSelectedDependency {
+                            name: name.clone(),
+                            dependency: dependency.to_owned(),
+                        });
+                    }
+                }
+                Err(reason) => {
+                    return Err(BuildFeatureError::InvalidSelected {
+                        name: name.clone(),
+                        reason,
+                    });
+                }
+            }
+        }
+        // The base set, then the explicit selection on top.
+        let mut seed: Vec<String> = if all {
+            self.features.keys().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        seed.extend(selected.iter().cloned());
+        Ok(self.expand_build_features(seed, !no_default))
     }
 
     /// The names of every `jar` `[dependencies]` entry that opted into recursive **bundled-jar**
@@ -1047,6 +1630,49 @@ pub enum ValidationError {
     /// or conflicting git refs. Wraps the classification [`DependencyError`] so the two layers share a
     /// single message and the variant set never drifts apart.
     Dependency(DependencyError),
+    /// A `[features]` entry's `default`/`enables` list references a feature that is not itself a
+    /// declared key.
+    UndeclaredBuildFeature {
+        /// The declared feature (or `default`) whose list carries the bad reference.
+        feature: String,
+        /// The referenced name that is not a declared feature.
+        enables: String,
+    },
+    /// A `[features]` **key** contains `/`, which is reserved for the cross-package
+    /// `<dependency>/<feature>` form — such a feature could never be enabled by name.
+    InvalidBuildFeatureName {
+        /// The unreachable feature name.
+        feature: String,
+    },
+    /// A `[features]` list entry is neither a feature name nor a well-formed
+    /// `<dependency>/<feature>` reference (see [`FeatureRef::parse`]).
+    InvalidFeatureRef {
+        /// The declared feature (or `default`) whose list carries the bad entry.
+        feature: String,
+        /// The offending entry, as written.
+        entry: String,
+        /// Why the shape was rejected.
+        reason: FeatureRefError,
+    },
+    /// A `<dependency>/<feature>` entry names a dependency this manifest does not declare.
+    UndeclaredFeatureDependency {
+        /// The declared feature (or `default`) whose list carries the entry.
+        feature: String,
+        /// The offending entry, as written.
+        entry: String,
+        /// The undeclared dependency name.
+        dependency: String,
+    },
+    /// A `<dependency>/<feature>` entry names a `jar` dependency, which runs no build script that
+    /// could read a feature.
+    BinaryFeatureDependency {
+        /// The declared feature (or `default`) whose list carries the entry.
+        feature: String,
+        /// The offending entry, as written.
+        entry: String,
+        /// The `jar` dependency name.
+        dependency: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -1080,6 +1706,38 @@ impl fmt::Display for ValidationError {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
             Self::Dependency(err) => write!(f, "{err}"),
+            Self::UndeclaredBuildFeature { feature, enables } => write!(
+                f,
+                "`[features] {feature}` enables `{enables}`, which is not a declared feature"
+            ),
+            Self::InvalidBuildFeatureName { feature } => write!(
+                f,
+                "`[features]` declares `{feature}`, but `/` is reserved for the \
+                 `<dependency>/<feature>` form, so the feature could never be enabled"
+            ),
+            Self::InvalidFeatureRef {
+                feature,
+                entry,
+                reason,
+            } => write!(f, "`[features] {feature}` enables `{entry}`: {reason}"),
+            Self::UndeclaredFeatureDependency {
+                feature,
+                entry,
+                dependency,
+            } => write!(
+                f,
+                "`[features] {feature}` enables `{entry}`, but `{dependency}` is not a declared \
+                 `[dependencies]` entry"
+            ),
+            Self::BinaryFeatureDependency {
+                feature,
+                entry,
+                dependency,
+            } => write!(
+                f,
+                "`[features] {feature}` enables `{entry}`, but `{dependency}` is a `jar` \
+                 dependency, which runs no build script that could read a feature"
+            ),
         }
     }
 }
@@ -1088,6 +1746,7 @@ impl Error for ValidationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Dependency(err) => Some(err),
+            Self::InvalidFeatureRef { reason, .. } => Some(reason),
             _ => None,
         }
     }
@@ -1474,6 +2133,331 @@ mod tests {
     }
 
     #[test]
+    fn parses_build_features() {
+        // `[features]` is an open-ended map: feature name -> the features it enables.
+        let m: Manifest =
+            toml::from_str("[features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        assert_eq!(
+            m.features.get("default"),
+            Some(&alloc::vec!["server".to_owned()])
+        );
+        assert!(m.features.contains_key("server"));
+        assert!(m.features.contains_key("client"));
+    }
+
+    #[test]
+    fn build_features_reject_the_old_build_section() {
+        // Features moved from `[build.features]` to the top-level `[features]` (Cargo's layout).
+        // `Build`'s `deny_unknown_fields` turns a manifest left at the old location into a parse
+        // error rather than a silently empty feature set, so the migration is loud.
+        assert!(toml::from_str::<Manifest>("[build.features]\nserver = []\n").is_err());
+    }
+
+    #[test]
+    fn build_features_default_selection() {
+        // No selection resolves to the `default` list, closed, with the directive name dropped.
+        let m: Manifest =
+            toml::from_str("[features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        let set = m.resolve_build_features(&[], false, false).unwrap();
+        assert_eq!(set.into_features(), BTreeSet::from(["server".to_owned()]));
+    }
+
+    #[test]
+    fn build_features_are_additive() {
+        // `--features client` keeps the default `server` (a feature never subtracts) -> both.
+        let m: Manifest =
+            toml::from_str("[features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        let set = m
+            .resolve_build_features(&["client".to_owned()], false, false)
+            .unwrap();
+        assert_eq!(
+            set.into_features(),
+            BTreeSet::from(["client".to_owned(), "server".to_owned()])
+        );
+    }
+
+    #[test]
+    fn build_features_all_and_no_default() {
+        let m: Manifest =
+            toml::from_str("[features]\ndefault = [\"server\"]\nserver = []\nclient = []\n")
+                .unwrap();
+        // `--all-features`: every declared feature, the `default` directive dropped.
+        let all = m.resolve_build_features(&[], true, false).unwrap();
+        assert_eq!(
+            all.into_features(),
+            BTreeSet::from(["client".to_owned(), "server".to_owned()])
+        );
+        // `--no-default-features --features client`: client alone.
+        let client_only = m
+            .resolve_build_features(&["client".to_owned()], false, true)
+            .unwrap();
+        assert_eq!(
+            client_only.into_features(),
+            BTreeSet::from(["client".to_owned()])
+        );
+        // `--all-features` overrides `--no-default-features`.
+        let both = m.resolve_build_features(&[], true, true).unwrap();
+        assert_eq!(
+            both.into_features(),
+            BTreeSet::from(["client".to_owned(), "server".to_owned()])
+        );
+    }
+
+    #[test]
+    fn build_features_closure_over_enables() {
+        // A feature that enables others pulls them in transitively.
+        let m: Manifest =
+            toml::from_str("[features]\ndefault = []\nfull = [\"a\"]\na = [\"b\"]\nb = []\n")
+                .unwrap();
+        let set = m
+            .resolve_build_features(&["full".to_owned()], false, false)
+            .unwrap();
+        assert_eq!(
+            set.into_features(),
+            BTreeSet::from(["a".to_owned(), "b".to_owned(), "full".to_owned()])
+        );
+    }
+
+    #[test]
+    fn build_features_unknown_selected_is_error() {
+        let m: Manifest = toml::from_str("[features]\nserver = []\n").unwrap();
+        assert_eq!(
+            m.resolve_build_features(&["client".to_owned()], false, false),
+            Err(BuildFeatureError::UnknownSelected {
+                name: "client".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn build_features_undeclared_reference_is_validate_error() {
+        // `default` references `server`, which is not itself a declared feature.
+        let m: Manifest = toml::from_str("[features]\ndefault = [\"server\"]\n").unwrap();
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::UndeclaredBuildFeature {
+                feature: "default".to_owned(),
+                enables: "server".to_owned(),
+            })
+        );
+    }
+
+    /// A manifest with one `path` dependency and one `jar`, for the cross-package form.
+    fn cross_manifest(features: &str) -> Manifest {
+        toml::from_str(&alloc::format!(
+            "[features]\n{features}\n\
+             [dependencies]\n\
+             render = {{ path = \"../render\" }}\n\
+             gson = {{ jar = \"libs/gson.jar\" }}\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn feature_refs_classify_by_shape() {
+        assert_eq!(FeatureRef::parse("gpu"), Ok(FeatureRef::Local("gpu")));
+        assert_eq!(
+            FeatureRef::parse("render/vulkan"),
+            Ok(FeatureRef::Dependency {
+                dependency: "render",
+                feature: "vulkan",
+            })
+        );
+        // Empty either side, and a second `/`: forwarding through an intermediate package is that
+        // package's own business, so `a/b/c` is a typo rather than a chain.
+        assert_eq!(FeatureRef::parse(""), Err(FeatureRefError::Empty));
+        assert_eq!(FeatureRef::parse("render/"), Err(FeatureRefError::Empty));
+        assert_eq!(FeatureRef::parse("/vulkan"), Err(FeatureRefError::Empty));
+        assert_eq!(
+            FeatureRef::parse("a/b/c"),
+            Err(FeatureRefError::NestedSeparator)
+        );
+        // The directive is never enableable by name, from any direction.
+        assert_eq!(
+            FeatureRef::parse("render/default"),
+            Err(FeatureRefError::ReservedFeature)
+        );
+    }
+
+    #[test]
+    fn cross_package_features_are_routed_not_queryable() {
+        // `gpu` is this project's feature; `render/vulkan` is a directive aimed at the dependency,
+        // so it must not come back as something `build.feature("…")` could see.
+        let m =
+            cross_manifest("default = [\"gpu\"]\ngpu = [\"render/vulkan\", \"fast\"]\nfast = []");
+        m.validate().unwrap();
+        let resolved = m.resolve_build_features(&[], false, false).unwrap();
+        assert_eq!(
+            resolved.features(),
+            &BTreeSet::from(["fast".to_owned(), "gpu".to_owned()])
+        );
+        assert_eq!(
+            resolved.dependency("render"),
+            Some(&BTreeSet::from(["vulkan".to_owned()]))
+        );
+        assert_eq!(resolved.dependency("gson"), None);
+    }
+
+    #[test]
+    fn cross_package_features_are_selectable_on_the_command_line() {
+        // Cargo's `--features serde/std`: routed exactly like a `[features]` entry, and the local
+        // set stays empty because nothing local was selected.
+        let m = cross_manifest("gpu = []");
+        let resolved = m
+            .resolve_build_features(&["render/vulkan".to_owned()], false, true)
+            .unwrap();
+        assert!(resolved.features().is_empty());
+        assert_eq!(
+            resolved.dependency("render"),
+            Some(&BTreeSet::from(["vulkan".to_owned()]))
+        );
+        // A dependency that cannot run a build script, and one that does not exist at all, are the
+        // same error: neither can receive a feature.
+        assert_eq!(
+            m.resolve_build_features(&["gson/pretty".to_owned()], false, false),
+            Err(BuildFeatureError::UnknownSelectedDependency {
+                name: "gson/pretty".to_owned(),
+                dependency: "gson".to_owned(),
+            })
+        );
+        assert_eq!(
+            m.resolve_build_features(&["nope/x".to_owned()], false, false),
+            Err(BuildFeatureError::UnknownSelectedDependency {
+                name: "nope/x".to_owned(),
+                dependency: "nope".to_owned(),
+            })
+        );
+        assert_eq!(
+            m.resolve_build_features(&["render/default".to_owned()], false, false),
+            Err(BuildFeatureError::InvalidSelected {
+                name: "render/default".to_owned(),
+                reason: FeatureRefError::ReservedFeature,
+            })
+        );
+    }
+
+    #[test]
+    fn all_features_reaches_cross_package_entries() {
+        // `--all-features` seeds every declared key, so whatever they route is routed too.
+        let m = cross_manifest("gpu = [\"render/vulkan\"]\naudio = [\"render/openal\"]");
+        assert_eq!(
+            m.resolve_build_features(&[], true, false)
+                .unwrap()
+                .dependency("render"),
+            Some(&BTreeSet::from(["openal".to_owned(), "vulkan".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn cross_package_features_validate_their_dependency() {
+        assert_eq!(
+            cross_manifest("gpu = [\"missing/x\"]").validate(),
+            Err(ValidationError::UndeclaredFeatureDependency {
+                feature: "gpu".to_owned(),
+                entry: "missing/x".to_owned(),
+                dependency: "missing".to_owned(),
+            })
+        );
+        // A jar contributes compiled classes and runs no build script, so nothing there could read
+        // the feature — reject it rather than resolve to a silent no-op.
+        assert_eq!(
+            cross_manifest("gpu = [\"gson/pretty\"]").validate(),
+            Err(ValidationError::BinaryFeatureDependency {
+                feature: "gpu".to_owned(),
+                entry: "gson/pretty".to_owned(),
+                dependency: "gson".to_owned(),
+            })
+        );
+        assert_eq!(
+            cross_manifest("gpu = [\"render/\"]").validate(),
+            Err(ValidationError::InvalidFeatureRef {
+                feature: "gpu".to_owned(),
+                entry: "render/".to_owned(),
+                reason: FeatureRefError::Empty,
+            })
+        );
+    }
+
+    #[test]
+    fn a_feature_name_carrying_the_separator_is_rejected() {
+        // Every list entry containing `/` is read as a cross-package reference, so such a key could
+        // never be enabled — reject the declaration instead of leaving dead config behind.
+        let m: Manifest = toml::from_str("[features]\n\"a/b\" = []\n").unwrap();
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::InvalidBuildFeatureName {
+                feature: "a/b".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_dependency_features_list_rejects_the_cross_package_form() {
+        // That list names features of the dependency itself, as in Cargo. Routing onward is written
+        // in the receiving project's own `[features]`, so `a/b` here is a mistake, not a route.
+        let m: Manifest = toml::from_str(
+            "[dependencies]\nrender = { path = \"../render\", features = [\"shader/spirv\"] }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::Dependency(DependencyError::CrossFeature {
+                name: "render".to_owned(),
+                feature: "shader/spirv".to_owned(),
+            }))
+        );
+    }
+
+    #[test]
+    fn default_features_defaults_to_true_and_is_source_only() {
+        let m: Manifest = toml::from_str(
+            "[dependencies]\n\
+             plain = { path = \"../plain\" }\n\
+             bare = { path = \"../bare\", default-features = false }\n",
+        )
+        .unwrap();
+        assert!(m.dependencies["plain"].default_features());
+        assert!(!m.dependencies["bare"].default_features());
+        // A jar has no build script, so the key does not exist on that form at all.
+        assert!(
+            toml::from_str::<Manifest>(
+                "[dependencies]\nlib = { jar = \"libs/x.jar\", default-features = false }\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn expand_build_features_closes_an_arriving_set() {
+        // What a dependency node goes through: an arriving set closed over its own table, with its
+        // `default` list applied only when an incoming edge allows it. Names it never declared stay
+        // queryable — a project may know more about a dependency than its own table does.
+        let m: Manifest = toml::from_str(
+            "[features]\ndefault = [\"soft\"]\nsoft = []\nvulkan = [\"shader/spirv\", \"gpu\"]\n\
+             gpu = []\n[dependencies]\nshader = { path = \"../shader\" }\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let with_defaults = m.expand_build_features(["vulkan".to_owned()], true);
+        assert_eq!(
+            with_defaults.features(),
+            &BTreeSet::from(["gpu".to_owned(), "soft".to_owned(), "vulkan".to_owned()])
+        );
+        assert_eq!(
+            with_defaults.dependency("shader"),
+            Some(&BTreeSet::from(["spirv".to_owned()]))
+        );
+        let suppressed = m.expand_build_features(["vulkan".to_owned(), "opaque".to_owned()], false);
+        assert_eq!(
+            suppressed.features(),
+            &BTreeSet::from(["gpu".to_owned(), "opaque".to_owned(), "vulkan".to_owned()])
+        );
+    }
+
+    #[test]
     fn parses_toolchain_section() {
         use crate::toolchain::{Compiler, Distribution, Runtime};
 
@@ -1733,7 +2717,7 @@ mod tests {
         let m: Manifest = toml::from_str(
             r#"
             [dependencies]
-            fromgit = { git = "https://github.com/x/y", tag = "v1.2", dir = "core/src/main/java" }
+            fromgit = { git = "https://github.com/x/y", tag = "v1.2", dir = "core/src/main/java", features = ["hello"] }
             frompath = { path = "../sibling" }
             "#,
         )
@@ -1746,6 +2730,8 @@ mod tests {
                 tag: Some("v1.2".to_owned()),
                 rev: None,
                 dir: Some("core/src/main/java".to_owned()),
+                features: vec!["hello".to_owned()],
+                default_features: None,
             }))
         );
         assert_eq!(
@@ -1753,6 +2739,8 @@ mod tests {
             Some(&Dependency::Path(PathDependency {
                 path: "../sibling".to_owned(),
                 dir: None,
+                features: Vec::new(),
+                default_features: None,
             }))
         );
     }
@@ -1765,6 +2753,8 @@ mod tests {
             tag,
             rev,
             dir: None,
+            features: Vec::new(),
+            default_features: None,
         };
         assert_eq!(make(None, None, None).git_ref("r"), Ok(GitRef::Default));
         assert_eq!(
@@ -1928,6 +2918,8 @@ mod tests {
                     Dependency::Path(PathDependency {
                         path: "../sibling".to_owned(),
                         dir: None,
+                        features: Vec::new(),
+                        default_features: None,
                     }),
                 ),
             ]),
@@ -1952,6 +2944,8 @@ mod tests {
                 tag: Some("v1".to_owned()),
                 rev: None,
                 dir: None,
+                features: Vec::new(),
+                default_features: None,
             }),
         );
         assert_eq!(
@@ -1975,6 +2969,99 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.validate(), Ok(()));
+    }
+
+    #[test]
+    fn dependency_features_are_read_off_both_source_forms() {
+        // The graph builders reach every form through this one accessor, so a `jar` — which has no
+        // build script to query them — has to answer with an empty list rather than be special-cased
+        // at each call site.
+        let m: Manifest = toml::from_str(
+            r#"
+            [dependencies]
+            g = { git = "https://github.com/x/y", features = ["hello"] }
+            p = { path = "../sibling", features = ["hello", "world"] }
+            j = { jar = "libs/x.jar" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(m.validate(), Ok(()));
+        assert_eq!(m.dependencies["g"].features(), ["hello"]);
+        assert_eq!(m.dependencies["p"].features(), ["hello", "world"]);
+        assert!(m.dependencies["j"].features().is_empty());
+    }
+
+    #[test]
+    fn jar_dependency_rejects_features_at_parse() {
+        // A jar contributes compiled classes and never runs a build script, so `features` on it
+        // could only ever be a silent no-op. `JarDependency` simply does not carry the field, which
+        // the untagged variants' `deny_unknown_fields` turns into a parse error for free.
+        let parsed: Result<Manifest, _> = toml::from_str(
+            "[dependencies]\nj = { jar = \"libs/x.jar\", features = [\"hello\"] }\n",
+        );
+        assert!(
+            parsed.is_err(),
+            "`features` on a jar dependency should not parse"
+        );
+    }
+
+    #[test]
+    fn dependency_features_reject_empty_and_reserved_names() {
+        let empty: Manifest =
+            toml::from_str("[dependencies]\np = { path = \"../s\", features = [\"\"] }\n").unwrap();
+        assert_eq!(
+            empty.validate(),
+            Err(ValidationError::Dependency(DependencyError::Empty {
+                name: "p".to_owned(),
+                field: "features",
+            }))
+        );
+
+        // Nothing expands a dependency's list, so accepting `default` here would be the one way to
+        // make `build.feature("default")` true anywhere.
+        let reserved: Manifest =
+            toml::from_str("[dependencies]\np = { path = \"../s\", features = [\"default\"] }\n")
+                .unwrap();
+        assert_eq!(
+            reserved.validate(),
+            Err(ValidationError::Dependency(
+                DependencyError::ReservedFeature {
+                    name: "p".to_owned(),
+                    feature: "default".to_owned(),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn absent_frontend_defaults_to_vanilla() {
+        let m: Manifest = toml::from_str("[build]\nrelease = 21\n").unwrap();
+        assert_eq!(m.build.frontend, FrontendKind::Vanilla {});
+    }
+
+    #[test]
+    fn explicit_vanilla_frontend_parses() {
+        // The internally-tagged enum with `deny_unknown_fields` has serde edge cases, so the
+        // explicit stanza is exercised directly rather than assumed to inherit BuildScript's
+        // behavior.
+        let m: Manifest = toml::from_str("[build.frontend]\ntype = \"vanilla\"\n").unwrap();
+        assert_eq!(m.build.frontend, FrontendKind::Vanilla {});
+        assert_eq!(m.build.frontend.tag_name(), "vanilla");
+    }
+
+    #[test]
+    fn unknown_frontend_type_is_a_parse_error() {
+        // The closed enum is the extension seam: an unimplemented frontend must be rejected at
+        // parse, not silently accepted or defaulted.
+        let parsed: Result<Manifest, _> = toml::from_str("[build.frontend]\ntype = \"macro\"\n");
+        assert!(parsed.is_err(), "unknown frontend type should not parse");
+    }
+
+    #[test]
+    fn frontend_rejects_unknown_field() {
+        let parsed: Result<Manifest, _> =
+            toml::from_str("[build.frontend]\ntype = \"vanilla\"\nbogus = 1\n");
+        assert!(parsed.is_err(), "unknown frontend field should not parse");
     }
 
     #[test]

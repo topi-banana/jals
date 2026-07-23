@@ -21,9 +21,9 @@ use jals_storage::{
 
 use crate::assemble::{CompileClasspathEntry, CompileClasspathFile, ProjectAssemblyError};
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, GraphEdge, GraphError,
-    GraphMetadata, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode,
-    ResolvedProjectGraph, SourceNode,
+    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
+    GraphError, GraphMetadata, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph,
+    ResolvedNode, ResolvedProjectGraph, SourceNode,
 };
 
 /// Native entry point for recursive dependency graph discovery.
@@ -274,7 +274,9 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        self.visit_source(parent.clone(), name, acquired).await?;
+                        let declared = DeclaredEdgeFeatures::of(dependency);
+                        self.visit_source(parent.clone(), name, declared, acquired)
+                            .await?;
                     }
                     Dependency::Git(git) => {
                         let acquired = match self.acquire_git(declaring, name, git).await {
@@ -284,7 +286,9 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        self.visit_source(parent.clone(), name, acquired).await?;
+                        let declared = DeclaredEdgeFeatures::of(dependency);
+                        self.visit_source(parent.clone(), name, declared, acquired)
+                            .await?;
                     }
                 }
             }
@@ -296,10 +300,13 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
+        declared: DeclaredEdgeFeatures,
         mut acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let checkout = acquired.checkout.take();
-        let result = self.visit_source_inner(parent, dependency, acquired).await;
+        let result = self
+            .visit_source_inner(parent, dependency, declared, acquired)
+            .await;
         let cleanup = if let Some(checkout) = checkout {
             jals_exec::tokio_rt::on_blocking_pool(move || {
                 checkout
@@ -328,6 +335,7 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
+        declared: DeclaredEdgeFeatures,
         acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let incoming = GraphEdge {
@@ -335,6 +343,8 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: acquired.id.clone(),
             recursive: false,
+            features: declared.features,
+            default_features: declared.default_features,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -380,6 +390,7 @@ impl GraphBuilder {
         self.seen_nodes.insert(acquired.id.clone());
         self.nodes.push(ResolvedNode {
             id: acquired.id.clone(),
+            location: Self::node_location(&acquired),
             body,
         });
         self.states
@@ -400,6 +411,15 @@ impl GraphBuilder {
             .insert(acquired.id.clone(), VisitState::Complete);
         self.order.push(index);
         Ok(())
+    }
+
+    /// How a diagnostic names this node. A Git dependency lives in a temporary checkout whose path
+    /// means nothing to a reader, so it is named by the repository it was cloned from instead.
+    fn node_location(acquired: &AcquiredSource) -> String {
+        acquired.confinement.as_ref().map_or_else(
+            || acquired.root.display().to_string(),
+            |confinement| confinement.stable_repository.clone(),
+        )
     }
 
     async fn visit_binary(
@@ -445,11 +465,14 @@ impl GraphBuilder {
             };
             (NodeId::from_identity(identity.as_bytes()), input)
         };
+        let binary = DeclaredEdgeFeatures::binary();
         self.edges.push(GraphEdge {
             from: parent,
             dependency: dependency.to_owned(),
             to: id.clone(),
             recursive,
+            features: binary.features,
+            default_features: binary.default_features,
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());
@@ -457,6 +480,7 @@ impl GraphBuilder {
         let index = self.nodes.len();
         self.nodes.push(ResolvedNode {
             id,
+            location: locator.to_owned(),
             body: NodeBody::Binary(input),
         });
         self.order.push(index);
@@ -1108,9 +1132,19 @@ impl GraphBuilder {
 #[cfg(test)]
 mod tests {
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
+    use jals_config::ResolvedBuildFeatures;
     use jals_storage::{CodeTree, MemoryStorage};
 
     use super::*;
+
+    /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
+    struct UnreachableFetcher;
+
+    impl jals_classpath::Fetcher for UnreachableFetcher {
+        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+            panic!("this graph must not fetch, but asked for `{locator}`")
+        }
+    }
 
     #[test]
     fn scheduler_invokes_every_node_kind_once() {
@@ -1125,22 +1159,26 @@ mod tests {
             let nodes = vec![
                 ResolvedNode {
                     id: NodeId::from_identity(b"binary"),
+                    location: "https://example.invalid/dependency.jar".to_owned(),
                     body: NodeBody::Binary(BinaryInput::External {
                         locator: "https://example.invalid/dependency.jar".to_owned(),
                     }),
                 },
                 ResolvedNode {
                     id: NodeId::from_identity(b"plain"),
+                    location: "plain".to_owned(),
                     body: NodeBody::PlainSource(source()),
                 },
                 ResolvedNode {
                     id: NodeId::from_identity(b"jals"),
+                    location: "jals".to_owned(),
                     body: NodeBody::JalsSource {
                         source: source(),
                         manifest: Box::new(Manifest::default()),
                     },
                 },
             ];
+            let exec = Exec::inline();
             let graph = ResolvedProjectGraph {
                 nodes,
                 edges: Vec::new(),
@@ -1152,12 +1190,84 @@ mod tests {
             }
             .preprocess(
                 storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
+                crate::graph::GraphPreprocess {
+                    exec: &exec,
+                    fetcher: &UnreachableFetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: NetworkPolicy::Offline,
+                },
             )
             .await
             .unwrap();
             assert_eq!(graph.exports.len(), 3);
         });
+    }
+
+    #[test]
+    fn a_path_dependency_edge_features_reach_its_build_script() {
+        // The per-node union lives in `graph.rs` and is shared, but reading `features` off a
+        // `[dependencies]` entry and putting it on the edge is written once here and once in
+        // `memory.rs`. Covering only the memory builder would let an omission on this side ship
+        // silently, since nothing else observes the difference.
+        jals_exec::tokio_rt::run(|exec| async move {
+            let project = tempfile::TempDir::new().unwrap();
+            let write = |path: &str, contents: &str| {
+                let path = project.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, contents).unwrap();
+            };
+            write(
+                "dep/jals.toml",
+                "[features]\nhello = []\n\
+                 [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+            );
+            write(
+                "dep/build.rhai",
+                r#"
+                    for name in ["hello", "root-only"] {
+                        if build.feature(name) {
+                            let source = output.write_text(name + ".java", "class X {}");
+                            build.add_source(source);
+                        }
+                    }
+                "#,
+            );
+            let root: Manifest =
+                "[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n"
+                    .parse()
+                    .unwrap();
+
+            let mut storage = MemoryStorage::memory(CodeTree::default());
+            let graph =
+                NativeProjectGraph::discover(&root, project.path(), &exec, NetworkPolicy::Offline)
+                    .await
+                    .unwrap()
+                    .preprocess(
+                        storage.artifacts_mut(),
+                        crate::graph::GraphPreprocess {
+                            exec: &exec,
+                            fetcher: &UnreachableFetcher,
+                            // A root selection the dependency must not inherit.
+                            environment: &BuildScriptEnvironment::new()
+                                .with_features(BTreeSet::from(["root-only".to_owned()])),
+                            root_features: &ResolvedBuildFeatures::default(),
+                            limits: &BuildScriptLimits::default(),
+                            network: NetworkPolicy::Offline,
+                        },
+                    )
+                    .await
+                    .unwrap();
+
+            let generated: Vec<String> = graph
+                .exports
+                .values()
+                .flat_map(|exports| exports.sources.iter())
+                .filter_map(|file| file.path.name().map(ToString::to_string))
+                .collect();
+            assert_eq!(generated, ["hello.java"]);
+        })
+        .unwrap();
     }
 }

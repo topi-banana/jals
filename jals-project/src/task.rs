@@ -16,13 +16,13 @@ use jals_build::task::{
 };
 use jals_classpath::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
-    NetworkPolicy, SourceTree, SourceTreeExtraction, SourceTreeLimits,
+    LibrarySource, NetworkPolicy, SourceTree, SourceTreeExtraction, SourceTreeLimits,
 };
 use jals_config::Manifest;
 use jals_exec::Exec;
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, Change, ContentDigest, DirKey, FileKey,
-    ProjectStorage, ProjectView, RelativePath, SourceBackend,
+    ProjectStorage, ProjectView, ProvenanceFold, RelativePath, SourceBackend,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,7 +32,15 @@ use serde_json::Value;
 pub enum BuildTaskHost {
     NoTerminals,
     ArtifactsOnly,
+    /// A host that owns a mutable project. Publications are applied to its source tree.
     Project,
+    /// A host reading an immutable snapshot, such as a dependency node in the project graph.
+    ///
+    /// Every terminal is evaluated, but publications are only *returned* — this host writes nothing
+    /// back, so the caller projects them into its own address space (the consumer's verified cache)
+    /// instead of the snapshot they were declared against. That is what lets a dependency declare
+    /// `publish_tree` while its snapshot stays byte-identical.
+    Snapshot,
 }
 
 /// One source tree ready for transactional publication by the root host.
@@ -128,6 +136,19 @@ pub struct RootBuildScriptOptions<'a> {
     pub publications: SourcePublication,
 }
 
+/// Identity of one memoized snapshot task execution.
+///
+/// The three fields are exactly what can change its result, so they are what its cache record is
+/// keyed on. They travel together because keying on a subset silently serves a stale execution.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotTaskOptions<'a> {
+    /// Stable identity of the project the plan belongs to — a graph node's digest.
+    pub identity: ContentDigest,
+    /// The build features the plan was produced under.
+    pub features: &'a BTreeSet<String>,
+    pub runtime: TaskRuntime,
+}
+
 /// Root build-script preparation, task, or storage failure.
 #[derive(Debug)]
 pub enum RootBuildScriptError {
@@ -206,6 +227,38 @@ struct OwnerState {
 struct OwnedFile {
     path: String,
     digest: String,
+}
+
+/// Wire version of a memoized snapshot execution. Bump it whenever the record's meaning changes for
+/// unchanged bytes; a mismatch is a miss, never a misread.
+const TASK_EXECUTION_VERSION: u32 = 1;
+
+/// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
+///
+/// Artifacts are named by [`CacheKey::to_token`], not copied — the bytes already live in the same
+/// cache under those keys, and a hit re-verifies that every one of them is still there before it is
+/// trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskExecutionState {
+    version: u32,
+    classpath: Vec<String>,
+    publications: Vec<PublishedTree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishedTree {
+    owner: String,
+    destination: String,
+    files: Vec<PublishedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishedFile {
+    path: String,
+    artifact: String,
 }
 
 impl BuildTaskExecutor {
@@ -366,6 +419,22 @@ impl BuildTaskExecutor {
         Ok(())
     }
 
+    /// Whether a plan declares any exclusive source-tree publication.
+    fn declares_publication(plan: &TaskPlan) -> bool {
+        plan.terminals
+            .iter()
+            .any(|terminal| matches!(terminal, TaskTerminal::PublishTree { .. }))
+    }
+
+    /// Digest of the whole plan, which is what makes one execution's identity differ from another's.
+    fn plan_fingerprint(plan: &TaskPlan) -> Result<ContentDigest, BuildTaskRunError> {
+        serde_json::to_vec(plan)
+            .map(|bytes| ContentDigest::of(&bytes))
+            .map_err(|error| {
+                BuildTaskRunError::Terminal(format!("could not fingerprint task plan: {error}"))
+            })
+    }
+
     fn plan_publications_current(view: &ProjectView, script: &FileKey, plan: &TaskPlan) -> bool {
         let ownership = FileKey::parse(OWNERSHIP_FILE)
             .expect("build-task ownership path is a portable file key");
@@ -374,15 +443,9 @@ impl BuildTaskExecutor {
             .ok()
             .and_then(|file| Self::decode_ownership(file.bytes()).ok())
         else {
-            return !plan
-                .terminals
-                .iter()
-                .any(|terminal| matches!(terminal, TaskTerminal::PublishTree { .. }));
+            return !Self::declares_publication(plan);
         };
-        let Some(fingerprint) = serde_json::to_vec(plan)
-            .ok()
-            .map(|bytes| ContentDigest::of(&bytes).to_hex())
-        else {
+        let Ok(fingerprint) = Self::plan_fingerprint(plan).map(ContentDigest::to_hex) else {
             return false;
         };
         let mut declared: Vec<_> = plan
@@ -415,6 +478,160 @@ impl BuildTaskExecutor {
             && Self::published_trees_match(view, &state)
     }
 
+    /// Execute `plan` against an immutable snapshot, memoized on the verified cache.
+    ///
+    /// This is the dependency-graph entry point: the plan belongs to a project the caller may not
+    /// write to, so [`BuildTaskHost::Snapshot`] applies and the publications come back for the
+    /// caller to project into its own address space.
+    ///
+    /// A record is keyed on everything that can change the result — the project's stable identity,
+    /// the plan itself, and the features it was produced under — and is only trusted once every
+    /// artifact it names is confirmed present. Without this, opening an editor would re-run every
+    /// remap and decompile in the graph: the fetches inside a plan are cached individually, but the
+    /// transformations between them are not.
+    pub async fn execute_snapshot<F: Fetcher, C: CacheBackend>(
+        exec: &Exec,
+        fetcher: &F,
+        view: &ProjectView,
+        cache: &mut ArtifactCache<C>,
+        plan: &TaskPlan,
+        options: SnapshotTaskOptions<'_>,
+    ) -> Result<BuildTaskExecution, BuildTaskRunError> {
+        let provenance = Self::snapshot_provenance(plan, &options)?;
+        if let Some(execution) = Self::cached_execution(cache, provenance).await {
+            return Ok(execution);
+        }
+        let execution = Self::execute(
+            exec,
+            fetcher,
+            view,
+            cache,
+            plan,
+            options.runtime,
+            BuildTaskHost::Snapshot,
+        )
+        .await?;
+        Self::record_execution(cache, provenance, &execution).await?;
+        Ok(execution)
+    }
+
+    /// Identity of one memoized snapshot execution.
+    fn snapshot_provenance(
+        plan: &TaskPlan,
+        options: &SnapshotTaskOptions<'_>,
+    ) -> Result<ContentDigest, BuildTaskRunError> {
+        let mut fold = ProvenanceFold::new(b"jals.build-task.snapshot\0");
+        fold.version(TASK_EXECUTION_VERSION)
+            .digest(options.identity)
+            .digest(Self::plan_fingerprint(plan)?);
+        // The feature set is already ordered and deduplicated by `BTreeSet`, and every append is
+        // length-framed, so two different selections can never fold to one digest.
+        for feature in options.features {
+            fold.bytes(feature.as_bytes());
+        }
+        Ok(fold.finish())
+    }
+
+    /// A recorded execution whose every artifact is still present, or `None` — a partially evicted
+    /// record is a miss, not an error, because re-running reproduces it.
+    async fn cached_execution<C: CacheBackend>(
+        cache: &ArtifactCache<C>,
+        provenance: ContentDigest,
+    ) -> Option<BuildTaskExecution> {
+        let key = cache
+            .indexed_key(CacheNamespace::BuildTaskState, provenance)
+            .await
+            .ok()
+            .flatten()?;
+        let bytes = cache.lookup(&key).await.ok().flatten()?;
+        let state: TaskExecutionState = serde_json::from_slice(&bytes).ok()?;
+        if state.version != TASK_EXECUTION_VERSION {
+            return None;
+        }
+
+        let mut execution = BuildTaskExecution::default();
+        for artifact in &state.classpath {
+            execution
+                .classpath
+                .push(Self::present_artifact(cache, artifact).await?);
+        }
+        for tree in &state.publications {
+            let mut files = Vec::with_capacity(tree.files.len());
+            for file in &tree.files {
+                files.push(LibrarySource {
+                    path: RelativePath::parse(&file.path).ok()?,
+                    key: Self::present_artifact(cache, &file.artifact).await?,
+                });
+            }
+            execution.publications.push(BuildTaskPublication {
+                owner: tree.owner.clone(),
+                destination: DirKey::parse(&tree.destination).ok()?,
+                tree: SourceTree { files },
+            });
+        }
+        Some(execution)
+    }
+
+    /// The key a recorded token names, if its bytes are still in the cache.
+    async fn present_artifact<C: CacheBackend>(
+        cache: &ArtifactCache<C>,
+        artifact: &str,
+    ) -> Option<CacheKey> {
+        let key = CacheKey::from_token(artifact)?;
+        // A verified read, not a presence predicate: a truncated or corrupt artifact must miss the
+        // same way an absent one does.
+        cache.open_verified(&key).await.ok().flatten()?;
+        Some(key)
+    }
+
+    async fn record_execution<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
+        provenance: ContentDigest,
+        execution: &BuildTaskExecution,
+    ) -> Result<(), BuildTaskRunError> {
+        let state = TaskExecutionState {
+            version: TASK_EXECUTION_VERSION,
+            classpath: execution.classpath.iter().map(CacheKey::to_token).collect(),
+            publications: execution
+                .publications
+                .iter()
+                .map(|publication| PublishedTree {
+                    owner: publication.owner.clone(),
+                    destination: publication.destination.to_string(),
+                    files: publication
+                        .tree
+                        .files
+                        .iter()
+                        .map(|file| PublishedFile {
+                            path: file.path.to_string(),
+                            artifact: file.key.to_token(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let bytes = serde_json::to_vec(&state).map_err(|error| {
+            BuildTaskRunError::Terminal(format!(
+                "could not serialize build-task execution state: {error}"
+            ))
+        })?;
+        let key = CacheKey::new(
+            CacheNamespace::BuildTaskState,
+            provenance,
+            ContentDigest::of(&bytes),
+        );
+        cache.publish(&key, &bytes).await.map_err(|error| {
+            BuildTaskRunError::Terminal(format!(
+                "build-task execution state publish failed: {error:?}"
+            ))
+        })?;
+        cache.record_index(&key).await.map_err(|error| {
+            BuildTaskRunError::Terminal(format!(
+                "build-task execution state index update failed: {error:?}"
+            ))
+        })
+    }
+
     pub async fn execute<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
@@ -424,16 +641,20 @@ impl BuildTaskExecutor {
         runtime: TaskRuntime,
         host: BuildTaskHost,
     ) -> Result<BuildTaskExecution, BuildTaskRunError> {
-        if host != BuildTaskHost::Project
-            && plan
-                .terminals
-                .iter()
-                .any(|terminal| matches!(terminal, TaskTerminal::PublishTree { .. }))
-        {
-            return Err(BuildTaskRunError::UnsupportedPublication);
-        }
-        if host == BuildTaskHost::NoTerminals && !plan.terminals.is_empty() {
-            return Err(BuildTaskRunError::UnsupportedTerminal);
+        match host {
+            // Publication is checked before the blanket terminal refusal so a host that rejects
+            // everything still names the specific effect it would not have allowed anyway.
+            BuildTaskHost::NoTerminals | BuildTaskHost::ArtifactsOnly
+                if Self::declares_publication(plan) =>
+            {
+                return Err(BuildTaskRunError::UnsupportedPublication);
+            }
+            BuildTaskHost::NoTerminals if !plan.terminals.is_empty() => {
+                return Err(BuildTaskRunError::UnsupportedTerminal);
+            }
+            // `Project` writes its publications; `Snapshot` hands them back to a caller that will
+            // not. Neither is refused here, and neither is applied here — `execute` only evaluates.
+            _ => {}
         }
 
         let reachable = Self::reachable(plan);
@@ -541,10 +762,7 @@ impl BuildTaskExecutor {
             }
         };
 
-        let fingerprint = ContentDigest::of(&serde_json::to_vec(plan).map_err(|error| {
-            BuildTaskRunError::Terminal(format!("could not fingerprint task plan: {error}"))
-        })?)
-        .to_hex();
+        let fingerprint = Self::plan_fingerprint(plan)?.to_hex();
         let mut owner_names = BTreeSet::new();
         let mut destinations = BTreeSet::new();
         let build_root =

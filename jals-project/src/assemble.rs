@@ -199,37 +199,130 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
     async fn publish_source_node(&mut self, node: &crate::graph::ResolvedNode) {
         let source = node.source().expect("source node has a source payload");
-        for file in &source.authored_sources {
-            self.publish_source_file(&node.id, b"source", file).await;
-        }
+
+        // Run this dependency's own frontend over its authored and generated sources before
+        // publishing them, so a consumer's backend sees only lowered output — the same guarantee
+        // the CLI gives the root project. The frontend comes from *this node's* manifest, never
+        // the root's: a dependency is lowered under its own authority and must not be re-expanded
+        // by whoever depends on it.
+        self.publish_lowered_sources(node, source).await;
+
         for entry in &source.classpath {
             self.publish_classpath_entry(&node.id, entry).await;
         }
         if let Some(exports) = self.graph.exports.get(&node.id) {
-            for file in &exports.sources {
-                self.publish_source_file(&node.id, b"generated-source", file)
-                    .await;
-            }
             for file in &exports.classpath {
                 self.publish_classpath_file(&node.id, file).await;
             }
+            self.project_task_exports(&node.id, exports);
         }
     }
 
-    async fn publish_source_file(&mut self, node: &NodeId, category: &[u8], file: &CapturedFile) {
-        if !self
-            .published_sources
-            .insert((node.clone(), file.path.clone()))
+    /// Project a dependency's build-task output, which is already in this cache under its own keys.
+    ///
+    /// Unlike every other publication here there are no bytes to write: the task executor produced
+    /// these artifacts against the same verified cache, so the plan only has to name them.
+    fn project_task_exports(&mut self, node: &NodeId, exports: &crate::graph::NodeExports) {
+        for (index, key) in exports.task_classpath.iter().enumerate() {
+            // Named after the root's own build-task materialization so the two read alike in a
+            // classpath dump; the node token keeps two dependencies' JARs apart.
+            let path = Self::logical_path(node, &Self::build_task_jar(index), b"classpath");
+            self.plan.classpath.push(ClasspathEntry::ArtifactFile {
+                path: path.clone(),
+                key: key.clone(),
+            });
+            self.compile_classpath
+                .push(CompileClasspathEntry::File(CompileClasspathFile {
+                    node: Some(node.clone()),
+                    path,
+                    key: key.clone(),
+                }));
+        }
+        // Navigation sources keep the package-relative path the task gave them, with no node token
+        // in front: that is the address every other library source uses, and sharing it is what
+        // lets one type resolve to one artifact when a jar's sources and a skeleton also offer it.
+        self.plan
+            .library_source_artifacts
+            .extend(exports.library_sources.iter().cloned());
+    }
+
+    fn build_task_jar(index: usize) -> RelativePath {
+        RelativePath::new([
+            Name::new("build-task").expect("constant is a portable name"),
+            Name::new(format!("{index}.jar")).expect("index-derived file name is portable"),
+        ])
+    }
+
+    /// Lower a source node's authored + generated `.java` and publish the frontend output.
+    async fn publish_lowered_sources(
+        &mut self,
+        node: &crate::graph::ResolvedNode,
+        source: &crate::graph::SourceNode,
+    ) {
+        // Authored and generated sources are the only place they merge; `preprocess` never sees
+        // the authored set. A build script may register a path that is also an authored file, so
+        // the union is deduplicated here — `LoweredTree` rejects a duplicate path, correctly.
+        let generated = self
+            .graph
+            .exports
+            .get(&node.id)
+            .map(|exports| &exports.sources);
+        let mut seen = BTreeSet::new();
+        let mut files = Vec::new();
+        for file in source
+            .authored_sources
+            .iter()
+            .chain(generated.into_iter().flatten())
         {
+            if seen.insert(file.path.clone()) {
+                files.push(jals_frontend::IrFile::new(
+                    file.path.clone(),
+                    file.bytes.as_slice().into(),
+                ));
+            }
+        }
+        if files.is_empty() {
             return;
         }
-        if let Some((path, key)) = self
-            .publish_file(node, CacheNamespace::PathSource, category, file)
-            .await
-        {
-            self.plan
-                .source_dependency_artifacts
-                .push(LibrarySource { path, key });
+        jals_frontend::FrontendKey::canonical_order(&mut files);
+
+        // The frontend comes from this node's own manifest — a JALS node's `[build.frontend]`, or
+        // the identity for a legacy source node with no manifest. Same rule as the CLI's root
+        // selection, applied at every depth of the graph.
+        let kind = match &node.body {
+            NodeBody::JalsSource { manifest, .. } => manifest.build.frontend,
+            NodeBody::PlainSource(_) | NodeBody::Binary(_) => jals_config::FrontendKind::Vanilla {},
+        };
+        let frontend: &dyn jals_frontend::Frontend = match kind {
+            jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
+        };
+        let lowered = match jals_frontend::Driver::lower(frontend, self.cache, &files).await {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                self.errors.push(ProjectAssemblyError {
+                    node: node.id.clone(),
+                    path: None,
+                    message: format!("frontend `{}` failed: {error}", frontend.caps().id),
+                });
+                return;
+            }
+        };
+
+        for file in lowered.tree.files() {
+            if !self
+                .published_sources
+                .insert((node.id.clone(), file.path.clone()))
+            {
+                continue;
+            }
+            // Keep the existing `dependencies/<node-hex>/sources/<path>` logical layout so a
+            // consumer materializes lowered output exactly where it materialized authored source
+            // before. Only the bytes' origin changed, not their address.
+            let path = Self::logical_path(&node.id, &file.path, b"generated-source");
+            self.plan.source_dependency_artifacts.push(LibrarySource {
+                path,
+                key: file.key.clone(),
+            });
         }
     }
 

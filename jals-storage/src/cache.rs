@@ -38,6 +38,14 @@ impl ContentDigest {
         &self.0
     }
 
+    /// Reconstruct a digest from its raw 32 bytes.
+    ///
+    /// For decoding a digest that was written out verbatim. This asserts nothing about the
+    /// bytes it names — soundness still comes from reading through a verified lookup.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn to_hex(self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut out = String::with_capacity(64);
@@ -85,11 +93,25 @@ pub enum CacheNamespace {
     BuildTaskArtifact,
     BuildTaskSource,
     BuildTaskState,
+    /// One Java source file emitted by a compile frontend — the first of the two compile
+    /// tiers. Keyed on what the frontend was permitted to observe, so a per-file frontend
+    /// stays per-file invalidated.
+    FrontendOutput,
+    /// One class artifact emitted by a compile backend — the second compile tier. Its
+    /// provenance folds the frontend output key, so a backend or toolchain change can never
+    /// invalidate a frontend entry.
+    // TODO(backend-tier): unused until the backend compile tier lands; see `jals_build::backend`.
+    BackendOutput,
 }
 
 impl CacheNamespace {
-    #[cfg(any(feature = "std", test))]
-    pub(crate) const fn directory(self) -> &'static str {
+    /// This namespace's stable name — the native backend's directory for it, and the namespace
+    /// half of [`CacheKey::to_token`].
+    ///
+    /// Persisted in both roles, so a name is frozen once released: renaming one orphans every
+    /// existing cache entry under it. [`from_name`](Self::from_name) is the inverse and must be
+    /// extended alongside this match.
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::DependencyJar => "dependency-jar",
             Self::NestedJar => "nested-jar",
@@ -103,7 +125,32 @@ impl CacheNamespace {
             Self::BuildTaskArtifact => "build-task-artifact",
             Self::BuildTaskSource => "build-task-source",
             Self::BuildTaskState => "build-task-state",
+            Self::FrontendOutput => "frontend-output",
+            Self::BackendOutput => "backend-output",
         }
+    }
+
+    /// The namespace a [`name`](Self::name) denotes, or `None` for anything else — an unknown name
+    /// is a record written by a different version, not an error.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        let namespace = match name {
+            "dependency-jar" => Self::DependencyJar,
+            "nested-jar" => Self::NestedJar,
+            "extracted-source" => Self::ExtractedSource,
+            "skeleton" => Self::Skeleton,
+            "git-checkout" => Self::GitCheckout,
+            "path-source" => Self::PathSource,
+            "external-classpath" => Self::ExternalClasspath,
+            "build-script-state" => Self::BuildScriptState,
+            "build-script-output" => Self::BuildScriptOutput,
+            "build-task-artifact" => Self::BuildTaskArtifact,
+            "build-task-source" => Self::BuildTaskSource,
+            "build-task-state" => Self::BuildTaskState,
+            "frontend-output" => Self::FrontendOutput,
+            "backend-output" => Self::BackendOutput,
+            _ => return None,
+        };
+        Some(namespace)
     }
 }
 
@@ -134,6 +181,103 @@ impl CacheKey {
     }
     pub const fn content(&self) -> ContentDigest {
         self.content
+    }
+
+    /// This key as one portable token, `namespace:provenance:content`.
+    ///
+    /// The textual form a consumer records when it wants to name an artifact it has already
+    /// published — a memoized execution's result, say — without copying the bytes. It lives here
+    /// rather than in each such consumer because both halves are already frozen persisted formats
+    /// ([`CacheNamespace::name`] and [`ContentDigest::to_hex`]), and neither can contain a `:`.
+    pub fn to_token(&self) -> String {
+        let mut token = String::from(self.namespace.name());
+        token.push(':');
+        token.push_str(&self.provenance.to_hex());
+        token.push(':');
+        token.push_str(&self.content.to_hex());
+        token
+    }
+
+    /// Parse a [`to_token`](Self::to_token) rendering. `None` for any other shape, including a
+    /// namespace this version does not know.
+    pub fn from_token(token: &str) -> Option<Self> {
+        let (namespace, digests) = token.split_once(':')?;
+        let (provenance, content) = digests.split_once(':')?;
+        Some(Self::new(
+            CacheNamespace::from_name(namespace)?,
+            ContentDigest::from_hex(provenance)?,
+            ContentDigest::from_hex(content)?,
+        ))
+    }
+
+    /// Derive a key under the workspace-wide provenance rule: a NUL-terminated kind tag
+    /// followed by length-framed input identity. See [`ProvenanceFold`].
+    // TODO(backend-tier): no callers yet — consumed only by the deferred backend compile tier; see
+    // `jals_build::backend`.
+    pub fn derive(
+        namespace: CacheNamespace,
+        kind: &[u8],
+        provenance: &[u8],
+        content: ContentDigest,
+    ) -> Self {
+        let mut fold = ProvenanceFold::new(kind);
+        fold.bytes(provenance);
+        Self::new(namespace, fold.finish(), content)
+    }
+}
+
+/// The workspace's universal provenance rule, as a type rather than a convention.
+///
+/// Every append is length-framed, so concatenation is never ambiguous: `("ab", "c")` and
+/// `("a", "bc")` fold to different digests. A derived artifact folds its parent's
+/// `provenance` *and* `content` via [`parent`](Self::parent), so a key identifies the whole
+/// chain that produced it, not just its immediate input.
+///
+/// Replicating this fold by hand is how two subsystems silently disagree about cache
+/// identity — reach for this type instead.
+pub struct ProvenanceFold {
+    buf: Vec<u8>,
+}
+
+impl ProvenanceFold {
+    /// Start a fold under `kind`, a NUL-terminated tag naming the derivation rule
+    /// (`b"jals.frontend\0"`). The tag subdivides a namespace without adding a variant.
+    pub fn new(kind: &[u8]) -> Self {
+        let mut buf = Vec::with_capacity(kind.len() + 64);
+        buf.extend_from_slice(kind);
+        Self { buf }
+    }
+
+    /// Fold an API version, big-endian. Bump it whenever a rule's output changes shape for
+    /// unchanged input, so stale entries miss instead of being trusted.
+    pub fn version(&mut self, version: u32) -> &mut Self {
+        self.buf.extend_from_slice(&version.to_be_bytes());
+        self
+    }
+
+    /// Fold opaque input identity, length-framed.
+    pub fn bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.buf
+            .extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        self.buf.extend_from_slice(bytes);
+        self
+    }
+
+    /// Fold an already-computed digest. Fixed width, so it needs no length frame.
+    pub fn digest(&mut self, digest: ContentDigest) -> &mut Self {
+        self.buf.extend_from_slice(digest.as_bytes());
+        self
+    }
+
+    /// Fold a parent artifact as `provenance ‖ content`, making this derivation's identity
+    /// depend on the parent's whole history rather than only its bytes.
+    pub fn parent(&mut self, key: &CacheKey) -> &mut Self {
+        self.digest(key.provenance()).digest(key.content())
+    }
+
+    #[must_use]
+    pub fn finish(&self) -> ContentDigest {
+        ContentDigest::of(&self.buf)
     }
 }
 
@@ -421,6 +565,39 @@ mod tests {
             ContentDigest::of(b"source"),
             ContentDigest::of(bytes),
         )
+    }
+
+    /// Every namespace listed here must round-trip. The list is maintained by hand — a variant
+    /// added without an arm in `from_name` still compiles, and the symptom is silent: a memoized
+    /// record naming it never parses, so its work is redone forever instead of being reused.
+    #[test]
+    fn every_namespace_round_trips_through_a_token() {
+        for namespace in [
+            CacheNamespace::DependencyJar,
+            CacheNamespace::NestedJar,
+            CacheNamespace::ExtractedSource,
+            CacheNamespace::Skeleton,
+            CacheNamespace::GitCheckout,
+            CacheNamespace::PathSource,
+            CacheNamespace::ExternalClasspath,
+            CacheNamespace::BuildScriptState,
+            CacheNamespace::BuildScriptOutput,
+            CacheNamespace::BuildTaskArtifact,
+            CacheNamespace::BuildTaskSource,
+            CacheNamespace::BuildTaskState,
+            CacheNamespace::FrontendOutput,
+            CacheNamespace::BackendOutput,
+        ] {
+            let key = CacheKey::new(
+                namespace,
+                ContentDigest::of(b"source"),
+                ContentDigest::of(b"content"),
+            );
+            assert_eq!(CacheKey::from_token(&key.to_token()), Some(key));
+        }
+        assert_eq!(CacheKey::from_token("dependency-jar:short:short"), None);
+        assert_eq!(CacheKey::from_token("no-such-namespace:a:b"), None);
+        assert_eq!(CacheKey::from_token("dependency-jar"), None);
     }
 
     #[test]

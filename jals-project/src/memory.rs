@@ -14,8 +14,8 @@ use jals_storage::{
 };
 
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, GraphEdge, GraphError,
-    GraphWarning, NodeBody, NodeId, ResolvedNode, ResolvedProjectGraph, SourceNode,
+    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
+    GraphError, GraphWarning, NodeBody, NodeId, ResolvedNode, ResolvedProjectGraph, SourceNode,
 };
 
 /// Portable entry point for recursive dependency discovery inside one captured [`CodeTree`].
@@ -133,7 +133,9 @@ impl GraphBuilder {
                                 continue;
                             }
                         };
-                        self.visit_source(parent.clone(), name, acquired).await?;
+                        let declared = DeclaredEdgeFeatures::of(dependency);
+                        self.visit_source(parent.clone(), name, declared, acquired)
+                            .await?;
                     }
                     Dependency::Git(_) => self.warnings.push(GraphWarning::dependency(
                         name,
@@ -149,6 +151,7 @@ impl GraphBuilder {
         &mut self,
         parent: Option<NodeId>,
         dependency: &str,
+        declared: DeclaredEdgeFeatures,
         acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let incoming = GraphEdge {
@@ -156,6 +159,8 @@ impl GraphBuilder {
             dependency: dependency.to_owned(),
             to: acquired.id.clone(),
             recursive: false,
+            features: declared.features,
+            default_features: declared.default_features,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -195,6 +200,7 @@ impl GraphBuilder {
         self.seen_nodes.insert(acquired.id.clone());
         self.nodes.push(ResolvedNode {
             id: acquired.id.clone(),
+            location: Self::node_location(&declaring),
             body,
         });
         self.states
@@ -257,11 +263,14 @@ impl GraphBuilder {
             };
             (NodeId::from_identity(identity.as_bytes()), input)
         };
+        let binary = DeclaredEdgeFeatures::binary();
         self.edges.push(GraphEdge {
             from: parent,
             dependency: dependency.to_owned(),
             to: id.clone(),
             recursive,
+            features: binary.features,
+            default_features: binary.default_features,
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());
@@ -269,6 +278,7 @@ impl GraphBuilder {
         let index = self.nodes.len();
         self.nodes.push(ResolvedNode {
             id,
+            location: locator.to_owned(),
             body: NodeBody::Binary(input),
         });
         self.order.push(index);
@@ -333,6 +343,15 @@ impl GraphBuilder {
         }
     }
 
+    /// How a diagnostic names this node. Inside one captured tree that is the subtree it selected.
+    fn node_location(root: &RelativePath) -> String {
+        if root.is_root() {
+            ".".to_owned()
+        } else {
+            root.to_string()
+        }
+    }
+
     fn capture_manifest_sources(
         &mut self,
         declaring: &RelativePath,
@@ -360,7 +379,7 @@ impl GraphBuilder {
             }
             let local = path.starts_with(declaring);
             let prefix = if local {
-                Self::strip_prefix(declaring, &path)
+                path.strip_prefix(declaring)
                     .expect("a path tested with starts_with has the prefix")
             } else {
                 RelativePath::new([Name::new(format!("external-source-{index}"))
@@ -421,7 +440,7 @@ impl GraphBuilder {
             match found {
                 Some(EntryRef::File(file)) => {
                     let logical = if path.starts_with(declaring) {
-                        Self::strip_prefix(declaring, &path)
+                        path.strip_prefix(declaring)
                             .expect("a path tested with starts_with has the prefix")
                     } else {
                         Self::external_file_path(index, &path)
@@ -433,7 +452,7 @@ impl GraphBuilder {
                 }
                 Some(EntryRef::Directory(directory)) => {
                     let logical = if path.starts_with(declaring) {
-                        Self::strip_prefix(declaring, &path)
+                        path.strip_prefix(declaring)
                             .expect("a path tested with starts_with has the prefix")
                     } else {
                         RelativePath::new([Name::new(format!("external-classpath-{index}"))
@@ -466,17 +485,12 @@ impl GraphBuilder {
         entries
     }
 
-    fn strip_prefix(root: &RelativePath, path: &RelativePath) -> Option<RelativePath> {
-        path.starts_with(root)
-            .then(|| RelativePath::new(path.segments().skip(root.segments().len()).cloned()))
-    }
-
     fn rebase_file_path(
         root: &RelativePath,
         path: &RelativePath,
         role: &str,
     ) -> Result<RelativePath, String> {
-        if let Some(relative) = Self::strip_prefix(root, path)
+        if let Some(relative) = path.strip_prefix(root)
             && !relative.is_root()
         {
             return Ok(relative);
@@ -581,10 +595,46 @@ impl GraphBuilder {
 #[cfg(test)]
 mod tests {
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
+    use jals_config::ResolvedBuildFeatures;
     use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
     use super::*;
     use crate::NodeKind;
+    use crate::graph::{GraphPreprocess, PreprocessedProjectGraph};
+
+    /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
+    struct UnreachableFetcher;
+
+    impl jals_classpath::Fetcher for UnreachableFetcher {
+        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+            panic!("this graph must not fetch, but asked for `{locator}`")
+        }
+    }
+
+    /// Preprocessing inputs for a graph under test, defaulting everything a task plan would need.
+    ///
+    /// A macro rather than a helper function because the borrowed defaults have to outlive the call
+    /// and nothing here owns them; as temporaries in the calling statement they live exactly long
+    /// enough.
+    macro_rules! inert {
+        () => {
+            inert!(
+                &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
+                &BuildScriptLimits::default()
+            )
+        };
+        ($environment:expr, $features:expr, $limits:expr) => {
+            GraphPreprocess {
+                exec: &jals_exec::Exec::inline(),
+                fetcher: &UnreachableFetcher,
+                environment: $environment,
+                root_features: $features,
+                limits: $limits,
+                network: jals_classpath::NetworkPolicy::Offline,
+            }
+        };
+    }
 
     fn manifest(text: &str) -> Manifest {
         text.parse().expect("test manifest is valid")
@@ -637,11 +687,7 @@ mod tests {
                 [NodeKind::JalsSource, NodeKind::JalsSource]
             );
             let graph = graph
-                .preprocess(
-                    storage.artifacts_mut(),
-                    &BuildScriptEnvironment::new(),
-                    &BuildScriptLimits::default(),
-                )
+                .preprocess(storage.artifacts_mut(), inert!())
                 .await
                 .unwrap();
             let assembly = graph.assemble(storage.artifacts_mut()).await;
@@ -755,11 +801,7 @@ mod tests {
             let graph = MemoryProjectGraph::discover(&root, &root_view)
                 .await
                 .unwrap()
-                .preprocess(
-                    storage.artifacts_mut(),
-                    &BuildScriptEnvironment::new(),
-                    &BuildScriptLimits::default(),
-                )
+                .preprocess(storage.artifacts_mut(), inert!())
                 .await
                 .unwrap();
             let assembly = graph.assemble(storage.artifacts_mut()).await;
@@ -824,8 +866,11 @@ mod tests {
                 .unwrap()
                 .preprocess(
                     storage.artifacts_mut(),
-                    &environment,
-                    &BuildScriptLimits::default(),
+                    inert!(
+                        &environment,
+                        &ResolvedBuildFeatures::default(),
+                        &BuildScriptLimits::default()
+                    ),
                 )
                 .await
                 .unwrap();
@@ -860,8 +905,11 @@ mod tests {
                 .unwrap()
                 .preprocess(
                     storage.artifacts_mut(),
-                    &BuildScriptEnvironment::new(),
-                    &limits,
+                    inert!(
+                        &BuildScriptEnvironment::new(),
+                        &ResolvedBuildFeatures::default(),
+                        &limits
+                    ),
                 )
                 .await
                 .unwrap();
@@ -906,6 +954,380 @@ mod tests {
                     .warnings()
                     .iter()
                     .all(|warning| warning.message.contains("cannot be acquired"))
+            );
+        });
+    }
+
+    /// A dependency `build.rhai` that registers one source per feature it is asked about, so the
+    /// generated file names spell out the exact set the script saw.
+    const FEATURE_PROBE: &[u8] = br#"
+        for name in ["hello", "world", "root-only", "a", "b", "ok", "soft", "vulkan", "spirv"] {
+            if build.feature(name) {
+                let source = output.write_text(name + ".java", "class X {}");
+                build.add_source(source);
+            }
+        }
+    "#;
+
+    const PROBE_MANIFEST: &[u8] = b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+
+    /// The basenames the graph's dependency scripts generated, sorted.
+    fn generated(graph: &PreprocessedProjectGraph) -> Vec<String> {
+        let mut names: Vec<String> = graph
+            .exports
+            .values()
+            .flat_map(|exports| exports.sources.iter())
+            .filter_map(|file| file.path.name().map(ToString::to_string))
+            .collect();
+        names.sort();
+        names
+    }
+
+    async fn preprocess_with(
+        root: &Manifest,
+        root_view: &ProjectView,
+        environment: &BuildScriptEnvironment,
+    ) -> PreprocessedProjectGraph {
+        preprocess_selecting(root, root_view, environment, &[]).await
+    }
+
+    /// Discover then preprocess, returning the error. For asserting the build-feature edge check,
+    /// which fires at the start of `preprocess` before any script runs.
+    async fn preprocess_error(root: &Manifest, root_view: &ProjectView) -> GraphError {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        MemoryProjectGraph::discover(root, root_view)
+            .await
+            .unwrap()
+            .preprocess(storage.artifacts_mut(), inert!())
+            .await
+            .unwrap_err()
+    }
+
+    /// Preprocess under a root `--features` selection, as a host does: the root resolves its own
+    /// `[features]` and the graph receives what that selection forwards.
+    async fn preprocess_selecting(
+        root: &Manifest,
+        root_view: &ProjectView,
+        environment: &BuildScriptEnvironment,
+        selected: &[&str],
+    ) -> PreprocessedProjectGraph {
+        let selected: Vec<String> = selected.iter().map(|name| (*name).to_owned()).collect();
+        let features = root
+            .resolve_build_features(&selected, false, false)
+            .unwrap();
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        MemoryProjectGraph::discover(root, root_view)
+            .await
+            .unwrap()
+            .preprocess(
+                storage.artifacts_mut(),
+                inert!(environment, &features, &BuildScriptLimits::default()),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn dependency_scripts_see_only_their_own_edge_features() {
+        jals_exec::block_on_inline(async {
+            // Features are per package: the declaring project's selection must not steer a
+            // dependency's script. A leaked `root-only` would mean anyone's `--features` silently
+            // rebuilds every dependency in the graph differently.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n");
+            let root_view = view(&[
+                (
+                    "dep/jals.toml",
+                    b"[features]\nhello = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let environment = BuildScriptEnvironment::new()
+                .with_features(BTreeSet::from(["root-only".to_owned()]));
+            let graph = preprocess_with(&root, &root_view, &environment).await;
+            assert_eq!(generated(&graph), ["hello.java"]);
+        });
+    }
+
+    #[test]
+    fn a_dependency_resolves_its_own_features_table() {
+        jals_exec::block_on_inline(async {
+            // What arrives on the edge is a *seed*, not the finished set: the dependency closes it
+            // over its own `enables` map (`hello` pulls in `b`) and adds its own `default` list
+            // (`a`), exactly as Cargo does for a dependency nobody passed `default-features` to.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n");
+            let root_view = view(&[
+                (
+                    "dep/jals.toml",
+                    b"[features]\ndefault = [\"a\"]\na = []\nb = []\nhello = [\"b\"]\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(generated(&graph), ["a.java", "b.java", "hello.java"]);
+        });
+    }
+
+    #[test]
+    fn default_features_false_suppresses_only_the_dependency_default_list() {
+        jals_exec::block_on_inline(async {
+            // `default-features = false` drops `a`; everything the edge asked for, and everything
+            // that follows from it through the dependency's own table, still applies.
+            let root = manifest(
+                "[dependencies]\n\
+                 dep = { path = \"dep\", features = [\"hello\"], default-features = false }\n",
+            );
+            let root_view = view(&[
+                (
+                    "dep/jals.toml",
+                    b"[features]\ndefault = [\"a\"]\na = []\nb = []\nhello = [\"b\"]\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(generated(&graph), ["b.java", "hello.java"]);
+        });
+    }
+
+    #[test]
+    fn one_edge_asking_for_the_defaults_turns_them_on_for_the_shared_node() {
+        jals_exec::block_on_inline(async {
+            // `default-features` unifies additively, like every other feature input: the node is
+            // shared, so suppressing the defaults on one edge cannot subtract them from the build
+            // another edge asked for. Otherwise a diamond's result would depend on edge order.
+            let root = manifest(
+                "[dependencies]\n\
+                 direct = { path = \"dep\", default-features = false }\n\
+                 mid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                (
+                    "dep/jals.toml",
+                    b"[features]\ndefault = [\"a\"]\na = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("dep/build.rhai", FEATURE_PROBE),
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\nshared = { path = \"../dep\" }\n",
+                ),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(generated(&graph), ["a.java"]);
+        });
+    }
+
+    #[test]
+    fn a_root_feature_forwards_to_its_dependency() {
+        jals_exec::block_on_inline(async {
+            // Cargo's `std = ["serde/std"]`, at the root: only the selection that names `gpu` sends
+            // `vulkan` down the edge, and `gpu` itself stays a feature of the root.
+            let root = manifest(
+                "[features]\ngpu = [\"dep/vulkan\"]\n\
+                 [dependencies]\ndep = { path = \"dep\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let selected =
+                preprocess_selecting(&root, &root_view, &BuildScriptEnvironment::new(), &["gpu"])
+                    .await;
+            assert_eq!(generated(&selected), ["vulkan.java"]);
+            let unselected =
+                preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert!(generated(&unselected).is_empty());
+        });
+    }
+
+    #[test]
+    fn forwarded_features_route_on_through_the_graph() {
+        jals_exec::block_on_inline(async {
+            // The routing is transitive because a node resolves its own table: `mid` receives
+            // `vulkan`, expands it, and forwards `spirv` to *its* dependency. A feature the root has
+            // no name for reaches a project the root never mentions.
+            let root = manifest(
+                "[features]\ndefault = [\"gpu\"]\ngpu = [\"mid/vulkan\"]\n\
+                 [dependencies]\nmid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                (
+                    "mid/jals.toml",
+                    b"[features]\nvulkan = [\"sub/spirv\"]\n\
+                      [dependencies]\nsub = { path = \"../sub\" }\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("mid/build.rhai", FEATURE_PROBE),
+                ("sub/jals.toml", PROBE_MANIFEST),
+                ("sub/build.rhai", FEATURE_PROBE),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(generated(&graph), ["spirv.java", "vulkan.java"]);
+        });
+    }
+
+    #[test]
+    fn features_unify_across_every_edge_reaching_a_node() {
+        jals_exec::block_on_inline(async {
+            // Cargo's feature unification: two entries reaching the same project give it one set and
+            // one build, rather than two nodes whose classes would both land on the classpath.
+            let root = manifest(
+                "[dependencies]\n\
+                 direct = { path = \"dep\", features = [\"hello\"] }\n\
+                 mid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                (
+                    "dep/jals.toml",
+                    b"[features]\nhello = []\nworld = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
+                ("dep/build.rhai", FEATURE_PROBE),
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\nshared = { path = \"../dep\", features = [\"world\"] }\n",
+                ),
+            ]);
+            let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
+            assert_eq!(
+                graph
+                    .metadata()
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.kind == NodeKind::JalsSource)
+                    .count(),
+                2,
+                "the shared dependency stays one node"
+            );
+            assert_eq!(generated(&graph), ["hello.java", "world.java"]);
+        });
+    }
+
+    #[test]
+    fn an_undeclared_edge_feature_is_rejected() {
+        jals_exec::block_on_inline(async {
+            // A `[dependencies] features` name the target does not declare is a typo, not an empty
+            // selection: reject it rather than silently expanding it to nothing and building the
+            // default. This is the exact failure the `[build.features]` -> `[features]` move made a
+            // hard error to avoid, now closed on the dependency edge too.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"typo\"] }\n");
+            let root_view = view(&[("dep/jals.toml", b"[features]\nreal = []\n")]);
+            let GraphError::InvalidDependency {
+                dependency,
+                message,
+                ..
+            } = preprocess_error(&root, &root_view).await
+            else {
+                panic!("expected an invalid dependency");
+            };
+            assert_eq!(dependency, "dep");
+            assert!(message.contains("typo"), "{message}");
+        });
+    }
+
+    #[test]
+    fn an_undeclared_edge_feature_is_caught_on_a_second_diamond_edge() {
+        jals_exec::block_on_inline(async {
+            // `dep` is already `Complete` when the second edge reaches it, so a check done at visit
+            // time would miss this. The scan reads every edge, so the typo on `mid`'s entry is still
+            // caught — and the error names that edge (`shared`), not the one that arrived first.
+            let root = manifest(
+                "[dependencies]\n\
+                 direct = { path = \"dep\", features = [\"good\"] }\n\
+                 mid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", b"[features]\ngood = []\n"),
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\nshared = { path = \"../dep\", features = [\"typo\"] }\n",
+                ),
+            ]);
+            let GraphError::InvalidDependency {
+                dependency,
+                message,
+                ..
+            } = preprocess_error(&root, &root_view).await
+            else {
+                panic!("expected an invalid dependency");
+            };
+            assert_eq!(dependency, "shared");
+            assert!(message.contains("typo"), "{message}");
+        });
+    }
+
+    #[test]
+    fn a_reserved_feature_name_is_rejected_wherever_the_manifest_sits() {
+        jals_exec::block_on_inline(async {
+            // `discover` validates the root, and every dependency manifest is validated by the parse
+            // inside `probe_manifest` — so `Dependency::validate_features` reaches a transitively
+            // declared entry too, and the graph never has to re-check what an edge carries.
+            let root = manifest("[dependencies]\nmid = { path = \"mid\" }\n");
+            let root_view = view(&[
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\ndep = { path = \"../dep\", features = [\"default\"] }\n",
+                ),
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+            ]);
+            let error = MemoryProjectGraph::discover(&root, &root_view)
+                .await
+                .unwrap_err();
+            let GraphError::MalformedManifest {
+                location, message, ..
+            } = error
+            else {
+                panic!("expected a malformed dependency manifest, got {error:?}");
+            };
+            assert_eq!(location, "mid/jals.toml");
+            assert!(
+                message.contains("lists the reserved feature `default`"),
+                "{message}"
+            );
+        });
+    }
+
+    #[test]
+    fn declared_edge_features_are_visible_on_the_graph_metadata() {
+        jals_exec::block_on_inline(async {
+            // The edges are the single source of truth the per-node union reads, and they are a pure
+            // function of the manifests — nothing about the host or its selection reaches them. That
+            // is also what keeps a dependency's build-script fingerprint stable across a changed
+            // root `--features`, so switching sides no longer re-runs every dependency script.
+            let root = manifest(
+                "[dependencies]\n\
+                 src = { path = \"dep\", features = [\"hello\", \"world\"] }\n\
+                 lib = { jar = \"libs/x.jar\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", PROBE_MANIFEST),
+                ("dep/build.rhai", FEATURE_PROBE),
+                ("libs/x.jar", b"not really a jar"),
+            ]);
+            let graph = MemoryProjectGraph::discover(&root, &root_view)
+                .await
+                .unwrap();
+            let metadata = graph.metadata();
+            let edges: Vec<(&str, Vec<&str>)> = metadata
+                .edges()
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.dependency.as_str(),
+                        edge.features.iter().map(String::as_str).collect(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                edges,
+                [("lib", vec![]), ("src", vec!["hello", "world"]),],
+                "a jar carries no features; a source edge carries exactly what it declared"
             );
         });
     }

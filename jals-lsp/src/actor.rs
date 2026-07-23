@@ -31,7 +31,7 @@ use jals_build::{
         BuildScriptOutput, BuildScriptPosition, BuildScriptSession,
     },
 };
-use jals_config::{BuildScript, Dependency, FeatureSet, Manifest};
+use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_editor::{
     EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
     SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
@@ -187,6 +187,18 @@ impl std::fmt::Debug for WorkspaceAssemblyFailure {
 struct BuildWatchPolicy {
     script: FileKey,
     rerun_files: BTreeSet<FileKey>,
+}
+
+/// What a dependency graph's preprocessing pass needs to run build scripts, borrowed as one value.
+///
+/// Grouped because the three travel together and are meaningless apart: the environment is already
+/// scoped to the root project, `features` is the same resolution its queryable half came from (the
+/// other half is what the root forwards into the graph), and `limits` bounds every script the pass
+/// runs. Both the real assembly and its root-only fallback pass exactly this.
+struct GraphScriptInputs<'a> {
+    environment: &'a BuildScriptEnvironment,
+    features: &'a ResolvedBuildFeatures,
+    limits: &'a BuildScriptLimits,
 }
 
 /// Deterministic classification of host changes for one assembled project. Source roots and exact
@@ -1717,8 +1729,22 @@ impl AssembledWorkspace {
         let mut project_sources = BTreeSet::new();
         let mut build_script_diagnostics =
             BuildScriptDiagnosticUpdate::new(configured_script.clone());
-        let environment = BuildScriptEnvironment::new().for_project(manifest);
+        // Analysis takes no `--features` flags, so the root project gets the manifest's own
+        // `default` list — the same selection `jals lint` uses, so what the editor analyses matches
+        // what a plain `jals build` produces. With nothing selected, resolution cannot fail.
+        // Dependency nodes resolve their own sets during graph preprocessing, from the
+        // `[dependencies]` entries pointing at them plus whatever this selection forwards.
+        let features = manifest
+            .resolve_build_features(&[], false, false)
+            .unwrap_or_default();
+        let environment =
+            BuildScriptEnvironment::new().for_project(manifest, features.features().clone());
         let limits = BuildScriptLimits::default();
+        let scripts = GraphScriptInputs {
+            environment: &environment,
+            features: &features,
+            limits: &limits,
+        };
         let mut task_classpath = Vec::new();
         let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
         match BuildTaskExecutor::execute_root(
@@ -1808,8 +1834,7 @@ impl AssembledWorkspace {
             &effective_manifest,
             root,
             &mut storage,
-            &environment,
-            &limits,
+            &scripts,
             &task_classpath,
         )
         .await
@@ -1825,8 +1850,7 @@ impl AssembledWorkspace {
                     &root_only,
                     root,
                     &mut storage,
-                    &environment,
-                    &limits,
+                    &scripts,
                     &task_classpath,
                 )
                 .await
@@ -1876,8 +1900,7 @@ impl AssembledWorkspace {
         effective_manifest: &Manifest,
         root: &Path,
         storage: &mut NativeStorage,
-        environment: &BuildScriptEnvironment,
-        limits: &BuildScriptLimits,
+        scripts: &GraphScriptInputs<'_>,
         task_classpath: &[jals_storage::CacheKey],
     ) -> Result<NativeProjectAssembly, GraphError> {
         // Analysis never reaches the network: opening a folder must not clone a remote the user
@@ -1889,8 +1912,21 @@ impl AssembledWorkspace {
             jals_classpath::NetworkPolicy::Offline,
         )
         .await?;
+        // A dependency's build tasks run under the same offline rule, for the same reason: opening
+        // a folder must consume only what a real `jals build` already fetched and verified.
+        let exec = storage.exec().clone();
         let graph = graph
-            .preprocess(storage.artifacts_mut(), environment, limits)
+            .preprocess(
+                storage.artifacts_mut(),
+                jals_project::GraphPreprocess {
+                    exec: &exec,
+                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    environment: scripts.environment,
+                    root_features: scripts.features,
+                    limits: scripts.limits,
+                    network: jals_classpath::NetworkPolicy::Offline,
+                },
+            )
             .await?;
         let mut assembly = graph
             .assemble_native(

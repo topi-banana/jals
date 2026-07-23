@@ -1,0 +1,22 @@
+[package]
+name = "jals-frontend"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately featureless. A frontend lowers project sources to Java sources and never needs a
+# host capability, so there is no `native`/`std` split to express — and having no feature at all
+# is what makes portability impossible to regress silently: there is no configuration in which
+# this crate stops being `no_std + alloc`.
+#
+# Later IR levels add `jals-syntax` / `jals-hir` / `jals-classfile`, all of which are already
+# `no_std`. This crate must never depend on `jals-build`, whose compile half is `native`-gated.
+[dependencies]
+jals-storage.workspace = true
+
+# Test-only: the crate itself takes no execution parameter — cooperative yielding is
+# runtime-free — so `jals-exec` is needed just to drive the futures in `src/tests.rs`.
+[dev-dependencies]
+jals-exec.workspace = true
+
+[lints]
+workspace = true

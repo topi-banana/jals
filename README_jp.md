@@ -217,6 +217,16 @@ jals clean                  # ビルド出力（target/classes）を削除
 name = "hello"
 version = "0.1.0"
 
+# `script` が `build.feature("…")` で読む Cargo 風の build feature。
+# `--features` / `--all-features` / `--no-default-features` で選択し、選択は加法的です。
+# Cargo と同じく package ごと: dependency へ渡るのは manifest が明示した分だけです
+# （下の `<dep>/<feature>`、または [dependencies] の `features`）。
+# [features]
+# default = ["server"]
+# server  = []
+# client  = []
+# gpu     = ["render/vulkan"]   # dependency `render` の `vulkan` を有効化（Cargo の `serde/std`）
+
 [build]
 release = 21                        # javac --release N
 # source-dirs = ["src/main/java"]   # -sourcepath のルート。.java 探索の対象でもある
@@ -231,10 +241,14 @@ main-class = "com.example.Main"     # `jals run` のエントリポイント
 # source project は transitive に探索され、`dir` で monorepo 内の project を選択する
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
+# `features` はその dependency 自身の build.rhai で有効になる build feature（Cargo と同じ）。
+# `default-features = false` でその dependency 自身の `default` リストを適用しない
+render = { path = "../render", features = ["vulkan"], default-features = false }
 ```
 
-`script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot を
-読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、生成 source・classpath entry・`javac`/JVM
+`script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot と
+選択された `[features]` を読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、
+生成 source・classpath entry・`javac`/JVM
 flag・compile/run environment entry を追加できます。さらに型付き `tasks` DAG で、size/digest 検証付き
 download、JSON projection、安全な sources JAR 展開、Mojang mappings による jar remap、jar merge、
 compile 向け decompile、排他的な物理 source tree の publish を宣言できます。
@@ -245,7 +259,7 @@ sandbox limit、Rust の `BuildScript` model は
 [`jals-build` の Rhai reference](jals-build/README.md#rhai-build-scripts)を、実行可能な例は
 [`examples/rhai_build_script`](examples/rhai_build_script)を参照してください。
 source archive task の形は [`examples/task_source_archive`](examples/task_source_archive)、
-remap 済み Minecraft の例は [`examples/minecraft-1.21.1-mojang-remap`](examples/minecraft-1.21.1-mojang-remap)
+remap 済み Minecraft の例は [`examples/minecraft-mojang-remap`](examples/minecraft-mojang-remap)
 にあります。
 
 root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess

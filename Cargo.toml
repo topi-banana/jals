@@ -10,6 +10,7 @@ members = [
   "jals-editor",
   "jals-exec",
   "jals-fmt",
+  "jals-frontend",
   "jals-storage",
   "jals-hir",
   "jals-lint",
@@ -52,6 +53,8 @@ jals-decompile = { path = "jals-decompile" }
 jals-editor = { path = "jals-editor" }
 jals-exec = { path = "jals-exec", default-features = false }
 jals-fmt = { path = "jals-fmt" }
+# Featureless by design: the compile frontend seam is portable in every configuration.
+jals-frontend = { path = "jals-frontend" }
 jals-storage = { path = "jals-storage", default-features = false }
 jals-hir = { path = "jals-hir" }
 jals-lint = { path = "jals-lint" }

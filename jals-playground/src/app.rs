@@ -906,11 +906,26 @@ impl App {
         let graph = MemoryProjectGraph::discover(&manifest, &storage.view())
             .await
             .map_err(|error| error.to_string())?;
+        // No command line here either, so what the root forwards to its dependencies comes from its
+        // own `default` list — the same selection the root script above ran under. With nothing
+        // selected, resolution cannot fail.
+        let features = manifest
+            .resolve_build_features(&[], false, false)
+            .unwrap_or_default();
+        let exec = storage.exec().clone();
         let graph = graph
             .preprocess(
                 storage.artifacts_mut(),
-                &BuildScriptEnvironment::new(),
-                &BuildScriptLimits::default(),
+                jals_project::GraphPreprocess {
+                    exec: &exec,
+                    // A dependency's build-task fetches go through the same CORS proxy as
+                    // dependency resolution below; nothing else in the browser can reach a host.
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &features,
+                    limits: &BuildScriptLimits::default(),
+                    network: jals_classpath::NetworkPolicy::Online,
+                },
             )
             .await
             .map_err(|error| error.to_string())?;

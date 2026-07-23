@@ -220,6 +220,16 @@ A minimal `jals.toml` — every key is optional and defaults to the Maven-style
 name = "hello"
 version = "0.1.0"
 
+# Cargo-style build features a `script` reads with `build.feature("…")`. Select them with
+# `--features` / `--all-features` / `--no-default-features`; selection is additive. Per package,
+# as in Cargo: a feature reaches a dependency only where a manifest says so — `<dep>/<feature>`
+# below, or `features` under [dependencies].
+# [features]
+# default = ["server"]
+# server  = []
+# client  = []
+# gpu     = ["render/vulkan"]   # enables `vulkan` in the `render` dependency (Cargo's `serde/std`)
+
 [build]
 release = 21                        # javac --release N
 # source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
@@ -234,6 +244,9 @@ main-class = "com.example.Main"     # entry point for `jals run` (used when no [
 # Source projects are discovered transitively; `dir` selects a project inside a monorepo.
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
+# `features` enables build features in that dependency's own build.rhai (Cargo's per-dep features);
+# `default-features = false` skips that dependency's own `default` list.
+render = { path = "../render", features = ["vulkan"], default-features = false }
 
 # Or declare several named entry points and pick one with `jals run --bin <name>`:
 # [[bin]]
@@ -242,7 +255,8 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ```
 
 With `script` configured, `build.rhai` runs before source discovery and `javac`. It can read the
-project snapshot, publish ordinary files below `target/jals/build/rhai/out`, and add generated
+project snapshot and the selected `[features]`, publish ordinary files below
+`target/jals/build/rhai/out`, and add generated
 sources, classpath entries, `javac`/JVM flags, and compile/run environment entries. A typed `tasks`
 DAG can also declare bounded, digest-verified downloads, JSON projections, safe source-JAR
 extraction, Mojang-mappings jar remapping, jar merge, compile-oriented decompilation, and explicit
@@ -255,7 +269,7 @@ open document, while the browser rejects physical publication before fetching. S
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
 The source-archive task shape is shown in
 [`examples/task_source_archive`](examples/task_source_archive); a full remapped-Minecraft example is
-[`examples/minecraft-1.21.1-mojang-remap`](examples/minecraft-1.21.1-mojang-remap).
+[`examples/minecraft-mojang-remap`](examples/minecraft-mojang-remap).
 
 The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`

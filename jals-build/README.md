@@ -83,7 +83,8 @@ Common behavior, all implemented in `jals-cli` on top of this crate:
 ## The manifest (`jals.toml`)
 
 Every key is optional and falls back to its default; keys are kebab-case and grouped into
-`[package]`, `[build]`, `[run]`, `[toolchain]`, the repeatable `[[bin]]`, and `[dependencies]`. The
+`[package]`, `[features]`, `[build]`, `[run]`, `[toolchain]`, the repeatable `[[bin]]`, and
+`[dependencies]`. The
 defaults encode the Maven-style `src/main/java` → `target/classes` layout, so an empty (or absent)
 section just uses them.
 
@@ -93,6 +94,11 @@ name = "hello"
 version = "0.1.0"
 # features = ["java25"]            # language features (release presets + individual); gates analysis, not javac
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
+
+# [features]                       # build features a `script` reads with `build.feature("…")`
+# default = ["server"]             # enabled when the command line selects none
+# server  = []
+# client  = []
 
 [build]
 # script = { type = "rhai", file = "build.rhai" } # optional pre-javac phase
@@ -138,8 +144,64 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 | --- | --- | --- | --- |
 | `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
 | `version` | string | — | ℹ️ informational |
-| `features` | array of feature names | `[]` | the language features the project enables (Cargo's `[features]`, additive-only). A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no feature gate. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. |
+| `features` | array of feature names | `[]` | the language features the project enables — additive-only, but a **closed** set, and not the top-level [`[features]`](#features) map. A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no feature gate. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. |
 | `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
+
+### `[features]`
+
+Cargo's `[features]`, at the same top level: an open-ended map from a **build feature** name to the
+other features it enables. These are user-defined build-time toggles a [build script](#rhai-build-scripts)
+reads with `build.feature("…")` / `build.features()` to vary what it produces — distinct from
+[`[package] features`](#package), which is a closed enum gating *language* analysis and is never
+selected on the command line.
+
+```toml
+[features]
+default = ["server"]   # enabled when the command line selects none
+server  = []
+client  = []
+full    = ["server", "client"]   # a feature may enable others; the closure is transitive
+gpu     = ["render/vulkan"]      # …or a feature of a dependency (Cargo's `serde/std` form)
+```
+
+Select them per invocation on `jals build` / `jals run`:
+
+| Flag | Effect |
+| --- | --- |
+| `--features <a,b>` | activate these features (comma separated, repeatable); a `<dependency>/<feature>` entry activates it in that dependency |
+| `--all-features` | activate every declared feature; takes precedence over `--no-default-features` |
+| `--no-default-features` | do not activate the `default` list |
+
+Selection is **additive** — a feature never subtracts — so `--features client` keeps the `default`
+list unless `--no-default-features` is also given. The reserved `default` key is a resolution
+directive, not a queryable feature: it is expanded and then dropped, so `build.feature("default")`
+is never true. A `--features` name that is not declared is an error before any work starts; a
+`default`/`enables` entry naming an undeclared feature is a manifest validation error. Omitting the
+section leaves the set empty.
+
+#### Forwarding a feature to a dependency
+
+A list entry of the form `<dependency>/<feature>` — Cargo's `std = ["serde/std"]` — enables
+`<feature>` in that `[dependencies]` entry rather than in this project. It is a *directive*, never a
+queryable feature: `build.feature("render/vulkan")` is always false, and the name is absent from
+`build.features()`. The dependency must be a declared `git`/`path` entry; a `jar` runs no build
+script that could read a feature, and naming one — or an undeclared entry, or `dep/default` — is a
+manifest validation error. `/` is likewise rejected in a `[features]` **key** and in a
+[`[dependencies]` `features`](#dependencies) list, which names features of that dependency only.
+
+Resolution is **per package**, as in Cargo, and every project in the graph goes through the same
+step. A project's seed is what its dependents asked for — the `features` lists on the
+`[dependencies]` entries aimed at it, plus whatever their `[features]` forwarded — closed over its
+*own* table: its `enables` map, and its `default` list unless every incoming entry set
+[`default-features = false`](#dependencies). Because a dependency resolves its own table, forwarding
+is transitive: a mid-graph project forwards to *its* dependencies from features it merely received.
+Nothing crosses an edge implicitly, though — a dependency never sees the selection its dependents
+are building under, only what their manifests spelled out. Where several entries reach one project
+the inputs unify additively (see [`[dependencies]`](#dependencies)), so it still builds once.
+
+The consequence for caching is that a dependency's build-script fingerprint now *does* depend on the
+root's `--features`, but only along a path some manifest wrote: switching a feature that forwards
+nothing still leaves every dependency script cached.
 
 ### `[build]`
 
@@ -199,6 +261,8 @@ records a typed DAG while the first three retain the direct APIs below:
 | `output` | `write(path, bytes)` | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`. |
 | `output` | `write_text(path, text)` | Buffer UTF-8 text below the same output root and return an `OutputPath`. |
 | `build` | `env(name)` | Read a value from the environment map explicitly supplied by the host; returns `()` when absent. |
+| `build` | `feature(name)` | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or, as a dependency, what its dependents asked for closed over its own `[features]` (see [`[features]`](#features)). A `<dependency>/<feature>` name is never enabled here; it is a forwarding directive. Always fingerprinted — no `rerun_` declaration needed. |
+| `build` | `features()` | The enabled build features for this project, in lexical order. |
 | `build` | `rerun_if_changed(path)` | Track one project file for cache invalidation. |
 | `build` | `rerun_if_env_changed(name)` | Track one supplied environment value for cache invalidation. |
 | `build` | `add_source(path)` | Add a project file or returned `OutputPath` to the later source set. |
@@ -252,8 +316,26 @@ root before build state. Outside declared roots, files are never changed.
 native LSP executes the same task plan, always offline: opening a folder in an editor runs whatever
 `build.rhai` it contains, and nobody reviews a repository before opening it, so the server consumes
 only what a real `jals build` already fetched and verified into the cache. It also defers
-publication while an open document is below the destination. The browser playground rejects physical publication before any fetch. Immutable
-dependency projects reject task terminals in this release. Tasks expose no shell/process API.
+publication while an open document is below the destination. The browser playground rejects physical
+publication before any fetch. Tasks expose no shell/process API.
+
+A `git`/`path` **dependency** may declare tasks too, and its plan runs the same way with one
+difference: publication is virtual. Every artifact lands in the *consumer's* verified cache, and the
+dependency's own snapshot is byte-identical afterwards — a dependency is never written to, which is
+what made the whole facility unavailable there before.
+
+- `add_classpath` / `add_nested_classpath` reach the consumer's compile classpath and analysis,
+  exactly like a `jar` dependency's classes.
+- `publish_tree` produces **navigation-only** sources rather than files on disk. Its `destination`
+  is still validated as a strict source-root descendant, but what the consumer receives is the
+  package path below that root (`src/main/java/net/x` → `net/x/…`), addressed like an extracted
+  `sources` jar so a type resolves to one artifact however many producers offer it. These are never
+  handed to the compiler: a decompiled skeleton and the classpath JAR that already defines the same
+  types would collide.
+
+Each dependency execution is memoized under its project identity, plan, and resolved features, and
+re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,
+or re-decompile a graph that has not changed.
 
 A concise `build.rhai` that generates and registers a Java source is:
 
@@ -307,8 +389,9 @@ digest-verified artifacts; the dependency source snapshot and its host tree are 
 Successful state and generated bytes are published write-once to the storage artifact cache and
 read back through digest-verified lookups. The native adapter persists them under
 `target/jals/cache`; memory hosts retain them in their aggregate. A fingerprint covers the API/state
-versions, script path and bytes, `jals.toml`, limits, tracked project bytes, and declared environment
-values. A matching cache hit restores outputs and all directives without evaluating Rhai.
+versions, script path and bytes, `jals.toml`, limits, tracked project bytes, declared environment
+values, and the project's resolved build features. A matching cache hit restores outputs and all
+directives without evaluating Rhai.
 
 The root uses the distinguished `BuildScriptCacheScope::ROOT`; each dependency uses a scope derived
 from its stable graph node identity. Identical `build.rhai` and output paths in two dependencies
@@ -317,7 +400,10 @@ therefore cannot collide in cache state or generated artifacts.
 If the script calls no `rerun_if_changed`, the conservative default fingerprints every project file
 except `target/jals/build/**`. Calling it at least once narrows project-file tracking to the declared
 set; the script and manifest remain tracked independently. Only names passed to
-`rerun_if_env_changed` contribute environment values to the fingerprint. Managed build-output paths
+`rerun_if_env_changed` contribute environment values to the fingerprint. The resolved build-feature
+set is different: it is always an input, whether or not the script reads it, so a changed selection
+can never reuse a build made under a different one — at the root a changed `--features`, and for a
+dependency a changed `[dependencies] features` list. Managed build-output paths
 cannot be registered as rerun inputs, preventing generated files from invalidating or certifying
 their own build.
 
@@ -360,8 +446,9 @@ cargo check -p jals-build --no-default-features --features rhai --target wasm32-
 
 See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable project.
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
-publication. [`examples/minecraft-1.21.1-mojang-remap`](../examples/minecraft-1.21.1-mojang-remap)
-fetches, remaps, and decompiles Minecraft 1.21.1 through the task DAG.
+publication. [`examples/minecraft-mojang-remap`](../examples/minecraft-mojang-remap)
+fetches, remaps, and decompiles a Minecraft release — selected from 43 mutually exclusive version
+`[features]` — through the task DAG.
 
 ### `[run]`
 
@@ -442,6 +529,8 @@ one **primary form** — `jar` (compiled classes), `git` (a checked-out project 
 | `branch` / `tag` / `rev` | string | git | *optional*, **at most one** — which commit to check out (default: the repo's default branch) |
 | `path` | string | path | a local project root (relative to the manifest dir) |
 | `dir` | string | git, path | *optional* selected **project root** within the repository/path (e.g. `core`). Manifest probing and all child-relative paths start there. |
+| `features` | array of feature names | git, path | *optional* (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.rhai` reads with `build.feature("…")`. Cargo's per-dependency `features`. These name features of the dependency itself, so a `<dependency>/<feature>` entry is rejected — [forwarding](#forwarding-a-feature-to-a-dependency) is written in `[features]`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
+| `default-features` | bool | git, path | *optional* (default `true`) — whether that dependency resolves its own `[features] default` list (Cargo's `default-features`). Not available on `jar`, where writing it is a parse error. |
 
 ```toml
 [dependencies]
@@ -457,6 +546,8 @@ mylib = { git = "https://github.com/owner/mylib", tag = "v1.2" }
 local = { path = "../sibling-lib" }
 # A monorepo dependency selects the project root whose exact jals.toml should be probed:
 core  = { git = "https://github.com/owner/mono", rev = "abc123", dir = "core" }
+# Enable build features in the dependency itself, and skip its own `default` list:
+render = { path = "../render", features = ["vulkan"], default-features = false }
 ```
 
 A **`jar`** dependency is resolved to a local `.jar` by the **host** (`jals-cli`/`jals-lsp` via
@@ -480,6 +571,22 @@ path/Git locators resolve relative to that selected root. A missing manifest kee
 convention (`src/main/java`, then `src`, then the selected root). A present but malformed manifest and
 a dependency cycle are structural errors; `jals build`/`run` fail before `javac` rather than silently
 falling back to legacy discovery.
+
+A `git`/`path` node's **`features`** are resolved when its preprocessing runs, and the result replaces
+whatever the declaring project selected — the set a node's script reads is its own, never its
+dependents'. Its seed is the `features` on every `[dependencies]` entry reaching it plus whatever
+those projects' [`[features]` forwarded](#forwarding-a-feature-to-a-dependency); the seed is then
+closed over the node's own `[features]`, including its `default` list unless every incoming entry set
+`default-features = false`. Where several entries reach the same node, all of that **unifies**
+additively and it still builds once (Cargo's feature unification), so a diamond never splits into two
+nodes whose classes would both land on the classpath — and one entry asking for the defaults turns
+them on for the shared node, whatever the others said. A seed name the node's own table does not
+declare is still queryable and simply expands to nothing, so a typo is silently a feature nobody
+reads. A node whose selected root has no `jals.toml`, or whose manifest declares no `script`, has no
+build script to read any of it at all. A node's set is a function of the manifests *and* of the
+root's selection wherever a `[features]` entry forwards along the path to it; a selection that
+forwards nothing leaves every dependency script's fingerprint — and so its cached output —
+untouched.
 
 Stable node identities deduplicate diamonds independently of dependency aliases. Native path nodes
 use their stable selected location; Git nodes use repository identity, checked-out commit, and

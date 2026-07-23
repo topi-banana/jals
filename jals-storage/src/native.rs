@@ -958,7 +958,7 @@ impl NativeCache {
     /// Native location used only when a host adapter must pass an artifact to an OS process.
     pub fn artifact_path(&self, key: &CacheKey) -> PathBuf {
         self.root
-            .join(key.namespace().directory())
+            .join(key.namespace().name())
             .join(key.provenance().to_hex())
             .join(key.content().to_hex())
     }
@@ -968,7 +968,7 @@ impl NativeCache {
     fn index_path(&self, namespace: CacheNamespace, provenance: &ContentDigest) -> PathBuf {
         self.root
             .join("index")
-            .join(namespace.directory())
+            .join(namespace.name())
             .join(provenance.to_hex())
     }
 }

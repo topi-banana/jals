@@ -1153,6 +1153,7 @@ dependencies = [
  "jals-config",
  "jals-exec",
  "jals-fmt",
+ "jals-frontend",
  "jals-hir",
  "jals-lint",
  "jals-lsp",
@@ -1215,6 +1216,14 @@ dependencies = [
  "jals-syntax",
  "proptest",
  "unicode-width",
+]
+
+[[package]]
+name = "jals-frontend"
+version = "0.1.0"
+dependencies = [
+ "jals-exec",
+ "jals-storage",
 ]
 
 [[package]]
@@ -1298,10 +1307,12 @@ dependencies = [
  "jals-classpath",
  "jals-config",
  "jals-exec",
+ "jals-frontend",
  "jals-storage",
  "serde",
  "serde_json",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

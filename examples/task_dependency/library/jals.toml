@@ -1,0 +1,12 @@
+[package]
+name = "task-dependency-library"
+version = "0.1.0"
+
+# Whether to hand the consumer browsable sources as well as the classpath. Features resolve per
+# package, so the consumer selects this on its own `[dependencies]` entry.
+[features]
+default = []
+sources = []
+
+[build]
+script = { type = "rhai", file = "build.rhai" }

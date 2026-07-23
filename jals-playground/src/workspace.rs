@@ -230,7 +230,14 @@ impl Workspace {
                     error,
                 })?;
             self.staged_script.clone_from(&configured_script);
-            let environment = BuildScriptEnvironment::new().for_project(manifest);
+            // No command line to select from, so the root project gets the manifest's own `default`
+            // list, matching `jals build` with no flags. Only the root's own half is installed here:
+            // a dependency script's set is resolved per node when the graph is preprocessed.
+            let features = manifest
+                .resolve_build_features(&[], false, false)
+                .unwrap_or_default();
+            let environment =
+                BuildScriptEnvironment::new().for_project(manifest, features.into_features());
             if manifest.build.script.is_none() {
                 clear_build_script_outputs(storage, &mut self.build_script_session).await?;
                 None
