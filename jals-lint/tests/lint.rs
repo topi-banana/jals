@@ -455,3 +455,47 @@ fn module_import_respects_allow_config() {
         out.diagnostics
     );
 }
+
+// ===== grouped-import =====
+
+#[test]
+fn grouped_import_flagged_without_the_dialect_feature() {
+    // A non-empty feature set that lacks `grouped-imports` (a jals dialect feature no release
+    // preset implies) gates the syntax, with the dialect-flavored "add it to features" hint.
+    expect![[r#"
+        grouped-import:0..38: grouped imports (`import a.b.{X, Y};`) are a jals dialect feature; to use them, add `"grouped-imports"` to `[package] features`
+    "#]]
+    .assert_eq(&lint_with_features(
+        "import java.util.{HashMap, ArrayList};",
+        &[Feature::Java25],
+    ));
+}
+
+#[test]
+fn grouped_import_allowed_with_the_feature() {
+    assert_eq!(
+        lint_with_features(
+            "import java.util.{HashMap, ArrayList};",
+            &[Feature::GroupedImports],
+        ),
+        ""
+    );
+}
+
+#[test]
+fn grouped_import_not_gated_without_features() {
+    // No declared features: the syntax is not flagged.
+    assert_eq!(
+        lint_with_features("import java.util.{HashMap, ArrayList};", &[]),
+        ""
+    );
+}
+
+#[test]
+fn ordinary_import_is_not_a_grouped_import() {
+    // A plain import has no group, so it is never flagged by `grouped-import`.
+    assert_eq!(
+        lint_with_features("import java.util.List;", &[Feature::Java25]),
+        ""
+    );
+}

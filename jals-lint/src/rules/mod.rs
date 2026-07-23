@@ -22,6 +22,7 @@ use crate::diagnostic::Severity;
 mod compact_source_file;
 mod constant_condition;
 mod empty_catch;
+mod grouped_import;
 mod missing_braces;
 mod module_import;
 mod naming;
@@ -159,6 +160,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     missing_braces::RULE,
     compact_source_file::RULE,
     module_import::RULE,
+    grouped_import::RULE,
     constant_condition::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
