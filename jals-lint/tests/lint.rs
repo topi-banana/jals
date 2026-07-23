@@ -541,3 +541,54 @@ fn ordinary_import_is_not_a_grouped_import() {
         ""
     );
 }
+
+// ===== attribute =====
+
+#[test]
+fn attribute_flagged_without_the_dialect_feature() {
+    // Attributes attach at several depths — an import, a member's modifiers, a statement — and
+    // each occurrence is flagged individually with the dialect-flavored hint.
+    expect![[r#"
+        attribute:0..21: attributes (`#[cfg(...)]`) are a jals dialect feature; to use them, add `"attributes"` to `[package] features`
+        attribute:43..65: attributes (`#[cfg(...)]`) are a jals dialect feature; to use them, add `"attributes"` to `[package] features`
+        attribute:76..98: attributes (`#[cfg(...)]`) are a jals dialect feature; to use them, add `"attributes"` to `[package] features`
+    "#]]
+    .assert_eq(&lint_with_features(
+        "#[cfg(feature = \"x\")] import a.B;\nclass C { #[cfg(feature = \"x\")] void m() { #[cfg(feature = \"y\")] f(); } }",
+        &[Feature::Java25],
+    ));
+}
+
+#[test]
+fn attribute_allowed_with_the_feature() {
+    assert_eq!(
+        lint_with_features(
+            "#[cfg(feature = \"x\")] import a.B;\nclass C { #[cfg(feature = \"x\")] void m() {} }",
+            &[Feature::Attributes],
+        ),
+        ""
+    );
+}
+
+#[test]
+fn attribute_flagged_even_without_declared_features() {
+    // Like every dialect feature, the empty-set exemption does not apply: `javac` has never heard
+    // of `#[...]`, so an undeclared feature set cannot compile it and silence would hide the one
+    // jals-side report.
+    expect![[r#"
+        attribute:0..21: attributes (`#[cfg(...)]`) are a jals dialect feature; to use them, add `"attributes"` to `[package] features`
+    "#]]
+    .assert_eq(&lint_with_features(
+        "#[cfg(feature = \"x\")] class C {}",
+        &[],
+    ));
+}
+
+#[test]
+fn java_annotation_is_not_an_attribute() {
+    // `@Override` is Java, not a jals attribute; it is never flagged by `attribute`.
+    assert_eq!(
+        lint_with_features("class C { @Override public void m() {} }", &[]),
+        ""
+    );
+}
