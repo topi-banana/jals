@@ -408,6 +408,16 @@ pub struct ResolvedProjectGraph {
     pub(crate) native: crate::native::NativeGraphState,
 }
 
+/// A direct `[dependencies] features` name that its target's `[features]` table does not declare.
+struct UndeclaredEdgeFeature {
+    /// The node that declared the edge, or `None` for a root edge.
+    declaring: Option<NodeId>,
+    /// The dependency name the edge points at.
+    dependency: String,
+    /// The name that appears in no `[features]` key of the target.
+    feature: String,
+}
+
 impl ResolvedProjectGraph {
     pub fn metadata(&self) -> GraphMetadata {
         GraphMetadata::from_graph(&self.nodes, &self.edges)
@@ -415,6 +425,50 @@ impl ResolvedProjectGraph {
 
     pub fn warnings(&self) -> &[GraphWarning] {
         &self.warnings
+    }
+
+    /// Every direct `[dependencies] features` name that its target dependency does not declare in
+    /// `[features]`.
+    ///
+    /// Only `edge.features` — the names written directly on a `[dependencies]` entry — are checked.
+    /// A `<dependency>/<feature>` forward never reaches here: it arrives through
+    /// [`resolve_node_features`](Self::resolve_node_features)'s routing, not on the edge, and stays
+    /// deliberately permissive (a project may know a feature its dependency's own table does not).
+    /// A manifest-less target is skipped — it has no `[features]` table to check against, matching
+    /// the existing rule that a plain-source node keeps what it was sent, inert.
+    ///
+    /// Every edge is walked, including a second edge to an already-visited node, so a diamond whose
+    /// two entries disagree is fully covered — the same reason the per-node union reads the edges
+    /// rather than tracking a set during traversal. The scan is over `edges` (discovery order) and
+    /// each edge's `features` (`BTreeSet`), so the order is deterministic.
+    fn undeclared_edge_features(&self) -> Vec<UndeclaredEdgeFeature> {
+        let manifests: BTreeMap<&NodeId, &Manifest> = self
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.body {
+                NodeBody::JalsSource { manifest, .. } => Some((&node.id, manifest.as_ref())),
+                NodeBody::Binary(_) | NodeBody::PlainSource(_) => None,
+            })
+            .collect();
+
+        let mut undeclared = Vec::new();
+        for edge in &self.edges {
+            let Some(manifest) = manifests.get(&edge.to) else {
+                continue;
+            };
+            for feature in &edge.features {
+                // The `[features]` keys are the target's complete valid feature namespace; there is
+                // no optional-dependency-implies-feature mechanism to widen it.
+                if !manifest.features.contains_key(feature) {
+                    undeclared.push(UndeclaredEdgeFeature {
+                        declaring: edge.from.clone(),
+                        dependency: edge.dependency.clone(),
+                        feature: feature.clone(),
+                    });
+                }
+            }
+        }
+        undeclared
     }
 
     /// The build features every node resolves to, given what the root project selected.
@@ -528,6 +582,21 @@ impl ResolvedProjectGraph {
         root_features: &ResolvedBuildFeatures,
         limits: &BuildScriptLimits,
     ) -> Result<PreprocessedProjectGraph, GraphError> {
+        // A `[dependencies] features` name the target does not declare is a mistake, not an empty
+        // selection: reject it before any build script runs, the way Cargo does, rather than letting
+        // it expand to nothing and silently build the default. Fail on the first, in deterministic
+        // order.
+        if let Some(bad) = self.undeclared_edge_features().into_iter().next() {
+            return Err(GraphError::InvalidDependency {
+                declaring: bad.declaring,
+                dependency: bad.dependency,
+                message: format!(
+                    "requests feature `{}`, which it does not declare in `[features]`",
+                    bad.feature
+                ),
+            });
+        }
+
         let features_by_node = self.resolve_node_features(root_features);
         let mut exports = BTreeMap::new();
         for index in &self.order {

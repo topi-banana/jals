@@ -1191,7 +1191,8 @@ mod tests {
             };
             write(
                 "dep/jals.toml",
-                "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                "[features]\nhello = []\n\
+                 [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
             );
             write(
                 "dep/build.rhai",

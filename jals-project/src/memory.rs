@@ -957,6 +957,23 @@ mod tests {
         preprocess_selecting(root, root_view, environment, &[]).await
     }
 
+    /// Discover then preprocess, returning the error. For asserting the build-feature edge check,
+    /// which fires at the start of `preprocess` before any script runs.
+    async fn preprocess_error(root: &Manifest, root_view: &ProjectView) -> GraphError {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        MemoryProjectGraph::discover(root, root_view)
+            .await
+            .unwrap()
+            .preprocess(
+                storage.artifacts_mut(),
+                &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
+                &BuildScriptLimits::default(),
+            )
+            .await
+            .unwrap_err()
+    }
+
     /// Preprocess under a root `--features` selection, as a host does: the root resolves its own
     /// `[features]` and the graph receives what that selection forwards.
     async fn preprocess_selecting(
@@ -992,7 +1009,11 @@ mod tests {
             let root =
                 manifest("[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n");
             let root_view = view(&[
-                ("dep/jals.toml", PROBE_MANIFEST),
+                (
+                    "dep/jals.toml",
+                    b"[features]\nhello = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
                 ("dep/build.rhai", FEATURE_PROBE),
             ]);
             let environment = BuildScriptEnvironment::new()
@@ -1133,7 +1154,11 @@ mod tests {
                  mid = { path = \"mid\" }\n",
             );
             let root_view = view(&[
-                ("dep/jals.toml", PROBE_MANIFEST),
+                (
+                    "dep/jals.toml",
+                    b"[features]\nhello = []\nworld = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
                 ("dep/build.rhai", FEATURE_PROBE),
                 (
                     "mid/jals.toml",
@@ -1152,6 +1177,60 @@ mod tests {
                 "the shared dependency stays one node"
             );
             assert_eq!(generated(&graph), ["hello.java", "world.java"]);
+        });
+    }
+
+    #[test]
+    fn an_undeclared_edge_feature_is_rejected() {
+        jals_exec::block_on_inline(async {
+            // A `[dependencies] features` name the target does not declare is a typo, not an empty
+            // selection: reject it rather than silently expanding it to nothing and building the
+            // default. This is the exact failure the `[build.features]` -> `[features]` move made a
+            // hard error to avoid, now closed on the dependency edge too.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"typo\"] }\n");
+            let root_view = view(&[("dep/jals.toml", b"[features]\nreal = []\n")]);
+            let GraphError::InvalidDependency {
+                dependency,
+                message,
+                ..
+            } = preprocess_error(&root, &root_view).await
+            else {
+                panic!("expected an invalid dependency");
+            };
+            assert_eq!(dependency, "dep");
+            assert!(message.contains("typo"), "{message}");
+        });
+    }
+
+    #[test]
+    fn an_undeclared_edge_feature_is_caught_on_a_second_diamond_edge() {
+        jals_exec::block_on_inline(async {
+            // `dep` is already `Complete` when the second edge reaches it, so a check done at visit
+            // time would miss this. The scan reads every edge, so the typo on `mid`'s entry is still
+            // caught — and the error names that edge (`shared`), not the one that arrived first.
+            let root = manifest(
+                "[dependencies]\n\
+                 direct = { path = \"dep\", features = [\"good\"] }\n\
+                 mid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", b"[features]\ngood = []\n"),
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\nshared = { path = \"../dep\", features = [\"typo\"] }\n",
+                ),
+            ]);
+            let GraphError::InvalidDependency {
+                dependency,
+                message,
+                ..
+            } = preprocess_error(&root, &root_view).await
+            else {
+                panic!("expected an invalid dependency");
+            };
+            assert_eq!(dependency, "shared");
+            assert!(message.contains("typo"), "{message}");
         });
     }
 
