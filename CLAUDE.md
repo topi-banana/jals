@@ -147,9 +147,11 @@ cargo check -p jals-classpath --no-default-features
 cargo check -p jals-project --no-default-features
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features
+cargo check -p jals-frontend
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --features archive --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
+cargo check -p jals-frontend --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
