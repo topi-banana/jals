@@ -172,6 +172,34 @@ which retires the previous `minecraft-<version>` owner of that same destination.
 that directory along with `target/classes` and `target/jals/build`. The shared verified cache under
 `target/jals/cache` is kept so `--offline` rebuilds stay fast.
 
+## Using it as a dependency
+
+Another project can depend on this one and get the game without running any of it itself:
+
+```toml
+[dependencies]
+minecraft = { path = "../jals/examples/minecraft-mojang-remap", features = ["client", "26.2"] }
+```
+
+The consumer's `jals build` runs this build script under its *own* feature selection and receives:
+
+- the resolved game jar (plus, for a 1.18+ server bundler, its flattened libraries) on the compile
+  classpath, so `net.minecraft.*` types resolve and compile;
+- the decompiled tree as read-only navigation sources, so an editor can open the real skeleton
+  behind a type. They are not compile inputs — the classpath jar already defines those types, and
+  handing `javac` both would be a duplicate-class error rather than an improvement.
+
+Everything lands in the *consumer's* `target/jals/cache`. This directory is not written to:
+`src/main/java/net/minecraft` is only ever physically published when this project is built as the
+root. A consumer that has never built it directly still gets the full classpath, so the two uses do
+not interfere — but note that if you *have* built it as a root, those 6000-odd published files are
+ordinary sources of a `path` dependency and the consumer will compile them alongside its own. Run
+`jals clean` here first if you want the dependency to contribute the classpath jar only.
+
+The first consumer build pays the same download-and-decompile cost documented above; after that the
+whole task execution is memoized under the resolved feature set, so rebuilds and editor reloads
+reuse it.
+
 ## Legal note
 
 Generated Minecraft sources and the original jars/mappings are Mojang's copyrighted material.

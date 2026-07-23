@@ -1,0 +1,11 @@
+[package]
+name = "task-dependency-consumer"
+version = "0.1.0"
+
+[run]
+main-class = "Main"
+
+# A plain `path` dependency. That the library builds itself with a task DAG is its own business —
+# nothing here names a task, a fetch, or a cache.
+[dependencies]
+example = { path = "../library", features = ["sources"] }

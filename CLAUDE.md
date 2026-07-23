@@ -76,7 +76,11 @@ filesystem reads into portable interfaces.
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
   trees or temporary Git checkouts. Dependency snapshots are immutable and must never receive
-  generated output.
+  generated output: a dependency's build tasks run under `BuildTaskHost::Snapshot`, so their JARs
+  and declared source trees are projected into the *consumer's* artifact cache (classpath, and
+  navigation-only `library_source_artifacts`) instead of being published to the project they were
+  declared in. Each such execution is memoized in `CacheNamespace::BuildTaskState` under the node
+  identity, plan digest, and resolved features, and re-verified before reuse.
 - `jals-exec`: the execution context (`Exec`, fan-out, yields, runtime adapters). Only its
   `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is

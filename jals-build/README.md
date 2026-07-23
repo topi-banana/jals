@@ -316,8 +316,26 @@ root before build state. Outside declared roots, files are never changed.
 native LSP executes the same task plan, always offline: opening a folder in an editor runs whatever
 `build.rhai` it contains, and nobody reviews a repository before opening it, so the server consumes
 only what a real `jals build` already fetched and verified into the cache. It also defers
-publication while an open document is below the destination. The browser playground rejects physical publication before any fetch. Immutable
-dependency projects reject task terminals in this release. Tasks expose no shell/process API.
+publication while an open document is below the destination. The browser playground rejects physical
+publication before any fetch. Tasks expose no shell/process API.
+
+A `git`/`path` **dependency** may declare tasks too, and its plan runs the same way with one
+difference: publication is virtual. Every artifact lands in the *consumer's* verified cache, and the
+dependency's own snapshot is byte-identical afterwards — a dependency is never written to, which is
+what made the whole facility unavailable there before.
+
+- `add_classpath` / `add_nested_classpath` reach the consumer's compile classpath and analysis,
+  exactly like a `jar` dependency's classes.
+- `publish_tree` produces **navigation-only** sources rather than files on disk. Its `destination`
+  is still validated as a strict source-root descendant, but what the consumer receives is the
+  package path below that root (`src/main/java/net/x` → `net/x/…`), addressed like an extracted
+  `sources` jar so a type resolves to one artifact however many producers offer it. These are never
+  handed to the compiler: a decompiled skeleton and the classpath JAR that already defines the same
+  types would collide.
+
+Each dependency execution is memoized under its project identity, plan, and resolved features, and
+re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,
+or re-decompile a graph that has not changed.
 
 A concise `build.rhai` that generates and registers a Java source is:
 
