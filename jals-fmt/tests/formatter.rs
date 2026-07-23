@@ -2278,6 +2278,41 @@ fn module_import_formats_inline() {
 }
 
 #[test]
+fn grouped_import_formats_to_compact_form() {
+    // A jals grouped import lays out as `.{A, B}`: no padding inside the braces, one space after
+    // each comma. Members (nested / wildcard) keep their authored order.
+    check(
+        "import java.util.{HashMap,regex.Pattern,concurrent.*};class C{}",
+        expect![[r"
+            import java.util.{HashMap, regex.Pattern, concurrent.*};
+            class C {}
+        "]],
+    );
+}
+
+#[test]
+fn grouped_import_is_idempotent() {
+    // The canonical form is a fixed point: formatting it again changes nothing.
+    let once = fmt("import java.util.{HashMap, ArrayList};\nclass C {}\n");
+    assert_eq!(fmt(&once), once);
+    assert!(once.contains("import java.util.{HashMap, ArrayList};"));
+}
+
+#[test]
+fn grouped_import_reorders_by_prefix_without_corruption() {
+    // Under reorder-imports a grouped import sorts by its prefix like any other, and its `.{...}`
+    // survives intact.
+    check_reorder(
+        "import java.util.{List, Map};import java.io.IOException;class C{}",
+        expect![[r"
+            import java.io.IOException;
+            import java.util.{List, Map};
+            class C {}
+        "]],
+    );
+}
+
+#[test]
 fn module_decl_empty_body_collapses() {
     // A module declaration's body is a braced declaration body like a class body: an empty one
     // collapses to `{}` (not `{ }`) under the default `empty-item-single-line`.

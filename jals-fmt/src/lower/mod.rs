@@ -119,6 +119,7 @@ impl<'a> Ctx<'a> {
             S::UNARY_EXPR => self.lower_unary(node).await,
             S::CALL_EXPR | S::FIELD_ACCESS => self.lower_chain(node).await,
             S::NON_SEALED_KW => self.lower_non_sealed(node),
+            S::IMPORT_GROUP => self.lower_import_group(node).await,
             _ => self.lower_generic(node).await,
         }
     }
@@ -133,6 +134,28 @@ impl<'a> Ctx<'a> {
             .filter(|t| !t.kind().is_trivia())
             .map(|t| self.tok(&t))
             .collect();
+        Doc::concat(parts)
+    }
+
+    /// Lower a jals grouped import's `.{ ... }` to the canonical compact form `.{A, B}`: no padding
+    /// inside the braces, exactly one space after each comma. Members are emitted in authored order
+    /// (the enclosing import run's reordering keys off the shared prefix, not the members). Comments
+    /// attached to any delimiter are preserved via [`Ctx::tok`].
+    async fn lower_import_group(&self, node: &SyntaxNode) -> Doc {
+        let mut parts: Vec<Doc> = Vec::new();
+        for el in node.children_with_tokens() {
+            if let Some(child) = el.as_node() {
+                parts.push(self.lower(child).await);
+            } else if let Some(t) = el.as_token() {
+                if t.kind().is_trivia() {
+                    continue;
+                }
+                parts.push(self.tok(t));
+                if t.kind() == S::COMMA {
+                    parts.push(Doc::text(" "));
+                }
+            }
+        }
         Doc::concat(parts)
     }
 }
