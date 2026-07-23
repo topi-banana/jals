@@ -214,7 +214,43 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             for file in &exports.classpath {
                 self.publish_classpath_file(&node.id, file).await;
             }
+            self.project_task_exports(&node.id, exports);
         }
+    }
+
+    /// Project a dependency's build-task output, which is already in this cache under its own keys.
+    ///
+    /// Unlike every other publication here there are no bytes to write: the task executor produced
+    /// these artifacts against the same verified cache, so the plan only has to name them.
+    fn project_task_exports(&mut self, node: &NodeId, exports: &crate::graph::NodeExports) {
+        for (index, key) in exports.task_classpath.iter().enumerate() {
+            // Named after the root's own build-task materialization so the two read alike in a
+            // classpath dump; the node token keeps two dependencies' JARs apart.
+            let path = Self::logical_path(node, &Self::build_task_jar(index), b"classpath");
+            self.plan.classpath.push(ClasspathEntry::ArtifactFile {
+                path: path.clone(),
+                key: key.clone(),
+            });
+            self.compile_classpath
+                .push(CompileClasspathEntry::File(CompileClasspathFile {
+                    node: Some(node.clone()),
+                    path,
+                    key: key.clone(),
+                }));
+        }
+        // Navigation sources keep the package-relative path the task gave them, with no node token
+        // in front: that is the address every other library source uses, and sharing it is what
+        // lets one type resolve to one artifact when a jar's sources and a skeleton also offer it.
+        self.plan
+            .library_source_artifacts
+            .extend(exports.library_sources.iter().cloned());
+    }
+
+    fn build_task_jar(index: usize) -> RelativePath {
+        RelativePath::new([
+            Name::new("build-task").expect("constant is a portable name"),
+            Name::new(format!("{index}.jar")).expect("index-derived file name is portable"),
+        ])
     }
 
     /// Lower a source node's authored + generated `.java` and publish the frontend output.
@@ -281,7 +317,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 self.errors.push(ProjectAssemblyError {
                     node: node.id.clone(),
                     path: None,
-                    message: format!("frontend `{}` failed: {error:?}", frontend.caps().id),
+                    message: format!("frontend `{}` failed: {error}", frontend.caps().id),
                 });
                 return;
             }

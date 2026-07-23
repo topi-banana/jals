@@ -8,6 +8,13 @@
 //! produced by a frontend. It never receives, and cannot reach, the project's authored source
 //! roots, which is what makes "the backend only ever sees frontend output" a structural property
 //! rather than a convention.
+//!
+//! TODO(backend-tier): deferred — no `impl Backend` exists yet, and compilation still runs through
+//! the pre-existing `<dyn Compiler>::select` path (`native.rs`). The [`Backend`] trait and its
+//! [`BackendRequest`] / [`BackendOptions`] / [`BackendOutcome`] / [`BackendSelection`] types —
+//! together with `CacheKey::derive` and `CacheNamespace::BackendOutput` in `jals-storage` — are the
+//! stable surface the `javac` backend adapter will implement and wire up in a later PR.
+//! ([`BackendError`] is already in use by `staging.rs` and is not part of the deferral.)
 
 use alloc::boxed::Box;
 use alloc::string::String;

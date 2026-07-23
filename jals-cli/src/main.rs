@@ -867,9 +867,16 @@ impl App {
         let graph = graph
             .preprocess(
                 storage.artifacts_mut(),
-                scripts.environment,
-                scripts.features,
-                &BuildScriptLimits::default(),
+                jals_project::GraphPreprocess {
+                    exec,
+                    // A dependency's build tasks fetch under the same policy as the root's, from
+                    // the same project cache — `--offline` means offline for the whole graph.
+                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    environment: scripts.environment,
+                    root_features: scripts.features,
+                    limits: &BuildScriptLimits::default(),
+                    network,
+                },
             )
             .await
             .context("preprocessing project dependency graph")?;
@@ -1006,10 +1013,18 @@ impl App {
         inputs
             .extra_sources
             .retain(|path| !generated.contains(path));
-        // Repoint `-sourcepath` at the staged tree. Without this the compiler could resolve a
-        // type from the authored source it was never given on the command line, silently reading
-        // around the frontend — harmless while the frontend is the identity, and a correctness
-        // hole the moment one rewrites anything.
+        // Replace `-sourcepath` with the staged tree so the authored source dirs leave it
+        // entirely. Without this the compiler could resolve a type from the authored source it was
+        // never given on the command line, silently reading around the frontend — harmless while
+        // the frontend is the identity, and a correctness hole the moment one rewrites anything.
+        //
+        // This only *excludes* the authored roots; it does not repoint resolution at the staged
+        // copies. The staging root is not a package root — staged files keep their full
+        // project-relative path beneath it (`<root>/src/main/java/com/example/Main.java`), so
+        // implicit lookup of `com.example.Foo` probes `<root>/com/example/Foo.java` and always
+        // misses. That is fine today because every source is passed to javac explicitly; a future
+        // rewriting frontend that relies on implicit resolution would have to stage under the
+        // original source-dir prefix instead.
         manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
         Ok((staged, inputs))
     }
@@ -1253,7 +1268,7 @@ impl App {
 
         let lowered = jals_frontend::Driver::lower(frontend, &mut cache, &files)
             .await
-            .map_err(|error| anyhow!("frontend `{}` failed: {error:?}", frontend.caps().id))?;
+            .map_err(|error| anyhow!("frontend `{}` failed: {error}", frontend.caps().id))?;
 
         let tree: Vec<_> = lowered
             .tree
@@ -1269,6 +1284,11 @@ impl App {
 
     /// The staged tree expressed as manifest `source-dirs`, relative to the project root when
     /// possible so the rendered `javac` command stays readable.
+    ///
+    /// This is the staging *root*, not a package root: staged files keep their full
+    /// project-relative path beneath it, so setting `-sourcepath` to it resolves nothing
+    /// implicitly. It is retained only to replace — and thereby exclude — the authored source
+    /// dirs; every source is passed to javac explicitly.
     fn staged_source_dirs(root: &Path, staged: &jals_build::StagedTree) -> Vec<String> {
         let path = staged
             .root()

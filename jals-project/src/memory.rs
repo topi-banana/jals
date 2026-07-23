@@ -200,6 +200,7 @@ impl GraphBuilder {
         self.seen_nodes.insert(acquired.id.clone());
         self.nodes.push(ResolvedNode {
             id: acquired.id.clone(),
+            location: Self::node_location(&declaring),
             body,
         });
         self.states
@@ -277,6 +278,7 @@ impl GraphBuilder {
         let index = self.nodes.len();
         self.nodes.push(ResolvedNode {
             id,
+            location: locator.to_owned(),
             body: NodeBody::Binary(input),
         });
         self.order.push(index);
@@ -341,6 +343,15 @@ impl GraphBuilder {
         }
     }
 
+    /// How a diagnostic names this node. Inside one captured tree that is the subtree it selected.
+    fn node_location(root: &RelativePath) -> String {
+        if root.is_root() {
+            ".".to_owned()
+        } else {
+            root.to_string()
+        }
+    }
+
     fn capture_manifest_sources(
         &mut self,
         declaring: &RelativePath,
@@ -368,7 +379,7 @@ impl GraphBuilder {
             }
             let local = path.starts_with(declaring);
             let prefix = if local {
-                Self::strip_prefix(declaring, &path)
+                path.strip_prefix(declaring)
                     .expect("a path tested with starts_with has the prefix")
             } else {
                 RelativePath::new([Name::new(format!("external-source-{index}"))
@@ -429,7 +440,7 @@ impl GraphBuilder {
             match found {
                 Some(EntryRef::File(file)) => {
                     let logical = if path.starts_with(declaring) {
-                        Self::strip_prefix(declaring, &path)
+                        path.strip_prefix(declaring)
                             .expect("a path tested with starts_with has the prefix")
                     } else {
                         Self::external_file_path(index, &path)
@@ -441,7 +452,7 @@ impl GraphBuilder {
                 }
                 Some(EntryRef::Directory(directory)) => {
                     let logical = if path.starts_with(declaring) {
-                        Self::strip_prefix(declaring, &path)
+                        path.strip_prefix(declaring)
                             .expect("a path tested with starts_with has the prefix")
                     } else {
                         RelativePath::new([Name::new(format!("external-classpath-{index}"))
@@ -474,17 +485,12 @@ impl GraphBuilder {
         entries
     }
 
-    fn strip_prefix(root: &RelativePath, path: &RelativePath) -> Option<RelativePath> {
-        path.starts_with(root)
-            .then(|| RelativePath::new(path.segments().skip(root.segments().len()).cloned()))
-    }
-
     fn rebase_file_path(
         root: &RelativePath,
         path: &RelativePath,
         role: &str,
     ) -> Result<RelativePath, String> {
-        if let Some(relative) = Self::strip_prefix(root, path)
+        if let Some(relative) = path.strip_prefix(root)
             && !relative.is_root()
         {
             return Ok(relative);
@@ -594,7 +600,41 @@ mod tests {
 
     use super::*;
     use crate::NodeKind;
-    use crate::graph::PreprocessedProjectGraph;
+    use crate::graph::{GraphPreprocess, PreprocessedProjectGraph};
+
+    /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
+    struct UnreachableFetcher;
+
+    impl jals_classpath::Fetcher for UnreachableFetcher {
+        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+            panic!("this graph must not fetch, but asked for `{locator}`")
+        }
+    }
+
+    /// Preprocessing inputs for a graph under test, defaulting everything a task plan would need.
+    ///
+    /// A macro rather than a helper function because the borrowed defaults have to outlive the call
+    /// and nothing here owns them; as temporaries in the calling statement they live exactly long
+    /// enough.
+    macro_rules! inert {
+        () => {
+            inert!(
+                &BuildScriptEnvironment::new(),
+                &ResolvedBuildFeatures::default(),
+                &BuildScriptLimits::default()
+            )
+        };
+        ($environment:expr, $features:expr, $limits:expr) => {
+            GraphPreprocess {
+                exec: &jals_exec::Exec::inline(),
+                fetcher: &UnreachableFetcher,
+                environment: $environment,
+                root_features: $features,
+                limits: $limits,
+                network: jals_classpath::NetworkPolicy::Offline,
+            }
+        };
+    }
 
     fn manifest(text: &str) -> Manifest {
         text.parse().expect("test manifest is valid")
@@ -647,12 +687,7 @@ mod tests {
                 [NodeKind::JalsSource, NodeKind::JalsSource]
             );
             let graph = graph
-                .preprocess(
-                    storage.artifacts_mut(),
-                    &BuildScriptEnvironment::new(),
-                    &ResolvedBuildFeatures::default(),
-                    &BuildScriptLimits::default(),
-                )
+                .preprocess(storage.artifacts_mut(), inert!())
                 .await
                 .unwrap();
             let assembly = graph.assemble(storage.artifacts_mut()).await;
@@ -766,12 +801,7 @@ mod tests {
             let graph = MemoryProjectGraph::discover(&root, &root_view)
                 .await
                 .unwrap()
-                .preprocess(
-                    storage.artifacts_mut(),
-                    &BuildScriptEnvironment::new(),
-                    &ResolvedBuildFeatures::default(),
-                    &BuildScriptLimits::default(),
-                )
+                .preprocess(storage.artifacts_mut(), inert!())
                 .await
                 .unwrap();
             let assembly = graph.assemble(storage.artifacts_mut()).await;
@@ -836,9 +866,11 @@ mod tests {
                 .unwrap()
                 .preprocess(
                     storage.artifacts_mut(),
-                    &environment,
-                    &ResolvedBuildFeatures::default(),
-                    &BuildScriptLimits::default(),
+                    inert!(
+                        &environment,
+                        &ResolvedBuildFeatures::default(),
+                        &BuildScriptLimits::default()
+                    ),
                 )
                 .await
                 .unwrap();
@@ -873,9 +905,11 @@ mod tests {
                 .unwrap()
                 .preprocess(
                     storage.artifacts_mut(),
-                    &BuildScriptEnvironment::new(),
-                    &ResolvedBuildFeatures::default(),
-                    &limits,
+                    inert!(
+                        &BuildScriptEnvironment::new(),
+                        &ResolvedBuildFeatures::default(),
+                        &limits
+                    ),
                 )
                 .await
                 .unwrap();
@@ -957,6 +991,18 @@ mod tests {
         preprocess_selecting(root, root_view, environment, &[]).await
     }
 
+    /// Discover then preprocess, returning the error. For asserting the build-feature edge check,
+    /// which fires at the start of `preprocess` before any script runs.
+    async fn preprocess_error(root: &Manifest, root_view: &ProjectView) -> GraphError {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        MemoryProjectGraph::discover(root, root_view)
+            .await
+            .unwrap()
+            .preprocess(storage.artifacts_mut(), inert!())
+            .await
+            .unwrap_err()
+    }
+
     /// Preprocess under a root `--features` selection, as a host does: the root resolves its own
     /// `[features]` and the graph receives what that selection forwards.
     async fn preprocess_selecting(
@@ -975,9 +1021,7 @@ mod tests {
             .unwrap()
             .preprocess(
                 storage.artifacts_mut(),
-                environment,
-                &features,
-                &BuildScriptLimits::default(),
+                inert!(environment, &features, &BuildScriptLimits::default()),
             )
             .await
             .unwrap()
@@ -992,7 +1036,11 @@ mod tests {
             let root =
                 manifest("[dependencies]\ndep = { path = \"dep\", features = [\"hello\"] }\n");
             let root_view = view(&[
-                ("dep/jals.toml", PROBE_MANIFEST),
+                (
+                    "dep/jals.toml",
+                    b"[features]\nhello = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
                 ("dep/build.rhai", FEATURE_PROBE),
             ]);
             let environment = BuildScriptEnvironment::new()
@@ -1133,7 +1181,11 @@ mod tests {
                  mid = { path = \"mid\" }\n",
             );
             let root_view = view(&[
-                ("dep/jals.toml", PROBE_MANIFEST),
+                (
+                    "dep/jals.toml",
+                    b"[features]\nhello = []\nworld = []\n\
+                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                ),
                 ("dep/build.rhai", FEATURE_PROBE),
                 (
                     "mid/jals.toml",
@@ -1152,6 +1204,60 @@ mod tests {
                 "the shared dependency stays one node"
             );
             assert_eq!(generated(&graph), ["hello.java", "world.java"]);
+        });
+    }
+
+    #[test]
+    fn an_undeclared_edge_feature_is_rejected() {
+        jals_exec::block_on_inline(async {
+            // A `[dependencies] features` name the target does not declare is a typo, not an empty
+            // selection: reject it rather than silently expanding it to nothing and building the
+            // default. This is the exact failure the `[build.features]` -> `[features]` move made a
+            // hard error to avoid, now closed on the dependency edge too.
+            let root =
+                manifest("[dependencies]\ndep = { path = \"dep\", features = [\"typo\"] }\n");
+            let root_view = view(&[("dep/jals.toml", b"[features]\nreal = []\n")]);
+            let GraphError::InvalidDependency {
+                dependency,
+                message,
+                ..
+            } = preprocess_error(&root, &root_view).await
+            else {
+                panic!("expected an invalid dependency");
+            };
+            assert_eq!(dependency, "dep");
+            assert!(message.contains("typo"), "{message}");
+        });
+    }
+
+    #[test]
+    fn an_undeclared_edge_feature_is_caught_on_a_second_diamond_edge() {
+        jals_exec::block_on_inline(async {
+            // `dep` is already `Complete` when the second edge reaches it, so a check done at visit
+            // time would miss this. The scan reads every edge, so the typo on `mid`'s entry is still
+            // caught — and the error names that edge (`shared`), not the one that arrived first.
+            let root = manifest(
+                "[dependencies]\n\
+                 direct = { path = \"dep\", features = [\"good\"] }\n\
+                 mid = { path = \"mid\" }\n",
+            );
+            let root_view = view(&[
+                ("dep/jals.toml", b"[features]\ngood = []\n"),
+                (
+                    "mid/jals.toml",
+                    b"[dependencies]\nshared = { path = \"../dep\", features = [\"typo\"] }\n",
+                ),
+            ]);
+            let GraphError::InvalidDependency {
+                dependency,
+                message,
+                ..
+            } = preprocess_error(&root, &root_view).await
+            else {
+                panic!("expected an invalid dependency");
+            };
+            assert_eq!(dependency, "shared");
+            assert!(message.contains("typo"), "{message}");
         });
     }
 

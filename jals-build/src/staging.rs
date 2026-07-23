@@ -50,7 +50,7 @@ impl StagedTree {
             let bytes = cache
                 .lookup(key)
                 .await
-                .map_err(|error| BackendError::Io(format!("{error:?}")))?
+                .map_err(|error| BackendError::Io(format!("{error}")))?
                 .ok_or_else(|| BackendError::MissingArtifact(path.clone()))?;
 
             let mut destination = root.clone();
@@ -91,7 +91,11 @@ impl StagedTree {
                 };
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() {
+                    // `read_dir` file types do not follow symlinks, unlike `Path::is_dir`. A
+                    // symlinked directory under this root must be unlinked as an unwanted entry,
+                    // never walked — recursing would delete files outside the staging tree, which
+                    // is exactly the "someone wrote that" case this pruning is allowed to skip.
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                         walk(&path, keep)?;
                         // Prune directories this pass emptied. A still-populated directory fails,
                         // which is the intended no-op.
@@ -108,7 +112,9 @@ impl StagedTree {
         .map_err(|error| BackendError::Io(error.to_string()))
     }
 
-    /// The staging root, for `-sourcepath`.
+    /// The staging root. Used as `-sourcepath` only to exclude the authored source dirs: it is not
+    /// a package root (staged files keep their full project-relative path beneath it), so it
+    /// resolves nothing implicitly, and every source is passed to the compiler explicitly.
     pub fn root(&self) -> &Path {
         &self.root
     }

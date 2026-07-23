@@ -1,12 +1,15 @@
 use std::io::{Cursor, Write};
 
 use jals_classpath::{
-    DependencyLocation, DependencySpec, Fetcher, ProjectInputOptions, ProjectInputPlan,
-    ProjectInputs,
+    DependencyLocation, DependencySpec, Fetcher, LibrarySource, ProjectInputOptions,
+    ProjectInputPlan, ProjectInputs,
 };
 use jals_config::{Feature, FeatureSet};
 use jals_exec::block_on_inline;
-use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage, Name};
+use jals_storage::{
+    CacheKey, CacheNamespace, CodeTree, ContentDigest, Entry, FileKey, MemoryStorage, Name,
+    RelativePath,
+};
 
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
 
@@ -68,4 +71,65 @@ fn compile_resolves_without_parsing_classfiles() {
     ));
     assert_eq!(inputs.dependency_jars.len(), 1);
     assert!(inputs.classpath_classes.is_empty());
+}
+
+#[test]
+fn a_published_navigation_source_wins_over_the_skeleton_for_the_same_type() {
+    // `Box.class` is on the classpath, so skeleton synthesis renders `Box.java` for it. A build
+    // task that published its own `Box.java` is the better answer — it is real source, not a
+    // rendering — and both address the type by the same package-relative path. Whichever the host
+    // mounts last would otherwise decide, silently.
+    let (mut storage, mut plan) = setup();
+    let published = b"public final class Box { /* the real thing */ }";
+    let key = CacheKey::new(
+        CacheNamespace::BuildTaskSource,
+        ContentDigest::of(b"published"),
+        ContentDigest::of(published),
+    );
+    block_on_inline(storage.artifacts_mut().publish(&key, published)).unwrap();
+    plan.library_source_artifacts = vec![LibrarySource {
+        path: RelativePath::parse("Box.java").unwrap(),
+        key: key.clone(),
+    }];
+
+    let inputs = block_on_inline(ProjectInputs::assemble(
+        &NoFetch,
+        &mut storage,
+        &plan,
+        ProjectInputOptions::Editor,
+    ));
+    let boxes: Vec<_> = inputs
+        .library_sources
+        .iter()
+        .filter(|source| source.path.to_string() == "Box.java")
+        .collect();
+    assert_eq!(boxes.len(), 1, "{:?}", inputs.library_sources);
+    assert_eq!(boxes[0].key, key);
+}
+
+#[test]
+fn navigation_sources_never_reach_a_compile() {
+    // They exist for a reader. Handing them to `javac` alongside the classpath that already defines
+    // the same types is a duplicate-class error, not extra coverage.
+    let (mut storage, mut plan) = setup();
+    let published = b"public final class Box {}";
+    let key = CacheKey::new(
+        CacheNamespace::BuildTaskSource,
+        ContentDigest::of(b"published"),
+        ContentDigest::of(published),
+    );
+    block_on_inline(storage.artifacts_mut().publish(&key, published)).unwrap();
+    plan.library_source_artifacts = vec![LibrarySource {
+        path: RelativePath::parse("Box.java").unwrap(),
+        key,
+    }];
+
+    let inputs = block_on_inline(ProjectInputs::assemble(
+        &NoFetch,
+        &mut storage,
+        &plan,
+        ProjectInputOptions::Compile,
+    ));
+    assert!(inputs.library_sources.is_empty());
+    assert!(inputs.source_dep_sources.is_empty());
 }

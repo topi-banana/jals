@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use jals_storage::{ArtifactCache, CacheBackend, CacheError, CacheNamespace, RelativePath};
 
 use crate::frontend::{Frontend, FrontendError};
-use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree};
+use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree, Severity};
 use crate::key::FrontendKey;
 
 /// A completed lowering.
@@ -32,6 +32,29 @@ impl From<CacheError> for LowerError {
     }
 }
 
+impl core::fmt::Display for LowerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Frontend(error) => write!(f, "{error}"),
+            Self::Cache(error) => write!(f, "{error}"),
+            Self::DuplicatePath(path) => write!(f, "frontend emitted `{path}` more than once"),
+            Self::Rejected(diagnostics) => {
+                f.write_str("frontend rejected its input")?;
+                for diagnostic in diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                {
+                    match &diagnostic.file {
+                        Some(file) => write!(f, "\n  {file}: {}", diagnostic.message)?,
+                        None => write!(f, "\n  {}", diagnostic.message)?,
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Lowering namespace: runs a frontend and publishes what it emitted.
 pub struct Driver;
 
@@ -51,8 +74,14 @@ impl Driver {
     ) -> Result<Lowered, LowerError> {
         /// The input file an emitted path came from, or `None` for a synthesized path with no
         /// single origin — which widens that file's key to project scope.
+        ///
+        /// `files` is in canonical (sorted) order per this function's contract, so this is a
+        /// binary search: a linear scan per emitted file is quadratic in project size.
         fn origin_of<'a>(files: &'a [IrFile], emitted: &RelativePath) -> Option<&'a IrFile> {
-            files.iter().find(|file| &file.path == emitted)
+            files
+                .binary_search_by(|file| file.path.cmp(emitted))
+                .ok()
+                .map(|index| &files[index])
         }
 
         let caps = frontend.caps();

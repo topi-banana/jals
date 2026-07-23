@@ -27,5 +27,10 @@ serde_json.workspace = true
 serde.workspace = true
 tempfile = { version = "3", optional = true }
 
+[dev-dependencies]
+# Writes the jar fixtures a build task extracts from; the product reads archives through
+# `jals-classpath`'s in-house reader, never this.
+zip.workspace = true
+
 [lints]
 workspace = true
