@@ -6,6 +6,13 @@
 //! reproduces the exact same number of `\n` as the span it replaces. Every other byte is copied
 //! verbatim, so a runtime stack trace still names the line the author wrote — the whole point of
 //! desugaring in the frontend rather than reformatting through `jals-fmt`.
+//!
+//! A parse error overlapping a grouped import is never desugared: plain imports synthesized from a
+//! broken group would be a guess at what the author meant. The file is emitted verbatim — the
+//! output stays one entry per input — together with an error diagnostic, which makes
+//! [`Driver::lower`](crate::driver::Driver::lower) reject the whole lowering and publish nothing.
+//! That is a deliberate fail-fast: `javac` never runs, so nothing downstream will report the syntax
+//! error for us and the diagnostic has to carry the offending line itself.
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
@@ -15,7 +22,7 @@ use alloc::vec::Vec;
 
 use jals_storage::ContentDigest;
 use jals_syntax::ast::{AstNode, ImportDecl, ImportGroup, SourceFile};
-use jals_syntax::{Parse, SyntaxKind};
+use jals_syntax::{Parse, SyntaxElement, SyntaxKind};
 
 use crate::frontend::{Frontend, FrontendCaps, FrontendFuture};
 use crate::ir::{FrontendDiagnostic, FrontendOutput, Ir, Severity};
@@ -100,14 +107,18 @@ impl Frontend for DialectFrontend {
                     Desugared::Rewritten(rewritten) => {
                         files.push((file.path.clone(), rewritten.into_bytes()));
                     }
-                    Desugared::Malformed => {
-                        // A parse error overlaps a grouped import: never synthesize plain imports
-                        // from a broken group. Emit verbatim so javac reports the real syntax
-                        // error, and flag it here too.
+                    Desugared::Malformed { line, detail } => {
+                        // Never synthesize plain imports from a broken group. The file is emitted
+                        // verbatim so the output keeps one entry per input, but the error makes the
+                        // driver reject the whole lowering — `javac` never runs, so this message is
+                        // the only report the user gets and has to locate the group itself.
                         diagnostics.push(FrontendDiagnostic {
                             severity: Severity::Error,
                             file: Some(file.path.clone()),
-                            message: "grouped import is malformed; not desugared".to_owned(),
+                            message: format!(
+                                "grouped import on line {line} is malformed ({detail}); \
+                                 not desugared"
+                            ),
                         });
                         files.push(verbatim());
                     }
@@ -138,7 +149,11 @@ enum Desugared {
     /// Rewritten source bytes (grouped imports expanded).
     Rewritten(String),
     /// A parse error overlaps a grouped import: caller emits verbatim and diagnoses.
-    Malformed,
+    ///
+    /// Carries what the diagnostic needs to stand on its own, because the lowering it belongs to
+    /// is rejected and no compiler downstream will restate it: the 1-based `line` of the offending
+    /// group's `import` keyword, and `detail` — the parser's own message, or the missing `;`.
+    Malformed { line: usize, detail: String },
 }
 
 impl DialectFrontend {
@@ -154,15 +169,22 @@ impl DialectFrontend {
                 continue;
             };
             let Some((start, end)) = Self::significant_span(&import) else {
-                // No `;` (malformed): leave it for javac to report.
-                return Desugared::Malformed;
+                // No `;` at all, so there is no span to replace.
+                return Desugared::Malformed {
+                    line: Self::keyword_start(&import)
+                        .map_or(1, |offset| Self::line_of(text, offset)),
+                    detail: "missing `;`".to_owned(),
+                };
             };
             // Only a parse error touching *this* group blocks desugaring — errors elsewhere in the
             // file (e.g. a method body) do not. Half-open overlap on `[start, end)`.
-            if parse.errors().iter().any(|error| {
+            if let Some(error) = parse.errors().iter().find(|error| {
                 usize::from(error.range().start()) < end && start < usize::from(error.range().end())
             }) {
-                return Desugared::Malformed;
+                return Desugared::Malformed {
+                    line: Self::line_of(text, start),
+                    detail: error.message().to_owned(),
+                };
             }
             splices.push((
                 start,
@@ -185,25 +207,39 @@ impl DialectFrontend {
         Desugared::Rewritten(out)
     }
 
+    /// The 1-based line `offset` falls on. `offset` comes from a token range, so it is always a
+    /// char boundary; `get` rather than an index keeps a defect from becoming a panic in the
+    /// compile path.
+    fn line_of(text: &str, offset: usize) -> usize {
+        text.get(..offset)
+            .map_or(1, |prefix| 1 + prefix.matches('\n').count())
+    }
+
+    /// The offset of the declaration's `import` keyword — the anchor a diagnostic about it points
+    /// at, and the start of [`significant_span`](Self::significant_span). Present whenever the
+    /// parser built the node at all, since it opens an `IMPORT_DECL` by consuming that keyword.
+    fn keyword_start(import: &ImportDecl) -> Option<usize> {
+        import
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|token| token.kind() == SyntaxKind::IMPORT_KW)
+            .map(|token| usize::from(token.text_range().start()))
+    }
+
     /// The significant span of an import declaration: from the `import` keyword's start to the `;`'s
     /// end. Excludes the leading trivia rowan attaches inside the node (the previous line's
     /// newline), which is exactly what keeps line numbers stable.
     fn significant_span(import: &ImportDecl) -> Option<(usize, usize)> {
-        let mut start = None;
-        let mut end = None;
-        for element in import.syntax().children_with_tokens() {
-            let Some(token) = element.as_token() else {
-                continue;
-            };
-            match token.kind() {
-                SyntaxKind::IMPORT_KW if start.is_none() => {
-                    start = Some(usize::from(token.text_range().start()));
-                }
-                SyntaxKind::SEMICOLON => end = Some(usize::from(token.text_range().end())),
-                _ => {}
-            }
-        }
-        Some((start?, end?))
+        let start = Self::keyword_start(import)?;
+        let end = import
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| token.kind() == SyntaxKind::SEMICOLON)
+            .map(|token| usize::from(token.text_range().end()))
+            .last()?;
+        Some((start, end))
     }
 
     /// Expand one grouped import into `import`-per-member text with the *same* newline count as

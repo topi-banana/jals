@@ -11,7 +11,7 @@ use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
 use crate::dialect::{DialectFlags, DialectFrontend};
 use crate::driver::Driver;
 use crate::frontend::Frontend;
-use crate::ir::{Ir, IrFile, LoweredFile, LoweredTree};
+use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree};
 use crate::key::FrontendKey;
 use crate::vanilla::VanillaFrontend;
 
@@ -229,6 +229,20 @@ mod helpers {
         alloc::string::String::from_utf8(desugar(src)).unwrap()
     }
 
+    /// Run the dialect frontend over a source expected to fail, returning its diagnostics and the
+    /// bytes it emitted.
+    pub(super) fn desugar_failing(src: &str) -> (Vec<FrontendDiagnostic>, Vec<u8>) {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(DialectFlags {
+            grouped_imports: true,
+        });
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(output.has_errors());
+        assert_eq!(output.files.len(), 1);
+        let bytes = output.files.into_iter().next().unwrap().1;
+        (output.diagnostics, bytes)
+    }
+
     pub(super) fn newlines(text: &str) -> usize {
         text.matches('\n').count()
     }
@@ -240,7 +254,7 @@ mod helpers {
     }
 }
 
-use helpers::{desugar_str, line_of, newlines};
+use helpers::{desugar_failing, desugar_str, line_of, newlines};
 
 #[test]
 fn desugars_single_line_group_onto_one_line() {
@@ -333,13 +347,40 @@ fn source_without_groups_is_emitted_unchanged() {
 #[test]
 fn malformed_group_is_emitted_verbatim_with_an_error() {
     let src = "import java.util.{HashMap, ArrayList;\nclass C {}\n";
-    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
-    let frontend = DialectFrontend::new(DialectFlags {
-        grouped_imports: true,
-    });
-    let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
-    assert!(output.has_errors());
-    assert_eq!(output.files[0].1, src.as_bytes());
+    let (_diagnostics, bytes) = desugar_failing(src);
+    // The output keeps one entry per input even though the driver will reject the lowering, so
+    // `FrontendOutput` never describes a half-emitted tree.
+    assert_eq!(bytes, src.as_bytes());
+}
+
+#[test]
+fn malformed_group_diagnostic_names_the_line_and_the_parse_error() {
+    // The lowering is rejected, so `javac` never runs and nothing downstream restates the error:
+    // the diagnostic is the only report the user gets and must locate the group on its own.
+    let src = "package p;\n\nimport java.util.{HashMap, ArrayList;\nclass C {}\n";
+    let (diagnostics, _bytes) = desugar_failing(src);
+    let message = &diagnostics[0].message;
+    assert!(
+        message.contains("on line 3"),
+        "diagnostic should name the group's line: {message}"
+    );
+    assert!(
+        message.contains("RBRACE"),
+        "diagnostic should carry the parser's own message: {message}"
+    );
+}
+
+#[test]
+fn group_without_a_semicolon_is_diagnosed_at_its_own_line() {
+    // No `;` at all: there is no span to replace, so the fallback anchor is the `import` keyword.
+    let src = "package p;\nimport a.{B}\nclass C {}\n";
+    let (diagnostics, bytes) = desugar_failing(src);
+    assert_eq!(bytes, src.as_bytes());
+    let message = &diagnostics[0].message;
+    assert!(
+        message.contains("on line 2") && message.contains("missing `;`"),
+        "unexpected diagnostic: {message}"
+    );
 }
 
 #[test]
