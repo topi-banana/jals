@@ -293,15 +293,31 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         // sources are desugared, so a dialect feature compiles without a separate frontend
         // selection. Legacy source/binary nodes have no manifest, so no dialect.
         let (kind, dialect_flags) = match &node.body {
-            NodeBody::JalsSource { manifest, .. } => (
-                manifest.build.frontend,
-                jals_frontend::DialectFlags {
-                    grouped_imports: manifest
-                        .feature_set()
-                        .contains(jals_config::Feature::GroupedImports),
-                    ..jals_frontend::DialectFlags::default()
-                },
-            ),
+            NodeBody::JalsSource { manifest, .. } => {
+                let feature_set = manifest.feature_set();
+                let attributes = feature_set.contains(jals_config::Feature::Attributes);
+                (
+                    manifest.build.frontend,
+                    jals_frontend::DialectFlags {
+                        grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
+                        attributes,
+                        // The node's own unified build-feature selection feeds its
+                        // `#[cfg(feature = "…")]` — a dependency is lowered under its own
+                        // authority, against the features its consumers routed to it. Kept
+                        // empty when the attributes dialect is off, so the cache identity of
+                        // attribute-free dialect nodes stays independent of the selection.
+                        build_features: if attributes {
+                            self.graph
+                                .features
+                                .get(&node.id)
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            alloc::collections::BTreeSet::new()
+                        },
+                    },
+                )
+            }
             NodeBody::PlainSource(_) | NodeBody::Binary(_) => (
                 jals_config::FrontendKind::Vanilla {},
                 jals_frontend::DialectFlags::default(),

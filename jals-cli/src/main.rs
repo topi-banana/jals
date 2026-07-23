@@ -1007,7 +1007,7 @@ impl App {
                 to_lower.push(path.clone());
             }
         }
-        let staged = Self::lower_sources(manifest, root, &to_lower).await?;
+        let staged = Self::lower_sources(manifest, root, &to_lower, features).await?;
         // Whatever was lowered is now represented by its staged copy; leaving the original in
         // `extra_sources` would hand javac the pre-frontend file as well.
         inputs
@@ -1233,15 +1233,24 @@ impl App {
         manifest: &Manifest,
         root: &Path,
         sources: &[PathBuf],
+        features: &ResolvedBuildFeatures,
     ) -> Result<jals_build::StagedTree> {
         // Enabling a jals dialect feature (`[package] features`) drives the build to desugar it,
         // so it compiles without a separate `[build.frontend]` selection. When no dialect feature
         // is on, fall back to vanilla so the cache identity of ordinary projects is unchanged.
+        let feature_set = manifest.feature_set();
+        let attributes = feature_set.contains(jals_config::Feature::Attributes);
         let dialect_flags = jals_frontend::DialectFlags {
-            grouped_imports: manifest
-                .feature_set()
-                .contains(jals_config::Feature::GroupedImports),
-            ..jals_frontend::DialectFlags::default()
+            grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
+            attributes,
+            // The resolved build features feed `#[cfg(feature = "…")]` — the same set a build
+            // script queries. Kept empty when the attributes dialect is off, so the cache
+            // identity of attribute-free dialect projects stays independent of `--features`.
+            build_features: if attributes {
+                features.features().clone()
+            } else {
+                std::collections::BTreeSet::new()
+            },
         };
         let use_dialect = dialect_flags.any();
         let dialect = jals_frontend::DialectFrontend::new(dialect_flags);

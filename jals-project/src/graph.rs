@@ -734,6 +734,7 @@ impl ResolvedProjectGraph {
             edges: self.edges,
             warnings: self.warnings,
             exports,
+            features: features_by_node,
             #[cfg(feature = "native")]
             native: self.native,
         })
@@ -747,6 +748,10 @@ pub struct PreprocessedProjectGraph {
     pub(crate) edges: Vec<GraphEdge>,
     pub(crate) warnings: Vec<GraphWarning>,
     pub(crate) exports: BTreeMap<NodeId, NodeExports>,
+    /// Each node's unified build-feature selection (from
+    /// [`resolve_node_features`](ResolvedProjectGraph::resolve_node_features)), kept so assembly
+    /// can hand a node's own features to its dialect frontend (`#[cfg(feature = "…")]`).
+    pub(crate) features: BTreeMap<NodeId, BTreeSet<String>>,
     #[cfg(feature = "native")]
     pub(crate) native: crate::native::NativeGraphState,
 }

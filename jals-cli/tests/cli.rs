@@ -595,6 +595,75 @@ fn grouped_import_preserves_stack_trace_line_through_real_javac() {
     );
 }
 
+/// The attributes acceptance test: `#[cfg(feature = "…")]` selects between two same-name methods
+/// through the real frontend + `javac`, and the surviving `throw`'s stack trace names its
+/// *original* line — proving both the duplicate elimination and that blanking the disabled
+/// definition (and the attributes themselves) shifted nothing.
+#[test]
+fn cfg_attribute_selects_code_and_preserves_lines_through_real_javac() {
+    if !javac_available() {
+        // No JDK on this machine/CI; the strip unit tests cover line preservation as a proxy.
+        return;
+    }
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"hello\"\nfeatures = [\"attributes\"]\n\
+         [features]\nfancy = []\n\
+         [run]\nmain-class = \"com.example.Main\"\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    // Two mutually exclusive definitions of `go()`: without `--features` the "plain" one on
+    // line 7 survives; with `--features fancy` the "fancy" one on line 5 does. A statement-level
+    // cfg on line 9 additionally exercises the `;`-preserving sole-body strip.
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\n\
+         public class Main {\n\
+         \x20\x20\x20\x20public static void main(String[] a) { go(); }\n\
+         \x20\x20\x20\x20#[cfg(feature = \"fancy\")]\n\
+         \x20\x20\x20\x20static void go() { hint(); throw new RuntimeException(\"fancy\"); }\n\
+         \x20\x20\x20\x20#[cfg(not(feature = \"fancy\"))]\n\
+         \x20\x20\x20\x20static void go() { hint(); throw new RuntimeException(\"plain\"); }\n\
+         \x20\x20\x20\x20static void hint() {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (a() > 0) #[cfg(feature = \"fancy\")] p();\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20static int a() { return 0; }\n\
+         \x20\x20\x20\x20static void p() {}\n\
+         }\n",
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+
+    let (_stdout, stderr, code) = run_full(&["run", "--manifest-path", manifest.to_str().unwrap()]);
+    assert_ne!(
+        code, 0,
+        "expected the thrown exception to fail the run; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("plain") && stderr.contains("Main.java:7"),
+        "the plain `go()` on line 7 should have survived; stderr: {stderr}"
+    );
+
+    let (_stdout, stderr, code) = run_full(&[
+        "run",
+        "--features",
+        "fancy",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_ne!(
+        code, 0,
+        "expected the thrown exception to fail the run; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("fancy") && stderr.contains("Main.java:5"),
+        "the fancy `go()` on line 5 should have survived; stderr: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
