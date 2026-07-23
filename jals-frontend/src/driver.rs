@@ -51,8 +51,14 @@ impl Driver {
     ) -> Result<Lowered, LowerError> {
         /// The input file an emitted path came from, or `None` for a synthesized path with no
         /// single origin — which widens that file's key to project scope.
+        ///
+        /// `files` is in canonical (sorted) order per this function's contract, so this is a
+        /// binary search: a linear scan per emitted file is quadratic in project size.
         fn origin_of<'a>(files: &'a [IrFile], emitted: &RelativePath) -> Option<&'a IrFile> {
-            files.iter().find(|file| &file.path == emitted)
+            files
+                .binary_search_by(|file| file.path.cmp(emitted))
+                .ok()
+                .map(|index| &files[index])
         }
 
         let caps = frontend.caps();
