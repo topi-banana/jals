@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+pub mod dialect;
 pub mod driver;
 pub mod frontend;
 pub mod ir;
@@ -30,6 +31,7 @@ pub mod key;
 pub mod level;
 pub mod vanilla;
 
+pub use dialect::{DialectFlags, DialectFrontend};
 pub use driver::{Driver, LowerError, Lowered};
 pub use frontend::{Frontend, FrontendCaps, FrontendError, FrontendFuture};
 pub use ir::{
