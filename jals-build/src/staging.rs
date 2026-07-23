@@ -112,7 +112,9 @@ impl StagedTree {
         .map_err(|error| BackendError::Io(error.to_string()))
     }
 
-    /// The staging root, for `-sourcepath`.
+    /// The staging root. Used as `-sourcepath` only to exclude the authored source dirs: it is not
+    /// a package root (staged files keep their full project-relative path beneath it), so it
+    /// resolves nothing implicitly, and every source is passed to the compiler explicitly.
     pub fn root(&self) -> &Path {
         &self.root
     }
