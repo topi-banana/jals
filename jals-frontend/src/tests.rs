@@ -577,6 +577,59 @@ fn structural_errors_fail_the_file_verbatim() {
 }
 
 #[test]
+fn mandatory_body_positions_fail_instead_of_blanking() {
+    // A mandatory `{…}` body — a method/constructor body, a `synchronized`/`try`/`catch`/
+    // `finally` body — cannot be `cfg`-removed: no `;` can stand in for it, and the parser reads
+    // such a body only when `{` immediately follows, so an interposed attribute *detaches* the
+    // block into statement/member position (several of these shapes parse with zero errors).
+    // Blanking there used to silently emit body-less Java; every one must now fail the file.
+    for src in [
+        "class C { void m() { synchronized (this) #[cfg(feature = \"x\")] { f(); } } }\n",
+        "class C { void m() { try { f(); } finally #[cfg(feature = \"x\")] { g(); } } }\n",
+        "class C { void m() { try { f(); } catch (Exception e) #[cfg(feature = \"x\")] { g(); } } }\n",
+        "class C { void m() #[cfg(feature = \"x\")] { } }\n",
+        "class C { C() #[cfg(feature = \"x\")] { } }\n",
+    ] {
+        let (messages, bytes) = strip_failing(src, &[]);
+        assert_eq!(
+            bytes,
+            src.as_bytes(),
+            "failing file must emit verbatim: {src:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("not supported on this construct")),
+            "expected an unsupported-position error in {messages:?} for {src:?}"
+        );
+    }
+    // `try #[cfg] { … } catch …` parses with recovery errors; whatever shape recovery produced,
+    // the attribute must fail the file rather than silently disable anything.
+    let (messages, bytes) = strip_failing(
+        "class C { void m() { try #[cfg(feature = \"x\")] { f(); } catch (Exception e) {} } }\n",
+        &[],
+    );
+    assert!(!messages.is_empty());
+    assert!(bytes.starts_with(b"class C"));
+}
+
+#[test]
+fn free_standing_and_initializer_blocks_still_strip() {
+    // The mandatory-body rejection must not claim the legitimate block hosts: a free-standing
+    // block statement, a control-structure body slot (`;`-rescued), and a class initializer —
+    // including one after a body-less *abstract* method (which ends with `;`, so it is not a
+    // detached body).
+    let src = "class C { void m() { #[cfg(feature = \"x\")] { f(); } } }\n";
+    assert!(!strip(src, &[]).contains("f()"));
+    let src = "class C { void m() { if (a()) #[cfg(feature = \"x\")] { f(); } } }\n";
+    let out = strip(src, &[]);
+    assert!(out.contains("if (a()) ;"));
+    let src = "abstract class C { abstract void m(); #[cfg(feature = \"x\")] { f(); } }\n";
+    let out = strip(src, &[]);
+    assert!(out.contains("abstract void m();") && !out.contains("f()"));
+}
+
+#[test]
 fn attributes_inside_a_disabled_host_are_not_validated() {
     // `#[wat]` would be an error, but its enclosing class is cfg'd out (Rust parity).
     let src = "#[cfg(feature = \"x\")]\nclass Gone {\n    #[wat]\n    void m() {}\n}\n";
