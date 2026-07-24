@@ -715,9 +715,8 @@ impl SkeletonGroup<'_> {
     }
 }
 
-#[allow(clippy::wildcard_imports)]
 mod helpers {
-    use super::*;
+    use super::{BTreeMap, BTreeSet, ClassFile, Cow, FieldType, MethodDescriptor, String, Vec};
 
     /// A type-appropriate default for an initializer slot: `0`/`false`/`'\0'`/`null`.
     pub(super) fn default_value_for_java_type(ty: &str) -> &'static str {

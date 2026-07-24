@@ -62,7 +62,6 @@ impl Server {
     // Runs on a current-thread runtime (see [`Server::run`]), so the future is deliberately
     // `!Send` — it holds the non-`Send` stdio locks across `.await`. Those guards are moved into
     // `run_buffered` and live for the whole loop by design, so neither can be dropped earlier.
-    #[allow(clippy::significant_drop_tightening)]
     pub async fn serve(exec: Exec) -> anyhow::Result<()> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (server, _client) = MainLoop::new_server(|client| {

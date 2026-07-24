@@ -99,6 +99,23 @@ jobs:
           tool: cargo-machete
       - run: cargo machete
 
+  unused-allow:
+    name: cargo unused-allow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Not in taiki-e/install-action's prebuilt set, so it is compiled from source (cached above).
+      # Version-pinned to match the rest of the workflow's tool pins.
+      - run: cargo install cargo-unused-allow --version 0.4.0 --locked
+      # Same target/feature scope as the clippy job, so "unused" is judged against the exact lint
+      # configuration CI enforces: an `#[allow(...)]` that suppresses nothing under
+      # `--all-targets --workspace --all-features` is flagged (exit 1) and fails the job.
+      - run: cargo unused-allow --all-targets -- --workspace --all-features
+
   typos:
     name: typos
     runs-on: ubuntu-latest

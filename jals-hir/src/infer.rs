@@ -546,7 +546,6 @@ impl<'a> Inferer<'a> {
                 stack.push((node.clone(), true));
                 // `SyntaxNodeChildren` is not double-ended, so the reversal needs the buffer
                 // (clippy's `needless_collect` suggestion of `.children().rev()` does not compile).
-                #[allow(clippy::needless_collect)]
                 let children: Vec<SyntaxNode> = node.children().collect();
                 for child in children.into_iter().rev() {
                     stack.push((child, false));

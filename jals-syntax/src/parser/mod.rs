@@ -216,7 +216,6 @@ pub struct Parse {
 
 // `parse` intentionally mirrors the standard `str::parse` entry-point naming even
 // though it matches the type name.
-#[allow(clippy::self_named_constructors)]
 impl Parse {
     /// Parse the source and return a [`Parse`]. Yields cooperatively (amortized) while
     /// lexing, parsing, and building the tree; output is identical to a synchronous parse.

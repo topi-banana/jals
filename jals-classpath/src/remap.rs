@@ -401,7 +401,6 @@ impl JarMerge {
     }
 }
 
-#[allow(clippy::wildcard_imports)]
 mod helpers {
     use super::*;
 
