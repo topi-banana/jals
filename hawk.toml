@@ -1,0 +1,133 @@
+# hawk.toml — declares the workspace's shipped binaries so `cargo hawk check`
+# can run its closed-world visibility analysis. Each `[[production]]` entry is a
+# reachability root: any `pub` item not reachable from one of these is a
+# candidate for `hawk::dead_public` / `hawk::unnecessary_public`.
+# See https://github.com/astral-sh/hawk for details.
+
+[[production]]
+package = "jals-cli"
+bin = "jals"
+reason = "primary shipped CLI: the Java formatter, LSP, and build front end"
+
+[[production]]
+package = "jals-playground"
+bin = "jals-playground"
+reason = "browser playground shipped as the wasm32 web frontend"
+
+[[production]]
+package = "jals-tests"
+bin = "jals-tests"
+reason = "corpus harness that parses real Java and reports parse-failure rates"
+
+[[production]]
+package = "jals-tests"
+bin = "jals-golden"
+reason = "golden harness comparing jals-fmt output against google-java-format"
+
+[[production]]
+package = "xtask"
+bin = "xtask"
+reason = "workspace automation (codegen from java.ungram) via the cargo-xtask pattern"
+
+# --- Exclusions -------------------------------------------------------------
+# `ast::generated` is emitted by `xtask codegen` from `java.ungram` with a
+# uniform `pub` accessor surface. Per-accessor visibility is usage-dependent
+# (the WIP `jals-fmt` rewrite is its consumer), so it cannot be narrowed from a
+# structural template without breaking the accessors used cross-crate today.
+[[exclude]]
+crate = "jals_syntax"
+module = "ast::generated"
+reason = "generated AST; uniform pub surface from xtask codegen, consumer (jals-fmt) is WIP"
+
+# The compile-backend tier is a documented, deliberately-unimplemented seam: no
+# `impl Backend` exists yet, so nothing reaches its declarations from a shipped
+# binary. See the `TODO(backend-tier)` note atop `jals-build/src/backend.rs`.
+[[exclude]]
+crate = "jals_build"
+module = "backend"
+reason = "deferred backend-tier compile seam; no impl exists yet (TODO(backend-tier))"
+
+# --- Overrides --------------------------------------------------------------
+# The backend seam's crate-root re-exports live outside the `backend` module,
+# so they need per-item allows. Kept public as the stable surface the future
+# `javac` backend adapter will implement and wire up (TODO(backend-tier)).
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_build"
+item = "Backend"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_build"
+item = "BackendFuture"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_build"
+item = "BackendSelection"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "jals_build"
+item = "BackendAbsence"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "jals_build"
+item = "BackendOptions"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "jals_build"
+item = "BackendOutcome"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "jals_build"
+item = "BackendRequest"
+level = "allow"
+reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+
+# `CacheKey::derive` is consumed only by the deferred backend compile tier; its
+# own `TODO(backend-tier)` note cross-references `jals_build::backend`.
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_storage"
+item = "cache::CacheKey::derive"
+level = "allow"
+reason = "deferred backend-tier seam; consumed only by jals_build::backend (TODO(backend-tier))"
+
+# `BackendKey` folds the frontend→backend pipeline provenance; part of the same
+# deferred backend tier.
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_frontend"
+item = "BackendKey"
+level = "allow"
+reason = "deferred backend-tier seam; frontend→backend cache-key provenance"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_frontend"
+item = "key::BackendKey::output"
+level = "allow"
+reason = "deferred backend-tier seam; frontend→backend cache-key provenance"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_frontend"
+item = "key::BackendKey::classpath"
+level = "allow"
+reason = "deferred backend-tier seam; frontend→backend cache-key provenance"
