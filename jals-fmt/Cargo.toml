@@ -4,11 +4,26 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# WIP: the formatter is being rewritten from scratch, so this crate is currently a no-op
-# skeleton (see `src/lib.rs`). It still accepts a `jals-config` formatter `Config` (ignored for
-# now) and parses via `jals-syntax` to surface syntax-error warnings.
+# WIP: the formatter is being rewritten from scratch, so the *formatter* is currently a no-op
+# skeleton (see `src/lib.rs`). What is implemented ahead of it is the `import` module — the
+# ConfigImporter surface that lowers native Java-formatter configs (google-/palantir-java-format,
+# Eclipse JDT, IntelliJ IDEA) into a jals `jals-config::fmt::Config`.
 jals-config.workspace = true
 jals-syntax.workspace = true
+# The importer models derive `Deserialize`; the KV → struct bridge routes through
+# `serde_json::Value` (both `no_std + alloc`, so the default build stays wasm-safe).
+serde.workspace = true
+serde_json.workspace = true
+# Host-only XML reader for the Eclipse profile / IntelliJ scheme importers. Gated behind `std`
+# so the default (portable, wasm) build never pulls it. The `.prefs` (Java properties) and
+# `.editorconfig` readers are pure `&str` parsers and need no dependency, so they stay portable.
+quick-xml = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the XML-backed config importers (Eclipse exported profile, IntelliJ code-style scheme).
+# Host-only; not enabled by the wasm playground.
+std = ["dep:quick-xml"]
 
 [lints]
 workspace = true
