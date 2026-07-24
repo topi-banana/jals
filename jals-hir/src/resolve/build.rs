@@ -39,6 +39,12 @@ impl Resolver {
     /// The per-node dispatch behind [`Resolver::build`].
     async fn build_impl(&mut self, node: &SyntaxNode, scope: ScopeId) {
         self.tick().await;
+        // A `cfg`-disabled host contributes nothing: no definition, no scope, and — because every
+        // recursion re-enters through here — no reference from anywhere inside it (Rust parity
+        // with the compile frontend blanking the whole host).
+        if self.cfg.disables_node(node) {
+            return;
+        }
         match node.kind() {
             CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL => {
                 self.build_type_decl(node, scope).await;

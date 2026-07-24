@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use hashbrown::HashSet;
 use jals_syntax::SyntaxKind::CALL_EXPR;
 use jals_syntax::ast::{self, AstNode};
+use jals_syntax::cfg::CfgMap;
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::def::{Def, DefId, DefKind, Namespace};
@@ -47,7 +48,16 @@ impl Resolved {
     /// `Arc<Parse>` per document; a lint rule, which is handed the root) calls without reparsing —
     /// mirroring `jals_lint::LintOutput::lint_node`.
     pub async fn resolve_node(root: &SyntaxNode) -> Self {
-        Resolver::new(root).run().await
+        Self::resolve_node_with_cfg(root, &CfgMap::default()).await
+    }
+
+    /// Like [`resolve_node`](Self::resolve_node), but skipping every `cfg`-disabled host in
+    /// `cfg` (computed over the same text as `root`): a disabled declaration contributes no
+    /// definition and nothing inside it is recorded as a reference — the analysis-side mirror of
+    /// the compile frontend blanking the host. An empty (default) map resolves identically to
+    /// [`resolve_node`](Self::resolve_node).
+    pub async fn resolve_node_with_cfg(root: &SyntaxNode, cfg: &CfgMap) -> Self {
+        Resolver::new(root, cfg).run().await
     }
 
     /// The definition with the given id.
@@ -193,6 +203,9 @@ struct RawRef {
 /// Builds the scope tree and resolves references for one file.
 pub(crate) struct Resolver {
     root: SyntaxNode,
+    /// The file's `cfg` evaluation; pass 1 skips every disabled host (and, by not descending,
+    /// its whole subtree). Empty when the caller has no attributes to apply.
+    cfg: CfgMap,
     defs: Vec<Def>,
     scopes: Vec<Scope>,
     raw_refs: Vec<RawRef>,
@@ -214,7 +227,7 @@ impl Resolver {
 
 impl Resolver {
     /// Creates a resolver rooted at `root` (the `SOURCE_FILE` node), seeded with the file scope.
-    pub(crate) fn new(root: &SyntaxNode) -> Self {
+    pub(crate) fn new(root: &SyntaxNode, cfg: &CfgMap) -> Self {
         let file_scope = Scope {
             id: ScopeId(0),
             kind: ScopeKind::File,
@@ -224,6 +237,7 @@ impl Resolver {
         };
         Self {
             root: root.clone(),
+            cfg: cfg.clone(),
             defs: Vec::new(),
             scopes: vec![file_scope],
             raw_refs: Vec::new(),
