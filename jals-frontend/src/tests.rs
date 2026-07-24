@@ -209,7 +209,7 @@ mod helpers {
     use super::*;
 
     /// Run the dialect frontend (grouped imports on) over one source and return the emitted bytes.
-    pub(super) fn desugar(src: &str) -> Vec<u8> {
+    fn desugar(src: &str) -> Vec<u8> {
         let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(DialectFlags {
             grouped_imports: true,

@@ -121,9 +121,9 @@ impl ProjectView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefreshOutcome {
-    pub revision: Revision,
+    revision: Revision,
     pub changed: bool,
-    pub diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 /// Aggregate root for project source, editor overlay, artifact cache, and revision.
@@ -376,7 +376,8 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
         self.stage(Change::ReplaceFile(key, bytes.into()))
     }
 
-    pub fn create_directory(&mut self, key: DirKey) -> Result<&mut Self> {
+    #[cfg(test)]
+    pub(crate) fn create_directory(&mut self, key: DirKey) -> Result<&mut Self> {
         self.stage(Change::CreateDirectory(key))
     }
 
@@ -384,7 +385,8 @@ impl<S: SourceBackend, C: CacheBackend> Transaction<'_, S, C> {
         self.stage(Change::RemoveFile(key))
     }
 
-    pub fn remove_directory(&mut self, key: DirKey) -> Result<&mut Self> {
+    #[cfg(test)]
+    pub(crate) fn remove_directory(&mut self, key: DirKey) -> Result<&mut Self> {
         self.stage(Change::RemoveDirectory(key))
     }
 

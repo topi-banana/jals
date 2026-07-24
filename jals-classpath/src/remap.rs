@@ -762,7 +762,7 @@ mod helpers {
     }
 
     /// Remap a Class-entry Utf8: either an internal binary name or an array descriptor.
-    pub(super) fn remap_class_constant(raw: &str, mappings: &Mappings) -> String {
+    fn remap_class_constant(raw: &str, mappings: &Mappings) -> String {
         if raw.starts_with('[') {
             return remap_descriptor(raw, mappings);
         }
@@ -926,10 +926,7 @@ mod helpers {
         }
     }
 
-    pub(super) fn remap_class_type_sig(
-        mut c: ClassTypeSignature,
-        mappings: &Mappings,
-    ) -> ClassTypeSignature {
+    fn remap_class_type_sig(mut c: ClassTypeSignature, mappings: &Mappings) -> ClassTypeSignature {
         // Reconstruct the full nested binary name (Outer$Inner$Deep), map it, then split.
         let mut full = c.name.clone();
         for s in &c.suffixes {
@@ -998,10 +995,7 @@ mod helpers {
         p
     }
 
-    pub(super) fn remap_class_signature(
-        mut s: ClassSignature,
-        mappings: &Mappings,
-    ) -> ClassSignature {
+    fn remap_class_signature(mut s: ClassSignature, mappings: &Mappings) -> ClassSignature {
         s.type_parameters = s
             .type_parameters
             .into_iter()

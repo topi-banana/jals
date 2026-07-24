@@ -100,7 +100,7 @@ impl SubprocessToolchain {
     ///
     /// Discovers installed JDKs only when a [`ToolSpec::Distribution`] selector is present (the
     /// common no-`[toolchain]` project pays no discovery cost).
-    pub async fn from_manifest(manifest: &Manifest) -> Self {
+    async fn from_manifest(manifest: &Manifest) -> Self {
         let tc = &manifest.toolchain;
         let needs_discovery = matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
             || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }));

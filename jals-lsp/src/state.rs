@@ -99,10 +99,7 @@ impl DocumentStore {
     /// event, so a fresh [`jals_editor::LineIndex`] is built per ranged event. An event without a
     /// range replaces the whole document. Reversed ranges are normalized and out-of-range
     /// positions are clamped by the index's `offset`, so this never panics.
-    pub(crate) fn apply_content_changes(
-        text: &str,
-        changes: &[TextDocumentContentChangeEvent],
-    ) -> String {
+    fn apply_content_changes(text: &str, changes: &[TextDocumentContentChangeEvent]) -> String {
         /// Decode an LSP position against `index`/`text` to a byte offset.
         fn offset_of(index: &jals_editor::LineIndex, text: &str, position: Position) -> usize {
             index.offset(
@@ -150,7 +147,7 @@ impl ProjectWorkspace {
     /// [`jals_editor::Workspace`]. The caller resolves the manifest and performs the dependency
     /// I/O; this keeps only the `PathBuf` → virtual-path lowering.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn load(
+    async fn load(
         project_root: PathBuf,
         source_roots: &[PathBuf],
         classfiles: &[jals_classfile::ClassFile],

@@ -6,8 +6,6 @@ use alloc::vec::Vec;
 
 use jals_storage::{CacheKey, CacheNamespace, ContentDigest, RelativePath};
 
-use crate::level::IrLevel;
-
 /// One input file, in canonical project order.
 ///
 /// `bytes` is an `Arc` so the driver can hand the same buffer to several frontends, and to a
@@ -16,9 +14,9 @@ use crate::level::IrLevel;
 pub struct IrFile {
     /// Project-relative logical path. Ordering by this — never by filesystem walk order — is
     /// what keeps digests identical across machines.
-    pub path: RelativePath,
-    pub bytes: Arc<[u8]>,
-    pub digest: ContentDigest,
+    pub(crate) path: RelativePath,
+    pub(crate) bytes: Arc<[u8]>,
+    pub(crate) digest: ContentDigest,
 }
 
 impl IrFile {
@@ -32,7 +30,7 @@ impl IrFile {
     }
 }
 
-/// The borrowed view a frontend receives. Exactly one variant per [`IrLevel`].
+/// The borrowed view a frontend receives. Exactly one variant per [`IrLevel`](crate::IrLevel).
 ///
 /// Modelling levels as an enum rather than as optional fields is what makes the contract
 /// compile-checked: a `Bytes`-level frontend has no field to reach a project index through, so
@@ -44,13 +42,7 @@ pub enum Ir<'a> {
 }
 
 impl Ir<'_> {
-    pub const fn level(&self) -> IrLevel {
-        match self {
-            Self::Bytes { .. } => IrLevel::Bytes,
-        }
-    }
-
-    pub const fn files(&self) -> &[IrFile] {
+    pub(crate) const fn files(&self) -> &[IrFile] {
         match self {
             Self::Bytes { files } => files,
         }
@@ -61,10 +53,10 @@ impl Ir<'_> {
 /// nobody has to re-plumb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendDiagnostic {
-    pub severity: Severity,
+    pub(crate) severity: Severity,
     /// The *input* file the diagnostic is about, when the frontend can attribute it.
-    pub file: Option<RelativePath>,
-    pub message: String,
+    pub(crate) file: Option<RelativePath>,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,12 +74,12 @@ pub enum Severity {
 /// macro frontend must answer for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginSpan {
-    pub generated: RelativePath,
-    pub generated_offset: u32,
-    pub generated_len: u32,
-    pub source: RelativePath,
-    pub source_offset: u32,
-    pub source_len: u32,
+    generated: RelativePath,
+    generated_offset: u32,
+    generated_len: u32,
+    source: RelativePath,
+    source_offset: u32,
+    source_len: u32,
 }
 
 /// What a frontend produces: Java source bytes at project-relative paths.
@@ -98,13 +90,15 @@ pub struct OriginSpan {
 /// a `&dyn Frontend` method at all.
 #[derive(Debug, Default)]
 pub struct FrontendOutput {
-    pub files: Vec<(RelativePath, Vec<u8>)>,
-    pub diagnostics: Vec<FrontendDiagnostic>,
-    pub origins: Vec<OriginSpan>,
+    pub(crate) files: Vec<(RelativePath, Vec<u8>)>,
+    pub(crate) diagnostics: Vec<FrontendDiagnostic>,
+    // Per-file origin spans produced for future consumers; not read yet.
+    #[allow(dead_code)]
+    pub(crate) origins: Vec<OriginSpan>,
 }
 
 impl FrontendOutput {
-    pub fn has_errors(&self) -> bool {
+    pub(crate) fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
             .any(|diagnostic| diagnostic.severity == Severity::Error)
@@ -123,7 +117,7 @@ pub struct LoweredFile {
 
 /// The frontend's published output tree — the intermediate currency a backend consumes.
 ///
-/// Always sorted by `path` and deduplicated, so [`digest`](Self::digest) is a function of the
+/// Always sorted by `path` and deduplicated, so its digest is a function of the
 /// content alone and not of the order the files happened to be produced in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoweredTree {
@@ -133,7 +127,7 @@ pub struct LoweredTree {
 impl LoweredTree {
     /// Build a tree, imposing canonical order. A duplicate path is a caller bug, not a
     /// last-one-wins merge, so it is reported rather than silently resolved.
-    pub fn new(mut files: Vec<LoweredFile>) -> Result<Self, DuplicatePath> {
+    pub(crate) fn new(mut files: Vec<LoweredFile>) -> Result<Self, DuplicatePath> {
         files.sort_by(|left, right| left.path.cmp(&right.path));
         if let Some(window) = files.windows(2).find(|pair| pair[0].path == pair[1].path) {
             return Err(DuplicatePath(window[0].path.clone()));
@@ -145,17 +139,14 @@ impl LoweredTree {
         &self.files
     }
 
-    pub const fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
-
     /// This tree's identity: a length-framed fold over every `(path, provenance, content)` in
     /// sorted order.
     ///
     /// Folding each member's *provenance as well as its content* means the digest identifies
     /// how the tree was produced, not merely what bytes it holds — two trees with identical
     /// bytes from different frontends stay distinguishable.
-    pub fn digest(&self) -> ContentDigest {
+    #[cfg(test)]
+    pub(crate) fn digest(&self) -> ContentDigest {
         let mut fold = jals_storage::ProvenanceFold::new(b"jals.frontend.tree\0");
         for file in &self.files {
             fold.bytes(file.path.to_string().as_bytes())
@@ -182,7 +173,7 @@ impl LoweredTree {
     ///   32   provenance digest
     ///   32   content digest
     /// ```
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(TREE_MAGIC.len() + 8 + self.files.len() * 88);
         out.extend_from_slice(TREE_MAGIC);
         out.extend_from_slice(&(self.files.len() as u64).to_be_bytes());
@@ -196,7 +187,7 @@ impl LoweredTree {
         out
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, TreeDecodeError> {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, TreeDecodeError> {
         let mut cursor = Cursor::new(bytes);
         if cursor.take(TREE_MAGIC.len())? != TREE_MAGIC {
             return Err(TreeDecodeError);
@@ -271,4 +262,4 @@ impl<'a> Cursor<'a> {
 pub struct TreeDecodeError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicatePath(pub RelativePath);
+pub struct DuplicatePath(pub(crate) RelativePath);

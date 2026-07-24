@@ -35,13 +35,17 @@ pub struct BuiltinToolchain {
 pub(crate) enum BuiltinBackend {
     /// `None` while a compile is in flight; a reentrant compile on the same backend is a
     /// structured [`ToolchainError::Unsupported`] rather than a `BorrowMutError` panic.
+    // Constructed only via the test-only in-memory `BuiltinToolchain::new`; the prod compile path
+    // still matches it, so the variant stays, but it is dead only in non-test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
     Memory(RefCell<Option<MemoryStorage>>),
     Native(jals_exec::Exec),
 }
 
 impl BuiltinToolchain {
     /// A builtin backend over one in-memory project storage aggregate.
-    pub const fn new(storage: MemoryStorage) -> Self {
+    #[cfg(test)]
+    const fn new(storage: MemoryStorage) -> Self {
         Self {
             backend: BuiltinBackend::Memory(RefCell::new(Some(storage))),
         }
@@ -49,7 +53,8 @@ impl BuiltinToolchain {
 
     /// Consume the toolchain and hand back its storage, so an in-memory host can read the
     /// outputs a compile produced.
-    pub fn into_storage(self) -> MemoryStorage {
+    #[cfg(test)]
+    fn into_storage(self) -> MemoryStorage {
         match self.backend {
             BuiltinBackend::Memory(storage) => storage
                 .into_inner()

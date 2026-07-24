@@ -66,14 +66,14 @@ impl Resolved {
     }
 
     /// The scope with the given id.
-    pub fn scope(&self, id: ScopeId) -> &Scope {
+    fn scope(&self, id: ScopeId) -> &Scope {
         &self.scopes[id.0 as usize]
     }
 
     /// The innermost (narrowest) scope whose range covers byte `offset` — the cursor's scope. `None`
     /// only for an offset outside the file; otherwise the file scope (which covers everything) bounds
     /// the search, and the chain then climbs `parent`.
-    pub fn scope_at(&self, offset: usize) -> Option<ScopeId> {
+    fn scope_at(&self, offset: usize) -> Option<ScopeId> {
         self.scopes
             .iter()
             .filter(|scope| scope.range.start <= offset && offset <= scope.range.end)
@@ -87,7 +87,7 @@ impl Resolved {
     /// rule [`Resolver::lookup`] applies, but yielding every visible binding rather than resolving one
     /// name. Not deduped — a binding and an outer one it shadows both appear, inner first; a caller
     /// wanting one-per-name keeps the first seen.
-    pub fn visible_defs(&self, offset: usize) -> impl Iterator<Item = &Def> {
+    pub(crate) fn visible_defs(&self, offset: usize) -> impl Iterator<Item = &Def> {
         let mut chain = Vec::new();
         let mut scope = self.scope_at(offset);
         while let Some(sid) = scope {
@@ -115,13 +115,13 @@ impl Resolved {
     /// The definition the reference covering byte `offset` resolves to, if any.
     ///
     /// This is the go-to-definition query: pass the cursor offset, get the target definition.
-    pub fn definition_at(&self, offset: usize) -> Option<&Def> {
+    pub(crate) fn definition_at(&self, offset: usize) -> Option<&Def> {
         let id = self.reference_at(offset)?.resolution.def_id()?;
         Some(self.def(id))
     }
 
     /// Every reference that resolves to `id` (the find-references query).
-    pub fn references_to(&self, id: DefId) -> impl Iterator<Item = &Reference> {
+    fn references_to(&self, id: DefId) -> impl Iterator<Item = &Reference> {
         self.references
             .iter()
             .filter(move |r| r.resolution == Resolution::Def(id))
@@ -181,13 +181,6 @@ impl Resolved {
             .iter()
             .filter(move |d| !referenced.contains(&d.id))
     }
-
-    /// Every reference that bound to no file-local definition.
-    pub fn unresolved(&self) -> impl Iterator<Item = &Reference> {
-        self.references
-            .iter()
-            .filter(|r| r.resolution == Resolution::Unresolved)
-    }
 }
 
 /// A reference recorded in pass 1, before its scope chain has been searched.
@@ -227,7 +220,7 @@ impl Resolver {
 
 impl Resolver {
     /// Creates a resolver rooted at `root` (the `SOURCE_FILE` node), seeded with the file scope.
-    pub(crate) fn new(root: &SyntaxNode, cfg: &CfgMap) -> Self {
+    fn new(root: &SyntaxNode, cfg: &CfgMap) -> Self {
         let file_scope = Scope {
             id: ScopeId(0),
             kind: ScopeKind::File,
@@ -246,7 +239,7 @@ impl Resolver {
     }
 
     /// Runs both passes and returns the result.
-    pub(crate) async fn run(mut self) -> Resolved {
+    async fn run(mut self) -> Resolved {
         let root = self.root.clone();
         self.build(&root, ScopeId(0)).await;
 

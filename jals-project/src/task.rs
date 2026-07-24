@@ -46,16 +46,16 @@ pub enum BuildTaskHost {
 /// One source tree ready for transactional publication by the root host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildTaskPublication {
-    pub owner: String,
-    pub destination: DirKey,
-    pub tree: SourceTree,
+    owner: String,
+    pub(crate) destination: DirKey,
+    pub(crate) tree: SourceTree,
 }
 
 /// Successfully evaluated terminal values. This type performs no project mutation itself.
 #[derive(Debug, Default)]
 pub struct BuildTaskExecution {
-    pub classpath: Vec<CacheKey>,
-    pub publications: Vec<BuildTaskPublication>,
+    pub(crate) classpath: Vec<CacheKey>,
+    pub(crate) publications: Vec<BuildTaskPublication>,
 }
 
 /// Failure during capability preflight or task-node evaluation.
@@ -101,10 +101,10 @@ pub struct RootBuildScriptOutput {
 /// Runtime policy for one task-plan execution.
 #[derive(Debug, Clone, Copy)]
 pub struct TaskRuntime {
-    pub network: NetworkPolicy,
+    pub(crate) network: NetworkPolicy,
     /// Ceiling on any single fetch, including a size projected out of fetched JSON with
     /// `tasks.json_u64`. A fetch buffers up to this many bytes before its digest is checked.
-    pub max_fetch_bytes: u64,
+    pub(crate) max_fetch_bytes: u64,
 }
 
 /// Whether a root run may apply the exclusive source-tree publications its plan declares.
@@ -143,10 +143,10 @@ pub struct RootBuildScriptOptions<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct SnapshotTaskOptions<'a> {
     /// Stable identity of the project the plan belongs to — a graph node's digest.
-    pub identity: ContentDigest,
+    pub(crate) identity: ContentDigest,
     /// The build features the plan was produced under.
-    pub features: &'a BTreeSet<String>,
-    pub runtime: TaskRuntime,
+    pub(crate) features: &'a BTreeSet<String>,
+    pub(crate) runtime: TaskRuntime,
 }
 
 /// Root build-script preparation, task, or storage failure.
@@ -489,7 +489,7 @@ impl BuildTaskExecutor {
     /// artifact it names is confirmed present. Without this, opening an editor would re-run every
     /// remap and decompile in the graph: the fetches inside a plan are cached individually, but the
     /// transformations between them are not.
-    pub async fn execute_snapshot<F: Fetcher, C: CacheBackend>(
+    pub(crate) async fn execute_snapshot<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
         view: &ProjectView,
@@ -632,7 +632,7 @@ impl BuildTaskExecutor {
         })
     }
 
-    pub async fn execute<F: Fetcher, C: CacheBackend>(
+    async fn execute<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
         view: &ProjectView,
@@ -723,7 +723,7 @@ impl BuildTaskExecutor {
     }
 
     /// Publication destinations declared by a plan, in terminal order.
-    pub fn publication_roots(plan: &TaskPlan) -> Result<Vec<DirKey>, BuildTaskRunError> {
+    fn publication_roots(plan: &TaskPlan) -> Result<Vec<DirKey>, BuildTaskRunError> {
         plan.terminals
             .iter()
             .filter_map(|terminal| match terminal {
@@ -742,7 +742,7 @@ impl BuildTaskExecutor {
 
     /// Prepare the complete project change set for exclusive-root publication and ownership.
     /// No project bytes are changed until the caller combines and commits these changes.
-    pub async fn publication_changes<C: CacheBackend>(
+    async fn publication_changes<C: CacheBackend>(
         view: &ProjectView,
         cache: &ArtifactCache<C>,
         script: &FileKey,

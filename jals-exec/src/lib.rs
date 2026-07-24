@@ -92,12 +92,6 @@ impl Exec {
         Self(Rc::new(wasm::WasmExec::new()))
     }
 
-    /// Cooperative yield through the runtime (participates in tokio's task budget natively).
-    /// Hot loops should prefer the free [`Yielder`], which needs no handle.
-    pub async fn yield_now(&self) {
-        self.0.yield_boxed().await;
-    }
-
     /// Spawns a detached local task. Dropping the returned [`Task`] detaches it; awaiting the
     /// [`Task`] yields the future's output.
     ///

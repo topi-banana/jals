@@ -25,7 +25,7 @@ impl IrLevel {
     ///
     /// Written as an explicit match rather than an `as` cast so that reordering the variants
     /// cannot silently renumber a shipped frontend's cache keys.
-    pub const fn tag(self) -> u8 {
+    pub(crate) const fn tag(self) -> u8 {
         match self {
             Self::Bytes => 0,
         }
@@ -36,4 +36,4 @@ impl IrLevel {
 ///
 /// Folded into all frontend provenance, so a change to what a level *hands out* invalidates
 /// cached output instead of being silently trusted. Mirrors `BUILD_SCRIPT_API_VERSION`.
-pub const PIPELINE_API_VERSION: u32 = 1;
+pub(crate) const PIPELINE_API_VERSION: u32 = 1;

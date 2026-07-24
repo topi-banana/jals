@@ -23,7 +23,7 @@ use crate::graph::{
 /// One verified file entry on the compile classpath.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileClasspathFile {
-    pub node: Option<NodeId>,
+    pub(crate) node: Option<NodeId>,
     pub path: RelativePath,
     pub key: CacheKey,
 }
@@ -39,7 +39,7 @@ pub struct CompileClasspathTreeMember {
 /// portable analysis but must be materialized as one directory for `javac`/`java`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileClasspathTree {
-    pub node: NodeId,
+    node: NodeId,
     pub path: RelativePath,
     pub members: Vec<CompileClasspathTreeMember>,
 }
@@ -52,7 +52,7 @@ pub enum CompileClasspathEntry {
 }
 
 impl CompileClasspathEntry {
-    pub const fn node(&self) -> Option<&NodeId> {
+    pub(crate) const fn node(&self) -> Option<&NodeId> {
         match self {
             Self::File(file) => file.node.as_ref(),
             Self::Tree(tree) => Some(&tree.node),

@@ -20,7 +20,7 @@ use crate::level::IrLevel;
 pub struct VanillaFrontend;
 
 impl VanillaFrontend {
-    pub const ID: &'static str = "vanilla";
+    const ID: &'static str = "vanilla";
 }
 
 impl Frontend for VanillaFrontend {

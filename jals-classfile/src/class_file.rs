@@ -25,7 +25,7 @@ pub struct ClassFile {
     /// The minor version number.
     pub minor_version: u16,
     /// The major version number (e.g. 69 for Java 25).
-    pub major_version: u16,
+    major_version: u16,
     /// The constant pool.
     pub constant_pool: ConstantPool,
     /// The class's access flags.

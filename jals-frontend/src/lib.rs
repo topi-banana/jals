@@ -39,7 +39,7 @@ pub use ir::{
     FrontendDiagnostic, FrontendOutput, Ir, IrFile, LoweredFile, LoweredTree, OriginSpan, Severity,
 };
 pub use key::{BackendKey, FrontendKey};
-pub use level::{IrLevel, PIPELINE_API_VERSION};
+pub use level::IrLevel;
 pub use vanilla::VanillaFrontend;
 
 #[cfg(test)]

@@ -21,18 +21,18 @@ pub struct FrontendCaps {
     /// must never renumber a shipped frontend's keys and silently invalidate its cache.
     pub id: &'static str,
     /// The lowest IR level this frontend can work from — and therefore the scope of its keys.
-    pub needs: IrLevel,
+    pub(crate) needs: IrLevel,
     /// Source file extensions this frontend claims, without the dot.
-    pub extensions: &'static [&'static str],
+    pub(crate) extensions: &'static [&'static str],
     /// Whether running this frontend can change the project's type graph (add, remove, or
     /// rename a type or member).
     ///
     /// A frontend that only rewrites bodies is stable and runs in a single pass. One that emits
     /// new types invalidates the index it reasoned from, and needs the bounded fixpoint the
     /// driver grows once a cross-file level exists.
-    pub type_stable: bool,
+    pub(crate) type_stable: bool,
     /// Bumped when this frontend's output changes for unchanged input.
-    pub version: u32,
+    pub(crate) version: u32,
 }
 
 pub type FrontendFuture<'a> =

@@ -132,9 +132,9 @@ impl Runtime {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Distribution {
     /// The JDK distribution / vendor (`temurin`, `openjdk`, `graalvm`, …), if named.
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// The major Java version (`21`), if named.
-    pub version: Option<u32>,
+    pub(crate) version: Option<u32>,
 }
 
 impl Distribution {

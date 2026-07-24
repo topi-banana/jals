@@ -61,9 +61,9 @@ pub enum ElementValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypeAnnotation {
     /// What kind of program element the annotated type appears in.
-    pub target_info: TargetInfo,
+    target_info: TargetInfo,
     /// The path from the annotated type to the specific part it applies to.
-    pub target_path: Vec<TypePathEntry>,
+    target_path: Vec<TypePathEntry>,
     /// `Utf8` index of the annotation type's field descriptor.
     pub type_index: u16,
     /// The annotation's element values.
@@ -144,20 +144,20 @@ pub enum TargetInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalVarTargetEntry {
     /// Start of the range (bytecode offset).
-    pub start_pc: u16,
+    start_pc: u16,
     /// Length of the range.
-    pub length: u16,
+    length: u16,
     /// Local-variable slot index.
-    pub index: u16,
+    index: u16,
 }
 
 /// One step of a [`TypeAnnotation::target_path`] (JVMS §4.7.20.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypePathEntry {
     /// How to step (array, nested, wildcard bound, or type argument).
-    pub type_path_kind: u8,
+    type_path_kind: u8,
     /// Which type argument to step into (only meaningful for kind 3).
-    pub type_argument_index: u8,
+    type_argument_index: u8,
 }
 
 impl ElementValuePair {

@@ -170,22 +170,22 @@ pub struct GitDependency {
     /// is used.
     pub git: String,
     /// The git branch to check out (mutually exclusive with `tag`/`rev`).
-    pub branch: Option<String>,
+    branch: Option<String>,
     /// The git tag to check out (mutually exclusive with `branch`/`rev`).
-    pub tag: Option<String>,
+    tag: Option<String>,
     /// The git revision (commit SHA) to check out (mutually exclusive with `branch`/`tag`).
-    pub rev: Option<String>,
+    rev: Option<String>,
     /// The source root *within* the repo (e.g. `core/src/main/java`), for a non-standard layout; omit
     /// to let the host auto-detect it (`src/main/java` → `src` → the root itself).
     pub dir: Option<String>,
     /// The **build features** to enable in this dependency (Cargo's per-dependency `features`). See
     /// [`Dependency::features`] for the semantics, which are the same for both source forms.
     #[serde(default)]
-    pub features: Vec<String>,
+    features: Vec<String>,
     /// Whether this dependency resolves its own `[features] default` list (Cargo's
     /// `default-features`). See [`Dependency::default_features`], which reads the `None` default.
     #[serde(default)]
-    pub default_features: Option<bool>,
+    default_features: Option<bool>,
 }
 
 /// The `path` form of a [`Dependency`]: a local directory tree of `.java` source.
@@ -201,11 +201,11 @@ pub struct PathDependency {
     /// The **build features** to enable in this dependency (Cargo's per-dependency `features`). See
     /// [`Dependency::features`] for the semantics, which are the same for both source forms.
     #[serde(default)]
-    pub features: Vec<String>,
+    features: Vec<String>,
     /// Whether this dependency resolves its own `[features] default` list (Cargo's
     /// `default-features`). See [`Dependency::default_features`], which reads the `None` default.
     #[serde(default)]
-    pub default_features: Option<bool>,
+    default_features: Option<bool>,
 }
 
 /// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
@@ -367,7 +367,7 @@ impl<'a> FeatureRef<'a> {
     /// # Errors
     /// [`FeatureRefError`] for an empty entry or side, a second `/`, or `dep/default` — the
     /// reserved directive is never enableable by name (see [`DEFAULT_BUILD_FEATURE`]).
-    pub fn parse(entry: &'a str) -> Result<Self, FeatureRefError> {
+    fn parse(entry: &'a str) -> Result<Self, FeatureRefError> {
         if entry.is_empty() {
             return Err(FeatureRefError::Empty);
         }
@@ -507,7 +507,8 @@ impl ResolvedBuildFeatures {
     }
 
     /// The features forwarded to one `[dependencies]` entry, or `None` when it receives none here.
-    pub fn dependency(&self, name: &str) -> Option<&BTreeSet<String>> {
+    #[cfg(test)]
+    fn dependency(&self, name: &str) -> Option<&BTreeSet<String>> {
         self.dependencies.get(name)
     }
 
@@ -547,7 +548,7 @@ pub struct Package {
     /// `[build] release`/`source`/`target`. Resolved (closed under [`Feature::implies`]) by
     /// [`Manifest::feature_set`]; an unknown name is a TOML parse error (serde unknown variant).
     /// Empty when omitted, leaving every feature gate off.
-    pub features: Vec<Feature>,
+    features: Vec<Feature>,
 }
 
 /// A single selectable language capability — the unit `[package] features` lists and the analysis
@@ -636,7 +637,7 @@ impl Feature {
     /// [`predecessor`](Feature::predecessor) / [`stabilized_in`](Feature::stabilized_in) /
     /// [`config_name`](Feature::config_name) already force a stop for a new variant). The
     /// declaration-order invariant is const-asserted below.
-    pub const ALL: [Self; 22] = [
+    const ALL: [Self; 22] = [
         Self::Java8,
         Self::Java9,
         Self::Java10,
@@ -684,7 +685,7 @@ impl Feature {
     /// The single edge each preset contributes to the `java25 ⊇ java24 ⊇ …` chain —
     /// [`implies`](Feature::implies) follows it, and [`FeatureSet::resolve`]'s closure walks it
     /// transitively, so no per-release membership list (and no version number) exists anywhere.
-    pub const fn predecessor(self) -> Option<Self> {
+    const fn predecessor(self) -> Option<Self> {
         match self {
             Self::Java9 => Some(Self::Java8),
             Self::Java10 => Some(Self::Java9),
@@ -758,7 +759,7 @@ impl Feature {
     ///
     /// Exhaustive with no `_` arm, like the release facts above: a new [`Feature`] has to decide
     /// which side of this line it falls on rather than defaulting to "Java".
-    pub const fn is_dialect(self) -> bool {
+    const fn is_dialect(self) -> bool {
         match self {
             Self::GroupedImports | Self::Attributes => true,
             Self::Java8
@@ -794,7 +795,7 @@ impl Feature {
     /// the predecessor chain, so the `java25 ⊇ java24 ⊇ …` monotonicity holds **by construction**.
     /// An individual feature implies nothing today; a feature-to-feature dependency would be added
     /// here.
-    pub fn implies(self) -> FeatureSet {
+    fn implies(self) -> FeatureSet {
         Self::ALL
             .into_iter()
             .filter(|feature| {
@@ -915,7 +916,7 @@ impl FeatureSet {
 
     /// Whether no feature is enabled — the set of a project that declares no `[package] features`,
     /// which leaves every feature gate off (the gated lint rules report nothing).
-    pub const fn is_empty(self) -> bool {
+    const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
@@ -985,7 +986,8 @@ pub enum BuildScript {
 
 impl BuildScript {
     /// The value of the script's serialized `type` tag.
-    pub const fn tag_name(&self) -> &'static str {
+    #[cfg(test)]
+    const fn tag_name(&self) -> &'static str {
         match self {
             Self::Rhai { .. } => "rhai",
         }
@@ -1020,7 +1022,8 @@ impl FrontendKind {
     ///
     /// Also its cache identity. A stable string rather than the enum discriminant, so adding or
     /// reordering variants can never renumber a shipped frontend's cache keys.
-    pub const fn tag_name(&self) -> &'static str {
+    #[cfg(test)]
+    const fn tag_name(self) -> &'static str {
         match self {
             Self::Vanilla {} => "vanilla",
         }
@@ -1080,7 +1083,7 @@ impl Dependency {
     /// # Errors
     /// [`DependencyError::Empty`] for an empty value, [`DependencyError::UnknownScheme`] for a URL
     /// with an unrecognised scheme.
-    pub fn validate_jar_location(
+    fn validate_jar_location(
         value: &str,
         name: &str,
         field: &'static str,
@@ -1117,7 +1120,7 @@ impl Dependency {
     /// # Errors
     /// Returns the first [`DependencyError`] found (empty value, unsupported URL scheme, conflicting
     /// git refs, or a bad `features` name).
-    pub fn validate(&self, name: &str) -> Result<(), DependencyError> {
+    fn validate(&self, name: &str) -> Result<(), DependencyError> {
         match self {
             Self::Jar(jar) => {
                 Self::validate_jar_location(&jar.jar, name, "jar")?;
@@ -1227,7 +1230,7 @@ impl Dependency {
     /// # Errors
     /// [`DependencyError::Empty`] for an empty name, [`DependencyError::ReservedFeature`] for
     /// `default`, [`DependencyError::CrossFeature`] for a name containing `/`.
-    pub fn validate_features(&self, name: &str) -> Result<(), DependencyError> {
+    fn validate_features(&self, name: &str) -> Result<(), DependencyError> {
         for feature in self.features() {
             if feature.is_empty() {
                 return Err(DependencyError::Empty {
@@ -1289,7 +1292,7 @@ impl GitDependency {
 
 impl Manifest {
     /// The synthetic manifest name used for error reporting when parsing from text (no real path).
-    pub(crate) const IN_MEMORY_NAME: &'static str = "jals.toml";
+    const IN_MEMORY_NAME: &'static str = "jals.toml";
 
     /// Structurally validate the manifest, independent of any filesystem (pure, so it stays
     /// `wasm32`-compatible and is called by the [`FromStr`] impl right after parsing, and by
@@ -1572,7 +1575,8 @@ impl Manifest {
     /// unpacking (`recursive = true`). The host pairs these names with the resolved jars to decide
     /// which jars to scan for nested `*.jar` members. Pure — no I/O; only the `jar` form carries
     /// `recursive`, so `git`/`path` entries are never present.
-    pub fn recursive_jar_dependencies(&self) -> BTreeSet<&str> {
+    #[cfg(test)]
+    fn recursive_jar_dependencies(&self) -> BTreeSet<&str> {
         self.dependencies
             .iter()
             .filter_map(|(name, dep)| match dep {

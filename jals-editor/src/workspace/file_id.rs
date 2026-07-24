@@ -56,7 +56,7 @@ impl WorkspaceFileId {
 
     /// Encode an id-space + within-space index back into a raw [`FileId`] (`base + index`).
     #[inline]
-    pub(crate) const fn to_raw(self) -> FileId {
+    const fn to_raw(self) -> FileId {
         match self {
             Self::Project(i) => FileId(i),
             Self::Library(i) => FileId(LIBRARY_FILE_BASE + i),

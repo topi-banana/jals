@@ -100,5 +100,5 @@ pub struct Def {
     /// go-to-definition target and the span an "unused binding" diagnostic points at.
     pub name_range: Range<usize>,
     /// The scope this definition is visible in.
-    pub scope: ScopeId,
+    pub(crate) scope: ScopeId,
 }

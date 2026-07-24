@@ -102,7 +102,7 @@ impl CompletedMarker {
 
 impl Marker {
     /// イベント列内の開始位置。
-    pub(super) const fn index(&self) -> usize {
+    const fn index(&self) -> usize {
         self.pos
     }
 }

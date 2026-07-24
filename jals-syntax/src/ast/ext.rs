@@ -13,14 +13,16 @@ use rowan::WalkEvent;
 use rowan::ast::support;
 
 use super::{
-    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, CatchClause,
-    ExportsDirective, Expr, FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, NameRef,
-    OpensDirective, ProvidesDirective, QualifiedName, Resource, SwitchExpr, Type, YieldStmt,
+    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, CatchClause, Expr,
+    FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, QualifiedName, Resource, SwitchExpr,
+    Type, YieldStmt,
 };
-use crate::language::{SyntaxNode, SyntaxToken};
-use crate::syntax_kind::SyntaxKind::{
-    self, DOT, IDENT, MODIFIERS, NON_SEALED_KW, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT,
-};
+#[cfg(test)]
+use crate::language::SyntaxNode;
+use crate::language::SyntaxToken;
+use crate::syntax_kind::SyntaxKind::{self, DOT, IDENT, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT};
+#[cfg(test)]
+use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
 
 impl QualifiedName {
     /// The full dotted text as written (without surrounding trivia), e.g. `a.b.c` or `a.b.*`.
@@ -30,7 +32,7 @@ impl QualifiedName {
 
     /// The dotted segments in source order (`a.b.C` → `["a", "b", "C"]`). The trailing wildcard
     /// `*` of an on-demand import is not a segment.
-    pub fn segments(&self) -> Vec<String> {
+    fn segments(&self) -> Vec<String> {
         AstSupport::ident_tokens(&self.syntax)
             .map(|t| t.text().to_owned())
             .collect()
@@ -63,41 +65,12 @@ impl QualifiedName {
     }
 }
 
-impl ExportsDirective {
-    /// The target modules of a qualified `exports ... to ...`, if any.
-    pub fn to_modules(&self) -> impl Iterator<Item = QualifiedName> {
-        self.syntax
-            .children()
-            .filter_map(QualifiedName::cast)
-            .skip(1)
-    }
-}
-
-impl OpensDirective {
-    /// The target modules of a qualified `opens ... to ...`, if any.
-    pub fn to_modules(&self) -> impl Iterator<Item = QualifiedName> {
-        self.syntax
-            .children()
-            .filter_map(QualifiedName::cast)
-            .skip(1)
-    }
-}
-
-impl ProvidesDirective {
-    /// The implementation types listed after `with`.
-    pub fn providers(&self) -> impl Iterator<Item = QualifiedName> {
-        self.syntax
-            .children()
-            .filter_map(QualifiedName::cast)
-            .skip(1)
-    }
-}
-
 impl Attribute {
     /// All jals attributes attached to `node`, wherever the parser placed them: leading
     /// direct children (statement position) plus those inside a direct `MODIFIERS` child
     /// (declarations parsed through `modifiers()`). A node never holds both in practice.
-    pub fn of(node: &SyntaxNode) -> impl Iterator<Item = Self> {
+    #[cfg(test)]
+    fn of(node: &SyntaxNode) -> impl Iterator<Item = Self> {
         node.children().filter_map(Self::cast).chain(
             node.children()
                 .filter(|n| n.kind() == MODIFIERS)
@@ -108,7 +81,7 @@ impl Attribute {
 
 impl AttrMeta {
     /// The meta name text (`cfg` in `#[cfg(...)]`, `feature` in `feature = "x"`).
-    pub fn name_text(&self) -> Option<String> {
+    pub(crate) fn name_text(&self) -> Option<String> {
         self.name().map(|n| n.text())
     }
 }
@@ -120,7 +93,8 @@ impl Modifiers {
     }
 
     /// Whether the `non-sealed` modifier is present.
-    pub fn is_non_sealed(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_non_sealed(&self) -> bool {
         self.syntax.children().any(|n| n.kind() == NON_SEALED_KW)
     }
 }
@@ -129,7 +103,8 @@ impl Type {
     /// The type text with surrounding/interleaved trivia removed (e.g. `List<T>`).
     ///
     /// Use [`AstNode::syntax`]<code>().text()</code> if you need the verbatim slice including trivia.
-    pub fn text(&self) -> String {
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> String {
         AstSupport::non_trivia_text(&self.syntax)
     }
 
@@ -190,15 +165,9 @@ impl Literal {
     }
 
     /// The literal text as written.
-    pub fn text(&self) -> Option<String> {
+    #[cfg(test)]
+    fn text(&self) -> Option<String> {
         self.token().map(|t| t.text().to_owned())
-    }
-}
-
-impl NameRef {
-    /// The referenced name text.
-    pub fn text(&self) -> Option<String> {
-        AstSupport::first_sig_token(&self.syntax).map(|t| t.text().to_owned())
     }
 }
 

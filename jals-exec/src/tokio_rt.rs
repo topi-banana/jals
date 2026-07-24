@@ -22,7 +22,7 @@ impl Exec {
     /// `spawn` requires a `LocalSet` context and `fan_out` result collection requires a tokio
     /// reactor — construct through [`run`] unless embedding in an existing runtime that
     /// guarantees both.
-    pub fn tokio() -> Self {
+    fn tokio() -> Self {
         Self(Rc::new(TokioExec {
             pool: OnceCell::new(),
         }))

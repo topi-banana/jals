@@ -49,5 +49,5 @@ pub struct Reference {
     /// For a qualified type reference (`a.b.C`), its full dotted text (`"a.b.C"`); `None` for a
     /// simple name. The project layer resolves a qualified type against a fully-qualified name
     /// rather than the scope chain, so this is recorded but left [`Resolution::Unresolved`] here.
-    pub qualified: Option<String>,
+    pub(crate) qualified: Option<String>,
 }

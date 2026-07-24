@@ -42,7 +42,7 @@ impl ScopeKind {
     /// Local variables and resources are sequential (`use(x); int x;` does not see `x`). Members,
     /// parameters, type parameters, and pattern bindings are visible throughout their scope, so
     /// forward references resolve.
-    pub const fn is_sequential(self) -> bool {
+    pub(crate) const fn is_sequential(self) -> bool {
         matches!(self, Self::Block | Self::For | Self::Resources)
     }
 }
@@ -51,11 +51,11 @@ impl ScopeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     /// This scope's identifier.
-    pub id: ScopeId,
+    pub(crate) id: ScopeId,
     /// What sort of region it covers.
-    pub kind: ScopeKind,
+    pub(crate) kind: ScopeKind,
     /// The enclosing scope, or `None` for the file scope.
-    pub parent: Option<ScopeId>,
+    pub(crate) parent: Option<ScopeId>,
     /// The byte range of the syntax node this scope covers.
     pub range: Range<usize>,
     /// The definitions declared directly in this scope, in source order.

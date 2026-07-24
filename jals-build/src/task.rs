@@ -15,20 +15,21 @@ use serde::{Deserialize, Serialize};
 
 /// Limits for one declarative build-task graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_field_names)] // `max_*` names each cap a distinct quantity; the prefix is intentional.
 pub struct TaskPlanLimits {
-    pub max_tasks: usize,
-    pub max_edges: usize,
-    pub max_literal_bytes: usize,
-    pub max_terminals: usize,
-    pub max_publication_roots: usize,
-    pub max_path_bytes: usize,
-    pub max_path_depth: usize,
+    pub(crate) max_tasks: usize,
+    pub(crate) max_edges: usize,
+    pub(crate) max_literal_bytes: usize,
+    pub(crate) max_terminals: usize,
+    pub(crate) max_publication_roots: usize,
+    pub(crate) max_path_bytes: usize,
+    pub(crate) max_path_depth: usize,
     /// Ceiling on any single fetch's declared size.
     ///
     /// A fetch buffers up to its byte count before the digest is checked, and the count can come
     /// from the fetched JSON itself (`tasks.json_u64`). Without a ceiling, a compromised or
     /// mistaken upstream could name a size that exhausts memory or disk.
-    pub max_fetch_bytes: u64,
+    pub(crate) max_fetch_bytes: u64,
 }
 
 /// Stable index of a task node in declaration order.
@@ -64,7 +65,7 @@ pub enum TaskDigestAlgorithm {
 }
 
 impl TaskDigestAlgorithm {
-    pub const fn hex_len(self) -> usize {
+    const fn hex_len(self) -> usize {
         match self {
             Self::Sha1 => 40,
             Self::Sha256 => 64,
@@ -150,7 +151,7 @@ pub enum TaskNodeKind {
 }
 
 impl TaskNodeKind {
-    pub const fn output_kind(&self) -> TaskValueKind {
+    const fn output_kind(&self) -> TaskValueKind {
         match self {
             Self::HttpsUrl { .. } | Self::JsonUrl { .. } => TaskValueKind::Url,
             Self::Digest { .. } | Self::JsonDigest { .. } => TaskValueKind::Digest,
@@ -321,7 +322,7 @@ impl TaskPlan {
         self.nodes.get(id.index())
     }
 
-    pub fn validate(&self, limits: TaskPlanLimits) -> Result<(), TaskPlanError> {
+    pub(crate) fn validate(&self, limits: TaskPlanLimits) -> Result<(), TaskPlanError> {
         if self.nodes.len() > limits.max_tasks {
             return Err(TaskPlanError::Limit("task count"));
         }

@@ -48,7 +48,7 @@ impl Literal {
     }
 
     /// Render a `char` constant as an escaped Java character literal (quotes included).
-    pub(crate) fn char_literal(c: char) -> String {
+    fn char_literal(c: char) -> String {
         let mut out = String::from("'");
         if c == '\'' {
             out.push_str("\\'");

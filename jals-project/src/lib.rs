@@ -26,7 +26,6 @@ pub use memory::MemoryProjectGraph;
 #[cfg(feature = "native")]
 pub use native::{NativeProjectAssembly, NativeProjectGraph};
 pub use task::{
-    BuildTaskExecution, BuildTaskExecutor, BuildTaskHost, BuildTaskPublication, BuildTaskRunError,
-    RootBuildScriptError, RootBuildScriptOptions, RootBuildScriptOutput, SnapshotTaskOptions,
-    SourcePublication, TaskRuntime,
+    BuildTaskExecutor, BuildTaskHost, BuildTaskRunError, RootBuildScriptError,
+    RootBuildScriptOptions, RootBuildScriptOutput, SourcePublication,
 };

@@ -122,7 +122,7 @@ impl RelativePath {
         self.0.iter()
     }
 
-    pub fn parent(&self) -> Option<Self> {
+    fn parent(&self) -> Option<Self> {
         (!self.0.is_empty()).then(|| Self(self.0[..self.0.len() - 1].to_vec()))
     }
 
@@ -147,7 +147,7 @@ impl RelativePath {
     }
 
     #[must_use]
-    pub fn join(&self, name: Name) -> Self {
+    fn join(&self, name: Name) -> Self {
         let mut segments = self.0.clone();
         segments.push(name);
         Self(segments)
@@ -198,7 +198,7 @@ impl FileKey {
         Self::new(RelativePath::parse(value)?)
     }
 
-    pub fn in_dir(dir: &DirKey, name: Name) -> Self {
+    fn in_dir(dir: &DirKey, name: Name) -> Self {
         Self(dir.0.join(name))
     }
 
@@ -216,7 +216,7 @@ impl FileKey {
         DirKey(self.0.clone())
     }
 
-    pub fn name(&self) -> &Name {
+    pub(crate) fn name(&self) -> &Name {
         self.0.name().expect("FileKey is never root")
     }
 
@@ -270,7 +270,7 @@ impl DirKey {
         &self.0
     }
 
-    pub fn parent(&self) -> Option<Self> {
+    fn parent(&self) -> Option<Self> {
         self.0.parent().map(Self)
     }
 
@@ -280,23 +280,17 @@ impl DirKey {
         FileKey::new(self.0.clone()).ok()
     }
 
-    pub fn name(&self) -> Option<&Name> {
+    pub(crate) fn name(&self) -> Option<&Name> {
         self.0.name()
     }
 
     #[must_use]
-    pub fn directory(&self, name: Name) -> Self {
+    pub(crate) fn directory(&self, name: Name) -> Self {
         Self(self.0.join(name))
     }
 
     pub fn file(&self, name: Name) -> FileKey {
         FileKey::in_dir(self, name)
-    }
-
-    /// The directory at `relative` under this directory.
-    #[must_use]
-    pub fn join_path(&self, relative: &RelativePath) -> Self {
-        Self(self.0.concat(relative))
     }
 
     /// The file at `relative` under this directory. [`PathError::FileIsRoot`] when `relative`
@@ -343,7 +337,8 @@ pub struct Revision(u64);
 impl Revision {
     pub const INITIAL: Self = Self(0);
 
-    pub const fn get(self) -> u64 {
+    #[cfg(test)]
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 

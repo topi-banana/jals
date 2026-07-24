@@ -23,7 +23,7 @@ pub struct Editor<S: SourceBackend, C: CacheBackend, H: EditorHost> {
 
 impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
     /// Pair an already-loaded workspace with its host.
-    pub const fn new(workspace: Workspace<S, C>, host: H) -> Self {
+    const fn new(workspace: Workspace<S, C>, host: H) -> Self {
         Self { workspace, host }
     }
 

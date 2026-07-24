@@ -381,11 +381,13 @@ impl Default for Config {
     }
 }
 
+// Rendering helpers for the WIP formatter (`jals-fmt`); currently exercised only by tests.
+#[cfg(test)]
 impl Config {
     /// One indentation level rendered as a string.
     ///
     /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
-    pub fn indent_unit(&self) -> String {
+    fn indent_unit(&self) -> String {
         match self.indent_style {
             IndentStyle::Tab => "\t".to_owned(),
             IndentStyle::Space => " ".repeat(self.indent_width),
@@ -395,7 +397,7 @@ impl Config {
     /// The number of display columns one indentation level occupies.
     ///
     /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
-    pub fn indent_cols(&self) -> usize {
+    fn indent_cols(&self) -> usize {
         self.indent_width.max(1)
     }
 
@@ -407,7 +409,7 @@ impl Config {
     /// emitted indentation a whole number of tabs.
     ///
     /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
-    pub fn continuation_cols(&self) -> usize {
+    fn continuation_cols(&self) -> usize {
         match self.indent_style {
             IndentStyle::Tab => self.indent_cols(),
             IndentStyle::Space => self.continuation_indent.unwrap_or(self.indent_width).max(1),
@@ -417,7 +419,7 @@ impl Config {
     /// The resolved line terminator for input `src`, honoring `Auto`/`Native`.
     ///
     /// A rendering helper for the formatter (`jals-fmt`); it is not a config key.
-    pub fn newline(&self, src: &str) -> &'static str {
+    fn newline(&self, src: &str) -> &'static str {
         self.line_ending.resolve(src)
     }
 }

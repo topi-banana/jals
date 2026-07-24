@@ -32,13 +32,13 @@ pub const MAX_COMMAND_LINE_BYTES: usize = 32_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
     /// The program to run, e.g. `"javac"` or `"java"`.
-    pub program: String,
+    pub(crate) program: String,
     /// The arguments, in the exact order they should be passed.
-    pub args: Vec<String>,
+    pub(crate) args: Vec<String>,
     /// The subprocess working directory.
-    pub working_dir: PathBuf,
+    pub(crate) working_dir: PathBuf,
     /// Explicit subprocess environment entries. Unspecified variables remain inherited.
-    pub environment: BTreeMap<String, String>,
+    pub(crate) environment: BTreeMap<String, String>,
 }
 
 impl Invocation {
@@ -47,7 +47,7 @@ impl Invocation {
     /// Environment entries are shown in sorted order with an `env` prefix. Words containing
     /// whitespace are wrapped in double quotes. This is display only, not a shell-escaping or
     /// executable contract.
-    pub fn display_command(&self) -> String {
+    pub(crate) fn display_command(&self) -> String {
         let mut words = Vec::new();
         if !self.environment.is_empty() {
             words.push("env".to_owned());
@@ -103,7 +103,7 @@ impl Invocation {
     /// (`"javac"` / `"java"`); the host toolchain resolves that to a concrete path (a discovered JDK,
     /// `$JAVA_HOME/bin`, …) and swaps it in with this before spawning or displaying the command.
     #[must_use]
-    pub fn with_program(mut self, program: impl AsRef<Path>) -> Self {
+    pub(crate) fn with_program(mut self, program: impl AsRef<Path>) -> Self {
         self.program = Self::path_string(program.as_ref());
         self
     }
@@ -121,7 +121,7 @@ impl Invocation {
     /// Exceeding the host limit is not a soft failure: `execve` rejects the whole command with
     /// `E2BIG` (and `CreateProcessW` with `ERROR_INVALID_PARAMETER`), which reads exactly like a
     /// missing JDK. Detecting it here means the spawn never gets the chance.
-    pub fn needs_argument_file(&self) -> bool {
+    pub(crate) fn needs_argument_file(&self) -> bool {
         self.command_line_len() > MAX_COMMAND_LINE_BYTES
     }
 
@@ -134,7 +134,7 @@ impl Invocation {
     /// `'` lose their meaning entirely. A line terminator inside an argument is the one thing the
     /// format cannot express — the tokenizer ends a token there, quoted or not — so such an
     /// invocation reports `None` and keeps its literal command line rather than being corrupted.
-    pub fn argument_file(&self) -> Option<String> {
+    pub(crate) fn argument_file(&self) -> Option<String> {
         if self.args.iter().any(|arg| arg.contains(['\n', '\r'])) {
             return None;
         }
@@ -155,7 +155,7 @@ impl Invocation {
     /// Replace the arguments with the single `@path` reference that reads them back from an
     /// argument file the host has written from [`argument_file`](Invocation::argument_file).
     #[must_use]
-    pub fn with_argument_file(mut self, path: &Path) -> Self {
+    pub(crate) fn with_argument_file(mut self, path: &Path) -> Self {
         self.args = vec![format!("@{}", Self::path_string(path))];
         self
     }
@@ -168,7 +168,7 @@ impl Invocation {
     /// the `extra_classpath` (the resolved dependency jars) follows the manifest's
     /// `[build] classpath`, joined with `path_sep`. See [`CompileRequest`] for each input's
     /// contract. The argument order is fixed so the result is stable.
-    pub fn build(req: &CompileRequest<'_>, path_sep: char) -> Self {
+    pub(crate) fn build(req: &CompileRequest<'_>, path_sep: char) -> Self {
         let &CompileRequest {
             manifest,
             project_root,
@@ -252,7 +252,7 @@ impl Invocation {
     /// (resolved against the request's `project_root`), then its `extra_classpath` (the
     /// already-resolved dependency jars), joined with `path_sep`. The request's `program_args` are
     /// passed to the program after the main class.
-    pub fn run(req: &RunRequest<'_>, path_sep: char) -> Self {
+    pub(crate) fn run(req: &RunRequest<'_>, path_sep: char) -> Self {
         let &RunRequest {
             manifest,
             project_root,

@@ -12,9 +12,13 @@ use crate::key::FrontendKey;
 #[derive(Debug)]
 pub struct Lowered {
     pub tree: LoweredTree,
-    pub diagnostics: Vec<FrontendDiagnostic>,
+    // Carried for consumers of a completed lowering; currently read only by tests.
+    #[allow(dead_code)]
+    diagnostics: Vec<FrontendDiagnostic>,
     /// True when the lowering was restored from cache and the frontend never ran.
-    pub cached: bool,
+    // Read only by tests, so the field is dead only in non-test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) cached: bool,
 }
 
 #[derive(Debug)]
