@@ -5,12 +5,28 @@
 //! touching the filesystem or spawning a process. The classpath separator is passed in by the
 //! backend that plans the command (it is a command-line encoding detail, not a request input), so
 //! the result is deterministic and the functions stay unit-testable with no JDK installed.
+//!
+//! A planned command line can outgrow what a host can spawn — one `.java` argument per source adds
+//! up, and every OS caps the total. [`Invocation::needs_argument_file`] is the pure policy for that
+//! (does this exceed [`MAX_COMMAND_LINE_BYTES`]?), [`Invocation::argument_file`] renders the JDK
+//! `@argfile` body, and [`Invocation::with_argument_file`] rewrites the invocation to point at one.
+//! Writing the file is the host's job; see `SubprocessToolchain::spill_arguments`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::request::{CompileRequest, RunRequest};
 use crate::toolchain::Tool;
+
+/// The command-line budget an [`Invocation`] is planned against, in bytes.
+///
+/// This is the tightest host limit, applied on every platform: Windows caps a `CreateProcessW`
+/// command line at 32767 characters, while Linux allows roughly `ulimit -s / 4` in total (2 MiB by
+/// default) and 128 KiB per single argument. Planning against the tightest one keeps the rule
+/// platform-independent, and the argument file it selects is understood by `javac`/`java`
+/// everywhere — so the only cost of being conservative is spilling a command line that one host
+/// could have taken directly.
+pub const MAX_COMMAND_LINE_BYTES: usize = 32_000;
 
 /// A resolved subprocess invocation. Pure data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +105,58 @@ impl Invocation {
     #[must_use]
     pub fn with_program(mut self, program: impl AsRef<Path>) -> Self {
         self.program = Self::path_string(program.as_ref());
+        self
+    }
+
+    /// The byte length this invocation occupies as a host command line: the program, every
+    /// argument, and one separator apiece (a space on Windows, a `NUL` terminator on Unix).
+    fn command_line_len(&self) -> usize {
+        self.args
+            .iter()
+            .fold(self.program.len() + 1, |total, arg| total + arg.len() + 1)
+    }
+
+    /// Whether this invocation is too long to spawn directly and must go through an argument file.
+    ///
+    /// Exceeding the host limit is not a soft failure: `execve` rejects the whole command with
+    /// `E2BIG` (and `CreateProcessW` with `ERROR_INVALID_PARAMETER`), which reads exactly like a
+    /// missing JDK. Detecting it here means the spawn never gets the chance.
+    pub fn needs_argument_file(&self) -> bool {
+        self.command_line_len() > MAX_COMMAND_LINE_BYTES
+    }
+
+    /// The `@argfile` body for this invocation's arguments — one quoted argument per line — or
+    /// `None` when an argument cannot be represented in one.
+    ///
+    /// Every argument is double-quoted with `\` and `"` escaped, which is what the JDK's argument
+    /// tokenizer round-trips (verified against `javac` 8/17/21/25): inside quotes it treats `\` as
+    /// an escape, so doubling it is what carries a Windows path through intact, and whitespace and
+    /// `'` lose their meaning entirely. A line terminator inside an argument is the one thing the
+    /// format cannot express — the tokenizer ends a token there, quoted or not — so such an
+    /// invocation reports `None` and keeps its literal command line rather than being corrupted.
+    pub fn argument_file(&self) -> Option<String> {
+        if self.args.iter().any(|arg| arg.contains(['\n', '\r'])) {
+            return None;
+        }
+        let mut body = String::with_capacity(self.command_line_len());
+        for arg in &self.args {
+            body.push('"');
+            for ch in arg.chars() {
+                if ch == '\\' || ch == '"' {
+                    body.push('\\');
+                }
+                body.push(ch);
+            }
+            body.push_str("\"\n");
+        }
+        Some(body)
+    }
+
+    /// Replace the arguments with the single `@path` reference that reads them back from an
+    /// argument file the host has written from [`argument_file`](Invocation::argument_file).
+    #[must_use]
+    pub fn with_argument_file(mut self, path: &Path) -> Self {
+        self.args = vec![format!("@{}", Self::path_string(path))];
         self
     }
 }
@@ -585,6 +653,91 @@ mod tests {
         let extra = vec![PathBuf::from("/abs/dep.jar")];
         let inv = build(&m, &[], &[], &extra);
         assert!(has_pair(&inv.args, "-classpath", "/abs/dep.jar"));
+    }
+
+    #[test]
+    fn argument_file_needed_only_past_the_command_line_budget() {
+        let mut invocation = Invocation {
+            program: "javac".to_owned(),
+            args: Vec::new(),
+            working_dir: PathBuf::from(ROOT),
+            environment: BTreeMap::new(),
+        };
+        assert!(!invocation.needs_argument_file());
+
+        // Straddle the budget with one argument, so the boundary itself is exercised rather than
+        // some comfortably-over case.
+        let mut arg = "a".repeat(MAX_COMMAND_LINE_BYTES - invocation.command_line_len() - 1);
+        invocation.args = vec![arg.clone()];
+        assert_eq!(invocation.command_line_len(), MAX_COMMAND_LINE_BYTES);
+        assert!(!invocation.needs_argument_file());
+
+        arg.push('a');
+        invocation.args = vec![arg];
+        assert!(invocation.needs_argument_file());
+    }
+
+    #[test]
+    fn argument_file_quotes_every_argument_and_escapes_backslashes() {
+        // The escaping the JDK tokenizer round-trips: whitespace and `'` are neutralized by the
+        // quotes, `\` and `"` are escaped. A Windows path is the case a Unix-only test would miss.
+        let invocation = Invocation {
+            program: "javac".to_owned(),
+            args: vec![
+                "-d".to_owned(),
+                r"C:\Users\dev\My Project\target\classes".to_owned(),
+                "quote'dir/A.java".to_owned(),
+                r#"say "hi".java"#.to_owned(),
+            ],
+            working_dir: PathBuf::from(ROOT),
+            environment: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            invocation.argument_file().unwrap(),
+            concat!(
+                "\"-d\"\n",
+                r#""C:\\Users\\dev\\My Project\\target\\classes""#,
+                "\n",
+                "\"quote'dir/A.java\"\n",
+                r#""say \"hi\".java""#,
+                "\n",
+            )
+        );
+    }
+
+    #[test]
+    fn argument_containing_a_line_terminator_has_no_argument_file() {
+        // The format ends a token at a newline even inside quotes, so there is no encoding of this
+        // argument — reporting it keeps the host on the literal command line instead of silently
+        // compiling something else.
+        let invocation = Invocation {
+            program: "javac".to_owned(),
+            args: vec!["/proj/src/two\nlines.java".to_owned()],
+            working_dir: PathBuf::from(ROOT),
+            environment: BTreeMap::new(),
+        };
+        assert!(invocation.argument_file().is_none());
+    }
+
+    #[test]
+    fn with_argument_file_replaces_every_argument() {
+        let invocation = Invocation {
+            program: "javac".to_owned(),
+            args: vec!["-d".to_owned(), "target/classes".to_owned()],
+            working_dir: PathBuf::from(ROOT),
+            environment: BTreeMap::from([("LANG".to_owned(), "C".to_owned())]),
+        };
+
+        let referenced = invocation
+            .clone()
+            .with_argument_file(Path::new("/proj/target/jals/build/javac-args"));
+        assert_eq!(referenced.args, vec!["@/proj/target/jals/build/javac-args"]);
+        // Only the arguments move: the program, working directory, and environment still decide
+        // what runs and where.
+        assert_eq!(referenced.program, invocation.program);
+        assert_eq!(referenced.working_dir, invocation.working_dir);
+        assert_eq!(referenced.environment, invocation.environment);
     }
 
     #[test]
