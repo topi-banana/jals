@@ -1,5 +1,7 @@
 /target
 /jals-playground/dist
+# Prebuilt `jals` binary vendored by the npm/bun launcher at install/first run.
+/npm/vendor
 # Generated golden corpus (derivatives of GPL'd OpenJDK sources — do not commit).
 /jals-tests/sources/openjdk-gjf
 # Scratch dirs the golden generator swaps from (same fs as the corpus, for atomic rename).

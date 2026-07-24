@@ -126,6 +126,21 @@ jobs:
           tool: typos
       - run: typos
 
+  biome:
+    name: biome
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: biomejs/setup-biome@v2
+        with:
+          # Version-pinned like the rest of the workflow's tools; keep it in sync with the
+          # `$schema` pin in `biome.json` so the CLI and the config schema never drift.
+          version: 2.5.5
+      # `biome ci` format- and lint-checks the JS sources (scoped by `biome.json`) without writing.
+      # `--error-on-warnings` promotes every lint warning to a hard failure, so the gate is strict:
+      # a plain `biome ci` exits 0 on warnings and would let a lint regression through silently.
+      - run: biome ci --error-on-warnings
+
   build:
     name: build (${{ matrix.name }})
     runs-on: ubuntu-latest

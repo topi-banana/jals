@@ -1,0 +1,22 @@
+{
+  "name": "jals",
+  "version": "0.1.0",
+  "description": "A Java toolchain (formatter, LSP, build front end) built on a lossless syntax tree",
+  "keywords": ["java", "formatter", "lsp", "linter", "cli"],
+  "homepage": "https://github.com/topi-banana/jals#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/topi-banana/jals.git"
+  },
+  "license": "(MIT OR Apache-2.0)",
+  "bin": {
+    "jals": "npm/bin/jals.mjs"
+  },
+  "files": ["npm/bin", "npm/lib"],
+  "scripts": {
+    "postinstall": "node npm/lib/install.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
