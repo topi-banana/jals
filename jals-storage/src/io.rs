@@ -177,7 +177,7 @@ impl<R: Read> Buffered<R> {
         Self::with_capacity(BUFFER_CAPACITY, inner)
     }
 
-    pub fn with_capacity(capacity: usize, inner: R) -> Self {
+    fn with_capacity(capacity: usize, inner: R) -> Self {
         Self {
             inner,
             buf: vec![0; capacity.max(1)].into_boxed_slice(),

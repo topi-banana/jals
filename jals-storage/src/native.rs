@@ -93,7 +93,8 @@ impl NativeSource {
         })
     }
 
-    pub fn root(&self) -> &Path {
+    #[cfg(test)]
+    fn root(&self) -> &Path {
         &self.root
     }
 

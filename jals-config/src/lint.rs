@@ -27,7 +27,7 @@ pub enum Severity {
 
 impl Severity {
     /// The lowercase name (`"allow"` / `"warn"` / `"error"`).
-    pub const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Allow => "allow",
             Self::Warn => "warn",

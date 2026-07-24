@@ -21,7 +21,7 @@ impl ContentDigest {
 
     /// Digest an entire reader by streaming fixed-size chunks, never materializing the content.
     /// Cooperates once per chunk, so digesting a large artifact never monopolizes the executor.
-    pub async fn of_reader<R: io::Read>(reader: &mut R) -> core::result::Result<Self, IoError> {
+    async fn of_reader<R: io::Read>(reader: &mut R) -> core::result::Result<Self, IoError> {
         let mut hasher = Sha256::new();
         let mut chunk = vec![0u8; 64 * 1024];
         let mut yielder = Yielder::new();
@@ -132,7 +132,7 @@ impl CacheNamespace {
 
     /// The namespace a [`name`](Self::name) denotes, or `None` for anything else — an unknown name
     /// is a record written by a different version, not an error.
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
+    fn from_name(name: &str) -> Option<Self> {
         let namespace = match name {
             "dependency-jar" => Self::DependencyJar,
             "nested-jar" => Self::NestedJar,

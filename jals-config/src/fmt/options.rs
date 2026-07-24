@@ -32,6 +32,8 @@ pub enum LineEnding {
     Native,
 }
 
+// Terminator resolution for the WIP formatter (`jals-fmt`); currently exercised only by tests.
+#[cfg(test)]
 impl LineEnding {
     /// Resolve to a concrete terminator string, consulting `src` for [`Auto`](Self::Auto).
     pub(crate) fn resolve(self, src: &str) -> &'static str {
