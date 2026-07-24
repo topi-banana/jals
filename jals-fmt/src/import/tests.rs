@@ -217,6 +217,36 @@ fn spotless_delegate_plus_generic_steps() {
 }
 
 #[test]
+fn import_group_prefixes_are_dotted_in_both_importers() {
+    // Both importers must encode a package group the same way: dotted, so prefix matching stops at
+    // a package boundary. A prefix that already carries its dot is left alone, and the catch-all is
+    // never dotted.
+    let spotless: Config = SpotlessConfig {
+        // `\#com.acme` is a static group scoped to one package — still just jals's one `static`.
+        import_order: [
+            "com.acme".to_owned(),
+            "org.".to_owned(),
+            "\\#com.acme".to_owned(),
+            "\\#".to_owned(),
+            String::new(),
+        ]
+        .into(),
+        ..SpotlessConfig::default()
+    }
+    .into();
+    assert_eq!(spotless.import_groups, ["com.acme.", "org.", "static", "*"]);
+
+    // The IntelliJ mini-list reaches the same encoding from its own syntax: `com.acme` is the
+    // wildcard-less "this package only" form, which jals can only express as a dotted prefix.
+    let editorconfig = "\
+[*.java]
+ij_java_imports_layout = com.acme, org.**, $*, $com.acme.**, *
+";
+    let intellij = IntellijEditorConfig::import(editorconfig).unwrap();
+    assert_eq!(intellij.import_groups, spotless.import_groups);
+}
+
+#[test]
 fn spotless_default_delegate_is_gjf() {
     let config: Config = SpotlessConfig::default().into();
     assert_eq!(config.max_width, 100);

@@ -17,7 +17,6 @@
 // Native product / token names (IntelliJ, editorconfig, …) recur throughout the docs as prose.
 #![allow(clippy::doc_markdown)]
 
-use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -28,7 +27,7 @@ use jals_config::fmt::{
 use serde::Deserialize;
 
 use super::serde_kv::Kv;
-use super::{ConfigImporter, ImportError};
+use super::{ConfigImporter, ImportError, ImportGroups};
 
 /// `indent_style` (universal editorconfig key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -317,6 +316,10 @@ impl IntellijConfig {
     /// blank line (dropped — jals blanks every group), a wildcard like `java.**` = the prefix
     /// `java.`, and a bare `*` = the catch-all. Example: `$*, |, java.**, |, *` →
     /// `["static", "java.", "*"]`.
+    ///
+    /// Stripping the wildcard can leave an already-dotted prefix (`java.**` → `java.`) or a bare
+    /// package (`com.acme`, IntelliJ's "this package only" form, which jals cannot express); both
+    /// go through [`ImportGroups::prefix`] so the encoding matches the Spotless importer's.
     fn parse_imports_layout(value: &str) -> Vec<String> {
         let mut groups = Vec::new();
         for raw in value.split(',') {
@@ -327,17 +330,14 @@ impl IntellijConfig {
             if entry.starts_with('$') {
                 // A static-import group (`$*` = every static import). jals collapses these to one
                 // `"static"` group regardless of the pattern.
-                if !groups.iter().any(|g| g == "static") {
-                    groups.push("static".to_owned());
-                }
+                ImportGroups::push_static(&mut groups);
                 continue;
             }
             let prefix = entry
                 .strip_suffix("**")
                 .or_else(|| entry.strip_suffix('*'))
                 .unwrap_or(entry);
-            // An entry that was nothing but a wildcard is the catch-all group.
-            groups.push(if prefix.is_empty() { "*" } else { prefix }.to_owned());
+            groups.push(ImportGroups::prefix(prefix));
         }
         groups
     }

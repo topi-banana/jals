@@ -26,7 +26,10 @@
 // The importer docs name many native products / files (IntelliJ, EditorConfig, …) in prose.
 #![allow(clippy::doc_markdown)]
 
+use alloc::borrow::ToOwned;
+use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 use jals_config::fmt::Config;
@@ -88,5 +91,41 @@ pub trait ConfigImporter {
     /// Parse and lower to a jals [`Config`] in one step.
     fn import(src: &str) -> Result<Config, ImportError> {
         Ok(Self::parse(src)?.into())
+    }
+}
+
+/// The shared normalization of a native import-group entry into a jals `import_groups` prefix.
+///
+/// Every native formatter spells its groups differently (IntelliJ `java.**`, Spotless `java`), but
+/// they all mean the same thing: *the package `java` and everything under it*. jals matches
+/// `import_groups` by raw string prefix, so the representation has to carry a trailing `.` — it is
+/// the dot that stops `java` from also capturing `javax.*`. Both importers go through here so they
+/// cannot drift apart on the encoding.
+struct ImportGroups;
+
+impl ImportGroups {
+    /// The catch-all group (every import not claimed by a named prefix).
+    const CATCH_ALL: &'static str = "*";
+    /// The single group jals uses for static imports; every native static group collapses into it.
+    const STATIC: &'static str = "static";
+
+    /// Normalize one package prefix, already stripped of its native wildcard / marker syntax.
+    /// An empty prefix is the catch-all; anything else is returned dotted.
+    fn prefix(package: &str) -> String {
+        if package.is_empty() {
+            Self::CATCH_ALL.to_owned()
+        } else if package.ends_with('.') {
+            package.to_owned()
+        } else {
+            format!("{package}.")
+        }
+    }
+
+    /// Append the `"static"` group unless it is already present — native configs may declare
+    /// several static groups (`$*`, `\#com.acme`), and jals models only one.
+    fn push_static(groups: &mut Vec<String>) {
+        if !groups.iter().any(|group| group == Self::STATIC) {
+            groups.push(Self::STATIC.to_owned());
+        }
     }
 }

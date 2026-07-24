@@ -12,14 +12,13 @@
 //! and its `From` impl, which starts from the delegate's [`Config`] and layers the generic steps
 //! on top.
 
-use alloc::borrow::ToOwned;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_config::fmt::Config;
 use serde::Deserialize;
 
+use super::ImportGroups;
 use super::eclipse::EclipseConfig;
 use super::gjf::GoogleJavaFormatConfig;
 use super::palantir::PalantirJavaFormatConfig;
@@ -90,21 +89,23 @@ impl From<SpotlessConfig> for Config {
 }
 
 impl SpotlessConfig {
-    /// Map a Spotless `importOrder` prefix list to jals import-group prefixes: `""` → `"*"` (the
-    /// catch-all), `"\#"` / `"#"` → `"static"`, and a package prefix gets a trailing `.` so it
-    /// matches at a package boundary — Spotless treats `java` as `java.*` (never `javax`), and
-    /// jals `import_groups` uses raw string-prefix matching, so the dot is what keeps `javax.*`
-    /// out of the `java` group. This is the same dotted shape the IntelliJ importer and `Config`'s
-    /// own defaults use.
+    /// Map a Spotless `importOrder` prefix list to jals import-group prefixes.
+    ///
+    /// A `\#` prefix marks a *static* group — bare (`\#`, every static import) or scoped to a
+    /// package (`\#com.acme`); jals models one `"static"` group, so all of them collapse into it.
+    /// Everything else is a package prefix (`""` being the catch-all) and is normalized by
+    /// [`ImportGroups::prefix`], which is what keeps this importer's encoding identical to the
+    /// IntelliJ one.
     fn map_import_order(order: &[String]) -> Vec<String> {
-        order
-            .iter()
-            .map(|entry| match entry.as_str() {
-                "" => "*".to_owned(),
-                "\\#" | "#" => "static".to_owned(),
-                prefix if prefix.ends_with('.') => prefix.to_owned(),
-                prefix => format!("{prefix}."),
-            })
-            .collect()
+        let mut groups = Vec::with_capacity(order.len());
+        for entry in order {
+            let entry = entry.as_str();
+            if entry.starts_with("\\#") || entry.starts_with('#') {
+                ImportGroups::push_static(&mut groups);
+                continue;
+            }
+            groups.push(ImportGroups::prefix(entry));
+        }
+        groups
     }
 }
