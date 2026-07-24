@@ -68,7 +68,7 @@ pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
 pub use init::{InitOptions, ScaffoldFile};
 #[cfg(feature = "native")]
-pub use invocation::Invocation;
+pub use invocation::{Invocation, MAX_COMMAND_LINE_BYTES};
 #[cfg(feature = "native")]
 pub use manifest_ext::{ManifestError, ManifestExt};
 #[cfg(feature = "native")]

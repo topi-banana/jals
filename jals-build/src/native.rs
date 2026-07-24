@@ -10,6 +10,14 @@
 //! locations (SDKMAN, `~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle directory) when a
 //! distribution selector needs them, probes which candidate exists, and spawns. Downloading a
 //! missing JDK is future work.
+//!
+//! Spawning is also where a planned command line meets the host's limit on one. A project whose
+//! sources (its own plus every source dependency's) outgrow that limit would otherwise fail at
+//! `execve` with `E2BIG`, indistinguishable from a missing JDK; [`SubprocessToolchain::spill_arguments`]
+//! writes those arguments to a JDK argument file instead, so the compile step scales to any project
+//! size. The run step is spilled by the same rule, with one caveat: `javac` has always read
+//! `@argfile`, but `java` only since JDK 9 — an over-long *run* on a JDK 8 runtime fails either way,
+//! it just fails complaining about the `@` argument rather than about the command's length.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +33,10 @@ use crate::toolchain::{
     BuildOutcome, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
     ToolchainFuture,
 };
+
+/// Where a spilled command line is written, relative to the project root: the managed build root,
+/// alongside [`FRONTEND_OUT_DIR`](crate::FRONTEND_OUT_DIR).
+const ARGUMENT_FILE_DIR: &str = "target/jals/build";
 
 impl dyn Compiler {
     /// Select the backend the manifest's `[toolchain] compiler` names, as one boxed [`Compiler`]:
@@ -157,10 +169,36 @@ impl SubprocessToolchain {
             .with_program(self.resolve_program(Tool::Java, req.project_root).await)
     }
 
+    /// Spill an over-long command line into a JDK argument file, returning the invocation to spawn.
+    ///
+    /// The pure policy decides *whether* ([`Invocation::needs_argument_file`]) and renders *what*
+    /// ([`Invocation::argument_file`]); this only picks the location and writes it. That location is
+    /// under the project's managed build root, so `jals clean` removes it, it never mixes with user
+    /// files, and it stays next to the compile it belongs to instead of in a shared temp directory.
+    /// An invocation the format cannot express keeps its literal command line.
+    fn spill_arguments(tool: Tool, invocation: Invocation) -> Result<Invocation, ToolchainError> {
+        if !invocation.needs_argument_file() {
+            return Ok(invocation);
+        }
+        let Some(body) = invocation.argument_file() else {
+            return Ok(invocation);
+        };
+        let directory = invocation.working_dir.join(ARGUMENT_FILE_DIR);
+        let path = directory.join(format!("{}-args", tool.binary_name()));
+        std::fs::create_dir_all(&directory)
+            .and_then(|()| std::fs::write(&path, body))
+            .map_err(|source| ToolchainError::ArgumentFile {
+                path: path.display().to_string(),
+                source,
+            })?;
+        Ok(invocation.with_argument_file(&path))
+    }
+
     /// Spawn an invocation on the blocking pool, inheriting stdio, and map the exit status to a
     /// [`BuildOutcome`]. The subprocess wait blocks one pool thread; the executor keeps running.
-    async fn spawn(invocation: Invocation) -> Result<BuildOutcome, ToolchainError> {
+    async fn spawn(tool: Tool, invocation: Invocation) -> Result<BuildOutcome, ToolchainError> {
         on_blocking_pool(move || {
+            let invocation = Self::spill_arguments(tool, invocation)?;
             let status = Command::new(&invocation.program)
                 .args(&invocation.args)
                 .current_dir(&invocation.working_dir)
@@ -227,7 +265,7 @@ impl SubprocessToolchain {
 
 impl Compiler for SubprocessToolchain {
     fn compile<'a>(&'a self, req: &'a CompileRequest<'_>) -> ToolchainFuture<'a> {
-        Box::pin(async move { Self::spawn(self.plan_compile(req).await).await })
+        Box::pin(async move { Self::spawn(Tool::Javac, self.plan_compile(req).await).await })
     }
 
     fn describe_compile(&self, req: &CompileRequest<'_>) -> String {
@@ -239,7 +277,7 @@ impl Compiler for SubprocessToolchain {
 
 impl Runtime for SubprocessToolchain {
     fn run<'a>(&'a self, req: &'a RunRequest<'_>) -> ToolchainFuture<'a> {
-        Box::pin(async move { Self::spawn(self.plan_run(req).await).await })
+        Box::pin(async move { Self::spawn(Tool::Java, self.plan_run(req).await).await })
     }
 
     fn describe_run(&self, req: &RunRequest<'_>) -> String {
@@ -414,10 +452,55 @@ mod tests {
         };
 
         assert!(
-            block_on_inline(SubprocessToolchain::spawn(invocation))
+            block_on_inline(SubprocessToolchain::spawn(Tool::Java, invocation))
                 .unwrap()
                 .success()
         );
+    }
+
+    #[test]
+    fn over_long_command_line_is_spilled_into_a_managed_argument_file() {
+        // One argument per source is what makes a real command line outgrow the host limit, so the
+        // fixture is shaped the same way: many paths, none of them individually large.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+        let args: Vec<String> = (0..2000)
+            .map(|index| format!("/proj/src/main/java/com/example/Generated{index}.java"))
+            .collect();
+        let invocation = Invocation {
+            program: "javac".to_owned(),
+            args: args.clone(),
+            working_dir: working_dir.clone(),
+            environment: BTreeMap::new(),
+        };
+        assert!(invocation.needs_argument_file());
+
+        let spilled = SubprocessToolchain::spill_arguments(Tool::Javac, invocation).unwrap();
+
+        let path = working_dir.join(ARGUMENT_FILE_DIR).join("javac-args");
+        assert_eq!(spilled.args, vec![format!("@{}", path.display())]);
+        let mut expected = String::new();
+        for arg in &args {
+            expected.push('"');
+            expected.push_str(arg);
+            expected.push_str("\"\n");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn command_line_within_budget_is_spawned_verbatim() {
+        let invocation = Invocation {
+            program: "javac".to_owned(),
+            args: vec!["-d".to_owned(), "target/classes".to_owned()],
+            working_dir: PathBuf::from("/proj"),
+            environment: BTreeMap::new(),
+        };
+
+        // No argument file, and therefore no write into a `working_dir` that need not even exist.
+        let spawned =
+            SubprocessToolchain::spill_arguments(Tool::Javac, invocation.clone()).unwrap();
+        assert_eq!(spawned, invocation);
     }
 
     #[test]
