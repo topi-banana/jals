@@ -47,6 +47,16 @@ crate = "jals_build"
 module = "backend"
 reason = "deferred backend-tier compile seam; no impl exists yet (TODO(backend-tier))"
 
+# `jals_fmt::import` lowers native formatter configs (Eclipse / IntelliJ / GJF /
+# Palantir / Spotless) into a jals `Config`. It landed ahead of the WIP formatter
+# rewrite, so no shipped binary reaches it yet — the CLI/LSP wiring that consumes
+# it arrives with the rewrite. Each importer is a `Deserialize` model whose fields
+# are read by serde, not by jals code, so the model surface stays `pub` by design.
+[[exclude]]
+crate = "jals_fmt"
+module = "import"
+reason = "config-importer surface for the WIP formatter rewrite; consumer wiring is not shipped yet"
+
 # --- Overrides --------------------------------------------------------------
 # The backend seam's crate-root re-exports live outside the `backend` module,
 # so they need per-item allows. Kept public as the stable surface the future
