@@ -83,6 +83,42 @@ enum ImportEntry {
     Blank,
 }
 
+/// What one scan of a scheme document accumulates.
+#[derive(Default)]
+struct SchemeScan {
+    /// Raw UPPER_SNAKE option name → raw value (integer / bool / separator).
+    raw: BTreeMap<String, String>,
+    /// `IMPORT_LAYOUT_TABLE` rows, in document order.
+    imports: Vec<ImportEntry>,
+    /// Whether the scan is inside the `IMPORT_LAYOUT_TABLE` option's `<value>` list.
+    in_import_layout: bool,
+}
+
+impl SchemeScan {
+    /// Record one opening / empty element.
+    fn visit(&mut self, element: &BytesStart<'_>) -> Result<(), ImportError> {
+        match element.name().as_ref() {
+            b"option" => match (Xml::attr(element, b"name")?, Xml::attr(element, b"value")?) {
+                (Some(name), Some(value)) => {
+                    self.raw.insert(name, value);
+                }
+                (Some(name), None) if name == "IMPORT_LAYOUT_TABLE" => {
+                    self.in_import_layout = true;
+                }
+                _ => {}
+            },
+            b"package" if self.in_import_layout => {
+                let name = Xml::attr(element, b"name")?.unwrap_or_default();
+                let is_static = Xml::attr(element, b"static")?.as_deref() == Some("true");
+                self.imports.push(ImportEntry::Package { name, is_static });
+            }
+            b"emptyLine" if self.in_import_layout => self.imports.push(ImportEntry::Blank),
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 /// Reader for an IntelliJ code-style scheme (`<option name=… value=…/>` plus the import-layout
 /// table).
 pub(crate) struct IntellijSchemeReader;
@@ -92,60 +128,55 @@ impl IntellijSchemeReader {
     /// tokens so [`super::intellij::IntellijConfig`] deserializes it unchanged.
     pub(crate) fn parse(src: &str) -> Result<BTreeMap<String, String>, ImportError> {
         let mut reader = Reader::from_str(src);
-        // Raw UPPER_SNAKE option name → raw value (integer / bool / separator).
-        let mut raw: BTreeMap<String, String> = BTreeMap::new();
-        let mut imports: Vec<ImportEntry> = Vec::new();
-        let mut in_import_layout = false;
-        // Whether the reader is inside Java-relevant settings. Options sit either at the top level
-        // / inside `<JavaCodeStyleSettings>` (global — read), or inside a per-language
-        // `<codeStyleSettings language="…">` block; a non-Java block must not overwrite Java's
-        // indent / wrap / brace options with its own (DESIGN §A.4.4).
-        let mut java_scope = true;
+        let mut scan = SchemeScan::default();
+        // Open-element depth inside a language-scoped block belonging to *another* language; `0`
+        // means the scan is reading. Java options are not confined to a Java block (old exported
+        // schemes put import options at the top level — DESIGN §A.4.5), so foreign blocks are
+        // skipped by denylist instead of Java being allowlisted.
+        let mut skip_depth = 0usize;
 
         loop {
             let event = reader
                 .read_event()
                 .map_err(|err| ImportError::Xml(err.to_string()))?;
+
+            // Drop a foreign block's entire subtree: every language reuses the same UPPER_SNAKE
+            // option vocabulary, so reading one would overwrite Java's values (DESIGN §A.4.4).
+            if skip_depth > 0 {
+                match event {
+                    Event::Eof => break,
+                    Event::Start(_) => skip_depth += 1,
+                    Event::End(_) => skip_depth -= 1,
+                    _ => {}
+                }
+                continue;
+            }
+
             match event {
                 Event::Eof => break,
-                // A per-language block scopes every option it wraps to that one language.
-                Event::Start(element) if element.name().as_ref() == b"codeStyleSettings" => {
-                    java_scope = Xml::attr(&element, b"language")?
-                        .is_none_or(|language| language.eq_ignore_ascii_case("JAVA"));
-                }
-                Event::End(element) if element.name().as_ref() == b"codeStyleSettings" => {
-                    java_scope = true;
-                }
-                // Inside a non-Java block, drop everything until it closes.
-                _ if !java_scope => {}
-                Event::End(element) if in_import_layout && element.name().as_ref() == b"option" => {
-                    in_import_layout = false;
-                }
-                Event::Empty(element) | Event::Start(element) => match element.name().as_ref() {
-                    b"option" => match (
-                        Xml::attr(&element, b"name")?,
-                        Xml::attr(&element, b"value")?,
-                    ) {
-                        (Some(name), Some(value)) => {
-                            raw.insert(name, value);
-                        }
-                        (Some(name), None) if name == "IMPORT_LAYOUT_TABLE" => {
-                            in_import_layout = true;
-                        }
-                        _ => {}
-                    },
-                    b"package" if in_import_layout => {
-                        let name = Xml::attr(&element, b"name")?.unwrap_or_default();
-                        let is_static = Xml::attr(&element, b"static")?.as_deref() == Some("true");
-                        imports.push(ImportEntry::Package { name, is_static });
+                Event::Start(element) => {
+                    if Self::is_foreign_language_block(&element)? {
+                        skip_depth = 1;
+                    } else {
+                        scan.visit(&element)?;
                     }
-                    b"emptyLine" if in_import_layout => imports.push(ImportEntry::Blank),
-                    _ => {}
-                },
+                }
+                // An empty element opens no subtree, so a foreign one needs no skip state.
+                Event::Empty(element) => {
+                    if !Self::is_foreign_language_block(&element)? {
+                        scan.visit(&element)?;
+                    }
+                }
+                Event::End(element)
+                    if scan.in_import_layout && element.name().as_ref() == b"option" =>
+                {
+                    scan.in_import_layout = false;
+                }
                 _ => {}
             }
         }
 
+        let SchemeScan { raw, imports, .. } = scan;
         let mut pairs = BTreeMap::new();
         for (name, value) in raw {
             if let Some((key, translated)) = Self::translate_option(&name, &value) {
@@ -159,6 +190,25 @@ impl IntellijSchemeReader {
             );
         }
         Ok(pairs)
+    }
+
+    /// Whether an element opens a settings block scoped to a language other than Java.
+    ///
+    /// Two element shapes carry a language scope (DESIGN §A.4.4): `<codeStyleSettings language=…>`
+    /// holds the whitespace / wrap / indent options, and the per-language
+    /// `<…CodeStyleSettings>` siblings (`<JavaCodeStyleSettings>`, `<KotlinCodeStyleSettings>`, …)
+    /// hold the import policy. Anything else — notably the `<code_scheme>` top level — is global
+    /// and read as Java's.
+    fn is_foreign_language_block(element: &BytesStart<'_>) -> Result<bool, ImportError> {
+        let name = element.name();
+        let name = name.as_ref();
+        if name == b"codeStyleSettings" {
+            // Without a `language` attribute the block is not language-scoped, so read it.
+            return Ok(Xml::attr(element, b"language")?
+                .is_some_and(|language| !language.eq_ignore_ascii_case("JAVA")));
+        }
+        // `codeStyleSettings` itself does not match this suffix (its leading `c` is lowercase).
+        Ok(name.ends_with(b"CodeStyleSettings") && name != b"JavaCodeStyleSettings")
     }
 
     /// Translate one raw IntelliJ scheme option into its `.editorconfig` (key, token) form, or

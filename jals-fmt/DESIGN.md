@@ -979,6 +979,10 @@ force-braces (`IF_BRACE_FORCE` 等): `0`=しない … `3`=always（brace-style 
   `<JavaCodeStyleSettings>`、空白/wrap/indent は `<codeStyleSettings language="JAVA">`＋`<indentOptions>`。
 - `PackageEntryTable`(`IMPORT_LAYOUT_TABLE`/`PACKAGES_TO_USE_IMPORT_ON_DEMAND`)=`<value>` 内に
   `<package name withSubpackages static [module]/>` と `<emptyLine/>` の順序付き列。空表は `<value/>`。
+- 言語スコープを持つ要素は 2 形。`<codeStyleSettings language="…">` と、`<…CodeStyleSettings>` 兄弟
+  (`<KotlinCodeStyleSettings>`/`<XmlCodeStyleSettings>`/…)。どの言語も **同一の UPPER_SNAKE option 語彙**
+  を使い回すので、Java 以外のこの 2 形は**部分木ごと捨てる**（読むと Java の値を上書きする）。逆に
+  top-level は言語スコープではないので Java として読む（A.4.5）→ Java 許可リストではなく他言語拒否リスト。
 
 **A.4.5 exported IDE scheme**（Settings→Code Style→Export）: ルートが `<code_scheme name="...">` 直で
 `<component>` ラッパも `codeStyleConfig.xml` 相棒も無い。`version` 属性は任意（旧 export には無い）。

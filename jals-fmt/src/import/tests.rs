@@ -307,10 +307,29 @@ fn intellij_xml_scheme_translates_ints_and_import_table() {
 fn intellij_xml_scheme_scopes_options_to_java_language() {
     use super::intellij::IntellijXmlScheme;
 
-    // A realistic multi-language scheme: the JAVA block must win, and a later non-Java block
-    // (kotlin, sharing the same UPPER_SNAKE option names) must not clobber it.
+    // A multi-language scheme. Both language-scoped shapes carry the *same* UPPER_SNAKE option
+    // vocabulary, so both must be skipped when they belong to another language: the
+    // `<codeStyleSettings language="kotlin">` block, and the `<KotlinCodeStyleSettings>` sibling
+    // of `<JavaCodeStyleSettings>` (given modeled names here deliberately, to pin the skip).
     let xml = r#"<component name="ProjectCodeStyleConfiguration">
   <code_scheme name="Project" version="173">
+    <JavaCodeStyleSettings>
+      <option name="IMPORT_LAYOUT_TABLE">
+        <value>
+          <package name="java" withSubpackages="true" static="false" />
+          <emptyLine />
+          <package name="" withSubpackages="true" static="false" />
+        </value>
+      </option>
+    </JavaCodeStyleSettings>
+    <KotlinCodeStyleSettings>
+      <option name="RIGHT_MARGIN" value="140" />
+      <option name="IMPORT_LAYOUT_TABLE">
+        <value>
+          <package name="kotlinx" withSubpackages="true" static="false" />
+        </value>
+      </option>
+    </KotlinCodeStyleSettings>
     <codeStyleSettings language="JAVA">
       <option name="METHOD_PARAMETERS_WRAP" value="2" />
       <indentOptions>
@@ -332,4 +351,8 @@ fn intellij_xml_scheme_scopes_options_to_java_language() {
     assert_eq!(config.indent_width, 2);
     assert_eq!(config.continuation_indent, Some(4));
     assert_eq!(config.fn_params_layout, FnParamsLayout::Vertical);
+    // The Kotlin sibling contributed neither its margin…
+    assert_eq!(config.max_width, Config::default().max_width);
+    // …nor its import rows: only Java's table survives, in order.
+    assert_eq!(config.import_groups, ["java.", "*"]);
 }
