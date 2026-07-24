@@ -31,28 +31,6 @@ fn read_arg_lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Run `jals fmt` over stdin and return (stdout, exit code).
-fn run_stdin(args: &[&str], input: &str) -> (String, i32) {
-    let mut child = jals()
-        .arg("fmt")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    (
-        String::from_utf8(out.stdout).unwrap(),
-        out.status.code().unwrap(),
-    )
-}
-
 #[test]
 fn deny_warnings_fails_on_syntax_error() {
     let dir = tempdir().unwrap();
