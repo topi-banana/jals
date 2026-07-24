@@ -14,9 +14,11 @@ This example uses the build-task DAG to:
 7. With the default `mixin` feature, fetch SpongePowered Mixin 0.8.7's **sources** jar and publish
    its real `org/spongepowered` sources at `src/main/java/org/spongepowered` under a second owner
    (`extract_java`, not `decompile_java` — Mixin ships actual `.java`).
+8. With the default `mixinextras` feature, do the same once more for MixinExtras 0.5.4's **sources**
+   jar, published at `src/main/java/com/llamalad7` under a third owner.
 
-The release, the distribution, and the Mixin sources all come from the `[features]` declared in
-`jals.toml`.
+The release, the distribution, and the two source libraries all come from the `[features]` declared
+in `jals.toml`.
 
 ## Version selection
 
@@ -36,14 +38,14 @@ release:
 ```
 
 They are mutually **exclusive**: at most one may be active. `jals.toml` therefore keeps
-`default = ["server", "mixin"]` — the default list carries a side and the Mixin sources, but
-deliberately no version — and `build.rhai` falls back to `DEFAULT_VERSION` (26.2, the newest
-release) when no version feature is selected. Selecting a version needs nothing else:
+`default = ["server", "mixin", "mixinextras"]` — the default list carries a side and the two source
+libraries, but deliberately no version — and `build.rhai` falls back to `DEFAULT_VERSION` (26.2, the
+newest release) when no version feature is selected. Selecting a version needs nothing else:
 
 ```sh
-jals build                       # 26.2 (the fallback) + server + mixin
-jals build --features 1.20.1     # 1.20.1 + server + mixin
-jals build --features 1.16.5,client   # 1.16.5, client overlaid on server, + mixin
+jals build                       # 26.2 (the fallback) + server + mixin + mixinextras
+jals build --features 1.20.1     # 1.20.1 + server + mixin + mixinextras
+jals build --features 1.16.5,client   # 1.16.5, client overlaid on server, + both libraries
 ```
 
 Two or more version features fail before any download, in `build.rhai` rather than in the manifest,
@@ -85,17 +87,17 @@ Selection is **additive**, exactly like Cargo: a feature never subtracts, so `--
 keeps the default `server` and therefore builds the _merged_ jar. Drop `server` with
 `--no-default-features`.
 
-| selection                                 | resolved features           | behaviour                                                   |
-| ----------------------------------------- | --------------------------- | ----------------------------------------------------------- |
-| (none)                                    | `server`, `mixin`           | server jar only (26.2 — no mappings, no remap)              |
-| `--features client`                       | `server`, `client`, `mixin` | remap both if obfuscated, then `merge_jars(server, client)` |
-| `--features server,client`                | `server`, `client`, `mixin` | same as above                                               |
-| `--no-default-features --features client` | `client`                    | client jar only — and no Mixin sources                      |
-| `--features 1.16.5`                       | `server`, `mixin`, `1.16.5` | 1.16.5 server jar + server mappings                         |
-| `--no-default-features --features 1.16.5` | `1.16.5`                    | same — no side selected falls back to `server`              |
+| selection                                 | resolved features                          | behaviour                                                   |
+| ----------------------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
+| (none)                                    | `server`, `mixin`, `mixinextras`           | server jar only (26.2 — no mappings, no remap)              |
+| `--features client`                       | `server`, `client`, `mixin`, `mixinextras` | remap both if obfuscated, then `merge_jars(server, client)` |
+| `--features server,client`                | `server`, `client`, `mixin`, `mixinextras` | same as above                                               |
+| `--no-default-features --features client` | `client`                                   | client jar only — and neither library's sources             |
+| `--features 1.16.5`                       | `server`, `mixin`, `mixinextras`, `1.16.5` | 1.16.5 server jar + server mappings                         |
+| `--no-default-features --features 1.16.5` | `1.16.5`                                   | same — no side selected falls back to `server`              |
 
-The `behaviour` column describes the game side only; `mixin` is orthogonal to it and is covered
-below.
+The `behaviour` column describes the game side only; `mixin` and `mixinextras` are orthogonal to it
+and are covered below.
 
 `merge_jars` overlays the client onto the server, so the client wins path conflicts. A client-only
 build never enters the server branch, so on 1.18+ `add_nested_classpath` is skipped and the bundled
@@ -114,13 +116,14 @@ cargo run -p jals-cli -- build --features 1.20.1
 # Merged: the client overlaid on the server.
 cargo run -p jals-cli -- build --features client
 
-# Client only — and, because `--no-default-features` also drops `mixin`, no Mixin sources.
+# Client only — and, because `--no-default-features` also drops `mixin` and `mixinextras`, neither
+# library's sources.
 cargo run -p jals-cli -- build --no-default-features --features client
 
 # Subsequent runs reuse the verified SHA-256 project cache.
 cargo run -p jals-cli -- build --offline
 
-cargo run -p jals-cli -- clean   # removes both owned publication roots too
+cargo run -p jals-cli -- clean   # removes every owned publication root too
 ```
 
 ## Mixin sources
@@ -155,6 +158,41 @@ the `mixin-0.8.7` owner, and dropping an owner removes its root. So
 `--no-default-features --features 1.20.1` deletes `src/main/java/org/spongepowered` on its next
 successful build — the same exclusive-ownership rule that swaps the game tree on a version switch.
 
+## MixinExtras sources
+
+The default `mixinextras` feature is the **fourth axis**, and the second one that fetches no
+Minecraft artifact: [MixinExtras](https://github.com/LlamaLad7/MixinExtras), the companion library
+whose `@WrapOperation` / `@ModifyExpressionValue` / `@Local` injectors and sugar every recent mod
+applies on top of Mixin. It is published as a _sources_ jar too, so it goes through exactly the same
+fetch → `extract_java` → `publish_tree` contract:
+
+| item        | value                                                                             |
+| ----------- | --------------------------------------------------------------------------------- |
+| coordinate  | `io.github.llamalad7:mixinextras-common:0.5.4` (classifier `sources`)             |
+| SHA-1       | `fd5d27cff1c8118f5a4a037e7f549b606d117caf` (215 KiB, capped at 512 KiB)           |
+| owner       | `mixinextras-0.5.4`                                                               |
+| destination | `src/main/java/com/llamalad7` (`replace-root`)                                    |
+| contents    | 216 real `.java` — the injectors, the sugar, and the `ap/**` annotation processor |
+
+`mixinextras-common` is the platform-neutral core; the `-fabric` / `-forge` / `-neoforge` artifacts
+are only thin per-loader bootstraps around it, so the `common` sources are the whole library worth
+browsing — including the expression engine under `expression/**` that backs `@Expression`. It comes
+from Maven Central, where a released version is immutable, so the one SHA-1 pins both the URL and
+the fetch like every other fetch here. Apart from its manifest the jar holds nothing outside
+`com/llamalad7/mixinextras`, so the single `com/llamalad7` prefix takes all of it.
+
+`mixinextras` is independent of `mixin`, not layered on it: neither feature enables the other, they
+own disjoint destinations, and each root appears, is replaced, or is removed on its own. So
+`--no-default-features --features mixinextras` publishes this root and the game tree (no side
+selected still falls back to `server`), but not Mixin's. The default selection simply lists both
+libraries, which is the combination worth browsing: MixinExtras' sources refer to
+`org.spongepowered.asm.*` throughout, so having Mixin's own tree open next to them is what makes
+them readable.
+
+Like Mixin's, the MixinExtras **jar** is deliberately not added to the classpath: its sources
+compile against Mixin, asm and the loader APIs, none of which this example resolves, and
+`mixinextras/ap` is an annotation processor. These are **reference sources** for the LSP as well.
+
 ## What it demonstrates
 
 - `tasks.fetch_json` / `fetch_jar` / `fetch_text` with mandatory HTTPS + digest + byte cap.
@@ -166,15 +204,17 @@ successful build — the same exclusive-ownership rule that swaps the game tree 
 - `tasks.merge_jars(base, overlay)` — deterministic union, overlay wins on conflict.
 - `tasks.decompile_java(jar, prefix)` — compile-oriented skeleton source tree.
 - `tasks.extract_java(jar, prefix)` — its counterpart for a library that ships real `.java`: the
-  Mixin sources jar goes through the same fetch → publish contract with no reconstruction step.
+  Mixin and MixinExtras sources jars go through the same fetch → publish contract with no
+  reconstruction step.
 - `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the resolved game jar.
-- **Two independent publication roots from one script**: `src/main/java/net/minecraft` (owner
-  `minecraft-<version>`) and `src/main/java/org/spongepowered` (owner `mixin-0.8.7`). They are
-  produced by disjoint task subgraphs, own disjoint destinations, and are enabled by unrelated
-  features — so each appears, is replaced, or is removed on its own.
-- `build.feature("server")` / `build.feature("client")` / `build.feature("mixin")` for `[features]`
-  switching — the resolved feature set is always part of the build-script fingerprint, so no
-  `rerun_if_env_changed` is needed for it.
+- **Three independent publication roots from one script**: `src/main/java/net/minecraft` (owner
+  `minecraft-<version>`), `src/main/java/org/spongepowered` (owner `mixin-0.8.7`), and
+  `src/main/java/com/llamalad7` (owner `mixinextras-0.5.4`). They are produced by disjoint task
+  subgraphs, own disjoint destinations, and are enabled by unrelated features — so each appears, is
+  replaced, or is removed on its own.
+- `build.feature("server")` / `build.feature("client")` / `build.feature("mixin")` /
+  `build.feature("mixinextras")` for `[features]` switching — the resolved feature set is always
+  part of the build-script fingerprint, so no `rerun_if_env_changed` is needed for it.
 - **Mutually exclusive features on top of an additive `[features]` model**: the script scans its
   catalog with `build.feature`, rejects a second match with `build.error` (which publishes nothing
   and runs no task), and falls back to `DEFAULT_VERSION` when none matched.
@@ -204,10 +244,11 @@ full tree to report remaining errors. Full semantic recompilation of vanilla is 
 The demonstrated piece is the pipeline itself (fetch → nested extract → remap → decompile →
 exclusive publish); a cleanly compiling tree is best-effort.
 
-None of this applies to the `mixin` tree, which is the library's own source rather than a skeleton —
-but it does not compile either, for the unrelated reason given above: its dependencies (asm, guava,
-gson, commons-io, log4j2, modlauncher) are never fetched, so `jals build` reports unresolved
-references there too.
+None of this applies to the `mixin` and `mixinextras` trees, which are the libraries' own source
+rather than skeletons — but they do not compile either, for the unrelated reason given above:
+Mixin's dependencies (asm, guava, gson, commons-io, log4j2, modlauncher) are never fetched, and
+MixinExtras needs those plus Mixin itself, whose jar this example keeps off the classpath as well.
+`jals build` reports unresolved references in both trees.
 
 The target release also sets the JDK the optional `javac` step needs: 26.x declares
 `javaVersion.majorVersion` 25 (1.21.11 declares 21), so its class files are major version 69.
@@ -216,13 +257,14 @@ Decompilation and publication do not care — `jals-classfile` reads the version
 
 ## Ownership and clean
 
-`replace-root` exclusively owns `src/main/java/net/minecraft` and — with the `mixin` feature —
-`src/main/java/org/spongepowered`. A successful changed result removes every existing descendant
-before rewriting the tree — including after a version switch, which retires the previous
-`minecraft-<version>` owner of that same destination, and after dropping `mixin`, which retires the
-`mixin-0.8.7` owner and with it that whole root. `jals clean` drops both directories along with
-`target/classes` and `target/jals/build`. The shared verified cache under `target/jals/cache` is
-kept so `--offline` rebuilds stay fast.
+`replace-root` exclusively owns `src/main/java/net/minecraft`, and — with the `mixin` and
+`mixinextras` features — `src/main/java/org/spongepowered` and `src/main/java/com/llamalad7`. A
+successful changed result removes every existing descendant before rewriting the tree — including
+after a version switch, which retires the previous `minecraft-<version>` owner of that same
+destination, and after dropping `mixin` or `mixinextras`, which retires the `mixin-0.8.7` or
+`mixinextras-0.5.4` owner and with it that whole root. `jals clean` drops all three directories
+along with `target/classes` and `target/jals/build`. The shared verified cache under
+`target/jals/cache` is kept so `--offline` rebuilds stay fast.
 
 ## Using it as a dependency
 
@@ -240,10 +282,11 @@ The consumer's `jals build` runs this build script under its _own_ feature selec
 - the decompiled tree as read-only navigation sources, so an editor can open the real skeleton
   behind a type. They are not compile inputs — the classpath jar already defines those types, and
   handing `javac` both would be a duplicate-class error rather than an improvement;
-- and, unless the entry sets `default-features = false`, the `mixin` tree the same way — Mixin's
-  real `org.spongepowered.*` sources as navigation-only artifacts in the consumer's cache. Since
-  this example never puts the Mixin jar on the classpath, that is all a consumer gets from the
-  feature: to actually _compile_ against Mixin, declare it as an ordinary `[dependencies]` jar.
+- and, unless the entry sets `default-features = false`, the `mixin` and `mixinextras` trees the
+  same way — the libraries' real `org.spongepowered.*` and `com.llamalad7.mixinextras.*` sources as
+  navigation-only artifacts in the consumer's cache. Since this example puts neither library jar on
+  the classpath, that is all a consumer gets from those two features: to actually _compile_ against
+  Mixin or MixinExtras, declare them as ordinary `[dependencies]` jars.
 
 Everything lands in the _consumer's_ `target/jals/cache`. This directory is not written to:
 `src/main/java/net/minecraft` is only ever physically published when this project is built as the

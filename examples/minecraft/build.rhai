@@ -215,3 +215,38 @@ if build.feature("mixin") {
         "replace-root"
     );
 }
+
+// The `mixinextras` feature is the same shape once more: a third publication root, holding
+// MixinExtras — the companion library whose `@WrapOperation` / `@ModifyExpressionValue` / `@Local`
+// injectors and sugar every recent mod applies on top of Mixin. It is as independent of the game as
+// `mixin` is, and independent of `mixin` too: the two own disjoint destinations and neither feature
+// implies the other, so selecting one publishes its root without the other's.
+//
+// `mixinextras-common` is the platform-neutral core; the `-fabric` / `-forge` / `-neoforge`
+// artifacts are only thin per-loader bootstraps around it. It is published on Maven Central, where
+// a released version is immutable, so the one SHA-1 pins both the URL and the fetch exactly like
+// every other fetch here.
+//
+// This jar stays off the classpath for the same reasons as Mixin's: its sources compile against
+// Mixin, asm and the loader APIs that this example never resolves, and `mixinextras/ap` is an
+// annotation processor.
+if build.feature("mixinextras") {
+    let mixinextras_version = "0.5.4";
+    let mixinextras_sources = tasks.fetch_jar(
+        tasks.https_url(
+            "https://repo1.maven.org/maven2/io/github/llamalad7/mixinextras-common/"
+                + mixinextras_version + "/mixinextras-common-" + mixinextras_version
+                + "-sources.jar"
+        ),
+        tasks.sha1("fd5d27cff1c8118f5a4a037e7f549b606d117caf"),
+        tasks.bytes(524288)
+    );
+    // Apart from its manifest the jar holds nothing outside `com/llamalad7/mixinextras`, so this
+    // prefix takes the whole library — runtime, sugar and annotation processor — under one owner.
+    tasks.publish_tree(
+        "mixinextras-" + mixinextras_version,
+        tasks.extract_java(mixinextras_sources, "com/llamalad7"),
+        "src/main/java/com/llamalad7",
+        "replace-root"
+    );
+}

@@ -2,7 +2,7 @@
 name = "minecraft"
 version = "0.1.0"
 
-# Three orthogonal axes: the distribution, the release, and the optional Mixin sources.
+# Four orthogonal axes: the distribution, the release, and the two optional source libraries.
 #
 # `server`/`client` choose which Minecraft distribution the build script fetches and remaps.
 # Enabling both produces the merged jar. Selection is additive, so `--features client` keeps the
@@ -19,16 +19,22 @@ version = "0.1.0"
 # independent of both axes above. It is on by default; `--no-default-features` drops it, and
 # dropping the owner removes that published root again.
 #
+# `mixinextras` is that same shape once more, for the MixinExtras 0.5.4 sources jar published as a
+# third root at `com/llamalad7/**`. It is independent of `mixin` as well — neither feature implies
+# the other, and each root appears and disappears on its own — so the two are simply both listed in
+# `default`.
+#
 # The keys must be quoted: a bare `1.20.1` is a TOML dotted key, not a feature name. Both ends of
 # the range are set by mappings: 1.14.4 is the oldest entry because Mojang published no official
 # mappings before it, and from 26.1 the game ships deobfuscated with no mappings download at all —
 # the build script simply skips its remap step there. Selecting such a release is no different from
 # any other.
 [features]
-default = ["server", "mixin"]
+default = ["server", "mixin", "mixinextras"]
 server = []
 client = []
 mixin = []
+mixinextras = []
 "26.2" = []
 "26.1.2" = []
 "26.1.1" = []
