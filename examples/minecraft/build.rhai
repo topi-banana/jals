@@ -182,3 +182,36 @@ tasks.publish_tree(
     "src/main/java/net/minecraft",
     "replace-root"
 );
+
+// The `mixin` feature adds a second, completely independent publication root: SpongePowered Mixin,
+// the bytecode-weaving framework every modern Minecraft mod loader builds on. Nothing here touches
+// the game artifacts above, so it composes freely with any side and any release.
+//
+// Unlike the game, Mixin publishes a *sources* jar, so this is `extract_java` on real `.java`
+// rather than `decompile_java` on bytecode — the same publication contract, minus the skeleton
+// rendering. The release is immutable on the SpongePowered Maven repository, so the one SHA-1 pins
+// both the URL and the fetch, exactly like the content-addressed version metadata above.
+//
+// The jar is deliberately *not* put on the classpath. Mixin 0.8.7 is unshaded — its sources need
+// asm, guava, gson, commons-io, log4j2 and modlauncher, and all of `org/spongepowered/tools` is an
+// annotation processor — none of which `mixin-0.8.7.jar` carries, so adding it would define every
+// published type a second time without making the tree compile.
+if build.feature("mixin") {
+    let mixin_version = "0.8.7";
+    let mixin_sources = tasks.fetch_jar(
+        tasks.https_url(
+            "https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixin/"
+                + mixin_version + "/mixin-" + mixin_version + "-sources.jar"
+        ),
+        tasks.sha1("b5fd91c657404b1712a612ece6c8ddf66069be0f"),
+        tasks.bytes(2097152)
+    );
+    // `org/spongepowered` covers both halves of the jar — the runtime (`asm/**`) and the
+    // annotation processor (`tools/**`) — under one owner and one publication root.
+    tasks.publish_tree(
+        "mixin-" + mixin_version,
+        tasks.extract_java(mixin_sources, "org/spongepowered"),
+        "src/main/java/org/spongepowered",
+        "replace-root"
+    );
+}

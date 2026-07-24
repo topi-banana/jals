@@ -2,9 +2,11 @@
 name = "minecraft"
 version = "0.1.0"
 
-# Which Minecraft distribution the build script fetches and remaps. Enabling both produces the
-# merged jar. Selection is additive, so `--features client` keeps the default `server` (and thus
-# merges) unless `--no-default-features` is given.
+# Three orthogonal axes: the distribution, the release, and the optional Mixin sources.
+#
+# `server`/`client` choose which Minecraft distribution the build script fetches and remaps.
+# Enabling both produces the merged jar. Selection is additive, so `--features client` keeps the
+# default `server` (and thus merges) unless `--no-default-features` is given.
 #
 # The release is chosen the same way, except the version features are mutually **exclusive**: at
 # most one may be active, and the build script rejects every other combination. `default` therefore
@@ -12,15 +14,21 @@ version = "0.1.0"
 # selects a version without needing `--no-default-features` to drop a conflicting default. As a
 # consequence `--all-features` selects every version at once and always fails.
 #
+# `mixin` touches no Minecraft artifact at all. It fetches the SpongePowered Mixin 0.8.7 *sources*
+# jar and publishes its real `org/spongepowered/**` sources as a second exclusively-owned root,
+# independent of both axes above. It is on by default; `--no-default-features` drops it, and
+# dropping the owner removes that published root again.
+#
 # The keys must be quoted: a bare `1.20.1` is a TOML dotted key, not a feature name. Both ends of
 # the range are set by mappings: 1.14.4 is the oldest entry because Mojang published no official
 # mappings before it, and from 26.1 the game ships deobfuscated with no mappings download at all —
 # the build script simply skips its remap step there. Selecting such a release is no different from
 # any other.
 [features]
-default = ["server"]
+default = ["server", "mixin"]
 server = []
 client = []
+mixin = []
 "26.2" = []
 "26.1.2" = []
 "26.1.1" = []
