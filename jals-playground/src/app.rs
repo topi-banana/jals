@@ -22,7 +22,7 @@
 //! longer showing is dropped instead of painted on the wrong model.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -227,6 +227,9 @@ struct DependencySourceTexts {
 pub struct ClasspathResolution {
     classpath: LoweredClasspath,
     feature_set: FeatureSet,
+    /// The root's resolved build features (its `default` list — the browser has no command
+    /// line), what `#[cfg(feature = "…")]` evaluates against when `attributes` is on.
+    build_features: BTreeSet<String>,
     status: String,
     artifacts: ArtifactCache<MemoryCache>,
     sources: DependencySourceTexts,
@@ -977,6 +980,7 @@ impl App {
         Ok(ClasspathResolution {
             classpath,
             feature_set: inputs.feature_set,
+            build_features: features.features().clone(),
             status,
             artifacts: storage.into_artifacts(),
             sources,
@@ -1485,6 +1489,7 @@ impl Component for App {
                                 ws.apply_project_inputs(
                                     resolution.classpath,
                                     resolution.feature_set,
+                                    resolution.build_features,
                                     resolution.artifacts,
                                     resolution.sources.library,
                                     resolution.sources.source_deps,

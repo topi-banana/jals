@@ -622,6 +622,11 @@ pub enum Feature {
     /// features`. Gated by the linter's `grouped-import` rule; the compile frontend desugars it to
     /// plain imports.
     GroupedImports,
+    /// jals dialect: attributes (`#[cfg(feature = "x")]`). Not valid Java at any release
+    /// (`stabilized_in` = `None`) — on only when explicitly listed in `[package] features`. Gated
+    /// by the linter's `attribute` rule; the compile frontend strips every attribute and applies
+    /// `cfg` conditional compilation against the resolved `[features]` build-feature set.
+    Attributes,
 }
 
 impl Feature {
@@ -631,7 +636,7 @@ impl Feature {
     /// [`predecessor`](Feature::predecessor) / [`stabilized_in`](Feature::stabilized_in) /
     /// [`config_name`](Feature::config_name) already force a stop for a new variant). The
     /// declaration-order invariant is const-asserted below.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Java8,
         Self::Java9,
         Self::Java10,
@@ -653,6 +658,7 @@ impl Feature {
         Self::ModuleImports,
         Self::CompactSourceFiles,
         Self::GroupedImports,
+        Self::Attributes,
     ];
 
     /// Every feature's [`config_name`](Feature::config_name), parallel to [`ALL`](Feature::ALL) —
@@ -697,9 +703,11 @@ impl Feature {
             Self::Java23 => Some(Self::Java22),
             Self::Java24 => Some(Self::Java23),
             Self::Java25 => Some(Self::Java24),
-            Self::Java8 | Self::ModuleImports | Self::CompactSourceFiles | Self::GroupedImports => {
-                None
-            }
+            Self::Java8
+            | Self::ModuleImports
+            | Self::CompactSourceFiles
+            | Self::GroupedImports
+            | Self::Attributes => None,
         }
     }
 
@@ -713,8 +721,8 @@ impl Feature {
     pub const fn stabilized_in(self) -> Option<Self> {
         match self {
             Self::ModuleImports | Self::CompactSourceFiles => Some(Self::Java25),
-            // A release preset itself, and `GroupedImports` — a jals dialect feature no Java release
-            // stabilizes — all return `None`.
+            // A release preset itself, and the jals dialect features (`GroupedImports`,
+            // `Attributes`) no Java release stabilizes — all return `None`.
             Self::Java8
             | Self::Java9
             | Self::Java10
@@ -733,7 +741,8 @@ impl Feature {
             | Self::Java23
             | Self::Java24
             | Self::Java25
-            | Self::GroupedImports => None,
+            | Self::GroupedImports
+            | Self::Attributes => None,
         }
     }
 
@@ -751,7 +760,7 @@ impl Feature {
     /// which side of this line it falls on rather than defaulting to "Java".
     pub const fn is_dialect(self) -> bool {
         match self {
-            Self::GroupedImports => true,
+            Self::GroupedImports | Self::Attributes => true,
             Self::Java8
             | Self::Java9
             | Self::Java10
@@ -821,6 +830,7 @@ impl Feature {
             Self::ModuleImports => "module-imports",
             Self::CompactSourceFiles => "compact-source-files",
             Self::GroupedImports => "grouped-imports",
+            Self::Attributes => "attributes",
         }
     }
 }
@@ -2178,6 +2188,32 @@ mod tests {
     }
 
     #[test]
+    fn attributes_is_an_independent_dialect_feature() {
+        // Enabled only by explicit opt-in; no release preset implies it (`stabilized_in` = None).
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"attributes\"]\n").unwrap();
+        assert!(m.feature_set().contains(Feature::Attributes));
+
+        // The newest release preset does NOT pull it in — it is not part of any Java version.
+        let m: Manifest = toml::from_str("[package]\nfeatures = [\"java25\"]\n").unwrap();
+        assert!(!m.feature_set().contains(Feature::Attributes));
+        assert_eq!(Feature::Attributes.stabilized_in(), None);
+
+        // Combinable with the other dialect feature and a release preset.
+        let m: Manifest = toml::from_str(
+            "[package]\nfeatures = [\"java25\", \"grouped-imports\", \"attributes\"]\n",
+        )
+        .unwrap();
+        let fs = m.feature_set();
+        assert!(fs.contains(Feature::Attributes));
+        assert!(fs.contains(Feature::GroupedImports));
+        assert!(fs.contains(Feature::ModuleImports));
+
+        // Like every dialect feature, the empty-set exemption does not apply.
+        assert!(!FeatureSet::resolve(&[]).permits(Feature::Attributes));
+        assert!(FeatureSet::resolve(&[Feature::Attributes]).permits(Feature::Attributes));
+    }
+
+    #[test]
     fn empty_feature_set_does_not_permit_a_dialect_feature() {
         // The empty-set exemption covers Java features only. A project that declares no
         // `[package] features` still cannot compile a dialect construct — the build path keys
@@ -2197,12 +2233,12 @@ mod tests {
 
     #[test]
     fn only_jals_constructs_are_dialect_features() {
-        // Every Java release preset and release-gated feature is Java; `grouped-imports` is the
-        // one construct javac has never heard of.
+        // Every Java release preset and release-gated feature is Java; `grouped-imports` and
+        // `attributes` are the constructs javac has never heard of.
         for feature in Feature::ALL {
             assert_eq!(
                 feature.is_dialect(),
-                feature == Feature::GroupedImports,
+                matches!(feature, Feature::GroupedImports | Feature::Attributes),
                 "unexpected dialect classification for `{}`",
                 feature.config_name()
             );

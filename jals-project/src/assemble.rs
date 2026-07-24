@@ -293,22 +293,40 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         // sources are desugared, so a dialect feature compiles without a separate frontend
         // selection. Legacy source/binary nodes have no manifest, so no dialect.
         let (kind, dialect_flags) = match &node.body {
-            NodeBody::JalsSource { manifest, .. } => (
-                manifest.build.frontend,
-                jals_frontend::DialectFlags {
-                    grouped_imports: manifest
-                        .feature_set()
-                        .contains(jals_config::Feature::GroupedImports),
-                },
-            ),
+            NodeBody::JalsSource { manifest, .. } => {
+                let feature_set = manifest.feature_set();
+                let attributes = feature_set.contains(jals_config::Feature::Attributes);
+                (
+                    manifest.build.frontend,
+                    jals_frontend::DialectFlags {
+                        grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
+                        attributes,
+                        // The node's own unified build-feature selection feeds its
+                        // `#[cfg(feature = "…")]` — a dependency is lowered under its own
+                        // authority, against the features its consumers routed to it. Kept
+                        // empty when the attributes dialect is off, so the cache identity of
+                        // attribute-free dialect nodes stays independent of the selection.
+                        build_features: if attributes {
+                            self.graph
+                                .features
+                                .get(&node.id)
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            alloc::collections::BTreeSet::new()
+                        },
+                    },
+                )
+            }
             NodeBody::PlainSource(_) | NodeBody::Binary(_) => (
                 jals_config::FrontendKind::Vanilla {},
                 jals_frontend::DialectFlags::default(),
             ),
         };
+        let use_dialect = dialect_flags.any();
         let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
         let frontend: &dyn jals_frontend::Frontend = match kind {
-            jals_config::FrontendKind::Vanilla {} if dialect_flags.any() => &dialect,
+            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
             jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
         };
         let lowered = match jals_frontend::Driver::lower(frontend, self.cache, &files).await {

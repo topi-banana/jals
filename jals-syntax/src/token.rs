@@ -118,6 +118,8 @@ pub enum TokenKind {
     ELLIPSIS,
     AT,
     COLON_COLON,
+    /// `#` (jals dialect; begins an attribute `#[...]`). Not a Java token.
+    HASH,
 
     // ===== Operators =====
     EQ,

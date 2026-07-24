@@ -13,13 +13,13 @@ use rowan::WalkEvent;
 use rowan::ast::support;
 
 use super::{
-    AssignmentExpr, AstNode, AstSupport, BinaryExpr, CatchClause, ExportsDirective, Expr,
-    FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, NameRef, OpensDirective,
-    ProvidesDirective, QualifiedName, Resource, SwitchExpr, Type, YieldStmt,
+    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, CatchClause,
+    ExportsDirective, Expr, FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, NameRef,
+    OpensDirective, ProvidesDirective, QualifiedName, Resource, SwitchExpr, Type, YieldStmt,
 };
-use crate::language::SyntaxToken;
+use crate::language::{SyntaxNode, SyntaxToken};
 use crate::syntax_kind::SyntaxKind::{
-    self, DOT, IDENT, NON_SEALED_KW, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT,
+    self, DOT, IDENT, MODIFIERS, NON_SEALED_KW, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT,
 };
 
 impl QualifiedName {
@@ -90,6 +90,26 @@ impl ProvidesDirective {
             .children()
             .filter_map(QualifiedName::cast)
             .skip(1)
+    }
+}
+
+impl Attribute {
+    /// All jals attributes attached to `node`, wherever the parser placed them: leading
+    /// direct children (statement position) plus those inside a direct `MODIFIERS` child
+    /// (declarations parsed through `modifiers()`). A node never holds both in practice.
+    pub fn of(node: &SyntaxNode) -> impl Iterator<Item = Self> {
+        node.children().filter_map(Self::cast).chain(
+            node.children()
+                .filter(|n| n.kind() == MODIFIERS)
+                .flat_map(|m| m.children().filter_map(Self::cast)),
+        )
+    }
+}
+
+impl AttrMeta {
+    /// The meta name text (`cfg` in `#[cfg(...)]`, `feature` in `feature = "x"`).
+    pub fn name_text(&self) -> Option<String> {
+        self.name().map(|n| n.text())
     }
 }
 
@@ -309,8 +329,8 @@ impl SwitchExpr {
 mod tests {
     use super::AstNode;
     use crate::ast::{
-        CatchClause, FieldDecl, ImportDecl, ImportGroup, LocalVarDecl, QualifiedName, Resource,
-        SwitchExpr, Type,
+        AttrArg, Attribute, CatchClause, ClassDecl, ExprStmt, FieldDecl, ImportDecl, ImportGroup,
+        LocalVarDecl, QualifiedName, Resource, SwitchExpr, Type,
     };
     use crate::parser::Parse;
 
@@ -435,6 +455,52 @@ mod tests {
     fn ordinary_import_has_no_group() {
         let decl: ImportDecl = first("import java.util.List;");
         assert!(decl.group().is_none());
+    }
+
+    #[test]
+    fn attribute_on_a_class_lives_in_its_modifiers() {
+        let class: ClassDecl = first("#[cfg(feature = \"x\")]\npublic class C {}");
+        let attrs: Vec<Attribute> = class.modifiers().unwrap().attrs().collect();
+        assert_eq!(attrs.len(), 1);
+        let meta = attrs[0].meta().unwrap();
+        assert_eq!(meta.name_text().as_deref(), Some("cfg"));
+        // The unified accessor sees it too.
+        assert_eq!(Attribute::of(class.syntax()).count(), 1);
+    }
+
+    #[test]
+    fn attribute_meta_exposes_nested_args_and_literals() {
+        let class: ClassDecl =
+            first("#[cfg(any(feature = \"a\", not(feature = \"b\")))] class C {}");
+        let attr = Attribute::of(class.syntax()).next().unwrap();
+        let cfg = attr.meta().unwrap();
+        assert_eq!(cfg.name_text().as_deref(), Some("cfg"));
+        let args: Vec<AttrArg> = cfg.args().unwrap().args().collect();
+        let [AttrArg::AttrMeta(any)] = args.as_slice() else {
+            panic!("cfg holds a single meta argument");
+        };
+        assert_eq!(any.name_text().as_deref(), Some("any"));
+        let nested: Vec<AttrArg> = any.args().unwrap().args().collect();
+        let [AttrArg::AttrMeta(feature), AttrArg::AttrMeta(not)] = nested.as_slice() else {
+            panic!("any holds two meta arguments");
+        };
+        assert_eq!(feature.name_text().as_deref(), Some("feature"));
+        assert_eq!(feature.value().unwrap().text().as_deref(), Some("\"a\""));
+        assert_eq!(not.name_text().as_deref(), Some("not"));
+    }
+
+    #[test]
+    fn attribute_on_a_statement_is_a_leading_child() {
+        let stmt: ExprStmt = first("class C { void m() { #[cfg(feature = \"x\")] f(); } }");
+        assert_eq!(stmt.attrs().count(), 1);
+        assert_eq!(Attribute::of(stmt.syntax()).count(), 1);
+    }
+
+    #[test]
+    fn attribute_on_an_import_is_a_leading_child() {
+        let decl: ImportDecl = first("#[cfg(feature = \"x\")] import java.util.List;");
+        assert_eq!(decl.attrs().count(), 1);
+        assert_eq!(decl.name().unwrap().text(), "java.util.List");
     }
 
     #[test]

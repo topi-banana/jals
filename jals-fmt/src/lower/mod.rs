@@ -112,6 +112,7 @@ impl<'a> Ctx<'a> {
             | S::ARG_LIST
             | S::RECORD_HEADER
             | S::ANNOTATION_ARG_LIST
+            | S::ATTR_ARG_LIST
             | S::ARRAY_INIT => self.lower_delimited(node).await,
             S::IF_STMT | S::TRY_STMT | S::DO_WHILE_STMT => self.lower_control_flow(node).await,
             S::BINARY_EXPR => self.lower_binary(node).await,

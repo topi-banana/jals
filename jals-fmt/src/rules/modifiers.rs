@@ -332,7 +332,9 @@ impl ModifierRule {
         let mut still_leading = true;
 
         for (idx, el) in els.iter().enumerate() {
-            let is_annotation = el.kind() == S::ANNOTATION;
+            // jals attributes break like declaration annotations; they are never type-use, so
+            // `trailing_type_use_start` (which scans `ANNOTATION` only) cannot claim them.
+            let is_annotation = matches!(el.kind(), S::ANNOTATION | S::ATTRIBUTE);
             // An annotation in the trailing type-use run annotates the type, so it stays inline.
             let in_trailing_run = idx >= trailing_start;
             if !is_annotation {

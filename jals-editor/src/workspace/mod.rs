@@ -26,6 +26,7 @@ use jals_config::FeatureSet;
 use jals_exec::Exec;
 use jals_hir::{FileFacts, FileId, LoweredClasspath, ProjectIndex, Resolved, SourceLocations, Ty};
 use jals_storage::{CacheBackend, DirKey, FileKey, ProjectStorage, ProjectView, SourceBackend};
+use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
 
 use crate::document::Document;
@@ -35,6 +36,16 @@ use crate::{
 };
 use file_id::WorkspaceFileId;
 
+/// What the load fan-out extracts alongside each parse: nothing (navigation-only overlays),
+/// plain [`FileFacts`] (source dependencies, attribute-free projects), or facts filtered by
+/// `#[cfg(...)]` against a build-feature set (project files with the `attributes` dialect on).
+#[derive(Clone)]
+enum ExtractFacts {
+    No,
+    Plain,
+    Cfg(BTreeSet<String>),
+}
+
 /// A file tracked by the [`Workspace`]: its virtual path, its cached [`Document`], and the two
 /// lazily-computed analysis caches an edit invalidates by replacing the whole struct.
 struct SourceFile {
@@ -42,16 +53,23 @@ struct SourceFile {
     path: FileKey,
     /// The file's text, coordinate map, and parsed CST.
     doc: Document,
+    /// The file's `#[cfg(...)]` evaluation against the workspace's build features, computed once
+    /// on first use. A pure function of the parse *and* the workspace's feature selection — an
+    /// edit replaces the whole struct, and a feature change resets it via
+    /// [`reset_analysis`](SourceFile::reset_analysis). Empty (and free) when the `attributes`
+    /// dialect feature is off.
+    cfg: OnceCell<CfgMap>,
     /// The file's name resolution, computed once on first use and cached. A pure function of the
-    /// parse, so it stays valid for this file's lifetime — an edit replaces the whole struct
-    /// (see [`Workspace::set_overlay`]), starting fresh. Lets a project-wide query that scans
-    /// every file (find-references) resolve each one only once instead of on every request.
+    /// parse and the `cfg` map, so it stays valid for this file's lifetime — an edit replaces the
+    /// whole struct (see [`Workspace::set_overlay`]), starting fresh. Lets a project-wide query
+    /// that scans every file (find-references) resolve each one only once instead of on every
+    /// request.
     resolved: OnceCell<Resolved>,
     /// The file's cached index facts — the CST-walking half of building the [`ProjectIndex`],
-    /// computed once on first use. Like `resolved`, a pure function of the parse, so an edit
-    /// (which replaces the whole struct) re-extracts them while every other file reuses its
-    /// cache. This is what makes [`rebuild_index`](Workspace::rebuild_index) re-walk only the
-    /// changed file rather than every file in the project.
+    /// computed once on first use. Like `resolved`, a pure function of the parse and the `cfg`
+    /// map, so an edit (which replaces the whole struct) re-extracts them while every other file
+    /// reuses its cache. This is what makes [`rebuild_index`](Workspace::rebuild_index) re-walk
+    /// only the changed file rather than every file in the project.
     facts: OnceCell<FileFacts>,
 }
 
@@ -62,32 +80,54 @@ impl SourceFile {
         Self {
             path,
             doc,
+            cfg: OnceCell::new(),
             resolved: OnceCell::new(),
             facts: OnceCell::new(),
         }
     }
 
-    /// The file's cached name resolution (computed on first use).
+    /// The file's cached `#[cfg(...)]` evaluation (computed on first use): against
+    /// `build_features` when the `attributes` dialect feature is on, the empty map otherwise —
+    /// so an attribute-free project pays nothing beyond one cell.
+    fn cfg_map(&self, build_features: &BTreeSet<String>, attributes: bool) -> &CfgMap {
+        self.cfg.get_or_init(|| {
+            if attributes {
+                CfgMap::compute(&self.doc.parse, build_features)
+            } else {
+                CfgMap::default()
+            }
+        })
+    }
+
+    /// Reset the per-file analysis caches (the `cfg` map and everything derived from it), for a
+    /// feature-selection change — the parse itself is a pure function of the text and survives.
+    fn reset_analysis(&mut self) {
+        self.cfg = OnceCell::new();
+        self.resolved = OnceCell::new();
+        self.facts = OnceCell::new();
+    }
+
+    /// The file's cached name resolution (computed on first use), skipping `cfg`-disabled hosts.
     ///
     /// Async-once over the `OnceCell`: compute, then publish. The workspace is single-threaded,
     /// but two queries interleaved at an await point can both see the empty cell and both
-    /// compute — the value is a pure function of the parse, so the duplicate work is benign and
-    /// the first `set` wins. No locking or single-flight gate keeps the pattern
+    /// compute — the value is a pure function of the parse and `cfg`, so the duplicate work is
+    /// benign and the first `set` wins. No locking or single-flight gate keeps the pattern
     /// cancellation-safe (a dropped query leaves the cell either empty or fully published).
-    async fn resolved(&self) -> &Resolved {
+    async fn resolved(&self, cfg: &CfgMap) -> &Resolved {
         if self.resolved.get().is_none() {
-            let resolved = Resolved::resolve_node(&self.doc.parse.syntax()).await;
+            let resolved = Resolved::resolve_node_with_cfg(&self.doc.parse.syntax(), cfg).await;
             let _ = self.resolved.set(resolved);
         }
         self.resolved.get().expect("published just above")
     }
 
     /// The file's cached index facts (computed on first use), the input to the incremental
-    /// [`ProjectIndex::assemble`]. Same async-once pattern (and duplicate-compute window) as
-    /// [`resolved`](Self::resolved).
-    async fn facts(&self) -> &FileFacts {
+    /// [`ProjectIndex::assemble`], skipping `cfg`-disabled hosts. Same async-once pattern (and
+    /// duplicate-compute window) as [`resolved`](Self::resolved).
+    async fn facts(&self, cfg: &CfgMap) -> &FileFacts {
         if self.facts.get().is_none() {
-            let facts = ProjectIndex::extract_file(&self.doc.parse.syntax()).await;
+            let facts = ProjectIndex::extract_file_with_cfg(&self.doc.parse.syntax(), cfg).await;
             let _ = self.facts.set(facts);
         }
         self.facts.get().expect("published just above")
@@ -95,27 +135,38 @@ impl SourceFile {
 
     /// Parse every `(path, text)` into a [`SourceFile`] through one ordered [`Exec::fan_out`].
     ///
-    /// Each worker receives one file's text (`Send`), parses it, and — when `extract_facts` —
-    /// walks the fresh CST for its index [`FileFacts`], entirely on that worker; only plain
-    /// `Send` data (the green-tree [`Parse`], the [`LineIndex`], the facts) crosses back. The
-    /// results come back in input order regardless of completion order, so [`FileId`]
-    /// assignment and index inputs stay deterministic across runtimes and worker counts. On the
-    /// inline/wasm executors the jobs run sequentially on the calling task — identical output.
+    /// Each worker receives one file's text (`Send`), parses it, and — unless `extract_facts` is
+    /// [`ExtractFacts::No`] — walks the fresh CST for its index [`FileFacts`], entirely on that worker; only
+    /// plain `Send` data (the green-tree [`Parse`], the [`LineIndex`], the facts) crosses back.
+    /// [`ExtractFacts::Cfg`]'s worker-side [`CfgMap`] holds `!Send` tree nodes, so it is computed
+    /// *and dropped* on the worker; the per-file `cfg` cell refills lazily on the main task when
+    /// a query needs it. The results come back in input order regardless of completion order, so
+    /// [`FileId`] assignment and index inputs stay deterministic across runtimes and worker
+    /// counts. On the inline/wasm executors the jobs run sequentially on the calling task —
+    /// identical output.
     async fn parse_all(
         exec: &Exec,
         files: Vec<(FileKey, String)>,
-        extract_facts: bool,
+        extract_facts: ExtractFacts,
     ) -> Vec<Self> {
         let (paths, texts): (Vec<FileKey>, Vec<String>) = files.into_iter().unzip();
         let parsed = exec
-            .fan_out(texts, move |text: String| async move {
-                let parse = Parse::parse(&text).await;
-                let facts = if extract_facts {
-                    Some(ProjectIndex::extract_file(&parse.syntax()).await)
-                } else {
-                    None
-                };
-                (text, parse, facts)
+            .fan_out(texts, move |text: String| {
+                let extract = extract_facts.clone();
+                async move {
+                    let parse = Parse::parse(&text).await;
+                    let facts = match extract {
+                        ExtractFacts::No => None,
+                        ExtractFacts::Plain => {
+                            Some(ProjectIndex::extract_file(&parse.syntax()).await)
+                        }
+                        ExtractFacts::Cfg(features) => {
+                            let cfg = CfgMap::compute(&parse, &features);
+                            Some(ProjectIndex::extract_file_with_cfg(&parse.syntax(), &cfg).await)
+                        }
+                    };
+                    (text, parse, facts)
+                }
             })
             .await;
         paths
@@ -133,14 +184,15 @@ impl SourceFile {
 
     /// Read and parse each library `.java` in `paths` through `view`, skipping unreadable ones
     /// and de-duplicating by path, into [`SourceFile`]s (fanned out per file). Shared by both
-    /// library-source kinds; `extract_facts` pre-fills the facts cache for the kind that is an
-    /// index input (the `git`/`path` source dependencies), while the navigation-only
-    /// `-sources.jar` overlays skip the walk their facts cache never needs.
+    /// library-source kinds; `extract_facts` pre-fills the (never `cfg`-filtered — a dependency
+    /// is indexed under its own authority) facts cache for the kind that is an index input (the
+    /// `git`/`path` source dependencies), while the navigation-only `-sources.jar` overlays skip
+    /// the walk their facts cache never needs.
     async fn read_all(
         exec: &Exec,
         view: &ProjectView,
         paths: &[FileKey],
-        extract_facts: bool,
+        extract_facts: ExtractFacts,
     ) -> Vec<Self> {
         let mut files = Vec::new();
         let mut seen = BTreeSet::new();
@@ -198,6 +250,11 @@ pub struct ProjectLayout {
     /// The project's resolved language feature set (from `[package] features`); empty when the
     /// manifest declares none, disabling the feature-gated lint rules.
     pub feature_set: FeatureSet,
+    /// The root project's resolved build features (the `[features]` names a build script queries
+    /// and `#[cfg(feature = "…")]` tests). Consulted only when `feature_set` enables the
+    /// `attributes` dialect; empty otherwise, so an attribute-free project's analysis is
+    /// independent of the selection.
+    pub build_features: BTreeSet<String>,
 }
 
 impl ProjectLayout {
@@ -253,6 +310,10 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
     /// The project's resolved language feature set, folded into every
     /// [`diagnostics`](Workspace::diagnostics) run for the feature-gated lint rules.
     feature_set: FeatureSet,
+    /// The root project's resolved build features, the set each project file's `#[cfg(...)]`
+    /// evaluates against when the `attributes` dialect feature is on (see
+    /// [`SourceFile::cfg_map`]).
+    build_features: BTreeSet<String>,
     /// The embedded `java.lang` stub facts, extracted once at construction and reused on every
     /// rebuild (they never change), so the stubs are never re-parsed per edit. Their reserved
     /// [`FileId`]s are disjoint from the project / library id-spaces.
@@ -276,14 +337,15 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
         // Extracted library sources, each a navigation file in the `Library` id-space. Read and
         // parsed once; the resulting trees feed `index_source_locations` below.
-        let library_files = SourceFile::read_all(&exec, &view, &spec.library_sources, false).await;
+        let library_files =
+            SourceFile::read_all(&exec, &view, &spec.library_sources, ExtractFacts::No).await;
         let source_locations = Self::library_source_locations(&library_files).await;
 
         // `git`/`path` library sources, read once; folded into the index as `Source`-origin types
         // on every rebuild (their `FileId`s are assigned in `rebuild_index`). They are facts
         // inputs, so the fan-out pre-extracts their facts alongside the parse.
         let source_dep_files =
-            SourceFile::read_all(&exec, &view, &spec.source_dep_sources, true).await;
+            SourceFile::read_all(&exec, &view, &spec.source_dep_sources, ExtractFacts::Plain).await;
 
         let mut ws = Self {
             exec,
@@ -298,6 +360,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             classpath: spec.classpath,
             source_locations,
             feature_set: spec.feature_set,
+            build_features: spec.build_features,
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts().await,
         };
@@ -344,7 +407,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
                 inputs.push((path, text.to_owned()));
             }
         }
-        self.files = SourceFile::parse_all(&self.exec, inputs, true).await;
+        self.files = SourceFile::parse_all(&self.exec, inputs, self.project_extract()).await;
         self.by_path = self
             .files
             .iter()
@@ -373,12 +436,27 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// file's CST, and [`ProjectIndex::assemble`] (order-sensitive, one task) reassembles the
     /// whole index — identical to a from-scratch build, but without re-walking the project.
     async fn rebuild_index(&mut self) {
-        let project = Self::facts_inputs(&self.files, WorkspaceFileId::Project).await;
+        // Project facts are `cfg`-filtered against the workspace's build features; the
+        // source-dependency facts never are (a dependency's own feature selection does not reach
+        // this seam — its files are indexed in full), which the shared empty map encodes.
+        let empty = CfgMap::default();
+        let mut project = Vec::with_capacity(self.files.len());
+        for (k, file) in self.files.iter().enumerate() {
+            project.push((
+                WorkspaceFileId::of_index(WorkspaceFileId::Project, k),
+                file.facts(self.cfg_of(file)).await,
+            ));
+        }
         // The `git`/`path` library sources are *also* index inputs (as `Source`-origin types),
         // under their own `SourceDep` ids so they navigate back to the right files. The
         // `-sources.jar` overlays remain navigation-only (folded in via `source_locations`).
-        let source_deps =
-            Self::facts_inputs(&self.source_dep_files, WorkspaceFileId::SourceDep).await;
+        let mut source_deps = Vec::with_capacity(self.source_dep_files.len());
+        for (k, file) in self.source_dep_files.iter().enumerate() {
+            source_deps.push((
+                WorkspaceFileId::of_index(WorkspaceFileId::SourceDep, k),
+                file.facts(&empty).await,
+            ));
+        }
         let stub: Vec<(FileId, &FileFacts)> = self
             .stub_facts
             .iter()
@@ -394,16 +472,24 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         .await;
     }
 
-    /// `(id, facts)` for each of `files`, in order, under `space`'s id-space.
-    async fn facts_inputs(
-        files: &[SourceFile],
-        space: fn(u32) -> WorkspaceFileId,
-    ) -> Vec<(FileId, &FileFacts)> {
-        let mut out = Vec::with_capacity(files.len());
-        for (k, file) in files.iter().enumerate() {
-            out.push((WorkspaceFileId::of_index(space, k), file.facts().await));
+    /// Whether the `attributes` dialect feature is on — the gate for every `cfg` evaluation.
+    const fn attributes_on(&self) -> bool {
+        self.feature_set.contains(jals_config::Feature::Attributes)
+    }
+
+    /// What the project-file load fan-out extracts: `cfg`-filtered facts when the `attributes`
+    /// dialect is on, plain facts otherwise.
+    fn project_extract(&self) -> ExtractFacts {
+        if self.attributes_on() {
+            ExtractFacts::Cfg(self.build_features.clone())
+        } else {
+            ExtractFacts::Plain
         }
-        out
+    }
+
+    /// The cached `cfg` map of one project file, under the workspace's feature selection.
+    fn cfg_of<'f>(&self, source: &'f SourceFile) -> &'f CfgMap {
+        source.cfg_map(&self.build_features, self.attributes_on())
     }
 
     /// The workspace file a [`FileId`] addresses, routed by its id-space: a project file, a
@@ -436,7 +522,11 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         let source = self.project_file(file)?;
         Some(ProjectQueries::new(
             &self.index,
-            QueryFile::new(file, source.doc.parse.syntax(), source.resolved().await),
+            QueryFile::new(
+                file,
+                source.doc.parse.syntax(),
+                source.resolved(self.cfg_of(source)).await,
+            ),
         ))
     }
 
@@ -452,10 +542,29 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         self.feature_set
     }
 
-    /// Replace the resolved feature set (the browser re-resolves it when the manifest buffer is
-    /// edited).
-    pub const fn set_feature_set(&mut self, feature_set: FeatureSet) {
+    /// Replace the resolved feature selection — the language feature set (the browser
+    /// re-resolves it when the manifest buffer is edited) and the build features that
+    /// `#[cfg(feature = "…")]` tests.
+    ///
+    /// The `cfg` maps — and everything derived from them (name resolution, index facts) — are
+    /// functions of this selection, so a change resets every project file's analysis caches and
+    /// rebuilds the index. Non-incremental by design: a feature change is a rare, settings-level
+    /// event, unlike the per-keystroke single-file invalidation. No-op when nothing changed, so
+    /// hosts can call it unconditionally on config re-reads.
+    pub async fn set_features(
+        &mut self,
+        feature_set: FeatureSet,
+        build_features: BTreeSet<String>,
+    ) {
+        if self.feature_set == feature_set && self.build_features == build_features {
+            return;
+        }
         self.feature_set = feature_set;
+        self.build_features = build_features;
+        for file in &mut self.files {
+            file.reset_analysis();
+        }
+        self.rebuild_index().await;
     }
 
     /// Replace the lowered classpath and fold it into the index (the browser resolves
@@ -478,9 +587,10 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         source_dep_sources.sort();
         source_dep_sources.dedup();
         let view = self.storage.view();
-        let library_files = SourceFile::read_all(&self.exec, &view, &library_sources, false).await;
+        let library_files =
+            SourceFile::read_all(&self.exec, &view, &library_sources, ExtractFacts::No).await;
         let source_dep_files =
-            SourceFile::read_all(&self.exec, &view, &source_dep_sources, true).await;
+            SourceFile::read_all(&self.exec, &view, &source_dep_sources, ExtractFacts::Plain).await;
         self.replace_dependency_files(library_files, source_dep_files)
             .await;
     }
@@ -500,8 +610,10 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         library_sources.dedup_by(|left, right| left.0 == right.0);
         source_dep_sources.sort();
         source_dep_sources.dedup_by(|left, right| left.0 == right.0);
-        let library_files = SourceFile::parse_all(&self.exec, library_sources, false).await;
-        let source_dep_files = SourceFile::parse_all(&self.exec, source_dep_sources, true).await;
+        let library_files =
+            SourceFile::parse_all(&self.exec, library_sources, ExtractFacts::No).await;
+        let source_dep_files =
+            SourceFile::parse_all(&self.exec, source_dep_sources, ExtractFacts::Plain).await;
         self.replace_dependency_files(library_files, source_dep_files)
             .await;
     }
@@ -675,7 +787,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             files.push(QueryFile::new(
                 WorkspaceFileId::of_index(WorkspaceFileId::Project, index),
                 source.doc.parse.syntax(),
-                source.resolved().await,
+                source.resolved(self.cfg_of(source)).await,
             ));
         }
         queries.references(offset, include_declaration, files)
@@ -738,8 +850,8 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             .unwrap_or_default()
     }
 
-    /// The canonical diagnostics of `file` under `config`, with the project's feature set and
-    /// index folded in (see [`FileDiagnostics`]).
+    /// The canonical diagnostics of `file` under `config`, with the project's feature set, its
+    /// `cfg` evaluation, and the index folded in (see [`FileDiagnostics`]).
     pub async fn diagnostics(
         &self,
         file: FileId,
@@ -750,11 +862,13 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         };
         let mut config = config.clone();
         config.features = self.feature_set;
+        let cfg = self.cfg_of(source);
         FileDiagnostics::assemble(
             &source.doc.parse,
-            Some(source.resolved().await),
+            Some(source.resolved(cfg).await),
             Some((&self.index, file)),
             &config,
+            Some(cfg),
         )
         .await
     }
@@ -844,6 +958,8 @@ impl SingleFileProject {
             Some(&self.resolved),
             Some((&self.index, Self::FILE)),
             config,
+            // A single detached file has no manifest, so no `attributes` dialect and no `cfg`.
+            None,
         )
         .await
     }
@@ -858,6 +974,7 @@ mod tests {
     use jals_storage::{CodeTree, Entry, MemoryCache, MemorySource, MemoryStorage};
 
     use super::*;
+    use crate::DiagnosticSeverity;
 
     /// A two-file project: `Main` references `Greeter` across files.
     fn memory(files: &[(&str, &str)]) -> MemoryStorage {
@@ -1384,6 +1501,128 @@ mod tests {
                 .await;
             assert!(
                 diags.iter().any(|d| d.code == Some("unused-local")),
+                "{diags:?}"
+            );
+        });
+    }
+
+    /// A workspace over one `#[cfg]`-bearing project, with `attributes` on and the given build
+    /// features.
+    async fn cfg_workspace(build_features: &[&str]) -> Workspace<MemorySource, MemoryCache> {
+        let storage = memory(&[
+            (
+                "src/Gated.java",
+                "#[cfg(feature = \"fancy\")]\npublic class Gated {}",
+            ),
+            ("src/Main.java", "public class Main { Gated g; }"),
+        ]);
+        Workspace::load(
+            storage,
+            ProjectLayout {
+                feature_set: jals_config::FeatureSet::resolve(&[jals_config::Feature::Attributes]),
+                build_features: build_features.iter().map(ToString::to_string).collect(),
+                ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+            },
+        )
+        .await
+    }
+
+    #[test]
+    fn cfg_disabled_type_unresolves_across_files_and_fades() {
+        block_on_inline(async {
+            let config = jals_config::lint::Config::default();
+
+            // Feature off: `Gated` is not indexed — the cross-file reference cannot resolve —
+            // and the disabled declaration is reported as a faded `cfg` hint in its own file.
+            let ws = cfg_workspace(&[]).await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let diags = ws.diagnostics(main, &config).await;
+            assert!(
+                diags.iter().any(|d| d.code == Some("cannot-resolve")),
+                "{diags:?}"
+            );
+            let gated = ws.file_id(&key("src/Gated.java")).unwrap();
+            let diags = ws.diagnostics(gated, &config).await;
+            assert!(
+                diags.iter().any(|d| d.code == Some("cfg")
+                    && d.unnecessary
+                    && d.severity == DiagnosticSeverity::Hint),
+                "{diags:?}"
+            );
+
+            // Feature on: the type resolves and nothing is faded.
+            let ws = cfg_workspace(&["fancy"]).await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let diags = ws.diagnostics(main, &config).await;
+            assert!(
+                !diags.iter().any(|d| d.code == Some("cannot-resolve")),
+                "{diags:?}"
+            );
+            let gated = ws.file_id(&key("src/Gated.java")).unwrap();
+            let diags = ws.diagnostics(gated, &config).await;
+            assert!(!diags.iter().any(|d| d.unnecessary), "{diags:?}");
+        });
+    }
+
+    #[test]
+    fn set_features_invalidates_the_cfg_analysis() {
+        block_on_inline(async {
+            let config = jals_config::lint::Config::default();
+            let mut ws = cfg_workspace(&[]).await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            assert!(
+                ws.diagnostics(main, &config)
+                    .await
+                    .iter()
+                    .any(|d| d.code == Some("cannot-resolve"))
+            );
+
+            // Flipping the build features re-evaluates every file's `cfg` map and the index.
+            let attrs = jals_config::FeatureSet::resolve(&[jals_config::Feature::Attributes]);
+            ws.set_features(attrs, BTreeSet::from(["fancy".to_owned()]))
+                .await;
+            assert!(
+                !ws.diagnostics(main, &config)
+                    .await
+                    .iter()
+                    .any(|d| d.code == Some("cannot-resolve"))
+            );
+
+            // And back off again (also exercising the no-op short-circuit first).
+            ws.set_features(attrs, BTreeSet::from(["fancy".to_owned()]))
+                .await;
+            ws.set_features(attrs, BTreeSet::new()).await;
+            assert!(
+                ws.diagnostics(main, &config)
+                    .await
+                    .iter()
+                    .any(|d| d.code == Some("cannot-resolve"))
+            );
+        });
+    }
+
+    #[test]
+    fn cfg_attribute_errors_surface_as_editor_diagnostics() {
+        block_on_inline(async {
+            let storage = memory(&[("src/Bad.java", "#[derive(Debug)]\npublic class Bad {}")]);
+            let ws = Workspace::load(
+                storage,
+                ProjectLayout {
+                    feature_set: jals_config::FeatureSet::resolve(&[
+                        jals_config::Feature::Attributes,
+                    ]),
+                    ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+                },
+            )
+            .await;
+            let bad = ws.file_id(&key("src/Bad.java")).unwrap();
+            let diags = ws
+                .diagnostics(bad, &jals_config::lint::Config::default())
+                .await;
+            assert!(
+                diags.iter().any(|d| d.code == Some("cfg")
+                    && d.severity == DiagnosticSeverity::Error
+                    && d.message.contains("unknown attribute `derive`")),
                 "{diags:?}"
             );
         });

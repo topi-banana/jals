@@ -307,6 +307,14 @@ pub enum SyntaxKind {
     // --- jals dialect ---
     /// A jals grouped import (`.{ A, B }`).
     IMPORT_GROUP,
+    /// `#` (begins a jals attribute; not a Java token).
+    HASH,
+    /// A jals attribute (`#[cfg(feature = "x")]`).
+    ATTRIBUTE,
+    /// The meta item of a jals attribute (`cfg(...)`, `feature = "x"`).
+    ATTR_META,
+    /// Argument list of a jals attribute meta (`(...)`).
+    ATTR_ARG_LIST,
 }
 
 impl SyntaxKind {
@@ -418,6 +426,7 @@ impl From<TokenKind> for SyntaxKind {
             TokenKind::ELLIPSIS => Self::ELLIPSIS,
             TokenKind::AT => Self::AT,
             TokenKind::COLON_COLON => Self::COLON_COLON,
+            TokenKind::HASH => Self::HASH,
             TokenKind::EQ => Self::EQ,
             TokenKind::LT => Self::LT,
             TokenKind::GT => Self::GT,

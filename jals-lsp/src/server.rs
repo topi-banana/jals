@@ -43,7 +43,7 @@ use jals_exec::Exec;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceBuilder;
 
-use crate::actor::{Actor, Cmd, Reply};
+use crate::actor::{Actor, Cmd, FeatureSelection, Reply};
 use crate::host::LspHost;
 
 /// The jals language server: builds the async-lsp main loop and runs the stdio event loop.
@@ -171,6 +171,16 @@ impl LanguageServer for ServerState {
             .and_then(|workspace| workspace.did_change_watched_files)
             .and_then(|caps| caps.dynamic_registration)
             .unwrap_or(false);
+        // The client's build-feature selection (`jals.features` / `jals.allFeatures` /
+        // `jals.noDefaultFeatures`), the LSP analogue of `--features` on `jals build`. Sent
+        // before any workspace assembles, so the first assembly already resolves under it.
+        if let Some(options) = &params.initialization_options {
+            let _ = self
+                .commands
+                .send(Cmd::SetFeatureSelection(FeatureSelection::from_json(
+                    options,
+                )));
+        }
         Box::pin(async move {
             Ok(InitializeResult {
                 capabilities: Self::server_capabilities(),
@@ -235,9 +245,13 @@ impl LanguageServer for ServerState {
 
     fn did_change_configuration(
         &mut self,
-        _params: DidChangeConfigurationParams,
+        params: DidChangeConfigurationParams,
     ) -> Self::NotifyResult {
-        ControlFlow::Continue(())
+        // A changed feature selection reassembles every open workspace (the actor no-ops when
+        // the selection is unchanged, so pushing settings unconditionally is safe).
+        self.forward(Cmd::SetFeatureSelection(FeatureSelection::from_json(
+            &params.settings,
+        )))
     }
 
     fn did_change_workspace_folders(

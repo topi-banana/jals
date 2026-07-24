@@ -30,6 +30,7 @@
 extern crate alloc;
 
 pub mod ast;
+pub mod cfg;
 pub mod language;
 pub mod lexer;
 mod parser;

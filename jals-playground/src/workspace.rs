@@ -9,6 +9,8 @@
 //! [`sync_active`](Workspace::sync_active) — a no-op when the text is unchanged, so a hover storm
 //! over an idle buffer never re-analyzes.
 
+use std::collections::BTreeSet;
+
 use jals_build::build_script::{
     BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptOutput,
     BuildScriptSession, clear_build_script_outputs,
@@ -135,12 +137,15 @@ impl Workspace {
         &mut self,
         classpath: LoweredClasspath,
         feature_set: FeatureSet,
+        build_features: BTreeSet<String>,
         artifacts: ArtifactCache<MemoryCache>,
         library_sources: Vec<(FileKey, String)>,
         source_dep_sources: Vec<(FileKey, String)>,
     ) {
         let workspace = self.editor.workspace_mut();
-        workspace.set_feature_set(feature_set);
+        // The combined setter resets the per-file `cfg` analysis when the selection changed
+        // (and no-ops when it did not), before the dependency/classpath folds rebuild below.
+        workspace.set_features(feature_set, build_features).await;
         workspace.storage_mut().replace_artifacts(artifacts);
         workspace
             .set_dependency_source_texts(library_sources, source_dep_sources)
@@ -1135,6 +1140,7 @@ mod tests {
             ws.apply_project_inputs(
                 LoweredClasspath::default(),
                 FeatureSet::default(),
+                BTreeSet::new(),
                 ArtifactCache::new(MemoryCache::default()),
                 Vec::new(),
                 vec![(
@@ -1168,6 +1174,7 @@ mod tests {
             ws.apply_project_inputs(
                 LoweredClasspath::default(),
                 FeatureSet::default(),
+                BTreeSet::new(),
                 ArtifactCache::new(MemoryCache::default()),
                 Vec::new(),
                 Vec::new(),
@@ -1198,6 +1205,7 @@ mod tests {
             ws.apply_project_inputs(
                 LoweredClasspath::default(),
                 FeatureSet::default(),
+                BTreeSet::new(),
                 ArtifactCache::new(MemoryCache::default()),
                 Vec::new(),
                 vec![(collision.clone(), "class DependencyOwned {}".to_string())],

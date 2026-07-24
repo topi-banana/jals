@@ -168,11 +168,11 @@ impl Scan {
     fn token(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
         use TokenKind::{
             AMP, AMP_AMP, AMP_EQ, ARROW, AT, BANG, BANG_EQ, BLOCK_COMMENT, CARET, CARET_EQ, COLON,
-            COLON_COLON, COMMA, DOT, ELLIPSIS, EQ, EQ_EQ, FLOAT_LITERAL, GT, IDENT, LBRACE, LBRACK,
-            LINE_COMMENT, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, MINUS, MINUS_EQ, MINUS_MINUS,
-            NEWLINE, PERCENT, PERCENT_EQ, PIPE, PIPE_EQ, PIPE_PIPE, PLUS, PLUS_EQ, PLUS_PLUS,
-            QUESTION, RBRACE, RBRACK, RPAREN, SEMICOLON, SLASH, SLASH_EQ, STAR, STAR_EQ, TILDE,
-            UNDERSCORE, WHITESPACE,
+            COLON_COLON, COMMA, DOT, ELLIPSIS, EQ, EQ_EQ, FLOAT_LITERAL, GT, HASH, IDENT, LBRACE,
+            LBRACK, LINE_COMMENT, LPAREN, LSHIFT, LSHIFT_EQ, LT, LT_EQ, MINUS, MINUS_EQ,
+            MINUS_MINUS, NEWLINE, PERCENT, PERCENT_EQ, PIPE, PIPE_EQ, PIPE_PIPE, PLUS, PLUS_EQ,
+            PLUS_PLUS, QUESTION, RBRACE, RBRACK, RPAREN, SEMICOLON, SLASH, SLASH_EQ, STAR, STAR_EQ,
+            TILDE, UNDERSCORE, WHITESPACE,
         };
 
         let mut cursor = Cursor { src, pos: start };
@@ -258,6 +258,8 @@ impl Scan {
             ';' => SEMICOLON,
             ',' => COMMA,
             '@' => AT,
+            // jals dialect: begins an attribute (`#[...]`). Not a Java token.
+            '#' => HASH,
 
             // Operators (maximal munch).
             '~' => TILDE,
@@ -860,9 +862,18 @@ mod tests {
 
     #[test]
     fn error_bytes_are_lossless() {
-        let src = "a # b ` c";
+        let src = "a \\ b ` c";
         assert!(kinds(src).contains(&ERROR), "未一致バイトは ERROR になる");
         assert_eq!(roundtrip(src), src);
+    }
+
+    #[test]
+    fn hash_lexes_to_a_single_token() {
+        assert_eq!(kinds("#"), [HASH]);
+        assert_eq!(
+            roundtrip("#[cfg(feature = \"x\")]"),
+            "#[cfg(feature = \"x\")]"
+        );
     }
 
     #[test]

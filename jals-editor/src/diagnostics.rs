@@ -26,6 +26,7 @@ use core::ops::Range;
 use jals_config::lint::Config;
 use jals_hir::{FileId, ProjectIndex, Resolved};
 use jals_syntax::Parse;
+use jals_syntax::cfg::CfgMap;
 
 /// How a host should present a [`FileDiagnostic`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,11 +77,18 @@ impl FileDiagnostics {
     ///
     /// `resolved` is the file's local name resolution when the caller has it cached; `None`
     /// resolves on demand (only needed for the unresolved-types pass).
+    ///
+    /// `cfg`, when present, is the file's `#[cfg(...)]` evaluation: lint findings inside a
+    /// disabled host are suppressed, each disabled range is reported as an `unnecessary` hint
+    /// (hosts that render faded code grey it out), and every structural attribute error — the
+    /// same set the compile frontend rejects a build with — surfaces as an error diagnostic at
+    /// edit time.
     pub async fn assemble(
         parse: &Parse,
         resolved: Option<&Resolved>,
         index: Option<(&ProjectIndex, FileId)>,
         config: &Config,
+        cfg: Option<&CfgMap>,
     ) -> Vec<FileDiagnostic> {
         let root = parse.syntax();
 
@@ -98,11 +106,26 @@ impl FileDiagnostics {
             .collect();
         let clean_parse = out.is_empty();
 
+        // 1b. Each `cfg`-disabled region as a faded-code hint (the structural attribute errors
+        // come out of the lint engine below, under the fixed `cfg` rule).
+        if let Some(cfg) = cfg {
+            for range in cfg.disabled_ranges() {
+                out.push(FileDiagnostic {
+                    range: crate::byte_range(range),
+                    severity: DiagnosticSeverity::Hint,
+                    code: Some("cfg"),
+                    message: "disabled by `cfg` under the current feature selection".to_owned(),
+                    unnecessary: true,
+                });
+            }
+        }
+
         // 2. Lint rules — one engine pass. A broken tree runs file-locally with `type-mismatch`
         // forced off; a clean tree threads the index in, so the index-aware rules check
-        // cross-file facts under the user's configured severities.
+        // cross-file facts under the user's configured severities. The `cfg` map rides along on
+        // both paths, suppressing findings inside disabled hosts.
         let findings = if clean_parse {
-            jals_lint::LintOutput::lint_parse_with_index(parse, config, index)
+            jals_lint::LintOutput::lint_parse_with_index(parse, config, index, cfg)
                 .await
                 .diagnostics
         } else {
@@ -111,7 +134,9 @@ impl FileDiagnostics {
                 jals_lint::TYPE_MISMATCH_RULE.to_owned(),
                 jals_config::Severity::Allow,
             );
-            jals_lint::LintOutput::lint_node(&root, &quiet).await
+            jals_lint::LintOutput::lint_parse_with_index(parse, &quiet, None, cfg)
+                .await
+                .diagnostics
         };
         for finding in findings {
             out.push(FileDiagnostic {
@@ -141,7 +166,12 @@ impl FileDiagnostics {
             if let Some(resolved) = resolved {
                 Self::push_unresolved(&mut out, &root, index, file, resolved).await;
             } else {
-                let resolved = Resolved::resolve_node(&root).await;
+                // Match the caller-cached shape: with a `cfg` map, resolution skips disabled
+                // hosts, so no `cannot-resolve` is reported for a name only disabled code uses.
+                let resolved = match cfg {
+                    Some(cfg) => Resolved::resolve_node_with_cfg(&root, cfg).await,
+                    None => Resolved::resolve_node(&root).await,
+                };
                 Self::push_unresolved(&mut out, &root, index, file, &resolved).await;
             }
         }
@@ -197,6 +227,7 @@ mod tests {
                 None,
                 None,
                 &Config::default(),
+                None,
             )
             .await
         })
@@ -210,7 +241,7 @@ mod tests {
                 .with_stdlib()
                 .build()
                 .await;
-            FileDiagnostics::assemble(&parse, None, Some((&index, FileId(0))), config).await
+            FileDiagnostics::assemble(&parse, None, Some((&index, FileId(0))), config, None).await
         })
     }
 
@@ -255,14 +286,14 @@ mod tests {
                 ..Default::default()
             };
             let parse = jals_syntax::Parse::parse(text).await;
-            let diags = FileDiagnostics::assemble(&parse, None, None, &config).await;
+            let diags = FileDiagnostics::assemble(&parse, None, None, &config, None).await;
             let gated = with_code(&diags, "compact-source-file");
             assert_eq!(gated.len(), 1);
             assert_eq!(gated[0].severity, DiagnosticSeverity::Error);
 
             // A `java25` set (or no features at all) allows the syntax: nothing is reported.
             config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
-            let diags = FileDiagnostics::assemble(&parse, None, None, &config).await;
+            let diags = FileDiagnostics::assemble(&parse, None, None, &config, None).await;
             assert!(with_code(&diags, "compact-source-file").is_empty());
         });
     }
@@ -329,6 +360,7 @@ mod tests {
                 None,
                 Some((&index, FileId(0))),
                 &Config::default(),
+                None,
             )
             .await;
             let unresolved = with_code(&diags, "cannot-resolve");

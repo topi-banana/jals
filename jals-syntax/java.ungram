@@ -34,6 +34,7 @@ PackageDecl =
   'package' name:QualifiedName ';'
 
 ImportDecl =
+  attrs:Attribute*
   'import' is_static:'static'? is_module:'module'? name:QualifiedName group:ImportGroup? ';'
 
 // A jals grouped import: `.{ Member, Member, ... }` after the shared prefix
@@ -41,6 +42,29 @@ ImportDecl =
 // nested (`regex.Pattern`) and wildcard (`regex.*`) members come for free.
 ImportGroup =
   '.' '{' members:(QualifiedName (',' QualifiedName)*)? '}'
+
+// ===== jals dialect: attributes =====
+//
+// A jals attribute (`#[cfg(feature = "x")]`). Outer attributes only, strictly leading
+// (Rust-style: before any modifier or annotation; the parser accepts a late one for
+// losslessness but diagnoses it). Attributes attach to imports, to declarations parsed
+// through `Modifiers`, and to statements (as leading children of the statement's node).
+
+Attribute =
+  '#' '[' meta:AttrMeta ']'
+
+// A meta item, mirroring Rust's meta grammar: a name alone (`cfg`), a name with a
+// parenthesized list of nested metas / literals (`any(a, b)`), or a name = literal
+// pair (`feature = "x"`).
+AttrMeta =
+  name:QualifiedName (args:AttrArgList | '=' value:Literal)?
+
+AttrArgList =
+  '(' args:(AttrArg (',' AttrArg)*)? ')'
+
+AttrArg =
+  AttrMeta
+| Literal
 
 QualifiedName =
   'ident' ('.' 'ident')* ('.' is_wildcard:'*')?
@@ -93,30 +117,34 @@ Decl =
 | MethodDecl
 | FieldDecl
 
+// Type declarations in statement position carry their leading jals attributes as
+// direct `attrs` children (before the Modifiers node); everywhere else the
+// attributes live inside Modifiers. `AstNode::attributes` (ext.rs) unifies the two.
 ClassDecl =
-  modifiers:Modifiers 'class' name:'ident' type_params:TypeParams?
+  attrs:Attribute* modifiers:Modifiers 'class' name:'ident' type_params:TypeParams?
   extends_clause:ExtendsClause? implements_clause:ImplementsClause?
   permits_clause:PermitsClause? body:ClassBody
 
 InterfaceDecl =
-  modifiers:Modifiers 'interface' name:'ident' type_params:TypeParams?
+  attrs:Attribute* modifiers:Modifiers 'interface' name:'ident' type_params:TypeParams?
   extends_clause:ExtendsClause? permits_clause:PermitsClause? body:ClassBody
 
 EnumDecl =
-  modifiers:Modifiers 'enum' name:'ident' implements_clause:ImplementsClause?
+  attrs:Attribute* modifiers:Modifiers 'enum' name:'ident' implements_clause:ImplementsClause?
   body:EnumBody
 
 RecordDecl =
-  modifiers:Modifiers 'record' name:'ident' type_params:TypeParams?
+  attrs:Attribute* modifiers:Modifiers 'record' name:'ident' type_params:TypeParams?
   header:RecordHeader implements_clause:ImplementsClause? body:ClassBody
 
 AnnotationTypeDecl =
-  modifiers:Modifiers '@' 'interface' name:'ident' body:ClassBody
+  attrs:Attribute* modifiers:Modifiers '@' 'interface' name:'ident' body:ClassBody
 
 // `non-sealed` is re-joined into a single NON_SEALED_KW *node* by the parser;
 // `Modifiers::is_non_sealed` and the keyword query `Modifiers::has` live in
 // ext.rs.
 Modifiers =
+  attrs:Attribute*
   annotations:Annotation*
   ( 'public' | 'protected' | 'private' | 'abstract' | 'static' | 'final'
   | 'native' | 'strictfp' | 'synchronized' | 'transient' | 'volatile'
@@ -232,9 +260,12 @@ TypeArgs =
   '<' args:(Type (',' Type)*)? '>'
 
 // ===== Statements =====
+//
+// Every statement (and a local declaration dispatched from statement position) may
+// carry leading jals attributes as direct children of its own node.
 
 Block =
-  '{' stmts:Stmt* '}'
+  attrs:Attribute* '{' stmts:Stmt* '}'
 
 // Local type declarations (class/interface/enum/record) also appear as
 // block children, but are not part of this enum.
@@ -262,51 +293,51 @@ Stmt =
 // Multiple declarators are flat, as in FieldDecl. The trailing `;` is absent
 // when the declaration is a C-style `for` initializer.
 LocalVarDecl =
-  modifiers:Modifiers ty:Type name:'ident' ('[' ']')* ('=' value:Expr)?
+  attrs:Attribute* modifiers:Modifiers ty:Type name:'ident' ('[' ']')* ('=' value:Expr)?
   (',' 'ident' ('[' ']')* ('=' Expr)?)* ';'?
 
 ExprStmt =
-  expr:Expr ';'
+  attrs:Attribute* expr:Expr ';'
 
 ReturnStmt =
-  'return' expr:Expr? ';'
+  attrs:Attribute* 'return' expr:Expr? ';'
 
 IfStmt =
-  'if' '(' condition:Expr ')' branches:(Stmt ('else' Stmt)?)
+  attrs:Attribute* 'if' '(' condition:Expr ')' branches:(Stmt ('else' Stmt)?)
 
 WhileStmt =
-  'while' '(' condition:Expr ')' body:Stmt
+  attrs:Attribute* 'while' '(' condition:Expr ')' body:Stmt
 
 DoWhileStmt =
-  'do' body:Stmt 'while' '(' condition:Expr ')' ';'
+  attrs:Attribute* 'do' body:Stmt 'while' '(' condition:Expr ')' ';'
 
 ForStmt =
-  'for' '(' (LocalVarDecl | Expr (',' Expr)*)? ';' Expr? ';'
+  attrs:Attribute* 'for' '(' (LocalVarDecl | Expr (',' Expr)*)? ';' Expr? ';'
   (Expr (',' Expr)*)? ')' Stmt
 
 ForEachStmt =
-  'for' '(' Modifiers ty:Type name:'ident' ':' iterable:Expr ')' body:Stmt
+  attrs:Attribute* 'for' '(' Modifiers ty:Type name:'ident' ':' iterable:Expr ')' body:Stmt
 
 BreakStmt =
-  'break' 'ident'? ';'
+  attrs:Attribute* 'break' 'ident'? ';'
 
 ContinueStmt =
-  'continue' 'ident'? ';'
+  attrs:Attribute* 'continue' 'ident'? ';'
 
 ThrowStmt =
-  'throw' expr:Expr ';'
+  attrs:Attribute* 'throw' expr:Expr ';'
 
 YieldStmt =
-  'yield' expr:Expr ';'
+  attrs:Attribute* 'yield' expr:Expr ';'
 
 AssertStmt =
-  'assert' Expr (':' Expr)? ';'
+  attrs:Attribute* 'assert' Expr (':' Expr)? ';'
 
 SynchronizedStmt =
-  'synchronized' '(' lock:Expr ')' body:Block
+  attrs:Attribute* 'synchronized' '(' lock:Expr ')' body:Block
 
 TryStmt =
-  'try' resources:ResourceList? block:Block catches:CatchClause*
+  attrs:Attribute* 'try' resources:ResourceList? block:Block catches:CatchClause*
   finally:FinallyClause?
 
 ResourceList =
@@ -323,15 +354,15 @@ FinallyClause =
   'finally' block:Block
 
 LabeledStmt =
-  label:'ident' ':' stmt:Stmt
+  attrs:Attribute* label:'ident' ':' stmt:Stmt
 
 EmptyStmt =
-  ';'
+  attrs:Attribute* ';'
 
 // ===== switch (shared by statement and expression) =====
 
 SwitchStmt =
-  'switch' '(' selector:Expr ')' body:SwitchBlock
+  attrs:Attribute* 'switch' '(' selector:Expr ')' body:SwitchBlock
 
 // Arrow rules and colon groups may in fact be mixed in one block; the two
 // accessors simply filter the children by kind.

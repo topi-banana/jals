@@ -5976,3 +5976,372 @@ fn throws_dotted_annotation() {
     "#]],
     );
 }
+
+#[test]
+fn attribute_on_class_parses_into_modifiers() {
+    check(
+        "#[cfg(feature = \"x\")]\npublic class C {}",
+        expect![[r##"
+            SOURCE_FILE@0..39
+              CLASS_DECL@0..39
+                MODIFIERS@0..28
+                  ATTRIBUTE@0..21
+                    HASH@0..1 "#"
+                    LBRACK@1..2 "["
+                    ATTR_META@2..20
+                      QUALIFIED_NAME@2..5
+                        IDENT@2..5 "cfg"
+                      ATTR_ARG_LIST@5..20
+                        LPAREN@5..6 "("
+                        ATTR_META@6..19
+                          QUALIFIED_NAME@6..13
+                            IDENT@6..13 "feature"
+                          WHITESPACE@13..14 " "
+                          EQ@14..15 "="
+                          LITERAL@15..19
+                            WHITESPACE@15..16 " "
+                            STRING_LITERAL@16..19 "\"x\""
+                        RPAREN@19..20 ")"
+                    RBRACK@20..21 "]"
+                  NEWLINE@21..22 "\n"
+                  PUBLIC_KW@22..28 "public"
+                WHITESPACE@28..29 " "
+                CLASS_KW@29..34 "class"
+                WHITESPACE@34..35 " "
+                IDENT@35..36 "C"
+                CLASS_BODY@36..39
+                  WHITESPACE@36..37 " "
+                  LBRACE@37..38 "{"
+                  RBRACE@38..39 "}"
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_with_nested_predicates() {
+    check(
+        "#[cfg(any(feature = \"a\", not(feature = \"b\")))] class C {}",
+        expect![[r##"
+            SOURCE_FILE@0..57
+              CLASS_DECL@0..57
+                MODIFIERS@0..46
+                  ATTRIBUTE@0..46
+                    HASH@0..1 "#"
+                    LBRACK@1..2 "["
+                    ATTR_META@2..45
+                      QUALIFIED_NAME@2..5
+                        IDENT@2..5 "cfg"
+                      ATTR_ARG_LIST@5..45
+                        LPAREN@5..6 "("
+                        ATTR_META@6..44
+                          QUALIFIED_NAME@6..9
+                            IDENT@6..9 "any"
+                          ATTR_ARG_LIST@9..44
+                            LPAREN@9..10 "("
+                            ATTR_META@10..23
+                              QUALIFIED_NAME@10..17
+                                IDENT@10..17 "feature"
+                              WHITESPACE@17..18 " "
+                              EQ@18..19 "="
+                              LITERAL@19..23
+                                WHITESPACE@19..20 " "
+                                STRING_LITERAL@20..23 "\"a\""
+                            COMMA@23..24 ","
+                            ATTR_META@24..43
+                              QUALIFIED_NAME@24..28
+                                WHITESPACE@24..25 " "
+                                IDENT@25..28 "not"
+                              ATTR_ARG_LIST@28..43
+                                LPAREN@28..29 "("
+                                ATTR_META@29..42
+                                  QUALIFIED_NAME@29..36
+                                    IDENT@29..36 "feature"
+                                  WHITESPACE@36..37 " "
+                                  EQ@37..38 "="
+                                  LITERAL@38..42
+                                    WHITESPACE@38..39 " "
+                                    STRING_LITERAL@39..42 "\"b\""
+                                RPAREN@42..43 ")"
+                            RPAREN@43..44 ")"
+                        RPAREN@44..45 ")"
+                    RBRACK@45..46 "]"
+                WHITESPACE@46..47 " "
+                CLASS_KW@47..52 "class"
+                WHITESPACE@52..53 " "
+                IDENT@53..54 "C"
+                CLASS_BODY@54..57
+                  WHITESPACE@54..55 " "
+                  LBRACE@55..56 "{"
+                  RBRACE@56..57 "}"
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_after_modifier_is_diagnosed() {
+    check(
+        "class C { public #[x] static int f; }",
+        expect![[r##"
+            SOURCE_FILE@0..37
+              CLASS_DECL@0..37
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..37
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  FIELD_DECL@9..35
+                    MODIFIERS@9..28
+                      WHITESPACE@9..10 " "
+                      PUBLIC_KW@10..16 "public"
+                      ATTRIBUTE@16..21
+                        WHITESPACE@16..17 " "
+                        HASH@17..18 "#"
+                        LBRACK@18..19 "["
+                        ATTR_META@19..20
+                          QUALIFIED_NAME@19..20
+                            IDENT@19..20 "x"
+                        RBRACK@20..21 "]"
+                      WHITESPACE@21..22 " "
+                      STATIC_KW@22..28 "static"
+                    TYPE@28..32
+                      WHITESPACE@28..29 " "
+                      INT_KW@29..32 "int"
+                    WHITESPACE@32..33 " "
+                    IDENT@33..34 "f"
+                    SEMICOLON@34..35 ";"
+                  WHITESPACE@35..36 " "
+                  RBRACE@36..37 "}"
+            error 16..16: attributes must come before modifiers and annotations
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_on_import() {
+    check(
+        "#[cfg(feature = \"x\")] import a.B;\nclass C {}",
+        expect![[r##"
+            SOURCE_FILE@0..44
+              IMPORT_DECL@0..33
+                ATTRIBUTE@0..21
+                  HASH@0..1 "#"
+                  LBRACK@1..2 "["
+                  ATTR_META@2..20
+                    QUALIFIED_NAME@2..5
+                      IDENT@2..5 "cfg"
+                    ATTR_ARG_LIST@5..20
+                      LPAREN@5..6 "("
+                      ATTR_META@6..19
+                        QUALIFIED_NAME@6..13
+                          IDENT@6..13 "feature"
+                        WHITESPACE@13..14 " "
+                        EQ@14..15 "="
+                        LITERAL@15..19
+                          WHITESPACE@15..16 " "
+                          STRING_LITERAL@16..19 "\"x\""
+                      RPAREN@19..20 ")"
+                  RBRACK@20..21 "]"
+                WHITESPACE@21..22 " "
+                IMPORT_KW@22..28 "import"
+                QUALIFIED_NAME@28..32
+                  WHITESPACE@28..29 " "
+                  IDENT@29..30 "a"
+                  DOT@30..31 "."
+                  IDENT@31..32 "B"
+                SEMICOLON@32..33 ";"
+              CLASS_DECL@33..44
+                MODIFIERS@33..33
+                NEWLINE@33..34 "\n"
+                CLASS_KW@34..39 "class"
+                WHITESPACE@39..40 " "
+                IDENT@40..41 "C"
+                CLASS_BODY@41..44
+                  WHITESPACE@41..42 " "
+                  LBRACE@42..43 "{"
+                  RBRACE@43..44 "}"
+        "##]],
+    );
+}
+
+#[test]
+fn attribute_on_statements() {
+    check(
+        "class C { void m() { #[cfg(feature = \"x\")] f(); #[cfg(feature = \"x\")] final int v = 1; #[cfg(feature = \"x\")] class L {} if (c) #[cfg(feature = \"y\")] g(); } }",
+        expect![[r##"
+            SOURCE_FILE@0..157
+              CLASS_DECL@0..157
+                MODIFIERS@0..0
+                CLASS_KW@0..5 "class"
+                WHITESPACE@5..6 " "
+                IDENT@6..7 "C"
+                CLASS_BODY@7..157
+                  WHITESPACE@7..8 " "
+                  LBRACE@8..9 "{"
+                  METHOD_DECL@9..155
+                    MODIFIERS@9..9
+                    TYPE@9..14
+                      WHITESPACE@9..10 " "
+                      VOID_KW@10..14 "void"
+                    WHITESPACE@14..15 " "
+                    IDENT@15..16 "m"
+                    PARAM_LIST@16..18
+                      LPAREN@16..17 "("
+                      RPAREN@17..18 ")"
+                    BLOCK@18..155
+                      WHITESPACE@18..19 " "
+                      LBRACE@19..20 "{"
+                      EXPR_STMT@20..47
+                        ATTRIBUTE@20..42
+                          WHITESPACE@20..21 " "
+                          HASH@21..22 "#"
+                          LBRACK@22..23 "["
+                          ATTR_META@23..41
+                            QUALIFIED_NAME@23..26
+                              IDENT@23..26 "cfg"
+                            ATTR_ARG_LIST@26..41
+                              LPAREN@26..27 "("
+                              ATTR_META@27..40
+                                QUALIFIED_NAME@27..34
+                                  IDENT@27..34 "feature"
+                                WHITESPACE@34..35 " "
+                                EQ@35..36 "="
+                                LITERAL@36..40
+                                  WHITESPACE@36..37 " "
+                                  STRING_LITERAL@37..40 "\"x\""
+                              RPAREN@40..41 ")"
+                          RBRACK@41..42 "]"
+                        CALL_EXPR@42..46
+                          NAME_REF@42..44
+                            WHITESPACE@42..43 " "
+                            IDENT@43..44 "f"
+                          ARG_LIST@44..46
+                            LPAREN@44..45 "("
+                            RPAREN@45..46 ")"
+                        SEMICOLON@46..47 ";"
+                      LOCAL_VAR_DECL@47..86
+                        ATTRIBUTE@47..69
+                          WHITESPACE@47..48 " "
+                          HASH@48..49 "#"
+                          LBRACK@49..50 "["
+                          ATTR_META@50..68
+                            QUALIFIED_NAME@50..53
+                              IDENT@50..53 "cfg"
+                            ATTR_ARG_LIST@53..68
+                              LPAREN@53..54 "("
+                              ATTR_META@54..67
+                                QUALIFIED_NAME@54..61
+                                  IDENT@54..61 "feature"
+                                WHITESPACE@61..62 " "
+                                EQ@62..63 "="
+                                LITERAL@63..67
+                                  WHITESPACE@63..64 " "
+                                  STRING_LITERAL@64..67 "\"x\""
+                              RPAREN@67..68 ")"
+                          RBRACK@68..69 "]"
+                        MODIFIERS@69..75
+                          WHITESPACE@69..70 " "
+                          FINAL_KW@70..75 "final"
+                        TYPE@75..79
+                          WHITESPACE@75..76 " "
+                          INT_KW@76..79 "int"
+                        WHITESPACE@79..80 " "
+                        IDENT@80..81 "v"
+                        WHITESPACE@81..82 " "
+                        EQ@82..83 "="
+                        LITERAL@83..85
+                          WHITESPACE@83..84 " "
+                          INT_LITERAL@84..85 "1"
+                        SEMICOLON@85..86 ";"
+                      CLASS_DECL@86..119
+                        ATTRIBUTE@86..108
+                          WHITESPACE@86..87 " "
+                          HASH@87..88 "#"
+                          LBRACK@88..89 "["
+                          ATTR_META@89..107
+                            QUALIFIED_NAME@89..92
+                              IDENT@89..92 "cfg"
+                            ATTR_ARG_LIST@92..107
+                              LPAREN@92..93 "("
+                              ATTR_META@93..106
+                                QUALIFIED_NAME@93..100
+                                  IDENT@93..100 "feature"
+                                WHITESPACE@100..101 " "
+                                EQ@101..102 "="
+                                LITERAL@102..106
+                                  WHITESPACE@102..103 " "
+                                  STRING_LITERAL@103..106 "\"x\""
+                              RPAREN@106..107 ")"
+                          RBRACK@107..108 "]"
+                        MODIFIERS@108..108
+                        WHITESPACE@108..109 " "
+                        CLASS_KW@109..114 "class"
+                        WHITESPACE@114..115 " "
+                        IDENT@115..116 "L"
+                        CLASS_BODY@116..119
+                          WHITESPACE@116..117 " "
+                          LBRACE@117..118 "{"
+                          RBRACE@118..119 "}"
+                      IF_STMT@119..153
+                        WHITESPACE@119..120 " "
+                        IF_KW@120..122 "if"
+                        WHITESPACE@122..123 " "
+                        LPAREN@123..124 "("
+                        NAME_REF@124..125
+                          IDENT@124..125 "c"
+                        RPAREN@125..126 ")"
+                        EXPR_STMT@126..153
+                          ATTRIBUTE@126..148
+                            WHITESPACE@126..127 " "
+                            HASH@127..128 "#"
+                            LBRACK@128..129 "["
+                            ATTR_META@129..147
+                              QUALIFIED_NAME@129..132
+                                IDENT@129..132 "cfg"
+                              ATTR_ARG_LIST@132..147
+                                LPAREN@132..133 "("
+                                ATTR_META@133..146
+                                  QUALIFIED_NAME@133..140
+                                    IDENT@133..140 "feature"
+                                  WHITESPACE@140..141 " "
+                                  EQ@141..142 "="
+                                  LITERAL@142..146
+                                    WHITESPACE@142..143 " "
+                                    STRING_LITERAL@143..146 "\"y\""
+                                RPAREN@146..147 ")"
+                            RBRACK@147..148 "]"
+                          CALL_EXPR@148..152
+                            NAME_REF@148..150
+                              WHITESPACE@148..149 " "
+                              IDENT@149..150 "g"
+                            ARG_LIST@150..152
+                              LPAREN@150..151 "("
+                              RPAREN@151..152 ")"
+                          SEMICOLON@152..153 ";"
+                      WHITESPACE@153..154 " "
+                      RBRACE@154..155 "}"
+                  WHITESPACE@155..156 " "
+                  RBRACE@156..157 "}"
+        "##]],
+    );
+}
+
+#[test]
+fn attributes_are_lossless_on_malformed_and_edge_inputs() {
+    for src in [
+        "#[",
+        "#[cfg(",
+        "#[cfg(]",
+        "#[cfg] class C {}",
+        "#[cfg(feature = )] class C {}",
+        "#[foo bar] import a.B;",
+        "#[a] #[b] class C { #[c] #[d] void m() {} }",
+        "class C { # }",
+        "class C { void m() { a # b; } }",
+        "class C { void m() { #[cfg(feature = \"x\")] } }",
+        "for (#[cfg] int i = 0;;) {}",
+    ] {
+        assert_lossless(src);
+    }
+}

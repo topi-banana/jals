@@ -23,6 +23,7 @@
 
 extern crate alloc;
 
+mod attr;
 pub mod dialect;
 pub mod driver;
 pub mod frontend;

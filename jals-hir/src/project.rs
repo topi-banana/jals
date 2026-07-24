@@ -35,6 +35,7 @@ use jals_syntax::SyntaxKind::{
     LBRACK, METHOD_DECL, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode};
+use jals_syntax::cfg::CfgMap;
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::Namespace;
@@ -418,6 +419,7 @@ pub struct ProjectIndexBuilder<'a> {
     stdlib: bool,
     classpath: Option<&'a LoweredClasspath>,
     sources: Option<&'a SourceLocations>,
+    disabled: &'a [(FileId, CfgMap)],
 }
 
 impl<'a> ProjectIndexBuilder<'a> {
@@ -468,13 +470,31 @@ impl<'a> ProjectIndexBuilder<'a> {
         self
     }
 
+    /// Skip each file's `cfg`-disabled hosts during extraction (see
+    /// [`ProjectIndex::extract_file_with_cfg`]): a disabled type or member is not indexed, so
+    /// references to it from other files resolve as they will after the compile frontend blanks
+    /// it. Only *project* files are filtered — a file absent from `cfgs` (and every source
+    /// dependency, which is indexed under its own authority) extracts in full.
+    #[must_use]
+    pub const fn with_disabled(mut self, cfgs: &'a [(FileId, CfgMap)]) -> Self {
+        self.disabled = cfgs;
+        self
+    }
+
     /// Build the index, folding in every configured input.
     pub async fn build(self) -> ProjectIndex {
         let empty = SourceLocations::default();
         let sources = self.sources.unwrap_or(&empty);
         let classes = self.classpath.map_or(&[][..], |cp| &cp.classes[..]);
-        ProjectIndex::build_inner(self.files, self.source_files, self.stdlib, classes, sources)
-            .await
+        ProjectIndex::build_inner(
+            self.files,
+            self.source_files,
+            self.stdlib,
+            classes,
+            sources,
+            self.disabled,
+        )
+        .await
     }
 }
 
@@ -499,6 +519,7 @@ impl ProjectIndex {
             stdlib: false,
             classpath: None,
             sources: None,
+            disabled: &[],
         }
     }
 
@@ -544,13 +565,19 @@ impl ProjectIndex {
         stdlib: bool,
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
+        disabled: &[(FileId, CfgMap)],
     ) -> Self {
         // The CST-walking half: extract each file's cacheable facts. A from-scratch build extracts
         // every file; an incremental host (the LSP) caches these and re-extracts only the file that
         // changed, then calls `assemble` (below) — which folds them in with no CST walking.
+        let empty_cfg = CfgMap::default();
         let mut project: Vec<(FileId, FileFacts)> = Vec::with_capacity(files.len());
         for (file, root) in files {
-            project.push((*file, Self::extract_file(root).await));
+            let cfg = disabled
+                .iter()
+                .find(|(id, _)| id == file)
+                .map_or(&empty_cfg, |(_, cfg)| cfg);
+            project.push((*file, Self::extract_file_with_cfg(root, cfg).await));
         }
         let mut source: Vec<(FileId, FileFacts)> = Vec::with_capacity(source_files.len());
         for (file, root) in source_files {
@@ -576,6 +603,15 @@ impl ProjectIndex {
     /// Captures both build passes' per-file data in one walk. Pure and `wasm32`-compatible; a root that
     /// is not a source file yields empty facts that contribute nothing.
     pub async fn extract_file(root: &SyntaxNode) -> FileFacts {
+        Self::extract_file_with_cfg(root, &CfgMap::default()).await
+    }
+
+    /// Like [`extract_file`](Self::extract_file), but skipping every `cfg`-disabled host in
+    /// `cfg` (computed over the same text as `root`): a disabled type contributes no [`RawType`],
+    /// a disabled member no [`Member`], a disabled import no entry in the import tables — the
+    /// analysis-side mirror of the compile frontend blanking the host. An empty (default) map
+    /// extracts identically to [`extract_file`](Self::extract_file).
+    pub async fn extract_file_with_cfg(root: &SyntaxNode, cfg: &CfgMap) -> FileFacts {
         let Some(src) = ast::SourceFile::cast(root.clone()) else {
             return FileFacts {
                 meta: None,
@@ -591,6 +627,10 @@ impl ProjectIndex {
         let mut single_imports = Vec::new();
         let mut on_demand = Vec::new();
         for import in src.imports() {
+            // A `cfg`-disabled import resolves nothing.
+            if cfg.disables_node(import.syntax()) {
+                continue;
+            }
             // Type-name resolution ignores static and module imports.
             if import.is_static() || import.is_module() {
                 continue;
@@ -624,7 +664,7 @@ impl ProjectIndex {
             }
         }
         let mut types = Vec::new();
-        Self::extract_types(root, package.as_deref(), &mut types).await;
+        Self::extract_types(root, package.as_deref(), &mut types, cfg).await;
         FileFacts {
             meta: Some(FileMeta {
                 package,
@@ -1268,8 +1308,15 @@ impl SourceLocations {
                 self.types
                     .entry(fqn.clone())
                     .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
-                for member in ProjectIndex::members_of_decl(ItemId(0), file, &node, name_tok.text())
-                {
+                // Library sources are never `cfg`-filtered (they are navigation-only and a
+                // dependency's own feature selection does not reach this seam), so the empty map.
+                for member in ProjectIndex::members_of_decl(
+                    ItemId(0),
+                    file,
+                    &node,
+                    name_tok.text(),
+                    &CfgMap::default(),
+                ) {
                     let loc = (member.file, member.name_range.clone());
                     self.members
                         .entry((fqn.clone(), member.name.clone(), member.params.len()))
@@ -1310,14 +1357,24 @@ impl ProjectIndex {
 /// facts are folded into a specific index) and are fixed up in
 /// [`register_file_members`](ProjectIndex::register_file_members).
 impl ProjectIndex {
-    async fn extract_types(root: &SyntaxNode, package: Option<&str>, out: &mut Vec<RawType>) {
+    async fn extract_types(
+        root: &SyntaxNode,
+        package: Option<&str>,
+        out: &mut Vec<RawType>,
+        cfg: &CfgMap,
+    ) {
         let mut yielder = Yielder::new();
         // The recursion's `enclosing` parameter, made explicit: each frame carries the enclosing
         // type's FQN as of that node. Children are pushed reversed so `out` receives the
-        // `RawType`s in exactly the recursion's pre-order (the ItemId assignment order).
+        // `RawType`s in exactly the recursion's pre-order (the ItemId assignment order) — a
+        // `cfg`-disabled host contributes nothing and is simply not pushed, so the surviving
+        // pre-order (and thus the ItemId assignment) stays deterministic.
         let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
         while let Some((node, enclosing)) = stack.pop() {
             yielder.tick().await;
+            if cfg.disables_node(&node) {
+                continue;
+            }
             let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
@@ -1328,7 +1385,13 @@ impl ProjectIndex {
                     name_range: Collect::byte_range(&name_tok),
                     type_params: Self::type_params_of(&node),
                     // Placeholder owner/file, fixed up when these facts are folded into an index.
-                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, name_tok.text()),
+                    members: Self::members_of_decl(
+                        ItemId(0),
+                        FileId(0),
+                        &node,
+                        name_tok.text(),
+                        cfg,
+                    ),
                     raw_supertypes: Self::raw_supertypes_of(&node),
                 });
                 Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
@@ -1356,6 +1419,7 @@ impl ProjectIndex {
         file: FileId,
         node: &SyntaxNode,
         owner_simple: &str,
+        cfg: &CfgMap,
     ) -> Vec<Member> {
         let mut members = Vec::new();
         // The body holds the members directly (a `ClassBody`, or an `EnumBody` whose constants and
@@ -1382,6 +1446,10 @@ impl ProjectIndex {
             source_location: None,
         };
         for member in body.children() {
+            // A `cfg`-disabled member is not part of the type's surface.
+            if cfg.disables_node(&member) {
+                continue;
+            }
             match member.kind() {
                 FIELD_DECL => {
                     if let Some(field) = ast::FieldDecl::cast(member.clone()) {

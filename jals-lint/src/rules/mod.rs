@@ -19,6 +19,7 @@ use crate::IndexCtx;
 
 use crate::diagnostic::Severity;
 
+mod attribute;
 mod compact_source_file;
 mod constant_condition;
 mod empty_catch;
@@ -174,6 +175,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     compact_source_file::RULE,
     module_import::RULE,
     grouped_import::RULE,
+    attribute::RULE,
     constant_condition::RULE,
     unused_local::RULE,
     type_mismatch::RULE,
