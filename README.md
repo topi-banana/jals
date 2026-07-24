@@ -48,7 +48,7 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 | --- | --- |
 | [`jals-editor`](jals-editor) | Protocol-neutral editor semantics (definition, references, hover, completion, signature help, and highlights) plus UTF-8 byte/UTF-16 coordinate conversion, shared by the LSP and browser playground. |
 | [`jals-syntax`](jals-syntax) | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
-| [`jals-fmt`](jals-fmt) | A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST. |
+| [`jals-fmt`](jals-fmt) | **WIP (rewrite in progress).** A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST — currently a no-op that returns its input unchanged. |
 | [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks. |
 | [`jals-hir`](jals-hir) | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath. |
 | [`jals-classfile`](jals-classfile) | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4). |
@@ -71,7 +71,7 @@ fidelity against real-world Java) and `xtask` (the `cargo xtask codegen` AST gen
 jals/
 ├── jals-editor/      # editor queries + byte/UTF-16 coordinates (no_std, wasm-compatible)
 ├── jals-syntax/      # lexer + CST parser + typed AST           (no_std, wasm-compatible)
-├── jals-fmt/         # formatter (CST -> Doc IR -> text)        (no_std, wasm-compatible)
+├── jals-fmt/         # formatter — WIP rewrite, currently a no-op (no_std, wasm-compatible)
 ├── jals-lint/        # linter (rules over CST + jals-hir)       (no_std, wasm-compatible)
 ├── jals-hir/         # name resolution + type inference         (no_std, wasm-compatible)
 ├── jals-classfile/   # JVM .class read/write model              (no_std, wasm-compatible)
@@ -407,11 +407,18 @@ assert_eq!(class.syntax().text().to_string(), "class Foo { }");
 
 ### `jals-fmt`
 
-```rust
-use jals_fmt::{Config, format_source};
+> **WIP — the formatter is being rewritten from scratch and is currently a no-op.**
+> `FormatOutput::format_source` returns its input byte-for-byte unchanged (only parser syntax
+> errors are surfaced as warnings); a `Config` is accepted and ignored. The example below shows
+> the intended shape once the rewrite lands.
 
-let out = format_source("class C{int x=1;}", &Config::default());
-assert_eq!(out.formatted, "class C {\n    int x = 1;\n}\n");
+```rust
+use jals_config::fmt::Config;
+use jals_fmt::FormatOutput;
+
+let out = FormatOutput::format_source("class C{int x=1;}", &Config::default()).await;
+// Intended (once implemented): "class C {\n    int x = 1;\n}\n".
+// Today (no-op): out.formatted == "class C{int x=1;}".
 assert!(!out.has_warnings());
 ```
 
@@ -435,8 +442,9 @@ source ──▶ lexer (hand-written) ──▶ CST parser (rowan) ──▶ typ
   `SyntaxError`s rather than aborting.
 - **Typed AST** (`jals-syntax`): zero-cost newtype views over the CST, so consumers read the
   tree through typed accessors instead of matching raw kinds.
-- **Formatter** (`jals-fmt`): lowers the CST into a Wadler/Prettier-style document IR, then
-  renders it, choosing for each group whether it fits on one line or must break.
+- **Formatter** (`jals-fmt`): **WIP — under a from-scratch rewrite, currently a no-op.** The
+  intended design lowers the CST into a Wadler/Prettier-style document IR, then renders it,
+  choosing for each group whether it fits on one line or must break.
 - **Project graph** (`jals-project`): discovers transitive path/Git/JAR nodes with stable identities,
   probes only the selected root's exact manifest, and makes preprocessing a required type-level
   transition before assembly. Assembly exposes graph metadata but sends consumers only authored or

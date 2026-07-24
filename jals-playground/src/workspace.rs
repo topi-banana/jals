@@ -906,17 +906,6 @@ mod tests {
     }
 
     #[test]
-    fn format_active_rewrites_messy_source() {
-        block_on_inline(async {
-            let ws = Workspace::new().await;
-            let out = ws.format_active(&FmtConfig::default()).await;
-            assert!(out.formatted.contains("class Greeter"));
-            // The seed is deliberately unformatted, so formatting must change it.
-            assert_ne!(out.formatted, ws.active_source());
-        });
-    }
-
-    #[test]
     fn sync_active_no_op_keeps_the_cached_parse() {
         block_on_inline(async {
             let mut ws = Workspace::new().await;

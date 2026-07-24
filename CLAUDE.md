@@ -92,7 +92,9 @@ filesystem reads into portable interfaces.
 - `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
   artifacts.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
-  domain crates; do not add host filesystem APIs.
+  domain crates; do not add host filesystem APIs. `jals-fmt` is **WIP** — its implementation was
+  removed for a from-scratch rewrite and it is currently a no-op that returns its input unchanged
+  (only `FormatOutput::format_source` and the `Warning` surface remain).
 - Tests, `xtask`, and `editors/zed` may use host paths for fixtures and tooling.
 
 The `.ast-grep/rules/no-portable-host-path.yml` allowlist enforces the host boundary. Add a narrow

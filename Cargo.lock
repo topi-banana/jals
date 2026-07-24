@@ -1210,12 +1210,8 @@ dependencies = [
 name = "jals-fmt"
 version = "0.1.0"
 dependencies = [
- "expect-test",
  "jals-config",
- "jals-exec",
  "jals-syntax",
- "proptest",
- "unicode-width",
 ]
 
 [[package]]
