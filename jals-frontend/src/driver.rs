@@ -16,7 +16,8 @@ pub struct Lowered {
     #[allow(dead_code)]
     diagnostics: Vec<FrontendDiagnostic>,
     /// True when the lowering was restored from cache and the frontend never ran.
-    #[allow(dead_code)]
+    // Read only by tests, so the field is dead only in non-test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) cached: bool,
 }
 

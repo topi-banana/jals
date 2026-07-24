@@ -35,8 +35,9 @@ pub struct BuiltinToolchain {
 pub(crate) enum BuiltinBackend {
     /// `None` while a compile is in flight; a reentrant compile on the same backend is a
     /// structured [`ToolchainError::Unsupported`] rather than a `BorrowMutError` panic.
-    // Constructed only via the test-only in-memory `BuiltinToolchain::new`.
-    #[allow(dead_code)]
+    // Constructed only via the test-only in-memory `BuiltinToolchain::new`; the prod compile path
+    // still matches it, so the variant stays, but it is dead only in non-test builds.
+    #[cfg_attr(not(test), allow(dead_code))]
     Memory(RefCell<Option<MemoryStorage>>),
     Native(jals_exec::Exec),
 }
