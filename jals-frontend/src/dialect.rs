@@ -68,7 +68,7 @@ pub struct DialectFrontend {
 }
 
 impl DialectFrontend {
-    pub const ID: &'static str = "jals-dialect";
+    const ID: &'static str = "jals-dialect";
 
     pub const fn new(flags: DialectFlags) -> Self {
         Self { flags }

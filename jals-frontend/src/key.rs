@@ -29,7 +29,7 @@ impl FrontendKey {
     ///
     /// The match is deliberately exhaustive with no `_` arm, so adding a level is a compile error
     /// here and its observation scope gets decided rather than defaulted.
-    pub fn observed_input(
+    pub(crate) fn observed_input(
         level: IrLevel,
         origin: Option<&IrFile>,
         all: &[IrFile],
@@ -41,7 +41,7 @@ impl FrontendKey {
     }
 
     /// Fold every input file in canonical order. `all` must already be sorted by path.
-    pub fn project(all: &[IrFile]) -> ContentDigest {
+    pub(crate) fn project(all: &[IrFile]) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"jals.frontend.observed.project\0");
         for entry in all {
             fold.bytes(entry.path.to_string().as_bytes())
@@ -51,7 +51,7 @@ impl FrontendKey {
     }
 
     /// Provenance for one file a frontend emitted.
-    pub fn emitted(
+    pub(crate) fn emitted(
         caps: &FrontendCaps,
         config: ContentDigest,
         observed: ContentDigest,
@@ -75,7 +75,11 @@ impl FrontendKey {
     /// on which files exist, so skipping the frontend entirely requires knowing the whole input
     /// set is unchanged. Per-file scoping still pays off below this, where identical emitted
     /// bytes dedupe across builds regardless of what else moved.
-    pub fn lowering(caps: &FrontendCaps, config: ContentDigest, all: &[IrFile]) -> ContentDigest {
+    pub(crate) fn lowering(
+        caps: &FrontendCaps,
+        config: ContentDigest,
+        all: &[IrFile],
+    ) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"jals.frontend.lowering\0");
         fold.version(PIPELINE_API_VERSION)
             .bytes(caps.id.as_bytes())
@@ -86,7 +90,7 @@ impl FrontendKey {
         fold.finish()
     }
 
-    pub fn artifact(provenance: ContentDigest, bytes: &[u8]) -> CacheKey {
+    pub(crate) fn artifact(provenance: ContentDigest, bytes: &[u8]) -> CacheKey {
         CacheKey::new(
             CacheNamespace::FrontendOutput,
             provenance,

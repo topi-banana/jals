@@ -65,7 +65,7 @@ impl BaseType {
     }
 
     /// The single descriptor character (`Int` → `'I'`).
-    pub const fn as_char(self) -> char {
+    pub(crate) const fn as_char(self) -> char {
         match self {
             Self::Byte => 'B',
             Self::Char => 'C',

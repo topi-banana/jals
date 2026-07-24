@@ -110,7 +110,7 @@ impl SkeletonGroup<'_> {
     }
 
     /// Render and publish one source artifact per top-level type under `namespace`, using `mode`.
-    pub async fn synthesize_with<C: CacheBackend>(
+    async fn synthesize_with<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         classes: &[ClassFile],
         mode: SkeletonMode,

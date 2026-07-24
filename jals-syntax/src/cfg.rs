@@ -166,7 +166,7 @@ impl CfgMap {
     const MAX_PREDICATE_DEPTH: usize = 64;
 
     /// Whether `range` lies inside a disabled host's span.
-    pub fn is_disabled(&self, range: TextRange) -> bool {
+    fn is_disabled(&self, range: TextRange) -> bool {
         self.disabled
             .iter()
             .any(|host| host.range.contains_range(range))
@@ -215,7 +215,8 @@ impl CfgMap {
 
     /// Whether the file has no attribute at all (nothing disabled, nothing to strip, no error) —
     /// consumers can skip their filtering entirely.
-    pub const fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    const fn is_empty(&self) -> bool {
         self.disabled.is_empty() && self.attr_spans.is_empty() && self.errors.is_empty()
     }
 

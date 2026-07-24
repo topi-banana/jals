@@ -39,8 +39,6 @@ pub use load::{
     CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree, SourceTreeExtraction,
     SourceTreeLimits,
 };
-#[cfg(feature = "archive")]
-pub use mappings::Mappings;
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
 #[cfg(feature = "archive")]

@@ -72,7 +72,7 @@ impl JavaType {
     }
 
     /// Render a `<...>` type-argument list, or `""` for none.
-    pub(crate) fn render_type_args(args: &[TypeArgument]) -> String {
+    fn render_type_args(args: &[TypeArgument]) -> String {
         if args.is_empty() {
             return String::new();
         }
@@ -81,7 +81,7 @@ impl JavaType {
     }
 
     /// Render one type argument (`?`, `T`, `? extends T`, `? super T`).
-    pub(crate) fn render_type_arg(arg: &TypeArgument) -> String {
+    fn render_type_arg(arg: &TypeArgument) -> String {
         match arg {
             TypeArgument::Any => "?".to_owned(),
             TypeArgument::Exact(t) => Self::render_type_sig(t),

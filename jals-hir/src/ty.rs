@@ -54,7 +54,7 @@ pub enum Primitive {
 
 impl Primitive {
     /// The Java keyword spelling.
-    pub const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
             Self::Byte => "byte",
@@ -68,13 +68,13 @@ impl Primitive {
     }
 
     /// Whether this is one of the numeric primitives (everything but `boolean`).
-    pub const fn is_numeric(self) -> bool {
+    const fn is_numeric(self) -> bool {
         !matches!(self, Self::Boolean)
     }
 
     /// The primitive whose Java keyword spelling is `keyword` (`"int"`), if any. The inverse of
     /// [`as_str`](Primitive::as_str), single-sourced from it so the spelling table lives in one place.
-    pub fn from_keyword(keyword: &str) -> Option<Self> {
+    pub(crate) fn from_keyword(keyword: &str) -> Option<Self> {
         const ALL: [Primitive; 8] = [
             Primitive::Boolean,
             Primitive::Byte,
@@ -91,7 +91,7 @@ impl Primitive {
     /// Widening primitive conversion (JLS §5.1.2): can a value of `self` widen to `target`
     /// without a cast? `boolean` widens to nothing. Reflexive pairs (`self == target`) are *not*
     /// widenings — the caller handles identity separately.
-    pub const fn widens_to(self, target: Self) -> bool {
+    const fn widens_to(self, target: Self) -> bool {
         use Primitive::{Byte, Char, Double, Float, Int, Long, Short};
         matches!(
             (self, target),
@@ -136,14 +136,14 @@ impl ClassTy {
     }
 
     /// The simple class name, common to both variants.
-    pub fn name(&self) -> &str {
+    fn name(&self) -> &str {
         match self {
             Self::Project { name, .. } | Self::External { name, .. } => name,
         }
     }
 
     /// The type arguments as written; empty for a raw or argument-free use.
-    pub fn args(&self) -> &[Ty] {
+    fn args(&self) -> &[Ty] {
         match self {
             Self::Project { args, .. } | Self::External { args, .. } => args,
         }
@@ -153,7 +153,7 @@ impl ClassTy {
 impl Ty {
     /// Whether this is the `String` class type (the only reference type the MVP recognises by
     /// name, for `+` string-concatenation).
-    pub fn is_string(&self) -> bool {
+    pub(crate) fn is_string(&self) -> bool {
         matches!(self, Self::Class(c) if c.name() == "String")
     }
 
@@ -332,7 +332,7 @@ impl Ty {
     /// does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged. The
     /// basis for binding a generic type's parameters to the arguments a use supplies.
     #[must_use]
-    pub fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Self>) -> Self {
+    pub(crate) fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Self>) -> Self {
         match self {
             Self::TypeVar { owner, name } => f(*owner, name).unwrap_or_else(|| self.clone()),
             Self::Array(elem) => Self::Array(Box::new(elem.substitute(f))),

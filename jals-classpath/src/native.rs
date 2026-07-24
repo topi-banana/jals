@@ -32,7 +32,7 @@ pub struct ReqwestFetcher {
 }
 
 impl ReqwestFetcher {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
             project_root: None,

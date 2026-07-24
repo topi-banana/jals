@@ -89,7 +89,8 @@ impl LintOutput {
     /// This is the rule half of [`LintOutput::lint_source`], split out so a caller that already
     /// holds a parse tree (e.g. the language server, which caches it per document) can lint without
     /// reparsing. Parser errors are *not* included — they belong to the parse, not the rules.
-    pub async fn lint_node(root: &SyntaxNode, config: &Config) -> Vec<Diagnostic> {
+    #[cfg(test)]
+    async fn lint_node(root: &SyntaxNode, config: &Config) -> Vec<Diagnostic> {
         Self::lint_node_with_index(root, config, None, None).await
     }
 

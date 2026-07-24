@@ -14,7 +14,7 @@ pub struct SyntaxError {
 
 impl SyntaxError {
     /// メッセージと範囲からエラーを作る。
-    pub fn new(message: impl Into<String>, range: TextRange) -> Self {
+    pub(crate) fn new(message: impl Into<String>, range: TextRange) -> Self {
         Self {
             message: message.into(),
             range,

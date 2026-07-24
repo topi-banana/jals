@@ -42,7 +42,7 @@ impl ProjectInputPlan {
     /// optional `sources` jar — classifying every locator through `classify` (hosts decide what
     /// resolves as a project file versus external content). A non-portable dependency name is
     /// diagnosed into `warnings` and skipped. Shared by the native lowering and the browser host.
-    pub fn add_jar_dependencies(
+    pub(crate) fn add_jar_dependencies(
         &mut self,
         manifest: &Manifest,
         mut classify: impl FnMut(&str) -> DependencyLocation,

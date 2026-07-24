@@ -22,13 +22,13 @@ impl ExternalLocator {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Whether `value` is a URL-shaped locator rather than a plain path — the one scheme set the
     /// host adapters share when deciding how a locator's bytes are obtained.
-    pub fn is_url(value: &str) -> bool {
+    pub(crate) fn is_url(value: &str) -> bool {
         ["http://", "https://", "file://"]
             .iter()
             .any(|scheme| value.starts_with(scheme))
@@ -37,7 +37,7 @@ impl ExternalLocator {
     /// Whether `value` is fetched over the network — the locators worth recovering from the
     /// cache's locator index instead of refetching. Local `file://` and plain-path locators are
     /// deliberately read fresh so edits to a local jar are always picked up.
-    pub(crate) fn is_remote(value: &str) -> bool {
+    fn is_remote(value: &str) -> bool {
         ["http://", "https://"]
             .iter()
             .any(|scheme| value.starts_with(scheme))
@@ -73,7 +73,7 @@ pub struct DependencySpec {
 pub struct ResolvedJar {
     pub name: Name,
     pub key: CacheKey,
-    pub recursive: bool,
+    pub(crate) recursive: bool,
 }
 
 /// Resolution continues after individual failures, collecting diagnostics in stable request order.
@@ -453,7 +453,7 @@ impl DependencyResolver {
         Self::cache_key_for_digest(namespace, kind, provenance, ContentDigest::of(bytes))
     }
 
-    pub(crate) fn cache_key_for_digest(
+    fn cache_key_for_digest(
         namespace: CacheNamespace,
         kind: &[u8],
         provenance: &[u8],

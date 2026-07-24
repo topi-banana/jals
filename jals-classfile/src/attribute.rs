@@ -134,9 +134,9 @@ pub enum AttributeBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeAttribute {
     /// Maximum operand-stack depth.
-    pub max_stack: u16,
+    max_stack: u16,
     /// Number of local-variable slots.
-    pub max_locals: u16,
+    max_locals: u16,
     /// The decoded bytecode instructions.
     pub code: Vec<Instruction>,
     /// The exception handlers covering this code.
@@ -149,13 +149,13 @@ pub struct CodeAttribute {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExceptionTableEntry {
     /// Inclusive start of the covered range (bytecode offset).
-    pub start_pc: u16,
+    start_pc: u16,
     /// Exclusive end of the covered range.
-    pub end_pc: u16,
+    end_pc: u16,
     /// Offset of the handler.
-    pub handler_pc: u16,
+    handler_pc: u16,
     /// `Class` index of the caught type, or 0 for a `finally` (`any`) handler.
-    pub catch_type: u16,
+    catch_type: u16,
 }
 
 /// One entry of an `InnerClasses` attribute.
@@ -164,20 +164,20 @@ pub struct InnerClassEntry {
     /// `Class` index of the inner class.
     pub inner_class_info_index: u16,
     /// `Class` index of the enclosing class, or 0.
-    pub outer_class_info_index: u16,
+    outer_class_info_index: u16,
     /// `Utf8` index of the simple name, or 0 for an anonymous class.
     pub inner_name_index: u16,
     /// The inner class's access flags.
-    pub inner_class_access_flags: u16,
+    inner_class_access_flags: u16,
 }
 
 /// One entry of a `LineNumberTable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineNumberEntry {
     /// Bytecode offset where the line begins.
-    pub start_pc: u16,
+    start_pc: u16,
     /// The source line number.
-    pub line_number: u16,
+    line_number: u16,
 }
 
 /// One entry of a `LocalVariableTable`.
@@ -186,7 +186,7 @@ pub struct LocalVariableEntry {
     /// Start of the variable's live range.
     pub start_pc: u16,
     /// Length of the live range.
-    pub length: u16,
+    length: u16,
     /// `Utf8` index of the variable's name.
     pub name_index: u16,
     /// `Utf8` index of the variable's field descriptor.
@@ -199,15 +199,15 @@ pub struct LocalVariableEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalVariableTypeEntry {
     /// Start of the variable's live range.
-    pub start_pc: u16,
+    start_pc: u16,
     /// Length of the live range.
-    pub length: u16,
+    length: u16,
     /// `Utf8` index of the variable's name.
-    pub name_index: u16,
+    name_index: u16,
     /// `Utf8` index of the variable's generic signature.
     pub signature_index: u16,
     /// Local-variable slot index.
-    pub index: u16,
+    index: u16,
 }
 
 /// One entry of a `BootstrapMethods` attribute.
@@ -225,7 +225,7 @@ pub struct MethodParameterEntry {
     /// `Utf8` index of the parameter name, or 0 if unnamed.
     pub name_index: u16,
     /// The parameter's access flags (`final`, `synthetic`, `mandated`).
-    pub access_flags: u16,
+    access_flags: u16,
 }
 
 /// One component of a `Record` attribute.
@@ -243,63 +243,66 @@ pub struct RecordComponentInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleAttribute {
     /// `Module` index of this module's name.
-    pub module_name_index: u16,
+    module_name_index: u16,
     /// The module's flags.
-    pub module_flags: u16,
+    module_flags: u16,
     /// `Utf8` index of the module version, or 0.
-    pub module_version_index: u16,
+    module_version_index: u16,
     /// `requires` directives.
-    pub requires: Vec<ModuleRequire>,
+    requires: Vec<ModuleRequire>,
     /// `exports` directives.
-    pub exports: Vec<ModuleExport>,
+    exports: Vec<ModuleExport>,
     /// `opens` directives.
-    pub opens: Vec<ModuleOpen>,
+    opens: Vec<ModuleOpen>,
     /// `Class` indices of the services this module uses.
-    pub uses_index: Vec<u16>,
+    uses_index: Vec<u16>,
     /// `provides` directives.
-    pub provides: Vec<ModuleProvide>,
+    provides: Vec<ModuleProvide>,
 }
 
 /// A `requires` directive of a [`ModuleAttribute`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)] // Field names mirror the JVM class-file `requires_*` spec fields.
 pub struct ModuleRequire {
     /// `Module` index of the required module.
-    pub requires_index: u16,
+    requires_index: u16,
     /// The directive's flags.
-    pub requires_flags: u16,
+    requires_flags: u16,
     /// `Utf8` index of the required version, or 0.
-    pub requires_version_index: u16,
+    requires_version_index: u16,
 }
 
 /// An `exports` directive of a [`ModuleAttribute`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)] // Field names mirror the JVM class-file `exports_*` spec fields.
 pub struct ModuleExport {
     /// `Package` index of the exported package.
-    pub exports_index: u16,
+    exports_index: u16,
     /// The directive's flags.
-    pub exports_flags: u16,
+    exports_flags: u16,
     /// `Module` indices the package is exported to (empty = exported to all).
-    pub exports_to_index: Vec<u16>,
+    exports_to_index: Vec<u16>,
 }
 
 /// An `opens` directive of a [`ModuleAttribute`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)] // Field names mirror the JVM class-file `opens_*` spec fields.
 pub struct ModuleOpen {
     /// `Package` index of the opened package.
-    pub opens_index: u16,
+    opens_index: u16,
     /// The directive's flags.
-    pub opens_flags: u16,
+    opens_flags: u16,
     /// `Module` indices the package is opened to (empty = opened to all).
-    pub opens_to_index: Vec<u16>,
+    opens_to_index: Vec<u16>,
 }
 
 /// A `provides` directive of a [`ModuleAttribute`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleProvide {
     /// `Class` index of the provided service interface.
-    pub provides_index: u16,
+    provides_index: u16,
     /// `Class` indices of the implementations.
-    pub provides_with_index: Vec<u16>,
+    provides_with_index: Vec<u16>,
 }
 
 impl Attribute {

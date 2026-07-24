@@ -37,7 +37,7 @@ const PARSER_FUEL: u32 = 256;
 pub(crate) struct Parser<'a> {
     input: &'a Input<'a>,
     pos: usize,
-    pub(crate) events: Vec<Event>,
+    events: Vec<Event>,
     fuel: Cell<u32>,
     /// Amortized cooperative yield point, ticked by the grammar's hub functions and
     /// unbounded token loops.
@@ -56,24 +56,24 @@ impl<'a> Parser<'a> {
     }
 
     /// Open a new node.
-    pub(crate) fn start(&mut self) -> Marker {
+    fn start(&mut self) -> Marker {
         let pos = self.events.len();
         self.events.push(Event::tombstone());
         Marker::new(pos)
     }
 
-    pub(crate) fn push_event(&mut self, e: Event) {
+    fn push_event(&mut self, e: Event) {
         self.events.push(e);
     }
 
     /// Current significant token position. Used for the loop's progress guarantee (if the value
     /// does not change, the token was not consumed).
-    pub(crate) const fn pos(&self) -> usize {
+    const fn pos(&self) -> usize {
         self.pos
     }
 
     /// Kind of the significant token `n` positions ahead.
-    pub(crate) fn nth(&self, n: usize) -> SyntaxKind {
+    fn nth(&self, n: usize) -> SyntaxKind {
         assert_ne!(
             self.fuel.get(),
             0,
@@ -84,49 +84,49 @@ impl<'a> Parser<'a> {
     }
 
     /// Kind of the current significant token.
-    pub(crate) fn current(&self) -> SyntaxKind {
+    fn current(&self) -> SyntaxKind {
         self.nth(0)
     }
 
-    pub(crate) fn at(&self, kind: SyntaxKind) -> bool {
+    fn at(&self, kind: SyntaxKind) -> bool {
         self.nth(0) == kind
     }
 
-    pub(crate) fn nth_at(&self, n: usize, kind: SyntaxKind) -> bool {
+    fn nth_at(&self, n: usize, kind: SyntaxKind) -> bool {
         self.nth(n) == kind
     }
 
-    pub(crate) fn at_ts(&self, set: TokenSet) -> bool {
+    fn at_ts(&self, set: TokenSet) -> bool {
         set.contains(self.nth(0))
     }
 
-    pub(crate) fn at_eof(&self) -> bool {
+    fn at_eof(&self) -> bool {
         self.at(SyntaxKind::EOF)
     }
 
     /// Whether the current token is `IDENT` and its text matches `kw` (contextual-keyword check).
-    pub(crate) fn at_contextual_kw(&self, kw: &str) -> bool {
+    fn at_contextual_kw(&self, kw: &str) -> bool {
         self.at(SyntaxKind::IDENT) && self.current_text() == kw
     }
 
     /// Whether the significant token `n` positions ahead is adjacent to the next significant token
     /// (no trivia in between). Used for fusing `>>` and similar.
-    pub(crate) fn nth_adjacent(&self, n: usize) -> bool {
+    fn nth_adjacent(&self, n: usize) -> bool {
         self.input.adjacent(self.pos + n)
     }
 
     /// Text of the current significant token (for contextual-keyword checks).
-    pub(crate) fn current_text(&self) -> &'a str {
+    fn current_text(&self) -> &'a str {
         self.input.text(self.pos)
     }
 
-    pub(crate) fn nth_text(&self, n: usize) -> &'a str {
+    fn nth_text(&self, n: usize) -> &'a str {
         self.input.text(self.pos + n)
     }
 
     /// Fuel-free lookahead (kind `n` positions ahead). For bounded scans in lambda / cast only.
     /// Cannot loop forever because it always stops at input length (out of range yields [`SyntaxKind::EOF`]).
-    pub(crate) fn nth_nofuel(&self, n: usize) -> SyntaxKind {
+    fn nth_nofuel(&self, n: usize) -> SyntaxKind {
         self.input.kind(self.pos + n)
     }
 
@@ -137,7 +137,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Consume the current token (no-op at EOF).
-    pub(crate) fn bump_any(&mut self) {
+    fn bump_any(&mut self) {
         if self.at_eof() {
             return;
         }
@@ -145,7 +145,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Assert the current token is `kind` and consume it.
-    pub(crate) fn bump(&mut self, kind: SyntaxKind) {
+    fn bump(&mut self, kind: SyntaxKind) {
         assert!(
             self.at(kind),
             "tried to bump {kind:?} but current was {:?}",
@@ -155,12 +155,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Reclassify the current token as `kind` and consume it (contextual-keyword promotion).
-    pub(crate) fn bump_remap(&mut self, kind: SyntaxKind) {
+    fn bump_remap(&mut self, kind: SyntaxKind) {
         self.do_bump(Some(kind));
     }
 
     /// If the current token is `kind`, consume it and return `true`.
-    pub(crate) fn eat(&mut self, kind: SyntaxKind) -> bool {
+    fn eat(&mut self, kind: SyntaxKind) -> bool {
         if self.at(kind) {
             self.do_bump(None);
             true
@@ -170,13 +170,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Record an error (does not consume a token).
-    pub(crate) fn error(&mut self, msg: impl Into<String>) {
+    fn error(&mut self, msg: impl Into<String>) {
         self.events.push(Event::Error { msg: msg.into() });
     }
 
     /// Expect `kind`. If present, consume it and return `true`; otherwise record an error and
     /// return `false` (does not consume).
-    pub(crate) fn expect(&mut self, kind: SyntaxKind) -> bool {
+    fn expect(&mut self, kind: SyntaxKind) -> bool {
         if self.eat(kind) {
             true
         } else {
@@ -186,7 +186,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Wrap the current token in an `ERROR` node and consume it (guarantees progress while recovering).
-    pub(crate) fn err_and_bump(&mut self, msg: impl Into<String>) {
+    fn err_and_bump(&mut self, msg: impl Into<String>) {
         let m = self.start();
         self.error(msg);
         self.bump_any();
@@ -195,7 +195,7 @@ impl<'a> Parser<'a> {
 
     /// Record an error and wrap one token in `ERROR` unless it is in the recovery set `recovery`.
     /// Does not consume when the token is in the recovery set (i.e., the caller can handle it) or at EOF.
-    pub(crate) fn err_recover(&mut self, msg: impl Into<String>, recovery: TokenSet) {
+    fn err_recover(&mut self, msg: impl Into<String>, recovery: TokenSet) {
         if self.at_eof() || self.at_ts(recovery) {
             self.error(msg);
             return;
@@ -236,10 +236,5 @@ impl Parse {
     /// The list of syntax errors.
     pub fn errors(&self) -> &[SyntaxError] {
         &self.errors
-    }
-
-    /// A reference to the green tree.
-    pub const fn green(&self) -> &GreenNode {
-        &self.green
     }
 }

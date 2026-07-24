@@ -44,7 +44,7 @@ struct ClassMembers {
 impl Mappings {
     /// Parse a Mojang mapping file. Comments (`#`) and blank lines are skipped; anything else that
     /// does not match the grammar is an error naming the 1-based line.
-    pub fn parse(text: &str) -> Result<Self, String> {
+    pub(crate) fn parse(text: &str) -> Result<Self, String> {
         // Pass 1: the whole class map. A member's descriptor translation can reference a class
         // declared anywhere in the file, so members only parse after every class is known.
         let mut lines = Vec::new();
@@ -248,20 +248,13 @@ impl Mappings {
     }
 
     /// The official internal name for an obfuscated internal name, when the class map covers it.
-    pub fn remap_class(&self, obf_internal: &str) -> Option<&str> {
+    pub(crate) fn remap_class(&self, obf_internal: &str) -> Option<&str> {
         self.obf_to_official.get(obf_internal).map(String::as_str)
-    }
-
-    /// The obfuscated internal name for an official internal name, when the class map covers it.
-    pub fn obfuscate_class(&self, official_internal: &str) -> Option<&str> {
-        self.official_to_obf
-            .get(official_internal)
-            .map(String::as_str)
     }
 
     /// The official name of a method declared by `owner_official` (internal form), looked up by
     /// its obfuscated name and descriptor.
-    pub fn remap_method(
+    pub(crate) fn remap_method(
         &self,
         owner_official: &str,
         obf_name: &str,
@@ -276,7 +269,7 @@ impl Mappings {
 
     /// The official name of a field declared by `owner_official` (internal form), looked up by
     /// its obfuscated name and descriptor.
-    pub fn remap_field(
+    pub(crate) fn remap_field(
         &self,
         owner_official: &str,
         obf_name: &str,
@@ -291,7 +284,11 @@ impl Mappings {
 
     /// The official name of a method when it is the only method carrying `obf_name` in the owner
     /// (used for annotation elements, which carry no descriptor).
-    pub fn remap_method_by_name(&self, owner_official: &str, obf_name: &str) -> Option<&str> {
+    pub(crate) fn remap_method_by_name(
+        &self,
+        owner_official: &str,
+        obf_name: &str,
+    ) -> Option<&str> {
         self.members
             .get(owner_official)?
             .methods_by_name
@@ -301,7 +298,7 @@ impl Mappings {
 
     /// The official name of a field when it is the only field carrying `obf_name` in the owner
     /// (used for enum constants in annotations, which carry no descriptor).
-    pub fn remap_field_by_name(&self, owner_official: &str, obf_name: &str) -> Option<&str> {
+    pub(crate) fn remap_field_by_name(&self, owner_official: &str, obf_name: &str) -> Option<&str> {
         self.members
             .get(owner_official)?
             .fields_by_name

@@ -31,7 +31,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     /// Creates a lexer over the given input.
-    pub const fn new(src: &'a str) -> Self {
+    const fn new(src: &'a str) -> Self {
         Lexer { src, pos: 0 }
     }
 

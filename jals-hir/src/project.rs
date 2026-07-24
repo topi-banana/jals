@@ -57,7 +57,7 @@ pub struct Fqn(String);
 impl Fqn {
     /// The simple (unqualified) name: the last dotted segment (`a.b.Outer.Inner` → `Inner`). Correct
     /// because every level — packages and nested types alike — is dotted.
-    pub fn simple_name(&self) -> &str {
+    pub(crate) fn simple_name(&self) -> &str {
         Self::simple_name_of(&self.0)
     }
 
@@ -146,7 +146,7 @@ pub struct Item {
     /// Whether any `extends` / `implements` clause names a type *outside* the indexed project (a JDK
     /// or third-party class). When true, this type may inherit members — including method overloads —
     /// that the index cannot see, so a "no member / no overload" conclusion is not trustworthy.
-    pub has_external_supertype: bool,
+    has_external_supertype: bool,
     /// A real-source go-to-definition override, for a [`Classpath`](ItemOrigin::Classpath) type whose
     /// library *sources* jar is available: the `(file, name range)` of the matching `.java`
     /// declaration. `None` for a project type (its own [`file`](Item::file) / [`name_range`](Item::name_range)
@@ -206,16 +206,16 @@ pub struct Member {
     /// A method's formal parameters, in order (each a name plus a type captured like
     /// [`ty`](Member::ty), resolved in the declaring file's context). Empty for non-methods. Used to
     /// check call arguments and to render signature help.
-    pub params: Vec<Param>,
+    pub(crate) params: Vec<Param>,
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
-    pub varargs: bool,
+    pub(crate) varargs: bool,
     /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
     /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
     /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
     /// ([`crate::unreported_exceptions`]) to tell whether a called method propagates a checked
     /// exception the caller must in turn declare or catch.
-    pub throws: Vec<MemberType>,
+    pub(crate) throws: Vec<MemberType>,
     /// A real-source go-to-definition override for a classpath member whose library *sources* jar is
     /// available — the `(file, name range)` of the matching `.java` declaration. `None` for a project
     /// member and for a classpath member with no source. Kept separate from [`file`](Member::file),
@@ -228,9 +228,9 @@ pub struct Member {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     /// The parameter's declared name, or `None` for an unnamed (`_`) or unreadable parameter.
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// The parameter's declared type.
-    pub ty: MemberType,
+    pub(crate) ty: MemberType,
 }
 
 /// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
@@ -1132,7 +1132,7 @@ impl ProjectIndex {
     /// inheritance walk), if any. The single-level building block of the inheritance-aware
     /// [`resolve_member`](Self::resolve_member); used by generic member substitution, which threads
     /// type arguments down the chain one level at a time.
-    pub fn declared_member(
+    pub(crate) fn declared_member(
         &self,
         owner: ItemId,
         name: &str,
@@ -1178,7 +1178,7 @@ impl ProjectIndex {
     /// project-internal supertypes), nearest-first. Unlike [`resolve_member`](Self::resolve_member),
     /// which returns the single nearest match, this returns *all* candidates — the overload set a
     /// call's arguments must be checked against.
-    pub fn resolve_members_all(
+    pub(crate) fn resolve_members_all(
         &self,
         owner: ItemId,
         name: &str,
