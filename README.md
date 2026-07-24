@@ -100,6 +100,24 @@ binary from the GitHub release assets — no compilation needed:
 cargo binstall --git https://github.com/topi-banana/jals jals-cli
 ```
 
+### npm / bun
+
+Install the `jals` command straight from the Git repository — no Rust toolchain needed. The launcher
+downloads the prebuilt binary that matches your platform from the GitHub release assets (verifying its
+SHA-256) on first run:
+
+```sh
+bun install -g git+https://github.com/topi-banana/jals.git
+# or, with npm:
+npm install -g git+https://github.com/topi-banana/jals.git
+```
+
+This resolves the release tagged `v<version>`, where `<version>` is the `package.json` version, so a
+matching release must be published. Prebuilt binaries are available for Linux, macOS, and Windows on
+`x64`/`arm64`; on any other platform the launcher points you at `cargo install`. Set
+`JALS_INSTALL_BASE_URL` to fetch the assets from a mirror. The launcher runs on Node.js — bun
+ships a `node` shim, so a bun-only setup works out of the box.
+
 ### From source (git)
 
 Requires a Rust toolchain with the **2024 edition** (Rust 1.85 or newer; CI builds on

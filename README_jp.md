@@ -100,6 +100,24 @@ jals/
 cargo binstall --git https://github.com/topi-banana/jals jals-cli
 ```
 
+### npm / bun
+
+Git リポジトリから直接 `jals` コマンドをインストールできます（Rust ツールチェイン不要）。ランチャーが
+初回実行時に、プラットフォームに合ったプリビルドバイナリを GitHub リリースの資産から
+ダウンロードします（SHA-256 を検証）:
+
+```sh
+bun install -g git+https://github.com/topi-banana/jals.git
+# npm の場合:
+npm install -g git+https://github.com/topi-banana/jals.git
+```
+
+`package.json` の `version` に対応する `v<version>` タグのリリースを解決するため、対応するリリースが
+公開されている必要があります。プリビルドバイナリは Linux・macOS・Windows の `x64`/`arm64` 向けに
+用意されており、それ以外のプラットフォームではランチャーが `cargo install` を案内します。
+`JALS_INSTALL_BASE_URL` を設定するとミラーから資産を取得できます。ランチャーは Node.js 上で動作しますが、
+bun は `node` shim を同梱するため、bun のみの環境でもそのまま動きます。
+
 ### ソースから（git）
 
 **2024 edition** に対応した Rust ツールチェイン（Rust 1.85 以降、CI は stable でビルド）が必要です。
