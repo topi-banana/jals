@@ -191,7 +191,7 @@ ij_java_class_brace_style = some_future_style
 indent_size = 3
 ";
     let config = IntellijEditorConfig::import(editorconfig).unwrap();
-    // The unparseable enum values fell back to defaults…
+    // The unparsable enum values fell back to defaults…
     assert_eq!(config.indent_style, IndentStyle::Space);
     assert_eq!(config.brace_style, BraceStyle::SameLine);
     // …while the well-formed numeric value still applied.

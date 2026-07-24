@@ -258,10 +258,10 @@ impl IntellijSchemeReader {
 
     /// Rebuild an `ij_java_imports_layout` mini-list from the parsed `IMPORT_LAYOUT_TABLE` entries
     /// so the shared editorconfig model parses it identically. A `static` row is prefixed with `$`,
-    /// a blank row becomes `|`, and the two catch-alls (empty package name) become `$*` / `*`. Any
-    /// *named* package gets a `.**` suffix unconditionally: jals import groups are subpackage-prefix
-    /// matches, so the IntelliJ `withSubpackages` flag (not modeled) has no jals counterpart to
-    /// distinguish.
+    /// a blank row becomes `|`, and the two catch-all rows (empty package name) become `$*` / `*`.
+    /// Any *named* package gets a `.**` suffix unconditionally: jals import groups are
+    /// subpackage-prefix matches, so the IntelliJ `withSubpackages` flag (not modeled) has no jals
+    /// counterpart to distinguish.
     fn imports_layout(entries: &[ImportEntry]) -> String {
         entries
             .iter()

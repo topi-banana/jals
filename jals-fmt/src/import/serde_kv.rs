@@ -13,7 +13,7 @@
 //! - enum fields deserialize straight from their native token (`end_of_line`, `split_into_lines`,
 //!   …) via `#[serde(rename_all = …)]` / `#[serde(rename = …)]`;
 //! - numeric / bitmask / bool fields take a `#[serde(deserialize_with = …)]` coercer from the
-//!   [`Kv`] helpers below, which parse the string and yield `None` on anything unparseable (native
+//!   [`Kv`] helpers below, which parse the string and yield `None` on anything unparsable (native
 //!   configs carry stray / tool-specific values we treat as "unset" rather than a hard error).
 
 // Native token examples (`split_into_lines`, …) appear in prose without being Rust items.
@@ -50,7 +50,7 @@ impl Kv {
     }
 
     /// Coerce a stringly-typed number into the field's own type, yielding `None` on anything
-    /// unparseable. Serves both the plain counts (`tabulation.size`, `indent_size`, …) and
+    /// unparsable. Serves both the plain counts (`tabulation.size`, `indent_size`, …) and
     /// Eclipse's `alignment_for_*` bitmasks, a decimal integer whose *bits* encode the wrap policy
     /// (see [`super::eclipse::Alignment`]).
     pub(crate) fn opt_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
