@@ -21,6 +21,7 @@ use core::cell::OnceCell;
 use jals_config::Severity;
 use jals_config::lint::Config;
 use jals_hir::{FileId, ProjectIndex, Resolved};
+use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
 
 use rules::{Checker, FeatureGate, Finding};
@@ -46,7 +47,7 @@ impl LintOutput {
     /// holding a project-wide [`ProjectIndex`] (the CLI over a multi-file run, the language server)
     /// uses [`LintOutput::lint_parse_with_index`] instead to also catch cross-file type mismatches.
     pub async fn lint_source(src: &str, config: &Config) -> Self {
-        Self::lint_parse_with_index(&jals_syntax::Parse::parse(src).await, config, None).await
+        Self::lint_parse_with_index(&jals_syntax::Parse::parse(src).await, config, None, None).await
     }
 
     /// Lint an already-parsed `parse`, optionally resolving reference types against a project
@@ -58,12 +59,18 @@ impl LintOutput {
     /// [`LintOutput::lint_source`]; with `Some`, the `type-mismatch` rule additionally catches
     /// project-internal subtyping mismatches and cross-file call-argument errors. Name resolution
     /// is computed once and shared across the resolution-based rules.
+    ///
+    /// `cfg`, when present, is the file's `#[cfg(...)]` evaluation (computed over the same text
+    /// as `parse` by a host that has the `attributes` dialect feature on): name resolution skips
+    /// every disabled host and any finding inside a disabled range is dropped, so `cfg`-false
+    /// code is not linted — the analysis-side mirror of the compile frontend blanking it.
     pub async fn lint_parse_with_index(
         parse: &Parse,
         config: &Config,
         index: Option<IndexCtx<'_>>,
+        cfg: Option<&CfgMap>,
     ) -> Self {
-        let diagnostics = Self::lint_node_with_index(&parse.syntax(), config, index).await;
+        let diagnostics = Self::lint_node_with_index(&parse.syntax(), config, index, cfg).await;
         let parse_errors = parse
             .errors()
             .iter()
@@ -83,7 +90,7 @@ impl LintOutput {
     /// holds a parse tree (e.g. the language server, which caches it per document) can lint without
     /// reparsing. Parser errors are *not* included — they belong to the parse, not the rules.
     pub async fn lint_node(root: &SyntaxNode, config: &Config) -> Vec<Diagnostic> {
-        Self::lint_node_with_index(root, config, None).await
+        Self::lint_node_with_index(root, config, None, None).await
     }
 
     /// The rule engine, shared by [`LintOutput::lint_node`] (with `index` `None`) and
@@ -93,10 +100,18 @@ impl LintOutput {
     /// so a configuration that enables only syntactic rules (or disables the resolution-based ones)
     /// never pays for it, and one that enables several resolves just once. The `index`, when
     /// present, is threaded only into [`Checker::Indexed`] rules.
+    ///
+    /// The `cfg` map applies twice: resolution skips disabled hosts (so resolution-based rules
+    /// never see a disabled definition), and a post-pass drops any finding whose range lands
+    /// inside a disabled host (covering the syntactic rules, which walk the raw CST). Note the
+    /// `attribute` gate rule and a non-empty `cfg` never coexist: a host produces a non-empty map
+    /// only when the `attributes` dialect feature is on, and exactly then `config.features`
+    /// permits the feature and the gate is silent.
     async fn lint_node_with_index(
         root: &SyntaxNode,
         config: &Config,
         index: Option<IndexCtx<'_>>,
+        cfg: Option<&CfgMap>,
     ) -> Vec<Diagnostic> {
         let resolved = OnceCell::new();
         let mut diagnostics = Vec::new();
@@ -108,10 +123,10 @@ impl LintOutput {
             let findings = match rule.check {
                 Checker::Syntactic(check) => check(root).await,
                 Checker::Resolved(check) => {
-                    check(root, Self::resolved_once(&resolved, root).await).await
+                    check(root, Self::resolved_once(&resolved, root, cfg).await).await
                 }
                 Checker::Indexed(check) => {
-                    check(root, Self::resolved_once(&resolved, root).await, index).await
+                    check(root, Self::resolved_once(&resolved, root, cfg).await, index).await
                 }
                 // Run a feature-gated rule's detector only when the project's set does not permit
                 // its guarded feature (`FeatureSet::permits` owns the empty-set exemption),
@@ -136,6 +151,25 @@ impl LintOutput {
                 diagnostics.push(Diagnostic::new(rule.name, severity, finding));
             }
         }
+        // Nothing inside a `cfg`-disabled host is reported: the code will not be compiled, so
+        // findings there are noise. One geometric pass covers every rule at once.
+        if let Some(cfg) = cfg {
+            diagnostics.retain(|d| !cfg.is_disabled_span(d.range.start, d.range.end));
+            // The structural attribute errors — the same set the compile frontend rejects a
+            // build with — surface here under the fixed `cfg` rule, so every consumer (the CLI,
+            // the editor) reports them at analysis time. Deliberately outside the per-rule
+            // severity gate: a build-blocking error is not a configurable lint.
+            for error in cfg.errors() {
+                diagnostics.push(Diagnostic {
+                    rule: "cfg",
+                    severity: Severity::Error,
+                    message: error.kind.message(),
+                    range: usize::from(error.range.start())..usize::from(error.range.end()),
+                    unnecessary: false,
+                    unnecessary_range: None,
+                });
+            }
+        }
         diagnostics.sort_by_key(|d| d.range.start);
         diagnostics
     }
@@ -143,9 +177,16 @@ impl LintOutput {
     /// The shared file-local name resolution, computed at most once per lint. The async-once
     /// shape (compute, then `get_or_init` with the ready value) is single-threaded, so at worst a
     /// re-entrant caller would compute twice — benign, since resolution is pure.
-    async fn resolved_once<'c>(cell: &'c OnceCell<Resolved>, root: &SyntaxNode) -> &'c Resolved {
+    async fn resolved_once<'c>(
+        cell: &'c OnceCell<Resolved>,
+        root: &SyntaxNode,
+        cfg: Option<&CfgMap>,
+    ) -> &'c Resolved {
         if cell.get().is_none() {
-            let computed = Resolved::resolve_node(root).await;
+            let computed = match cfg {
+                Some(cfg) => Resolved::resolve_node_with_cfg(root, cfg).await,
+                None => Resolved::resolve_node(root).await,
+            };
             let _ = cell.set(computed);
         }
         cell.get().expect("the cell was just filled")
@@ -190,7 +231,8 @@ mod tests {
         let src = "import java.util.*;\nclass C { int x = 1.0; }\n";
         let cfg = Config::default();
         let parse = block_on_inline(jals_syntax::Parse::parse(src));
-        let with_none = block_on_inline(LintOutput::lint_parse_with_index(&parse, &cfg, None));
+        let with_none =
+            block_on_inline(LintOutput::lint_parse_with_index(&parse, &cfg, None, None));
         let file_local = block_on_inline(LintOutput::lint_source(src, &cfg));
         assert_eq!(with_none.diagnostics, file_local.diagnostics);
         assert_eq!(with_none.parse_errors, file_local.parse_errors);
@@ -221,6 +263,7 @@ mod tests {
             &parse,
             &cfg,
             Some((&index, jals_hir::FileId(0))),
+            None,
         ));
         assert!(
             out.diagnostics.iter().any(|d| d.rule == TYPE_MISMATCH_RULE
@@ -288,6 +331,7 @@ mod tests {
             &parse,
             &cfg,
             Some((&index, jals_hir::FileId(0))),
+            None,
         ));
         assert!(
             out.diagnostics

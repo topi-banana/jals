@@ -510,6 +510,7 @@ mod tests {
             None,
             None,
             &jals_config::lint::Config::default(),
+            None,
         ))
         .into_iter()
         .map(|d| LspHost.diagnostic(&document, d))

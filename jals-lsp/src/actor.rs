@@ -134,6 +134,10 @@ pub(crate) enum Cmd {
         positions: Vec<Position>,
         reply: Reply<Option<Vec<SelectionRange>>>,
     },
+    /// The client's build-feature selection changed (`initialize` options or a
+    /// `workspace/didChangeConfiguration`): store it and reassemble every open workspace under
+    /// the new selection when it differs.
+    SetFeatureSelection(FeatureSelection),
     // -- Actor-internal --
     /// A spawned workspace assembly finished (see [`Actor::ensure_workspace_for`]): the parts to
     /// build the project's [`ProjectWorkspace`] from, or the error that makes it fall back to a
@@ -145,6 +149,50 @@ pub(crate) enum Cmd {
     },
 }
 
+/// The client's build-feature selection — the LSP analogue of `--features` /
+/// `--all-features` / `--no-default-features` on `jals build`. Read from
+/// `initializationOptions` and `workspace/didChangeConfiguration` settings (under a `jals` key:
+/// `{"jals": {"features": [...], "allFeatures": bool, "noDefaultFeatures": bool}}`, or the same
+/// keys at the top level). The default (nothing selected) resolves the manifest's own `default`
+/// list — the same selection a plain `jals build` uses.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FeatureSelection {
+    features: Vec<String>,
+    all_features: bool,
+    no_default_features: bool,
+}
+
+impl FeatureSelection {
+    /// Parse a selection out of client-provided JSON. Absent or malformed keys fall back to the
+    /// default — a client that sends unrelated options simply keeps the manifest's `default`
+    /// selection.
+    pub(crate) fn from_json(value: &serde_json::Value) -> Self {
+        let scope = value.get("jals").unwrap_or(value);
+        let features = scope
+            .get("features")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let flag = |key: &str| {
+            scope
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        Self {
+            features,
+            all_features: flag("allFeatures"),
+            no_default_features: flag("noDefaultFeatures"),
+        }
+    }
+}
+
 /// Everything a spawned assembly task produced for one project: the opened aggregate plus the
 /// resolved analysis/navigation inputs, ready for [`ProjectWorkspace::load_storage`].
 pub(crate) struct AssembledWorkspace {
@@ -153,6 +201,10 @@ pub(crate) struct AssembledWorkspace {
     project_sources: Vec<FileKey>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
     feature_set: FeatureSet,
+    /// The root's resolved build features under the client's [`FeatureSelection`] — what each
+    /// project file's `#[cfg(feature = "…")]` evaluates against when the `attributes` dialect
+    /// is on.
+    build_features: BTreeSet<String>,
     library_sources: Vec<FileKey>,
     source_dep_sources: Vec<FileKey>,
     materialized: BTreeMap<FileKey, PathBuf>,
@@ -438,6 +490,9 @@ pub(crate) struct Actor {
     /// Monotonic identity for workspace assembly tasks. Completions only apply to the generation
     /// currently recorded by their project slot.
     workspace_assembly_generation: u64,
+    /// The client's build-feature selection (`initialize` options / configuration), fed into
+    /// every workspace assembly's `resolve_build_features`.
+    feature_selection: FeatureSelection,
 }
 
 impl Actor {
@@ -487,6 +542,7 @@ impl Actor {
             semantic_tokens_cache: HashMap::new(),
             semantic_tokens_result_id: 0,
             workspace_assembly_generation: 0,
+            feature_selection: FeatureSelection::default(),
         }
     }
 
@@ -558,6 +614,9 @@ impl Actor {
             Cmd::DidClose(params) => Self::guard(async { self.did_close(params) }).await,
             Cmd::DidChangeWatchedFiles(params) => {
                 Self::guard(self.watched_files_changed(&params)).await;
+            }
+            Cmd::SetFeatureSelection(selection) => {
+                Self::guard(async { self.set_feature_selection(selection) }).await;
             }
             Cmd::WorkspaceReady {
                 root,
@@ -937,6 +996,7 @@ impl Actor {
     fn spawn_workspace_assembly(&self, root: PathBuf, generation: u64) {
         let exec = self.exec.clone();
         let commands = self.commands.clone();
+        let selection = self.feature_selection.clone();
         let blocked_files: Vec<_> = self
             .store
             .uris()
@@ -960,6 +1020,7 @@ impl Actor {
                             &root,
                             exec,
                             &blocked_files,
+                            &selection,
                         ));
                     futures::FutureExt::catch_unwind(assemble)
                         .await
@@ -999,6 +1060,25 @@ impl Actor {
                 assembled: assembled.map(Box::new).map_err(Box::new),
             });
         }));
+    }
+
+    /// Store a new build-feature selection and reassemble every open workspace under it: the
+    /// resolved features feed each project's dependency graph *and* its `#[cfg(...)]` analysis,
+    /// so a change re-runs the same path a watched `jals.toml` edit does. A selection equal to
+    /// the current one is a no-op, so clients may push their configuration unconditionally.
+    fn set_feature_selection(&mut self, selection: FeatureSelection) {
+        if self.feature_selection == selection {
+            return;
+        }
+        self.feature_selection = selection;
+        let roots: Vec<PathBuf> = self
+            .workspaces
+            .iter()
+            .map(|slot| slot.project_root().to_path_buf())
+            .collect();
+        for root in roots {
+            self.request_workspace_reassembly(&root);
+        }
     }
 
     /// Queue a replacement assembly for one project. Repeated changes while one run is active are
@@ -1103,6 +1183,7 @@ impl Actor {
             project_sources,
             classpath_classes,
             feature_set,
+            build_features,
             library_sources,
             source_dep_sources,
             materialized,
@@ -1136,6 +1217,7 @@ impl Actor {
             source_dep_sources,
             materialized,
             feature_set,
+            build_features,
         )
         .await;
         self.install_workspace(index, root, workspace, Some(watch_policy))
@@ -1677,7 +1759,7 @@ impl AssembledWorkspace {
         root: &Path,
         exec: Exec,
     ) -> Result<Self, WorkspaceAssemblyFailure> {
-        Self::assemble_with_blocked(manifest, root, exec, &[]).await
+        Self::assemble_with_blocked(manifest, root, exec, &[], &FeatureSelection::default()).await
     }
 
     async fn assemble_with_blocked(
@@ -1685,6 +1767,7 @@ impl AssembledWorkspace {
         root: &Path,
         exec: Exec,
         blocked_files: &[FileKey],
+        selection: &FeatureSelection,
     ) -> Result<Self, WorkspaceAssemblyFailure> {
         // Scripts receive a complete project snapshot because project.read/project.walk_files can
         // address any project-relative input. Script and generated-output I/O stays entirely in
@@ -1729,14 +1812,25 @@ impl AssembledWorkspace {
         let mut project_sources = BTreeSet::new();
         let mut build_script_diagnostics =
             BuildScriptDiagnosticUpdate::new(configured_script.clone());
-        // Analysis takes no `--features` flags, so the root project gets the manifest's own
-        // `default` list — the same selection `jals lint` uses, so what the editor analyses matches
-        // what a plain `jals build` produces. With nothing selected, resolution cannot fail.
+        // The root project resolves the client's feature selection (`initialize` options /
+        // configuration) — defaulting to the manifest's own `default` list, the same selection a
+        // plain `jals build` uses, so what the editor analyses matches what the build produces.
         // Dependency nodes resolve their own sets during graph preprocessing, from the
-        // `[dependencies]` entries pointing at them plus whatever this selection forwards.
+        // `[dependencies]` entries pointing at them plus whatever this selection forwards. An
+        // invalid selection (an unknown feature name) degrades to the default rather than
+        // failing the whole workspace; the mistake still surfaces on the command line.
         let features = manifest
-            .resolve_build_features(&[], false, false)
-            .unwrap_or_default();
+            .resolve_build_features(
+                &selection.features,
+                selection.all_features,
+                selection.no_default_features,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("jals-lsp: invalid feature selection ({error}); using defaults");
+                manifest
+                    .resolve_build_features(&[], false, false)
+                    .unwrap_or_default()
+            });
         let environment =
             BuildScriptEnvironment::new().for_project(manifest, features.features().clone());
         let limits = BuildScriptLimits::default();
@@ -1874,6 +1968,7 @@ impl AssembledWorkspace {
                     build_script_watch,
                     build_script_diagnostics,
                     fallback_assembly,
+                    features.into_features(),
                 )
                 .await;
                 return Err(WorkspaceAssemblyFailure {
@@ -1891,6 +1986,7 @@ impl AssembledWorkspace {
             build_script_watch,
             build_script_diagnostics,
             assembly,
+            features.into_features(),
         )
         .await)
     }
@@ -1964,6 +2060,7 @@ impl AssembledWorkspace {
         build_script_watch: Option<BuildWatchPolicy>,
         build_script_diagnostics: BuildScriptDiagnosticUpdate,
         assembly: NativeProjectAssembly,
+        build_features: BTreeSet<String>,
     ) -> Self {
         let NativeProjectAssembly {
             mut inputs,
@@ -2062,6 +2159,7 @@ impl AssembledWorkspace {
             project_sources: project_sources.into_iter().collect(),
             classpath_classes: inputs.classpath_classes,
             feature_set: inputs.feature_set,
+            build_features,
             library_sources,
             source_dep_sources,
             materialized,
@@ -2945,6 +3043,7 @@ mod tests {
                 dir.path(),
                 Exec::inline(),
                 &[FileKey::parse("src/generated/A.java").unwrap()],
+                &FeatureSelection::default(),
             )
             .await
             .unwrap();
@@ -3478,6 +3577,115 @@ mod tests {
             })
             .await;
             assert!(!ran, "the computation never starts for a closed reply");
+        });
+    }
+
+    #[test]
+    fn feature_selection_parses_nested_and_flat_json() {
+        let nested = serde_json::json!({
+            "jals": { "features": ["fancy", "extra"], "noDefaultFeatures": true }
+        });
+        assert_eq!(
+            FeatureSelection::from_json(&nested),
+            FeatureSelection {
+                features: vec!["fancy".to_owned(), "extra".to_owned()],
+                all_features: false,
+                no_default_features: true,
+            }
+        );
+        let flat = serde_json::json!({ "allFeatures": true });
+        assert_eq!(
+            FeatureSelection::from_json(&flat),
+            FeatureSelection {
+                features: Vec::new(),
+                all_features: true,
+                no_default_features: false,
+            }
+        );
+        // Unrelated options keep the default selection.
+        assert_eq!(
+            FeatureSelection::from_json(&serde_json::json!({"other": 1})),
+            FeatureSelection::default()
+        );
+    }
+
+    /// The `#[cfg]`-aware analysis end to end through the LSP layer: with the `attributes`
+    /// dialect on, the manifest's `default` build features select which definition survives, a
+    /// changed selection reassembles under the new one, and the disabled region is published as
+    /// a faded (`Unnecessary`) hint.
+    #[test]
+    fn cfg_analysis_follows_the_feature_selection() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[package]\nfeatures = [\"attributes\"]\n[features]\nfancy = []\n\
+                 [build]\nsource-dirs = [\"src\"]\n",
+            );
+            write(
+                dir.path(),
+                "src/Gated.java",
+                "#[cfg(feature = \"fancy\")]\npublic class Gated {}\n",
+            );
+            let main = dir.path().join("src/Main.java");
+
+            let (mut actor, mut receiver, _sender) = actor();
+            open(
+                &mut actor,
+                &mut receiver,
+                main.clone(),
+                "public class Main { Gated g; }\n",
+            )
+            .await;
+            let main_uri = Url::from_file_path(&main).unwrap();
+            let config = jals_config::lint::Config::default();
+
+            // `fancy` is not in the manifest's `default` list, so `Gated` is disabled and the
+            // cross-file reference cannot resolve.
+            let workspace = actor.workspaces[0].ready().expect("workspace is ready");
+            let diags = workspace.diagnostics(&main_uri, &config).await.unwrap();
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| diagnostic_code(d) == Some("cannot-resolve")),
+                "{diags:?}"
+            );
+            let gated_uri = Url::from_file_path(dir.path().join("src/Gated.java")).unwrap();
+            let diags = workspace.diagnostics(&gated_uri, &config).await.unwrap();
+            assert!(
+                diags.iter().any(|d| diagnostic_code(d) == Some("cfg")
+                    && d.tags.as_ref().is_some_and(
+                        |tags| tags.contains(&async_lsp::lsp_types::DiagnosticTag::UNNECESSARY)
+                    )),
+                "{diags:?}"
+            );
+
+            // Selecting `fancy` (as initialization options / settings would) reassembles the
+            // workspace; the type is live again and nothing is faded.
+            actor
+                .process(Cmd::SetFeatureSelection(FeatureSelection::from_json(
+                    &serde_json::json!({"jals": {"features": ["fancy"]}}),
+                )))
+                .await;
+            drain(&mut actor, &mut receiver).await;
+            let workspace = actor.workspaces[0].ready().expect("workspace reassembled");
+            let diags = workspace.diagnostics(&main_uri, &config).await.unwrap();
+            assert!(
+                !diags
+                    .iter()
+                    .any(|d| diagnostic_code(d) == Some("cannot-resolve")),
+                "{diags:?}"
+            );
+
+            // An identical selection is a no-op (no reassembly spawned).
+            let generation = actor.workspace_assembly_generation;
+            actor
+                .process(Cmd::SetFeatureSelection(FeatureSelection::from_json(
+                    &serde_json::json!({"jals": {"features": ["fancy"]}}),
+                )))
+                .await;
+            assert_eq!(actor.workspace_assembly_generation, generation);
         });
     }
 }

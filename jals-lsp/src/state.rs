@@ -2,7 +2,7 @@
 //! config discovery. All of it is `!Send` and owned exclusively by the actor
 //! ([`Actor`](crate::actor)).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use async_lsp::lsp_types::{
@@ -149,6 +149,7 @@ impl ProjectWorkspace {
     /// source-dependency `.java`, and resolve `feature_set` into every lint run — all inside
     /// [`jals_editor::Workspace`]. The caller resolves the manifest and performs the dependency
     /// I/O; this keeps only the `PathBuf` → virtual-path lowering.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn load(
         project_root: PathBuf,
         source_roots: &[PathBuf],
@@ -156,6 +157,7 @@ impl ProjectWorkspace {
         library_sources: &[PathBuf],
         source_dep_sources: &[PathBuf],
         feature_set: FeatureSet,
+        build_features: BTreeSet<String>,
         exec: Exec,
     ) -> Self {
         let scopes = source_roots.iter().filter_map(|path| {
@@ -187,6 +189,7 @@ impl ProjectWorkspace {
             source_dep_sources,
             BTreeMap::new(),
             feature_set,
+            build_features,
         )
         .await
     }
@@ -203,6 +206,7 @@ impl ProjectWorkspace {
             &[],
             &[],
             FeatureSet::default(),
+            BTreeSet::new(),
             exec,
         )
         .await
@@ -223,6 +227,7 @@ impl ProjectWorkspace {
         source_dep_sources: Vec<FileKey>,
         materialized: BTreeMap<FileKey, PathBuf>,
         feature_set: FeatureSet,
+        build_features: BTreeSet<String>,
     ) -> Self {
         let spec = ProjectLayout {
             source_roots,
@@ -231,6 +236,9 @@ impl ProjectWorkspace {
             library_sources,
             source_dep_sources,
             feature_set,
+            // What each project file's `#[cfg(feature = "…")]` evaluates against (used only
+            // when `feature_set` enables the `attributes` dialect).
+            build_features,
         };
         let host = LspHost::for_root(project_root.clone()).with_materialized(materialized);
         Self {
@@ -901,6 +909,7 @@ mod tests {
                 &[],
                 &[],
                 FeatureSet::default(),
+                BTreeSet::new(),
                 Exec::inline(),
             )
             .await;

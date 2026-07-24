@@ -1427,3 +1427,62 @@ fn invalid_manifest_duplicate_bin_errors_early() {
     assert_eq!(code, 1);
     assert!(stderr.contains("duplicate"), "stderr: {stderr}");
 }
+
+/// `jals lint --features` drives the `#[cfg(...)]` analysis: a false-`cfg` definition leaves the
+/// analysis (its findings are suppressed and duplicates are tolerated), flipping the selection
+/// flips which side is live, and a structural attribute error surfaces as a `cfg` diagnostic.
+#[test]
+fn lint_features_flag_selects_cfg_analysis() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"hello\"\nfeatures = [\"attributes\"]\n[features]\nfancy = []\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    let main = src.join("Main.java");
+    // The disabled branch carries an `empty-catch` finding; the live branch is clean. With the
+    // feature off the finding must not be reported, with it on it must be.
+    std::fs::write(
+        &main,
+        "package com.example;\n\
+         public class Main {\n\
+         \x20\x20\x20\x20#[cfg(feature = \"fancy\")]\n\
+         \x20\x20\x20\x20static void go() { try { p(); } catch (Exception e) {} }\n\
+         \x20\x20\x20\x20#[cfg(not(feature = \"fancy\"))]\n\
+         \x20\x20\x20\x20static void go() { p(); }\n\
+         \x20\x20\x20\x20static void p() {}\n\
+         }\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stdout.contains("empty-catch") && !stderr.contains("empty-catch"),
+        "the disabled branch must not be linted: {stdout}{stderr}"
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", "--features", "fancy", main.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("empty-catch") || stderr.contains("empty-catch"),
+        "the live branch is linted under --features fancy: {stdout}{stderr}"
+    );
+
+    // A structural attribute error is a `cfg` diagnostic at lint time — the same failure the
+    // build would report.
+    std::fs::write(
+        &main,
+        "package com.example;\n#[derive(Debug)]\npublic class Main {}\n",
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("unknown attribute `derive`")
+            || stderr.contains("unknown attribute `derive`"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+}

@@ -592,3 +592,55 @@ fn java_annotation_is_not_an_attribute() {
         ""
     );
 }
+
+// ===== cfg-aware linting =====
+
+/// Lint under the `attributes` dialect feature with the given build features enabled, mirroring
+/// how a host wires the two: `Feature::Attributes` in the config's `FeatureSet`, and the file's
+/// `CfgMap` computed against the resolved build-feature names.
+fn lint_with_cfg(src: &str, build_features: &[&str]) -> String {
+    let config = Config {
+        features: FeatureSet::resolve(&[Feature::Attributes]),
+        ..Default::default()
+    };
+    let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
+    let features = build_features
+        .iter()
+        .map(ToString::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let cfg = jals_syntax::cfg::CfgMap::compute(&parse, &features);
+    render(&jals_exec::block_on_inline(
+        LintOutput::lint_parse_with_index(&parse, &config, None, Some(&cfg)),
+    ))
+}
+
+#[test]
+fn findings_inside_a_disabled_host_are_dropped() {
+    // The empty catch (a syntactic rule) and the unused local (a resolution rule) both sit in
+    // `cfg`-disabled code: the file compiles without them, so neither is reported. With the
+    // feature on, both come back.
+    let src = "class C {\n    #[cfg(feature = \"x\")]\n    void m() {\n        int unused = 1;\n        try { g(); } catch (Exception e) {}\n    }\n    void g() {}\n}";
+    assert_eq!(lint_with_cfg(src, &[]), "");
+    let on = lint_with_cfg(src, &["x"]);
+    assert!(
+        on.contains("unused-local") && on.contains("empty-catch"),
+        "expected both rules with the feature on: {on}"
+    );
+}
+
+#[test]
+fn disabled_duplicate_definition_does_not_shadow_the_live_one() {
+    // Two same-name methods, mutually exclusive under `cfg` — the analysis must resolve calls
+    // against whichever survives, not report the pair as clashing or unused.
+    let src = "class C {\n    #[cfg(feature = \"x\")]\n    int pick() { return 1; }\n    #[cfg(not(feature = \"x\"))]\n    int pick() { return 2; }\n    int use() { return pick(); }\n}";
+    assert_eq!(lint_with_cfg(src, &[]), "");
+    assert_eq!(lint_with_cfg(src, &["x"]), "");
+}
+
+#[test]
+fn cfg_none_still_lints_everything() {
+    // Without a cfg map (attributes off / no dialect), disabled-looking code is ordinary code.
+    let src = "class C {\n    void m() {\n        try { g(); } catch (Exception e) {}\n    }\n    void g() {}\n}";
+    let out = lint(src);
+    assert!(out.contains("empty-catch"), "{out}");
+}

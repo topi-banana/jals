@@ -6,7 +6,7 @@
 
 mod report;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -85,6 +85,12 @@ struct LintArgs {
     /// Use this config file instead of discovering `jalslint.toml`.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Build-feature selection for `#[cfg(feature = "…")]` analysis (with the `attributes`
+    /// dialect on) and build scripts — the same flags `build`/`run` take. Defaults to the
+    /// manifest's `default` list.
+    #[command(flatten)]
+    features: FeatureArgs,
 }
 
 #[derive(Args)]
@@ -387,13 +393,15 @@ impl LintArgs {
             // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
             // so `type-mismatch` sees external library types, and its feature set (`[package]
             // features`) so the feature-gated rules run — exactly as the multi-file path does.
-            let ctx = ProjectLintContext::load(&cwd, exec).await;
+            let ctx = ProjectLintContext::load(&cwd, exec, &self.features).await;
             cfg.features = ctx.feature_set;
-            let index = ctx.build_index(&[(FileId(0), parse.syntax())]).await;
+            let cfgs = [(FileId(0), ctx.cfg_map(&parse))];
+            let index = ctx.build_index(&[(FileId(0), parse.syntax())], &cfgs).await;
             let out = jals_lint::LintOutput::lint_parse_with_index(
                 &parse,
                 &cfg,
                 Some((&index, FileId(0))),
+                Some(&cfgs[0].1),
             )
             .await;
             any_finding |= Reporter::report_lint("<stdin>", &src, &out);
@@ -425,8 +433,16 @@ impl LintArgs {
             // index so a method whose argument type comes from a dependency jar resolves) and its
             // feature set (`[package] features`, shared across the project's files), from a single
             // manifest parse.
-            let ctx = ProjectLintContext::load(&start_dir, exec).await;
-            let index = ctx.build_index(&inputs).await;
+            let ctx = ProjectLintContext::load(&start_dir, exec, &self.features).await;
+            // Each file's `#[cfg(...)]` evaluation (empty maps when the `attributes` dialect is
+            // off): the index skips disabled declarations, and each file's lint run drops
+            // findings inside them — matching what the compile frontend will blank.
+            let cfgs: Vec<_> = files
+                .iter()
+                .enumerate()
+                .map(|(i, (_, _, parse))| (FileId(i as u32), ctx.cfg_map(parse)))
+                .collect();
+            let index = ctx.build_index(&inputs, &cfgs).await;
 
             for (i, (path, src, parse)) in files.iter().enumerate() {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -436,6 +452,7 @@ impl LintArgs {
                     parse,
                     &cfg,
                     Some((&index, FileId(i as u32))),
+                    Some(&cfgs[i].1),
                 )
                 .await;
                 any_finding |= Reporter::report_lint(&path.display().to_string(), src, &out);
@@ -698,10 +715,13 @@ impl InitArgs {
 struct ProjectLintContext {
     classpath: LoweredClasspath,
     feature_set: FeatureSet,
+    /// The resolved build features `#[cfg(feature = "…")]` evaluates against. Meaningful only
+    /// when `feature_set` enables the `attributes` dialect.
+    build_features: BTreeSet<String>,
 }
 
 impl ProjectLintContext {
-    async fn load(start_dir: &Path, exec: &Exec) -> Self {
+    async fn load(start_dir: &Path, exec: &Exec, selection: &FeatureArgs) -> Self {
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
             return Self::default();
         };
@@ -724,11 +744,15 @@ impl ProjectLintContext {
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
         // `type-mismatch` index) and the `[package] features`. Any strict graph failure is reported and
         // converted into the default lint context below.
-        // The lint / editor path takes no `--features` flags, so build scripts see the manifest's
-        // default selection. With nothing selected, resolution cannot fail.
-        let features = manifest
-            .resolve_build_features(&[], false, false)
-            .unwrap_or_default();
+        // `jals lint` takes the same `--features` flags as `build`/`run`; nothing selected
+        // resolves the manifest's `default` list. An invalid selection (an unknown feature name)
+        // warns and degrades to the default rather than dropping the whole project context.
+        let features = selection.resolve(&manifest).unwrap_or_else(|error| {
+            eprintln!("warning: invalid feature selection ({error}); using defaults");
+            manifest
+                .resolve_build_features(&[], false, false)
+                .unwrap_or_default()
+        });
         let environment = App::build_script_environment(&manifest, &features);
         let inputs = match App::project_inputs(
             &manifest,
@@ -754,16 +778,33 @@ impl ProjectLintContext {
         Self {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes).await,
             feature_set: inputs.feature_set,
+            build_features: features.into_features(),
+        }
+    }
+
+    /// The `#[cfg(...)]` evaluation of one parsed file under this context: computed against the
+    /// resolved build features when the `attributes` dialect feature is on, empty otherwise (an
+    /// attribute-free project's lint output is independent of `--features`).
+    fn cfg_map(&self, parse: &jals_syntax::Parse) -> jals_syntax::cfg::CfgMap {
+        if self.feature_set.contains(jals_config::Feature::Attributes) {
+            jals_syntax::cfg::CfgMap::compute(parse, &self.build_features)
+        } else {
+            jals_syntax::cfg::CfgMap::default()
         }
     }
 
     /// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and this
     /// context's lowered classpath so the index-aware `type-mismatch` rule resolves stdlib and
     /// external library types. Shared by the stdin and multi-file lint paths.
-    async fn build_index(&self, files: &[(FileId, jals_syntax::SyntaxNode)]) -> ProjectIndex {
+    async fn build_index(
+        &self,
+        files: &[(FileId, jals_syntax::SyntaxNode)],
+        cfgs: &[(FileId, jals_syntax::cfg::CfgMap)],
+    ) -> ProjectIndex {
         ProjectIndex::builder(files)
             .with_stdlib()
             .with_classpath(&self.classpath)
+            .with_disabled(cfgs)
             .build()
             .await
     }
@@ -1249,7 +1290,7 @@ impl App {
             build_features: if attributes {
                 features.features().clone()
             } else {
-                std::collections::BTreeSet::new()
+                BTreeSet::new()
             },
         };
         let use_dialect = dialect_flags.any();
