@@ -25,7 +25,7 @@ feature (`SubprocessToolchain`, plus the `<dyn Compiler>::select` / `<dyn Runtim
 factories). The toolchain abstraction is a pair of object-safe traits, `Compiler` and `Runtime`, and
 the subprocess backend is not their only implementation: the core also ships
 `BuiltinToolchain`, the **in-process backend** selected by `[toolchain] compiler/runtime =
-"builtin"` — today a *dummy* (compile copies each source into the `classes-dir` unchanged; run is a
+"builtin"` — today a _dummy_ (compile copies each source into the `classes-dir` unchanged; run is a
 successful no-op) whose I/O goes through a revisioned `jals_storage::ProjectStorage`; memory and
 native adapters obey the same transaction contract, and a real embedded compiler later replaces
 the copy step without touching the seam. Because each step is selected from its own enum and driven as its
@@ -49,12 +49,12 @@ here. This keeps command planning independent of graph acquisition and preserves
 
 Four subcommands are wired through `jals-cli`:
 
-| Command | Backed by | What it does | Flags |
-| --- | --- | --- | --- |
-| `jals build` | `execute_build_script` + `jals-project` + `Invocation::build` | Run the root pre-build script, preprocess the transitive dependency graph, discover `.java` sources, build the `javac` command, and run it. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>` |
-| `jals run` | `execute_build_script` + `jals-project` + `RunTarget::resolve` + invocations | Run the root and dependency pre-build phases, compile the complete source graph, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
-| `jals clean` | `CleanTargets::keys` | Remove `classes-dir` and `target/jals/build`, including stale outputs after a script is removed. A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run` |
-| `jals init [PATH]` | `InitOptions::scaffold` | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`. | `--name <NAME>` |
+| Command            | Backed by                                                                    | What it does                                                                                                                                                    | Flags                                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `jals build`       | `execute_build_script` + `jals-project` + `Invocation::build`                | Run the root pre-build script, preprocess the transitive dependency graph, discover `.java` sources, build the `javac` command, and run it.                     | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>`                  |
+| `jals run`         | `execute_build_script` + `jals-project` + `RunTarget::resolve` + invocations | Run the root and dependency pre-build phases, compile the complete source graph, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
+| `jals clean`       | `CleanTargets::keys`                                                         | Remove `classes-dir` and `target/jals/build`, including stale outputs after a script is removed. A never-built project succeeds quietly.                        | `--manifest-path <PATH>`, `--dry-run`                                                                       |
+| `jals init [PATH]` | `InitOptions::scaffold`                                                      | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`.                                   | `--name <NAME>`                                                                                             |
 
 Common behavior, all implemented in `jals-cli` on top of this crate:
 
@@ -140,19 +140,19 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 
 ### `[package]`
 
-| Key | Type | Default | Status |
-| --- | --- | --- | --- |
-| `name` | string | — | ℹ️ informational (reserved for future jar packaging) |
-| `version` | string | — | ℹ️ informational |
-| `features` | array of feature names | `[]` | the language features the project enables — additive-only, but a **closed** set, and not the top-level [`[features]`](#features) map. A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A *language-feature gate* for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no gate on the *Java* features above. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. Two already have. `"grouped-imports"` enables the jals grouped-import syntax (`import java.util.{HashMap, ArrayList};`) — a dialect feature belonging to no Java release. Unlike the analysis-only gates above, it is also lowered by the compile frontend, which desugars each grouped import into one plain import per member (preserving line numbers) before `javac` sees it. `"attributes"` enables jals attributes (`#[cfg(feature = "x")]`), Rust-style conditional compilation against the **build features** resolved from [`[features]`](#features) + `--features` — the same set a build script queries. An attribute attaches before an import, a declaration (type, field, method, constructor, initializer — before any modifier or annotation, Rust-style), or a statement; predicates are `feature = "…"`, `all(…)`, `any(…)`, and `not(…)`. The frontend strips every attribute and blanks each `cfg`-false construct length-preservingly before `javac` sees it, so line numbers (and stack traces) never move; an unknown *feature name* is simply false (features are additive, Cargo-style), while an unknown *attribute* name, a malformed predicate, or an unsupported position (a parameter, an enum constant, a `for` header) fails the build. A **dialect** feature is gated even when `features` is empty or unset: its syntax is not valid Java at any release, so without the opt-in the frontend does not lower it and `javac` sees the raw `.{…}` / `#[…]` — the `grouped-import` / `attribute` lints therefore flag the syntax whenever the feature is not listed, declared feature set or not. The **analysis side** (the linter, the LSP, the playground) applies the same `cfg` evaluation: a disabled declaration is neither indexed nor resolved nor linted (mutually exclusive same-name definitions analyse cleanly), editors render it as an inactive region, structural attribute errors surface as `cfg` diagnostics at edit time, and `jals lint` takes the same `--features` flags as `build`/`run` (the LSP reads `jals.features` / `jals.allFeatures` / `jals.noDefaultFeatures` from its initialization options or settings; the default everywhere is the manifest's `default` list). One scoping rule: analysis evaluates `cfg` only in the *root* project's own files — a `git`/`path` dependency's sources are indexed in full rather than under that node's own feature selection (the build, which lowers each node under its own resolved set, remains authoritative there). (Future work for attributes: inner `#![…]` attributes, enum-constant / parameter positions, per-node feature selections in analysis, and a lint that checks `cfg` feature names against the declared `[features]`.) |
-| `default-run` | string | — | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`. |
+| Key           | Type                   | Default | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------- | ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`        | string                 | —       | ℹ️ informational (reserved for future jar packaging)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `version`     | string                 | —       | ℹ️ informational                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `features`    | array of feature names | `[]`    | the language features the project enables — additive-only, but a **closed** set, and not the top-level [`[features]`](#features) map. A **Java release preset** (`"java8"` … `"java25"`) selects everything that release stabilized — each preset implies the one before it, so `java25 ⊇ java24 ⊇ …` holds from one entry — while an **individual feature** name (`"module-imports"`, `"compact-source-files"`) turns on a single otherwise-preview construct (the analogue of one `--enable-preview` flag). A _language-feature gate_ for analysis only (the linter / LSP), **not** passed to `javac` — the compile knobs stay `[build] release`/`source`/`target`. E.g. `["java24"]` flags a top-level `main` (compact source files) via the `compact-source-file` lint and an `import module …;` (module import declarations) via the `module-import` lint — both preview features there, permanent in `java25`. Empty/unset means no gate on the _Java_ features above. The name set is a closed enum (an unknown name is a parse error), so jals-specific dialect features can join later. Two already have. `"grouped-imports"` enables the jals grouped-import syntax (`import java.util.{HashMap, ArrayList};`) — a dialect feature belonging to no Java release. Unlike the analysis-only gates above, it is also lowered by the compile frontend, which desugars each grouped import into one plain import per member (preserving line numbers) before `javac` sees it. `"attributes"` enables jals attributes (`#[cfg(feature = "x")]`), Rust-style conditional compilation against the **build features** resolved from [`[features]`](#features) + `--features` — the same set a build script queries. An attribute attaches before an import, a declaration (type, field, method, constructor, initializer — before any modifier or annotation, Rust-style), or a statement; predicates are `feature = "…"`, `all(…)`, `any(…)`, and `not(…)`. The frontend strips every attribute and blanks each `cfg`-false construct length-preservingly before `javac` sees it, so line numbers (and stack traces) never move; an unknown _feature name_ is simply false (features are additive, Cargo-style), while an unknown _attribute_ name, a malformed predicate, or an unsupported position (a parameter, an enum constant, a `for` header) fails the build. A **dialect** feature is gated even when `features` is empty or unset: its syntax is not valid Java at any release, so without the opt-in the frontend does not lower it and `javac` sees the raw `.{…}` / `#[…]` — the `grouped-import` / `attribute` lints therefore flag the syntax whenever the feature is not listed, declared feature set or not. The **analysis side** (the linter, the LSP, the playground) applies the same `cfg` evaluation: a disabled declaration is neither indexed nor resolved nor linted (mutually exclusive same-name definitions analyse cleanly), editors render it as an inactive region, structural attribute errors surface as `cfg` diagnostics at edit time, and `jals lint` takes the same `--features` flags as `build`/`run` (the LSP reads `jals.features` / `jals.allFeatures` / `jals.noDefaultFeatures` from its initialization options or settings; the default everywhere is the manifest's `default` list). One scoping rule: analysis evaluates `cfg` only in the _root_ project's own files — a `git`/`path` dependency's sources are indexed in full rather than under that node's own feature selection (the build, which lowers each node under its own resolved set, remains authoritative there). (Future work for attributes: inner `#![…]` attributes, enum-constant / parameter positions, per-node feature selections in analysis, and a lint that checks `cfg` feature names against the declared `[features]`.) |
+| `default-run` | string                 | —       | which `[[bin]]` `jals run` runs when several exist and `--bin` is not given. Must name a declared `[[bin]]`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 ### `[features]`
 
 Cargo's `[features]`, at the same top level: an open-ended map from a **build feature** name to the
 other features it enables. These are user-defined build-time toggles a [build script](#rhai-build-scripts)
 reads with `build.feature("…")` / `build.features()` to vary what it produces — distinct from
-[`[package] features`](#package), which is a closed enum gating *language* analysis and is never
+[`[package] features`](#package), which is a closed enum gating _language_ analysis and is never
 selected on the command line. With the `"attributes"` language feature on, source code tests the
 same resolved set via `#[cfg(feature = "…")]` (see [`[package]`](#package)).
 
@@ -167,11 +167,11 @@ gpu     = ["render/vulkan"]      # …or a feature of a dependency (Cargo's `ser
 
 Select them per invocation on `jals build` / `jals run`:
 
-| Flag | Effect |
-| --- | --- |
-| `--features <a,b>` | activate these features (comma separated, repeatable); a `<dependency>/<feature>` entry activates it in that dependency |
-| `--all-features` | activate every declared feature; takes precedence over `--no-default-features` |
-| `--no-default-features` | do not activate the `default` list |
+| Flag                    | Effect                                                                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `--features <a,b>`      | activate these features (comma separated, repeatable); a `<dependency>/<feature>` entry activates it in that dependency |
+| `--all-features`        | activate every declared feature; takes precedence over `--no-default-features`                                          |
+| `--no-default-features` | do not activate the `default` list                                                                                      |
 
 Selection is **additive** — a feature never subtracts — so `--features client` keeps the `default`
 list unless `--no-default-features` is also given. The reserved `default` key is a resolution
@@ -183,7 +183,7 @@ section leaves the set empty.
 #### Forwarding a feature to a dependency
 
 A list entry of the form `<dependency>/<feature>` — Cargo's `std = ["serde/std"]` — enables
-`<feature>` in that `[dependencies]` entry rather than in this project. It is a *directive*, never a
+`<feature>` in that `[dependencies]` entry rather than in this project. It is a _directive_, never a
 queryable feature: `build.feature("render/vulkan")` is always false, and the name is absent from
 `build.features()`. The dependency must be a declared `git`/`path` entry; a `jar` runs no build
 script that could read a feature, and naming one — or an undeclared entry, or `dep/default` — is a
@@ -193,29 +193,29 @@ manifest validation error. `/` is likewise rejected in a `[features]` **key** an
 Resolution is **per package**, as in Cargo, and every project in the graph goes through the same
 step. A project's seed is what its dependents asked for — the `features` lists on the
 `[dependencies]` entries aimed at it, plus whatever their `[features]` forwarded — closed over its
-*own* table: its `enables` map, and its `default` list unless every incoming entry set
+_own_ table: its `enables` map, and its `default` list unless every incoming entry set
 [`default-features = false`](#dependencies). Because a dependency resolves its own table, forwarding
-is transitive: a mid-graph project forwards to *its* dependencies from features it merely received.
+is transitive: a mid-graph project forwards to _its_ dependencies from features it merely received.
 Nothing crosses an edge implicitly, though — a dependency never sees the selection its dependents
 are building under, only what their manifests spelled out. Where several entries reach one project
 the inputs unify additively (see [`[dependencies]`](#dependencies)), so it still builds once.
 
-The consequence for caching is that a dependency's build-script fingerprint now *does* depend on the
+The consequence for caching is that a dependency's build-script fingerprint now _does_ depend on the
 root's `--features`, but only along a path some manifest wrote: switching a feature that forwards
 nothing still leaves every dependency script cached.
 
 ### `[build]`
 
-| Key | Type | Default | Maps to |
-| --- | --- | --- | --- |
-| `script` | tagged table | — | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }` |
-| `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files |
-| `classes-dir` | string | `"target/classes"` | `javac -d` (also the dir `jals clean` removes) |
-| `release` | integer | — | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored |
-| `source` | integer | — | `--source N` — only when `release` is unset |
-| `target` | integer | — | `--target N` — only when `release` is unset |
-| `classpath` | array of strings | `[]` | `-classpath` (joined with the platform separator); omitted entirely when empty |
-| `javac-flags` | array of strings | `[]` | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet |
+| Key           | Type             | Default             | Maps to                                                                                                                                 |
+| ------------- | ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `script`      | tagged table     | —                   | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                    |
+| `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                      |
+| `classes-dir` | string           | `"target/classes"`  | `javac -d` (also the dir `jals clean` removes)                                                                                          |
+| `release`     | integer          | —                   | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                |
+| `source`      | integer          | —                   | `--source N` — only when `release` is unset                                                                                             |
+| `target`      | integer          | —                   | `--target N` — only when `release` is unset                                                                                             |
+| `classpath`   | array of strings | `[]`                | `-classpath` (joined with the platform separator); omitted entirely when empty                                                          |
+| `javac-flags` | array of strings | `[]`                | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet |
 
 ### Rhai build scripts
 
@@ -252,46 +252,46 @@ revision-checked transaction only after successful evaluation. Immutable depende
 uses the same evaluator without that source-storage commit. Scripts get four scope objects; `tasks`
 records a typed DAG while the first three retain the direct APIs below:
 
-| Object | Method | Effect |
-| --- | --- | --- |
-| `project` | `read(path)` | Read a project file as an array of bytes (`0..=255`). |
-| `project` | `read_text(path)` | Read a UTF-8 project file as a string. |
-| `project` | `exists(path)` | Test whether a project-relative file or directory exists. |
-| `project` | `read_dir(path)` | List direct child paths in deterministic order. |
-| `project` | `walk_files(path)` | List all files below a directory in deterministic order. |
-| `output` | `write(path, bytes)` | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`. |
-| `output` | `write_text(path, text)` | Buffer UTF-8 text below the same output root and return an `OutputPath`. |
-| `build` | `env(name)` | Read a value from the environment map explicitly supplied by the host; returns `()` when absent. |
-| `build` | `feature(name)` | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or, as a dependency, what its dependents asked for closed over its own `[features]` (see [`[features]`](#features)). A `<dependency>/<feature>` name is never enabled here; it is a forwarding directive. Always fingerprinted — no `rerun_` declaration needed. |
-| `build` | `features()` | The enabled build features for this project, in lexical order. |
-| `build` | `rerun_if_changed(path)` | Track one project file for cache invalidation. |
-| `build` | `rerun_if_env_changed(name)` | Track one supplied environment value for cache invalidation. |
-| `build` | `add_source(path)` | Add a project file or returned `OutputPath` to the later source set. |
-| `build` | `add_classpath(path)` | Add a project file or returned `OutputPath` to the classpath. |
-| `build` | `add_javac_arg(arg)` / `add_jvm_arg(arg)` | Append compiler or JVM arguments in call order. |
-| `build` | `set_compile_env(name, value)` / `set_run_env(name, value)` | Add environment entries to the compiler or runtime request. |
-| `build` | `warning(message)` / `error(message)` | Report a non-fatal warning or a fatal diagnostic. Any error prevents publication. |
-| `build` | `metadata(key, value)` | Return deterministic host-readable metadata without changing a tool invocation. |
+| Object    | Method                                                      | Effect                                                                                                                                                                                                                                                                                                                                                                      |
+| --------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `project` | `read(path)`                                                | Read a project file as an array of bytes (`0..=255`).                                                                                                                                                                                                                                                                                                                       |
+| `project` | `read_text(path)`                                           | Read a UTF-8 project file as a string.                                                                                                                                                                                                                                                                                                                                      |
+| `project` | `exists(path)`                                              | Test whether a project-relative file or directory exists.                                                                                                                                                                                                                                                                                                                   |
+| `project` | `read_dir(path)`                                            | List direct child paths in deterministic order.                                                                                                                                                                                                                                                                                                                             |
+| `project` | `walk_files(path)`                                          | List all files below a directory in deterministic order.                                                                                                                                                                                                                                                                                                                    |
+| `output`  | `write(path, bytes)`                                        | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`.                                                                                                                                                                                                                                                                                                 |
+| `output`  | `write_text(path, text)`                                    | Buffer UTF-8 text below the same output root and return an `OutputPath`.                                                                                                                                                                                                                                                                                                    |
+| `build`   | `env(name)`                                                 | Read a value from the environment map explicitly supplied by the host; returns `()` when absent.                                                                                                                                                                                                                                                                            |
+| `build`   | `feature(name)`                                             | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or, as a dependency, what its dependents asked for closed over its own `[features]` (see [`[features]`](#features)). A `<dependency>/<feature>` name is never enabled here; it is a forwarding directive. Always fingerprinted — no `rerun_` declaration needed. |
+| `build`   | `features()`                                                | The enabled build features for this project, in lexical order.                                                                                                                                                                                                                                                                                                              |
+| `build`   | `rerun_if_changed(path)`                                    | Track one project file for cache invalidation.                                                                                                                                                                                                                                                                                                                              |
+| `build`   | `rerun_if_env_changed(name)`                                | Track one supplied environment value for cache invalidation.                                                                                                                                                                                                                                                                                                                |
+| `build`   | `add_source(path)`                                          | Add a project file or returned `OutputPath` to the later source set.                                                                                                                                                                                                                                                                                                        |
+| `build`   | `add_classpath(path)`                                       | Add a project file or returned `OutputPath` to the classpath.                                                                                                                                                                                                                                                                                                               |
+| `build`   | `add_javac_arg(arg)` / `add_jvm_arg(arg)`                   | Append compiler or JVM arguments in call order.                                                                                                                                                                                                                                                                                                                             |
+| `build`   | `set_compile_env(name, value)` / `set_run_env(name, value)` | Add environment entries to the compiler or runtime request.                                                                                                                                                                                                                                                                                                                 |
+| `build`   | `warning(message)` / `error(message)`                       | Report a non-fatal warning or a fatal diagnostic. Any error prevents publication.                                                                                                                                                                                                                                                                                           |
+| `build`   | `metadata(key, value)`                                      | Return deterministic host-readable metadata without changing a tool invocation.                                                                                                                                                                                                                                                                                             |
 
 Root scripts can use these `tasks` methods. They only record work; network/archive effects run
 asynchronously after Rhai evaluation and capability preflight succeed:
 
-| Method | Result/effect |
-| --- | --- |
-| `https_url(url)` | Typed HTTPS URL. A fetch still requires an expected digest and byte limit. |
-| `project_jar(path)` | Typed JAR from the immutable project snapshot. |
-| `sha1(hex)` / `sha256(hex)` / `bytes(n)` | Typed verification and size values. |
-| `fetch_json(url, digest, max)` / `fetch_jar(...)` / `fetch_text(...)` | Verified cache-first artifact fetch (JSON, JAR, or UTF-8 text). |
-| `json_at(json, path)` / `json_find_string(json, path, field, value)` | Typed JSON projection without exposing fetched values to Rhai. |
-| `json_url(json, path)` / `json_sha1(...)` / `json_sha256(...)` / `json_u64(...)` | Values for a dependent fetch, resolved by the host DAG executor. |
-| `extract_java(jar, prefix)` | Safe `.java` source tree below `prefix`, with the prefix stripped. |
-| `nested_jar(jar, member)` | Extract one nested `.jar` member and treat it as a JAR. |
-| `remap_jar(jar, mappings)` | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware). |
-| `merge_jars(base, overlay)` | Deterministic JAR union; overlay wins path conflicts. |
-| `decompile_java(jar, prefix)` | Compile-oriented skeleton source tree below `prefix`. |
-| `add_classpath(jar)` | Add a task-produced JAR to the root classpath. |
-| `add_nested_classpath(jar)` | Expand every nested `.jar` member onto the root classpath (library bundlers). |
-| `publish_tree(owner, tree, destination, "replace-root")` | Atomically replace an exclusive physical source subtree. |
+| Method                                                                           | Result/effect                                                                 |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `https_url(url)`                                                                 | Typed HTTPS URL. A fetch still requires an expected digest and byte limit.    |
+| `project_jar(path)`                                                              | Typed JAR from the immutable project snapshot.                                |
+| `sha1(hex)` / `sha256(hex)` / `bytes(n)`                                         | Typed verification and size values.                                           |
+| `fetch_json(url, digest, max)` / `fetch_jar(...)` / `fetch_text(...)`            | Verified cache-first artifact fetch (JSON, JAR, or UTF-8 text).               |
+| `json_at(json, path)` / `json_find_string(json, path, field, value)`             | Typed JSON projection without exposing fetched values to Rhai.                |
+| `json_url(json, path)` / `json_sha1(...)` / `json_sha256(...)` / `json_u64(...)` | Values for a dependent fetch, resolved by the host DAG executor.              |
+| `extract_java(jar, prefix)`                                                      | Safe `.java` source tree below `prefix`, with the prefix stripped.            |
+| `nested_jar(jar, member)`                                                        | Extract one nested `.jar` member and treat it as a JAR.                       |
+| `remap_jar(jar, mappings)`                                                       | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware).       |
+| `merge_jars(base, overlay)`                                                      | Deterministic JAR union; overlay wins path conflicts.                         |
+| `decompile_java(jar, prefix)`                                                    | Compile-oriented skeleton source tree below `prefix`.                         |
+| `add_classpath(jar)`                                                             | Add a task-produced JAR to the root classpath.                                |
+| `add_nested_classpath(jar)`                                                      | Expand every nested `.jar` member onto the root classpath (library bundlers). |
+| `publish_tree(owner, tree, destination, "replace-root")`                         | Atomically replace an exclusive physical source subtree.                      |
 
 For example:
 
@@ -321,7 +321,7 @@ publication while an open document is below the destination. The browser playgro
 publication before any fetch. Tasks expose no shell/process API.
 
 A `git`/`path` **dependency** may declare tasks too, and its plan runs the same way with one
-difference: publication is virtual. Every artifact lands in the *consumer's* verified cache, and the
+difference: publication is virtual. Every artifact lands in the _consumer's_ verified cache, and the
 dependency's own snapshot is byte-identical afterwards — a dependency is never written to, which is
 what made the whole facility unavailable there before.
 
@@ -447,15 +447,15 @@ cargo check -p jals-build --no-default-features --features rhai --target wasm32-
 
 See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable project.
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
-publication. [`examples/minecraft-mojang-remap`](../examples/minecraft-mojang-remap)
+publication. [`examples/minecraft`](../examples/minecraft)
 fetches, remaps, and decompiles a Minecraft release — selected from 43 mutually exclusive version
 `[features]` — through the task DAG.
 
 ### `[run]`
 
-| Key | Type | Default | Maps to |
-| --- | --- | --- | --- |
-| `main-class` | string | — | the fully-qualified entry point passed to `java`, used **only when no `[[bin]]` is declared**. `jals run` errors if it is unset, no `[[bin]]` exists, and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. |
+| Key          | Type   | Default | Maps to                                                                                                                                                                                                                                            |
+| ------------ | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main-class` | string | —       | the fully-qualified entry point passed to `java`, used **only when no `[[bin]]` is declared**. `jals run` errors if it is unset, no `[[bin]]` exists, and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. |
 
 ### `[toolchain]`
 
@@ -464,20 +464,20 @@ independently, so a project can compile with one JDK and run on another. The rou
 `rust-toolchain.toml`. Omitting the table (or a field) uses the system tools, so an existing manifest
 is unaffected.
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
+| Key        | Type            | Default    | Meaning                                    |
+| ---------- | --------------- | ---------- | ------------------------------------------ |
 | `compiler` | string or table | `"system"` | which `javac` to use (see the forms below) |
-| `runtime` | string or table | `"system"` | which `java` to use (same forms) |
+| `runtime`  | string or table | `"system"` | which `java` to use (same forms)           |
 
 Each value is one of four forms — a keyword string, or a tagged table naming the form (the enum's
 plain serde representation; nothing is classified from a free-form string):
 
-| Form | Example | Meaning |
-| --- | --- | --- |
-| `"system"` | `"system"` | the system tools — identical to omitting the field |
-| `"builtin"` | `"builtin"` | the **in-process backend** instead of a JDK tool — today a *dummy* (compile copies each source into the `classes-dir` unchanged, nothing is compiled; run is a successful no-op, nothing is executed), the placeholder a future embedded compiler replaces behind the same selector |
-| `{ path = "…" }` | `{ path = "/opt/jdk-21" }`, `{ path = "./jdk/bin/javac" }` | an explicit JDK home directory (the tool is `<path>/bin/<tool>`) or the tool binary itself; a relative path resolves against the manifest dir. Used verbatim — a non-existent path errors rather than silently reverting to `PATH`. |
-| `{ distribution = { … } }` | `{ distribution = { name = "temurin", version = 21 } }` | a JDK to **discover** among the installed ones by distribution and/or version; both keys are optional (a bare `version` matches any distribution, a bare `name` any version) |
+| Form                       | Example                                                    | Meaning                                                                                                                                                                                                                                                                             |
+| -------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"system"`                 | `"system"`                                                 | the system tools — identical to omitting the field                                                                                                                                                                                                                                  |
+| `"builtin"`                | `"builtin"`                                                | the **in-process backend** instead of a JDK tool — today a _dummy_ (compile copies each source into the `classes-dir` unchanged, nothing is compiled; run is a successful no-op, nothing is executed), the placeholder a future embedded compiler replaces behind the same selector |
+| `{ path = "…" }`           | `{ path = "/opt/jdk-21" }`, `{ path = "./jdk/bin/javac" }` | an explicit JDK home directory (the tool is `<path>/bin/<tool>`) or the tool binary itself; a relative path resolves against the manifest dir. Used verbatim — a non-existent path errors rather than silently reverting to `PATH`.                                                 |
+| `{ distribution = { … } }` | `{ distribution = { name = "temurin", version = 21 } }`    | a JDK to **discover** among the installed ones by distribution and/or version; both keys are optional (a bare `version` matches any distribution, a bare `name` any version)                                                                                                        |
 
 A JDK tool is resolved in this order: the `$JAVAC`/`$JAVA` environment override (wins
 unconditionally, for CI/back-compat) → the `[toolchain]` selection above → `$JAVA_HOME/bin/<tool>` →
@@ -494,12 +494,12 @@ are independent (each is its own enum, matched by its own `select` factory), so 
 A repeatable array-of-tables declaring **named entry points** (Cargo's `[[bin]]`). Both keys are
 **required**.
 
-| Key | Type | Maps to |
-| --- | --- | --- |
-| `name` | string | the bin's selector for `--bin <name>` and `[package] default-run` |
-| `main-class` | string | the fully-qualified class `java` runs for this bin |
+| Key          | Type   | Maps to                                                           |
+| ------------ | ------ | ----------------------------------------------------------------- |
+| `name`       | string | the bin's selector for `--bin <name>` and `[package] default-run` |
+| `main-class` | string | the fully-qualified class `java` runs for this bin                |
 
-Because `javac` compiles **all** discovered sources in one pass, a `[[bin]]` is *not* a separate
+Because `javac` compiles **all** discovered sources in one pass, a `[[bin]]` is _not_ a separate
 compilation unit (unlike Rust). It only selects which `main-class` `java` runs — it never changes
 what is compiled. `jals build --bin <name>` therefore only validates that the name exists; the
 compile command is unchanged.
@@ -521,17 +521,17 @@ A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Ea
 one **primary form** — `jar` (compiled classes), `git` (a checked-out project repository), or `path`
 (a local project root) — plus form-specific options:
 
-| Key | Type | Form | Maps to |
-| --- | --- | --- | --- |
-| `jar` | string | jar | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir) |
-| `sources` | string | jar | *optional* companion **sources** `.jar` (the library's `.java`), located like `jar`. Editor go-to-definition only — never a compile or analysis input |
-| `recursive` | bool | jar | *optional* (default `false`) — recursively unpack the jar's **bundled jars** (`*.jar` members nested inside it, as in a fat jar's `BOOT-INF/lib/*.jar`) onto the classpath, at any depth |
-| `git` | string | git | a project repository URL to clone |
-| `branch` / `tag` / `rev` | string | git | *optional*, **at most one** — which commit to check out (default: the repo's default branch) |
-| `path` | string | path | a local project root (relative to the manifest dir) |
-| `dir` | string | git, path | *optional* selected **project root** within the repository/path (e.g. `core`). Manifest probing and all child-relative paths start there. |
-| `features` | array of feature names | git, path | *optional* (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.rhai` reads with `build.feature("…")`. Cargo's per-dependency `features`. These name features of the dependency itself, so a `<dependency>/<feature>` entry is rejected — [forwarding](#forwarding-a-feature-to-a-dependency) is written in `[features]`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
-| `default-features` | bool | git, path | *optional* (default `true`) — whether that dependency resolves its own `[features] default` list (Cargo's `default-features`). Not available on `jar`, where writing it is a parse error. |
+| Key                      | Type                   | Form      | Maps to                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `jar`                    | string                 | jar       | a `.jar` location: an `https://`/`http://` URL (downloaded and cached), a `file://` URL, or a bare path (relative to the manifest dir)                                                                                                                                                                                                                                                                                                                             |
+| `sources`                | string                 | jar       | _optional_ companion **sources** `.jar` (the library's `.java`), located like `jar`. Editor go-to-definition only — never a compile or analysis input                                                                                                                                                                                                                                                                                                              |
+| `recursive`              | bool                   | jar       | _optional_ (default `false`) — recursively unpack the jar's **bundled jars** (`*.jar` members nested inside it, as in a fat jar's `BOOT-INF/lib/*.jar`) onto the classpath, at any depth                                                                                                                                                                                                                                                                           |
+| `git`                    | string                 | git       | a project repository URL to clone                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `branch` / `tag` / `rev` | string                 | git       | _optional_, **at most one** — which commit to check out (default: the repo's default branch)                                                                                                                                                                                                                                                                                                                                                                       |
+| `path`                   | string                 | path      | a local project root (relative to the manifest dir)                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `dir`                    | string                 | git, path | _optional_ selected **project root** within the repository/path (e.g. `core`). Manifest probing and all child-relative paths start there.                                                                                                                                                                                                                                                                                                                          |
+| `features`               | array of feature names | git, path | _optional_ (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.rhai` reads with `build.feature("…")`. Cargo's per-dependency `features`. These name features of the dependency itself, so a `<dependency>/<feature>` entry is rejected — [forwarding](#forwarding-a-feature-to-a-dependency) is written in `[features]`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
+| `default-features`       | bool                   | git, path | _optional_ (default `true`) — whether that dependency resolves its own `[features] default` list (Cargo's `default-features`). Not available on `jar`, where writing it is a parse error.                                                                                                                                                                                                                                                                          |
 
 ```toml
 [dependencies]
@@ -584,7 +584,7 @@ nodes whose classes would both land on the classpath — and one entry asking fo
 them on for the shared node, whatever the others said. A seed name the node's own table does not
 declare is still queryable and simply expands to nothing, so a typo is silently a feature nobody
 reads. A node whose selected root has no `jals.toml`, or whose manifest declares no `script`, has no
-build script to read any of it at all. A node's set is a function of the manifests *and* of the
+build script to read any of it at all. A node's set is a function of the manifests _and_ of the
 root's selection wherever a `[features]` entry forwards along the path to it; a selection that
 forwards nothing leaves every dependency script's fingerprint — and so its cached output —
 untouched.
@@ -617,7 +617,7 @@ misplaced for its form (`branch` without `git`, `sources` with `git`) — match 
 **parse** time (a TOML error). The remaining **value-level** errors — an empty value, an unknown URL
 scheme, conflicting git refs (`branch` + `tag`) — are caught by `Manifest::validate`. A runtime
 acquisition failure (a download/clone error, a local jar/dir that does not exist) is reported as a
-warning where recovery is possible and skips that input. `jals-build` itself only *classifies* each spec
+warning where recovery is possible and skips that input. `jals-build` itself only _classifies_ each spec
 (`Manifest::dependency_sources` → `DependencySource`, `dependency_source_jars` → the `sources` jar,
 `dependency_source_dirs` → `SourceDependency::{Git, Path}`), staying pure — it performs no I/O.
 This implemented transitive JALS source-project graph is distinct from Maven-coordinate resolution:
@@ -736,21 +736,21 @@ fed into `Invocation::build` exactly as the discovered source list is fed in tod
 
 ## 1. Commands to add
 
-| Command | Cargo analogue | What it does | Needs |
-| --- | --- | --- | --- |
-| `jals new <path>` | `cargo new` | Scaffold into a **new** directory (vs. `init`, which is in-place). Mostly a thin alias over today's `InitOptions::scaffold`. | reuse `InitOptions::scaffold` |
-| `jals check` | `cargo check` | Compile for diagnostics only, no runnable output (`javac -proc:only` / throwaway `-d`), or fold in `jals fmt --check` + `jals lint`. | a "check" invocation variant |
-| `jals test [filter]` | `cargo test` | Compile test sources and run them via the JUnit Platform launcher; filter by class/method. | `[test]` section, `test-source-dirs`, a JUnit dep on the classpath, a runner invocation builder |
-| `jals doc` | `cargo doc` | Run `javadoc` into `target/doc`; optionally open it. | a `javadoc` invocation builder, `[doc]` options |
-| `jals jar` / `jals package` | `cargo package` | Produce a runnable jar (`Main-Class` in the manifest), optionally a fat/uber jar bundling classpath deps. | a `jar`/archive plan, `[package]` metadata |
-| `jals add <coord>` / `jals remove <coord>` | `cargo add` / `cargo remove` | Edit `[dependencies]` in `jals.toml`. | manifest **writing** + Maven coordinate parsing |
-| `jals tree` | `cargo tree` | Print the implemented source-project graph plus the future resolved Maven dependency tree. | CLI presentation + a Maven dependency resolver (§3) |
-| `jals fetch` | `cargo fetch` | Download and cache dependencies without building. | a dependency resolver (§3) |
-| `jals update` | `cargo update` | Re-resolve and update locked dependency versions. | a lockfile + resolver (§3) |
-| `jals metadata` | `cargo metadata` | Emit the resolved manifest + dependency graph as JSON for external tooling. | resolver (§3) |
-| `jals install` | `cargo install` | Build and install a runnable jar / launcher script. | packaging (§4) |
-| `jals publish` | `cargo publish` | Publish artifacts to a Maven repository. | packaging (§4) + repo auth |
-| `jals bench` | `cargo bench` | Run a JMH benchmark harness. | a JMH integration |
+| Command                                    | Cargo analogue               | What it does                                                                                                                         | Needs                                                                                           |
+| ------------------------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `jals new <path>`                          | `cargo new`                  | Scaffold into a **new** directory (vs. `init`, which is in-place). Mostly a thin alias over today's `InitOptions::scaffold`.         | reuse `InitOptions::scaffold`                                                                   |
+| `jals check`                               | `cargo check`                | Compile for diagnostics only, no runnable output (`javac -proc:only` / throwaway `-d`), or fold in `jals fmt --check` + `jals lint`. | a "check" invocation variant                                                                    |
+| `jals test [filter]`                       | `cargo test`                 | Compile test sources and run them via the JUnit Platform launcher; filter by class/method.                                           | `[test]` section, `test-source-dirs`, a JUnit dep on the classpath, a runner invocation builder |
+| `jals doc`                                 | `cargo doc`                  | Run `javadoc` into `target/doc`; optionally open it.                                                                                 | a `javadoc` invocation builder, `[doc]` options                                                 |
+| `jals jar` / `jals package`                | `cargo package`              | Produce a runnable jar (`Main-Class` in the manifest), optionally a fat/uber jar bundling classpath deps.                            | a `jar`/archive plan, `[package]` metadata                                                      |
+| `jals add <coord>` / `jals remove <coord>` | `cargo add` / `cargo remove` | Edit `[dependencies]` in `jals.toml`.                                                                                                | manifest **writing** + Maven coordinate parsing                                                 |
+| `jals tree`                                | `cargo tree`                 | Print the implemented source-project graph plus the future resolved Maven dependency tree.                                           | CLI presentation + a Maven dependency resolver (§3)                                             |
+| `jals fetch`                               | `cargo fetch`                | Download and cache dependencies without building.                                                                                    | a dependency resolver (§3)                                                                      |
+| `jals update`                              | `cargo update`               | Re-resolve and update locked dependency versions.                                                                                    | a lockfile + resolver (§3)                                                                      |
+| `jals metadata`                            | `cargo metadata`             | Emit the resolved manifest + dependency graph as JSON for external tooling.                                                          | resolver (§3)                                                                                   |
+| `jals install`                             | `cargo install`              | Build and install a runnable jar / launcher script.                                                                                  | packaging (§4)                                                                                  |
+| `jals publish`                             | `cargo publish`              | Publish artifacts to a Maven repository.                                                                                             | packaging (§4) + repo auth                                                                      |
+| `jals bench`                               | `cargo bench`                | Run a JMH benchmark harness.                                                                                                         | a JMH integration                                                                               |
 
 ## 2. Manifest sections & keys to add
 
@@ -763,18 +763,18 @@ Making a `features` release preset also imply a default `javac --release` is sti
 
 ### `[build]` additions
 
-| Key | Maps to | Notes |
-| --- | --- | --- |
-| `encoding` | `javac -encoding` | source encoding; default `UTF-8` |
-| `enable-preview` | `--enable-preview` (with `--release`) | preview-language features (also needed at `java` run time) |
-| `debug` / `debug-info` | `-g` / `-g:none` | debug-symbol level |
-| `parameters` | `-parameters` | keep formal parameter names at runtime |
-| `lint` / `warnings` | `-Xlint:all`, `-Werror` | typed `-Xlint` config instead of raw `javac-flags` |
-| `annotation-processors` | `-processor`, `-processorpath`, `-proc:` | annotation processing |
-| `resource-dirs` | (copy step) | `src/main/resources` → `classes-dir`, like Maven |
-| `module` / `module-path` | `--module-path`, `--module-source-path` | JPMS (modular) builds vs. the classpath |
-| `target-dir` | `-d` parent | override the `target/` location (also a CLI flag, §6) |
-| `incremental` | (skip unchanged) | recompile only stale sources — needs timestamp/hash tracking in `jals-cli` |
+| Key                      | Maps to                                  | Notes                                                                      |
+| ------------------------ | ---------------------------------------- | -------------------------------------------------------------------------- |
+| `encoding`               | `javac -encoding`                        | source encoding; default `UTF-8`                                           |
+| `enable-preview`         | `--enable-preview` (with `--release`)    | preview-language features (also needed at `java` run time)                 |
+| `debug` / `debug-info`   | `-g` / `-g:none`                         | debug-symbol level                                                         |
+| `parameters`             | `-parameters`                            | keep formal parameter names at runtime                                     |
+| `lint` / `warnings`      | `-Xlint:all`, `-Werror`                  | typed `-Xlint` config instead of raw `javac-flags`                         |
+| `annotation-processors`  | `-processor`, `-processorpath`, `-proc:` | annotation processing                                                      |
+| `resource-dirs`          | (copy step)                              | `src/main/resources` → `classes-dir`, like Maven                           |
+| `module` / `module-path` | `--module-path`, `--module-source-path`  | JPMS (modular) builds vs. the classpath                                    |
+| `target-dir`             | `-d` parent                              | override the `target/` location (also a CLI flag, §6)                      |
+| `incremental`            | (skip unchanged)                         | recompile only stale sources — needs timestamp/hash tracking in `jals-cli` |
 
 ### `[run]` additions (Cargo `[profile]`/run)
 
@@ -783,15 +783,15 @@ Making a `features` release preset also imply a default `javac --release` is sti
 
 ### New sections
 
-| Section | Cargo analogue | Purpose |
-| --- | --- | --- |
-| `[dependencies]` | `[dependencies]` | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources), and `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation. Maven coordinates, POM/version resolution, transitive Maven download, and a lockfile remain §3. |
-| `[dev-dependencies]` | `[dev-dependencies]` | test/bench-only deps (JUnit, etc.) |
-| `[toolchain]` | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
-| `[repositories]` | (registries) | Maven repository URLs; default Maven Central |
-| `[profile.dev]` / `[profile.release]` | `[profile.*]` | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels) |
-| `[workspace]` / `[[module]]` | `[workspace]` | multi-module builds with a shared lockfile |
-| `[lints]` | `[lints]` | wire `jals-lint` / `-Xlint` configuration |
+| Section                               | Cargo analogue        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[dependencies]`                      | `[dependencies]`      | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources), and `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation. Maven coordinates, POM/version resolution, transitive Maven download, and a lockfile remain §3.                                                                            |
+| `[dev-dependencies]`                  | `[dev-dependencies]`  | test/bench-only deps (JUnit, etc.)                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `[toolchain]`                         | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
+| `[repositories]`                      | (registries)          | Maven repository URLs; default Maven Central                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `[profile.dev]` / `[profile.release]` | `[profile.*]`         | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels)                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `[workspace]` / `[[module]]`          | `[workspace]`         | multi-module builds with a shared lockfile                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `[lints]`                             | `[lints]`             | wire `jals-lint` / `-Xlint` configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ## 3. Maven dependency management (the largest remaining gap)
 
@@ -808,10 +808,10 @@ crate, e.g. `jals-resolve`):
   (drives `jals fetch` / `jals update` / `--locked` / `--frozen`).
 - **Network fetch** — download missing jars from `[repositories]`; gated by `--offline`.
 
-`jals-build` itself only needs the *result*: the resolved classpath, fed in like the current
+`jals-build` itself only needs the _result_: the resolved classpath, fed in like the current
 `jals-project` source/artifact projection. No part of this changes the crate's purity.
 
-**Already wired (analysis + compile side):** the *consumption* of a classpath is done, the
+**Already wired (analysis + compile side):** the _consumption_ of a classpath is done, the
 explicit-jar form resolves end-to-end, and JALS path/Git projects recurse through their own exact
 manifests. `Manifest::classpath_entries`
 resolves the `[build] classpath` to paths, and `Manifest::dependency_sources` classifies each
@@ -820,7 +820,7 @@ reads the `.class` bytes out of typed project/cache entries (and **downloads** r
 SHA-256 verified artifact cache via `ProjectInputs::assemble`) and parses them with `jals-classfile`; and
 `jals-hir`'s `ProjectIndex::builder().with_classpath()` folds them in so external library types resolve in
 `jals lint` and the language server, while `jals build`/`run` put the same jars on `javac`/`java`'s
-classpath. What is still missing is the *resolver* above — turning **Maven coordinates** into those
+classpath. What is still missing is the _resolver_ above — turning **Maven coordinates** into those
 classpath entries (POM walking + coordinate version conflict resolution + lockfile). Until
 then, a project lists explicit jar URLs/paths under `[dependencies]` (or jars/dirs under
 `[build] classpath`) by hand. JDK standard-library classes are not loaded this way either; the
@@ -829,12 +829,12 @@ separate, still-unwired step).
 
 ## 4. Packaging
 
-| Capability | Cargo analogue | Notes |
-| --- | --- | --- |
+| Capability                        | Cargo analogue                   | Notes                                                                 |
+| --------------------------------- | -------------------------------- | --------------------------------------------------------------------- |
 | Plain jar (`Main-Class` manifest) | `cargo build --release` artifact | a `jar` invocation/archive plan from `[package]` + `[run] main-class` |
-| Fat / uber jar | — | bundle dependency jars into one runnable archive |
-| `jpackage` / native image | — | OS installers / GraalVM native binaries |
-| Source & javadoc jars | — | `-sources.jar` / `-javadoc.jar` for publishing |
+| Fat / uber jar                    | —                                | bundle dependency jars into one runnable archive                      |
+| `jpackage` / native image         | —                                | OS installers / GraalVM native binaries                               |
+| Source & javadoc jars             | —                                | `-sources.jar` / `-javadoc.jar` for publishing                        |
 
 ## 5. Testing
 
@@ -845,15 +845,15 @@ classpath plan, a runner-`Invocation` builder, and result reporting in `jals-cli
 
 ## 6. Operational / CLI flags (language-agnostic)
 
-| Flag | Cargo analogue | Notes |
-| --- | --- | --- |
-| `--release` / `--profile <name>` | `--release` / `--profile` | select a `[profile.*]` |
-| `--offline` / `--frozen` / `--locked` | same | dependency-resolution modes |
-| `--target-dir <DIR>` | `--target-dir` | override `target/` (generalizes today's `--out-dir`) |
-| `--color auto\|always\|never` | `--color` | colored output |
-| `-q`/`--quiet`, `-v`/`-vv` | same | verbosity levels (build already has `-v`) |
-| `--workspace` / `-p <pkg>` | same | multi-module selection |
-| `--manifest-path` everywhere | `--manifest-path` | already on build/run/clean; extend to `init`/future commands |
+| Flag                                  | Cargo analogue            | Notes                                                        |
+| ------------------------------------- | ------------------------- | ------------------------------------------------------------ |
+| `--release` / `--profile <name>`      | `--release` / `--profile` | select a `[profile.*]`                                       |
+| `--offline` / `--frozen` / `--locked` | same                      | dependency-resolution modes                                  |
+| `--target-dir <DIR>`                  | `--target-dir`            | override `target/` (generalizes today's `--out-dir`)         |
+| `--color auto\|always\|never`         | `--color`                 | colored output                                               |
+| `-q`/`--quiet`, `-v`/`-vv`            | same                      | verbosity levels (build already has `-v`)                    |
+| `--workspace` / `-p <pkg>`            | same                      | multi-module selection                                       |
+| `--manifest-path` everywhere          | `--manifest-path`         | already on build/run/clean; extend to `init`/future commands |
 
 ## Out of scope (for `jals-build` the crate)
 

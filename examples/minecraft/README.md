@@ -64,7 +64,7 @@ each entry (`bundler?` and `obfuscated?`), which are independent of each other:
   the mappings `fetch_text` and `remap_jar`; everything else (bundler extraction, decompile,
   publication) is unchanged. This is orthogonal to the layout boundary below: 26.x is still a
   bundler.
-- **1.18 changes the server layout.** From 1.18 the server download is a *bundler*: the game jar
+- **1.18 changes the server layout.** From 1.18 the server download is a _bundler_: the game jar
   sits at `META-INF/versions/<version>/server-<version>.jar` with its libraries under
   `META-INF/libraries/`, so the script pulls the game out with `nested_jar` and flattens the
   libraries with `add_nested_classpath`. 1.14.4–1.17.1 ship one flat jar with the libraries
@@ -78,21 +78,21 @@ re-runs the script and `replace-root` swaps the whole published tree for the new
 ## Side selection
 
 Selection is **additive**, exactly like Cargo: a feature never subtracts, so `--features client`
-keeps the default `server` and therefore builds the *merged* jar. Drop `server` with
+keeps the default `server` and therefore builds the _merged_ jar. Drop `server` with
 `--no-default-features`.
 
-| selection | resolved features | behaviour |
-|---|---|---|
-| (none) | `server` | server jar only (26.2 — no mappings, no remap) |
-| `--features client` | `server`, `client` | remap both if obfuscated, then `merge_jars(server, client)` |
-| `--features server,client` | `server`, `client` | same as above |
-| `--no-default-features --features client` | `client` | client jar only |
-| `--features 1.16.5` | `server`, `1.16.5` | 1.16.5 server jar + server mappings |
-| `--no-default-features --features 1.16.5` | `1.16.5` | same — no side selected falls back to `server` |
+| selection                                 | resolved features  | behaviour                                                   |
+| ----------------------------------------- | ------------------ | ----------------------------------------------------------- |
+| (none)                                    | `server`           | server jar only (26.2 — no mappings, no remap)              |
+| `--features client`                       | `server`, `client` | remap both if obfuscated, then `merge_jars(server, client)` |
+| `--features server,client`                | `server`, `client` | same as above                                               |
+| `--no-default-features --features client` | `client`           | client jar only                                             |
+| `--features 1.16.5`                       | `server`, `1.16.5` | 1.16.5 server jar + server mappings                         |
+| `--no-default-features --features 1.16.5` | `1.16.5`           | same — no side selected falls back to `server`              |
 
 `merge_jars` overlays the client onto the server, so the client wins path conflicts. A client-only
 build never enters the server branch, so on 1.18+ `add_nested_classpath` is skipped and the bundled
-libraries (brigadier, guava, netty, …) are absent from its compile classpath. Client-*specific*
+libraries (brigadier, guava, netty, …) are absent from its compile classpath. Client-_specific_
 libraries (lwjgl, icu4j, jorbis, …) are never fetched at all — the launcher resolves them from the
 metadata's `libraries` list, which this example does not walk — so `net/minecraft/client` classes
 referencing them stay unresolved in a merged build too.
@@ -178,10 +178,10 @@ Another project can depend on this one and get the game without running any of i
 
 ```toml
 [dependencies]
-minecraft = { path = "../jals/examples/minecraft-mojang-remap", features = ["client", "26.2"] }
+minecraft = { path = "../jals/examples/minecraft", features = ["client", "26.2"] }
 ```
 
-The consumer's `jals build` runs this build script under its *own* feature selection and receives:
+The consumer's `jals build` runs this build script under its _own_ feature selection and receives:
 
 - the resolved game jar (plus, for a 1.18+ server bundler, its flattened libraries) on the compile
   classpath, so `net.minecraft.*` types resolve and compile;
@@ -189,10 +189,10 @@ The consumer's `jals build` runs this build script under its *own* feature selec
   behind a type. They are not compile inputs — the classpath jar already defines those types, and
   handing `javac` both would be a duplicate-class error rather than an improvement.
 
-Everything lands in the *consumer's* `target/jals/cache`. This directory is not written to:
+Everything lands in the _consumer's_ `target/jals/cache`. This directory is not written to:
 `src/main/java/net/minecraft` is only ever physically published when this project is built as the
 root. A consumer that has never built it directly still gets the full classpath, so the two uses do
-not interfere — but note that if you *have* built it as a root, those 6000-odd published files are
+not interfere — but note that if you _have_ built it as a root, those 6000-odd published files are
 ordinary sources of a `path` dependency and the consumer will compile them alongside its own. Run
 `jals clean` here first if you want the dependency to contribute the classpath jar only.
 
