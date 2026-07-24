@@ -600,7 +600,7 @@ impl Actor {
     /// Dispatch one command. `didChange` is normally routed through the coalescer in
     /// [`run`](Self::run); the plain arm here (splice + overlay + diagnostics) keeps dispatch
     /// total for direct drivers such as tests.
-    pub(crate) async fn process(&mut self, cmd: Cmd) {
+    async fn process(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::DidOpen(params) => Self::guard(self.did_open(params)).await,
             Cmd::DidChange(params) => {

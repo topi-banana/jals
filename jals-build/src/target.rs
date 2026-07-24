@@ -33,7 +33,7 @@ impl RunTarget {
     /// 4. several `[[bin]]` without `default-run` — [`ResolveTargetError::Ambiguous`].
     /// 5. no `[[bin]]` — `[run] main-class` if set, else [`ResolveTargetError::NoTarget`].
     ///
-    /// The returned `&str` borrows from `manifest`, matching [`Invocation::run`](crate::Invocation::run)'s
+    /// The returned `&str` borrows from `manifest`, matching `Invocation::run`'s
     /// `main_class` parameter so the caller can pass it straight through.
     ///
     /// # Errors

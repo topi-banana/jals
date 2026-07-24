@@ -50,16 +50,9 @@ use crate::host::LspHost;
 pub struct Server;
 
 impl Server {
-    /// Run the language server over stdio on a fresh current-thread runtime (the workspace-wide
-    /// `jals-exec` bootstrap). Blocks until the client disconnects. The public entry point
-    /// (`jals lsp`).
-    pub fn run() -> anyhow::Result<()> {
-        jals_exec::tokio_rt::run(Self::serve)?
-    }
-
     /// Build the server and run its stdio event loop until the client disconnects. Exported so a
     /// host that already owns a `jals-exec` runtime (the CLI) can await it directly.
-    // Runs on a current-thread runtime (see [`Server::run`]), so the future is deliberately
+    // Runs on a current-thread runtime, so the future is deliberately
     // `!Send` — it holds the non-`Send` stdio locks across `.await`. Those guards are moved into
     // `run_buffered` and live for the whole loop by design, so neither can be dropped earlier.
     pub async fn serve(exec: Exec) -> anyhow::Result<()> {

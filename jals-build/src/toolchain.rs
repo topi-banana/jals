@@ -43,7 +43,7 @@ pub enum Tool {
 impl Tool {
     /// The bare executable name (`"javac"` / `"java"`), used both as the `bin/` leaf of a JDK home
     /// and as the ultimate `PATH`-resolved fallback.
-    pub const fn binary_name(self) -> &'static str {
+    pub(crate) const fn binary_name(self) -> &'static str {
         match self {
             Self::Javac => "javac",
             Self::Java => "java",
@@ -52,7 +52,7 @@ impl Tool {
 
     /// The environment variable that hard-overrides this tool's path (`$JAVAC` / `$JAVA`), honored
     /// above the `[toolchain]` selection for CI/back-compat (see [`ToolResolver::resolve`]).
-    pub const fn env_var(self) -> &'static str {
+    pub(crate) const fn env_var(self) -> &'static str {
         match self {
             Self::Javac => "JAVAC",
             Self::Java => "JAVA",
@@ -61,7 +61,7 @@ impl Tool {
 
     /// Where this tool lives inside a JDK `home` (`<home>/bin/<tool>`) — the one place the JDK
     /// layout rule is encoded.
-    pub fn path_in(self, home: &Path) -> PathBuf {
+    fn path_in(self, home: &Path) -> PathBuf {
         home.join("bin").join(self.binary_name())
     }
 }
@@ -75,11 +75,11 @@ impl Tool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JdkInstall {
     /// The JDK home directory (the parent of `bin/`).
-    pub home: PathBuf,
+    home: PathBuf,
     /// The distribution / vendor parsed from the install (`temurin`, `openjdk`, …), if determinable.
-    pub distribution: Option<String>,
+    distribution: Option<String>,
     /// The major Java version parsed from the install (`21`), if determinable.
-    pub version: Option<u32>,
+    version: Option<u32>,
 }
 
 impl JdkInstall {
@@ -91,7 +91,7 @@ impl JdkInstall {
     /// `1.8`-style versions (`jdk1.8.0_292` → 8). The distribution is canonicalized to the same
     /// lowercase vocabulary [`matches`](Self::matches) compares against, so classification and
     /// matching stay one scheme; an unrecognized vendor or version is `None` (matched leniently).
-    pub fn from_install_name(home: PathBuf, name: &str) -> Self {
+    pub(crate) fn from_install_name(home: PathBuf, name: &str) -> Self {
         Self {
             home,
             distribution: Self::parse_distribution(name),
@@ -177,11 +177,11 @@ impl JdkInstall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidates {
     /// The candidate program paths to probe for existence, most-preferred first.
-    pub preferred: Vec<PathBuf>,
+    preferred: Vec<PathBuf>,
     /// The path used when no preferred candidate exists — the selector's natural default. Used
     /// *without* probing, so an explicit-but-wrong selection (a bad `[toolchain]` path, a bogus
     /// `$JAVAC`) surfaces as a spawn error naming it rather than silently reverting to `PATH`.
-    pub fallback: PathBuf,
+    fallback: PathBuf,
 }
 
 impl Candidates {
@@ -189,7 +189,7 @@ impl Candidates {
     ///
     /// The existence probe is injected so the policy stays pure and the host owns the one
     /// filesystem touch (`Path::is_file`).
-    pub fn pick(self, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    pub(crate) fn pick(self, exists: impl Fn(&Path) -> bool) -> PathBuf {
         self.preferred
             .into_iter()
             .find(|candidate| exists(candidate))
@@ -198,7 +198,7 @@ impl Candidates {
 
     /// [`pick`](Self::pick) with an async existence probe, so the host can keep its filesystem
     /// touches off the executor. Same rule, one place: first existing preferred, else fallback.
-    pub async fn pick_async(self, exists: impl AsyncFn(&Path) -> bool) -> PathBuf {
+    pub(crate) async fn pick_async(self, exists: impl AsyncFn(&Path) -> bool) -> PathBuf {
         for candidate in self.preferred {
             if exists(&candidate).await {
                 return candidate;
@@ -216,13 +216,13 @@ impl Candidates {
 /// reads env vars, probes existence, and spawns.
 pub struct ToolResolver<'a> {
     /// The installed JDKs the host discovered, matched by a [`ToolSpec::Distribution`].
-    pub installs: &'a [JdkInstall],
+    pub(crate) installs: &'a [JdkInstall],
     /// `$JAVA_HOME`, when set: the preferred system-tool location.
-    pub java_home: Option<&'a Path>,
+    pub(crate) java_home: Option<&'a Path>,
     /// `$HOME`, when known: expands a `~/`-anchored [`ToolSpec::Path`].
-    pub home: Option<&'a Path>,
+    pub(crate) home: Option<&'a Path>,
     /// The project root, against which a relative [`ToolSpec::Path`] is resolved.
-    pub project_root: &'a Path,
+    pub(crate) project_root: &'a Path,
 }
 
 impl ToolResolver<'_> {
@@ -243,7 +243,7 @@ impl ToolResolver<'_> {
     ///   system locations (an un-discovered distribution reverts to the system tools).
     /// - [`System`](ToolSpec::System) or `None`: `<java_home>/bin/<tool>` (when `java_home` is
     ///   set), falling back to the bare name on `PATH`.
-    pub fn resolve(
+    pub(crate) fn resolve(
         &self,
         tool: Tool,
         spec: Option<ToolSpec<'_>>,

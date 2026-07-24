@@ -36,10 +36,7 @@ const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 const MANAGED_ROOT: &str = "target/jals";
 const MANIFEST_FILE: &str = "jals.toml";
 
-/// Project directory reserved for all Rhai build-script artifacts.
-pub const RHAI_BUILD_ROOT: &str = "target/jals/build/rhai";
-
-/// Directory under [`RHAI_BUILD_ROOT`] where script-generated files are published.
+/// Directory under `target/jals/build/rhai` where script-generated files are published.
 pub const RHAI_OUTPUT_ROOT: &str = "target/jals/build/rhai/out";
 
 /// Cache identity for one build-script project.
@@ -51,7 +48,7 @@ pub const RHAI_OUTPUT_ROOT: &str = "target/jals/build/rhai/out";
 pub struct BuildScriptCacheScope(Option<ContentDigest>);
 
 impl BuildScriptCacheScope {
-    /// Distinguished cache scope for the root project executed by [`execute_build_script`].
+    /// Distinguished cache scope for the root project executed by `execute_build_script`.
     pub const ROOT: Self = Self(None);
 
     /// Construct an isolated dependency-project cache scope from a stable digest.
@@ -259,7 +256,7 @@ impl BuildScriptEnvironment {
     /// an untrusted `build.rhai` — including a dependency's, which the user never reviewed.
     /// Passing host state stays possible, but only through names the user opted in by choosing
     /// this prefix.
-    pub const HOST_PREFIX: &'static str = "JALS_";
+    const HOST_PREFIX: &'static str = "JALS_";
 
     /// Construct an empty environment.
     pub const fn new() -> Self {
@@ -330,25 +327,20 @@ impl BuildScriptEnvironment {
     }
 
     /// Get an explicit variable.
-    pub fn get(&self, name: &str) -> Option<&str> {
+    fn get(&self, name: &str) -> Option<&str> {
         self.values.get(name).map(String::as_str)
     }
 
     /// Iterate variables in lexical order.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+    fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.values
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
     }
 
     /// Number of explicit variables.
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.values.len()
-    }
-
-    /// Whether the environment is empty.
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
     }
 
     /// This environment with the current project's resolved build features set to `features`.
@@ -362,12 +354,12 @@ impl BuildScriptEnvironment {
     }
 
     /// Whether build feature `name` is enabled (backs `build.feature("…")`).
-    pub fn has_feature(&self, name: &str) -> bool {
+    fn has_feature(&self, name: &str) -> bool {
         self.features.contains(name)
     }
 
     /// Iterate the enabled build features in lexical order (backs `build.features()`).
-    pub fn features(&self) -> impl ExactSizeIterator<Item = &str> {
+    fn features(&self) -> impl ExactSizeIterator<Item = &str> {
         self.features.iter().map(String::as_str)
     }
 }
@@ -408,7 +400,7 @@ impl BuildScriptDiagnostic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildScriptOutput {
     /// Storage revision containing the published files. It is unchanged for an exact no-op.
-    pub revision: Revision,
+    revision: Revision,
     /// Every file written below [`RHAI_OUTPUT_ROOT`], in key order.
     pub generated_files: BTreeSet<FileKey>,
     /// Generated or project source files added by the script, in key order.
@@ -426,12 +418,12 @@ pub struct BuildScriptOutput {
     /// Project files that invalidate this result, in key order.
     pub rerun_files: BTreeSet<FileKey>,
     /// Environment names that invalidate this result, in lexical order.
-    pub rerun_env: BTreeSet<String>,
+    rerun_env: BTreeSet<String>,
     /// Script warnings and any non-fatal cache-persistence warning. Successful results never
     /// contain an error diagnostic.
     pub diagnostics: Vec<BuildScriptDiagnostic>,
     /// Script metadata, in lexical key order.
-    pub metadata: BTreeMap<String, String>,
+    metadata: BTreeMap<String, String>,
     /// Declarative host tasks recorded by the script.
     pub task_plan: TaskPlan,
 }
@@ -443,13 +435,6 @@ pub struct BuildScriptOutput {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BuildScriptOutputPath {
     key: FileKey,
-}
-
-impl BuildScriptOutputPath {
-    /// Fully rooted key below [`RHAI_OUTPUT_ROOT`].
-    pub const fn key(&self) -> &FileKey {
-        &self.key
-    }
 }
 
 /// Aggregate-local knowledge used to reconcile stale generated files safely.
@@ -473,7 +458,8 @@ impl BuildScriptSession {
     }
 
     /// Keys known to have been published through this session, in key order.
-    pub fn known_outputs(&self) -> impl ExactSizeIterator<Item = &FileKey> {
+    #[cfg(test)]
+    fn known_outputs(&self) -> impl ExactSizeIterator<Item = &FileKey> {
         self.outputs.keys()
     }
 }
@@ -885,22 +871,9 @@ pub struct PreparedBuildScript {
 }
 
 impl PreparedBuildScript {
-    /// Cache scope used for this preparation.
-    pub const fn cache_scope(&self) -> BuildScriptCacheScope {
-        self.cache_scope
-    }
-
     /// Configured project-relative script path.
     pub const fn script_path(&self) -> &FileKey {
         &self.script
-    }
-
-    /// Generated project keys and bytes in deterministic key order.
-    pub fn generated_files(&self) -> impl ExactSizeIterator<Item = (&FileKey, &[u8])> {
-        self.pending
-            .generated
-            .iter()
-            .map(|(key, bytes)| (key, bytes.as_slice()))
     }
 
     /// Resolve a generated or pre-existing project file from the immutable preparation view.
@@ -924,7 +897,7 @@ impl PreparedBuildScript {
     /// Returns `None` when `path` was not generated by this preparation. After
     /// [`persist`](Self::persist) succeeds, the key can be consumed through the artifact cache's
     /// verified lookup APIs.
-    pub fn generated_cache_key(&self, path: &FileKey) -> Option<CacheKey> {
+    fn generated_cache_key(&self, path: &FileKey) -> Option<CacheKey> {
         self.pending.generated.get(path).map(|bytes| {
             CacheKey::new(
                 CacheNamespace::BuildScriptOutput,
@@ -2608,7 +2581,11 @@ mod api {
     /// This is the root-project adapter over [`prepare_build_script`]. It reconciles root outputs
     /// with a revision check, updates aggregate-local ownership, then persists prepared cache
     /// artifacts. A cache failure after source commit remains a non-fatal warning.
-    pub async fn execute_build_script<S: SourceBackend, C: CacheBackend>(
+    ///
+    /// A test convenience over the two-phase `prepare_build_script` /
+    /// `publish_prepared_build_script` API that the host drives directly.
+    #[cfg(test)]
+    pub(crate) async fn execute_build_script<S: SourceBackend, C: CacheBackend>(
         storage: &mut ProjectStorage<S, C>,
         manifest: &Manifest,
         environment: &BuildScriptEnvironment,
@@ -2686,10 +2663,9 @@ mod api {
     }
 }
 
-pub use api::{
-    clear_build_script_outputs, execute_build_script, prepare_build_script,
-    publish_prepared_build_script,
-};
+#[cfg(test)]
+pub(crate) use api::execute_build_script;
+pub use api::{clear_build_script_outputs, prepare_build_script, publish_prepared_build_script};
 
 #[cfg(test)]
 mod tests {

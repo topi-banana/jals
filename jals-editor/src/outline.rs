@@ -26,7 +26,7 @@ pub struct OutlineNode {
     pub selection_range: Range<usize>,
     /// Nested declarations. An enum's constants come before its members; an unnamed
     /// static/instance initializer block contributes nothing.
-    pub children: Vec<Self>,
+    pub(crate) children: Vec<Self>,
 }
 
 /// Builds the document outline from a parsed file's syntax tree.

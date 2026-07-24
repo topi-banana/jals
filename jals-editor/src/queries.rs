@@ -19,16 +19,16 @@ use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 #[derive(Clone)]
 pub struct QueryFile<'a> {
     /// Stable identity within the associated [`ProjectIndex`].
-    pub file: FileId,
+    file: FileId,
     /// The file's immutable syntax tree.
-    pub syntax: SyntaxNode,
+    syntax: SyntaxNode,
     /// File-local name resolution for `syntax`.
-    pub resolved: &'a Resolved,
+    resolved: &'a Resolved,
 }
 
 impl<'a> QueryFile<'a> {
     /// Bundle one file's analysis inputs.
-    pub const fn new(file: FileId, syntax: SyntaxNode, resolved: &'a Resolved) -> Self {
+    pub(crate) const fn new(file: FileId, syntax: SyntaxNode, resolved: &'a Resolved) -> Self {
         Self {
             file,
             syntax,
@@ -98,7 +98,7 @@ pub struct ProjectQueries<'a> {
 
 impl<'a> ProjectQueries<'a> {
     /// Create a query module over `index` and the current file.
-    pub const fn new(index: &'a ProjectIndex, current: QueryFile<'a>) -> Self {
+    pub(crate) const fn new(index: &'a ProjectIndex, current: QueryFile<'a>) -> Self {
         Self { index, current }
     }
 
@@ -136,7 +136,7 @@ impl<'a> ProjectQueries<'a> {
     /// caller whose project files resolve lazily (and asynchronously) answer a file-local query
     /// without touching any other file, then fall back to [`references`](Self::references) with
     /// the fully-resolved set.
-    pub fn local_references(
+    pub(crate) fn local_references(
         &self,
         offset: usize,
         include_declaration: bool,
@@ -186,7 +186,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// The inferred type under `offset`, suppressing an uninformative unknown result.
-    pub async fn hover(&self, offset: usize) -> Option<Ty> {
+    async fn hover(&self, offset: usize) -> Option<Ty> {
         let inference = jals_hir::TypeInference::infer(
             &self.current.syntax,
             self.current.resolved,
@@ -520,7 +520,7 @@ impl Ident {
     /// Locals and other file-scoped bindings always qualify; project types do too (a host widens
     /// their rewrite project-wide). Members are withheld — their uses can span files a rename
     /// does not rewrite.
-    pub const fn is_renamable_kind(kind: DefKind) -> bool {
+    const fn is_renamable_kind(kind: DefKind) -> bool {
         use DefKind::{
             AnnotationType, CatchParam, Class, Enum, Interface, LambdaParam, Local, Param,
             PatternVar, Record, Resource, TypeParam,

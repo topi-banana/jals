@@ -92,13 +92,8 @@ pub enum Outcome {
 
 impl Outcome {
     /// Whether the file parsed cleanly.
-    pub fn is_ok(self) -> bool {
+    fn is_ok(self) -> bool {
         matches!(self, Outcome::Ok)
-    }
-
-    /// Whether this outcome breaks a hard parser invariant (panic / non-lossless).
-    pub fn is_invariant_violation(self) -> bool {
-        matches!(self, Outcome::Panicked | Outcome::NonLossless)
     }
 
     /// A short, stable label for display.
@@ -116,7 +111,7 @@ impl Outcome {
     ///
     /// Never panics: a panic inside the parser is caught and reported as
     /// [`Outcome::Panicked`], since catching invariant violations is the whole point.
-    pub fn check_file(path: &Path) -> Self {
+    fn check_file(path: &Path) -> Self {
         let src = match std::fs::read_to_string(path) {
             Ok(src) => src,
             Err(_) => return Self::ReadError,
@@ -154,7 +149,7 @@ impl Outcome {
 #[derive(Debug, Clone)]
 pub struct SourceReport {
     /// Source name.
-    pub name: String,
+    name: String,
     /// Resolved root directory that was walked.
     pub root: PathBuf,
     /// Total `.java` files found.
@@ -174,15 +169,6 @@ pub struct SourceReport {
 }
 
 impl SourceReport {
-    /// Fraction of files (0.0–1.0) with at least one syntax error.
-    pub fn syntax_error_rate(&self) -> f64 {
-        if self.total == 0 {
-            0.0
-        } else {
-            self.syntax_errors as f64 / self.total as f64
-        }
-    }
-
     /// Whether any hard invariant (non-lossless / panic) was violated.
     pub fn has_invariant_violations(&self) -> bool {
         self.panicked > 0 || self.non_lossless > 0

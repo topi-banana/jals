@@ -33,7 +33,8 @@ pub struct GoldenSource {
     /// Root directory, relative to the `sources/` dir.
     pub root_rel: &'static str,
     /// Human-readable description.
-    pub description: &'static str,
+    #[allow(dead_code)]
+    description: &'static str,
 }
 
 /// Every golden corpus the CLI knows about. Add an entry here to register a new one.
@@ -66,13 +67,13 @@ pub struct PairResult {
     /// `0.0..=1.0` (1.0 = identical). The Ratcliff/Obershelp ratio over lines.
     pub similarity: f64,
     /// Whether the formatted output is byte-for-byte equal to the expected output.
-    pub exact: bool,
+    exact: bool,
 }
 
 impl PairResult {
     /// Format `input` with `cfg` and score it against the expected `expected` output:
     /// a line-level similarity ratio plus whether the two are byte-identical.
-    pub fn score(input: &str, expected: &str, cfg: &Config) -> (f64, bool) {
+    fn score(input: &str, expected: &str, cfg: &Config) -> (f64, bool) {
         let formatted =
             jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(input, cfg)).formatted;
         let exact = formatted == expected;
@@ -179,7 +180,7 @@ impl GoldenReport {
     }
 
     /// Recursively collect every `*.input` under `root` that has a sibling `*.output`.
-    pub fn collect_pairs(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    fn collect_pairs(root: &Path) -> Vec<(PathBuf, PathBuf)> {
         WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)

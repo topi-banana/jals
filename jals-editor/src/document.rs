@@ -30,7 +30,7 @@ impl Document {
     }
 
     /// Wrap an already-parsed `text` (a fan-out worker's output) without reparsing.
-    pub fn with_parse(text: String, parse: Parse) -> Self {
+    pub(crate) fn with_parse(text: String, parse: Parse) -> Self {
         let line_index = Arc::new(LineIndex::new(&text));
         Self {
             text: Arc::from(text),

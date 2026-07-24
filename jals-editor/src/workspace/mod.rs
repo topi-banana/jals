@@ -24,7 +24,7 @@ use core::ops::Range;
 
 use jals_config::FeatureSet;
 use jals_exec::Exec;
-use jals_hir::{FileFacts, FileId, LoweredClasspath, ProjectIndex, Resolved, SourceLocations, Ty};
+use jals_hir::{FileFacts, FileId, LoweredClasspath, ProjectIndex, Resolved, SourceLocations};
 use jals_storage::{CacheBackend, DirKey, FileKey, ProjectStorage, ProjectView, SourceBackend};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
@@ -328,7 +328,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// per-file work fans out in that order, so the index is deterministic. The execution context
     /// is taken from the storage ([`ProjectStorage::exec`]) — one handle threads through the whole
     /// aggregate.
-    pub async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
+    pub(crate) async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
         let exec = storage.exec().clone();
         let view = storage.view();
         let mut project_sources = spec.project_sources;
@@ -530,18 +530,6 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         ))
     }
 
-    /// The project symbol index.
-    pub const fn index(&self) -> &ProjectIndex {
-        &self.index
-    }
-
-    /// The project's resolved language feature set (from `[package] features`), empty when none
-    /// is declared. Folded into [`diagnostics`](Workspace::diagnostics) automatically; exposed
-    /// for hosts that assemble a lint config elsewhere.
-    pub const fn feature_set(&self) -> FeatureSet {
-        self.feature_set
-    }
-
     /// Replace the resolved feature selection — the language feature set (the browser
     /// re-resolves it when the manifest buffer is edited) and the build features that
     /// `#[cfg(feature = "…")]` tests.
@@ -577,7 +565,8 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// Replace the exact dependency source files used for navigation and source-dependency
     /// indexing. The paths are reread from the current project view; they never become editable
     /// project files and do not widen any project source root.
-    pub async fn set_dependency_sources(
+    #[cfg(test)]
+    async fn set_dependency_sources(
         &mut self,
         mut library_sources: Vec<FileKey>,
         mut source_dep_sources: Vec<FileKey>,
@@ -681,7 +670,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// The virtual path of the file `id` addresses (any id-space), or `None` for an id that
     /// addresses no real file.
-    pub fn path_of(&self, id: FileId) -> Option<&FileKey> {
+    pub(crate) fn path_of(&self, id: FileId) -> Option<&FileKey> {
         Some(&self.ws_file(id)?.path)
     }
 
@@ -760,7 +749,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// Go-to-definition for the cursor at `offset` in `file`: a file-local binding if there is
     /// one, then the project type a reference names, then — for a member access — the member the
     /// receiver type declares.
-    pub async fn definition(&self, file: FileId, offset: usize) -> Option<crate::FileRange> {
+    pub(crate) async fn definition(&self, file: FileId, offset: usize) -> Option<crate::FileRange> {
         self.queries(file).await?.definition(offset).await
     }
 
@@ -768,7 +757,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// the cursor — across the whole project when it is a project type, or within this one file
     /// for a file-local binding. The declaration is included when `include_declaration`. Empty if
     /// the cursor is on no resolvable symbol.
-    pub async fn references(
+    pub(crate) async fn references(
         &self,
         file: FileId,
         offset: usize,
@@ -793,19 +782,15 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         queries.references(offset, include_declaration, files)
     }
 
-    /// The inferred type under `offset` in `file`, or `None` for nothing informative.
-    pub async fn hover(&self, file: FileId, offset: usize) -> Option<Ty> {
-        self.queries(file).await?.hover(offset).await
-    }
-
-    /// [`hover`](Self::hover) rendered as the shared Markdown (a fenced ` ```java ` block).
-    pub async fn hover_markdown(&self, file: FileId, offset: usize) -> Option<String> {
+    /// The inferred type under `offset` in `file`, rendered as the shared Markdown (a fenced
+    /// ` ```java ` block).
+    pub(crate) async fn hover_markdown(&self, file: FileId, offset: usize) -> Option<String> {
         self.queries(file).await?.hover_markdown(offset).await
     }
 
     /// Completions for the cursor at `offset` in `file`: the members after a `.`, otherwise the
     /// in-scope bindings, project types, and keywords.
-    pub async fn completions(&self, file: FileId, offset: usize) -> Vec<Completion> {
+    pub(crate) async fn completions(&self, file: FileId, offset: usize) -> Vec<Completion> {
         match self.queries(file).await {
             Some(queries) => queries.completions(offset).await,
             None => Vec::new(),
@@ -813,7 +798,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     }
 
     /// Signature help for the call at `offset` in `file`, with cross-file type resolution.
-    pub async fn signature_help(
+    pub(crate) async fn signature_help(
         &self,
         file: FileId,
         offset: usize,
@@ -823,7 +808,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// Occurrence highlights for the cursor at `offset` in `file`, resolved against the project
     /// so a cross-file type name highlights precisely.
-    pub async fn highlights(&self, file: FileId, offset: usize) -> Vec<Highlight> {
+    pub(crate) async fn highlights(&self, file: FileId, offset: usize) -> Vec<Highlight> {
         self.queries(file)
             .await
             .map(|queries| queries.highlights(offset))
@@ -832,7 +817,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// Classified semantic tokens for `file`, resolved against the project so a cross-file type
     /// name is classified by its declared kind rather than the generic `Type`.
-    pub async fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
+    pub(crate) async fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
         match self.project_file(file) {
             Some(source) => {
                 SemanticTokens::classify(&source.doc.parse.syntax(), Some((&self.index, file)))
@@ -844,7 +829,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// The document outline of `file`. Purely syntactic over the cached tree, so it stays a
     /// synchronous read.
-    pub fn outline(&self, file: FileId) -> Vec<OutlineNode> {
+    pub(crate) fn outline(&self, file: FileId) -> Vec<OutlineNode> {
         self.project_file(file)
             .map(|source| Outline::of(&source.doc.parse.syntax()))
             .unwrap_or_default()
@@ -852,7 +837,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// The canonical diagnostics of `file` under `config`, with the project's feature set, its
     /// `cfg` evaluation, and the index folded in (see [`FileDiagnostics`]).
-    pub async fn diagnostics(
+    pub(crate) async fn diagnostics(
         &self,
         file: FileId,
         config: &jals_config::lint::Config,
@@ -876,7 +861,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// prepareRename for the cursor at `offset` in `file`: the byte range of the identifier under
     /// the cursor when it names a renamable symbol, else `None` (an external name, a
     /// keyword/literal, or a withheld member — see [`ProjectQueries::renamable_range`]).
-    pub async fn prepare_rename(&self, file: FileId, offset: usize) -> Option<Range<usize>> {
+    pub(crate) async fn prepare_rename(&self, file: FileId, offset: usize) -> Option<Range<usize>> {
         self.queries(file).await?.renamable_range(offset)
     }
 
@@ -884,7 +869,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// for a project type, within the file for a file-local binding — or `None` if the cursor is
     /// on no renamable symbol or there is nothing to change. The host validates the new name
     /// ([`crate::Ident::is_valid_java_identifier`]) and shapes the edit.
-    pub async fn rename_targets(
+    pub(crate) async fn rename_targets(
         &self,
         file: FileId,
         offset: usize,
@@ -939,11 +924,6 @@ impl SingleFileProject {
     /// The file's query inputs (for the project-files iterator of a references query).
     pub fn file(&self) -> QueryFile<'_> {
         QueryFile::new(Self::FILE, self.root.clone(), &self.resolved)
-    }
-
-    /// The one-file symbol index (with the stdlib stubs folded in).
-    pub const fn index(&self) -> &ProjectIndex {
-        &self.index
     }
 
     /// The canonical diagnostics of the file under `config`, with the one-file index folded in

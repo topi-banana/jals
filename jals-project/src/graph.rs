@@ -67,21 +67,21 @@ pub enum NodeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphEdge {
     /// `None` denotes the root project, which is not itself a dependency node.
-    pub from: Option<NodeId>,
+    pub(crate) from: Option<NodeId>,
     pub dependency: String,
-    pub to: NodeId,
+    pub(crate) to: NodeId,
     /// Whether a binary dependency requests recursive nested-jar extraction.
-    pub recursive: bool,
+    pub(crate) recursive: bool,
     /// The build features this edge's `[dependencies]` entry enables in the target project. Empty
     /// for a binary node, which has no build script. Purely what the manifest declared: the entry's
     /// `features` list and nothing else — what the declaring project's own `[features]` forwards
     /// through a `<dependency>/<feature>` entry depends on its resolved selection, so it is applied
     /// by [`ResolvedProjectGraph::resolve_node_features`] rather than baked in here.
-    pub features: BTreeSet<String>,
+    pub(crate) features: BTreeSet<String>,
     /// Whether this edge lets the target resolve its own `[features] default` list
     /// (`default-features`, `true` unless the entry says otherwise; always `true` for a binary
     /// node, which receives no features at all).
-    pub default_features: bool,
+    pub(crate) default_features: bool,
 }
 
 /// What one `[dependencies]` entry declares about its target's build features, kept together so a
@@ -121,9 +121,9 @@ impl DeclaredEdgeFeatures {
 /// One edge in a deterministic cycle diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CycleEdge {
-    pub from: NodeId,
+    pub(crate) from: NodeId,
     pub dependency: String,
-    pub to: NodeId,
+    pub(crate) to: NodeId,
 }
 
 /// Stable read-only node metadata.
@@ -305,7 +305,7 @@ pub(crate) struct ResolvedNode {
 }
 
 impl ResolvedNode {
-    pub(crate) const fn kind(&self) -> NodeKind {
+    const fn kind(&self) -> NodeKind {
         match &self.body {
             NodeBody::Binary(_) => NodeKind::Binary,
             NodeBody::PlainSource(_) => NodeKind::PlainSource,
@@ -757,11 +757,7 @@ pub struct PreprocessedProjectGraph {
 }
 
 impl PreprocessedProjectGraph {
-    pub fn metadata(&self) -> GraphMetadata {
+    pub(crate) fn metadata(&self) -> GraphMetadata {
         GraphMetadata::from_graph(&self.nodes, &self.edges)
-    }
-
-    pub fn warnings(&self) -> &[GraphWarning] {
-        &self.warnings
     }
 }

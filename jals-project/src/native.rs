@@ -51,7 +51,8 @@ impl NativeProjectGraph {
 /// Fully projected native root plus its preprocessed dependency graph.
 #[derive(Debug)]
 pub struct NativeProjectAssembly {
-    pub graph: GraphMetadata,
+    #[allow(dead_code)]
+    graph: GraphMetadata,
     pub plan: jals_classpath::ProjectInputPlan,
     pub inputs: ProjectInputs,
     pub source_roots: Vec<DirKey>,
