@@ -4,16 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# The formatter configuration (`Config` and its option enums) lives in `jals-config`, the shared
-# config-model crate; `jals-fmt` re-exports it internally and formats with it.
+# WIP: the formatter is being rewritten from scratch, so this crate is currently a no-op
+# skeleton (see `src/lib.rs`). It still accepts a `jals-config` formatter `Config` (ignored for
+# now) and parses via `jals-syntax` to surface syntax-error warnings.
 jals-config.workspace = true
-jals-exec.workspace = true
 jals-syntax.workspace = true
-unicode-width.workspace = true
-
-[dev-dependencies]
-expect-test = "1.5"
-proptest = "1"
 
 [lints]
 workspace = true
