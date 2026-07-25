@@ -8,37 +8,37 @@
 #   [layout] [blank-lines] [braces] [wrapping] [spacing] [comments] [imports] [literals]
 
 [layout]
-indent-style = "space"        # "space" | "tab" | "mixed"
-indent-width = 4              # columns per indentation level
-tab-width = 4                 # display width of a literal tab
+indent-style = "space" # "space" | "tab" | "mixed"
+indent-width = 4       # columns per indentation level
+tab-width = 4          # display width of a literal tab
 # continuation-indent = 4     # columns for a wrapped line; unset tracks indent-width
-max-width = 100               # column limit
-line-ending = "lf"            # "lf" | "crlf" | "auto" | "native"
+max-width = 100                      # column limit
+line-ending = "lf"                   # "lf" | "crlf" | "auto" | "native"
 insert-final-newline = true
 trim-trailing-whitespace = true
-indent-switch-labels = true   # indent `case` one level from its `switch`
-formatter-tags = false        # honor the on/off markers below
+indent-switch-labels = true          # indent `case` one level from its `switch`
+formatter-tags = false               # honor the on/off markers below
 formatter-off-tag = "@formatter:off"
 formatter-on-tag = "@formatter:on"
 
 [blank-lines]
-max-in-code = 1               # longest run of source blank lines kept in a body
+max-in-code = 1        # longest run of source blank lines kept in a body
 after-package = 1
 after-imports = 1
 around-type = 1
 around-method = 1
 around-field = 0
-at-type-body-start = 0        # enforced count; a source blank line still survives max-in-code
+at-type-body-start = 0 # enforced count; a source blank line still survives max-in-code
 
 [braces]
-type-declaration = "same-line"   # "same-line" | "next-line" | "next-line-shifted"
-method-declaration = "same-line" #   | "next-line-shifted-braces" | "next-line-on-wrap"
+type-declaration = "same-line"            # "same-line" | "next-line" | "next-line-shifted"
+method-declaration = "same-line"          #   | "next-line-shifted-braces" | "next-line-on-wrap"
 block = "same-line"
 lambda-body = "same-line"
 else-on-new-line = false
-keep-method-body-on-one-line = "if-empty"  # "never" | "if-empty" | "if-single-item"
-keep-block-on-one-line = "if-empty"        #   | "always" | "preserve"
-force-if = "never"            # "never" | "if-multiline" | "always"; adds braces when not "never"
+keep-method-body-on-one-line = "if-empty" # "never" | "if-empty" | "if-single-item"
+keep-block-on-one-line = "if-empty"       #   | "always" | "preserve"
+force-if = "never"                        # "never" | "if-multiline" | "always"; adds braces when not "never"
 
 [wrapping]
 # Every construct key below takes:
@@ -51,7 +51,7 @@ ternary = "if-long"
 method-chain = "if-long"
 method-annotations = "always-per-item"
 parameter-annotations = "never"
-before-binary-operator = true     # the operator starts the continuation line
+before-binary-operator = true          # the operator starts the continuation line
 # "common-lines" | "separate-lines-if-wrapped" | "separate-lines-if-not-empty"
 #   | "separate-lines" | "preserve"
 paren-method-invocation = "common-lines"
@@ -73,14 +73,14 @@ before-assert-colon = true
 format-line = false
 format-block = false
 format-javadoc = false
-width = 80                    # only consulted when one of the reflow keys above is on
+width = 80             # only consulted when one of the reflow keys above is on
 
 [imports]
-order = "preserve"            # "preserve" | "sort" | "group"
+order = "preserve"                          # "preserve" | "sort" | "group"
 groups = ["java.", "javax.", "*", "static"]
 reorder-modifiers = false
 
 [literals]
-hex-case = "preserve"         # "preserve" | "upper" | "lower"
+hex-case = "preserve"            # "preserve" | "upper" | "lower"
 float-trailing-zero = "preserve"
 suffix-case = "preserve"
