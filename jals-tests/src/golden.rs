@@ -269,6 +269,48 @@ mod tests {
         assert_eq!(from_file, GoldenReport::google_config());
     }
 
+    /// Every documented `jalsfmt.toml` sample, with the path it lives at.
+    ///
+    /// Each one claims its values *are* the defaults, so each has to parse and come back equal
+    /// to `Config::default()`. Without this they drift silently: the config is sectioned and
+    /// `Config` ignores unknown keys, so a sample written against an older schema still parses —
+    /// it just yields the defaults instead of what it says.
+    const DEFAULT_SAMPLES: [&str; 3] = [
+        "../jals-fmt/jalsfmt.toml",
+        "../README.md",
+        "../README_jp.md",
+    ];
+
+    /// Pull the `jalsfmt.toml` fenced TOML block out of a Markdown page, or take the whole file
+    /// when it already is one.
+    fn default_sample(text: &str, path: &str) -> String {
+        if !path.ends_with(".md") {
+            return text.to_owned();
+        }
+        text.split("```toml")
+            .skip(1)
+            .filter_map(|block| block.split("```").next())
+            .find(|block| block.contains("# jalsfmt.toml"))
+            .unwrap_or_else(|| panic!("{path} should document a jalsfmt.toml block"))
+            .to_owned()
+    }
+
+    #[test]
+    fn the_documented_samples_are_the_defaults() {
+        for path in DEFAULT_SAMPLES {
+            let full = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+            let text = fs::read_to_string(&full).unwrap_or_else(|_| panic!("{path} should exist"));
+            let sample = default_sample(&text, path);
+            let parsed: Config = toml::from_str(&sample)
+                .unwrap_or_else(|err| panic!("{path}: the sample should parse: {err}"));
+            assert_eq!(
+                parsed,
+                Config::default(),
+                "{path} drifted from the defaults"
+            );
+        }
+    }
+
     #[test]
     fn score_is_one_for_already_formatted_input() {
         // A trivially-formatted class, in Google's 2-space style, is a fixed point.
