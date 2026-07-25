@@ -182,3 +182,71 @@ tasks.publish_tree(
     "src/main/java/net/minecraft",
     "replace-root"
 );
+
+// The `mixin` feature adds a second, completely independent publication root: SpongePowered Mixin,
+// the bytecode-weaving framework every modern Minecraft mod loader builds on. Nothing here touches
+// the game artifacts above, so it composes freely with any side and any release.
+//
+// Unlike the game, Mixin publishes a *sources* jar, so this is `extract_java` on real `.java`
+// rather than `decompile_java` on bytecode — the same publication contract, minus the skeleton
+// rendering. The release is immutable on the SpongePowered Maven repository, so the one SHA-1 pins
+// both the URL and the fetch, exactly like the content-addressed version metadata above.
+//
+// The jar is deliberately *not* put on the classpath. Mixin 0.8.7 is unshaded — its sources need
+// asm, guava, gson, commons-io, log4j2 and modlauncher, and all of `org/spongepowered/tools` is an
+// annotation processor — none of which `mixin-0.8.7.jar` carries, so adding it would define every
+// published type a second time without making the tree compile.
+if build.feature("mixin") {
+    let mixin_version = "0.8.7";
+    let mixin_sources = tasks.fetch_jar(
+        tasks.https_url(
+            "https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixin/"
+                + mixin_version + "/mixin-" + mixin_version + "-sources.jar"
+        ),
+        tasks.sha1("b5fd91c657404b1712a612ece6c8ddf66069be0f"),
+        tasks.bytes(2097152)
+    );
+    // `org/spongepowered` covers both halves of the jar — the runtime (`asm/**`) and the
+    // annotation processor (`tools/**`) — under one owner and one publication root.
+    tasks.publish_tree(
+        "mixin-" + mixin_version,
+        tasks.extract_java(mixin_sources, "org/spongepowered"),
+        "src/main/java/org/spongepowered",
+        "replace-root"
+    );
+}
+
+// The `mixinextras` feature is the same shape once more: a third publication root, holding
+// MixinExtras — the companion library whose `@WrapOperation` / `@ModifyExpressionValue` / `@Local`
+// injectors and sugar every recent mod applies on top of Mixin. It is as independent of the game as
+// `mixin` is, and independent of `mixin` too: the two own disjoint destinations and neither feature
+// implies the other, so selecting one publishes its root without the other's.
+//
+// `mixinextras-common` is the platform-neutral core; the `-fabric` / `-forge` / `-neoforge`
+// artifacts are only thin per-loader bootstraps around it. It is published on Maven Central, where
+// a released version is immutable, so the one SHA-1 pins both the URL and the fetch exactly like
+// every other fetch here.
+//
+// This jar stays off the classpath for the same reasons as Mixin's: its sources compile against
+// Mixin, asm and the loader APIs that this example never resolves, and `mixinextras/ap` is an
+// annotation processor.
+if build.feature("mixinextras") {
+    let mixinextras_version = "0.5.4";
+    let mixinextras_sources = tasks.fetch_jar(
+        tasks.https_url(
+            "https://repo1.maven.org/maven2/io/github/llamalad7/mixinextras-common/"
+                + mixinextras_version + "/mixinextras-common-" + mixinextras_version
+                + "-sources.jar"
+        ),
+        tasks.sha1("fd5d27cff1c8118f5a4a037e7f549b606d117caf"),
+        tasks.bytes(524288)
+    );
+    // Apart from its manifest the jar holds nothing outside `com/llamalad7/mixinextras`, so this
+    // prefix takes the whole library — runtime, sugar and annotation processor — under one owner.
+    tasks.publish_tree(
+        "mixinextras-" + mixinextras_version,
+        tasks.extract_java(mixinextras_sources, "com/llamalad7"),
+        "src/main/java/com/llamalad7",
+        "replace-root"
+    );
+}

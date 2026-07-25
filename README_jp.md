@@ -44,24 +44,24 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 
 `jals` はブラウザ向け playground を含む 16 個のプロダクト crate からなる Cargo ワークスペースです。
 
-| Crate | 説明 |
-| --- | --- |
-| [`jals-editor`](jals-editor) | definition・references・hover・completion・signature help・highlight の protocol-neutral な意味論と、UTF-8 バイト／UTF-16 座標変換。LSP とブラウザ playground で共有します。 |
-| [`jals-syntax`](jals-syntax) | 無損失な Java lexer とエラー耐性のある CST parser（`rowan`）、および CST 上の型付き AST 層。すべてのツールの共通基盤です。 |
-| [`jals-fmt`](jals-fmt) | **WIP（作り直し中）。** `jals-syntax` の CST を入力とする Wadler/Prettier 方式の pretty-printer。現状は入力をそのまま返す no-op。 |
-| [`jals-lint`](jals-lint) | linter（`jals-cli` 経由の `jals lint`）。CST と `jals-hir` に基づくルールレジストリで、未使用のローカル変数・型不一致・報告されていない例外・定数条件による到達不能分岐・`[package] features` に応じたプレビュー機能チェックを行います。 |
-| [`jals-hir`](jals-hir) | CST 上での名前解決・ファイル横断の型インデックス・型推論/型検査。linter と LSP が拠り所とするセマンティック層で、コンパイル済み classpath からの外部型の橋渡しも行います。 |
-| [`jals-classfile`](jals-classfile) | JVM の `.class` ファイル形式（JVMS 第 4 章）を完全にバイト一致で読み書きするモデル。 |
-| [`jals-decompile`](jals-decompile) | パース済みの `.class` から読める Java を再構築します。型/シグネチャのレンダリング、初期化子、宣言された `throws`、そして（段階的に）バイトコードからのメソッド本体の完全な逆コンパイル。 |
-| [`jals-classpath`](jals-classpath) | project byte と検証済み classpath artifact（ローカル/リモート jar、同梱/ネストした jar）を解決・ロードし、`jals-hir`・linter・LSP に供給します。依存に source が無い場合は逆コンパイルした `.java` skeleton にフォールバックします。 |
-| [`jals-config`](jals-config) | 3 つの設定ファイル（`jals.toml`、`jalsfmt.toml`、`jalslint.toml`）すべての純粋なデータモデル・パース・探索・検証。 |
-| [`jals-exec`](jals-exec) | native・browser・inline host 共通の current-thread 実行コンテキスト。確定的な worker fan-out と runtime に依存しない協調 yield を提供します。 |
-| [`jals-storage`](jals-storage) | revision付きの確定的なproject storage。portable codeは検証済み`FileKey`/`DirKey`、不変`CodeTree` snapshot、transaction、overlay、SHA-256検証付きartifact cacheを使い、memory/native adapterが同じsealed contractを実装します。 |
-| [`jals-project`](jals-project) | stable な node identity を持つ transitive path/Git/JAR project graph を探索し、選択 root 直下の正確な `jals.toml` だけを probe し、resolved から preprocessed への phase transition を必須にして、dependency input を node-scoped な検証済み artifact としてのみ `jals-classpath` へ公開します。portable in-memory host と native acquisition host を含みます。 |
-| [`jals-build`](jals-build) | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Rhai pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`clean`/`init` と LSP/playground の build phase を支えます。 |
-| [`jals-lsp`](jals-lsp) | Language Server Protocol サーバ（`jals lsp` サブコマンド）。同じ CST とセマンティック層から診断・ドキュメントシンボル・整形・hover・定義へのジャンプ・参照検索などを提供。ホスト専用。 |
-| [`jals-cli`](jals-cli) | `jals` コマンドラインバイナリ。 |
-| [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Rhai build-script の各層をブラウザ上だけで動かします。 |
+| Crate                                | 説明                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`jals-editor`](jals-editor)         | definition・references・hover・completion・signature help・highlight の protocol-neutral な意味論と、UTF-8 バイト／UTF-16 座標変換。LSP とブラウザ playground で共有します。                                                                                                                                                                                    |
+| [`jals-syntax`](jals-syntax)         | 無損失な Java lexer とエラー耐性のある CST parser（`rowan`）、および CST 上の型付き AST 層。すべてのツールの共通基盤です。                                                                                                                                                                                                                                      |
+| [`jals-fmt`](jals-fmt)               | **WIP（作り直し中）。** `jals-syntax` の CST を入力とする Wadler/Prettier 方式の pretty-printer。現状は入力をそのまま返す no-op。                                                                                                                                                                                                                               |
+| [`jals-lint`](jals-lint)             | linter（`jals-cli` 経由の `jals lint`）。CST と `jals-hir` に基づくルールレジストリで、未使用のローカル変数・型不一致・報告されていない例外・定数条件による到達不能分岐・`[package] features` に応じたプレビュー機能チェックを行います。                                                                                                                        |
+| [`jals-hir`](jals-hir)               | CST 上での名前解決・ファイル横断の型インデックス・型推論/型検査。linter と LSP が拠り所とするセマンティック層で、コンパイル済み classpath からの外部型の橋渡しも行います。                                                                                                                                                                                      |
+| [`jals-classfile`](jals-classfile)   | JVM の `.class` ファイル形式（JVMS 第 4 章）を完全にバイト一致で読み書きするモデル。                                                                                                                                                                                                                                                                            |
+| [`jals-decompile`](jals-decompile)   | パース済みの `.class` から読める Java を再構築します。型/シグネチャのレンダリング、初期化子、宣言された `throws`、そして（段階的に）バイトコードからのメソッド本体の完全な逆コンパイル。                                                                                                                                                                        |
+| [`jals-classpath`](jals-classpath)   | project byte と検証済み classpath artifact（ローカル/リモート jar、同梱/ネストした jar）を解決・ロードし、`jals-hir`・linter・LSP に供給します。依存に source が無い場合は逆コンパイルした `.java` skeleton にフォールバックします。                                                                                                                            |
+| [`jals-config`](jals-config)         | 3 つの設定ファイル（`jals.toml`、`jalsfmt.toml`、`jalslint.toml`）すべての純粋なデータモデル・パース・探索・検証。                                                                                                                                                                                                                                              |
+| [`jals-exec`](jals-exec)             | native・browser・inline host 共通の current-thread 実行コンテキスト。確定的な worker fan-out と runtime に依存しない協調 yield を提供します。                                                                                                                                                                                                                   |
+| [`jals-storage`](jals-storage)       | revision付きの確定的なproject storage。portable codeは検証済み`FileKey`/`DirKey`、不変`CodeTree` snapshot、transaction、overlay、SHA-256検証付きartifact cacheを使い、memory/native adapterが同じsealed contractを実装します。                                                                                                                                  |
+| [`jals-project`](jals-project)       | stable な node identity を持つ transitive path/Git/JAR project graph を探索し、選択 root 直下の正確な `jals.toml` だけを probe し、resolved から preprocessed への phase transition を必須にして、dependency input を node-scoped な検証済み artifact としてのみ `jals-classpath` へ公開します。portable in-memory host と native acquisition host を含みます。 |
+| [`jals-build`](jals-build)           | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Rhai pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`clean`/`init` と LSP/playground の build phase を支えます。                                                                                      |
+| [`jals-lsp`](jals-lsp)               | Language Server Protocol サーバ（`jals lsp` サブコマンド）。同じ CST とセマンティック層から診断・ドキュメントシンボル・整形・hover・定義へのジャンプ・参照検索などを提供。ホスト専用。                                                                                                                                                                          |
+| [`jals-cli`](jals-cli)               | `jals` コマンドラインバイナリ。                                                                                                                                                                                                                                                                                                                                 |
+| [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Rhai build-script の各層をブラウザ上だけで動かします。                                                                                                                                                                    |
 
 残り 2 つのワークスペースメンバーは開発専用のツールで、製品には含まれません:
 [`jals-tests`](jals-tests)（実世界の Java に対して parser の健全性とフォーマッタの忠実度を
@@ -277,7 +277,7 @@ sandbox limit、Rust の `BuildScript` model は
 [`jals-build` の Rhai reference](jals-build/README.md#rhai-build-scripts)を、実行可能な例は
 [`examples/rhai_build_script`](examples/rhai_build_script)を参照してください。
 source archive task の形は [`examples/task_source_archive`](examples/task_source_archive)、
-remap 済み Minecraft の例は [`examples/minecraft-mojang-remap`](examples/minecraft-mojang-remap)
+remap 済み Minecraft の例は [`examples/minecraft`](examples/minecraft)
 にあります。
 
 root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess
@@ -321,12 +321,12 @@ version selection、transitive Maven download、`jals.lock` lockfile は将来�
 
 ### オプション
 
-| オプション | 説明 |
-| --- | --- |
-| `[PATHS]...` | フォーマット対象のファイルまたはディレクトリ。ディレクトリは `.java` ファイルを再帰的に探索します。パス指定なし → stdin/stdout。 |
-| `--check` | 何も書き込まず、変更が生じるファイルがあれば非ゼロで終了します。 |
-| `-D <LINT>` | lint を拒否（繰り返し指定可）。認識されるのは `warnings` のみで、構文警告のあるファイルがあれば失敗します。 |
-| `--config <PATH>` | `jalsfmt.toml` の探索の代わりに、指定した設定ファイルを使用します。 |
+| オプション        | 説明                                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `[PATHS]...`      | フォーマット対象のファイルまたはディレクトリ。ディレクトリは `.java` ファイルを再帰的に探索します。パス指定なし → stdin/stdout。 |
+| `--check`         | 何も書き込まず、変更が生じるファイルがあれば非ゼロで終了します。                                                                 |
+| `-D <LINT>`       | lint を拒否（繰り返し指定可）。認識されるのは `warnings` のみで、構文警告のあるファイルがあれば失敗します。                      |
+| `--config <PATH>` | `jalsfmt.toml` の探索の代わりに、指定した設定ファイルを使用します。                                                              |
 
 ## 設定
 
