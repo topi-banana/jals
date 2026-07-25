@@ -76,14 +76,16 @@ impl EclipseProfileReader {
 
 /// One entry of an IntelliJ `PackageEntryTable`, in document order.
 enum ImportEntry {
-    /// A `<package name=… withSubpackages=… static=…/>` row.
+    /// A `<package name=… withSubpackages=… static=… [module=…]/>` row.
     Package {
-        /// The package name, empty for the catch-all row.
+        /// The package name, empty for the catch-all *and* for the module row.
         name: String,
         /// `withSubpackages="true"`.
         with_subpackages: bool,
         /// `static="true"`.
         is_static: bool,
+        /// `module="true"` — the "all module imports" row (`DESIGN.md` §A.4.4).
+        is_module: bool,
     },
     /// An `<emptyLine/>` (blank-line separator).
     Blank,
@@ -124,6 +126,7 @@ impl SchemeScan {
                     with_subpackages: Xml::attr(element, b"withSubpackages")?.as_deref()
                         == Some("true"),
                     is_static: Xml::attr(element, b"static")?.as_deref() == Some("true"),
+                    is_module: Xml::attr(element, b"module")?.as_deref() == Some("true"),
                 });
             }
             b"emptyLine" if self.open_table.is_some() => self.entries.push(ImportEntry::Blank),
@@ -146,8 +149,17 @@ impl SchemeScan {
                         name,
                         with_subpackages,
                         is_static,
+                        is_module,
                     } => {
-                        let marker = if *is_static { "$" } else { "" };
+                        // `$` is IntelliJ's own static marker. `%` is *not* an IntelliJ spelling:
+                        // its `.editorconfig` serializer has no token for the module row, so this
+                        // is jals's marker for the XML-only shape. A package name can never start
+                        // with it, so it cannot collide with a real editorconfig entry.
+                        let marker = match (*is_module, *is_static) {
+                            (true, _) => "%",
+                            (false, true) => "$",
+                            (false, false) => "",
+                        };
                         let wildcard = if *with_subpackages { "**" } else { "*" };
                         if name.is_empty() {
                             format!("{marker}{wildcard}")

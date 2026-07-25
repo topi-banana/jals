@@ -349,6 +349,7 @@ native モデルには載せるが、`Config` へは写さない。理由を型�
 | IntelliJ 命名規約 | `FIELD_NAME_PREFIX`, `TEST_NAME_SUFFIX`, `PREFER_LONGER_NAMES`, `VISIBILITY` | コード生成・inspection の設定であってフォーマッタ rule ではない |
 | IntelliJ コード生成 | `INSERT_OVERRIDE_ANNOTATION`, `GENERATE_FINAL_LOCALS`, `REPLACE_INSTANCEOF`, `REPLACE_SUM` | 同上 |
 | IntelliJ 意味論依存 | `CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND`, `NAMES_COUNT_TO_USE_IMPORT_ON_DEMAND`, `PACKAGES_TO_USE_IMPORT_ON_DEMAND`, `DELETE_UNUSED_MODULE_IMPORTS` | wildcard 集約・未使用判定は classpath / 名前解決を要する（`DESIGN.md` §11 結論 4, P-gen-3） |
+| IntelliJ `IMPORT_LAYOUT_TABLE` の module 行 | `<package name="" module="true"/>` | `import module M;` を**名前 prefix ではなくプロジェクト構造**で選ぶ行。jals の `imports.groups` は生の文字列 prefix マッチなので写像先が無い。`PackageEntry::is_module` として型付きで保持し、射影では**行ごと落とす**（name が空なので、落とさないと catch-all 群が二重に出る） |
 | IntelliJ エディタ挙動 | `WRAP_ON_TYPING`, `FORCE_REARRANGE_MODE`, `KEEP_BUILDER_METHODS_INDENTS` | 入力中の挙動・rearrange ダイアログ設定でバッチ整形の出力に効かない |
 | IntelliJ 整列 | `ALIGN_MULTILINE_*` 18 個, `ALIGN_CONSECUTIVE_*` | **列揃え**は幅計算が入力に依存し、jals の canonical レイアウトモデルに乗らない（`DESIGN.md` §13 の L2 = engine 固有）。native モデルには全数保持し、互換 engine 移植時に使う |
 | Eclipse 整列 | `align_type_members_on_columns`, `align_variable_declarations_on_columns`, `align_assignment_statements_on_columns`, `alignment_for_*` の `M_INDENT_ON_COLUMN` ビット | 同上 |

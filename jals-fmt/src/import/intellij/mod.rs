@@ -173,11 +173,19 @@ impl PackageEntryTable {
     /// `blank-lines.between-import-groups` — and every static entry collapses into the single
     /// `"static"` group jals models. Prefixes go through [`ImportGroups::prefix`] so this
     /// importer's encoding matches the Spotless one.
+    ///
+    /// The "all module imports" row is skipped: it selects `import module M;` declarations by
+    /// project structure rather than by name prefix, so jals has nothing to map it to
+    /// (`MAPPING.md` §7). Its name is empty, so projecting it would otherwise emit a second
+    /// catch-all group.
     fn to_jals_groups(&self) -> alloc::vec::Vec<String> {
         let mut groups = alloc::vec::Vec::new();
         for entry in &self.0 {
             match entry {
-                PackageEntry::BlankLine => {}
+                PackageEntry::BlankLine
+                | PackageEntry::Package {
+                    is_module: true, ..
+                } => {}
                 PackageEntry::Package {
                     name, is_static, ..
                 } => {

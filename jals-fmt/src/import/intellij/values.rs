@@ -142,7 +142,9 @@ pub enum PackageEntry {
         with_subpackages: bool,
         /// `static="true"` — spelled with a leading `$`.
         is_static: bool,
-        /// `module="true"` — the project's own modules.
+        /// `module="true"` — the "all module imports" row (`import module M;`). IntelliJ's
+        /// `.editorconfig` serializer has no token for it, so the XML reader marks it with a
+        /// leading `%`, which no package name can start with.
         is_module: bool,
     },
     /// `<emptyLine/>` / `|` — a blank line between groups.
@@ -170,6 +172,9 @@ impl PackageEntryTable {
                 entries.push(PackageEntry::BlankLine);
                 continue;
             }
+            let (is_module, entry) = entry
+                .strip_prefix('%')
+                .map_or((false, entry), |rest| (true, rest));
             let (is_static, entry) = entry
                 .strip_prefix('$')
                 .map_or((false, entry), |rest| (true, rest));
@@ -185,7 +190,7 @@ impl PackageEntryTable {
                 name: name.trim_end_matches('.').to_owned(),
                 with_subpackages,
                 is_static,
-                is_module: false,
+                is_module,
             });
         }
         Self(entries)

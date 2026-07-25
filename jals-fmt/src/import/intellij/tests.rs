@@ -402,3 +402,44 @@ fn the_scheme_xml_reads_the_package_entry_table_and_skips_foreign_languages() {
     assert_eq!(config.imports.order, ImportOrder::Group);
     assert_eq!(config.imports.groups, ["static", "java.", "*"]);
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn the_module_row_is_carried_but_not_projected() {
+    use super::IntellijXmlScheme;
+    use super::values::{PackageEntry, PackageEntryTable};
+
+    // IntelliJ's default layout leads with the "all module imports" row, which has an *empty*
+    // name. Reading it as an ordinary package would emit a second catch-all group; ignoring the
+    // `module` attribute outright would drop it from the model (MAPPING.md §7).
+    let xml = r#"<code_scheme name="Project">
+  <JavaCodeStyleSettings>
+    <option name="IMPORT_LAYOUT_TABLE">
+      <value>
+        <package name="" withSubpackages="true" static="false" module="true" />
+        <package name="java" withSubpackages="true" static="false" />
+        <emptyLine />
+        <package name="" withSubpackages="true" static="false" />
+      </value>
+    </option>
+  </JavaCodeStyleSettings>
+</code_scheme>"#;
+
+    let native = IntellijXmlScheme::parse(xml).expect("scheme should parse");
+    let PackageEntryTable(entries) = native
+        .imports
+        .import_layout_table
+        .as_ref()
+        .expect("the table should be read");
+    assert!(
+        matches!(entries.first(), Some(PackageEntry::Package { is_module: true, name, .. }) if name.is_empty()),
+        "the module row must survive into the native model: {entries:?}"
+    );
+
+    let config: Config = native.into();
+    assert_eq!(
+        config.imports.groups,
+        ["java.", "*"],
+        "the module row must not become a second catch-all"
+    );
+}
