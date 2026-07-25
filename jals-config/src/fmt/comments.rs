@@ -6,10 +6,10 @@
 //! the single `wrap-comments` / `comment-width` pair the old rule set had.
 //! See `jals-fmt/MAPPING.md` §5.6.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Comment and Javadoc formatting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Comments {

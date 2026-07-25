@@ -17,10 +17,10 @@
 //!
 //! See `jals-fmt/MAPPING.md` §5.2 for the per-vendor correspondence.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Blank-line counts, in lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct BlankLines {
     /// Longest run of source blank lines kept inside a method body. Eclipse

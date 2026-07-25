@@ -6,7 +6,7 @@
 //! per-construct *width thresholds*. [`WrapPolicy`] is the shared four-valued vocabulary those
 //! two encodings collapse onto (`jals-fmt/MAPPING.md` §5.4).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// How a construct lays out when it does not fit the column limit.
 ///
@@ -15,7 +15,7 @@ use serde::Deserialize;
 /// counter-intuitive — `split_into_lines` is *Wrap Always* and `on_every_item` is *Chop Down If
 /// Long* — which is exactly why the shared vocabulary is spelled out here instead of reusing
 /// either vendor's names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WrapPolicy {
     /// Never break here, even past the column limit. Eclipse's `Integer.MAX_VALUE` sentinel /
@@ -38,7 +38,7 @@ pub enum WrapPolicy {
 /// booleans (`*_LPAREN_ON_NEXT_LINE` / `*_RPAREN_ON_NEXT_LINE`); its two asymmetric combinations
 /// have no value here and fold onto [`SeparateLines`](Self::SeparateLines) on import, staying
 /// visible as the original pair in the native model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ParenPositions {
     /// Both delimiters share a line with the adjacent item — the opening one ends the header
@@ -60,7 +60,7 @@ pub enum ParenPositions {
 }
 
 /// Per-construct wrapping policy and break placement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Wrapping {
