@@ -1003,9 +1003,11 @@ impl BuildTaskExecutor {
                     .file(&key)
                     .map_err(|error| format!("project JAR `{key}` cannot be read: {error}"))?
                     .bytes();
+                let mut fold = ProvenanceFold::new(b"jals.build-task.project-jar\0");
+                fold.bytes(path.as_bytes());
                 let artifact = CacheKey::new(
                     CacheNamespace::BuildTaskArtifact,
-                    ContentDigest::of(path.as_bytes()),
+                    fold.finish(),
                     ContentDigest::of(bytes),
                 );
                 cache

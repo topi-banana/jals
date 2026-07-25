@@ -17,12 +17,13 @@ use jals_config::{Dependency, GitDependency, GitRef, Manifest, PathDependency};
 use jals_exec::tokio_rt::on_blocking_pool;
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
-    NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, RelativePath,
+    NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, ProvenanceFold,
+    RelativePath,
 };
 
 use crate::{
-    ClasspathEntry, DependencyLocation, DependencyResolver, ExternalLocator, Fetcher,
-    LibrarySource, ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
+    ClasspathEntry, DependencyLocation, ExternalLocator, Fetcher, LibrarySource,
+    ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
 };
 
 /// A fetcher backed by `reqwest`'s async client.
@@ -439,10 +440,11 @@ impl NativeProjectPlan {
             })
             .await?
         };
-        let provenance = ContentDigest::of(host.display().to_string().as_bytes());
+        let mut fold = ProvenanceFold::new(b"host-classpath\0");
+        fold.bytes(host.display().to_string().as_bytes());
         let key = CacheKey::new(
             CacheNamespace::ExternalClasspath,
-            provenance,
+            fold.finish(),
             ContentDigest::of(&bytes),
         );
         storage
@@ -592,8 +594,7 @@ impl NativeProjectPlan {
         reference: &GitRef,
     ) -> Option<Vec<LibrarySource>> {
         let identity = Self::git_identity(git, reference);
-        let provenance =
-            DependencyResolver::provenance_digest(b"git-manifest\0", identity.as_bytes());
+        let provenance = Self::git_manifest_provenance(&identity);
         let key = storage
             .artifacts()
             .indexed_key(CacheNamespace::GitCheckout, provenance)
@@ -608,7 +609,7 @@ impl NativeProjectPlan {
             let file = FileKey::parse(in_checkout).ok()?;
             let key = CacheKey::new(
                 CacheNamespace::GitCheckout,
-                ContentDigest::of(format!("{identity}\0{file}").as_bytes()),
+                Self::source_file_provenance(&identity, &file),
                 content,
             );
             if !matches!(storage.artifacts().open_verified(&key).await, Ok(Some(_))) {
@@ -644,7 +645,7 @@ impl NativeProjectPlan {
         }
         let key = CacheKey::new(
             CacheNamespace::GitCheckout,
-            DependencyResolver::provenance_digest(b"git-manifest\0", identity.as_bytes()),
+            Self::git_manifest_provenance(&identity),
             ContentDigest::of(manifest.as_bytes()),
         );
         if storage
@@ -655,6 +656,15 @@ impl NativeProjectPlan {
         {
             let _ = storage.artifacts_mut().record_index(&key).await;
         }
+    }
+
+    /// The provenance shared by a pinned checkout's recorded manifest and its locator-index
+    /// recovery. Record and recovery must fold identically or every recovery misses and the
+    /// checkout is re-cloned forever — never inline one side.
+    fn git_manifest_provenance(identity: &str) -> ContentDigest {
+        let mut fold = ProvenanceFold::new(b"git-manifest\0");
+        fold.bytes(identity.as_bytes());
+        fold.finish()
     }
 
     /// The name-independent identity of a checkout: repository, pinned ref, and source dir.
@@ -727,9 +737,20 @@ impl NativeProjectPlan {
             .unwrap_or(RelativePath::ROOT)
     }
 
+    /// The provenance shared by a published source file and its manifest-driven re-derivation
+    /// in [`cached_git_sources`](Self::cached_git_sources). Publish and re-derivation must fold
+    /// identically or every recovery misses and the checkout is re-cloned forever — never
+    /// inline one side.
+    fn source_file_provenance(identity: &str, file: &FileKey) -> ContentDigest {
+        let mut fold = ProvenanceFold::new(b"source-file\0");
+        fold.bytes(identity.as_bytes())
+            .bytes(file.to_string().as_bytes());
+        fold.finish()
+    }
+
     /// Scan `source_root` through the safe native source adapter and publish every Java file as
-    /// a verified artifact under `namespace`, with a per-file provenance of
-    /// `<identity>\0<in-tree path>`.
+    /// a verified artifact under `namespace`, with a per-file provenance folded from the
+    /// checkout identity and the in-tree path.
     async fn publish_source_tree(
         storage: &mut NativeStorage,
         name: &Name,
@@ -753,10 +774,9 @@ impl NativeProjectPlan {
             .filter(|file| file.key().has_extension("java"))
         {
             let path = prefix.concat(file.key().path());
-            let provenance = format!("{identity}\0{}", file.key());
             let key = CacheKey::new(
                 namespace,
-                ContentDigest::of(provenance.as_bytes()),
+                Self::source_file_provenance(identity, file.key()),
                 ContentDigest::of(file.bytes()),
             );
             storage

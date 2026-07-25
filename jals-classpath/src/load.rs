@@ -26,13 +26,13 @@ use jals_decompile::ClassHierarchy;
 use jals_exec::{Exec, LocalBoxFuture};
 use jals_storage::io::{self as sio, Buffered, IoError, SeekFrom};
 use jals_storage::{
-    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, DirKey, FileKey, Name, ProjectView,
-    RelativePath,
+    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, FileKey, Name,
+    ProjectView, ProvenanceFold, RelativePath,
 };
 
 use crate::skeleton::{SkeletonGroup, SkeletonMode};
 use crate::zip::{CentralDirectory, MemberStream};
-use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
+use crate::{LibrarySource, Warning, WarningOrigin};
 
 /// What a jar-backing reader must satisfy: portable `Read + Seek` feeds the member streams, and
 /// `Clone + Send + 'static` lets a fan-out chunk carry its own reader clone to a worker, every
@@ -834,11 +834,9 @@ impl Archive {
         member: &RelativePath,
         bytes: &[u8],
     ) -> CacheKey {
-        let mut provenance = Vec::new();
-        provenance.extend_from_slice(parent.provenance().as_bytes());
-        provenance.extend_from_slice(parent.content().as_bytes());
-        provenance.extend_from_slice(member.to_string().as_bytes());
-        DependencyResolver::cache_key(namespace, b"archive-member\0", &provenance, bytes)
+        let mut fold = ProvenanceFold::new(b"archive-member\0");
+        fold.parent(parent).bytes(member.to_string().as_bytes());
+        CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes))
     }
 
     fn extension(value: &str) -> Option<&str> {
