@@ -2,8 +2,9 @@
 //!
 //! Three *different* int -> token tables meet in this family and must never be shared:
 //! `*_WRAP` ([`IjWrap`]), `*_BRACE_STYLE` ([`IjBraceStyle`]), and `*_BRACE_FORCE`
-//! ([`IjForceBraces`]). The `ALIGN_*` settings are column alignment, which jals's canonical
-//! layout model cannot express; they are kept here for the compat engine (`MAPPING.md` §7).
+//! ([`IjForceBraces`]). The `ALIGN_*` settings are column alignment, which jals's single layout
+//! engine does not reproduce; they are kept here as the typed record of that divergence
+//! (`MAPPING.md` §7, `DESIGN.md` §18.2 D1).
 
 use serde::Deserialize;
 

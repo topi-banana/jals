@@ -54,7 +54,8 @@ pub enum ParenPositions {
     /// Each delimiter always takes its own line. Eclipse `separate_lines`.
     SeparateLines,
     /// Keep the delimiters wherever the source put them. Eclipse `preserve_positions`; reads
-    /// input whitespace (`DESIGN.md` §17).
+    /// input whitespace, which the single engine does not do: it rounds this to
+    /// [`CommonLines`](Self::CommonLines) and warns (`DESIGN.md` §17).
     Preserve,
 }
 
@@ -181,7 +182,8 @@ pub struct Wrapping {
     pub paren_record: ParenPositions,
     /// Rejoin lines the source broke but the policy would keep together. Eclipse
     /// `join_wrapped_lines` / IntelliJ `KEEP_LINE_BREAKS` (inverted). Off means the source's
-    /// breaks survive, which reads input whitespace (`DESIGN.md` §17).
+    /// breaks survive, which reads input whitespace — so the single engine rounds this back to
+    /// `true` (always rejoin) and warns (`DESIGN.md` §17).
     pub join_wrapped_lines: bool,
     /// Break lines that exceed the column limit even where no policy allows a break.
     /// IntelliJ `WRAP_LONG_LINES`.

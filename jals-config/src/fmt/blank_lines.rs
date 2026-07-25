@@ -3,8 +3,10 @@
 //! Two distinct concepts share this section, exactly as they do in every native formatter:
 //!
 //! - **`max-*`** clamps the blank lines *already present in the source* (Eclipse
-//!   `number_of_empty_lines_to_preserve` / IntelliJ `KEEP_BLANK_LINES_*`). These read input
-//!   whitespace, so they only have meaning in the whitespace-retaining mode (`DESIGN.md` §17).
+//!   `number_of_empty_lines_to_preserve` / IntelliJ `KEEP_BLANK_LINES_*`). Whether two
+//!   significant tokens have a blank line between them is the *only* fact the engine reads from
+//!   the input's whitespace — google-java-format reads it too — and it never feeds a line-break
+//!   decision (`DESIGN.md` §17).
 //! - every other key **enforces** a count at a structural position, independent of the input
 //!   (Eclipse `blank_lines_*` / IntelliJ `BLANK_LINES_*`).
 //!

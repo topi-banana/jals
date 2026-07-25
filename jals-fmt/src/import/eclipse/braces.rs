@@ -1,7 +1,7 @@
 //! Eclipse JDT — the 15 `brace_position_for_*` settings.
 //!
 //! Four-valued ([`BracePosition`]), one per construct. jals's `[braces]` section keeps six of
-//! these; the rest stay here for the compat engine.
+//! these; the rest stay modeled here, unprojected (`MAPPING.md` §7).
 
 use serde::Deserialize;
 

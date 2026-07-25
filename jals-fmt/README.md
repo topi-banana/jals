@@ -48,7 +48,9 @@ native values can never collapse before the projection decides.
 rather than the union of four surfaces (a full bijection is impossible; `DESIGN.md` §11 / §15).
 An option with no jals equivalent — Eclipse's column-alignment settings, IntelliJ's naming
 conventions, the classpath-dependent import-on-demand thresholds — is still modeled, named, and
-typed; it simply is not carried across, and it is what a future compat engine will read.
+typed; it simply is not carried across. `jals-fmt` has **one** layout engine and approximates the
+other formatters by tuning rules, so an unprojected option is not an engine option in waiting: it
+is the typed record of a divergence the design accepts and enumerates (`DESIGN.md` §18.2).
 
 **[`MAPPING.md`](MAPPING.md) is the ledger**: the vendor inventories, the criterion for what
 earns a jals rule, the per-rule correspondence table, and the explicit list of what is

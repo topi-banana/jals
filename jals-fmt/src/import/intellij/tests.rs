@@ -318,7 +318,7 @@ fn keep_simple_booleans_become_the_preserve_policy() {
     ])
     .into();
 
-    // `true` is "leave it where the author put it" — the whitespace-retaining policy.
+    // `true` is "leave it where the author put it" — `preserve` (rounded by the engine, not here).
     assert_eq!(
         config.braces.keep_method_body_on_one_line,
         KeepOnOneLine::Preserve

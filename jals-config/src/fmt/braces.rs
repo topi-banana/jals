@@ -40,7 +40,9 @@ pub enum BraceStyle {
 pub enum ForceBraces {
     /// Leave a braceless body exactly as written. The default.
     Never,
-    /// Add braces only when the statement spans more than one line.
+    /// Add braces only when the statement spans more than one line. The only rule whose
+    /// condition consumes the engine's own line-breaking result, so its idempotency is a tested
+    /// property rather than a constructive one (`DESIGN.md` §8.1 / §17).
     IfMultiline,
     /// Always add braces.
     Always,
@@ -66,8 +68,9 @@ pub enum KeepOnOneLine {
     /// Collapse whenever the body fits the column limit. Eclipse `one_line_always`.
     Always,
     /// Keep the body on one line iff the source had it there. Eclipse `one_line_preserve` /
-    /// IntelliJ `KEEP_SIMPLE_*_IN_ONE_LINE = true`. Reads input whitespace, so it is only
-    /// meaningful in the whitespace-retaining mode (`DESIGN.md` §17).
+    /// IntelliJ `KEEP_SIMPLE_*_IN_ONE_LINE = true`. Reads input whitespace, which the single
+    /// engine does not do: it rounds this to [`IfSingleItem`](Self::IfSingleItem) — the closest
+    /// structural approximation of the same intent — and warns (`DESIGN.md` §17).
     Preserve,
 }
 

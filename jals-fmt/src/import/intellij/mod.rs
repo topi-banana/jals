@@ -240,8 +240,9 @@ impl Lower {
 
     /// Lower a `KEEP_SIMPLE_*_IN_ONE_LINE` boolean onto the five-valued jals policy.
     ///
-    /// `true` means "leave it on one line if the author did", which is the whitespace-retaining
-    /// `preserve`; `false` means "always expand".
+    /// `true` means "leave it on one line if the author did", which is `preserve` — the one
+    /// value that reads the input's line breaks, so the engine later rounds it to
+    /// `if-single-item` (`DESIGN.md` §17); `false` means "always expand".
     const fn keep(value: bool) -> KeepOnOneLine {
         if value {
             KeepOnOneLine::Preserve

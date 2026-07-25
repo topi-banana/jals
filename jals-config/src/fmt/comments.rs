@@ -36,7 +36,8 @@ pub struct Comments {
     /// `comment.clear_blank_lines_in_javadoc_comment` (inverted) / IntelliJ `JD_KEEP_EMPTY_LINES`.
     pub preserve_blank_lines: bool,
     /// Keep the source's line breaks inside comment prose instead of refilling. IntelliJ
-    /// `JD_PRESERVE_LINE_FEEDS`. Reads input whitespace (`DESIGN.md` §17).
+    /// `JD_PRESERVE_LINE_FEEDS`. Reads input whitespace, which the single engine does not do:
+    /// it rounds this to `false` (always refill) and warns (`DESIGN.md` §17).
     pub preserve_line_breaks: bool,
     /// Emit a blank line between the Javadoc description and the first block tag. Eclipse
     /// `comment.insert_new_line_before_root_tags` / IntelliJ `JD_ADD_BLANK_AFTER_DESCRIPTION`.

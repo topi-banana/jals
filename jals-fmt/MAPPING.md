@@ -64,9 +64,9 @@ option ではなく不変条件（有意トークン列保存）そのものに�
 
 ## 3. 二層構造 — 完全性の基準は層ごとに違う
 
-`DESIGN.md` §11 結論 5 は「統一スタイル言語は不可能、生成 toml は**エンジン多重化器**」と結論し、
-§15 は engine 固有 option の**透過**を規定している。ブラッシュアップはこの結論に従い、
-**2 つの成果物に別々の完全性基準**を置く。
+`DESIGN.md` §11 結論 5 は「生成 toml は**共通語彙 `Config` への射影**であり、全単射ではない」と
+結論している（`jals-fmt` はエンジンを 1 つしか持たないので、engine 固有 option の透過先が無い）。
+本書はこの結論に従い、**2 つの成果物に別々の完全性基準**を置く。
 
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
@@ -76,8 +76,9 @@ option ではなく不変条件（有意トークン列保存）そのものに�
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は
 - serde が読み、型が付き、`Debug`/`PartialEq` が効き、
-- 将来 `DESIGN.md` §14 の `LayoutEngine`（Eclipse/IntelliJ 互換 engine）を移植したときに**そのまま
-  engine のオプションになる**。
+- **「なぜ写さないか」を型で記録した監査記録**になる。単一エンジン方針（`DESIGN.md` §11）では、
+  写らない option の多くは `DESIGN.md` §18.2 の**恒久差分**に対応する — 移植待ちの在庫ではなく、
+  諦めたことの根拠である。
 
 写像しないことと、モデル化しないことは別である。
 
@@ -196,8 +197,9 @@ option ではなく不変条件（有意トークン列保存）そのものに�
 | `always` | `one_line_always` | — |
 | `preserve` | `one_line_preserve` | `KEEP_SIMPLE_*_IN_ONE_LINE = true`（入力空白依存） |
 
-`preserve` が **`DESIGN.md` §17 の whitespace-retaining モードに落ちる唯一の値**であることに注意
-（canonical モードでは `never` に丸められる）。
+`preserve` は**入力の既存改行を読む唯一の値**であり、単一エンジンはこの依存を採らない
+（`DESIGN.md` §17）。射影では値として保持されるが、エンジンは `if-single-item` へ丸め、
+丸めたことを `Warning` として報告する。
 
 ### 5.4 `[wrapping]` — `WrapPolicy` の語彙統合
 
@@ -352,9 +354,9 @@ native モデルには載せるが、`Config` へは写さない。理由を型�
 | IntelliJ `IMPORT_LAYOUT_TABLE` の module 行 | `<package name="" module="true"/>` | `import module M;` を**名前 prefix ではなくプロジェクト構造**で選ぶ行。jals の `imports.groups` は生の文字列 prefix マッチなので写像先が無い。`PackageEntry::is_module` として型付きで保持し、射影では**行ごと落とす**（name が空なので、落とさないと catch-all 群が二重に出る） |
 | IntelliJ `IMPORT_LAYOUT_TABLE` の `withSubpackages` | `java.*`（当該パッケージのみ） vs `java.**`（配下含む） | jals の `imports.groups` は生の文字列 prefix マッチで、**非再帰の prefix を表す形が無い**。両者とも `"java."` に潰れる（＝`java.*` 指定でも `java.util.*` を巻き込む）。§2 の基準「2 つ以上の到達可能なターゲットが食い違う」を満たさない — この概念を持つのは IntelliJ だけで、Spotless `importOrder` にも GJF にも非再帰の形は無く、Eclipse は import を触らない。よって投機的な rule を足さず、`PackageEntry::with_subpackages` として型付きで保持するに留める |
 | IntelliJ エディタ挙動 | `WRAP_ON_TYPING`, `FORCE_REARRANGE_MODE`, `KEEP_BUILDER_METHODS_INDENTS` | 入力中の挙動・rearrange ダイアログ設定でバッチ整形の出力に効かない |
-| IntelliJ 整列 | `ALIGN_MULTILINE_*` 18 個, `ALIGN_CONSECUTIVE_*` | **列揃え**は幅計算が入力に依存し、jals の canonical レイアウトモデルに乗らない（`DESIGN.md` §13 の L2 = engine 固有）。native モデルには全数保持し、互換 engine 移植時に使う |
+| IntelliJ 整列 | `ALIGN_MULTILINE_*` 18 個, `ALIGN_CONSECUTIVE_*` | **列揃え**は幅計算が入力に依存し、jals の canonical レイアウトモデルに乗らない。単一エンジンでは**再現しないと確定**している（`DESIGN.md` §18.2 の D1）。native モデルには全数保持し、差分の根拠として残す |
 | Eclipse 整列 | `align_type_members_on_columns`, `align_variable_declarations_on_columns`, `align_assignment_statements_on_columns`, `alignment_for_*` の `M_INDENT_ON_COLUMN` ビット | 同上 |
-| Eclipse コメント微細 | `comment.javadoc_paragraphs_tags_with_content`, `comment.new_lines_at_javadoc_boundaries` ほか | Javadoc 整形器を移植するまで写像先が無い。native 側に保持 |
+| Eclipse コメント微細 | `comment.javadoc_paragraphs_tags_with_content`, `comment.new_lines_at_javadoc_boundaries` ほか | Javadoc 整形器の忠実度の問題で写像先が無い（`DESIGN.md` §18.2 の D7）。native 側に保持 |
 
 **この表に載っていることが「構造化された」の意味**である。写像表（§5）に現れない native option も、
 モデル上は型を持ち、名前を持ち、テスト 1 が存在を保証している。
@@ -364,10 +366,12 @@ native モデルには載せるが、`Config` へは写さない。理由を型�
 ## 8. 残る限界（`DESIGN.md` の再掲・更新）
 
 - **P-gen-1（統一不能）は解消していない。** 本書の写像は「共通語彙への射影」であって全単射ではない。
-  bit 一致には `DESIGN.md` §14 の pluggable engine が要る。
-- **P-gen-2（空白依存）**: `KeepOnOneLine::Preserve` / `join-wrapped-lines` / `blank-lines.max-*` は
-  入力空白の関数であり、§17 の whitespace-retaining モードでしか意味を持たない。canonical モード
-  （GJF/Palantir/jals-native）ではそれぞれ決定的な既定値に丸める。
+  byte 一致を狙えるのは `gjf` プロファイル（エンジンのネイティブ意味論）だけで、他ターゲットは
+  **明示的に近似**である（`DESIGN.md` §18 の精度階層と恒久差分表）。
+- **P-gen-2（空白依存）**: `KeepOnOneLine::Preserve` / `join-wrapped-lines` / `wrap-long-lines` は
+  入力の既存改行の関数であり、単一エンジンはこの依存を採らない（`DESIGN.md` §17）。射影では値として
+  保持し、エンジンが canonical 値へ丸めて `Warning` を出す。`blank-lines.max-*` だけは例外で、
+  「有意トークン間に空行があるか」はエンジンが読む唯一の入力空白の事実なのでそのまま効く。
 - **P-gen-4（Spotless DSL）**: `build.gradle` / `pom.xml` はコードなので、`SpotlessConfig` は
   **解決済みパイプライン**をモデル化する。DSL テキストからの値抽出は本 importer の対象外。
 - **P-gen-6（非既定のみ透過）**: 目録に既定値を持たせているのは、生成 toml に非既定 option だけを
