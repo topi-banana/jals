@@ -87,14 +87,21 @@ filesystem reads into portable interfaces.
   `FileKey`, and source/config invalidation follows storage revisions.
 - `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
   environment variables, and classpath separators stay in native/host code.
-- `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys.
+- `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
+  also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
+  filesystem, so the host decides which config file is there and reads its bytes through a
+  `ProjectView`, then hands the text to `jals_fmt::import` and the result to
+  `jals_fmt::generate`.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`.
 - `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
   artifacts.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
   domain crates; do not add host filesystem APIs. `jals-fmt` is **WIP** — its implementation was
   removed for a from-scratch rewrite and it is currently a no-op that returns its input unchanged
-  (only `FormatOutput::format_source` and the `Warning` surface remain).
+  (only `FormatOutput::format_source` and the `Warning` surface remain). Its `import` and
+  `generate` modules are complete and shipped: `import` lowers a native Eclipse / IntelliJ /
+  google-java-format / Palantir / Spotless config onto `jals_config::fmt::Config`, and `generate`
+  renders that config back out as a `jalsfmt.toml`. Both are pure and stay portable.
 - Tests, `xtask`, and `editors/zed` may use host paths for fixtures and tooling.
 
 The `.ast-grep/rules/no-portable-host-path.yml` allowlist enforces the host boundary. Add a narrow
@@ -120,6 +127,8 @@ its `lib.rs`; every other module imports with `use alloc::...`. The
 - `jals-build --no-default-features` must remain a genuine portable core.
 - rayon is workspace-banned except in `jals-tests`' host-only harness; product fan-out goes
   through `jals-exec`.
+- `jals-cli` enables `jals-fmt/std`, which adds only `quick-xml` for the two XML-backed config
+  importers. The wasm playground resolves separately and never sees it.
 - `serde` stays `default-features = false, features = ["derive", "alloc"]`.
 - `toml` stays `default-features = false, features = ["parse", "serde"]`.
 

@@ -4,6 +4,7 @@
 // set of files on the command line, never approaching 2³² — so they cannot truncate in practice.
 #![allow(clippy::cast_possible_truncation)]
 
+mod migrate;
 mod report;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -74,6 +75,13 @@ struct FmtArgs {
     /// Use this config file instead of discovering `jalsfmt.toml`.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Do not generate a `jalsfmt.toml` from a detected Eclipse / IntelliJ / EditorConfig
+    /// formatter config. The detected settings are still used for this run.
+    // Product names, and this doc line is also the `--help` text, so it stays unquoted.
+    #[allow(clippy::doc_markdown)]
+    #[arg(long)]
+    no_migrate: bool,
 }
 
 #[derive(Args)]
@@ -265,8 +273,13 @@ impl FmtArgs {
             std::io::stdin()
                 .read_to_string(&mut src)
                 .context("reading stdin")?;
-            let cfg =
-                discovery.for_dir(&std::env::current_dir().context("getting current dir")?)?;
+            let cwd = std::env::current_dir().context("getting current dir")?;
+            // Migrating a native config still applies to a piped source, so stdin and a file get
+            // the same output — but nothing is written: a pipe should not make a file appear in
+            // the working directory.
+            self.migrate(std::slice::from_ref(&cwd), false, &mut discovery, exec)
+                .await?;
+            let cfg = discovery.for_dir(&cwd)?;
             let out = jals_fmt::FormatOutput::format_source(&src, &cfg).await;
             let changed = out.formatted != src;
             any_changed |= changed;
@@ -297,6 +310,11 @@ impl FmtArgs {
                     .or_default()
                     .extend(App::collect_java_files(std::slice::from_ref(target))?);
             }
+            // Resolve — and, in write mode, emit — the migrated config before any source is
+            // rewritten, so a run can never format against a config it then fails to record.
+            let anchors: Vec<PathBuf> = groups.keys().cloned().collect();
+            self.migrate(&anchors, !show_diff, &mut discovery, exec)
+                .await?;
             for (root, mut paths) in groups {
                 paths.sort();
                 paths.dedup();
@@ -352,6 +370,50 @@ impl FmtArgs {
         } else {
             ExitCode::SUCCESS
         })
+    }
+
+    /// Detect a native formatter config for each anchor directory and fold it into `discovery`,
+    /// writing it out as a `jalsfmt.toml` when `may_write` allows.
+    ///
+    /// Detection resolves to a *project root*, so several anchors inside one project collapse to
+    /// one migration and one generated file. An explicit `--config` wins over every directory, so
+    /// there is nothing to detect in that case.
+    ///
+    /// `may_write` is the caller's mode; `--no-migrate` turns the write off while leaving the
+    /// detected config in play for this run.
+    async fn migrate(
+        &self,
+        anchors: &[PathBuf],
+        may_write: bool,
+        discovery: &mut HostConfigs<Config>,
+        exec: &Exec,
+    ) -> Result<()> {
+        if self.config.is_some() {
+            return Ok(());
+        }
+        let mut seen = HashSet::new();
+        for anchor in anchors {
+            let Some(migration) =
+                migrate::Migration::detect(anchor, migrate::Walk::Ancestors, exec).await?
+            else {
+                continue;
+            };
+            if !seen.insert(migration.root.clone()) {
+                continue;
+            }
+            Reporter::report_migration(&migration);
+            if may_write && !self.no_migrate {
+                match migration.write(exec).await? {
+                    Some(path) => println!("created {}", path.display()),
+                    None => eprintln!(
+                        "note: {} already exists",
+                        migration.root.join("jalsfmt.toml").display()
+                    ),
+                }
+            }
+            discovery.seed(&migration.root, migration.config.clone());
+        }
+        Ok(())
     }
 
     /// Commit the staged rewrites against one aggregate in a single transaction (a no-op when
@@ -680,7 +742,25 @@ impl InitArgs {
             None => project_name_from_dir(&dir)?,
         };
 
-        let files = jals_build::InitOptions { name: name.clone() }.scaffold();
+        let mut files = jals_build::InitOptions { name: name.clone() }.scaffold();
+        // A native formatter config already in the target directory becomes a fourth scaffold
+        // file. `InitOptions::scaffold` is pure — it cannot look at a filesystem — so the
+        // detection happens here and its result joins the list. Only the directory itself is
+        // probed: a new project should not silently inherit an unrelated parent repository's
+        // formatter settings.
+        if let Some(migration) =
+            migrate::Migration::detect(&dir, migrate::Walk::DirectoryOnly, exec).await?
+        {
+            Reporter::report_migration(&migration);
+            files.push(jals_build::ScaffoldFile {
+                path: FileKey::parse("jalsfmt.toml").expect("static key is valid"),
+                contents: migration
+                    .provenance
+                    .jalsfmt_toml(&migration.config, &migration.warnings),
+            });
+        }
+        // The scopes have to be derived after the push, or the generated file falls outside the
+        // snapshot and both the existence check and the create below misbehave.
         let scopes = files
             .iter()
             .map(|file| NativeScope::all(file.path.path().clone()));
@@ -1429,6 +1509,20 @@ impl App {
         C::from_text(&key, &text).map_err(Into::into)
     }
 
+    /// The path a host config lookup should be keyed by: absolute and symlink-free where
+    /// possible, so `src/a`, `./src/a` and an absolute spelling of one directory agree.
+    ///
+    /// Falls back to the path as given when it cannot be canonicalized (it may not exist yet),
+    /// which is no worse than not canonicalizing at all.
+    fn canonical_dir(dir: &Path) -> PathBuf {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+    }
+
     /// The config an explicit `--config` path names, when one was given.
     fn load_explicit<C: DiscoverableConfig>(explicit: Option<&Path>) -> Result<Option<C>> {
         explicit
@@ -1440,6 +1534,10 @@ impl App {
 /// Host-side memoized config discovery for one run: the explicit `--config` override answers
 /// every directory; otherwise the governing config root is found by walking `dir`'s ancestors on
 /// the host filesystem, and its file is read and parsed once per root.
+///
+/// Roots are keyed by their canonical path, so `src/a`, `./src/a` and an absolute spelling of one
+/// directory share a memo entry — and so a [seeded](Self::seed) root matches however the caller
+/// spells the directory it asks about.
 struct HostConfigs<C> {
     explicit: Option<C>,
     by_root: HashMap<PathBuf, C>,
@@ -1453,16 +1551,27 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
         }
     }
 
-    /// The config governing `dir`: the explicit override, the memoized config of the discovered
-    /// root, or the default when no ancestor carries `C::FILE_NAME`.
+    /// Record a config as governing `root` even though no `C::FILE_NAME` file exists there.
+    ///
+    /// `jals fmt` uses this for a native formatter config it migrated but did not write out
+    /// (`--check`, `--diff`, and stdin all format against the migrated config while leaving the
+    /// project untouched). Nothing seeds the lint config, so `jals lint` keeps its exact
+    /// file-or-default behavior.
+    fn seed(&mut self, root: &Path, config: C) {
+        self.by_root.insert(App::canonical_dir(root), config);
+    }
+
+    /// The config governing `dir`: the explicit override, the memoized or seeded config of the
+    /// discovered root, or the default when no ancestor carries `C::FILE_NAME`.
     fn for_dir(&mut self, dir: &Path) -> Result<C> {
         if let Some(config) = &self.explicit {
             return Ok(config.clone());
         }
-        let Some(root) = dir
-            .ancestors()
-            .find(|candidate| candidate.join(C::FILE_NAME).is_file())
-        else {
+        // Nearest first, so an authored config always beats one seeded further up.
+        let start = App::canonical_dir(dir);
+        let Some(root) = start.ancestors().find(|candidate| {
+            self.by_root.contains_key(*candidate) || candidate.join(C::FILE_NAME).is_file()
+        }) else {
             return Ok(C::default());
         };
         if let Some(config) = self.by_root.get(root) {

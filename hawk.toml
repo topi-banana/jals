@@ -48,26 +48,28 @@ module = "backend"
 reason = "deferred backend-tier compile seam; no impl exists yet (TODO(backend-tier))"
 
 # `jals_fmt::import` lowers native formatter configs (Eclipse / IntelliJ / GJF /
-# Palantir / Spotless) into a jals `Config`. It landed ahead of the WIP formatter
-# rewrite, so no shipped binary reaches it yet — the CLI/LSP wiring that consumes
-# it arrives with the rewrite. Each importer is a `Deserialize` model whose fields
-# are read by serde, not by jals code, so the model surface stays `pub` by design.
+# Palantir / Spotless) into a jals `Config`. `jals fmt` / `jals init` now reach the
+# file-backed importers through `jals-cli/src/migrate.rs`, but three things here
+# still have no caller by design: the google-/palantir-java-format models (those
+# tools have no config file to detect, so they are constructed directly), the
+# Spotless model (its Gradle/Maven DSL is code, not data — DESIGN.md P-gen-4), and
+# the ~700 model *fields*, which are read by serde rather than by jals code.
 [[exclude]]
 crate = "jals_fmt"
 module = "import"
-reason = "config-importer surface for the WIP formatter rewrite; consumer wiring is not shipped yet"
+reason = "serde-read native config models; the non-file importers have no detectable file"
 
 # `jals_config::fmt` is the formatter's config *schema*: a serde data model whose
-# fields are read by `serde` and — once the WIP `jals-fmt` rewrite lands — by the
-# formatter itself. Nothing in a shipped binary reads them today, for the same
-# reason `jals_fmt::import` is excluded above: the consumer is the rewrite. The
-# `Layout` accessors are likewise rendering helpers the formatter will call.
-# Narrowing the schema to `pub(crate)` would break `jalsfmt.toml`'s public
+# fields are read by `serde` — now in both directions, since `jals_fmt::generate`
+# serializes it back out as a `jalsfmt.toml` — and, once the WIP `jals-fmt`
+# rewrite lands, by the formatter itself. No jals code names the individual fields
+# today. The `Layout` accessors are likewise rendering helpers the formatter will
+# call. Narrowing the schema to `pub(crate)` would break `jalsfmt.toml`'s public
 # surface and the importers that construct it.
 [[exclude]]
 crate = "jals_config"
 module = "fmt"
-reason = "formatter config schema for the WIP jals-fmt rewrite; its consumer is not shipped yet"
+reason = "serde-read/written formatter config schema; the formatter that names its fields is the WIP rewrite"
 
 # --- Overrides --------------------------------------------------------------
 # The backend seam's crate-root re-exports live outside the `backend` module,

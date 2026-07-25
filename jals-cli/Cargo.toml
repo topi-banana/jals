@@ -37,7 +37,11 @@ jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
-jals-fmt.workspace = true
+# `std` for the XML-backed config importers (Eclipse exported profile, IntelliJ code-style
+# scheme): `jals fmt` / `jals init` detect a native formatter config on the host and migrate it,
+# and an exported XML profile is the usual way a team shares one. The workspace default is the
+# portable core, so the wasm playground still resolves without `quick-xml`.
+jals-fmt = { workspace = true, features = ["std"] }
 jals-frontend.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true

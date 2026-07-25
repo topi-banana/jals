@@ -58,4 +58,26 @@ deliberately not projected.
 
 The `.prefs` / `.editorconfig` readers are pure `&str` parsers and portable (`no_std` / wasm). The
 two XML readers use `quick-xml` and live behind the crate's **`std` feature**, which is not part of
-the default (wasm) build.
+the default (wasm) build — `jals-cli` enables it, so `jals` reaches all four.
+
+## Config generation (`jals_fmt::generate`)
+
+The other direction: [`Provenance::jalsfmt_toml`] renders a `jals_config::fmt::Config` back out
+as the file jals discovers. Together with `import` it is `DESIGN.md` §15's *jalsfmt.toml 自動生成* —
+`jals-cli` finds a native config, `import` projects it, `generate` writes it.
+
+**Only the keys that differ from `Config::default()` are written** (§15 P-gen-6), under a header
+recording the source file and the version it declared. Rather than 174 hand-written comparisons,
+the config is diffed against its default through `serde_json::Value`: `Config` is exactly two
+levels deep — eight section tables of leaves, no scalar at the root — which makes the diff short,
+automatically correct when a section gains a key, and free of TOML's "scalars before sub-tables"
+constraint. That shape is asserted by a test, not assumed.
+
+[`MigrationWarning::rounding`] is the companion: the §17 rows whose value reads the input's line
+breaks, which the single engine rounds to a canonical value. It is a pure function of the config —
+§17 puts the rounding in the *engine*, so the projection stays lossless — and reports only rows
+that differ from the default, which is exactly the set `jalsfmt_toml` writes.
+
+**Finding the file is not this crate's job.** `jals-fmt` is portable and has no filesystem access;
+the detection ladder (`DESIGN.md` A.1) lives in `jals-cli/src/migrate.rs`, which reads bytes
+through a `jals-storage` `ProjectView` (`DESIGN.md` §19).
