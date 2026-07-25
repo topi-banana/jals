@@ -113,8 +113,14 @@ impl EditorConfig {
             if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
                 continue;
             }
-            if let Some(header) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                in_java_section = Self::section_matches_java(header);
+            if let Some(rest) = line.strip_prefix('[') {
+                // A trailing comment is not part of the glob. Without this the line fails the
+                // `]` test, falls through, and silently leaves the *previous* section open — so
+                // the next properties land in whichever section came before.
+                let rest = Self::strip_comment(rest);
+                in_java_section = rest
+                    .strip_suffix(']')
+                    .is_some_and(Self::section_matches_java);
                 continue;
             }
             if !in_java_section {
@@ -127,15 +133,54 @@ impl EditorConfig {
         out
     }
 
+    /// Drop a trailing `#` / `;` comment from a section-header line.
+    fn strip_comment(line: &str) -> &str {
+        line.find(['#', ';'])
+            .map_or(line, |at| line[..at].trim_end())
+    }
+
     /// Whether an `.editorconfig` section header applies to `*.java` files.
     ///
-    /// Approximated (sufficient for the importer) as a universal header (`[*]` / `[**]`), or any
-    /// header carrying `java` as a whole extension segment — so `[*.java]` and `[{*.java,*.kt}]`
-    /// match while `[*.javascript]` and `[*.jsp]` do not.
+    /// Still an approximation — the importer is handed one file's text with no target path, so a
+    /// directory-scoped section cannot actually be resolved — but the decision is taken from the
+    /// **extension** the glob selects, never from a directory component:
+    ///
+    /// - `[*.java]`, `[{*.java,*.kt}]`, `[*.{java,kt}]` match, because `java` occurs as a whole
+    ///   glob segment that is not a path component;
+    /// - `[*.javascript]`, `[*.jsp]`, `[*.kt]` do not;
+    /// - `[src/main/java/**/*.xml]` does **not**, even though it spells `java`: the segment is a
+    ///   directory, and the glob names `xml` as its extension;
+    /// - `[*]`, `[**]`, `[src/main/java/**]` match, because they name no extension at all —
+    ///   erring toward applying a section jals cannot resolve, which is what `[*]` already does.
     fn section_matches_java(header: &str) -> bool {
-        matches!(header, "*" | "**")
-            || header
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|segment| segment == "java")
+        Self::names_java(header) || !Self::names_an_extension(header)
+    }
+
+    /// Whether `java` occurs in `header` as a whole glob segment that is not a directory
+    /// component (`*.java`, `*.{java,kt}` — but not `java/**`).
+    fn names_java(header: &str) -> bool {
+        let bytes = header.as_bytes();
+        let mut from = 0;
+        while let Some(offset) = header[from..].find("java") {
+            let start = from + offset;
+            let end = start + "java".len();
+            let preceded_by_segment = start > 0 && bytes[start - 1].is_ascii_alphanumeric();
+            let next = bytes.get(end).copied();
+            let followed_by_segment = next.is_some_and(|byte| byte.is_ascii_alphanumeric());
+            if !preceded_by_segment && !followed_by_segment && next != Some(b'/') {
+                return true;
+            }
+            from = end;
+        }
+        false
+    }
+
+    /// Whether the header's file-name component names an extension at all — `*.xml` does,
+    /// `**` and `src/main/java/**` do not.
+    fn names_an_extension(header: &str) -> bool {
+        header
+            .rsplit('/')
+            .next()
+            .is_some_and(|file| file.contains('.'))
     }
 }

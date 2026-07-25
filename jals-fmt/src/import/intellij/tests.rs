@@ -189,6 +189,62 @@ fn the_universal_section_cascades_into_the_java_one() {
 }
 
 #[test]
+fn a_java_directory_does_not_make_a_section_java() {
+    // The old matcher scanned every glob segment, so `java` as a *directory* was enough and an
+    // XML section landed on Java's config.
+    let config: Config = IntellijEditorConfig::parse(
+        "[*]\n\
+         indent_size = 2\n\
+         [src/main/java/**/*.xml]\n\
+         indent_size = 8\n\
+         [*.jsp]\n\
+         indent_size = 9\n",
+    )
+    .expect("editorconfig should parse")
+    .into();
+
+    assert_eq!(config.layout.indent_width, 2);
+}
+
+#[test]
+fn a_header_keeps_its_meaning_next_to_a_comment() {
+    // A trailing comment used to make the header unrecognizable, which left the *previous*
+    // section open and fed its properties into whatever came before.
+    let config: Config = IntellijEditorConfig::parse(
+        "[*.kt] ; kotlin only\n\
+         indent_size = 8\n\
+         [*.java] # java only\n\
+         indent_size = 2\n",
+    )
+    .expect("editorconfig should parse")
+    .into();
+
+    assert_eq!(config.layout.indent_width, 2);
+}
+
+#[test]
+fn brace_alternation_selects_java_from_either_position() {
+    for header in ["{*.java,*.kt}", "*.{java,kt}", "*.{kt,java}", "**/*.java"] {
+        let config: Config =
+            IntellijEditorConfig::parse(&alloc::format!("[{header}]\nindent_size = 2\n"))
+                .expect("editorconfig should parse")
+                .into();
+        assert_eq!(config.layout.indent_width, 2, "`[{header}]` should be Java");
+    }
+    for header in ["*.kt", "*.javascript", "*.jsp", "*.{kt,xml}"] {
+        let config: Config =
+            IntellijEditorConfig::parse(&alloc::format!("[{header}]\nindent_size = 8\n"))
+                .expect("editorconfig should parse")
+                .into();
+        assert_eq!(
+            config.layout.indent_width,
+            Config::default().layout.indent_width,
+            "`[{header}]` should not be Java"
+        );
+    }
+}
+
+#[test]
 fn an_inherit_sentinel_is_not_a_width() {
     // IntelliJ writes -1 for "inherit the general setting" on every width; taking it literally
     // would collapse the indent to zero columns.
