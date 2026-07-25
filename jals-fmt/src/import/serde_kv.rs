@@ -28,7 +28,7 @@ use core::str::FromStr;
 use serde::de::value::StrDeserializer;
 use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Deserializer};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use super::ImportError;
 
@@ -41,11 +41,13 @@ impl Kv {
     ///
     /// Kept separate from [`from_object`](Self::from_object) because a config's surface is
     /// modeled as several family structs, each of which deserializes from the *same* object.
-    pub(crate) fn object(pairs: BTreeMap<String, String>) -> Map<String, Value> {
-        pairs
-            .into_iter()
-            .map(|(k, v)| (k, Value::String(v)))
-            .collect()
+    pub(crate) fn object(pairs: BTreeMap<String, String>) -> Value {
+        Value::Object(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect(),
+        )
     }
 
     /// Deserialize one importer model `T` from a lifted key/value object.
@@ -53,11 +55,12 @@ impl Kv {
     /// Keys absent from `T` are ignored (another family models them, or jals does not model
     /// them at all), and keys present in `T` but absent from the object fall back to `T`'s
     /// `#[serde(default)]`.
-    pub(crate) fn from_object<T: DeserializeOwned>(
-        object: &Map<String, Value>,
-    ) -> Result<T, ImportError> {
-        T::deserialize(Value::Object(object.clone()))
-            .map_err(|err| ImportError::Deserialize(err.to_string()))
+    ///
+    /// Borrows the object: `serde_json` deserializes from `&Value`, so the nine (Eclipse) or ten
+    /// (IntelliJ) family passes share one map instead of each cloning a several-hundred-entry
+    /// one.
+    pub(crate) fn from_object<T: DeserializeOwned>(object: &Value) -> Result<T, ImportError> {
+        T::deserialize(object).map_err(|err| ImportError::Deserialize(err.to_string()))
     }
 
     /// Coerce a stringly-typed number into the field's own type, yielding `None` on anything
