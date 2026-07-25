@@ -19,6 +19,11 @@ serde_json.workspace = true
 # `.editorconfig` readers are pure `&str` parsers and need no dependency, so they stay portable.
 quick-xml = { workspace = true, optional = true }
 
+[dev-dependencies]
+# The Spotless importer models a *resolved* pipeline, so its test constructs one from a
+# `[compat.spotless]`-shaped TOML table the way a future config loader would.
+toml.workspace = true
+
 [features]
 default = []
 # Enables the XML-backed config importers (Eclipse exported profile, IntelliJ code-style scheme).

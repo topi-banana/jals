@@ -1,6 +1,9 @@
-//! Case / trailing-zero option enums for numeric literals — the opt-in rewrites the formatter's
-//! literal rules carry out. Each defaults to `Preserve`, keeping the source exactly so the strict
-//! significant-token invariant holds unless opted into.
+//! `[literals]` — opt-in numeric-literal rewrites.
+//!
+//! The one jals-native section: no native formatter rewrites a literal, so every key defaults to
+//! `preserve` — the behavior all four targets agree on — and a non-default value is reachable
+//! only from the `jals-native` profile. Rewriting changes a literal token's *text* (never its
+//! kind), so the strict significant-token invariant holds unless opted into.
 
 use serde::Deserialize;
 
@@ -16,11 +19,12 @@ use serde::Deserialize;
 /// `f` / `F` / `d` / `D` float suffix are all left exactly as written (suffix-letter case is a
 /// separate Java-specific concern handled by [`LiteralSuffixCase`]). Decimal, octal, and binary
 /// literals have no hex digits and are never touched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HexLiteralCase {
     /// Keep the source's hex-digit case exactly. The default; preserves the significant-token
     /// sequence.
+    #[default]
     Preserve,
     /// Force hex digits to upper case (`0xff` → `0xFF`).
     Upper,
@@ -41,11 +45,12 @@ pub enum HexLiteralCase {
 /// a dotless float (`1e10`, `100f`), a leading-dot float (`.5`, `.0`), a hex float (`0x1.0p3`), and
 /// every integer literal are all left exactly as written. The numeric value, the type suffix
 /// (`f` / `F` / `d` / `D`), and any exponent are preserved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FloatLiteralTrailingZero {
     /// Keep the source's trailing zero (or lack of one) exactly. The default; preserves the
     /// significant-token sequence.
+    #[default]
     Preserve,
     /// Give every in-scope float literal a trailing zero (`1.` → `1.0`, `1.f` → `1.0f`).
     Always,
@@ -65,14 +70,27 @@ pub enum FloatLiteralTrailingZero {
 /// digit (`0xabcdef`), never a suffix, and a float literal never ends in `l` / `L`. The numeric
 /// value, the radix prefix, the mantissa, and any exponent are all left exactly as written; a
 /// literal with no suffix is untouched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LiteralSuffixCase {
     /// Keep the source's suffix-letter case exactly. The default; preserves the significant-token
     /// sequence.
+    #[default]
     Preserve,
     /// Force the suffix letter to upper case (`123l` → `123L`, `1.5f` → `1.5F`, `1.5d` → `1.5D`).
     Upper,
     /// Force the suffix letter to lower case (`123L` → `123l`, `1.5F` → `1.5f`, `1.5D` → `1.5d`).
     Lower,
+}
+
+/// Numeric-literal normalization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Literals {
+    /// Case of a literal's hexadecimal digit letters.
+    pub hex_case: HexLiteralCase,
+    /// Whether a decimal float literal carries a trailing zero.
+    pub float_trailing_zero: FloatLiteralTrailingZero,
+    /// Case of a numeric literal's trailing type suffix.
+    pub suffix_case: LiteralSuffixCase,
 }

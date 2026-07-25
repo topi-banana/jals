@@ -1,22 +1,36 @@
-//! google-java-format: the (deliberately empty) configuration surface and its jals mapping.
+//! google-java-format — the whole (deliberately tiny) configuration surface, and the profile
+//! the GJF family shares.
 //!
-//! GJF has **no config file** — non-configurability is an explicit design goal (DESIGN §0,
-//! §A.7), so there is nothing to detect on disk and nothing to parse. The whole surface is the
-//! style variant chosen on the command line (`--aosp`) or through a build-tool option, which is
-//! exactly what [`GoogleJavaFormatConfig`] models: a minimal struct with a single [`GjfStyle`]
-//! field. It still derives `Deserialize` so a profile embedding (e.g. a future `[compat.gjf]`
-//! table, or a Spotless `googleJavaFormat(...)` lowering) can construct it through serde like
-//! every other importer.
+//! # Coverage
+//!
+//! GJF has **no config file**; non-configurability is an explicit design goal. Its entire
+//! surface is `JavaFormatterOptions` — `style`, `formatJavadoc`, `reorderModifiers`,
+//! `reflowLongStrings` — plus the two `CommandLineOptions` toggles that decide whether the
+//! import passes run. [`GoogleJavaFormatConfig`] models all six, so nothing is missing.
+//!
+//! What is deliberately *not* modeled is `CommandLineOptions`' range selection (`--lines`,
+//! `--offset`, `--length`, `--assume-filename`) and its process flags (`--dry-run`,
+//! `--set-exit-if-changed`): those pick *what* to format and how to report, not how the output
+//! looks, so they have no place in a style config.
+//!
+//! # The family profile
+//!
+//! palantir-java-format inherits GJF's token-level passes and canonical conventions verbatim and
+//! differs only in its break engine (which no config can express) plus the style-derived indents
+//! and column limit. Both `From` impls therefore funnel through [`GoogleJavaFormatConfig::family`].
 
 use alloc::borrow::ToOwned;
 use alloc::vec;
 
-use jals_config::fmt::{AnnotationPlacement, BinopLayout, ClosingParen, Config, FnParamsLayout};
+use jals_config::fmt::{
+    Comments, Config, ImportOrder, Imports, IndentStyle, KeepOnOneLine, Layout, ParenPositions,
+    WrapPolicy, Wrapping,
+};
 use serde::Deserialize;
 
 /// The two published google-java-format style variants.
 ///
-/// The *only* difference is the indent multiplier (`JavaFormatterOptions`: `GOOGLE(1)` /
+/// The only difference is the indent multiplier (`JavaFormatterOptions`: `GOOGLE(1)` /
 /// `AOSP(2)`); the 100-column limit is shared.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,78 +42,131 @@ pub enum GjfStyle {
     Aosp,
 }
 
-/// google-java-format's whole configuration surface — a minimal struct, because GJF is
-/// deliberately non-configurable ("no configurability as to the formatter's algorithm").
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+impl GjfStyle {
+    /// `(block indent, continuation indent)` in columns.
+    const fn indents(self) -> (usize, usize) {
+        match self {
+            Self::Google => (2, 4),
+            Self::Aosp => (4, 8),
+        }
+    }
+}
+
+/// google-java-format's whole configuration surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
+// `JavaFormatterOptions` really is mostly booleans; grouping them would misrepresent it.
+#[allow(clippy::struct_excessive_bools)]
 pub struct GoogleJavaFormatConfig {
-    /// The selected style variant.
+    /// `JavaFormatterOptions.style` — the CLI's `--aosp`.
     pub style: GjfStyle,
+    /// `JavaFormatterOptions.formatJavadoc` — the CLI's `--skip-javadoc-formatting` inverted.
+    pub format_javadoc: bool,
+    /// `JavaFormatterOptions.reorderModifiers` — runs `ModifierOrderer`.
+    pub reorder_modifiers: bool,
+    /// `JavaFormatterOptions.reflowLongStrings` — runs `StringWrapper`, which *adds* `+`
+    /// tokens, so it has no jals counterpart yet and is carried for fidelity only.
+    pub reflow_long_strings: bool,
+    /// `--skip-sorting-imports` inverted — runs `ImportOrderer`.
+    pub sort_imports: bool,
+    /// `--skip-removing-unused-imports` inverted — runs `RemoveUnusedImports`. Semantic rather
+    /// than layout (it deletes declarations), so it too has no jals counterpart.
+    pub remove_unused_imports: bool,
+}
+
+impl Default for GoogleJavaFormatConfig {
+    fn default() -> Self {
+        Self {
+            style: GjfStyle::Google,
+            format_javadoc: true,
+            reorder_modifiers: true,
+            reflow_long_strings: true,
+            sort_imports: true,
+            remove_unused_imports: true,
+        }
+    }
 }
 
 impl From<GoogleJavaFormatConfig> for Config {
     fn from(native: GoogleJavaFormatConfig) -> Self {
-        let (indent_width, continuation_indent) = match native.style {
-            GjfStyle::Google => (2, 4),
-            GjfStyle::Aosp => (4, 8),
-        };
-        // GJF formats Javadoc by default (`--skip-javadoc-formatting` opts out).
-        GoogleJavaFormatConfig::family(indent_width, continuation_indent, 100, true)
+        let (indent_width, continuation_indent) = native.style.indents();
+        GoogleJavaFormatConfig::family(indent_width, continuation_indent, 100, native)
     }
 }
 
 impl GoogleJavaFormatConfig {
-    /// The jals options shared by the whole GJF family — palantir-java-format inherits GJF's
-    /// token-level passes and canonical layout conventions verbatim, so both `From` impls funnel
-    /// here and differ only in indents, column limit, and Javadoc reflow.
+    /// The jals config shared by the whole GJF family, parameterized by the style-derived
+    /// indents and column limit.
     ///
-    /// Non-default choices, each anchored to a documented GJF behavior (the jals option docs name
-    /// their google-java-format equivalent explicitly):
+    /// Each non-default choice is anchored to a documented GJF behavior:
     ///
-    /// - widths: GJF has a single 100-column driver and no rustfmt-style sub-widths, so every
-    ///   width-scoped option is bound to the column limit;
-    /// - `binop-layout` `compressed`: GJF's binary-expression fill;
-    /// - `closing-paren` `hug`: GJF never dangles a `)`;
-    /// - `fn-params-layout` `compressed`: argument/parameter fill (`INDEPENDENT` breaks);
-    /// - `tabular-array-initializers`, `switch-expression-on-new-line`, `wrap-case-labels`,
-    ///   `normalize-parameter-comments`, `inline-block-comments`: the jals options that exist to
-    ///   mirror GJF, switched on;
-    /// - `space-around-operator-colon`: GJSG spaces the for-each / ternary colon;
-    /// - imports: static block first, then everything else, one blank line between (GJSG §3.3.3);
-    /// - `reorder-modifiers`: `ModifierOrderer` runs by default;
-    /// - `annotation-placement` `expanded`: declaration annotations each take a line (field
-    ///   annotations may share one in GJF — jals's nearest value is still `expanded`);
-    /// - literal rewrites stay `preserve`: GJF never rewrites a literal (DESIGN §4).
+    /// - one column limit drives every wrap, so no construct gets its own threshold; the
+    ///   argument / parameter / binary fills are `if-long`, and a method chain that does not fit
+    ///   goes one call per line (`if-long-per-item`);
+    /// - `paren-*` are all `common-lines`: GJF never puts a `)` on its own line;
+    /// - `tabular-array-initializers`: GJF keeps a grid-shaped initializer's source rows;
+    /// - `case-labels` wrap: GJF breaks a long `case` label list;
+    /// - comments are always reflowed (Javadoc only when `formatJavadoc`), and both
+    ///   GJF-specific comment rewrites are on;
+    /// - imports: a static block first, then everything else, one blank line between
+    ///   (Google Java Style §3.3.3);
+    /// - literal rewrites stay `preserve`: GJF never rewrites a literal.
     pub(crate) fn family(
         indent_width: usize,
         continuation_indent: usize,
         max_width: usize,
-        wrap_comments: bool,
+        native: Self,
     ) -> Config {
         Config {
-            indent_width,
-            continuation_indent: Some(continuation_indent),
-            max_width,
-            chain_width: max_width,
-            fn_call_width: max_width,
-            array_width: max_width,
-            single_line_if_else_max_width: max_width,
-            comment_width: max_width,
-            wrap_comments,
-            normalize_parameter_comments: true,
-            inline_block_comments: true,
-            reorder_imports: true,
-            group_imports: true,
-            import_groups: vec!["static".to_owned(), "*".to_owned()],
-            binop_layout: BinopLayout::Compressed,
-            closing_paren: ClosingParen::Hug,
-            tabular_array_initializers: true,
-            switch_expression_on_new_line: true,
-            wrap_case_labels: true,
-            space_around_operator_colon: true,
-            fn_params_layout: FnParamsLayout::Compressed,
-            reorder_modifiers: true,
-            annotation_placement: AnnotationPlacement::Expanded,
+            layout: Layout {
+                indent_style: IndentStyle::Space,
+                indent_width,
+                tab_width: indent_width,
+                continuation_indent: Some(continuation_indent),
+                max_width,
+                ..Layout::default()
+            },
+            // GJF collapses an empty body to `{}` and never joins a non-empty one, which is
+            // the jals default; every brace is K&R, also the default.
+            braces: jals_config::fmt::Braces {
+                keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
+                keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
+                ..jals_config::fmt::Braces::default()
+            },
+            wrapping: Wrapping {
+                method_chain: WrapPolicy::IfLongPerItem,
+                case_labels: WrapPolicy::IfLong,
+                paren_method_declaration: ParenPositions::CommonLines,
+                paren_method_invocation: ParenPositions::CommonLines,
+                paren_control: ParenPositions::CommonLines,
+                paren_annotation: ParenPositions::CommonLines,
+                paren_lambda: ParenPositions::CommonLines,
+                paren_record: ParenPositions::CommonLines,
+                tabular_array_initializers: true,
+                ..Wrapping::default()
+            },
+            comments: Comments {
+                format_line: true,
+                format_block: true,
+                format_javadoc: native.format_javadoc,
+                format_header: true,
+                format_html: true,
+                width: max_width,
+                blank_line_before_tags: true,
+                normalize_parameter_comments: true,
+                inline_block_comments: true,
+                ..Comments::default()
+            },
+            imports: Imports {
+                order: if native.sort_imports {
+                    ImportOrder::Group
+                } else {
+                    ImportOrder::Preserve
+                },
+                groups: vec!["static".to_owned(), "*".to_owned()],
+                static_first: true,
+                reorder_modifiers: native.reorder_modifiers,
+            },
             ..Config::default()
         }
     }

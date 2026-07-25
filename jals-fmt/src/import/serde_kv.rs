@@ -19,13 +19,16 @@
 // Native token examples (`split_into_lines`, …) appear in prose without being Rust items.
 #![allow(clippy::doc_markdown)]
 
+use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::str::FromStr;
 
 use serde::de::value::StrDeserializer;
 use serde::de::{DeserializeOwned, IntoDeserializer};
 use serde::{Deserialize, Deserializer};
+use serde_json::{Map, Value};
 
 use super::ImportError;
 
@@ -34,18 +37,26 @@ use super::ImportError;
 pub(crate) struct Kv;
 
 impl Kv {
-    /// Deserialize a native-config key/value map into an importer model `T`.
+    /// Lift a native-config key/value map into the JSON object the model reads.
     ///
-    /// Keys absent from `T` are ignored (the model covers only the common-rule subset), and keys
-    /// present in `T` but absent from `pairs` fall back to `T`'s `#[serde(default)]`.
-    pub(crate) fn from_pairs<T: DeserializeOwned>(
-        pairs: BTreeMap<String, String>,
-    ) -> Result<T, ImportError> {
-        let object: serde_json::Map<String, serde_json::Value> = pairs
+    /// Kept separate from [`from_object`](Self::from_object) because a config's surface is
+    /// modeled as several family structs, each of which deserializes from the *same* object.
+    pub(crate) fn object(pairs: BTreeMap<String, String>) -> Map<String, Value> {
+        pairs
             .into_iter()
-            .map(|(k, v)| (k, serde_json::Value::String(v)))
-            .collect();
-        serde_json::from_value(serde_json::Value::Object(object))
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect()
+    }
+
+    /// Deserialize one importer model `T` from a lifted key/value object.
+    ///
+    /// Keys absent from `T` are ignored (another family models them, or jals does not model
+    /// them at all), and keys present in `T` but absent from the object fall back to `T`'s
+    /// `#[serde(default)]`.
+    pub(crate) fn from_object<T: DeserializeOwned>(
+        object: &Map<String, Value>,
+    ) -> Result<T, ImportError> {
+        T::deserialize(Value::Object(object.clone()))
             .map_err(|err| ImportError::Deserialize(err.to_string()))
     }
 
@@ -76,6 +87,38 @@ impl Kv {
             "false" => Some(false),
             _ => None,
         })
+    }
+
+    /// Coerce the two spellings of "indent with tabs" into `Option<bool>`.
+    ///
+    /// IntelliJ stores `USE_TAB_CHARACTER` as a bool in its scheme XML but surfaces the same
+    /// setting as EditorConfig's universal `indent_style = tab | space`, so both must parse.
+    pub(crate) fn opt_tab_flag<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.trim().to_lowercase().as_str() {
+            "true" | "tab" => Some(true),
+            "false" | "space" => Some(false),
+            _ => None,
+        })
+    }
+
+    /// Coerce a comma-separated value list into `Option<Vec<String>>`, dropping empty entries.
+    /// Serves IntelliJ's synthetic list accessors (`REPEAT_ANNOTATIONS`).
+    pub(crate) fn opt_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let items: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Ok(if items.is_empty() { None } else { Some(items) })
     }
 
     /// Coerce a stringly-typed enum token into `Option<T>`, yielding `None` for any token that is

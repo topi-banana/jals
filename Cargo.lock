@@ -1215,6 +1215,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -1351,6 +1352,7 @@ dependencies = [
  "rayon",
  "similar",
  "tempfile",
+ "toml",
  "walkdir",
 ]
 

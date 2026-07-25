@@ -57,6 +57,18 @@ crate = "jals_fmt"
 module = "import"
 reason = "config-importer surface for the WIP formatter rewrite; consumer wiring is not shipped yet"
 
+# `jals_config::fmt` is the formatter's config *schema*: a serde data model whose
+# fields are read by `serde` and — once the WIP `jals-fmt` rewrite lands — by the
+# formatter itself. Nothing in a shipped binary reads them today, for the same
+# reason `jals_fmt::import` is excluded above: the consumer is the rewrite. The
+# `Layout` accessors are likewise rendering helpers the formatter will call.
+# Narrowing the schema to `pub(crate)` would break `jalsfmt.toml`'s public
+# surface and the importers that construct it.
+[[exclude]]
+crate = "jals_config"
+module = "fmt"
+reason = "formatter config schema for the WIP jals-fmt rewrite; its consumer is not shipped yet"
+
 # --- Overrides --------------------------------------------------------------
 # The backend seam's crate-root re-exports live outside the `backend` module,
 # so they need per-item allows. Kept public as the stable surface the future

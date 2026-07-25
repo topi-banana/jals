@@ -18,10 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use jals_config::fmt::{
-    AnnotationPlacement, BinopLayout, BinopSeparator, BraceStyle, ClosingParen, Config,
-    ControlBraceStyle, IndentStyle, LineEnding,
-};
+use jals_config::fmt::Config;
 use rayon::prelude::*;
 use similar::TextDiff;
 use walkdir::WalkDir;
@@ -109,74 +106,15 @@ impl GoldenReport {
         }
     }
 
-    /// A best-effort Google Java Style [`Config`], expressed with the options jals has
-    /// today.
+    /// The Google Java Style [`Config`], as the google-java-format importer produces it.
     ///
-    /// This deliberately lives in the test crate, not in `jals-fmt`, until a first-class
-    /// `Config::google()` preset exists. The **continuation indent** — Google style indents
-    /// wrapped continuation lines by +4 columns while the block indent is +2 — is now
-    /// modeled with the dedicated `continuation-indent` option (see below); it had been the
-    /// single largest gap in the similarity metric this harness reports.
+    /// This used to be a hand-written `Config` literal that restated the same style twice —
+    /// once here and once in `jals_fmt::import::gjf` — and drifted from it. The importer's
+    /// family profile is now the single definition; see `jals-fmt/MAPPING.md` §5 for what each
+    /// value is anchored to.
+    #[must_use]
     pub fn google_config() -> Config {
-        Config {
-            // Block indentation: Google style is 2 spaces.
-            indent_style: IndentStyle::Space,
-            indent_width: 2,
-            // Continuation indentation: Google style indents wrapped lines by +4 columns
-            // (double the +2 block indent).
-            continuation_indent: Some(4),
-            // Column limit and blank-line policy.
-            max_width: 100,
-            max_blank_lines: 1,
-            // google-java-format preserves a blank line at the start of a braced body (right after
-            // `{`), e.g. a class body or a control-flow block, instead of dropping it.
-            blank_line_at_block_start: true,
-            line_ending: LineEnding::Lf,
-            insert_final_newline: true,
-            // K&R / "Egyptian" braces for both declarations and control flow.
-            brace_style: BraceStyle::SameLine,
-            control_brace_style: ControlBraceStyle::SameLine,
-            // Imports: a static group, a blank line, then a non-static group, each sorted.
-            group_imports: true,
-            import_groups: vec!["static".to_string(), "*".to_string()],
-            // Modifiers in canonical JLS order; annotations on their own lines.
-            reorder_modifiers: true,
-            annotation_placement: AnnotationPlacement::Expanded,
-            // Break before binary operators, packing as many operands per line as fit (fill).
-            binop_separator: BinopSeparator::Front,
-            binop_layout: BinopLayout::Compressed,
-            // Google style has no fixed per-construct width heuristics — it wraps purely
-            // against the 100-column limit, so push every threshold up to the column limit.
-            chain_width: 100,
-            fn_call_width: 100,
-            array_width: 100,
-            single_line_if_else_max_width: 100,
-            // google-java-format normalizes parameter-name block comments (`/*a=*/` → `/* a= */`)
-            // and hugs them to the following argument.
-            normalize_parameter_comments: true,
-            // google-java-format keeps a block comment written immediately before a token on the
-            // same line (e.g. `java.lang./* @A */ String`) hugging that token instead of flushing
-            // it to end of line.
-            inline_block_comments: true,
-            // google-java-format never puts the closing `)` of a paren-delimited list (call /
-            // annotation args, parameters, record header) on its own line — it hugs the last item.
-            closing_paren: ClosingParen::Hug,
-            // google-java-format preserves the source row breaks of a tabular (grid-shaped) array
-            // initializer instead of reflowing it by width.
-            tabular_array_initializers: true,
-            // google-java-format puts a `switch` expression that is the value of a `=` (a variable
-            // / field initializer or an assignment) on its own continuation-indented line.
-            switch_expression_on_new_line: true,
-            // google-java-format wraps a `case` label's constant list across lines when the arm
-            // overflows the column limit (e.g. `ExpressionSwitch`'s `breakLongCaseArgs`).
-            wrap_case_labels: true,
-            // google-java-format surrounds an operator colon — an enhanced `for` (`for (T x : xs)`),
-            // a ternary (`a ? b : c`), and an `assert` message (`assert c : m`) — with spaces, while
-            // still hugging the colon of an unnamed `_` for-each variable (`for (T _: xs)`) and of
-            // label / `case` colons (`label:`, `case x:`).
-            space_around_operator_colon: true,
-            ..Config::default()
-        }
+        jals_fmt::import::GoogleJavaFormatConfig::default().into()
     }
 
     /// Recursively collect every `*.input` under `root` that has a sibling `*.output`.
@@ -288,6 +226,8 @@ impl GoldenReport {
 
 #[cfg(test)]
 mod tests {
+    use jals_config::fmt::{ImportOrder, IndentStyle, ParenPositions, WrapPolicy};
+
     use super::*;
     use std::fs;
     use tempfile::tempdir;
@@ -295,24 +235,38 @@ mod tests {
     #[test]
     fn google_config_has_google_defaults() {
         let c = GoldenReport::google_config();
-        assert_eq!(c.indent_width, 2);
+        assert_eq!(c.layout.indent_style, IndentStyle::Space);
+        assert_eq!(c.layout.indent_width, 2);
         // Google style wraps continuation lines at +4 columns (double the +2 block indent).
-        assert_eq!(c.continuation_indent, Some(4));
-        assert_eq!(c.max_width, 100);
-        assert!(c.group_imports);
-        assert_eq!(c.import_groups, ["static", "*"]);
-        assert!(c.reorder_modifiers);
-        assert_eq!(c.annotation_placement, AnnotationPlacement::Expanded);
-        assert!(c.normalize_parameter_comments);
-        assert!(c.inline_block_comments);
-        assert!(c.tabular_array_initializers);
-        assert!(c.switch_expression_on_new_line);
-        assert!(c.wrap_case_labels);
-        // google-java-format spaces the operator colon (enhanced-`for` / ternary / `assert`).
-        assert!(c.space_around_operator_colon);
-        // google-java-format breaks and indents a legacy (colon-form) switch's case bodies; this
-        // is jals's default, so `google_config` inherits it.
-        assert_eq!(c.switch_case_body, jals_config::fmt::SwitchCaseBody::Always);
+        assert_eq!(c.layout.continuation_indent, Some(4));
+        assert_eq!(c.layout.max_width, 100);
+        // Imports: a static group, a blank line, then everything else, each sorted.
+        assert_eq!(c.imports.order, ImportOrder::Group);
+        assert_eq!(c.imports.groups, ["static", "*"]);
+        assert!(c.imports.reorder_modifiers);
+        // The comment rewrites that exist to mirror google-java-format.
+        assert!(c.comments.normalize_parameter_comments);
+        assert!(c.comments.inline_block_comments);
+        assert!(c.wrapping.tabular_array_initializers);
+        // A chain that does not fit goes one call per line; a long `case` label list wraps.
+        assert_eq!(c.wrapping.method_chain, WrapPolicy::IfLongPerItem);
+        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLong);
+        // google-java-format spaces the enhanced-`for` colon and never dangles a `)`.
+        assert!(c.spacing.before_foreach_colon);
+        assert_eq!(
+            c.wrapping.paren_method_invocation,
+            ParenPositions::CommonLines
+        );
+    }
+
+    #[test]
+    fn the_google_preset_toml_matches_the_importer() {
+        // `jals-fmt.toml` at the workspace root is the readable form of the same preset. If it
+        // drifts, the file stops documenting what the harness actually scores against.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../jals-fmt.toml");
+        let text = fs::read_to_string(&path).expect("the preset file should exist");
+        let from_file: Config = toml::from_str(&text).expect("the preset should parse");
+        assert_eq!(from_file, GoldenReport::google_config());
     }
 
     #[test]

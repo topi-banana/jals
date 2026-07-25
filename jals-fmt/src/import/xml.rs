@@ -5,9 +5,9 @@
 //! in [`super::eclipse`] / [`super::intellij`] are reused unchanged:
 //! - the Eclipse exported profile shares the `org.eclipse.jdt.core.formatter.*` id namespace with
 //!   `.prefs`, so it lowers to the identical map;
-//! - the IntelliJ scheme uses `UPPER_SNAKE` option names and *integer* enum values, so it is
-//!   normalized to the `.editorconfig` `ij_java_*` key + token shape here (via the portable
-//!   [`super::intellij`] token tables) before deserialization.
+//! - the IntelliJ scheme uses `UPPER_SNAKE` option names, which is exactly how
+//!   [`super::intellij::IntellijConfig`] is keyed, so only its element-valued
+//!   `PackageEntryTable` options need reshaping.
 
 // Native product / option names (IntelliJ, `UPPER_SNAKE`, …) recur in the docs as prose.
 #![allow(clippy::doc_markdown)]
@@ -22,7 +22,6 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 
 use super::ImportError;
-use super::intellij::{IjBraceStyle, IjEndOfLine, IjWrap};
 use super::text::ECLIPSE_FORMATTER_PREFIX;
 
 /// Shared XML helpers.
@@ -75,23 +74,33 @@ impl EclipseProfileReader {
     }
 }
 
-/// One entry of an IntelliJ `IMPORT_LAYOUT_TABLE`, in document order.
+/// One entry of an IntelliJ `PackageEntryTable`, in document order.
 enum ImportEntry {
-    /// A `<package name=… static=…/>` row.
-    Package { name: String, is_static: bool },
+    /// A `<package name=… withSubpackages=… static=…/>` row.
+    Package {
+        /// The package name, empty for the catch-all row.
+        name: String,
+        /// `withSubpackages="true"`.
+        with_subpackages: bool,
+        /// `static="true"`.
+        is_static: bool,
+    },
     /// An `<emptyLine/>` (blank-line separator).
     Blank,
 }
 
+/// The `PackageEntryTable`-valued options, which are element lists rather than `value=` attributes.
+const PACKAGE_TABLES: [&str; 2] = ["IMPORT_LAYOUT_TABLE", "PACKAGES_TO_USE_IMPORT_ON_DEMAND"];
+
 /// What one scan of a scheme document accumulates.
 #[derive(Default)]
 struct SchemeScan {
-    /// Raw UPPER_SNAKE option name → raw value (integer / bool / separator).
+    /// `UPPER_SNAKE` option name → raw value (integer / bool / separator), verbatim.
     raw: BTreeMap<String, String>,
-    /// `IMPORT_LAYOUT_TABLE` rows, in document order.
-    imports: Vec<ImportEntry>,
-    /// Whether the scan is inside the `IMPORT_LAYOUT_TABLE` option's `<value>` list.
-    in_import_layout: bool,
+    /// The rows of the `PackageEntryTable` option currently open, in document order.
+    entries: Vec<ImportEntry>,
+    /// The name of that option, when one is open.
+    open_table: Option<String>,
 }
 
 impl SchemeScan {
@@ -102,30 +111,70 @@ impl SchemeScan {
                 (Some(name), Some(value)) => {
                     self.raw.insert(name, value);
                 }
-                (Some(name), None) if name == "IMPORT_LAYOUT_TABLE" => {
-                    self.in_import_layout = true;
+                // A table-valued option carries its rows as children instead of a `value=`.
+                (Some(name), None) if PACKAGE_TABLES.contains(&name.as_str()) => {
+                    self.open_table = Some(name);
+                    self.entries.clear();
                 }
                 _ => {}
             },
-            b"package" if self.in_import_layout => {
-                let name = Xml::attr(element, b"name")?.unwrap_or_default();
-                let is_static = Xml::attr(element, b"static")?.as_deref() == Some("true");
-                self.imports.push(ImportEntry::Package { name, is_static });
+            b"package" if self.open_table.is_some() => {
+                self.entries.push(ImportEntry::Package {
+                    name: Xml::attr(element, b"name")?.unwrap_or_default(),
+                    with_subpackages: Xml::attr(element, b"withSubpackages")?.as_deref()
+                        == Some("true"),
+                    is_static: Xml::attr(element, b"static")?.as_deref() == Some("true"),
+                });
             }
-            b"emptyLine" if self.in_import_layout => self.imports.push(ImportEntry::Blank),
+            b"emptyLine" if self.open_table.is_some() => self.entries.push(ImportEntry::Blank),
             _ => {}
         }
         Ok(())
     }
+
+    /// Close the open table-valued option, lowering its rows to the mini-list form.
+    fn close_table(&mut self) {
+        if let Some(name) = self.open_table.take()
+            && !self.entries.is_empty()
+        {
+            let list = self
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    ImportEntry::Blank => "|".to_owned(),
+                    ImportEntry::Package {
+                        name,
+                        with_subpackages,
+                        is_static,
+                    } => {
+                        let marker = if *is_static { "$" } else { "" };
+                        let wildcard = if *with_subpackages { "**" } else { "*" };
+                        if name.is_empty() {
+                            format!("{marker}{wildcard}")
+                        } else {
+                            format!("{marker}{name}.{wildcard}")
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.raw.insert(name, list);
+        }
+        self.entries.clear();
+    }
 }
 
-/// Reader for an IntelliJ code-style scheme (`<option name=… value=…/>` plus the import-layout
-/// table).
+/// Reader for an IntelliJ code-style scheme.
 pub(crate) struct IntellijSchemeReader;
 
 impl IntellijSchemeReader {
-    /// Lower the scheme to the `.editorconfig` `ij_java_*` shape, translating raw integer enums to
-    /// tokens so [`super::intellij::IntellijConfig`] deserializes it unchanged.
+    /// Lower the scheme to the `UPPER_SNAKE` option map [`super::intellij::IntellijConfig`] reads.
+    ///
+    /// Values are passed through **verbatim** — the model's value types accept a raw integer just
+    /// as they accept an `.editorconfig` token — so no per-property int→token table is applied
+    /// here. The one shape that is not a `value=` attribute is a `PackageEntryTable`, whose
+    /// `<package>` / `<emptyLine/>` rows are lowered to the same comma-separated mini-list the
+    /// `.editorconfig` form uses.
     pub(crate) fn parse(src: &str) -> Result<BTreeMap<String, String>, ImportError> {
         let mut reader = Reader::from_str(src);
         let mut scan = SchemeScan::default();
@@ -168,28 +217,17 @@ impl IntellijSchemeReader {
                     }
                 }
                 Event::End(element)
-                    if scan.in_import_layout && element.name().as_ref() == b"option" =>
+                    if scan.open_table.is_some() && element.name().as_ref() == b"option" =>
                 {
-                    scan.in_import_layout = false;
+                    scan.close_table();
                 }
                 _ => {}
             }
         }
+        // An unterminated document still yields whatever rows were read.
+        scan.close_table();
 
-        let SchemeScan { raw, imports, .. } = scan;
-        let mut pairs = BTreeMap::new();
-        for (name, value) in raw {
-            if let Some((key, translated)) = Self::translate_option(&name, &value) {
-                pairs.insert(key.to_owned(), translated);
-            }
-        }
-        if !imports.is_empty() {
-            pairs.insert(
-                "ij_java_imports_layout".to_owned(),
-                Self::imports_layout(&imports),
-            );
-        }
-        Ok(pairs)
+        Ok(scan.raw)
     }
 
     /// Whether an element opens a settings block scoped to a language other than Java.
@@ -209,74 +247,5 @@ impl IntellijSchemeReader {
         }
         // `codeStyleSettings` itself does not match this suffix (its leading `c` is lowercase).
         Ok(name.ends_with(b"CodeStyleSettings") && name != b"JavaCodeStyleSettings")
-    }
-
-    /// Translate one raw IntelliJ scheme option into its `.editorconfig` (key, token) form, or
-    /// `None` for options outside the modeled common-rule subset. Enum-valued options use the
-    /// per-property token tables (never one table reused — DESIGN §A.4.2).
-    fn translate_option(name: &str, value: &str) -> Option<(&'static str, String)> {
-        let pass = |key: &'static str| Some((key, value.to_owned()));
-        match name {
-            "RIGHT_MARGIN" => pass("max_line_length"),
-            "INDENT_SIZE" => pass("indent_size"),
-            "CONTINUATION_INDENT_SIZE" => pass("ij_continuation_indent_size"),
-            "KEEP_BLANK_LINES_IN_CODE" => pass("ij_java_keep_blank_lines_in_code"),
-            "SPACE_BEFORE_COLON" => pass("ij_java_space_before_colon"),
-            "SPACE_AFTER_COLON" => pass("ij_java_space_after_colon"),
-            "BINARY_OPERATION_SIGN_ON_NEXT_LINE" => {
-                pass("ij_java_binary_operation_sign_on_next_line")
-            }
-            "USE_TAB_CHARACTER" => Some((
-                "indent_style",
-                if value == "true" { "tab" } else { "space" }.to_owned(),
-            )),
-            "LINE_SEPARATOR" => {
-                IjEndOfLine::token_from_str(value).map(|token| ("end_of_line", token.to_owned()))
-            }
-            "CLASS_BRACE_STYLE" => Self::enum_token(value, IjBraceStyle::token_from_int)
-                .map(|t| ("ij_java_class_brace_style", t)),
-            "METHOD_BRACE_STYLE" => Self::enum_token(value, IjBraceStyle::token_from_int)
-                .map(|t| ("ij_java_method_brace_style", t)),
-            "METHOD_PARAMETERS_WRAP" => Self::enum_token(value, IjWrap::token_from_int)
-                .map(|t| ("ij_java_method_parameters_wrap", t)),
-            "CLASS_ANNOTATION_WRAP" => Self::enum_token(value, IjWrap::token_from_int)
-                .map(|t| ("ij_java_class_annotation_wrap", t)),
-            "METHOD_ANNOTATION_WRAP" => Self::enum_token(value, IjWrap::token_from_int)
-                .map(|t| ("ij_java_method_annotation_wrap", t)),
-            _ => None,
-        }
-    }
-
-    /// Parse a raw integer value and map it to a token via one of the per-property tables.
-    fn enum_token(value: &str, table: fn(i64) -> Option<&'static str>) -> Option<String> {
-        value
-            .parse::<i64>()
-            .ok()
-            .and_then(table)
-            .map(ToOwned::to_owned)
-    }
-
-    /// Rebuild an `ij_java_imports_layout` mini-list from the parsed `IMPORT_LAYOUT_TABLE` entries
-    /// so the shared editorconfig model parses it identically. A `static` row is prefixed with `$`,
-    /// a blank row becomes `|`, and the two catch-all rows (empty package name) become `$*` / `*`.
-    /// Any *named* package gets a `.**` suffix unconditionally: jals import groups are
-    /// subpackage-prefix matches, so the IntelliJ `withSubpackages` flag (not modeled) has no jals
-    /// counterpart to distinguish.
-    fn imports_layout(entries: &[ImportEntry]) -> String {
-        entries
-            .iter()
-            .map(|entry| match entry {
-                ImportEntry::Blank => "|".to_owned(),
-                ImportEntry::Package { name, is_static } => {
-                    let marker = if *is_static { "$" } else { "" };
-                    if name.is_empty() {
-                        format!("{marker}*")
-                    } else {
-                        format!("{marker}{name}.**")
-                    }
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }

@@ -683,15 +683,15 @@ mod tests {
             let uri = Url::from_file_path(dir.path().join("A.java")).unwrap();
 
             let mut configs = UriConfigs::<Config>::default();
-            std::fs::write(&config_path, "indent-width = 7\n").unwrap();
-            assert_eq!(configs.for_uri(&uri).await.indent_width, 7);
+            std::fs::write(&config_path, "[layout]\nindent-width = 7\n").unwrap();
+            assert_eq!(configs.for_uri(&uri).await.layout.indent_width, 7);
 
             // The cached config survives an edit on disk until the cache is cleared.
-            std::fs::write(&config_path, "indent-width = 3\n").unwrap();
-            assert_eq!(configs.for_uri(&uri).await.indent_width, 7);
+            std::fs::write(&config_path, "[layout]\nindent-width = 3\n").unwrap();
+            assert_eq!(configs.for_uri(&uri).await.layout.indent_width, 7);
 
             configs.clear();
-            assert_eq!(configs.for_uri(&uri).await.indent_width, 3);
+            assert_eq!(configs.for_uri(&uri).await.layout.indent_width, 3);
         });
     }
 

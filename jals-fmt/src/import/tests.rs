@@ -1,388 +1,289 @@
-//! Importer round-trips: native config text / model → jals [`Config`].
+//! Cross-cutting importer tests.
+//!
+//! Per-vendor coverage and projection live next to each model (`eclipse::tests`,
+//! `intellij::tests`). What is checked here is what spans them: the non-file importers, the
+//! shared import-group encoding, and the reachability of jals's own rule set.
 
-use alloc::collections::BTreeMap;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec;
 
-use jals_config::fmt::{
-    AnnotationPlacement, BinopSeparator, BraceStyle, Config, FnParamsLayout, IndentStyle,
-    LineEnding,
-};
+use jals_config::fmt::{Comments, Config, ImportOrder, IndentStyle, Layout, WrapPolicy, Wrapping};
 
-use super::ConfigImporter;
-use super::eclipse::{EclipseConfig, EclipsePrefs};
+use super::eclipse::EclipsePrefs;
 use super::gjf::{GjfStyle, GoogleJavaFormatConfig};
-use super::intellij::{IntellijConfig, IntellijEditorConfig};
+use super::intellij::IntellijEditorConfig;
 use super::palantir::{PalantirJavaFormatConfig, PalantirStyle};
-use super::spotless::{SpotlessConfig, SpotlessDelegate};
+use super::spotless::{LeadingWhitespace, SpotlessConfig, SpotlessDelegate};
+use super::{ConfigImporter, ImportError};
 
 #[test]
-fn gjf_google_and_aosp_indent() {
-    let google: Config = GoogleJavaFormatConfig::default().into();
-    assert_eq!(google.indent_width, 2);
-    assert_eq!(google.continuation_indent, Some(4));
-    assert_eq!(google.max_width, 100);
-    // GJF binds every rustfmt-style sub-width to the single column driver.
-    assert_eq!(google.fn_call_width, 100);
-    assert_eq!(google.fn_params_layout, FnParamsLayout::Compressed);
+fn google_java_format_defaults_to_google_style() {
+    let config: Config = GoogleJavaFormatConfig::default().into();
 
-    let aosp: Config = GoogleJavaFormatConfig {
-        style: GjfStyle::Aosp,
-    }
-    .into();
-    assert_eq!(aosp.indent_width, 4);
-    assert_eq!(aosp.continuation_indent, Some(8));
-    assert_eq!(aosp.max_width, 100);
+    assert_eq!(config.layout.indent_style, IndentStyle::Space);
+    assert_eq!(config.layout.indent_width, 2);
+    assert_eq!(config.layout.continuation_indent, Some(4));
+    assert_eq!(config.layout.max_width, 100);
+    // One column limit drives everything, so the comment width tracks it.
+    assert_eq!(config.comments.width, 100);
+    assert!(config.comments.format_javadoc);
+    assert!(config.comments.normalize_parameter_comments);
+    assert!(config.comments.inline_block_comments);
+    // A method chain that does not fit goes one call per line.
+    assert_eq!(config.wrapping.method_chain, WrapPolicy::IfLongPerItem);
+    assert!(config.wrapping.tabular_array_initializers);
+    assert_eq!(config.imports.order, ImportOrder::Group);
+    assert_eq!(config.imports.groups, ["static", "*"]);
+    assert!(config.imports.static_first);
+    assert!(config.imports.reorder_modifiers);
+    // google-java-format never rewrites a literal.
+    assert_eq!(config.literals, jals_config::fmt::Literals::default());
 }
 
 #[test]
-fn palantir_style_widths() {
-    let palantir: Config = PalantirJavaFormatConfig::default().into();
-    assert_eq!(palantir.indent_width, 4);
-    assert_eq!(palantir.continuation_indent, Some(8));
-    assert_eq!(palantir.max_width, 120);
-    // formatJavadoc defaults off, so comment reflow is not enabled.
-    assert!(!palantir.wrap_comments);
+fn the_aosp_variant_only_doubles_the_indents() {
+    let google: Config = GoogleJavaFormatConfig::default().into();
+    let aosp: Config = GoogleJavaFormatConfig {
+        style: GjfStyle::Aosp,
+        ..GoogleJavaFormatConfig::default()
+    }
+    .into();
 
-    let google_style: Config = PalantirJavaFormatConfig {
+    assert_eq!(aosp.layout.indent_width, 4);
+    assert_eq!(aosp.layout.continuation_indent, Some(8));
+    assert_eq!(aosp.layout.max_width, google.layout.max_width);
+    // Nothing else moves.
+    assert_eq!(aosp.wrapping, google.wrapping);
+    assert_eq!(aosp.spacing, google.spacing);
+    assert_eq!(aosp.imports, google.imports);
+}
+
+#[test]
+fn skipping_a_google_java_format_pass_shows_up_in_the_config() {
+    let config: Config = GoogleJavaFormatConfig {
+        format_javadoc: false,
+        sort_imports: false,
+        ..GoogleJavaFormatConfig::default()
+    }
+    .into();
+
+    assert!(!config.comments.format_javadoc);
+    // Other comment reflow is unconditional in GJF.
+    assert!(config.comments.format_block);
+    assert_eq!(config.imports.order, ImportOrder::Preserve);
+    // `reorderModifiers` is independent of the import passes.
+    assert!(config.imports.reorder_modifiers);
+}
+
+#[test]
+fn palantir_defaults_to_its_own_style() {
+    let config: Config = PalantirJavaFormatConfig::default().into();
+
+    assert_eq!(config.layout.indent_width, 4);
+    assert_eq!(config.layout.continuation_indent, Some(8));
+    assert_eq!(config.layout.max_width, 120);
+    // Unlike google-java-format, Javadoc reflow is off by default.
+    assert!(!config.comments.format_javadoc);
+}
+
+#[test]
+fn palantirs_borrowed_styles_match_google_java_formats() {
+    let palantir_google: Config = PalantirJavaFormatConfig {
         style: PalantirStyle::Google,
         format_javadoc: true,
     }
     .into();
-    assert_eq!(google_style.max_width, 100);
-    assert!(google_style.wrap_comments);
+    let gjf: Config = GoogleJavaFormatConfig::default().into();
+    assert_eq!(palantir_google, gjf);
 }
 
 #[test]
-fn eclipse_prefs_common_rules() {
-    let prefs = "\
-eclipse.preferences.version=1
-org.eclipse.jdt.core.compiler.compliance=21
-org.eclipse.jdt.core.formatter.tabulation.char=space
-org.eclipse.jdt.core.formatter.tabulation.size=4
-org.eclipse.jdt.core.formatter.continuation_indentation=2
-org.eclipse.jdt.core.formatter.lineSplit=120
-org.eclipse.jdt.core.formatter.brace_position_for_type_declaration=next_line
-org.eclipse.jdt.core.formatter.wrap_before_binary_operator=false
-org.eclipse.jdt.core.formatter.alignment_for_parameters_in_method_declaration=48
-org.eclipse.jdt.core.formatter.insert_new_line_at_end_of_file_if_missing=insert
-";
-    let config = EclipsePrefs::import(prefs).unwrap();
-    assert_eq!(config.indent_style, IndentStyle::Space);
-    assert_eq!(config.indent_width, 4);
-    // continuation_indentation is in units; 2 units × 4-column tab = 8 columns.
-    assert_eq!(config.continuation_indent, Some(8));
-    assert_eq!(config.max_width, 120);
-    assert_eq!(config.brace_style, BraceStyle::NextLine);
-    // wrap_before_binary_operator=false ⇒ operator trails the broken line.
-    assert_eq!(config.binop_separator, BinopSeparator::Back);
-    // alignment 48 = M_ONE_PER_LINE_SPLIT ⇒ one parameter per line.
-    assert_eq!(config.fn_params_layout, FnParamsLayout::Vertical);
-    assert!(config.insert_final_newline);
-    // A `compiler.*` key in the same file must not leak into the formatter model.
-}
+fn spotless_starts_from_its_delegate() {
+    let config: Config = SpotlessConfig::default().into();
+    let gjf: Config = GoogleJavaFormatConfig::default().into();
+    assert_eq!(
+        config, gjf,
+        "an unconfigured pipeline is exactly its default delegate"
+    );
 
-#[test]
-fn eclipse_alignment_never_sentinel_stays_tall() {
-    let prefs = "\
-org.eclipse.jdt.core.formatter.alignment_for_parameters_in_method_declaration=2147483647
-";
-    let config = EclipsePrefs::import(prefs).unwrap();
-    assert_eq!(config.fn_params_layout, FnParamsLayout::Tall);
-}
-
-#[test]
-fn eclipse_insert_space_is_enum_not_bool() {
-    // Eclipse spells the toggle `do not insert` (interior spaces); it must round-trip.
-    let model: EclipseConfig = super::serde_kv::Kv::from_pairs(BTreeMap::from([(
-        "org.eclipse.jdt.core.formatter.insert_space_after_colon_in_conditional".to_owned(),
-        "do not insert".to_owned(),
-    )]))
-    .unwrap();
-    let config: Config = model.into();
-    assert!(!config.space_after_colon);
-}
-
-#[test]
-fn intellij_editorconfig_common_rules() {
-    let editorconfig = "\
-root = true
-[*]
-end_of_line = crlf
-insert_final_newline = true
-[*.java]
-indent_style = space
-indent_size = 2
-ij_continuation_indent_size = 4
-max_line_length = 120
-ij_java_keep_blank_lines_in_code = 3
-ij_java_class_brace_style = whitesmiths
-ij_java_method_parameters_wrap = split_into_lines
-ij_java_class_annotation_wrap = on_every_item
-ij_java_imports_layout = $*, |, java.**, |, *
-";
-    let config = IntellijEditorConfig::import(editorconfig).unwrap();
-    assert_eq!(config.indent_style, IndentStyle::Space);
-    assert_eq!(config.indent_width, 2);
-    assert_eq!(config.continuation_indent, Some(4));
-    assert_eq!(config.max_width, 120);
-    assert_eq!(config.line_ending, LineEnding::Crlf);
-    assert!(config.insert_final_newline);
-    assert_eq!(config.max_blank_lines, 3);
-    // whitesmiths is a next-line variant.
-    assert_eq!(config.brace_style, BraceStyle::NextLine);
-    // split_into_lines = Wrap Always ⇒ one parameter per line.
-    assert_eq!(config.fn_params_layout, FnParamsLayout::Vertical);
-    assert_eq!(config.annotation_placement, AnnotationPlacement::Expanded);
-    assert!(config.group_imports);
-    assert_eq!(config.import_groups, ["static", "java.", "*"]);
-}
-
-#[test]
-fn intellij_ignores_non_java_sections() {
-    let editorconfig = "\
-[*.kt]
-indent_size = 8
-[*.javascript]
-indent_size = 16
-[*.java]
-indent_size = 2
-";
-    let config = IntellijEditorConfig::import(editorconfig).unwrap();
-    // `.javascript` must not be read as Java despite containing the substring "java".
-    assert_eq!(config.indent_width, 2);
-}
-
-#[test]
-fn editorconfig_values_are_case_insensitive() {
-    // editorconfig property values are case-insensitive per spec, so a titlecased / uppercased
-    // enum token must still apply rather than silently leaving the option at its default.
-    let editorconfig = "\
-[*.java]
-indent_style = Tab
-end_of_line = CRLF
-insert_final_newline = TRUE
-";
-    let config = IntellijEditorConfig::import(editorconfig).unwrap();
-    // Enum-coerced fields…
-    assert_eq!(config.indent_style, IndentStyle::Tab);
-    assert_eq!(config.line_ending, LineEnding::Crlf);
-    // …and bool-coerced core properties both honor case-insensitive values.
-    assert!(config.insert_final_newline);
-}
-
-#[test]
-fn editorconfig_double_star_section_is_universal() {
-    // `[**]` matches every file (a valid universal header), so its Java-applicable keys apply.
-    let editorconfig = "\
-[**]
-indent_size = 8
-";
-    let config = IntellijEditorConfig::import(editorconfig).unwrap();
-    assert_eq!(config.indent_width, 8);
-}
-
-#[test]
-fn unknown_and_unset_enum_tokens_are_lenient() {
-    // editorconfig's spec-valid `unset`, and any token outside the modeled variants, must leave
-    // the option unset rather than failing the whole import.
-    let editorconfig = "\
-[*.java]
-indent_style = unset
-ij_java_class_brace_style = some_future_style
-indent_size = 3
-";
-    let config = IntellijEditorConfig::import(editorconfig).unwrap();
-    // The unparsable enum values fell back to defaults…
-    assert_eq!(config.indent_style, IndentStyle::Space);
-    assert_eq!(config.brace_style, BraceStyle::SameLine);
-    // …while the well-formed numeric value still applied.
-    assert_eq!(config.indent_width, 3);
-}
-
-#[test]
-fn spotless_delegate_plus_generic_steps() {
-    let spotless = SpotlessConfig {
+    let palantir: Config = SpotlessConfig {
         delegate: SpotlessDelegate::PalantirJavaFormat(PalantirJavaFormatConfig::default()),
-        end_with_newline: Some(false),
-        import_order: ["java".to_owned(), String::new(), "\\#".to_owned()].into(),
-    };
-    let config: Config = spotless.into();
-    // Layout comes from the delegate…
-    assert_eq!(config.max_width, 120);
-    // …and the generic steps override on top.
-    assert!(!config.insert_final_newline);
-    assert!(config.group_imports);
-    // Package prefixes are dotted so they match at a package boundary (`java` never `javax`) —
-    // the same shape the IntelliJ importer produces.
-    assert_eq!(config.import_groups, ["java.", "*", "static"]);
-}
-
-#[test]
-fn import_group_prefixes_are_dotted_in_both_importers() {
-    // Both importers must encode a package group the same way: dotted, so prefix matching stops at
-    // a package boundary. A prefix that already carries its dot is left alone, and the catch-all is
-    // never dotted.
-    let spotless: Config = SpotlessConfig {
-        // `\#com.acme` is a static group scoped to one package — still just jals's one `static`.
-        import_order: [
-            "com.acme".to_owned(),
-            "org.".to_owned(),
-            "\\#com.acme".to_owned(),
-            "\\#".to_owned(),
-            String::new(),
-        ]
-        .into(),
         ..SpotlessConfig::default()
     }
     .into();
-    assert_eq!(spotless.import_groups, ["com.acme.", "org.", "static", "*"]);
-
-    // The IntelliJ mini-list reaches the same encoding from its own syntax: `com.acme` is the
-    // wildcard-less "this package only" form, which jals can only express as a dotted prefix.
-    let editorconfig = "\
-[*.java]
-ij_java_imports_layout = com.acme, org.**, $*, $com.acme.**, *
-";
-    let intellij = IntellijEditorConfig::import(editorconfig).unwrap();
-    assert_eq!(intellij.import_groups, spotless.import_groups);
+    assert_eq!(palantir.layout.max_width, 120);
 }
 
 #[test]
-fn spotless_default_delegate_is_gjf() {
-    let config: Config = SpotlessConfig::default().into();
-    assert_eq!(config.max_width, 100);
-    assert_eq!(config.indent_width, 2);
+fn spotless_generic_steps_layer_over_the_delegate() {
+    let config: Config = SpotlessConfig {
+        end_with_newline: Some(false),
+        trim_trailing_whitespace: Some(false),
+        leading_whitespace: Some(LeadingWhitespace::Tabs),
+        leading_whitespace_size: Some(8),
+        toggle_off_on: true,
+        toggle_off_tag: Some("spotless:off".to_owned()),
+        toggle_on_tag: Some("spotless:on".to_owned()),
+        import_order: vec![
+            "java".to_owned(),
+            "javax".to_owned(),
+            String::new(),
+            "\\#".to_owned(),
+        ],
+        ..SpotlessConfig::default()
+    }
+    .into();
+
+    assert!(!config.layout.insert_final_newline);
+    assert!(!config.layout.trim_trailing_whitespace);
+    assert_eq!(config.layout.indent_style, IndentStyle::Tab);
+    assert_eq!(config.layout.indent_width, 8);
+    assert!(config.layout.formatter_tags);
+    assert_eq!(config.layout.formatter_off_tag, "spotless:off");
+    assert_eq!(config.layout.formatter_on_tag, "spotless:on");
+    assert_eq!(config.imports.order, ImportOrder::Group);
+    assert_eq!(config.imports.groups, ["java.", "javax.", "*", "static"]);
 }
 
 #[test]
-fn unmodeled_keys_are_ignored() {
-    // A key outside the modeled subset must not fail deserialization.
-    let model: IntellijConfig = super::serde_kv::Kv::from_pairs(
-        [
-            ("indent_size".to_owned(), "8".to_owned()),
-            (
-                "ij_java_some_future_option".to_owned(),
-                "whatever".to_owned(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
+fn spotless_delegates_to_an_eclipse_profile() {
+    // `eclipse().configFile(...)` hands over the stringified profile, which is why the delegate
+    // deserializes from a setting map rather than a typed table.
+    let toml = r#"
+        [delegate]
+        engine = "eclipse"
+        "org.eclipse.jdt.core.formatter.lineSplit" = "140"
+        "org.eclipse.jdt.core.formatter.tabulation.size" = "8"
+    "#;
+    let native: SpotlessConfig = toml::from_str(toml).expect("pipeline should parse");
+    let config: Config = native.into();
+
+    assert_eq!(config.layout.max_width, 140);
+    assert_eq!(config.layout.indent_width, 8);
+}
+
+#[test]
+fn the_import_group_encoding_is_shared_across_importers() {
+    // Both importers must spell "the package `java` and everything under it" the same way, or a
+    // project migrating between them would silently regroup. The trailing dot is what stops
+    // `java` from also capturing `javax`.
+    let spotless: Config = SpotlessConfig {
+        import_order: vec![
+            "\\#".to_owned(),
+            "java".to_owned(),
+            "javax".to_owned(),
+            String::new(),
+        ],
+        ..SpotlessConfig::default()
+    }
+    .into();
+    let intellij: Config = IntellijEditorConfig::parse(
+        "[*.java]\nij_java_imports_layout = $*, |, java.**, javax.**, |, *\n",
     )
-    .unwrap();
-    assert_eq!(model.indent_size, Some(8));
+    .expect("editorconfig should parse")
+    .into();
+
+    assert_eq!(spotless.imports.groups, ["static", "java.", "javax.", "*"]);
+    assert_eq!(spotless.imports.groups, intellij.imports.groups);
 }
 
-#[cfg(feature = "std")]
 #[test]
-fn eclipse_xml_profile_matches_prefs() {
-    use super::eclipse::EclipseXmlProfile;
-
-    let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<profiles version="23">
-<profile kind="CodeFormatterProfile" name="Eclipse" version="23">
-<setting id="org.eclipse.jdt.core.formatter.tabulation.size" value="4"/>
-<setting id="org.eclipse.jdt.core.formatter.lineSplit" value="120"/>
-<setting id="org.eclipse.jdt.core.formatter.brace_position_for_type_declaration" value="next_line"/>
-</profile>
-</profiles>"#;
-    let config = EclipseXmlProfile::import(xml).unwrap();
-    assert_eq!(config.indent_width, 4);
-    assert_eq!(config.max_width, 120);
-    assert_eq!(config.brace_style, BraceStyle::NextLine);
+fn several_static_groups_collapse_into_one() {
+    // Native configs may declare several static groups; jals models exactly one.
+    let config: Config = SpotlessConfig {
+        import_order: vec!["\\#com.acme".to_owned(), "\\#".to_owned(), String::new()],
+        ..SpotlessConfig::default()
+    }
+    .into();
+    assert_eq!(config.imports.groups, ["static", "*"]);
 }
 
-#[cfg(feature = "std")]
 #[test]
-fn intellij_xml_scheme_translates_ints_and_import_table() {
-    use super::intellij::IntellijXmlScheme;
-
-    let xml = r#"<component name="ProjectCodeStyleConfiguration">
-  <code_scheme name="Project" version="173">
-    <option name="RIGHT_MARGIN" value="120" />
-    <JavaCodeStyleSettings>
-      <option name="IMPORT_LAYOUT_TABLE">
-        <value>
-          <package name="" withSubpackages="true" static="true" />
-          <emptyLine />
-          <package name="java" withSubpackages="true" static="false" />
-          <emptyLine />
-          <package name="" withSubpackages="true" static="false" />
-        </value>
-      </option>
-    </JavaCodeStyleSettings>
-    <codeStyleSettings language="JAVA">
-      <option name="CLASS_BRACE_STYLE" value="2" />
-      <option name="METHOD_PARAMETERS_WRAP" value="2" />
-      <indentOptions>
-        <option name="INDENT_SIZE" value="2" />
-        <option name="CONTINUATION_INDENT_SIZE" value="4" />
-      </indentOptions>
-    </codeStyleSettings>
-  </code_scheme>
-</component>"#;
-    let config = IntellijXmlScheme::import(xml).unwrap();
-    assert_eq!(config.max_width, 120);
-    assert_eq!(config.indent_width, 2);
-    assert_eq!(config.continuation_indent, Some(4));
-    // CLASS_BRACE_STYLE=2 ⇒ next_line.
-    assert_eq!(config.brace_style, BraceStyle::NextLine);
-    // METHOD_PARAMETERS_WRAP=2 ⇒ split_into_lines ⇒ Vertical.
-    assert_eq!(config.fn_params_layout, FnParamsLayout::Vertical);
-    // The raw IMPORT_LAYOUT_TABLE (static, blank, java, blank, all) becomes jals groups.
-    assert!(config.group_imports);
-    assert_eq!(config.import_groups, ["static", "java.", "*"]);
+fn a_malformed_xml_document_is_an_error_not_a_panic() {
+    #[cfg(feature = "std")]
+    {
+        use super::eclipse::EclipseXmlProfile;
+        let err = EclipseXmlProfile::parse("<profile><setting id=").expect_err("malformed");
+        assert!(matches!(err, ImportError::Xml(_)), "{err:?}");
+        assert!(err.to_string().contains("XML"));
+    }
+    // Nothing to assert without the XML readers; the portable readers never fail.
+    let _ = ImportError::Deserialize("unused".to_owned());
 }
 
-#[cfg(feature = "std")]
+/// Every section of jals's rule set must be reachable from at least one native config —
+/// otherwise the rule is speculative and does not belong in the common vocabulary
+/// (`jals-fmt/MAPPING.md` §2).
 #[test]
-fn intellij_xml_scheme_scopes_options_to_java_language() {
-    use super::intellij::IntellijXmlScheme;
+fn every_config_section_is_reachable_from_some_vendor() {
+    let defaults = Config::default();
 
-    // A multi-language scheme. Both language-scoped shapes carry the *same* UPPER_SNAKE option
-    // vocabulary, so both must be skipped when they belong to another language: the
-    // `<codeStyleSettings language="kotlin">` block, and the `<KotlinCodeStyleSettings>` sibling
-    // of `<JavaCodeStyleSettings>` (given modeled names here deliberately, to pin the skip).
-    let xml = r#"<component name="ProjectCodeStyleConfiguration">
-  <code_scheme name="Project" version="173">
-    <JavaCodeStyleSettings>
-      <option name="IMPORT_LAYOUT_TABLE">
-        <value>
-          <package name="java" withSubpackages="true" static="false" />
-          <emptyLine />
-          <package name="" withSubpackages="true" static="false" />
-        </value>
-      </option>
-    </JavaCodeStyleSettings>
-    <KotlinCodeStyleSettings>
-      <option name="RIGHT_MARGIN" value="140" />
-      <option name="IMPORT_LAYOUT_TABLE">
-        <value>
-          <package name="kotlinx" withSubpackages="true" static="false" />
-        </value>
-      </option>
-    </KotlinCodeStyleSettings>
-    <codeStyleSettings language="JAVA">
-      <option name="METHOD_PARAMETERS_WRAP" value="2" />
-      <indentOptions>
-        <option name="INDENT_SIZE" value="2" />
-        <option name="CONTINUATION_INDENT_SIZE" value="4" />
-      </indentOptions>
-    </codeStyleSettings>
-    <codeStyleSettings language="kotlin">
-      <option name="METHOD_PARAMETERS_WRAP" value="0" />
-      <indentOptions>
-        <option name="INDENT_SIZE" value="4" />
-        <option name="CONTINUATION_INDENT_SIZE" value="8" />
-      </indentOptions>
-    </codeStyleSettings>
-  </code_scheme>
-</component>"#;
-    let config = IntellijXmlScheme::import(xml).unwrap();
-    // Java's values, not kotlin's.
-    assert_eq!(config.indent_width, 2);
-    assert_eq!(config.continuation_indent, Some(4));
-    assert_eq!(config.fn_params_layout, FnParamsLayout::Vertical);
-    // The Kotlin sibling contributed neither its margin…
-    assert_eq!(config.max_width, Config::default().max_width);
-    // …nor its import rows: only Java's table survives, in order.
-    assert_eq!(config.import_groups, ["java.", "*"]);
+    // Eclipse alone moves six of the eight sections.
+    let eclipse: Config = EclipsePrefs::parse(
+        "org.eclipse.jdt.core.formatter.lineSplit=120\n\
+         org.eclipse.jdt.core.formatter.blank_lines_before_method=2\n\
+         org.eclipse.jdt.core.formatter.brace_position_for_type_declaration=next_line\n\
+         org.eclipse.jdt.core.formatter.alignment_for_enum_constants=2147483647\n\
+         org.eclipse.jdt.core.formatter.insert_space_before_comma_in_method_invocation_arguments=insert\n\
+         org.eclipse.jdt.core.formatter.comment.format_javadoc_comments=true\n",
+    )
+    .expect("profile should parse")
+    .into();
+
+    assert_ne!(eclipse.layout, defaults.layout);
+    assert_ne!(eclipse.blank_lines, defaults.blank_lines);
+    assert_ne!(eclipse.braces, defaults.braces);
+    assert_ne!(eclipse.wrapping, defaults.wrapping);
+    assert_ne!(eclipse.spacing, defaults.spacing);
+    assert_ne!(eclipse.comments, defaults.comments);
+
+    // `[imports]` has no Eclipse source at all — the JDT formatter deliberately does not touch
+    // imports — so google-java-format is what makes it reachable.
+    let gjf: Config = GoogleJavaFormatConfig::default().into();
+    assert_ne!(gjf.imports, defaults.imports);
+
+    // `[literals]` is the one jals-native section: all four targets agree on `preserve`, so no
+    // importer can move it, and that is recorded rather than asserted away.
+    assert_eq!(gjf.literals, defaults.literals);
+    assert_eq!(eclipse.literals, defaults.literals);
+}
+
+#[test]
+fn the_gjf_family_profile_is_the_google_preset() {
+    // The golden harness and `jals-fmt.toml` both describe Google Java Style; this is the single
+    // definition they should be derived from rather than restate.
+    let config: Config = GoogleJavaFormatConfig::default().into();
+    assert_eq!(
+        config.layout,
+        Layout {
+            indent_width: 2,
+            tab_width: 2,
+            continuation_indent: Some(4),
+            ..Layout::default()
+        }
+    );
+    assert_eq!(
+        config.comments,
+        Comments {
+            format_line: true,
+            format_block: true,
+            format_javadoc: true,
+            format_header: true,
+            width: 100,
+            blank_line_before_tags: true,
+            normalize_parameter_comments: true,
+            inline_block_comments: true,
+            ..Comments::default()
+        }
+    );
+    assert_eq!(
+        config.wrapping,
+        Wrapping {
+            method_chain: WrapPolicy::IfLongPerItem,
+            case_labels: WrapPolicy::IfLong,
+            tabular_array_initializers: true,
+            ..Wrapping::default()
+        }
+    );
 }

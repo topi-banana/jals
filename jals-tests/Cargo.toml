@@ -30,3 +30,5 @@ walkdir.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# Reads the `jals-fmt.toml` Google preset back, so the file and the importer cannot drift.
+toml.workspace = true
