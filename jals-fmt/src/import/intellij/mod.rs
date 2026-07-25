@@ -178,6 +178,11 @@ impl PackageEntryTable {
     /// project structure rather than by name prefix, so jals has nothing to map it to
     /// (`MAPPING.md` §7). Its name is empty, so projecting it would otherwise emit a second
     /// catch-all group.
+    ///
+    /// `with_subpackages` is likewise **not** carried: `java.*` (that package only) and `java.**`
+    /// (it and everything under it) both become `"java."`, because jals matches a group by raw
+    /// string prefix and has no non-recursive form. IntelliJ is the only vendor with the concept,
+    /// so §7 records the collapse rather than jals growing a rule no other target can produce.
     fn to_jals_groups(&self) -> alloc::vec::Vec<String> {
         let mut groups = alloc::vec::Vec::new();
         for entry in &self.0 {

@@ -403,6 +403,41 @@ fn the_scheme_xml_reads_the_package_entry_table_and_skips_foreign_languages() {
     assert_eq!(config.imports.groups, ["static", "java.", "*"]);
 }
 
+#[test]
+fn the_non_recursive_prefix_form_collapses_onto_the_recursive_one() {
+    use super::values::{PackageEntry, PackageEntryTable};
+
+    // `java.*` is "that package only"; `java.**` is "it and everything under it". jals matches a
+    // group by raw string prefix and has no non-recursive form, so both project onto `"java."`
+    // and `java.*` over-captures. The distinction survives in the native model; the collapse is
+    // deliberate and recorded in MAPPING.md §7.
+    let narrow = IntellijEditorConfig::parse("[*.java]\nij_java_imports_layout = java.*, |, *\n")
+        .expect("editorconfig should parse");
+    let wide = IntellijEditorConfig::parse("[*.java]\nij_java_imports_layout = java.**, |, *\n")
+        .expect("editorconfig should parse");
+
+    let subpackages = |config: &IntellijConfig| {
+        let PackageEntryTable(entries) = config
+            .imports
+            .import_layout_table
+            .as_ref()
+            .expect("the table should be read");
+        match entries.first() {
+            Some(PackageEntry::Package {
+                with_subpackages, ..
+            }) => *with_subpackages,
+            other => panic!("expected a package row, got {other:?}"),
+        }
+    };
+    assert!(!subpackages(&narrow));
+    assert!(subpackages(&wide));
+
+    let narrow: Config = narrow.into();
+    let wide: Config = wide.into();
+    assert_eq!(narrow.imports.groups, ["java.", "*"]);
+    assert_eq!(narrow.imports.groups, wide.imports.groups);
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn the_module_row_is_carried_but_not_projected() {
