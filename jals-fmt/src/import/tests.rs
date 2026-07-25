@@ -138,7 +138,9 @@ fn spotless_generic_steps_layer_over_the_delegate() {
     assert!(!config.layout.insert_final_newline);
     assert!(!config.layout.trim_trailing_whitespace);
     assert_eq!(config.layout.indent_style, IndentStyle::Tab);
+    // The step's `n` is the tab stop, so it fixes the tab's display width too.
     assert_eq!(config.layout.indent_width, 8);
+    assert_eq!(config.layout.tab_width, 8);
     assert!(config.layout.formatter_tags);
     assert_eq!(config.layout.formatter_off_tag, "spotless:off");
     assert_eq!(config.layout.formatter_on_tag, "spotless:on");

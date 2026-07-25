@@ -91,7 +91,8 @@ pub struct SpotlessConfig {
     /// `leadingTabsToSpaces(n)` / `leadingSpacesToTabs(n)` — which unit leading whitespace is
     /// converted to.
     pub leading_whitespace: Option<LeadingWhitespace>,
-    /// The `n` of the step above, when it was given one.
+    /// The `n` of the step above, when it was given one: the tab stop the conversion assumes,
+    /// which projects onto both `layout.indent-width` and `layout.tab-width`.
     pub leading_whitespace_size: Option<usize>,
     /// `importOrder(...)` / `importOrderFile(...)` groups: a prefix list where `""` is the
     /// catch-all and `\#` marks a static-import group. Empty ⇒ the step was not configured.
@@ -131,7 +132,11 @@ impl From<SpotlessConfig> for Config {
                 LeadingWhitespace::Tabs => IndentStyle::Tab,
             };
             if let Some(size) = native.leading_whitespace_size {
+                // The step's `n` is the tab stop on *both* sides of the conversion — the spaces
+                // one tab becomes, and the spaces that become one tab — so it fixes the literal
+                // tab's display width as much as the indentation level's.
                 config.layout.indent_width = size;
+                config.layout.tab_width = size;
             }
         }
         if native.toggle_off_on {
