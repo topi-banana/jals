@@ -342,19 +342,35 @@ work.
 ## Configuration
 
 The formatter reads a `jalsfmt.toml` file. The CLI discovers it by searching upward from
-each formatted file's directory (or pass `--config <PATH>` to use a specific file). Every
-key is optional and falls back to the default; keys use kebab-case.
+each formatted file's directory (or pass `--config <PATH>` to use a specific file). The config
+is a set of **sections** — `[layout]`, `[blank-lines]`, `[braces]`, `[wrapping]`, `[spacing]`,
+`[comments]`, `[imports]`, `[literals]` — and every key, and every whole section, is optional
+and falls back to the default. Keys use kebab-case.
 
 ```toml
 # jalsfmt.toml — every key is optional; values below are the defaults.
-indent-style = "space"      # "space" | "tab"
-indent-width = 4
-max-blank-lines = 1         # collapse runs of blank lines down to this many
-line-ending = "lf"          # "lf" | "crlf"
+[layout]
+indent-style = "space" # "space" | "tab" | "mixed"
+indent-width = 4       # columns per indentation level
+tab-width = 4          # display width of a literal tab
+max-width = 100        # column limit
+line-ending = "lf"     # "lf" | "crlf" | "auto" | "native"
 insert-final-newline = true
-max-width = 100             # code wrap target (columns)
-comment-width = 80          # comment / Javadoc reflow target (columns)
+
+[blank-lines]
+max-in-code = 1 # longest run of source blank lines kept in a body
+
+[imports]
+order = "preserve" # "preserve" | "sort" | "group"
+
+[comments]
+format-javadoc = false
+width = 80 # only consulted when a reflow key is on
 ```
+
+`jals-fmt/jalsfmt.toml` lists the frequently-touched keys of every section; each section module
+under `jals-config/src/fmt/` documents the full surface, and `jals-fmt/MAPPING.md` records which
+Eclipse / IntelliJ / google-java-format / Spotless setting each key corresponds to.
 
 ### Example
 

@@ -331,19 +331,35 @@ version selection、transitive Maven download、`jals.lock` lockfile は将来�
 ## 設定
 
 フォーマッタは `jalsfmt.toml` を読み込みます。CLI は、整形する各ファイルのディレクトリから上位
-方向に探索して見つけます（`--config <PATH>` で特定のファイルを指定することも可能）。すべてのキーは
-任意で、省略時はデフォルト値が使われます。キーは kebab-case です。
+方向に探索して見つけます（`--config <PATH>` で特定のファイルを指定することも可能）。設定は
+**セクション**の集合（`[layout]`、`[blank-lines]`、`[braces]`、`[wrapping]`、`[spacing]`、
+`[comments]`、`[imports]`、`[literals]`）で、すべてのキーは、そしてセクションごと省略しても、
+デフォルト値が使われます。キーは kebab-case です。
 
 ```toml
 # jalsfmt.toml — すべてのキーは任意。以下の値はデフォルト。
-indent-style = "space"      # "space" | "tab"
-indent-width = 4
-max-blank-lines = 1         # 連続する空行をこの数まで圧縮する
-line-ending = "lf"          # "lf" | "crlf"
+[layout]
+indent-style = "space" # "space" | "tab" | "mixed"
+indent-width = 4       # インデント 1 段あたりの桁数
+tab-width = 4          # タブ文字の表示幅
+max-width = 100        # 列上限
+line-ending = "lf"     # "lf" | "crlf" | "auto" | "native"
 insert-final-newline = true
-max-width = 100             # コードの折り返し目標（桁数）
-comment-width = 80          # コメント / Javadoc の再整形目標（桁数）
+
+[blank-lines]
+max-in-code = 1 # 本体中に残す、ソース由来の連続空行の上限
+
+[imports]
+order = "preserve" # "preserve" | "sort" | "group"
+
+[comments]
+format-javadoc = false
+width = 80 # 再整形キーが on のときだけ参照される
 ```
+
+各セクションのよく触るキーは `jals-fmt/jalsfmt.toml` に、全体は `jals-config/src/fmt/` の各
+セクションモジュールに記載しています。各キーが Eclipse / IntelliJ / google-java-format /
+Spotless のどの設定に対応するかは `jals-fmt/MAPPING.md` の台帳を参照してください。
 
 ### 例
 
