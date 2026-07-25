@@ -212,8 +212,6 @@ impl CacheKey {
 
     /// Derive a key under the workspace-wide provenance rule: a NUL-terminated kind tag
     /// followed by length-framed input identity. See [`ProvenanceFold`].
-    // TODO(backend-tier): no callers yet — consumed only by the deferred backend compile tier; see
-    // `jals_build::backend`.
     pub fn derive(
         namespace: CacheNamespace,
         kind: &[u8],
@@ -266,6 +264,21 @@ impl ProvenanceFold {
     /// Fold an already-computed digest. Fixed width, so it needs no length frame.
     pub fn digest(&mut self, digest: ContentDigest) -> &mut Self {
         self.buf.extend_from_slice(digest.as_bytes());
+        self
+    }
+
+    /// Fold an optional digest behind a one-byte presence discriminant: `0` for `None`,
+    /// `1 ‖ digest` for `Some`. Discriminant and payload are both fixed width, so like
+    /// [`digest`](Self::digest) it needs no length frame, and `None` can never collide with
+    /// any real digest.
+    pub fn opt_digest(&mut self, digest: Option<ContentDigest>) -> &mut Self {
+        match digest {
+            None => self.buf.push(0),
+            Some(digest) => {
+                self.buf.push(1);
+                self.digest(digest);
+            }
+        }
         self
     }
 
@@ -598,6 +611,109 @@ mod tests {
         assert_eq!(CacheKey::from_token("dependency-jar:short:short"), None);
         assert_eq!(CacheKey::from_token("no-such-namespace:a:b"), None);
         assert_eq!(CacheKey::from_token("dependency-jar"), None);
+    }
+
+    /// The fold's byte layout is a persistence contract: every framed append below mirrors the
+    /// exact bytes the builder must produce. A mismatch here means persisted keys silently
+    /// change identity.
+    #[test]
+    fn fold_layout_matches_the_documented_frame() {
+        let payload = ContentDigest::of(b"payload");
+        let mut fold = ProvenanceFold::new(b"kind\0");
+        fold.version(7)
+            .bytes(b"ab")
+            .digest(payload)
+            .opt_digest(None)
+            .opt_digest(Some(payload));
+
+        let mut mirror = Vec::new();
+        mirror.extend_from_slice(b"kind\0");
+        mirror.extend_from_slice(&7u32.to_be_bytes());
+        mirror.extend_from_slice(&2u64.to_be_bytes());
+        mirror.extend_from_slice(b"ab");
+        mirror.extend_from_slice(payload.as_bytes());
+        mirror.push(0);
+        mirror.push(1);
+        mirror.extend_from_slice(payload.as_bytes());
+        assert_eq!(fold.finish(), ContentDigest::of(&mirror));
+    }
+
+    /// Pins one representative fold to a hard-coded digest so a change to either the frame
+    /// layout or the hash function fails loudly instead of invalidating caches quietly.
+    #[test]
+    fn fold_digest_is_stable_across_releases() {
+        let mut fold = ProvenanceFold::new(b"jals.golden\0");
+        fold.version(1)
+            .bytes(b"input")
+            .digest(ContentDigest::of(b"parent"))
+            .opt_digest(None);
+        assert_eq!(
+            fold.finish().to_hex(),
+            "4e5f6e6cf05b848cd9572ac68999a69bd3b7ceb208754000ba7ca52d3ace1b51"
+        );
+    }
+
+    #[test]
+    fn fold_framing_is_unambiguous() {
+        let ab_c = {
+            let mut fold = ProvenanceFold::new(b"kind\0");
+            fold.bytes(b"ab").bytes(b"c");
+            fold.finish()
+        };
+        let a_bc = {
+            let mut fold = ProvenanceFold::new(b"kind\0");
+            fold.bytes(b"a").bytes(b"bc");
+            fold.finish()
+        };
+        assert_ne!(ab_c, a_bc);
+
+        let none = {
+            let mut fold = ProvenanceFold::new(b"kind\0");
+            fold.opt_digest(None);
+            fold.finish()
+        };
+        let some = {
+            let mut fold = ProvenanceFold::new(b"kind\0");
+            fold.opt_digest(Some(ContentDigest::of(b"scope")));
+            fold.finish()
+        };
+        assert_ne!(none, some);
+    }
+
+    #[test]
+    fn parent_folds_the_parents_provenance_then_content() {
+        let parent = key(b"parent-bytes");
+        let via_parent = {
+            let mut fold = ProvenanceFold::new(b"kind\0");
+            fold.parent(&parent);
+            fold.finish()
+        };
+        let via_digests = {
+            let mut fold = ProvenanceFold::new(b"kind\0");
+            fold.digest(parent.provenance()).digest(parent.content());
+            fold.finish()
+        };
+        assert_eq!(via_parent, via_digests);
+    }
+
+    /// `new(kind).bytes(provenance)` must keep producing the layout the pre-fold classpath
+    /// helpers hand-rolled (`kind ‖ u64-BE length ‖ provenance`): the `external\0`,
+    /// `project\0`, `skeleton\0`, and `git-manifest\0` keys already persisted under that rule
+    /// have to stay reachable.
+    #[test]
+    fn single_bytes_fold_matches_the_legacy_hand_rolled_layout() {
+        for (kind, provenance) in [
+            (&b"external\0"[..], &b"https://example.test/dep.jar"[..]),
+            (&b"git-manifest\0"[..], &b"git\0url\0ref\0dir"[..]),
+        ] {
+            let mut legacy = Vec::with_capacity(kind.len() + 8 + provenance.len());
+            legacy.extend_from_slice(kind);
+            legacy.extend_from_slice(&(provenance.len() as u64).to_be_bytes());
+            legacy.extend_from_slice(provenance);
+            let mut fold = ProvenanceFold::new(kind);
+            fold.bytes(provenance);
+            assert_eq!(fold.finish(), ContentDigest::of(&legacy));
+        }
     }
 
     #[test]

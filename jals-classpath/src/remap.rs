@@ -27,9 +27,10 @@ use jals_classfile::{
     TypeParameter, TypeSignature,
 };
 use jals_exec::Exec;
-use jals_storage::{ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest};
+use jals_storage::{
+    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, ProvenanceFold,
+};
 
-use crate::DependencyResolver;
 use crate::load::{Archive, SourceTreeLimits};
 use crate::mappings::Mappings;
 use crate::zip::{StoredZip, WriteMember};
@@ -163,15 +164,12 @@ impl NestedJar {
         if !helpers::looks_like_zip(bytes) {
             return Err(format!("nested member `{member}` is not a zip archive"));
         }
-        let mut provenance = Vec::new();
-        provenance.extend_from_slice(parent.provenance().as_bytes());
-        provenance.extend_from_slice(parent.content().as_bytes());
-        provenance.extend_from_slice(member.as_bytes());
-        let key = DependencyResolver::cache_key(
+        let mut fold = ProvenanceFold::new(b"nested-jar\0");
+        fold.parent(parent).bytes(member.as_bytes());
+        let key = CacheKey::new(
             CacheNamespace::BuildTaskArtifact,
-            b"nested-jar\0",
-            &provenance,
-            bytes,
+            fold.finish(),
+            ContentDigest::of(bytes),
         );
         cache
             .publish(&key, bytes)
@@ -311,15 +309,14 @@ impl JarRemap {
         }
         let jar_bytes = StoredZip::write(&out_members)?;
 
-        let mut provenance = Vec::new();
-        provenance.extend_from_slice(jar.provenance().as_bytes());
-        provenance.extend_from_slice(jar.content().as_bytes());
-        provenance.extend_from_slice(ContentDigest::of(mappings_text.as_bytes()).as_bytes());
-        let key = DependencyResolver::cache_key(
+        // The mappings fold as their digest, not their text: the rule keys on mapping identity.
+        let mut fold = ProvenanceFold::new(b"remap-jar\0");
+        fold.parent(jar)
+            .digest(ContentDigest::of(mappings_text.as_bytes()));
+        let key = CacheKey::new(
             CacheNamespace::BuildTaskArtifact,
-            b"remap-jar\0",
-            &provenance,
-            &jar_bytes,
+            fold.finish(),
+            ContentDigest::of(&jar_bytes),
         );
         cache
             .publish(&key, &jar_bytes)
@@ -382,16 +379,12 @@ impl JarMerge {
         }
 
         let jar_bytes = StoredZip::write(&out_members)?;
-        let mut provenance = Vec::new();
-        provenance.extend_from_slice(base.provenance().as_bytes());
-        provenance.extend_from_slice(base.content().as_bytes());
-        provenance.extend_from_slice(overlay.provenance().as_bytes());
-        provenance.extend_from_slice(overlay.content().as_bytes());
-        let key = DependencyResolver::cache_key(
+        let mut fold = ProvenanceFold::new(b"merge-jars\0");
+        fold.parent(base).parent(overlay);
+        let key = CacheKey::new(
             CacheNamespace::BuildTaskArtifact,
-            b"merge-jars\0",
-            &provenance,
-            &jar_bytes,
+            fold.finish(),
+            ContentDigest::of(&jar_bytes),
         );
         cache
             .publish(&key, &jar_bytes)

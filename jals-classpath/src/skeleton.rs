@@ -34,9 +34,11 @@ use jals_classfile::{
     ReturnType, TypeParameter, TypeSignature,
 };
 use jals_decompile::{Attrs, ClassHierarchy, JavaType, MethodBody};
-use jals_storage::{ArtifactCache, CacheBackend, CacheNamespace, RelativePath};
+use jals_storage::{
+    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, RelativePath,
+};
 
-use crate::{DependencyResolver, LibrarySource, Warning, WarningOrigin};
+use crate::{LibrarySource, Warning, WarningOrigin};
 
 /// How a skeleton file is rendered.
 ///
@@ -130,11 +132,11 @@ impl SkeletonGroup<'_> {
                 continue;
             };
             let bytes = group.render(&hierarchy).await.into_bytes();
-            let key = DependencyResolver::cache_key(
+            let key = CacheKey::derive(
                 namespace,
                 b"skeleton\0",
                 path.to_string().as_bytes(),
-                &bytes,
+                ContentDigest::of(&bytes),
             );
             match cache.publish(&key, &bytes).await {
                 Ok(()) => out.sources.push(LibrarySource { path, key }),
