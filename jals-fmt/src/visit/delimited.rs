@@ -31,9 +31,17 @@ impl Ctx<'_> {
     }
 
     /// Which `[wrapping]` rule governs this list.
+    ///
+    /// An argument list gets one refinement google-java-format applies and no vendor setting
+    /// expresses: a list of **simple** arguments (names, literals, `X.class`) packs by width,
+    /// but as soon as one argument is itself a call, a lambda, or an initializer, the list goes
+    /// one argument per line. Packing complex arguments produces lines that read as one
+    /// expression when they are several, which is the readability problem the rule exists for.
+    /// The refinement only ever *tightens* `if-long`; the other three policies say what they mean
+    /// and are left alone.
     fn list_policy(&self, node: &SyntaxNode) -> WrapPolicy {
         let wrapping = &self.style.cfg.wrapping;
-        match node.kind() {
+        let policy = match node.kind() {
             S::ARG_LIST => wrapping.call_arguments,
             S::PARAM_LIST | S::LAMBDA_PARAMS => wrapping.method_parameters,
             S::RECORD_HEADER => wrapping.record_components,
@@ -41,6 +49,24 @@ impl Ctx<'_> {
             S::RESOURCE_LIST => self.resource_policy(),
             S::RECORD_PATTERN => wrapping.deconstruction_list,
             _ => wrapping.call_arguments,
+        };
+        if policy == WrapPolicy::IfLong
+            && matches!(node.kind(), S::ARG_LIST | S::ANNOTATION_ARG_LIST)
+            && !node.children().all(|arg| Self::is_simple_argument(&arg))
+        {
+            return WrapPolicy::IfLongPerItem;
+        }
+        policy
+    }
+
+    /// Whether an argument is simple enough to share a line with its neighbours.
+    fn is_simple_argument(node: &SyntaxNode) -> bool {
+        match node.kind() {
+            S::NAME_REF | S::LITERAL | S::CLASS_LITERAL | S::TYPE => true,
+            S::FIELD_ACCESS | S::PAREN_EXPR | S::UNARY_EXPR | S::POSTFIX_EXPR => node
+                .children()
+                .all(|child| Self::is_simple_argument(&child)),
+            _ => false,
         }
     }
 
@@ -184,81 +210,174 @@ impl Ctx<'_> {
     /// reflowing it by width — google-java-format's behavior, and the one place a *layout*
     /// decision legitimately consults the source, because the grid is information the width
     /// alone cannot recover.
+    /// An array initializer `{ a, b, c }`.
+    ///
+    /// Unlike a paren-delimited list, an initializer is **block-shaped**: the `{` ends its line,
+    /// the elements sit at one *block* indent, and the `}` returns to the line that opened it.
+    /// That is what google-java-format does and why an initializer is the one list whose closing
+    /// delimiter always dangles.
     pub(super) async fn visit_array_init(&mut self, node: &SyntaxNode) {
-        let policy = self.style.cfg.wrapping.array_initializer;
         if self.style.cfg.wrapping.tabular_array_initializers && Self::is_tabular(node) {
             self.emit_tabular_array(node).await;
             return;
         }
-        self.emit_delimited(
-            node,
-            policy,
-            ParenPositions::CommonLines,
-            S::LBRACE,
-            S::RBRACE,
-        )
-        .await;
-    }
+        let policy = self.style.cfg.wrapping.array_initializer;
+        let indent = self.style.indent();
+        let children = Self::children(node);
+        let empty = !children.iter().any(|child| child.as_node().is_some());
+        // A trailing comma is the author saying "one item per row" — google-java-format keeps
+        // such an initializer vertical whether or not it would fit. The comma is a significant
+        // token that survives either way; only the layout responds to it.
+        let trailing_comma = Self::has_trailing_comma(&children);
+        let last_element = children.iter().rposition(|child| child.as_node().is_some());
 
-    /// Whether an initializer is written as a grid: more than one line, and every line holding
-    /// the same number of elements.
-    fn is_tabular(node: &SyntaxNode) -> bool {
-        let mut rows: Vec<usize> = Vec::new();
-        let mut current = 0usize;
-        let mut saw_break = false;
-        for child in node.children_with_tokens() {
-            match child {
-                SyntaxElement::Token(tok) if tok.kind() == S::NEWLINE => {
-                    if current > 0 {
-                        rows.push(current);
-                        current = 0;
-                    }
-                    saw_break = true;
-                }
-                SyntaxElement::Node(_) => current += 1,
-                SyntaxElement::Token(_) => {}
-            }
-        }
-        if current > 0 {
-            rows.push(current);
-        }
-        saw_break && rows.len() > 1 && rows.windows(2).all(|pair| pair[0] == pair[1])
-    }
-
-    /// Emit a grid-shaped initializer, keeping the source's row breaks.
-    async fn emit_tabular_array(&mut self, node: &SyntaxNode) {
-        let indent = self.style.continuation();
+        self.open_flat(Indent::ZERO);
         let mut opened = false;
-        let mut pending_row_break = false;
-        for child in node.children_with_tokens() {
-            match &child {
-                SyntaxElement::Token(tok) if tok.kind() == S::NEWLINE => {
-                    if opened {
-                        pending_row_break = true;
+        for (nth, child) in children.iter().enumerate() {
+            match child.as_token().map(|tok| tok.kind()) {
+                Some(S::LBRACE) => {
+                    self.visit_element(child).await;
+                    if !empty {
+                        self.open(indent.clone());
+                        opened = true;
+                        self.edge_break(trailing_comma);
                     }
                     continue;
                 }
-                SyntaxElement::Token(tok) if tok.kind().is_trivia() => continue,
-                SyntaxElement::Token(tok) if tok.kind() == S::LBRACE => {
-                    self.token(tok);
-                    self.open(indent.clone());
-                    opened = true;
-                    pending_row_break = true;
-                    continue;
-                }
-                SyntaxElement::Token(tok) if tok.kind() == S::RBRACE => {
+                Some(S::RBRACE) => {
                     if opened {
                         self.close_indent(&indent);
                         opened = false;
+                        self.edge_break(trailing_comma);
                     }
-                    self.forced_break(Indent::columns(0));
-                    self.token(tok);
+                    self.visit_element(child).await;
+                    continue;
+                }
+                Some(S::COMMA) => {
+                    self.visit_element(child).await;
+                    // The trailing comma separates nothing, so the closing edge's break is the
+                    // only one it needs; emitting one here too would leave `1, 2, }`.
+                    if last_element.is_some_and(|last| nth < last) {
+                        self.list_break(policy, Indent::ZERO);
+                    }
                     continue;
                 }
                 _ => {}
             }
-            if pending_row_break {
-                pending_row_break = false;
+            self.visit_element(child).await;
+        }
+        if opened {
+            self.close_indent(&indent);
+        }
+        self.close();
+    }
+
+    /// The break just inside an initializer's braces: forced when the initializer is pinned
+    /// vertical, negotiable otherwise.
+    fn edge_break(&mut self, vertical: bool) {
+        if vertical {
+            self.forced_break(Indent::ZERO);
+        } else {
+            self.break_tight(Indent::ZERO);
+        }
+    }
+
+    /// Whether the last significant token before the closing brace is a comma.
+    fn has_trailing_comma(children: &[SyntaxElement]) -> bool {
+        let Some(last_element) = children.iter().rposition(|child| child.as_node().is_some())
+        else {
+            return false;
+        };
+        children[last_element + 1..]
+            .iter()
+            .any(|child| child.as_token().is_some_and(|tok| tok.kind() == S::COMMA))
+    }
+
+    /// Whether an initializer is written as a **grid**: several source rows, each holding the
+    /// same number of elements, and more than one element per row.
+    ///
+    /// The row-length test is what separates a table from a plain one-per-line list. An
+    /// initializer written one element per row carries no column structure, so
+    /// google-java-format refills it by width; a `3 × 3` block does, and refilling it would
+    /// destroy information the source encodes and the width cannot recover. A short final row is
+    /// tolerated — a table's last line is rarely full.
+    fn is_tabular(node: &SyntaxNode) -> bool {
+        let mut rows: Vec<usize> = Vec::new();
+        for element in node.children() {
+            let leaves = Self::leaf_count(&element);
+            if rows.is_empty() || Self::starts_a_row(&element) {
+                rows.push(leaves);
+            } else if let Some(last) = rows.last_mut() {
+                *last += leaves;
+            }
+        }
+        let Some((last, full)) = rows.split_last() else {
+            return false;
+        };
+        full.len() > 1 && full[0] > 1 && full.iter().all(|row| *row == full[0]) && *last <= full[0]
+    }
+
+    /// How many *leaf* values an element contributes to its row.
+    ///
+    /// A row of nested initializers is a row of their contents: `{{"a","b","c"}, …}` written one
+    /// nested initializer per line is a three-column table, while `{{"a"}, {"b"}}` written the
+    /// same way is a one-column list and gets refilled.
+    fn leaf_count(node: &SyntaxNode) -> usize {
+        if node.kind() != S::ARRAY_INIT {
+            return 1;
+        }
+        node.children()
+            .map(|child| Self::leaf_count(&child))
+            .sum::<usize>()
+            .max(1)
+    }
+
+    /// Whether `node` is the first element on its source line.
+    fn starts_a_row(node: &SyntaxNode) -> bool {
+        let Some(first) = Ctx::first_token(node) else {
+            return false;
+        };
+        let mut cursor = first.prev_token();
+        while let Some(previous) = cursor {
+            match previous.kind() {
+                S::NEWLINE => return true,
+                kind if kind.is_trivia() => {}
+                _ => return false,
+            }
+            cursor = previous.prev_token();
+        }
+        false
+    }
+
+    /// Emit a grid-shaped initializer, keeping the source's row breaks.
+    async fn emit_tabular_array(&mut self, node: &SyntaxNode) {
+        let indent = self.style.indent();
+        self.open_flat(Indent::ZERO);
+        let mut opened = false;
+        for child in Self::children(node) {
+            match child.as_token().map(|tok| tok.kind()) {
+                Some(S::LBRACE) => {
+                    self.visit_element(&child).await;
+                    self.open(indent.clone());
+                    opened = true;
+                    self.forced_break(Indent::ZERO);
+                    continue;
+                }
+                Some(S::RBRACE) => {
+                    if opened {
+                        self.close_indent(&indent);
+                        opened = false;
+                    }
+                    self.forced_break(Indent::ZERO);
+                    self.visit_element(&child).await;
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(element) = child.as_node()
+                && Self::starts_a_row(element)
+                && !self.ops.last_is_break()
+            {
                 self.forced_break(Indent::ZERO);
             }
             self.visit_element(&child).await;
@@ -266,6 +385,7 @@ impl Ctx<'_> {
         if opened {
             self.close_indent(&indent);
         }
+        self.close();
     }
 
     /// Note that whitespace has already been emitted, so the next token owes no space.

@@ -26,6 +26,10 @@ tabular-array-initializers = true
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
 
+[spacing]
+# `new String[] { … }` takes a space before the initializer's brace.
+before-array-initializer-left-brace = true
+
 [comments]
 # google-java-format always reflows comments, Javadoc included, against the column limit.
 format-line = true

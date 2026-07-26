@@ -24,7 +24,7 @@ use alloc::vec;
 
 use jals_config::fmt::{
     Comments, Config, ImportOrder, Imports, IndentStyle, KeepOnOneLine, Layout, ParenPositions,
-    WrapPolicy, Wrapping,
+    Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -147,6 +147,12 @@ impl GoogleJavaFormatConfig {
                 tabular_array_initializers: true,
                 reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
+            },
+            // `new String[] {…}` and `{{1}, {2}}` both take a space before the initializer's
+            // brace; every other spacing decision is already the jals default.
+            spacing: Spacing {
+                before_array_initializer_left_brace: true,
+                ..Spacing::default()
             },
             comments: Comments {
                 format_line: true,

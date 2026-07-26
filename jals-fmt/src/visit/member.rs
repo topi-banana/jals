@@ -8,15 +8,27 @@
 use alloc::vec::Vec;
 
 use jals_config::fmt::{KeepOnOneLine, WrapPolicy};
-use jals_syntax::{SyntaxKind as S, SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
 use crate::visit::Ctx;
 
 impl Ctx<'_> {
     /// A class / interface / record / `@interface` body.
+    ///
+    /// "Members" here means every child between the braces, not just declarations: a stray `;`
+    /// is legal in a class body and is a member of the token multiset like any other, so it gets
+    /// its own line rather than being quietly dropped.
     pub(super) async fn visit_class_body(&mut self, node: &SyntaxNode) {
-        let members: Vec<SyntaxNode> = node.children().collect();
+        let members: Vec<SyntaxElement> = Self::children(node)
+            .into_iter()
+            .filter(|child| {
+                !matches!(
+                    child.as_token().map(|tok| tok.kind()),
+                    Some(S::LBRACE | S::RBRACE)
+                )
+            })
+            .collect();
         let keep = self.keep_for_type_body(node);
         self.emit_member_body(node, &members, keep).await;
     }
@@ -39,7 +51,7 @@ impl Ctx<'_> {
     async fn emit_member_body(
         &mut self,
         node: &SyntaxNode,
-        members: &[SyntaxNode],
+        members: &[SyntaxElement],
         keep: KeepOnOneLine,
     ) {
         let lbrace = Self::token_of(node, S::LBRACE);
@@ -78,16 +90,17 @@ impl Ctx<'_> {
         }
         self.open(indent.clone());
         for (nth, member) in members.iter().enumerate() {
-            let enforced = if nth == 0 {
-                blank.at_type_body_start
-            } else {
-                self.enforced_around_member(member, node)
+            let enforced = match member.as_node() {
+                _ if nth == 0 => blank.at_type_body_start,
+                Some(member) => self.enforced_around_member(member, node),
+                None => 0,
             };
-            let source = self
-                .blank_lines_before(member)
-                .min(blank.max_in_declarations);
+            let source = member.as_node().map_or(0, |member| {
+                self.blank_lines_before(member)
+                    .min(blank.max_in_declarations)
+            });
             self.body_break(collapsible, enforced.max(source), Indent::ZERO);
-            self.visit(member).await;
+            self.visit_element(member).await;
         }
         self.close_indent(&indent);
 
@@ -191,7 +204,11 @@ impl Ctx<'_> {
             .children()
             .filter(|child| child.kind() != S::ENUM_CONSTANT)
             .collect();
+        // An enum with no member section and no constant body is laid out like an array
+        // initializer — one line if it fits. A `;` marks a member section even when the section
+        // turns out to be empty, and google-java-format keeps such an enum multi-line.
         let trivial = members.is_empty()
+            && Self::token_of(node, S::SEMICOLON).is_none()
             && constants
                 .iter()
                 .all(|constant| Self::child_of(constant, S::CLASS_BODY).is_none());
@@ -199,20 +216,30 @@ impl Ctx<'_> {
         let blank = self.style.cfg.blank_lines;
         let indent = self.style.indent();
 
-        let mut opened = false;
-        let mut past_constants = false;
+        let children = Self::children(node);
+        let has_content = children.iter().any(|child| {
+            !matches!(
+                child.as_token().map(|tok| tok.kind()),
+                Some(S::LBRACE | S::RBRACE)
+            )
+        });
+
         // One level for the whole body, so a trivial enum can collapse to `{A, B, C}` the way
         // google-java-format lays out an array initializer.
         self.open_flat(Indent::ZERO);
-        for child in Self::children(node) {
+        let mut opened = false;
+        let mut past_constants = false;
+        // Whether a break is owed before the next item. A `;` that directly follows a constant
+        // terminates it (`B;`) and takes no break; a further `;` is an item of its own and does.
+        let mut pending = false;
+
+        for child in &children {
             match child.as_token().map(|tok| tok.kind()) {
                 Some(S::LBRACE) => {
-                    self.visit_element(&child).await;
+                    self.visit_element(child).await;
                     self.open(indent.clone());
                     opened = true;
-                    if !constants.is_empty() || !members.is_empty() {
-                        self.enum_break(trivial, Indent::ZERO);
-                    }
+                    pending = has_content;
                     continue;
                 }
                 Some(S::RBRACE) => {
@@ -220,42 +247,46 @@ impl Ctx<'_> {
                         self.close_indent(&indent);
                         opened = false;
                     }
-                    if trivial && members.is_empty() {
-                        self.break_tight(Indent::ZERO);
-                    } else {
-                        self.forced_break(Indent::ZERO);
+                    if has_content {
+                        self.enum_break(trivial, policy);
                     }
-                    self.visit_element(&child).await;
+                    self.visit_element(child).await;
                     continue;
                 }
                 Some(S::COMMA) => {
-                    self.visit_element(&child).await;
-                    if trivial {
-                        self.list_break(policy, Indent::ZERO);
-                    } else {
-                        self.forced_break(Indent::ZERO);
-                    }
+                    self.visit_element(child).await;
+                    pending = true;
                     continue;
                 }
                 Some(S::SEMICOLON) => {
-                    self.visit_element(&child).await;
+                    if pending {
+                        self.enum_break(trivial, policy);
+                    }
+                    self.visit_element(child).await;
                     past_constants = true;
+                    pending = true;
                     continue;
                 }
                 _ => {}
             }
             let Some(member) = child.as_node() else {
-                self.visit_element(&child).await;
+                self.visit_element(child).await;
+                pending = false;
                 continue;
             };
-            if past_constants {
-                let enforced = self.enforced_around_member(member, node);
-                let source = self
-                    .blank_lines_before(member)
-                    .min(blank.max_in_declarations);
-                self.blank_lines(enforced.max(source), Indent::ZERO);
+            if pending {
+                if past_constants {
+                    let enforced = self.enforced_around_member(member, node);
+                    let source = self
+                        .blank_lines_before(member)
+                        .min(blank.max_in_declarations);
+                    self.blank_lines(enforced.max(source), Indent::ZERO);
+                } else {
+                    self.enum_break(trivial, policy);
+                }
             }
             self.visit(member).await;
+            pending = false;
         }
         if opened {
             self.close_indent(&indent);
@@ -263,12 +294,13 @@ impl Ctx<'_> {
         self.close();
     }
 
-    /// The break between an enum's `{` and its first constant.
-    fn enum_break(&mut self, trivial: bool, plus_indent: Indent) {
+    /// The break between two items of an enum body: negotiable while the enum is still shaped
+    /// like an array initializer, forced once it has a member section.
+    fn enum_break(&mut self, trivial: bool, policy: WrapPolicy) {
         if trivial {
-            self.break_tight(plus_indent);
+            self.list_break_tight(policy, Indent::ZERO);
         } else {
-            self.forced_break(plus_indent);
+            self.forced_break(Indent::ZERO);
         }
     }
 

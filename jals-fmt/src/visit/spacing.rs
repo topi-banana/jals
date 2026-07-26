@@ -48,6 +48,12 @@ impl Spacing {
         if let Some(space) = Self::delimiters(pk, nk, pp, np, rules) {
             return space;
         }
+        // An annotation opening after a word or a closing delimiter needs separating —
+        // `public @interface`, `@Foo(1) @Bar`. Checked after the delimiter rules so
+        // `(@NonNull String x)` still hugs its parenthesis.
+        if nk == S::AT {
+            return Self::is_word(pk) || matches!(pk, S::RPAREN | S::RBRACK | S::GT);
+        }
         if let Some(space) = Self::separators(prev, next, pp, np, rules) {
             return space;
         }
@@ -118,6 +124,10 @@ impl Spacing {
             (S::LBRACK, _) => Some(pp == S::INDEX_EXPR && rules.within_brackets),
             (_, S::RBRACK) => Some(np == S::INDEX_EXPR && rules.within_brackets),
             (_, S::LBRACK) => Some(false),
+            // `String[][] xs` — an array type's `]` is followed by the name it declares. Only a
+            // word is separated, so `a[0] = 1` still reaches the assignment rule and `a[0].b`
+            // still hugs its selector.
+            (S::RBRACK, _) if Self::is_word(nk) => Some(true),
 
             (_, S::LPAREN) => Some(Self::before_parens(np, rules)),
             (_, S::LBRACE) => Some(Self::before_brace(np, rules)),

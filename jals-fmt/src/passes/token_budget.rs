@@ -33,6 +33,34 @@ use crate::style::Style;
 /// A significant-token multiset, keyed either by `(kind, text)` or by kind alone.
 type Budget = BTreeMap<(SyntaxKind, String), usize>;
 
+/// Which part of a compilation unit a [`Budget`] covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Every significant token.
+    Everything,
+    /// Only tokens inside an `import` declaration.
+    ImportsOnly,
+    /// Everything except those.
+    OutsideImports,
+}
+
+impl Scope {
+    /// Whether this scope counts `tok`.
+    fn admits(self, tok: &jals_syntax::SyntaxToken) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::ImportsOnly => Self::in_import(tok),
+            Self::OutsideImports => !Self::in_import(tok),
+        }
+    }
+
+    /// Whether a token sits inside an `import` declaration.
+    fn in_import(tok: &jals_syntax::SyntaxToken) -> bool {
+        tok.parent_ancestors()
+            .any(|node| node.kind() == SyntaxKind::IMPORT_DECL)
+    }
+}
+
 /// Verifies that a formatted output still accounts for its input.
 pub(crate) struct TokenBudget;
 
@@ -56,12 +84,26 @@ impl TokenBudget {
         }
 
         let by_kind = LiteralRewrite::is_active(&style.cfg.literals);
-        let before = Self::collect(src_tree, by_kind);
-        let after = Self::collect(&reparsed.syntax(), by_kind);
-
-        let allow_missing = style.cfg.imports.remove_unused;
         let allow_extra_braces = Self::forces_braces(style);
-        Self::compare(&before, &after, allow_missing, allow_extra_braces)
+
+        if !style.cfg.imports.remove_unused {
+            let before = Self::collect(src_tree, by_kind, Scope::Everything);
+            let after = Self::collect(&reparsed.syntax(), by_kind, Scope::Everything);
+            return Self::compare(&before, &after, false, allow_extra_braces);
+        }
+
+        // Unused-import removal deletes whole declarations, so the import block is checked as a
+        // *subset* — but only the import block. Splitting the two scopes keeps the allowance from
+        // masking a token dropped anywhere else, which is exactly the class of bug this check
+        // exists to catch.
+        let before_code = Self::collect(src_tree, by_kind, Scope::OutsideImports);
+        let after_code = Self::collect(&reparsed.syntax(), by_kind, Scope::OutsideImports);
+        if !Self::compare(&before_code, &after_code, false, allow_extra_braces) {
+            return false;
+        }
+        let before_imports = Self::collect(src_tree, by_kind, Scope::ImportsOnly);
+        let after_imports = Self::collect(&reparsed.syntax(), by_kind, Scope::ImportsOnly);
+        Self::compare(&before_imports, &after_imports, true, false)
     }
 
     /// Whether any `[braces] force-*` rule can insert a brace.
@@ -77,16 +119,17 @@ impl TokenBudget {
         .any(|force| *force != ForceBraces::Never)
     }
 
-    /// The significant-token multiset of a tree.
+    /// The significant-token multiset of a tree, restricted to `scope`.
     ///
     /// `by_kind` drops the text, which is what makes the check survive `[literals]` rewriting a
     /// literal's spelling while still catching a literal that turned into something else.
-    fn collect(root: &SyntaxNode, by_kind: bool) -> Budget {
+    fn collect(root: &SyntaxNode, by_kind: bool, scope: Scope) -> Budget {
         let mut budget = Budget::new();
         for tok in root
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| !tok.kind().is_trivia())
+            .filter(|tok| scope.admits(tok))
         {
             let text = if by_kind {
                 String::new()
