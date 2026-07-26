@@ -408,11 +408,15 @@ impl<'s> Writer<'s> {
         let Some(first) = lines.next() else {
             return;
         };
-        let starred = text
-            .split('\n')
-            .skip(1)
-            .all(|line| line.trim_start().starts_with('*'));
-        if !starred {
+        // Only the two conventional shapes are re-aligned: a `*`-prefixed block comment and a
+        // refilled `//` run. Anything else (ASCII art, an embedded snippet) keeps its own
+        // relative indentation, because trimming would destroy information the formatter cannot
+        // reconstruct.
+        let conventional = text.split('\n').skip(1).all(|line| {
+            let body = line.trim_start();
+            body.starts_with('*') || body.starts_with("//")
+        });
+        if !conventional {
             self.write_raw(text);
             return;
         }

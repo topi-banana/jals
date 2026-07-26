@@ -135,9 +135,16 @@ impl Ctx<'_> {
                 self.visit_element(child).await;
                 continue;
             }
-            let after_comma = Self::follows_comma(&children, child);
-            if after_comma {
-                self.list_break(policy, Indent::ZERO);
+            if self.style.cfg.wrapping.before_comma {
+                if child.as_token().is_some_and(|tok| tok.kind() == S::COMMA) {
+                    let flat = Self::flat_space(self.style.cfg.spacing.before_comma);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
+                } else if Self::follows_comma(&children, child) {
+                    self.space_if(self.style.cfg.spacing.after_comma);
+                }
+            } else if Self::follows_comma(&children, child) {
+                let flat = Self::flat_space(self.style.cfg.spacing.after_comma);
+                self.list_break_flat(policy, flat, Indent::ZERO);
             }
             self.visit_element(child).await;
         }
@@ -236,6 +243,7 @@ impl Ctx<'_> {
         for (nth, child) in children.iter().enumerate() {
             match child.as_token().map(|tok| tok.kind()) {
                 Some(S::LBRACE) => {
+                    self.brace_before(self.style.cfg.braces.array_initializer);
                     self.visit_element(child).await;
                     if !empty {
                         self.open(indent.clone());
@@ -258,7 +266,8 @@ impl Ctx<'_> {
                     // The trailing comma separates nothing, so the closing edge's break is the
                     // only one it needs; emitting one here too would leave `1, 2, }`.
                     if last_element.is_some_and(|last| nth < last) {
-                        self.list_break(policy, Indent::ZERO);
+                        let flat = Self::flat_space(self.style.cfg.spacing.after_comma);
+                        self.list_break_flat(policy, flat, Indent::ZERO);
                     }
                     continue;
                 }
@@ -273,13 +282,16 @@ impl Ctx<'_> {
     }
 
     /// The break just inside an initializer's braces: forced when the initializer is pinned
-    /// vertical, negotiable otherwise.
+    /// vertical, negotiable otherwise. Its flat form carries `within-array-initializer-braces`.
     fn edge_break(&mut self, vertical: bool) {
         if vertical {
             self.forced_break(Indent::ZERO);
-        } else {
-            self.break_tight(Indent::ZERO);
+            return;
         }
+        let flat = Self::flat_space(self.style.cfg.spacing.within_array_initializer_braces);
+        self.ops
+            .brk(crate::ir::FillMode::Unified, flat, Indent::ZERO, None);
+        self.space_already_emitted();
     }
 
     /// Whether the last significant token before the closing brace is a comma.
@@ -357,6 +369,7 @@ impl Ctx<'_> {
         for child in Self::children(node) {
             match child.as_token().map(|tok| tok.kind()) {
                 Some(S::LBRACE) => {
+                    self.brace_before(self.style.cfg.braces.array_initializer);
                     self.visit_element(&child).await;
                     self.open(indent.clone());
                     opened = true;

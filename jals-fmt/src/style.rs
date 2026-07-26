@@ -33,7 +33,7 @@ use crate::output::Warning;
 #[derive(Debug, Clone)]
 pub(crate) struct Style {
     /// The configuration, with the whitespace-dependent rules already rounded. Visitors read
-    /// their rules straight off this rather than through 175 mirrored fields.
+    /// their rules straight off this rather than through 176 mirrored fields.
     pub(crate) cfg: Config,
     /// The line terminator, with `auto` / `native` already resolved against the source.
     pub(crate) newline: &'static str,

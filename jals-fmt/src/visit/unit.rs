@@ -103,10 +103,12 @@ impl Ctx<'_> {
     /// This is the composition every native formatter uses — an enforced count is a *minimum* and
     /// a `max-*` is a *cap on a run the source already wrote* — and it is the only place input
     /// whitespace reaches the document (`DESIGN.md` §17).
+    ///
+    /// `first` is not a guard here: `Ops::ensure_blank_lines` already does nothing on an empty
+    /// level, so the *first* item is separated exactly when something (a header comment) has
+    /// already been emitted — which is what `before-package` means.
     pub(super) fn separate(&mut self, node: &SyntaxNode, enforced: usize, first: bool) {
-        if first {
-            return;
-        }
+        let _ = first;
         let source = self
             .blank_lines_before(node)
             .min(self.style.cfg.blank_lines.max_in_declarations);

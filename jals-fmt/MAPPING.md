@@ -71,7 +71,7 @@ option ではなく不変条件（有意トークン列保存）そのものに�
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
 | **native モデル** | `jals_fmt::import::{eclipse, intellij, gjf, palantir, spotless}` | **全数**。ベンダー option は 1 つも落とさない。jals に写像先が無い option も**型付きで保持**する | Eclipse 416 / IntelliJ 297 |
-| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・174 |
+| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・176 |
 
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は

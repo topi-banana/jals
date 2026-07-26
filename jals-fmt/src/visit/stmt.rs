@@ -306,7 +306,8 @@ impl Ctx<'_> {
                 }
                 Some(S::SEMICOLON) if in_header => {
                     self.visit_element(child).await;
-                    self.list_break(policy, Indent::ZERO);
+                    let flat = Self::flat_space(self.style.cfg.spacing.after_semicolon);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                     continue;
                 }
                 Some(S::RPAREN) if in_header => {
@@ -384,6 +385,48 @@ impl Ctx<'_> {
         }
     }
 
+    /// A `try`-with-resources list. Its separator is `;`, so the shared comma-list emitter does
+    /// not see it; the wrap policy and the paren positions are otherwise the same decision.
+    pub(super) async fn visit_resource_list(&mut self, node: &SyntaxNode) {
+        let policy = self.resource_policy();
+        let continuation = self.style.continuation();
+        let children = Self::children(node);
+        let last = children.iter().rposition(|child| child.as_node().is_some());
+        let mut opened = false;
+        for (nth, child) in children.iter().enumerate() {
+            match child.as_token().map(|tok| tok.kind()) {
+                Some(S::LPAREN) => {
+                    self.visit_element(child).await;
+                    self.open(continuation.clone());
+                    opened = true;
+                    self.break_tight(Indent::ZERO);
+                    continue;
+                }
+                Some(S::RPAREN) => {
+                    if opened {
+                        self.close_indent(&continuation);
+                        opened = false;
+                    }
+                    self.visit_element(child).await;
+                    continue;
+                }
+                Some(S::SEMICOLON) => {
+                    self.visit_element(child).await;
+                    if last.is_some_and(|last| nth < last) {
+                        let flat = Self::flat_space(self.style.cfg.spacing.after_semicolon);
+                        self.list_break_flat(policy, flat, Indent::ZERO);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            self.visit_element(child).await;
+        }
+        if opened {
+            self.close_indent(&continuation);
+        }
+    }
+
     /// `try (resources) { … } catch … finally …`.
     pub(super) async fn visit_try(&mut self, node: &SyntaxNode) {
         for child in Self::children(node) {
@@ -399,11 +442,21 @@ impl Ctx<'_> {
     /// A `catch` clause, preceded by its own line when `catch-on-new-line` asks.
     pub(super) async fn visit_catch(&mut self, node: &SyntaxNode) {
         self.clause_keyword(self.style.cfg.braces.catch_on_new_line);
+        let policy = self.style.cfg.wrapping.multi_catch_types;
+        let continuation = self.style.continuation();
+        let flat = Self::flat_space(self.style.cfg.spacing.around_type_bounds);
         for child in Self::children(node) {
             if let Some(block) = child.as_node()
                 && block.kind() == S::BLOCK
             {
                 self.brace_before(self.style.cfg.braces.block);
+            }
+            // `catch (A | B | C e)` — the union is a list like any other, with `|` in the
+            // separator's place.
+            if child.as_token().is_some_and(|tok| tok.kind() == S::PIPE) {
+                self.list_break_flat(policy, flat, continuation.clone());
+                self.visit_element(&child).await;
+                continue;
             }
             self.visit_element(&child).await;
         }
@@ -592,12 +645,15 @@ impl Ctx<'_> {
         self.open(continuation.clone());
         for child in Self::children(node) {
             if child.as_token().is_some_and(|tok| tok.kind() == S::COLON) {
+                let spacing = &self.style.cfg.spacing;
                 if before {
-                    self.list_break(policy, Indent::ZERO);
+                    let flat = Self::flat_space(spacing.before_assert_colon);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 self.visit_element(&child).await;
                 if !before {
-                    self.list_break(policy, Indent::ZERO);
+                    let flat = Self::flat_space(spacing.after_assert_colon);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 continue;
             }

@@ -61,13 +61,14 @@ impl Width {
         }
     }
 
-    /// The width of `text` as a *comment*, following `Doc.Tok.computeWidth`: a `//` comment
-    /// swallows the rest of the line so it is [`INFINITE`](Self::INFINITE); a multi-line block
-    /// comment counts only its **first** line, which deliberately does *not* poison the level.
+    /// The width of `text` as a *comment*: its first line.
+    ///
+    /// A `//` comment swallows the rest of its line, but that is enforced by forcing the break
+    /// that follows it ([`Ops::force_next_break`](crate::ops::Ops::force_next_break)), not by
+    /// making it infinitely wide. Measuring it as infinite would additionally poison every
+    /// enclosing level, so a trailing `// note` on a field would break the field's initializer
+    /// onto its own line — a comment changing the layout of the code it annotates.
     pub(crate) fn tok(text: &str) -> usize {
-        if text.starts_with("//") {
-            return Self::INFINITE;
-        }
         match text.find('\n') {
             Some(idx) => Self::utf16(&text[..idx]),
             None => Self::utf16(text),

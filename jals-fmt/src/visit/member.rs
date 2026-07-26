@@ -336,11 +336,18 @@ impl Ctx<'_> {
         for (nth, child) in children.iter().enumerate() {
             let kind = child.as_token().map(|tok| tok.kind());
             if kind == Some(S::EQ) {
-                if before {
+                // A bare array initializer is *block-shaped*: it opens on this line and closes on
+                // its own, so it has nowhere better to go and breaking before it would leave `=`
+                // dangling above an opening brace.
+                let block_shaped = children
+                    .get(nth + 1)
+                    .and_then(|next| next.as_node())
+                    .is_some_and(|next| next.kind() == S::ARRAY_INIT);
+                if before && !block_shaped {
                     self.list_break(policy, Indent::ZERO);
                 }
                 self.visit_element(child).await;
-                if !before {
+                if !before && !block_shaped {
                     self.list_break(policy, Indent::ZERO);
                 }
                 continue;

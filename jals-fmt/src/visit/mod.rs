@@ -254,8 +254,8 @@ impl<'a> Ctx<'a> {
             | S::RECORD_HEADER
             | S::ANNOTATION_ARG_LIST
             | S::ATTR_ARG_LIST
-            | S::LAMBDA_PARAMS
-            | S::RESOURCE_LIST => self.visit_delimited(node).await,
+            | S::LAMBDA_PARAMS => self.visit_delimited(node).await,
+            S::RESOURCE_LIST => self.visit_resource_list(node).await,
             S::ARRAY_INIT => self.visit_array_init(node).await,
             S::RECORD_PATTERN => self.visit_record_pattern(node).await,
 
@@ -348,6 +348,13 @@ impl<'a> Ctx<'a> {
     pub(crate) fn space(&mut self) {
         self.ops.space();
         self.spaced = true;
+    }
+
+    /// A space, or nothing, depending on a `[spacing]` rule.
+    pub(crate) fn space_if(&mut self, yes: bool) {
+        if yes {
+            self.space();
+        }
     }
 
     /// Record that whitespace has already been emitted, so the next token owes no space.

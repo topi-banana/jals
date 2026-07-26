@@ -11,10 +11,10 @@
 //! fits or splits at every operator under `if-long-per-item`, and packs under `if-long`.
 
 use jals_config::fmt::WrapPolicy;
-use jals_syntax::{SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
 
 use crate::ir::Indent;
-use crate::visit::Ctx;
+use crate::visit::{Ctx, Spacing};
 
 impl Ctx<'_> {
     /// A binary operator run.
@@ -51,17 +51,31 @@ impl Ctx<'_> {
                     .as_token()
                     .is_some_and(|previous| previous.kind() == S::GT);
             if is_operator && !fused_tail {
+                let flat = self.operator_flat(child);
                 if before {
-                    self.list_break(policy, Indent::ZERO);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 self.visit_element(child).await;
                 if !before {
-                    self.list_break(policy, Indent::ZERO);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 continue;
             }
             self.visit_element(child).await;
         }
+    }
+
+    /// The flat rendering of the break placed against an operator token.
+    ///
+    /// A break stands where a space would otherwise be decided, so the operator's own `[spacing]`
+    /// rule has to travel with it — otherwise `space-around-additive-operators = false` would be
+    /// honored on an expression that fits and ignored on one that wraps.
+    fn operator_flat(&self, child: &SyntaxElement) -> &'static str {
+        let space = child.as_token().is_some_and(|tok| {
+            let previous = tok.prev_token();
+            previous.is_none_or(|previous| Spacing::between(&previous, tok, self.style))
+        });
+        Self::flat_space(space)
     }
 
     /// Whether a token kind is an infix operator that may carry a break.
@@ -100,12 +114,13 @@ impl Ctx<'_> {
                 .as_token()
                 .is_some_and(|tok| Self::is_assignment_operator(tok.kind()));
             if is_operator {
+                let flat = self.operator_flat(child);
                 if before {
-                    self.list_break(policy, Indent::ZERO);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 self.visit_element(child).await;
                 if !before {
-                    self.list_break(policy, Indent::ZERO);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 continue;
             }
@@ -142,12 +157,13 @@ impl Ctx<'_> {
                 .as_token()
                 .is_some_and(|tok| matches!(tok.kind(), S::QUESTION | S::COLON));
             if is_operator {
+                let flat = self.operator_flat(&child);
                 if before {
-                    self.list_break(policy, Indent::ZERO);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 self.visit_element(&child).await;
                 if !before {
-                    self.list_break(policy, Indent::ZERO);
+                    self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 continue;
             }

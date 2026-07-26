@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use jals_config::fmt::{BraceStyle, WrapPolicy};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
 
-use crate::ir::Indent;
+use crate::ir::{FillMode, Indent};
 use crate::passes::ModifierOrder;
 use crate::visit::Ctx;
 
@@ -210,12 +210,7 @@ impl Ctx<'_> {
     /// `if-long` is a fill, `if-long-per-item` is all-or-nothing, `always-per-item` is forced,
     /// and `never` is a plain space.
     pub(super) fn list_break(&mut self, policy: WrapPolicy, plus_indent: Indent) {
-        match policy {
-            WrapPolicy::Never => self.space(),
-            WrapPolicy::IfLong => self.break_to_fill(plus_indent),
-            WrapPolicy::IfLongPerItem => self.break_op(plus_indent),
-            WrapPolicy::AlwaysPerItem => self.forced_break(plus_indent),
-        }
+        self.list_break_flat(policy, " ", plus_indent);
     }
 
     /// The same, for a break whose flat form is **empty** rather than a space.
@@ -224,15 +219,34 @@ impl Ctx<'_> {
     /// construct stays on one line; using [`list_break`](Self::list_break) there would leave
     /// `a .b()` behind.
     pub(super) fn list_break_tight(&mut self, policy: WrapPolicy, plus_indent: Indent) {
-        match policy {
-            WrapPolicy::Never => {}
-            WrapPolicy::IfLong => {
-                self.ops
-                    .brk(crate::ir::FillMode::Independent, "", plus_indent, None);
-                self.space_already_emitted();
+        self.list_break_flat(policy, "", plus_indent);
+    }
+
+    /// A list break whose **flat** rendering is `flat`.
+    ///
+    /// A break stands where a space would otherwise be decided, so the two cannot both apply: if
+    /// the break emitted a space of its own and [`Spacing`](super::Spacing) emitted another, every
+    /// list would be double-spaced. The break therefore *carries* the spacing decision — its flat
+    /// text is what the `[spacing]` rule for that position asks for — which is why a rule like
+    /// `after-comma` reaches the output at all.
+    pub(super) fn list_break_flat(&mut self, policy: WrapPolicy, flat: &str, plus_indent: Indent) {
+        let fill = match policy {
+            WrapPolicy::Never => {
+                if !flat.is_empty() {
+                    self.space();
+                }
+                return;
             }
-            WrapPolicy::IfLongPerItem => self.break_tight(plus_indent),
-            WrapPolicy::AlwaysPerItem => self.forced_break(plus_indent),
-        }
+            WrapPolicy::IfLong => FillMode::Independent,
+            WrapPolicy::IfLongPerItem => FillMode::Unified,
+            WrapPolicy::AlwaysPerItem => FillMode::Forced,
+        };
+        self.ops.brk(fill, flat, plus_indent, None);
+        self.space_already_emitted();
+    }
+
+    /// The flat rendering a `[spacing]` decision asks for.
+    pub(super) const fn flat_space(space: bool) -> &'static str {
+        if space { " " } else { "" }
     }
 }

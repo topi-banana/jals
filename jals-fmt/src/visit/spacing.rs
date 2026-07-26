@@ -230,7 +230,8 @@ impl Spacing {
             S::TERNARY_EXPR => rules.before_ternary_colon,
             S::FOR_EACH_STMT => rules.before_foreach_colon,
             S::LABELED_STMT => rules.before_label_colon,
-            S::SWITCH_LABEL => rules.before_case_colon,
+            // The `:` of a colon-form case is a child of the *group*, not of the label.
+            S::SWITCH_LABEL | S::SWITCH_GROUP => rules.before_case_colon,
             S::ASSERT_STMT => rules.before_assert_colon,
             _ => false,
         }
@@ -242,7 +243,7 @@ impl Spacing {
             S::TERNARY_EXPR => rules.after_ternary_colon,
             S::FOR_EACH_STMT => rules.after_foreach_colon,
             S::LABELED_STMT => rules.after_label_colon,
-            S::SWITCH_LABEL => rules.after_case_colon,
+            S::SWITCH_LABEL | S::SWITCH_GROUP => rules.after_case_colon,
             S::ASSERT_STMT => rules.after_assert_colon,
             _ => true,
         }
@@ -269,6 +270,9 @@ impl Spacing {
         match (delimiter(pk, pp), delimiter(nk, np)) {
             (true, true) => Some(rules.within_angle_brackets),
             (true, false) if pk == S::LT => Some(rules.within_angle_brackets),
+            // A closing `>` followed by an operator — `Comparable<T> & Cloneable` — is not an
+            // angle-bracket decision at all; let the operator's own rule answer it.
+            (true, false) if Self::operator_rule(nk, np, rules).is_some() => None,
             (true, false) => Some(Self::is_word(nk)),
             (false, true) if nk == S::GT => Some(rules.within_angle_brackets),
             (false, true) => Some(pp != S::IDENT && Self::before_angle(np, rules)),

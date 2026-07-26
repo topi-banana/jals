@@ -132,6 +132,21 @@ impl CommentFormatter {
             .saturating_sub(indent + prefix_width)
             .max(16);
 
+        // `align-tag-descriptions` lines every description up under one column, so the width is
+        // a property of the whole comment rather than of each tag.
+        let aligned = cfg.align_tag_descriptions.then(|| {
+            blocks
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Tag { name, argument, .. } => Some(
+                        Width::utf16(name) + argument.as_deref().map_or(0, |a| Width::utf16(a) + 1),
+                    ),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
+        });
+
         let mut out = String::from(opener);
         let mut seen_tag = false;
         for block in &blocks {
@@ -160,7 +175,15 @@ impl CommentFormatter {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
                     seen_tag = true;
-                    Self::push_tag(&mut out, name, argument.as_deref(), words, budget, style);
+                    Self::push_tag(
+                        &mut out,
+                        name,
+                        argument.as_deref(),
+                        words,
+                        budget,
+                        aligned,
+                        style,
+                    );
                 }
             }
         }
@@ -194,6 +217,7 @@ impl CommentFormatter {
         argument: Option<&str>,
         words: &[String],
         budget: usize,
+        aligned: Option<usize>,
         style: &Style,
     ) {
         let cfg = style.comments();
@@ -202,9 +226,13 @@ impl CommentFormatter {
             head.push(' ');
             head.push_str(argument);
         }
+        // Under alignment every head is padded to the widest, so the descriptions share a column.
+        if let Some(column) = aligned {
+            while Width::utf16(&head) < column {
+                head.push(' ');
+            }
+        }
 
-        // `align-tag-descriptions` lines every description up in one column; without it the
-        // description simply follows its tag.
         let continuation = if cfg.indent_tag_description {
             Width::utf16(&head) + 1
         } else {
