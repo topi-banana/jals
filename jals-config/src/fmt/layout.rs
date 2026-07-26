@@ -7,10 +7,10 @@
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// How one indentation level is rendered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IndentStyle {
     /// `indent-width` spaces per level. Eclipse `tabulation.char = space`.
@@ -24,7 +24,7 @@ pub enum IndentStyle {
 }
 
 /// The line terminator emitted by the formatter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LineEnding {
     /// `\n`.
@@ -72,7 +72,7 @@ const DEFAULT_OFF_TAG: &str = "@formatter:off";
 const DEFAULT_ON_TAG: &str = "@formatter:on";
 
 /// Indentation, width, and line-level output settings.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Layout {

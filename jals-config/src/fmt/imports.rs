@@ -11,13 +11,13 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// How `import` declarations are ordered.
 ///
 /// Replaces the former `reorder-imports` / `group-imports` pair, where the second implied and
 /// overrode the first — a three-valued choice spelled as two booleans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImportOrder {
     /// Leave the import block exactly as written. The default.
@@ -31,7 +31,7 @@ pub enum ImportOrder {
 }
 
 /// Import ordering and modifier ordering.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Imports {
     /// How imports are ordered.

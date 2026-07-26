@@ -4,14 +4,14 @@
 //! goes, whether a braceless body gets braces added, and whether a short body is allowed to stay
 //! on one line. See `jals-fmt/MAPPING.md` §5.3.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Where the opening brace of a construct is placed.
 ///
 /// The union of both vendors' vocabularies — Eclipse's four `brace_position_for_*` values and
 /// IntelliJ's five `*_BRACE_STYLE` values — so neither collapses on import
 /// (`MAPPING.md` §5.3 has the conversion table).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BraceStyle {
     /// K&R: the brace stays on the header's line. Eclipse `end_of_line` / IntelliJ `end_of_line`.
@@ -35,7 +35,7 @@ pub enum BraceStyle {
 /// The only rule in this crate that *adds* significant tokens, so it defaults to
 /// [`Never`](Self::Never) and the strict token-sequence invariant holds unless opted into.
 /// IntelliJ `IF_BRACE_FORCE` and friends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForceBraces {
     /// Leave a braceless body exactly as written. The default.
@@ -55,7 +55,7 @@ pub enum ForceBraces {
 /// `true` ⇒ [`Preserve`](Self::Preserve)). Replaces the former `empty-item-single-line` /
 /// `fn-single-line` / `force-multiline-blocks` trio, whose interactions could only be expressed
 /// in prose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeepOnOneLine {
     /// Always lay the body out across lines, even when empty. Eclipse `one_line_never`.
@@ -75,7 +75,7 @@ pub enum KeepOnOneLine {
 }
 
 /// Brace placement, forcing, and one-line collapsing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Braces {

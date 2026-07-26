@@ -32,7 +32,7 @@
 // recur throughout this module tree's docs as prose, not as Rust items.
 #![allow(clippy::doc_markdown)]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 mod blank_lines;
 mod braces;
@@ -61,7 +61,7 @@ pub use wrapping::{ParenPositions, WrapPolicy, Wrapping};
 ///
 /// Eight sections, each documented in its own module: [`Layout`], [`BlankLines`], [`Braces`],
 /// [`Wrapping`], [`Spacing`], [`Comments`], [`Imports`], and [`Literals`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     /// `[layout]` — indentation, the column limit, and the line-level output shape.

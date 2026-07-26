@@ -11,10 +11,10 @@
 //! `space-around-operator-colon` trio, whose "either one turns the space on" rule matched no
 //! vendor at all.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Inter-token spacing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Spacing {
