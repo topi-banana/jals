@@ -83,7 +83,7 @@ impl TokenBudget {
             return false;
         }
 
-        let by_kind = LiteralRewrite::is_active(&style.cfg.literals);
+        let by_kind = LiteralRewrite::is_active(style.cfg.literals);
         let allow_extra_braces = Self::forces_braces(style);
 
         if !style.cfg.imports.remove_unused {

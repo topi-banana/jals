@@ -85,7 +85,14 @@ impl Ops {
         if level.docs.is_empty() {
             return;
         }
-        self.push(Doc::Level(level));
+        // Appended directly, never through `push`: suppression is about what the visitor is
+        // *emitting now*, and a level that already has contents was built before it started. A
+        // formatter-disabled region opens exactly this way — its verbatim text is emitted, then
+        // suppression goes on, then the enclosing level closes — and routing this through `push`
+        // would drop the region on the floor.
+        if let Some(parent) = self.stack.last_mut() {
+            parent.docs.push(Doc::Level(level));
+        }
     }
 
     /// Append a node to the innermost level.
@@ -133,7 +140,7 @@ impl Ops {
     // ===== Breaks =====
 
     /// A fresh break tag, for correlating a break with an [`Indent::If`] elsewhere.
-    pub(crate) fn new_tag(&mut self) -> BreakTag {
+    pub(crate) const fn new_tag(&mut self) -> BreakTag {
         let tag = BreakTag(self.next_tag);
         self.next_tag += 1;
         tag
@@ -174,11 +181,6 @@ impl Ops {
     /// A break that renders as nothing when it stays (before a `.`, after a `(`).
     pub(crate) fn break_tight(&mut self, plus_indent: Indent) {
         self.brk(FillMode::Unified, "", plus_indent, None);
-    }
-
-    /// A *fill* break: it goes only when what follows would not fit, so items pack onto a line.
-    pub(crate) fn break_to_fill(&mut self, plus_indent: Indent) {
-        self.brk(FillMode::Independent, " ", plus_indent, None);
     }
 
     /// A break that always goes, making its level unable to render flat.

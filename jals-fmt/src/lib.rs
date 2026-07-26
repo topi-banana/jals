@@ -5,8 +5,8 @@
 //!
 //! `jals-fmt` has exactly **one layout engine**: a port of google-java-format's greedy,
 //! single-pass `computeBreaks` over a GJF-shaped [`Doc`](ir::Doc) IR. Every style target —
-//! google-java-format, Eclipse JDT, IntelliJ IDEA, Palantir — is reached by tuning
-//! [`Config`] on top of that engine, never by swapping engines. The four products really do have
+//! `google-java-format`, Eclipse JDT, IntelliJ IDEA, and `palantir-java-format` — is reached by
+//! tuning [`Config`] on top of that engine, never by swapping engines. The four products really do have
 //! four mutually incompatible resolution algorithms; porting all of them was considered and
 //! rejected, and `DESIGN.md` §11 and §18 record both the decision and the differences it makes
 //! permanent. **Do not add an engine trait, a second renderer, or a Wadler/prettier `fits`.**
@@ -39,6 +39,11 @@
 //!   google-java-format: whether two significant tokens had a blank line between them. Rules that
 //!   would read more are rounded to a canonical value and the rounding is reported as a
 //!   [`Warning`] (`DESIGN.md` §17).
+
+// Native product names (google-java-format, Eclipse JDT, IntelliJ IDEA, Spotless, Palantir) and
+// their setting ids run through this crate's docs as prose, exactly as they do in
+// `jals_config::fmt`. They are not Rust items and backticking them would read worse.
+#![allow(clippy::doc_markdown)]
 
 extern crate alloc;
 

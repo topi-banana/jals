@@ -932,10 +932,13 @@ T1 の差分を消すためにエンジンへ特殊分岐を足すことはせ�
 | D6 | **wildcard 集約 / classpath 依存の import 操作** | IntelliJ `CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` ほか（§11 結論 4） | intellij |
 | D7 | **Javadoc / コメント整形の細部** — `comment.javadoc_paragraphs_tags_with_content`, `comment.new_lines_at_javadoc_boundaries` ほか | Eclipse `CommentsPreparator` / `CommentWrapExecutor` | eclipse |
 | D8 | **非対称な paren 位置** — lparen だけ / rparen だけ次行 | IntelliJ `*_LPAREN_ON_NEXT_LINE` と `*_RPAREN_ON_NEXT_LINE` の非対称組合せ（`MAPPING.md` §5.4） | intellij |
+| D9 | **`spacing.after-case-colon` が到達不能** — colon 形 `case` ラベルの `:` の後でエンジンは常に折るため、`:` と同じ行に続くものが存在しない | 単一エンジンの colon 形 switch レイアウト | eclipse |
 
 D1–D4 は**解決アルゴリズムの違い**なので rule では埋まらない。D5 は §17 の方針で意図的に採らない。
 D6 は pure CST の外。D7 は Javadoc 整形器の忠実度の問題で、rule を足せば縮むが完全一致はしない。
-D8 は共通語彙の粒度の問題（native モデルには両 bool が残る）。
+D8 は共通語彙の粒度の問題（native モデルには両 bool が残る）。D9 は rule 側ではなくエンジンの
+レイアウトが原因で、`jals-fmt/tests/coverage.rs` の `UNREACHABLE` に理由つきで列挙されている
+（そこに載る rule だけが「出力が動かなくてよい」唯一の例外である）。
 
 ### 18.3 byte 一致が本当に必要な場合
 

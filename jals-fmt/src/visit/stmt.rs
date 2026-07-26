@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 
 use jals_config::fmt::{ForceBraces, KeepOnOneLine, WrapPolicy};
-use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
 use crate::visit::Ctx;
@@ -66,6 +66,14 @@ impl Ctx<'_> {
                 0
             };
             let source = self.blank_lines_before(statement).min(blank.max_in_code);
+            let element = SyntaxElement::Node(statement.clone());
+            if let Some(at) = self.disabled_region_of(&element) {
+                if self.take_disabled_region(at) {
+                    self.block_break(collapsible, enforced.max(source));
+                    self.emit_disabled(at);
+                }
+                continue;
+            }
             self.block_break(collapsible, enforced.max(source));
             self.visit(statement).await;
         }
@@ -97,7 +105,7 @@ impl Ctx<'_> {
     }
 
     /// Whether a block of `items` statements may share a line.
-    fn block_collapses(items: usize, dangling: bool, keep: KeepOnOneLine) -> bool {
+    const fn block_collapses(items: usize, dangling: bool, keep: KeepOnOneLine) -> bool {
         if dangling {
             return false;
         }
@@ -146,7 +154,7 @@ impl Ctx<'_> {
         let mut seen_condition = false;
 
         for (nth, child) in children.iter().enumerate() {
-            let kind = child.as_token().map(|tok| tok.kind());
+            let kind = child.as_token().map(SyntaxToken::kind);
             if kind == Some(S::RPAREN) {
                 self.visit_element(child).await;
                 seen_condition = true;
@@ -178,7 +186,7 @@ impl Ctx<'_> {
             && children[..nth]
                 .iter()
                 .rev()
-                .find_map(|child| child.as_token().map(|tok| tok.kind()))
+                .find_map(|child| child.as_token().map(SyntaxToken::kind))
                 == Some(S::ELSE_KW)
     }
 
@@ -223,8 +231,9 @@ impl Ctx<'_> {
             self.visit(branch).await;
             return;
         }
-        if self.forces_braces(branch, force) {
+        if Self::forces_braces(branch, force) {
             self.brace_before(self.style.cfg.braces.block);
+            self.space_if(self.style.cfg.spacing.before_left_brace);
             self.synthetic("{");
             let indent = self.style.indent();
             self.open(indent.clone());
@@ -233,6 +242,7 @@ impl Ctx<'_> {
             self.close_indent(&indent);
             self.forced_break(Indent::ZERO);
             self.synthetic("}");
+            self.braced_branch = true;
             return;
         }
         self.emit_braceless_body(branch).await;
@@ -260,19 +270,51 @@ impl Ctx<'_> {
     /// `if-multiline` asks whether the statement spans more than one line, which the engine has
     /// not decided yet; the **source's** span answers it instead. Deciding it before the document
     /// exists is what keeps the engine a single forward pass.
-    fn forces_braces(&self, branch: &SyntaxNode, force: ForceBraces) -> bool {
+    fn forces_braces(branch: &SyntaxNode, force: ForceBraces) -> bool {
         match force {
             ForceBraces::Never => false,
             ForceBraces::Always => true,
-            ForceBraces::IfMultiline => branch.text().contains_char('\n'),
+            // Only the body's **interior** line span counts — the source text strictly between
+            // its first and last significant token. The span of the whole *statement* would flip
+            // on the second run, because the first run already moved a braceless body onto its
+            // own line; the interior span does not, so `fmt ∘ fmt = fmt` holds.
+            ForceBraces::IfMultiline => Self::spans_lines(branch),
         }
+    }
+
+    /// Whether a node's own tokens are spread over more than one source line.
+    fn spans_lines(node: &SyntaxNode) -> bool {
+        let mut tokens = node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| !tok.kind().is_trivia());
+        let Some(first) = tokens.next() else {
+            return false;
+        };
+        let mut cursor = first;
+        for next in tokens {
+            let mut between = cursor.next_token();
+            while let Some(tok) = between {
+                if tok == next {
+                    break;
+                }
+                if tok.kind() == S::NEWLINE {
+                    return true;
+                }
+                between = tok.next_token();
+            }
+            cursor = next;
+        }
+        false
     }
 
     /// Emit the separation before a continuation keyword (`else`, `catch`, `finally`, `while`).
     fn continuation_keyword(&mut self, on_new_line: bool, previous: Option<&SyntaxElement>) {
-        let after_brace = previous
-            .and_then(SyntaxElement::as_node)
-            .is_some_and(|node| node.kind() == S::BLOCK)
+        // A branch this run put braces around ends in `}` just like a source block does.
+        let after_brace = core::mem::take(&mut self.braced_branch)
+            || previous
+                .and_then(SyntaxElement::as_node)
+                .is_some_and(|node| node.kind() == S::BLOCK)
             || previous
                 .and_then(SyntaxElement::as_token)
                 .is_some_and(|tok| tok.kind() == S::RBRACE);
@@ -296,7 +338,7 @@ impl Ctx<'_> {
         let mut in_header = false;
 
         for child in &children {
-            let kind = child.as_token().map(|tok| tok.kind());
+            let kind = child.as_token().map(SyntaxToken::kind);
             match kind {
                 Some(S::LPAREN) => {
                     self.visit_element(child).await;
@@ -394,7 +436,7 @@ impl Ctx<'_> {
         let last = children.iter().rposition(|child| child.as_node().is_some());
         let mut opened = false;
         for (nth, child) in children.iter().enumerate() {
-            match child.as_token().map(|tok| tok.kind()) {
+            match child.as_token().map(SyntaxToken::kind) {
                 Some(S::LPAREN) => {
                     self.visit_element(child).await;
                     self.open(continuation.clone());
@@ -592,18 +634,27 @@ impl Ctx<'_> {
             Indent::ZERO
         };
         let mut body_open = false;
+        let mut first = true;
         for child in Self::children(node) {
-            let is_label = child
+            // The `:` belongs to the group, not to the label, so it has to be emitted with the
+            // label it terminates rather than treated as the first body statement.
+            if child.as_token().is_some_and(|tok| tok.kind() == S::COLON) {
+                self.visit_element(&child).await;
+                continue;
+            }
+            if child
                 .as_node()
-                .is_some_and(|child| child.kind() == S::SWITCH_LABEL);
-            if is_label {
+                .is_some_and(|child| child.kind() == S::SWITCH_LABEL)
+            {
                 if body_open {
                     self.close_indent(&indent);
                     body_open = false;
                 }
-                if !self.ops.level_is_empty() {
+                // The enclosing switch block already separated this group from the previous one.
+                if !first {
                     self.forced_break(Indent::ZERO);
                 }
+                first = false;
                 self.visit_element(&child).await;
                 continue;
             }
@@ -611,6 +662,7 @@ impl Ctx<'_> {
                 self.open(indent.clone());
                 body_open = true;
             }
+            first = false;
             self.forced_break(Indent::ZERO);
             self.visit_element(&child).await;
         }

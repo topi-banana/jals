@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 
 use jals_config::fmt::{ParenPositions, WrapPolicy};
-use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
 use crate::visit::Ctx;
@@ -39,6 +39,10 @@ impl Ctx<'_> {
     /// expression when they are several, which is the readability problem the rule exists for.
     /// The refinement only ever *tightens* `if-long`; the other three policies say what they mean
     /// and are left alone.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "a named arm documents that the kind was considered, even when it falls back"
+    )]
     fn list_policy(&self, node: &SyntaxNode) -> WrapPolicy {
         let wrapping = &self.style.cfg.wrapping;
         let policy = match node.kind() {
@@ -48,6 +52,8 @@ impl Ctx<'_> {
             S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST => wrapping.annotation_arguments,
             S::RESOURCE_LIST => self.resource_policy(),
             S::RECORD_PATTERN => wrapping.deconstruction_list,
+            // A list the grammar can produce but no rule names: an argument list is the closest
+            // shape, and its policy is the one a reader would expect to govern it.
             _ => wrapping.call_arguments,
         };
         if policy == WrapPolicy::IfLong
@@ -71,6 +77,10 @@ impl Ctx<'_> {
     }
 
     /// Which `[wrapping] paren-*` rule governs this list's delimiters.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "a named arm documents that the kind was considered, even when it falls back"
+    )]
     fn paren_positions(&self, node: &SyntaxNode) -> ParenPositions {
         let wrapping = &self.style.cfg.wrapping;
         match node.kind() {
@@ -80,6 +90,7 @@ impl Ctx<'_> {
             S::RECORD_HEADER => wrapping.paren_record,
             S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST => wrapping.paren_annotation,
             S::RESOURCE_LIST => wrapping.paren_control,
+            // Same fallback as `list_policy`, for the same reason.
             _ => wrapping.paren_method_invocation,
         }
     }
@@ -98,7 +109,7 @@ impl Ctx<'_> {
             .iter()
             .filter(|child| {
                 !matches!(
-                    child.as_token().map(|tok| tok.kind()),
+                    child.as_token().map(SyntaxToken::kind),
                     Some(kind) if kind == open || kind == close
                 )
             })
@@ -114,7 +125,7 @@ impl Ctx<'_> {
 
         let mut opened = false;
         for child in &children {
-            let kind = child.as_token().map(|tok| tok.kind());
+            let kind = child.as_token().map(SyntaxToken::kind);
             if kind == Some(open) {
                 self.visit_element(child).await;
                 self.open(continuation.clone());
@@ -160,7 +171,7 @@ impl Ctx<'_> {
         };
         at > 0
             && matches!(
-                children[at - 1].as_token().map(|tok| tok.kind()),
+                children[at - 1].as_token().map(SyntaxToken::kind),
                 Some(S::COMMA)
             )
     }
@@ -168,17 +179,16 @@ impl Ctx<'_> {
     /// The break just inside an opening delimiter.
     fn delimiter_break(&mut self, parens: ParenPositions, tag: Option<crate::ir::BreakTag>) {
         match parens {
-            // google-java-format's shape: the first item shares the opener's line.
-            // `preserve` is rounded here by `Style::reify`.
-            ParenPositions::CommonLines | ParenPositions::Preserve => {
+            // google-java-format's shape: the first item shares the opener's line. The
+            // "if wrapped" variant opens the same way and differs only at the *closing*
+            // delimiter, which reads this break's tag. `preserve` is rounded here by
+            // `Style::reify`.
+            ParenPositions::CommonLines
+            | ParenPositions::Preserve
+            | ParenPositions::SeparateLinesIfWrapped => {
                 self.ops
                     .brk(crate::ir::FillMode::Unified, "", Indent::ZERO, tag);
-                self.mark_spaced();
-            }
-            ParenPositions::SeparateLinesIfWrapped => {
-                self.ops
-                    .brk(crate::ir::FillMode::Unified, "", Indent::ZERO, tag);
-                self.mark_spaced();
+                self.space_already_emitted();
             }
             ParenPositions::SeparateLinesIfNotEmpty | ParenPositions::SeparateLines => {
                 self.forced_break(Indent::ZERO);
@@ -203,7 +213,7 @@ impl Ctx<'_> {
                     Indent::when_broken(tag, dedent, Indent::ZERO),
                     None,
                 );
-                self.mark_spaced();
+                self.space_already_emitted();
             }
             ParenPositions::SeparateLinesIfNotEmpty | ParenPositions::SeparateLines => {
                 self.forced_break(dedent);
@@ -241,7 +251,7 @@ impl Ctx<'_> {
         self.open_flat(Indent::ZERO);
         let mut opened = false;
         for (nth, child) in children.iter().enumerate() {
-            match child.as_token().map(|tok| tok.kind()) {
+            match child.as_token().map(SyntaxToken::kind) {
                 Some(S::LBRACE) => {
                     self.brace_before(self.style.cfg.braces.array_initializer);
                     self.visit_element(child).await;
@@ -326,7 +336,11 @@ impl Ctx<'_> {
         let Some((last, full)) = rows.split_last() else {
             return false;
         };
-        full.len() > 1 && full[0] > 1 && full.iter().all(|row| *row == full[0]) && *last <= full[0]
+        // Two rows are already a table; only the *last* one may be short.
+        !full.is_empty()
+            && full[0] > 1
+            && full.iter().all(|row| *row == full[0])
+            && *last <= full[0]
     }
 
     /// How many *leaf* values an element contributes to its row.
@@ -367,7 +381,7 @@ impl Ctx<'_> {
         self.open_flat(Indent::ZERO);
         let mut opened = false;
         for child in Self::children(node) {
-            match child.as_token().map(|tok| tok.kind()) {
+            match child.as_token().map(SyntaxToken::kind) {
                 Some(S::LBRACE) => {
                     self.brace_before(self.style.cfg.braces.array_initializer);
                     self.visit_element(&child).await;
@@ -399,10 +413,5 @@ impl Ctx<'_> {
             self.close_indent(&indent);
         }
         self.close();
-    }
-
-    /// Note that whitespace has already been emitted, so the next token owes no space.
-    fn mark_spaced(&mut self) {
-        self.space_already_emitted();
     }
 }

@@ -1,8 +1,8 @@
 //! R0.3 — modifier ordering, as a plan the `MODIFIERS` visitor emits.
 //!
 //! google-java-format's `ModifierOrderer`, which it always runs. The canonical sequence is the
-//! JLS one (`javax.lang.model.element.Modifier`'s ordinal order), which Google Java Style §4.8.6
-//! restates:
+//! JLS one (`javax.lang.model.element.Modifier`'s ordinal order), which the Google Java Style
+//! restates as:
 //!
 //! ```text
 //! public protected private abstract default static sealed non-sealed
@@ -10,7 +10,8 @@
 //! ```
 //!
 //! Annotations are hoisted ahead of every keyword, keeping their relative order. Neither Eclipse
-//! nor IntelliJ has an equivalent, so `[imports] reorder-modifiers` is off by default.
+//! nor IntelliJ has an equivalent, so `[imports] reorder-modifiers` is off by default (that
+//! section owns it because it is a token-reordering pass, not a layout rule).
 //!
 //! Like [`ImportPlan`](super::import_order::ImportPlan) this is a **reordering of the original
 //! nodes**, so the token multiset is preserved and each modifier's comments travel with it.

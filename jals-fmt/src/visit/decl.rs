@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use jals_config::fmt::{BraceStyle, WrapPolicy};
-use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::{FillMode, Indent};
 use crate::passes::ModifierOrder;
@@ -158,8 +158,8 @@ impl Ctx<'_> {
         self.open_flat(Indent::ZERO);
         let children = Self::children(node);
         for (nth, child) in children.iter().enumerate() {
-            let is_open = matches!(child.as_token().map(|tok| tok.kind()), Some(S::LT));
-            let is_close = matches!(child.as_token().map(|tok| tok.kind()), Some(S::GT));
+            let is_open = matches!(child.as_token().map(SyntaxToken::kind), Some(S::LT));
+            let is_close = matches!(child.as_token().map(SyntaxToken::kind), Some(S::GT));
             if is_open {
                 self.visit_element(child).await;
                 self.open(continuation.clone());
@@ -172,7 +172,7 @@ impl Ctx<'_> {
             }
             if nth > 0
                 && matches!(
-                    children[nth - 1].as_token().map(|tok| tok.kind()),
+                    children[nth - 1].as_token().map(SyntaxToken::kind),
                     Some(S::COMMA)
                 )
             {
@@ -194,7 +194,7 @@ impl Ctx<'_> {
         for (nth, child) in children.iter().enumerate() {
             let after_comma = nth > 0
                 && matches!(
-                    children[nth - 1].as_token().map(|tok| tok.kind()),
+                    children[nth - 1].as_token().map(SyntaxToken::kind),
                     Some(S::COMMA)
                 );
             if after_comma {

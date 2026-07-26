@@ -316,7 +316,7 @@ pub(crate) struct Writer<'s> {
 
 impl<'s> Writer<'s> {
     /// An empty writer for `style`.
-    fn new(style: &'s Style) -> Self {
+    const fn new(style: &'s Style) -> Self {
         Self {
             style,
             out: String::new(),
@@ -332,10 +332,10 @@ impl<'s> Writer<'s> {
 
     /// The column after emitting `text` from `column`.
     fn advance(column: usize, text: &str) -> usize {
-        match text.rfind('\n') {
-            Some(at) => Width::utf16(text[at + 1..].trim_end_matches('\r')),
-            None => column.saturating_add(Width::utf16(text)),
-        }
+        text.rfind('\n').map_or_else(
+            || column.saturating_add(Width::utf16(text)),
+            |at| Width::utf16(text[at + 1..].trim_end_matches('\r')),
+        )
     }
 
     /// Emit one node.
@@ -351,6 +351,12 @@ impl<'s> Writer<'s> {
                 if brk.broken {
                     for _ in 0..=brk.blank_lines {
                         self.out.push('\n');
+                        // `indent-empty-lines` keeps the indentation on the otherwise blank lines
+                        // of a run; `Finalize` strips it again when `trim-trailing-whitespace`
+                        // wins, which is how the two settings resolve.
+                        if self.style.cfg.layout.indent_empty_lines {
+                            self.style.write_indent(brk.new_indent, &mut self.out);
+                        }
                     }
                     self.style.write_indent(brk.new_indent, &mut self.out);
                     self.column = brk.new_indent;

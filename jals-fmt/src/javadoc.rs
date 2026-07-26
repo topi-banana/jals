@@ -9,7 +9,7 @@
 //!
 //! # What is never reflowed
 //!
-//! Content whose line structure carries meaning: a `<pre>` block, a fenced ``` region, a
+//! Content whose line structure carries meaning: a `<pre>` block, a fenced code region, a
 //! multi-line `{@code …}`, and — unless `format-source-in-comments` is on — anything inside them.
 //! Reflowing those would change what the comment *says*, not just how it looks.
 //!
@@ -434,11 +434,10 @@ impl CommentFormatter {
             }
             if Width::utf16(&current) + 1 + width > budget {
                 lines.push(core::mem::take(&mut current));
-                current.push_str(word);
             } else {
                 current.push(' ');
-                current.push_str(word);
             }
+            current.push_str(word);
         }
         if !current.is_empty() {
             lines.push(current);

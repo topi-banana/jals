@@ -149,15 +149,14 @@ impl ImportPlan {
                 groups.push("static".into());
             }
         }
+
         groups
     }
 
     /// Which group an import belongs to: its longest matching prefix, or the catch-all.
     fn group_of(groups: &[String], name: &str, is_static: bool) -> usize {
-        if is_static {
-            if let Some(at) = groups.iter().position(|g| g == "static") {
-                return at;
-            }
+        if is_static && let Some(at) = groups.iter().position(|g| g == "static") {
+            return at;
         }
         let mut best: Option<(usize, usize)> = None;
         for (at, prefix) in groups.iter().enumerate() {

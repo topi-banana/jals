@@ -81,6 +81,7 @@ impl CommentMap {
         root: &SyntaxNode,
         normalize_parameter_comments: bool,
         inline_block_comments: bool,
+        disabled: &[text_size::TextRange],
     ) -> Self {
         let mut map = Self::default();
         let mut yielder = jals_exec::Yielder::new();
@@ -97,6 +98,14 @@ impl CommentMap {
             let kind = tok.kind();
 
             if Self::is_comment(kind) {
+                // A comment inside a formatter-disabled region is part of that region's verbatim
+                // text; anchoring it as well would emit it twice.
+                if disabled
+                    .iter()
+                    .any(|region| region.contains(tok.text_range().start()))
+                {
+                    continue;
+                }
                 map.anchored += 1;
                 let (text, mut hugs) = Self::classify(&tok, normalize_parameter_comments);
                 if inline_block_comments
@@ -204,10 +213,8 @@ impl CommentMap {
         match tok.kind() {
             SyntaxKind::LINE_COMMENT => (tok.text().trim_end().into(), false),
             SyntaxKind::BLOCK_COMMENT => {
-                match ParameterComment::normalize(tok.text(), normalize_parameter_comments) {
-                    Some(text) => (text, true),
-                    None => (tok.text().into(), false),
-                }
+                ParameterComment::normalize(tok.text(), normalize_parameter_comments)
+                    .map_or_else(|| (tok.text().into(), false), |text| (text, true))
             }
             _ => (tok.text().into(), false),
         }

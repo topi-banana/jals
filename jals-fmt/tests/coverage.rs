@@ -21,7 +21,7 @@
 //! not gaps, so each such rule names the base it needs. A prerequisite is a claim about the rule's
 //! meaning — if one is wrong, the test still fails, just for the base instead.
 
-use jals_config::fmt::{Config, ImportOrder, IndentStyle};
+use jals_config::fmt::{Config, ImportOrder, IndentStyle, WrapPolicy};
 use serde_json::{Map, Value};
 
 /// Java that exercises most of the language at once.
@@ -35,7 +35,6 @@ import static java.lang.Math.PI;
 /**
  * A type comment long enough to be worth reflowing, with prose that runs past the comment width so
  * the refill rules have something to do.
- *
  * <p>A second paragraph immediately after the first, with no blank line between them at all.
  * <pre>
  *   preformatted   text   whose   spacing   matters
@@ -52,7 +51,9 @@ public class Demo<T extends Comparable<T> & Cloneable> extends Base implements F
     private static final int ALPHA = 0xff; // trailing
     private long beta = 10l;
     private int[] flat = {1, 2, 3};
+    private int[] made = new int[] {4, 5, 6};
     private int inline = /*count=*/ 3;
+    private int hugged = /* note */ 4;
     private double gamma = 1.;
     private int[] table = {
         1, 2, 3,
@@ -140,8 +141,9 @@ const WRAPPING: &str = r#"class Overflow {
             TypeParameterOne firstParameter, TypeParameterTwo secondParameter, int thirdParameter)
             throws IllegalStateException, IllegalArgumentException, UnsupportedOperationException {
         int computed = firstOperandName + secondOperandName + thirdOperandName + fourthOperandName;
-        String chained = builderFactory.newBuilder().withFirstOption().withSecondOption().build();
-        String conditional = computed > 0 ? "the affirmative branch text" : "the negative branch";
+        String chained = builderFactory.newBuilder().withTheFirstOption().withTheSecondOption().withTheThirdOption().build();
+        String conditional = computed > 0 ? "the affirmative branch text goes here" : "and the negative branch text goes over here";
+        consume(/* note */ theFirstArgumentName, theSecondArgumentName, theThirdArgumentName, theFourthArgumentName, theFifth);
         assert computed > 0 : "a message long enough that the assert statement has to wrap somewhere";
         try (Resource firstResource = openFirst(); Resource secondResource = openSecondThing()) {
             switch (computed) {
@@ -210,6 +212,9 @@ fn schema() -> Map<String, Value> {
 fn base_for(section: &str, key: &str) -> Value {
     let mut config = Config::default();
     match (section, key) {
+        // These two decide where a parameter comment goes and how it is spelled; reflow would
+        // rewrite it either way and mask the difference.
+        ("comments", "inline-block-comments" | "normalize-parameter-comments") => {}
         ("comments", _) => {
             config.comments.format_line = true;
             config.comments.format_block = true;
@@ -217,17 +222,22 @@ fn base_for(section: &str, key: &str) -> Value {
             config.comments.format_header = true;
         }
         ("layout", "tab-width") => config.layout.indent_style = IndentStyle::Tab,
+        // The first call's break only exists once the chain wraps one call per line.
+        ("wrapping", "wrap-first-method-in-chain") => {
+            config.wrapping.method_chain = WrapPolicy::IfLongPerItem;
+        }
         ("layout", "indent-empty-lines") => config.layout.trim_trailing_whitespace = false,
         ("layout", "trim-trailing-whitespace") => config.layout.indent_empty_lines = true,
         ("layout", "formatter-off-tag" | "formatter-on-tag") => config.layout.formatter_tags = true,
-        ("imports", "groups") => config.imports.order = ImportOrder::Group,
+        ("imports", "groups") | ("blank-lines", "between-import-groups") => {
+            config.imports.order = ImportOrder::Group;
+        }
         // `static-first` only decides where the static block goes when `groups` has not pinned
         // it, which the default list does.
         ("imports", "static-first") => {
             config.imports.order = ImportOrder::Group;
             config.imports.groups = alloc_groups();
         }
-        ("blank-lines", "between-import-groups") => config.imports.order = ImportOrder::Group,
         _ => {}
     }
     serde_json::to_value(config).expect("serializable")
@@ -242,6 +252,7 @@ fn base_for(section: &str, key: &str) -> Value {
 fn candidates(section: &str, key: &str, current: &Value) -> Vec<Value> {
     match current {
         Value::Bool(value) => vec![Value::Bool(!value)],
+        // `continuation-indent` is the one optional leaf: unset means "track indent-width".
         Value::Number(_) | Value::Null => vec![Value::from(3), Value::from(0)],
         Value::Array(_) => vec![Value::from(vec![
             Value::from("static"),
@@ -252,11 +263,15 @@ fn candidates(section: &str, key: &str, current: &Value) -> Vec<Value> {
             .into_iter()
             .map(Value::from)
             .collect(),
-        other => panic!("unexpected leaf shape for {section}.{key}: {other}"),
+        other @ Value::Object(_) => panic!("unexpected leaf shape for {section}.{key}: {other}"),
     }
 }
 
 /// The non-default variants of an enum- or text-valued leaf.
+#[allow(
+    clippy::match_same_arms,
+    reason = "each named family documents its own vocabulary, even where two coincide"
+)]
 fn variants(section: &str, key: &str) -> Vec<&'static str> {
     match (section, key) {
         ("layout", "indent-style") => vec!["tab", "mixed"],
@@ -278,6 +293,18 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
         _ => panic!("no non-default variant known for {section}.{key}"),
     }
 }
+
+/// Rules the single engine cannot reach, with the reason.
+///
+/// This list is a claim about the *engine*, not an excuse: each entry names a layout the engine
+/// never produces, so the rule has no position to decide. Adding an entry is a design decision
+/// and belongs in `DESIGN.md` §18.2 alongside the other permanent differences.
+const UNREACHABLE: [(&str, &str); 1] = [(
+    "spacing",
+    // The engine always breaks after a colon-form `case` label, so nothing ever follows the
+    // colon on its line for this rule to space.
+    "after-case-colon",
+)];
 
 #[test]
 fn every_rule_reaches_the_formatter() {
@@ -322,7 +349,12 @@ fn every_rule_reaches_the_formatter() {
                         out.formatted != *expected || out.warnings.iter().any(|w| w.range.is_none())
                     })
                 });
-            if !noticed {
+            let excused = UNREACHABLE.contains(&(section.as_str(), key.as_str()));
+            assert!(
+                !(noticed && excused),
+                "{section}.{key} is listed as unreachable but the formatter noticed it",
+            );
+            if !noticed && !excused {
                 inert.push(alloc_key(&section, &key));
             }
         }

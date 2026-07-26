@@ -2,8 +2,8 @@
 //!
 //! # A name test, not a type test
 //!
-//! google-java-format's `RemoveUnusedImports` resolves nothing. It collects every identifier in
-//! the compilation unit plus the reference names inside Javadoc's `@link` / `@see` / `@throws`,
+//! `RemoveUnusedImports` resolves nothing. It collects every identifier in
+//! the compilation unit plus the reference names inside Javadoc's `{@link}` / `@see` / `@throws`,
 //! and drops an import whose last component is not in that set. That is a **heuristic**: a local
 //! variable named `List` keeps `java.util.List` alive even though nothing uses the type, and a
 //! name shadowed by a nested class is likewise counted. Both are blind spots GJF has, and
@@ -11,7 +11,7 @@
 //!
 //! The upside is that the whole pass stays inside the CST. It needs no `jals-hir`, no classpath,
 //! and no host I/O, so it runs identically in the browser. IntelliJ's optimize-imports takes the
-//! other road (its wildcard aggregation counts resolved imports), which is exactly why that
+//! other road — its wildcard aggregation counts *resolved* imports — which is exactly why that
 //! setting does not project onto this one (`MAPPING.md` §7).
 //!
 //! # What is never removed

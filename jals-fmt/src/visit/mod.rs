@@ -71,9 +71,12 @@ impl Formatter {
         // reproduces it exactly (`DESIGN.md` §R4.1).
         let text = match StringWrapper::candidate(&text, style).await {
             Some(candidate) => {
-                let reformatted = Self::format_source_text(&candidate, style).await;
-                if reformatted == candidate {
-                    candidate
+                // The candidate is a re-split concatenation on one logical line; the engine
+                // places the breaks. Adopt its formatting only if formatting *that* is a fixed
+                // point, which is the guarantee `DESIGN.md` §R4.1 asks for.
+                let laid_out = Self::format_source_text(&candidate, style).await;
+                if Self::format_source_text(&laid_out, style).await == laid_out {
+                    laid_out
                 } else {
                     text
                 }
@@ -134,6 +137,9 @@ pub(crate) struct Ctx<'a> {
     previous: Option<SyntaxToken>,
     /// Whitespace has already been emitted, so no space is owed.
     spaced: bool,
+    /// The branch just emitted got its braces from `[braces] force-*`, so the continuation
+    /// keyword after it cuddles a `}` the source never had.
+    pub(crate) braced_branch: bool,
     /// The file's leading comment has been seen (`comments.format-header` gates only the first).
     header_seen: bool,
     /// Token offsets whose own-line leading comments were already hoisted by an enclosing node.
@@ -157,6 +163,7 @@ impl<'a> Ctx<'a> {
             root,
             style.cfg.comments.normalize_parameter_comments,
             style.cfg.comments.inline_block_comments,
+            &disabled,
         )
         .await;
         Self {
@@ -170,6 +177,7 @@ impl<'a> Ctx<'a> {
             indent: 0,
             previous: None,
             spaced: true,
+            braced_branch: false,
             header_seen: false,
             hoisted: BTreeSet::new(),
             emitted_comments: 0,
@@ -211,6 +219,10 @@ impl<'a> Ctx<'a> {
     }
 
     /// The per-kind dispatch behind [`Ctx::visit`].
+    #[allow(
+        clippy::match_same_arms,
+        reason = "a named arm documents that the kind was considered, even when it falls back"
+    )]
     async fn visit_impl(&mut self, node: &SyntaxNode) {
         self.yielder.tick().await;
         self.hoist_leading_comments(node);
@@ -237,6 +249,8 @@ impl<'a> Ctx<'a> {
                 self.visit_type_clause(node).await;
             }
             S::TYPE_PARAMS | S::TYPE_ARGS => self.visit_type_list(node).await,
+            // `TYPE_PARAM` has no bespoke rule of its own — its `&` bound is a spacing decision —
+            // but naming it here documents that the omission is deliberate.
             S::TYPE_PARAM => self.visit_children(node).await,
 
             // --- members ---
@@ -311,6 +325,7 @@ impl<'a> Ctx<'a> {
     pub(crate) async fn visit_element(&mut self, child: &SyntaxElement) {
         match child {
             SyntaxElement::Node(node) => self.visit(node).await,
+            // Trivia is not emitted here: a comment rides with the token it is anchored to.
             SyntaxElement::Token(tok) if !tok.kind().is_trivia() => self.token(tok),
             SyntaxElement::Token(_) => {}
         }
@@ -330,7 +345,7 @@ impl<'a> Ctx<'a> {
         {
             self.ops.space();
         }
-        let text = LiteralRewrite::apply(tok.text(), tok.kind(), &self.style.cfg.literals);
+        let text = LiteralRewrite::apply(tok.text(), tok.kind(), self.style.cfg.literals);
         self.ops.token(&text);
         self.spaced = false;
         self.previous = Some(tok.clone());
@@ -375,12 +390,6 @@ impl<'a> Ctx<'a> {
     /// A break that renders as nothing when it stays on the line.
     pub(crate) fn break_tight(&mut self, plus_indent: Indent) {
         self.ops.break_tight(plus_indent);
-        self.spaced = true;
-    }
-
-    /// A fill break: items pack onto a line until one would not fit.
-    pub(crate) fn break_to_fill(&mut self, plus_indent: Indent) {
-        self.ops.break_to_fill(plus_indent);
         self.spaced = true;
     }
 
@@ -542,6 +551,12 @@ impl<'a> Ctx<'a> {
         let Some(at) = OffOn::region_at(&self.disabled, tok.text_range().start()) else {
             if self.ops.is_suppressed() {
                 self.ops.set_suppressed(false);
+                // The region's last line may be a `//` comment, which would swallow whatever
+                // followed it. Forcing the *next* break rather than emitting one here keeps the
+                // indent decision with the structure that owns it.
+                self.ops.force_next_break();
+                self.spaced = true;
+                self.previous = None;
             }
             return false;
         };
@@ -559,6 +574,47 @@ impl<'a> Ctx<'a> {
         }
         self.ops.set_suppressed(true);
         true
+    }
+
+    /// The index of an unemitted disabled region covering `item`, or `None`.
+    ///
+    /// Bodies consult this *before* emitting an item's separator, so the region's verbatim text
+    /// lands at the body's own indent rather than at whatever depth the item's rule would have
+    /// opened.
+    pub(crate) fn disabled_region_of(&self, item: &SyntaxElement) -> Option<usize> {
+        if self.disabled.is_empty() {
+            return None;
+        }
+        let first = match item {
+            SyntaxElement::Node(node) => Self::first_token(node)?,
+            SyntaxElement::Token(tok) => tok.clone(),
+        };
+        OffOn::region_at(&self.disabled, first.text_range().start())
+    }
+
+    /// Emit a disabled region verbatim, or skip it when it is already out.
+    ///
+    /// Returns `true` when the caller should emit a separator before it.
+    pub(crate) fn take_disabled_region(&mut self, at: usize) -> bool {
+        if self.emitted[at] {
+            return false;
+        }
+        self.emitted[at] = true;
+        true
+    }
+
+    /// The source text of a disabled region.
+    pub(crate) fn disabled_text(&self, at: usize) -> &'a str {
+        let region = self.disabled[at];
+        &self.src[usize::from(region.start())..usize::from(region.end())]
+    }
+
+    /// Emit a disabled region's verbatim text.
+    pub(crate) fn emit_disabled(&mut self, at: usize) {
+        let text = self.disabled_text(at);
+        self.ops.verbatim(text);
+        self.spaced = false;
+        self.previous = None;
     }
 
     // ===== Shared queries =====

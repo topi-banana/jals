@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 
 use jals_syntax::ast::{AstNode, ImportDecl};
-use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
 use crate::passes::ImportPlan;
@@ -82,13 +82,14 @@ impl Ctx<'_> {
         let plan = ImportPlan::build(&decls, self.used.as_ref(), self.style);
         let lead = owed.max(self.style.cfg.blank_lines.before_imports);
 
-        let entries: Vec<(SyntaxNode, usize)> = match &plan {
-            Some(plan) => plan
-                .entries()
-                .map(|(node, separation)| (node.clone(), separation))
-                .collect(),
-            None => run.iter().map(|node| (node.clone(), 0)).collect(),
-        };
+        let entries: Vec<(SyntaxNode, usize)> = plan.as_ref().map_or_else(
+            || run.iter().map(|node| (node.clone(), 0)).collect(),
+            |plan| {
+                plan.entries()
+                    .map(|(node, separation)| (node.clone(), separation))
+                    .collect()
+            },
+        );
 
         for (nth, (node, separation)) in entries.iter().enumerate() {
             let enforced = if nth == 0 { lead } else { *separation };
@@ -127,7 +128,7 @@ impl Ctx<'_> {
             .iter()
             .filter(|child| {
                 !matches!(
-                    child.as_token().map(|tok| tok.kind()),
+                    child.as_token().map(SyntaxToken::kind),
                     Some(S::LBRACE | S::RBRACE)
                 )
             })

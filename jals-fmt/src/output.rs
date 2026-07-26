@@ -32,7 +32,7 @@ impl Warning {
     }
 
     /// A diagnostic about the configuration itself, with no position in the source.
-    pub(crate) fn config(message: String) -> Self {
+    pub(crate) const fn config(message: String) -> Self {
         Self {
             message,
             range: None,

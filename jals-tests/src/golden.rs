@@ -10,11 +10,13 @@
 //! unformatted source and `Foo.output` is what google-java-format produces from it.
 //! We format each `.input` and compare the result against the paired `.output`.
 //!
-//! jals cannot byte-match google-java-format on line wrapping yet — it has no
-//! separate continuation indent and uses a different (Wadler/Prettier) wrapping
-//! algorithm — so this reports a **similarity** metric (the mean line-level diff
-//! ratio, plus the count of exact matches) to track convergence as formatter
-//! options are added, rather than a hard pass/fail.
+//! `jals-fmt` runs a port of google-java-format's own greedy `computeBreaks`, so
+//! byte-matching it is the stated goal for the `gjf` profile (`DESIGN.md` §18.1's
+//! tier T1) rather than an impossibility. It is not reached yet, and a byte-equal
+//! rate alone would hide progress — one space of difference sinks a whole file —
+//! so this reports a **similarity** metric (the mean line-level diff ratio, plus
+//! the count of exact matches) to track convergence, rather than a hard
+//! pass/fail.
 
 use std::path::{Path, PathBuf};
 

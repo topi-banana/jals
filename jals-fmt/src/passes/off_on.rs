@@ -1,6 +1,8 @@
 //! `formatter-tags` — regions the formatter must leave byte-identical.
 //!
-//! Eclipse's `@formatter:off` / `@formatter:on`, IntelliJ's `FORMATTER_OFF_TAG`, Spotless's
+//! Eclipse's `@formatter:off` / `@formatter:on`, IntelliJ's `FORMATTER_OFF_TAG`, and Spotless's `toggleOffOn`.
+//!
+//! A region marked this way
 //! `toggleOffOn()`. A region marked this way has to survive **every** stage untouched: L0 must
 //! not reorder anything inside it, L2 must not re-space it, L1 must not re-wrap it, and L4 must
 //! not trim it.

@@ -78,6 +78,10 @@ impl Spacing {
     ///
     /// Requires source adjacency *and* a shared parent, so the two `>` closing `Map<K, List<V>>`
     /// — which belong to different `TYPE_ARGS` nodes — are not mistaken for a shift.
+    #[allow(
+        clippy::suspicious_operation_groupings,
+        reason = "`prev.end() == next.start()` is source adjacency, not a mismatched pair"
+    )]
     fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
         prev.kind() == S::GT
             && matches!(next.kind(), S::GT | S::EQ)
@@ -130,7 +134,7 @@ impl Spacing {
             (S::RBRACK, _) if Self::is_word(nk) => Some(true),
 
             (_, S::LPAREN) => Some(Self::before_parens(np, rules)),
-            (_, S::LBRACE) => Some(Self::before_brace(np, rules)),
+            (_, S::LBRACE) => Some(Self::before_brace(pk, np, rules)),
             (S::LBRACE, _) => Some(pp == S::ARRAY_INIT && rules.within_array_initializer_braces),
             (_, S::RBRACE) => Some(np == S::ARRAY_INIT && rules.within_array_initializer_braces),
 
@@ -145,7 +149,7 @@ impl Spacing {
     }
 
     /// The `within-*-parentheses` rule for a parenthesis owned by `parent`.
-    fn within_parens(parent: S, rules: &SpacingRules) -> bool {
+    const fn within_parens(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::ARG_LIST => rules.within_method_call_parentheses,
             S::PARAM_LIST | S::LAMBDA_PARAMS => rules.within_method_parentheses,
@@ -167,7 +171,7 @@ impl Spacing {
     }
 
     /// The `before-*-parentheses` rule for an opening parenthesis owned by `parent`.
-    fn before_parens(parent: S, rules: &SpacingRules) -> bool {
+    const fn before_parens(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::ARG_LIST => rules.before_method_call_parentheses,
             S::PARAM_LIST => rules.before_method_parentheses,
@@ -183,20 +187,25 @@ impl Spacing {
             | S::SYNCHRONIZED_STMT
             | S::TRY_STMT
             | S::RESOURCE_LIST => rules.before_keyword_parentheses,
-            // A record header and a lambda parameter list hug their name.
-            S::RECORD_HEADER | S::LAMBDA_PARAMS => false,
-            // `(a + b)` after a keyword or an operator: the word rule already spaced it.
+            // A record header and a lambda parameter list hug their name; a parenthesized
+            // expression after a keyword or an operator was already spaced by that token's own
+            // rule. Neither adds a space of its own.
             _ => false,
         }
     }
 
     /// The `before-*-brace` rule for an opening brace owned by `parent`.
-    fn before_brace(parent: S, rules: &SpacingRules) -> bool {
-        if parent == S::ARRAY_INIT {
-            rules.before_array_initializer_left_brace
-        } else {
-            rules.before_left_brace
+    ///
+    /// An initializer that follows `=` is the one place two rules meet: the brace's own
+    /// `before-array-initializer-left-brace` and the assignment operator's spacing. Either asking
+    /// for a space is enough — `int[] xs ={1}` is not what
+    /// `around-assignment-operators = true` means.
+    fn before_brace(previous: S, parent: S, rules: &SpacingRules) -> bool {
+        if parent != S::ARRAY_INIT {
+            return rules.before_left_brace;
         }
+        rules.before_array_initializer_left_brace
+            || (previous == S::EQ && rules.around_assignment_operators)
     }
 
     // ===== Punctuation =====
@@ -225,7 +234,7 @@ impl Spacing {
     }
 
     /// Java's five colon contexts genuinely disagree across vendors, so each keeps its own pair.
-    fn before_colon(parent: S, rules: &SpacingRules) -> bool {
+    const fn before_colon(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::TERNARY_EXPR => rules.before_ternary_colon,
             S::FOR_EACH_STMT => rules.before_foreach_colon,
@@ -238,7 +247,7 @@ impl Spacing {
     }
 
     /// The `after-*-colon` half of the same five.
-    fn after_colon(parent: S, rules: &SpacingRules) -> bool {
+    const fn after_colon(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::TERNARY_EXPR => rules.after_ternary_colon,
             S::FOR_EACH_STMT => rules.after_foreach_colon,

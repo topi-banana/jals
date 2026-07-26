@@ -69,10 +69,8 @@ impl Width {
     /// enclosing level, so a trailing `// note` on a field would break the field's initializer
     /// onto its own line — a comment changing the layout of the code it annotates.
     pub(crate) fn tok(text: &str) -> usize {
-        match text.find('\n') {
-            Some(idx) => Self::utf16(&text[..idx]),
-            None => Self::utf16(text),
-        }
+        text.find('\n')
+            .map_or_else(|| Self::utf16(text), |at| Self::utf16(&text[..at]))
     }
 }
 
@@ -110,9 +108,9 @@ pub(crate) enum Indent {
         /// The break whose decision selects the branch.
         tag: BreakTag,
         /// Used when that break was taken.
-        broken: Box<Indent>,
+        broken: Box<Self>,
         /// Used when it was not.
-        flat: Box<Indent>,
+        flat: Box<Self>,
     },
 }
 

@@ -24,7 +24,7 @@ impl Ctx<'_> {
             .into_iter()
             .filter(|child| {
                 !matches!(
-                    child.as_token().map(|tok| tok.kind()),
+                    child.as_token().map(SyntaxToken::kind),
                     Some(S::LBRACE | S::RBRACE)
                 )
             })
@@ -99,6 +99,13 @@ impl Ctx<'_> {
                 self.blank_lines_before(member)
                     .min(blank.max_in_declarations)
             });
+            if let Some(at) = self.disabled_region_of(member) {
+                if self.take_disabled_region(at) {
+                    self.body_break(collapsible, enforced.max(source), Indent::ZERO);
+                    self.emit_disabled(at);
+                }
+                continue;
+            }
             self.body_break(collapsible, enforced.max(source), Indent::ZERO);
             self.visit_element(member).await;
         }
@@ -119,7 +126,7 @@ impl Ctx<'_> {
     ///
     /// A body carrying a comment never collapses: a `//` would swallow the closing brace, and a
     /// block comment moved onto the header's line changes what it appears to describe.
-    fn collapses(items: usize, dangling: bool, keep: KeepOnOneLine) -> bool {
+    const fn collapses(items: usize, dangling: bool, keep: KeepOnOneLine) -> bool {
         if dangling {
             return false;
         }
@@ -200,14 +207,13 @@ impl Ctx<'_> {
             .children()
             .filter(|child| child.kind() == S::ENUM_CONSTANT)
             .collect();
-        let members: Vec<SyntaxNode> = node
+        let has_members = node
             .children()
-            .filter(|child| child.kind() != S::ENUM_CONSTANT)
-            .collect();
+            .any(|child| child.kind() != S::ENUM_CONSTANT);
         // An enum with no member section and no constant body is laid out like an array
         // initializer — one line if it fits. A `;` marks a member section even when the section
         // turns out to be empty, and google-java-format keeps such an enum multi-line.
-        let trivial = members.is_empty()
+        let trivial = !has_members
             && Self::token_of(node, S::SEMICOLON).is_none()
             && constants
                 .iter()
@@ -219,7 +225,7 @@ impl Ctx<'_> {
         let children = Self::children(node);
         let has_content = children.iter().any(|child| {
             !matches!(
-                child.as_token().map(|tok| tok.kind()),
+                child.as_token().map(SyntaxToken::kind),
                 Some(S::LBRACE | S::RBRACE)
             )
         });
@@ -234,7 +240,7 @@ impl Ctx<'_> {
         let mut pending = false;
 
         for child in &children {
-            match child.as_token().map(|tok| tok.kind()) {
+            match child.as_token().map(SyntaxToken::kind) {
                 Some(S::LBRACE) => {
                     self.visit_element(child).await;
                     self.open(indent.clone());
@@ -334,7 +340,7 @@ impl Ctx<'_> {
         let before = self.style.cfg.wrapping.before_assignment_operator;
         let children = Self::children(node);
         for (nth, child) in children.iter().enumerate() {
-            let kind = child.as_token().map(|tok| tok.kind());
+            let kind = child.as_token().map(SyntaxToken::kind);
             if kind == Some(S::EQ) {
                 // A bare array initializer is *block-shaped*: it opens on this line and closes on
                 // its own, so it has nowhere better to go and breaking before it would leave `=`
@@ -354,7 +360,7 @@ impl Ctx<'_> {
             }
             if nth > 0
                 && matches!(
-                    children[nth - 1].as_token().map(|tok| tok.kind()),
+                    children[nth - 1].as_token().map(SyntaxToken::kind),
                     Some(S::COMMA)
                 )
             {

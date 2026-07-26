@@ -142,7 +142,13 @@ impl StringWrapper {
         text.contains('\n') || column + Width::utf16(text) > style.max_width()
     }
 
-    /// Re-chunk the pieces so each line fits, `+` leading every continuation.
+    /// Re-chunk the pieces so each one fits a continuation line.
+    ///
+    /// The result is emitted **flat** — `"a" + "b" + "c"` on one logical line — and the caller
+    /// re-formats it. Choosing the line breaks here as well would mean guessing what the engine
+    /// is about to decide, and a guess that misses is exactly what the fixed-point check throws
+    /// away. Re-splitting is the part the engine cannot do; placing breaks is the part only it
+    /// should.
     ///
     /// Returns `None` when the budget is too small to make progress — a deeply indented
     /// concatenation with a narrow limit — rather than emitting one character per line.
@@ -156,16 +162,15 @@ impl StringWrapper {
 
         let joined: String = pieces.concat();
         let chunks = Self::split(&joined, budget);
-        if chunks.len() < 2 {
+        // Nothing to gain when the re-split reproduces the pieces it started from.
+        if chunks.len() < 2 || chunks == pieces {
             return None;
         }
 
         let mut out = String::new();
         for (nth, chunk) in chunks.iter().enumerate() {
             if nth > 0 {
-                out.push('\n');
-                style.write_indent(indent, &mut out);
-                out.push_str("+ ");
+                out.push_str(" + ");
             }
             out.push('"');
             out.push_str(chunk);
@@ -188,8 +193,10 @@ impl StringWrapper {
             unit.push(c);
             // An escape is one indivisible unit; `\uXXXX` and the octal forms are longer, and
             // splitting any of them would change what the literal means.
-            if c == '\\' {
-                if let Some(next) = chars.next() {
+            if c == '\\'
+                && let Some(next) = chars.next()
+            {
+                {
                     unit.push(next);
                     if next == 'u' {
                         for _ in 0..4 {
@@ -240,6 +247,8 @@ impl StringWrapper {
         for (range, text) in edits {
             let start = usize::from(range.start());
             let end = usize::from(range.end());
+            // Overlapping or out-of-range edits are dropped rather than trusted: a bad splice
+            // would corrupt the file, and skipping one only means a concatenation stays as it was.
             if start < at || end > src.len() {
                 continue;
             }

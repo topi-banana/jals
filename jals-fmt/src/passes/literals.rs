@@ -25,7 +25,7 @@ impl LiteralRewrite {
     /// The three rewrites compose in a fixed order — hex digits, then the trailing zero, then the
     /// suffix letter — and they operate on disjoint parts of a literal, so the order does not
     /// affect the result. It is fixed anyway, so the composition stays idempotent by inspection.
-    pub(crate) fn apply<'t>(text: &'t str, kind: SyntaxKind, rules: &Literals) -> Cow<'t, str> {
+    pub(crate) fn apply(text: &str, kind: SyntaxKind, rules: Literals) -> Cow<'_, str> {
         if !matches!(kind, SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL) {
             return Cow::Borrowed(text);
         }
@@ -43,7 +43,7 @@ impl LiteralRewrite {
     }
 
     /// Whether any rule in `rules` can change a literal at all.
-    pub(crate) fn is_active(rules: &Literals) -> bool {
+    pub(crate) fn is_active(rules: Literals) -> bool {
         rules.hex_case != HexLiteralCase::Preserve
             || rules.float_trailing_zero != FloatLiteralTrailingZero::Preserve
             || rules.suffix_case != LiteralSuffixCase::Preserve
