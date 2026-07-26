@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, Name,
-    ProjectView,
+    ProjectView, ProvenanceFold,
 };
 use sha1::{Digest as _, Sha1};
 
@@ -223,13 +223,14 @@ impl ExternalArtifactResolver {
         Ok(key)
     }
 
+    /// The provenance shared by a fetched artifact's published key and its locator-index
+    /// recovery for SHA-1-pinned specs. Publish and recovery must fold identically or every
+    /// recovery misses and the artifact is refetched — never inline one side.
     fn provenance(spec: &ExternalArtifactSpec) -> ContentDigest {
-        let expected = spec.expected.framed_bytes();
-        let mut bytes = Vec::with_capacity(spec.locator.as_str().len() + expected.len() + 8);
-        bytes.extend_from_slice(&(spec.locator.as_str().len() as u64).to_be_bytes());
-        bytes.extend_from_slice(spec.locator.as_str().as_bytes());
-        bytes.extend_from_slice(&expected);
-        ContentDigest::of(&bytes)
+        let mut fold = ProvenanceFold::new(b"external-artifact\0");
+        fold.bytes(spec.locator.as_str().as_bytes())
+            .bytes(&spec.expected.framed_bytes());
+        fold.finish()
     }
 }
 
@@ -324,10 +325,9 @@ impl DependencyResolver {
             }),
             DependencyLocation::External { locator, expected } => {
                 if let Some(content) = expected {
-                    let key = Self::cache_key_for_digest(
+                    let key = CacheKey::new(
                         CacheNamespace::DependencyJar,
-                        b"external\0",
-                        locator.as_str().as_bytes(),
+                        Self::external_provenance(locator),
                         *content,
                     );
                     match cache.open_verified(&key).await {
@@ -348,8 +348,7 @@ impl DependencyResolver {
                     // locator index, so an already-fetched dependency resolves from the
                     // persistent cache (and offline). The artifact is still read through the
                     // verified lookup; any index or artifact problem just falls back to a fetch.
-                    let provenance =
-                        Self::provenance_digest(b"external\0", locator.as_str().as_bytes());
+                    let provenance = Self::external_provenance(locator);
                     if let Ok(Some(key)) = cache
                         .indexed_key(CacheNamespace::DependencyJar, provenance)
                         .await
@@ -378,11 +377,11 @@ impl DependencyResolver {
                 )
             })?
             .bytes();
-        let key = Self::cache_key(
+        let key = CacheKey::derive(
             CacheNamespace::DependencyJar,
             b"project\0",
             file.to_string().as_bytes(),
-            bytes,
+            ContentDigest::of(bytes),
         );
         cache.publish(&key, bytes).await.map_err(|error| {
             Warning::new(
@@ -423,10 +422,9 @@ impl DependencyResolver {
                 ),
             ));
         }
-        let key = Self::cache_key_for_digest(
+        let key = CacheKey::new(
             CacheNamespace::DependencyJar,
-            b"external\0",
-            locator.as_str().as_bytes(),
+            Self::external_provenance(locator),
             actual,
         );
         cache.publish(&key, bytes).await.map_err(|error| {
@@ -444,35 +442,12 @@ impl DependencyResolver {
         Ok(key)
     }
 
-    pub(crate) fn cache_key(
-        namespace: CacheNamespace,
-        kind: &[u8],
-        provenance: &[u8],
-        bytes: &[u8],
-    ) -> CacheKey {
-        Self::cache_key_for_digest(namespace, kind, provenance, ContentDigest::of(bytes))
-    }
-
-    fn cache_key_for_digest(
-        namespace: CacheNamespace,
-        kind: &[u8],
-        provenance: &[u8],
-        content: ContentDigest,
-    ) -> CacheKey {
-        CacheKey::new(
-            namespace,
-            Self::provenance_digest(kind, provenance),
-            content,
-        )
-    }
-
-    /// The length-framed `(kind, provenance)` digest shared by every classpath cache key, so a
-    /// key can also be recovered from provenance alone through the cache's locator index.
-    pub(crate) fn provenance_digest(kind: &[u8], provenance: &[u8]) -> ContentDigest {
-        let mut framed = Vec::with_capacity(kind.len() + 8 + provenance.len());
-        framed.extend_from_slice(kind);
-        framed.extend_from_slice(&(provenance.len() as u64).to_be_bytes());
-        framed.extend_from_slice(provenance);
-        ContentDigest::of(&framed)
+    /// The provenance shared by an external jar's published key and its locator-index
+    /// recovery. Publish and recovery must fold identically or every recovery misses and the
+    /// jar is refetched forever — never inline one side.
+    fn external_provenance(locator: &ExternalLocator) -> ContentDigest {
+        let mut fold = ProvenanceFold::new(b"external\0");
+        fold.bytes(locator.as_str().as_bytes());
+        fold.finish()
     }
 }

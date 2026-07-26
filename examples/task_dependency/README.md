@@ -17,10 +17,10 @@ cd consumer && jals run
 
 ## What crosses the edge
 
-| Terminal | Consumer receives |
-| --- | --- |
+| Terminal                                 | Consumer receives                                       |
+| ---------------------------------------- | ------------------------------------------------------- |
 | `add_classpath` / `add_nested_classpath` | Compile classpath and analysis, like a `jar` dependency |
-| `publish_tree` | Read-only navigation sources, addressed by package |
+| `publish_tree`                           | Read-only navigation sources, addressed by package      |
 
 `publish_tree` is **virtual** here. A root project physically replaces its destination directory; a
 dependency is an immutable snapshot, so `library/src/main/java/net/example` is never written and the
@@ -52,5 +52,5 @@ rather than its digest.
 analyse the project.
 
 See [`jals-build/README.md`](../../jals-build/README.md#rhai-build-scripts) for the complete task
-API, and [`../minecraft-mojang-remap`](../minecraft-mojang-remap) for a real fetch-remap-decompile
+API, and [`../minecraft`](../minecraft) for a real fetch-remap-decompile
 pipeline consumed the same way.

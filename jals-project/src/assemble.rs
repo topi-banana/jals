@@ -12,7 +12,7 @@ use jals_classpath::{
 };
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, Name,
-    RelativePath,
+    ProvenanceFold, RelativePath,
 };
 
 use crate::graph::{
@@ -464,16 +464,13 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         bytes: &[u8],
     ) -> Option<(RelativePath, CacheKey)> {
         let path = Self::logical_path(node, file_path, category);
-        let rendered_path = file_path.to_string();
-        let mut provenance = Vec::with_capacity(category.len() + 32 + rendered_path.len());
-        provenance.extend_from_slice(category);
-        provenance.extend_from_slice(node.digest().as_bytes());
-        provenance.extend_from_slice(rendered_path.as_bytes());
-        let key = CacheKey::new(
-            namespace,
-            ContentDigest::of(&provenance),
-            ContentDigest::of(bytes),
-        );
+        // The category folds as framed bytes, not as part of the kind tag: the same constants
+        // also select the logical-path group, so they must stay NUL-free.
+        let mut fold = ProvenanceFold::new(b"jals.project.assembly\0");
+        fold.bytes(category)
+            .digest(node.digest())
+            .bytes(file_path.to_string().as_bytes());
+        let key = CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes));
         if let Err(error) = self.cache.publish(&key, bytes).await {
             self.errors.push(ProjectAssemblyError {
                 node: node.clone(),

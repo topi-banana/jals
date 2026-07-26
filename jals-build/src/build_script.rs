@@ -18,7 +18,7 @@ use core::fmt;
 use jals_config::Manifest;
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, ProjectView,
-    Revision,
+    ProvenanceFold, Revision,
 };
 use serde::{Deserialize, Serialize};
 
@@ -608,46 +608,31 @@ enum DiagnosticLevelWire {
     Error,
 }
 
+/// The provenance shared by every writer and re-derivation of build-script state and output
+/// keys. All sides must fold identically or persisted state stops resolving its outputs —
+/// always go through these functions, never inline the fold.
 struct CacheIdentity;
 
 impl CacheIdentity {
+    const STATE: &'static [u8] = b"jals.build-script.state\0";
+    const OUTPUT: &'static [u8] = b"jals.build-script.output\0";
+
     fn state(scope: BuildScriptCacheScope, script: &FileKey) -> ContentDigest {
-        Self::digest(b"jals-build:build-script-state", scope, script, None)
+        Self::fold(Self::STATE, scope, script).finish()
     }
 
     fn output(scope: BuildScriptCacheScope, script: &FileKey, output: &FileKey) -> ContentDigest {
-        Self::digest(
-            b"jals-build:build-script-output",
-            scope,
-            script,
-            Some(output),
-        )
+        let mut fold = Self::fold(Self::OUTPUT, scope, script);
+        fold.bytes(output.to_string().as_bytes());
+        fold.finish()
     }
 
-    fn digest(
-        domain: &[u8],
-        scope: BuildScriptCacheScope,
-        script: &FileKey,
-        output: Option<&FileKey>,
-    ) -> ContentDigest {
-        let script = ContentDigest::of(script.to_string().as_bytes());
-        let output = output.map(|key| ContentDigest::of(key.to_string().as_bytes()));
-        let mut bytes =
-            Vec::with_capacity(domain.len() + 4 + 1 + 32 + 32 + usize::from(output.is_some()) * 32);
-        bytes.extend_from_slice(domain);
-        bytes.extend_from_slice(&BUILD_SCRIPT_API_VERSION.to_be_bytes());
-        match scope.digest() {
-            None => bytes.push(0),
-            Some(digest) => {
-                bytes.push(1);
-                bytes.extend_from_slice(digest.as_bytes());
-            }
-        }
-        bytes.extend_from_slice(script.as_bytes());
-        if let Some(output) = output {
-            bytes.extend_from_slice(output.as_bytes());
-        }
-        ContentDigest::of(&bytes)
+    fn fold(kind: &'static [u8], scope: BuildScriptCacheScope, script: &FileKey) -> ProvenanceFold {
+        let mut fold = ProvenanceFold::new(kind);
+        fold.version(BUILD_SCRIPT_API_VERSION)
+            .opt_digest(scope.digest())
+            .bytes(script.to_string().as_bytes());
+        fold
     }
 }
 

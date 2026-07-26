@@ -44,24 +44,24 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 
 `jals` is a Cargo workspace of sixteen product crates, including a browser playground:
 
-| Crate | Description |
-| --- | --- |
-| [`jals-editor`](jals-editor) | Protocol-neutral editor semantics (definition, references, hover, completion, signature help, and highlights) plus UTF-8 byte/UTF-16 coordinate conversion, shared by the LSP and browser playground. |
-| [`jals-syntax`](jals-syntax) | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool. |
-| [`jals-fmt`](jals-fmt) | **WIP (rewrite in progress).** A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST — currently a no-op that returns its input unchanged. |
-| [`jals-lint`](jals-lint) | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks. |
-| [`jals-hir`](jals-hir) | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath. |
-| [`jals-classfile`](jals-classfile) | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4). |
-| [`jals-decompile`](jals-decompile) | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode. |
-| [`jals-classpath`](jals-classpath) | Resolves and loads project bytes and verified classpath artifacts (local/remote and bundled/nested jars) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources. |
-| [`jals-config`](jals-config) | The pure data model, parsing, discovery, and validation for all three config files (`jals.toml`, `jalsfmt.toml`, `jalslint.toml`). |
-| [`jals-exec`](jals-exec) | The unified current-thread execution context for native, browser, and inline hosts, including deterministic worker fan-out and runtime-free cooperative yielding. |
-| [`jals-storage`](jals-storage) | Deterministic, revisioned project storage. Portable code uses validated `FileKey`/`DirKey` values, immutable `CodeTree` snapshots, transactions, overlays, a SHA-256 verified artifact cache (whole-buffer `lookup` or streaming `open_verified` readers), and the portable `io` byte-stream traits the class-file codec parses through; memory and `std`-gated native adapters implement the same sealed contract. |
-| [`jals-project`](jals-project) | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts. |
-| [`jals-build`](jals-build) | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase. |
-| [`jals-lsp`](jals-lsp) | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only. |
-| [`jals-cli`](jals-cli) | The `jals` command-line binary. |
-| [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser. |
+| Crate                                | Description                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`jals-editor`](jals-editor)         | Protocol-neutral editor semantics (definition, references, hover, completion, signature help, and highlights) plus UTF-8 byte/UTF-16 coordinate conversion, shared by the LSP and browser playground.                                                                                                                                                                                                               |
+| [`jals-syntax`](jals-syntax)         | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool.                                                                                                                                                                                                                                                                 |
+| [`jals-fmt`](jals-fmt)               | **WIP (rewrite in progress).** A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST — currently a no-op that returns its input unchanged.                                                                                                                                                                                                                                                         |
+| [`jals-lint`](jals-lint)             | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks.                                                                                                                                                                                              |
+| [`jals-hir`](jals-hir)               | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath.                                                                                                                                                                                                         |
+| [`jals-classfile`](jals-classfile)   | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4).                                                                                                                                                                                                                                                                                                                               |
+| [`jals-decompile`](jals-decompile)   | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode.                                                                                                                                                                                                                                |
+| [`jals-classpath`](jals-classpath)   | Resolves and loads project bytes and verified classpath artifacts (local/remote and bundled/nested jars) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources.                                                                                                                                                                                    |
+| [`jals-config`](jals-config)         | The pure data model, parsing, discovery, and validation for all three config files (`jals.toml`, `jalsfmt.toml`, `jalslint.toml`).                                                                                                                                                                                                                                                                                  |
+| [`jals-exec`](jals-exec)             | The unified current-thread execution context for native, browser, and inline hosts, including deterministic worker fan-out and runtime-free cooperative yielding.                                                                                                                                                                                                                                                   |
+| [`jals-storage`](jals-storage)       | Deterministic, revisioned project storage. Portable code uses validated `FileKey`/`DirKey` values, immutable `CodeTree` snapshots, transactions, overlays, a SHA-256 verified artifact cache (whole-buffer `lookup` or streaming `open_verified` readers), and the portable `io` byte-stream traits the class-file codec parses through; memory and `std`-gated native adapters implement the same sealed contract. |
+| [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
+| [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
+| [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
+| [`jals-cli`](jals-cli)               | The `jals` command-line binary.                                                                                                                                                                                                                                                                                                                                                                                     |
+| [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser.                                                                                                                                                                                                                   |
 
 Two more workspace members are development-only tooling, not part of the shipped product:
 [`jals-tests`](jals-tests) (corpus harnesses that check parser soundness and formatter
@@ -287,7 +287,7 @@ open document, while the browser rejects physical publication before fetching. S
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
 The source-archive task shape is shown in
 [`examples/task_source_archive`](examples/task_source_archive); a full remapped-Minecraft example is
-[`examples/minecraft-mojang-remap`](examples/minecraft-mojang-remap).
+[`examples/minecraft`](examples/minecraft).
 
 The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`
@@ -332,13 +332,13 @@ work.
 
 ### Options
 
-| Option | Description |
-| --- | --- |
-| `[PATHS]...` | Files or directories to format. Directories are searched recursively for `.java` files. No paths → stdin/stdout. |
-| `--check` | Do not write anything; exit non-zero if any file would change. |
-| `-D <LINT>` | Deny lints (repeatable). Only `warnings` is recognized: fail when any file has syntax warnings. |
-| `--config <PATH>` | Use this config file instead of discovering `jalsfmt.toml`. |
-| `--no-migrate` | Do not generate a `jalsfmt.toml` from a detected native formatter config. The detected settings are still used for the run. |
+| Option            | Description                                                                                                                 |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `[PATHS]...`      | Files or directories to format. Directories are searched recursively for `.java` files. No paths → stdin/stdout.            |
+| `--check`         | Do not write anything; exit non-zero if any file would change.                                                              |
+| `-D <LINT>`       | Deny lints (repeatable). Only `warnings` is recognized: fail when any file has syntax warnings.                             |
+| `--config <PATH>` | Use this config file instead of discovering `jalsfmt.toml`.                                                                 |
+| `--no-migrate`    | Do not generate a `jalsfmt.toml` from a detected native formatter config. The detected settings are still used for the run. |
 
 ## Configuration
 

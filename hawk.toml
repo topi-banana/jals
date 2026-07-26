@@ -124,15 +124,6 @@ item = "BackendRequest"
 level = "allow"
 reason = "deferred backend-tier seam; stable surface for the future javac adapter"
 
-# `CacheKey::derive` is consumed only by the deferred backend compile tier; its
-# own `TODO(backend-tier)` note cross-references `jals_build::backend`.
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_storage"
-item = "cache::CacheKey::derive"
-level = "allow"
-reason = "deferred backend-tier seam; consumed only by jals_build::backend (TODO(backend-tier))"
-
 # `BackendKey` folds the frontend→backend pipeline provenance; part of the same
 # deferred backend tier.
 [[override]]
