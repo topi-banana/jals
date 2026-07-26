@@ -294,14 +294,14 @@ impl CommentMap {
 /// GJF rewrites it to the canonical `/* name= */` and glues it to that argument. Recognition is
 /// unconditional — such a comment always hugs — but the *rewrite* is gated, because changing a
 /// comment's text is a change the user has to ask for.
-pub(crate) struct ParameterComment;
+struct ParameterComment;
 
 impl ParameterComment {
     /// The canonical form of `text` when it is a parameter-name comment, else `None`.
     ///
     /// When `normalize` is off the text is returned unchanged, so the comment still hugs its
     /// argument but keeps the spelling the author wrote.
-    pub(crate) fn normalize(text: &str, normalize: bool) -> Option<String> {
+    fn normalize(text: &str, normalize: bool) -> Option<String> {
         let body = text.strip_prefix("/*")?.strip_suffix("*/")?;
         let name = body.trim().strip_suffix('=')?.trim_end();
         if name.is_empty() || !Self::is_identifier(name) {

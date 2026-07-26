@@ -268,10 +268,6 @@ fn candidates(section: &str, key: &str, current: &Value) -> Vec<Value> {
 }
 
 /// The non-default variants of an enum- or text-valued leaf.
-#[allow(
-    clippy::match_same_arms,
-    reason = "each named family documents its own vocabulary, even where two coincide"
-)]
 fn variants(section: &str, key: &str) -> Vec<&'static str> {
     match (section, key) {
         ("layout", "indent-style") => vec!["tab", "mixed"],

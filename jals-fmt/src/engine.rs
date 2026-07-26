@@ -303,7 +303,7 @@ impl Measure {
 /// The writer always emits `\n`; converting to the configured terminator is
 /// [`Finalize`](crate::passes::Finalize)'s job, so every width computation upstream can assume a
 /// one-character break.
-pub(crate) struct Writer<'s> {
+struct Writer<'s> {
     /// The resolved style, for rendering indentation.
     style: &'s Style,
     /// The text built so far.

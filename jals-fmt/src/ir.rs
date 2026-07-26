@@ -44,7 +44,7 @@ impl Width {
     /// The sentinel width of something that can never sit on one line: a forced break, a token
     /// holding a newline, a `//` comment. Saturating arithmetic keeps it absorbing, so any level
     /// containing one fails `column + width <= max_width` at every column.
-    pub(crate) const INFINITE: usize = usize::MAX;
+    const INFINITE: usize = usize::MAX;
 
     /// The width of `text` in UTF-16 code units.
     pub(crate) fn utf16(text: &str) -> usize {
@@ -53,7 +53,7 @@ impl Width {
 
     /// The width of `text` as a *token*: [`INFINITE`](Self::INFINITE) when it spans lines (a text
     /// block, a disabled region), otherwise its UTF-16 width.
-    pub(crate) fn token(text: &str) -> usize {
+    fn token(text: &str) -> usize {
         if text.contains('\n') {
             Self::INFINITE
         } else {
@@ -68,7 +68,7 @@ impl Width {
     /// making it infinitely wide. Measuring it as infinite would additionally poison every
     /// enclosing level, so a trailing `// note` on a field would break the field's initializer
     /// onto its own line — a comment changing the layout of the code it annotates.
-    pub(crate) fn tok(text: &str) -> usize {
+    fn tok(text: &str) -> usize {
         text.find('\n')
             .map_or_else(|| Self::utf16(text), |at| Self::utf16(&text[..at]))
     }
@@ -181,12 +181,12 @@ impl Break {
     }
 
     /// Whether this break always goes — which also makes its level unable to be flat.
-    pub(crate) const fn is_forced(&self) -> bool {
+    const fn is_forced(&self) -> bool {
         matches!(self.fill, FillMode::Forced)
     }
 
     /// The flat width, or [`Width::INFINITE`] when forced (`Break.computeWidth`).
-    pub(crate) fn width(&self) -> usize {
+    fn width(&self) -> usize {
         if self.is_forced() {
             Width::INFINITE
         } else {

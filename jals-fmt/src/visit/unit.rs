@@ -108,7 +108,7 @@ impl Ctx<'_> {
     /// `first` is not a guard here: `Ops::ensure_blank_lines` already does nothing on an empty
     /// level, so the *first* item is separated exactly when something (a header comment) has
     /// already been emitted — which is what `before-package` means.
-    pub(super) fn separate(&mut self, node: &SyntaxNode, enforced: usize, first: bool) {
+    fn separate(&mut self, node: &SyntaxNode, enforced: usize, first: bool) {
         let _ = first;
         let source = self
             .blank_lines_before(node)

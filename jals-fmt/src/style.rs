@@ -38,7 +38,7 @@ pub(crate) struct Style {
     /// The line terminator, with `auto` / `native` already resolved against the source.
     pub(crate) newline: &'static str,
     /// Columns in one block indent level.
-    pub(crate) indent_cols: usize,
+    indent_cols: usize,
     /// Columns in one continuation indent.
     pub(crate) continuation_cols: usize,
 }

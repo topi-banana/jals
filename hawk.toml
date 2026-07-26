@@ -31,13 +31,14 @@ reason = "workspace automation (codegen from java.ungram) via the cargo-xtask pa
 
 # --- Exclusions -------------------------------------------------------------
 # `ast::generated` is emitted by `xtask codegen` from `java.ungram` with a
-# uniform `pub` accessor surface. Per-accessor visibility is usage-dependent
-# (the WIP `jals-fmt` rewrite is its consumer), so it cannot be narrowed from a
+# uniform `pub` accessor surface. Which accessors have a caller is usage-dependent
+# and changes with every consumer, so the surface cannot be narrowed from a
 # structural template without breaking the accessors used cross-crate today.
+# Dropping this exclusion reports 214 findings, one per accessor with no caller.
 [[exclude]]
 crate = "jals_syntax"
 module = "ast::generated"
-reason = "generated AST; uniform pub surface from xtask codegen, consumer (jals-fmt) is WIP"
+reason = "generated AST; uniform pub accessor surface emitted from java.ungram by xtask codegen"
 
 # The compile-backend tier is a documented, deliberately-unimplemented seam: no
 # `impl Backend` exists yet, so nothing reaches its declarations from a shipped
@@ -59,17 +60,13 @@ crate = "jals_fmt"
 module = "import"
 reason = "serde-read native config models; the non-file importers have no detectable file"
 
-# `jals_config::fmt` is the formatter's config *schema*: a serde data model whose
-# fields are read by `serde` — now in both directions, since `jals_fmt::generate`
-# serializes it back out as a `jalsfmt.toml` — and, once the WIP `jals-fmt`
-# rewrite lands, by the formatter itself. No jals code names the individual fields
-# today. The `Layout` accessors are likewise rendering helpers the formatter will
-# call. Narrowing the schema to `pub(crate)` would break `jalsfmt.toml`'s public
-# surface and the importers that construct it.
-[[exclude]]
-crate = "jals_config"
-module = "fmt"
-reason = "serde-read/written formatter config schema; the formatter that names its fields is the WIP rewrite"
+# `jals_config::fmt` needed an exclusion only while the formatter that reads the
+# schema did not exist: with nothing naming the individual fields, every one of
+# them looked unreachable. `jals-fmt` now folds the whole schema in `Style::reify`
+# and the visitors read it, so the gate holds on its own and the exclusion is
+# gone. A key added to the schema but never consumed by the formatter is now a
+# hawk finding — the same "declared but not implemented" failure
+# `jals-fmt/tests/coverage.rs` guards from the other side.
 
 # --- Overrides --------------------------------------------------------------
 # The backend seam's crate-root re-exports live outside the `backend` module,

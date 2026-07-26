@@ -96,7 +96,7 @@ impl Ops {
     }
 
     /// Append a node to the innermost level.
-    pub(crate) fn push(&mut self, doc: Doc) {
+    fn push(&mut self, doc: Doc) {
         if self.suppressed {
             return;
         }
@@ -111,7 +111,7 @@ impl Ops {
     }
 
     /// The last node emitted into the innermost level.
-    pub(crate) fn last(&self) -> Option<&Doc> {
+    fn last(&self) -> Option<&Doc> {
         self.stack.last().and_then(|level| level.docs.last())
     }
 

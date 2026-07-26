@@ -118,28 +118,28 @@ impl Formatter {
 /// The emission context threaded through the whole lowering walk.
 pub(crate) struct Ctx<'a> {
     /// The resolved style — the only thing a rule reads to change what it emits.
-    pub(crate) style: &'a Style,
+    style: &'a Style,
     /// The original source, for verbatim regions.
     src: &'a str,
     /// Where each comment is anchored.
-    pub(crate) comments: CommentMap,
+    comments: CommentMap,
     /// The document under construction.
-    pub(crate) ops: Ops,
+    ops: Ops,
     /// The used-name set, when unused-import removal is on.
-    pub(crate) used: Option<BTreeSet<String>>,
+    used: Option<BTreeSet<String>>,
     /// Formatter-disabled regions, in source order.
     disabled: Vec<TextRange>,
     /// Whether each disabled region has been emitted yet.
     emitted: Vec<bool>,
     /// The structural indent in columns, used as the comment reflow budget's base.
-    pub(crate) indent: usize,
+    indent: usize,
     /// The last significant token emitted, for the spacing decision.
     previous: Option<SyntaxToken>,
     /// Whitespace has already been emitted, so no space is owed.
     spaced: bool,
     /// The branch just emitted got its braces from `[braces] force-*`, so the continuation
     /// keyword after it cuddles a `}` the source never had.
-    pub(crate) braced_branch: bool,
+    braced_branch: bool,
     /// The file's leading comment has been seen (`comments.format-header` gates only the first).
     header_seen: bool,
     /// Token offsets whose own-line leading comments were already hoisted by an enclosing node.
@@ -214,7 +214,7 @@ impl<'a> Ctx<'a> {
     ///
     /// The one boxed shim of the lowering recursion: every rule recurses back through here, so
     /// the async cycle has a single choke point rather than a box per call.
-    pub(crate) fn visit<'n>(&'n mut self, node: &'n SyntaxNode) -> LocalBoxFuture<'n, ()> {
+    fn visit<'n>(&'n mut self, node: &'n SyntaxNode) -> LocalBoxFuture<'n, ()> {
         Box::pin(self.visit_impl(node))
     }
 
@@ -315,14 +315,14 @@ impl<'a> Ctx<'a> {
     }
 
     /// The generic path: emit every direct token, recurse into every child node.
-    pub(crate) async fn visit_children(&mut self, node: &SyntaxNode) {
+    async fn visit_children(&mut self, node: &SyntaxNode) {
         for child in node.children_with_tokens() {
             self.visit_element(&child).await;
         }
     }
 
     /// Lower one child, whichever kind it is.
-    pub(crate) async fn visit_element(&mut self, child: &SyntaxElement) {
+    async fn visit_element(&mut self, child: &SyntaxElement) {
         match child {
             SyntaxElement::Node(node) => self.visit(node).await,
             // Trivia is not emitted here: a comment rides with the token it is anchored to.
@@ -334,7 +334,7 @@ impl<'a> Ctx<'a> {
     // ===== Token emission =====
 
     /// Emit one significant token, with its comments and its spacing.
-    pub(crate) fn token(&mut self, tok: &SyntaxToken) {
+    fn token(&mut self, tok: &SyntaxToken) {
         if self.in_disabled_region(tok) {
             return;
         }
@@ -353,20 +353,20 @@ impl<'a> Ctx<'a> {
     }
 
     /// Emit a token whose text the rule chose — a brace it is inserting, say.
-    pub(crate) fn synthetic(&mut self, text: &str) {
+    fn synthetic(&mut self, text: &str) {
         self.ops.token(text);
         self.spaced = false;
         self.previous = None;
     }
 
     /// A single space, suppressing the automatic decision for the next token.
-    pub(crate) fn space(&mut self) {
+    fn space(&mut self) {
         self.ops.space();
         self.spaced = true;
     }
 
     /// A space, or nothing, depending on a `[spacing]` rule.
-    pub(crate) fn space_if(&mut self, yes: bool) {
+    fn space_if(&mut self, yes: bool) {
         if yes {
             self.space();
         }
@@ -377,42 +377,42 @@ impl<'a> Ctx<'a> {
     /// Needed by the few rules that reach [`Ops::brk`](crate::ops::Ops::brk) directly to build a
     /// tagged or conditionally-indented break, which the [`break_op`](Self::break_op) family
     /// cannot express.
-    pub(crate) const fn space_already_emitted(&mut self) {
+    const fn space_already_emitted(&mut self) {
         self.spaced = true;
     }
 
     /// A break that renders as a space when it stays on the line.
-    pub(crate) fn break_op(&mut self, plus_indent: Indent) {
+    fn break_op(&mut self, plus_indent: Indent) {
         self.ops.break_op(plus_indent);
         self.spaced = true;
     }
 
     /// A break that renders as nothing when it stays on the line.
-    pub(crate) fn break_tight(&mut self, plus_indent: Indent) {
+    fn break_tight(&mut self, plus_indent: Indent) {
         self.ops.break_tight(plus_indent);
         self.spaced = true;
     }
 
     /// A break that always goes.
-    pub(crate) fn forced_break(&mut self, plus_indent: Indent) {
+    fn forced_break(&mut self, plus_indent: Indent) {
         self.ops.forced_break(plus_indent);
         self.spaced = true;
     }
 
     /// A forced break followed by `count` empty lines.
-    pub(crate) fn blank_lines(&mut self, count: usize, plus_indent: Indent) {
+    fn blank_lines(&mut self, count: usize, plus_indent: Indent) {
         self.ops.blank_lines(count, plus_indent);
         self.spaced = true;
     }
 
     /// Raise the separation before the next item to at least `count` blank lines.
-    pub(crate) fn ensure_blank_lines(&mut self, count: usize, plus_indent: Indent) {
+    fn ensure_blank_lines(&mut self, count: usize, plus_indent: Indent) {
         self.ops.ensure_blank_lines(count, plus_indent);
         self.spaced = true;
     }
 
     /// Open a level, tracking the structural indent used for comment budgets.
-    pub(crate) fn open(&mut self, plus_indent: Indent) {
+    fn open(&mut self, plus_indent: Indent) {
         if let Indent::Const(columns) = plus_indent {
             self.indent = self
                 .indent
@@ -422,18 +422,18 @@ impl<'a> Ctx<'a> {
     }
 
     /// Close the innermost level.
-    pub(crate) fn close(&mut self) {
+    fn close(&mut self) {
         self.ops.close();
     }
 
     /// Open a level, keeping the structural indent where it was — for a level that groups without
     /// indenting, so a comment inside it keeps the enclosing budget.
-    pub(crate) fn open_flat(&mut self, plus_indent: Indent) {
+    fn open_flat(&mut self, plus_indent: Indent) {
         self.ops.open(plus_indent);
     }
 
     /// Close a level opened by [`open`](Self::open), restoring the structural indent.
-    pub(crate) fn close_indent(&mut self, plus_indent: &Indent) {
+    fn close_indent(&mut self, plus_indent: &Indent) {
         if let Indent::Const(columns) = plus_indent {
             self.indent = self
                 .indent
@@ -527,7 +527,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Emit a comment's text, reflowed when its `[comments]` rule is on.
-    pub(crate) fn emit_comment(&mut self, comment: &Comment) {
+    fn emit_comment(&mut self, comment: &Comment) {
         let is_header = !self.header_seen;
         self.header_seen = true;
         let text = CommentFormatter::render(
@@ -581,7 +581,7 @@ impl<'a> Ctx<'a> {
     /// Bodies consult this *before* emitting an item's separator, so the region's verbatim text
     /// lands at the body's own indent rather than at whatever depth the item's rule would have
     /// opened.
-    pub(crate) fn disabled_region_of(&self, item: &SyntaxElement) -> Option<usize> {
+    fn disabled_region_of(&self, item: &SyntaxElement) -> Option<usize> {
         if self.disabled.is_empty() {
             return None;
         }
@@ -595,7 +595,7 @@ impl<'a> Ctx<'a> {
     /// Emit a disabled region verbatim, or skip it when it is already out.
     ///
     /// Returns `true` when the caller should emit a separator before it.
-    pub(crate) fn take_disabled_region(&mut self, at: usize) -> bool {
+    fn take_disabled_region(&mut self, at: usize) -> bool {
         if self.emitted[at] {
             return false;
         }
@@ -604,13 +604,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// The source text of a disabled region.
-    pub(crate) fn disabled_text(&self, at: usize) -> &'a str {
+    fn disabled_text(&self, at: usize) -> &'a str {
         let region = self.disabled[at];
         &self.src[usize::from(region.start())..usize::from(region.end())]
     }
 
     /// Emit a disabled region's verbatim text.
-    pub(crate) fn emit_disabled(&mut self, at: usize) {
+    fn emit_disabled(&mut self, at: usize) {
         let text = self.disabled_text(at);
         self.ops.verbatim(text);
         self.spaced = false;
@@ -620,26 +620,26 @@ impl<'a> Ctx<'a> {
     // ===== Shared queries =====
 
     /// A node's direct children, with trivia tokens dropped.
-    pub(crate) fn children(node: &SyntaxNode) -> Vec<SyntaxElement> {
+    fn children(node: &SyntaxNode) -> Vec<SyntaxElement> {
         node.children_with_tokens()
             .filter(|child| !child.as_token().is_some_and(|tok| tok.kind().is_trivia()))
             .collect()
     }
 
     /// The node's first direct token of `kind`, if any.
-    pub(crate) fn token_of(node: &SyntaxNode, kind: S) -> Option<SyntaxToken> {
+    fn token_of(node: &SyntaxNode, kind: S) -> Option<SyntaxToken> {
         node.children_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .find(|tok| tok.kind() == kind)
     }
 
     /// The node's first child node of `kind`, if any.
-    pub(crate) fn child_of(node: &SyntaxNode, kind: S) -> Option<SyntaxNode> {
+    fn child_of(node: &SyntaxNode, kind: S) -> Option<SyntaxNode> {
         node.children().find(|child| child.kind() == kind)
     }
 
     /// The first significant token anywhere under `node`.
-    pub(crate) fn first_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    fn first_token(node: &SyntaxNode) -> Option<SyntaxToken> {
         node.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .find(|tok| !tok.kind().is_trivia())
@@ -650,7 +650,7 @@ impl<'a> Ctx<'a> {
     /// The one fact the engine reads from input whitespace (`DESIGN.md` §17). When the node has
     /// leading comments the count belongs to the *first comment*, because that is what the blank
     /// line was separating.
-    pub(crate) fn blank_lines_before(&self, node: &SyntaxNode) -> usize {
+    fn blank_lines_before(&self, node: &SyntaxNode) -> usize {
         let Some(first) = Self::first_token(node) else {
             return 0;
         };
