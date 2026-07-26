@@ -1,14 +1,86 @@
-# jalsfmt.toml — every key is optional; values below are the defaults.
-indent-style = "space"             # "space" | "tab"
-indent-width = 4
-max-blank-lines = 1                # collapse runs of blank lines down to this many
-line-ending = "lf"                 # "lf" | "crlf"
+# jalsfmt.toml — every key is optional; the values below are the defaults.
+#
+# The config is a set of sections, each documented in `jals-config/src/fmt/`. Omit a key, or a
+# whole section, to keep its default. `jals-fmt/MAPPING.md` records which Eclipse / IntelliJ /
+# google-java-format / Spotless setting each key corresponds to.
+#
+# Only the frequently-touched keys are listed here. The full surface is:
+#   [layout] [blank-lines] [braces] [wrapping] [spacing] [comments] [imports] [literals]
+
+[layout]
+indent-style = "space" # "space" | "tab" | "mixed"
+indent-width = 4       # columns per indentation level
+tab-width = 4          # display width of a literal tab
+# continuation-indent = 4     # columns for a wrapped line; unset tracks indent-width
+max-width = 100                      # column limit
+line-ending = "lf"                   # "lf" | "crlf" | "auto" | "native"
 insert-final-newline = true
-max-width = 100                    # code wrap target (columns)
-single-line-if-else-max-width = 50 # max flat width of a ternary (a ? b : c) kept on one line; 0 always wraps
-brace-style = "same-line"          # "same-line" (K&R) | "next-line" (Allman); declaration bodies only
-empty-item-single-line = true      # collapse an empty declaration body to {}; off expands it to { … }
-fn-single-line = false             # keep a single-statement method/constructor/initializer body on one line
-control-brace-style = "same-line"  # "same-line" | "next-line"; control-flow/switch braces & } else
-wrap-comments = false              # reflow comments/Javadoc to comment-width (off by default)
-comment-width = 80                 # comment / Javadoc reflow target (columns); needs wrap-comments
+trim-trailing-whitespace = true
+indent-switch-labels = true          # indent `case` one level from its `switch`
+formatter-tags = false               # honor the on/off markers below
+formatter-off-tag = "@formatter:off"
+formatter-on-tag = "@formatter:on"
+
+[blank-lines]
+max-in-code = 1        # longest run of source blank lines kept in a body
+after-package = 1
+after-imports = 1
+around-type = 1
+around-method = 1
+around-field = 0
+at-type-body-start = 0 # enforced count; a source blank line still survives max-in-code
+
+[braces]
+type-declaration = "same-line"            # "same-line" | "next-line" | "next-line-shifted"
+method-declaration = "same-line"          #   | "next-line-shifted-braces" | "next-line-on-wrap"
+block = "same-line"
+lambda-body = "same-line"
+else-on-new-line = false
+keep-method-body-on-one-line = "if-empty" # "never" | "if-empty" | "if-single-item"
+keep-block-on-one-line = "if-empty"       #   | "always" | "preserve"
+force-if = "never"                        # "never" | "if-multiline" | "always"; adds braces when not "never"
+
+[wrapping]
+# Every construct key below takes:
+#   "never" | "if-long" | "if-long-per-item" | "always-per-item"
+call-arguments = "if-long"
+method-parameters = "if-long"
+array-initializer = "if-long"
+binary-operation = "if-long"
+ternary = "if-long"
+method-chain = "if-long"
+method-annotations = "always-per-item"
+parameter-annotations = "never"
+before-binary-operator = true          # the operator starts the continuation line
+# "common-lines" | "separate-lines-if-wrapped" | "separate-lines-if-not-empty"
+#   | "separate-lines" | "preserve"
+paren-method-invocation = "common-lines"
+join-wrapped-lines = true
+
+[spacing]
+after-comma = true
+before-keyword-parentheses = true      # `if (`, `for (`, …
+before-method-call-parentheses = false
+before-left-brace = true
+# The five colon contexts are independent of one another.
+before-ternary-colon = true
+before-foreach-colon = true
+before-label-colon = false
+before-case-colon = false
+before-assert-colon = true
+
+[comments]
+format-line = false
+format-block = false
+format-javadoc = false
+width = 80             # only consulted when one of the reflow keys above is on
+
+[imports]
+order = "preserve"                          # "preserve" | "sort" | "group"
+groups = ["java.", "javax.", "*", "static"]
+reorder-modifiers = false
+
+[literals]
+hex-case = "preserve"            # "preserve" | "upper" | "lower"
+float-trailing-zero = "preserve"
+suffix-case = "preserve"

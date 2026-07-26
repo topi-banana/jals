@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn discover_walks_upward_and_defaults_without_a_file() {
         let fs = storage(&[
-            ("p/jalsfmt.toml", "indent-width = 7"),
+            ("p/jalsfmt.toml", "[layout]\nindent-width = 7"),
             ("q/A.java", "class A {}"),
         ]);
         assert_eq!(
@@ -137,6 +137,7 @@ mod tests {
                 &DirKey::parse("p/src/deep").unwrap()
             ))
             .unwrap()
+            .layout
             .indent_width,
             7
         );
@@ -150,7 +151,7 @@ mod tests {
 
     #[test]
     fn discover_propagates_a_parse_error() {
-        let fs = storage(&[("p/jalsfmt.toml", "indent-width = ")]);
+        let fs = storage(&[("p/jalsfmt.toml", "[layout]\nindent-width = ")]);
         assert!(matches!(
             jals_exec::block_on_inline(Config::discover(&fs.view(), &DirKey::parse("p").unwrap())),
             Err(ConfigError::Parse { .. })

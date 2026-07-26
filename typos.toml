@@ -22,3 +22,18 @@ Ifle = "Ifle"
 # `mis` is the hyphenated prefix in prose like `mis-read` / `mis-structured` /
 # `mis-associating` (jals-decompile docs); not a misspelling of "miss"/"mist".
 mis = "mis"
+# The three identifiers below are misspelled *in the vendors' products*, and
+# `jals-fmt`'s importer models reproduce them verbatim — a corrected spelling
+# would silently stop matching the real setting.
+#   Eclipse JDT: `org.eclipse.jdt.core.formatter.parentheses_positions_in_for_statment`
+#                `...formatter.parentheses_positions_in_method_delcaration`
+#                `...formatter.keep_imple_if_on_one_line`
+statment = "statment"
+delcaration = "delcaration"
+imple = "imple"
+#   IntelliJ: `SPACE_BEFORE_ANOTATION_PARAMETER_LIST` (one `n`) and
+#             `JD_ADD_BLANK_AFTER_PARM_COMMENTS` (`PARM`, not `PARAM`).
+anotation = "anotation"
+Anotation = "Anotation"
+parm = "parm"
+PARM = "PARM"

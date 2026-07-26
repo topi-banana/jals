@@ -140,6 +140,21 @@ impl Reporter {
         }
     }
 
+    /// Announce a migrated native formatter config on stderr, with any note it carried.
+    ///
+    /// Not an `ariadne` report: these have no source span to point at, and they belong to the run
+    /// rather than to a file. They follow the CLI's plain `note:` / `warning:` convention.
+    pub(crate) fn report_migration(migration: &crate::migrate::Migration) {
+        let provenance = &migration.provenance;
+        eprintln!(
+            "note: migrating formatter settings from {} ({})",
+            provenance.source, provenance.tool
+        );
+        for warning in &migration.warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+
     /// Render every lint diagnostic (and parser error) for one source through `ariadne`.
     /// Returns whether anything was reported.
     pub(crate) fn report_lint(label: &str, src: &str, out: &LintOutput) -> bool {
