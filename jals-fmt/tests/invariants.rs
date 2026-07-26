@@ -10,9 +10,13 @@
 //!   included deliberately: it is the one rule whose condition consumes the engine's own result,
 //!   so its idempotence is a tested property rather than a constructive one
 //!   (`DESIGN.md` §8.1, §17).
-//! - **Significant tokens.** With the six token-changing rules off — the default — the output's
-//!   significant-token multiset equals the input's, exactly.
-//! - **Comments.** Every comment in the input appears in the output.
+//! - **Significant tokens.** Every profile is held to *its own* form of the invariant — exact
+//!   equality for the default, exact outside the import block plus a subset inside it when unused
+//!   imports are removed, and brace-insertion allowed when braces are forced. No profile is
+//!   skipped, and none is checked against an allowance it does not have.
+//! - **Comments.** Every comment in the input appears in the output. A profile that deletes
+//!   unused imports takes their comments with them, so the *import block* is excluded rather than
+//!   the whole profile.
 //! - **Never panics.** Malformed input is formatted best-effort or returned unchanged, never
 //!   dropped and never a crash.
 
@@ -67,22 +71,29 @@ fn format(src: &str, config: &Config) -> String {
     jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(src, config)).formatted
 }
 
-/// The significant tokens of `src`, in order.
-fn tokens(src: &str) -> Vec<(SyntaxKind, String)> {
+/// Whether a token sits inside an `import` declaration.
+fn in_import(tok: &jals_syntax::SyntaxToken) -> bool {
+    tok.parent_ancestors()
+        .any(|node| node.kind() == SyntaxKind::IMPORT_DECL)
+}
+
+/// The significant tokens of `src`, sorted, optionally excluding the import block.
+fn tokens(src: &str, imports: bool) -> Vec<(SyntaxKind, String)> {
     let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
     let mut out: Vec<(SyntaxKind, String)> = parse
         .syntax()
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .filter(|tok| !tok.kind().is_trivia())
+        .filter(|tok| imports || !in_import(tok))
         .map(|tok| (tok.kind(), tok.text().to_owned()))
         .collect();
     out.sort();
     out
 }
 
-/// The comment texts of `src`, normalized for trailing whitespace.
-fn comments(src: &str) -> Vec<String> {
+/// The comment texts of `src`, optionally excluding the import block.
+fn comments(src: &str, imports: bool) -> Vec<String> {
     let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
     parse
         .syntax()
@@ -94,6 +105,7 @@ fn comments(src: &str) -> Vec<String> {
                 SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT
             )
         })
+        .filter(|tok| imports || !in_import(tok))
         .map(|tok| tok.text().trim().to_owned())
         .collect()
 }
@@ -113,32 +125,70 @@ fn formatting_is_idempotent() {
 }
 
 #[test]
-fn the_default_config_preserves_every_significant_token() {
-    // The default has all six token-changing rules off, so this is the strict form of the
-    // invariant: the multiset is equal, not merely a subset.
-    let config = Config::default();
-    for src in SOURCES {
-        let formatted = format(src, &config);
-        assert_eq!(
-            tokens(src),
-            tokens(&formatted),
-            "token multiset changed for {src:?}\n--- output ---\n{formatted}",
-        );
+fn every_profile_preserves_its_significant_tokens() {
+    // Each profile is held to *its own* form of the invariant, so no profile is skipped and none
+    // is checked against a rule it does not have:
+    //
+    // - the default has all six token-changing rules off, so the multiset is equal exactly;
+    // - a profile that removes unused imports is exact outside the import block and a superset
+    //   inside it;
+    // - a profile that forces braces may additionally have gained `{` / `}`.
+    for (name, config) in configurations() {
+        let removes = config.imports.remove_unused;
+        let forces = config.braces.force_if != ForceBraces::Never;
+        for src in SOURCES {
+            let formatted = format(src, &config);
+
+            let before = tokens(src, !removes);
+            let after = tokens(&formatted, !removes);
+            let after: Vec<_> = if forces {
+                after
+                    .into_iter()
+                    .filter(|(kind, _)| !matches!(kind, SyntaxKind::LBRACE | SyntaxKind::RBRACE))
+                    .collect()
+            } else {
+                after
+            };
+            let before: Vec<_> = if forces {
+                before
+                    .into_iter()
+                    .filter(|(kind, _)| !matches!(kind, SyntaxKind::LBRACE | SyntaxKind::RBRACE))
+                    .collect()
+            } else {
+                before
+            };
+            assert_eq!(
+                before, after,
+                "{name}: token multiset changed for {src:?}\n--- output ---\n{formatted}",
+            );
+
+            if removes {
+                // The imports that survive must be a sub-multiset of the ones that went in.
+                let kept = tokens(&formatted, true);
+                let given = tokens(src, true);
+                for token in &kept {
+                    assert!(
+                        given.contains(token),
+                        "{name}: {token:?} appeared from nowhere for {src:?}",
+                    );
+                }
+            }
+        }
     }
 }
 
 #[test]
 fn no_comment_is_ever_dropped() {
     for (name, config) in configurations() {
+        // A profile that deletes unused imports takes the comments attached to them with it, so
+        // the import block is excluded rather than the whole profile being skipped — the rest of
+        // the file is still held to exact comment preservation.
+        let scope = !config.imports.remove_unused;
         for src in SOURCES {
             let formatted = format(src, &config);
-            // Unused-import removal may take a comment attached to the import it deletes.
-            if config.imports.remove_unused {
-                continue;
-            }
             assert_eq!(
-                comments(src).len(),
-                comments(&formatted).len(),
+                comments(src, scope),
+                comments(&formatted, scope),
                 "{name}: a comment was dropped or duplicated for {src:?}\n--- output ---\n{formatted}",
             );
         }
