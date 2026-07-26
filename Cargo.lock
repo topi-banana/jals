@@ -1211,10 +1211,12 @@ name = "jals-fmt"
 version = "0.1.0"
 dependencies = [
  "jals-config",
+ "jals-exec",
  "jals-syntax",
  "quick-xml",
  "serde",
  "serde_json",
+ "text-size",
  "toml",
 ]
 

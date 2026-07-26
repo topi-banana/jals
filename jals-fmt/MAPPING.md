@@ -315,6 +315,8 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `imports.groups` | — | `IMPORT_LAYOUT_TABLE` | `["static", "*"]` 固定 |
 | `imports.static-first` | — | `LAYOUT_STATIC_IMPORTS_SEPARATELY` | true |
 | `imports.reorder-modifiers` | — | — | `ModifierOrderer`（固定 true） |
+| `imports.remove-unused` | — | —（`CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` 等は classpath 依存で §7） | `RemoveUnusedImports`（`--skip-removing-unused-imports` の否定、既定 true） |
+| `wrapping.reflow-long-strings` | — | — | `JavaFormatterOptions.reflowLongStrings` → `StringWrapper`（既定 true） |
 | `literals.*` | — | — | すべて `preserve`（GJF はリテラルを書き換えない） |
 
 ---

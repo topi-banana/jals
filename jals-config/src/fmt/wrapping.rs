@@ -191,6 +191,16 @@ pub struct Wrapping {
     /// Preserve the *tabular* layout of a grid-shaped array initializer instead of reflowing it
     /// by width. google-java-format keeps such tables; Eclipse and IntelliJ reflow them.
     pub tabular_array_initializers: bool,
+    /// Re-wrap a string concatenation that overflows the column limit, redistributing the
+    /// pieces across the `+` operators. google-java-format's `StringWrapper` — its
+    /// `JavaFormatterOptions.reflowLongStrings`, which it always runs.
+    ///
+    /// This is a *second pass* over the formatted text, not part of the layout engine: the
+    /// output is re-parsed, the concatenation flattened and re-split at word / escape
+    /// boundaries, and the result adopted only when re-formatting it is a fixed point. It
+    /// never splits a single literal into new tokens, so the `+` and string-piece multiset is
+    /// preserved and only their arrangement changes. Eclipse and IntelliJ have no equivalent.
+    pub reflow_long_strings: bool,
 }
 
 impl Default for Wrapping {
@@ -238,6 +248,7 @@ impl Default for Wrapping {
             join_wrapped_lines: true,
             wrap_long_lines: false,
             tabular_array_initializers: false,
+            reflow_long_strings: false,
         }
     }
 }

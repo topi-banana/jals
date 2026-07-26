@@ -23,6 +23,8 @@ method-chain = "if-long-per-item"
 case-labels = "if-long"
 # Preserve the source row breaks of a grid-shaped array initializer instead of reflowing it.
 tabular-array-initializers = true
+# `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
+reflow-long-strings = true
 
 [comments]
 # google-java-format always reflows comments, Javadoc included, against the column limit.
@@ -44,3 +46,5 @@ order = "group"
 groups = ["static", "*"]
 static-first = true
 reorder-modifiers = true
+# `RemoveUnusedImports`: drop an import whose simple name appears nowhere else in the file.
+remove-unused = true

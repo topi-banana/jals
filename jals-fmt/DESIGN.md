@@ -887,7 +887,7 @@ call-arguments = "if-long-per-item"  # alignment_for_arguments_in_method_invocat
   | `braces.keep-*-on-one-line = preserve` | Eclipse `one_line_preserve` / IntelliJ `KEEP_SIMPLE_*_IN_ONE_LINE=true` | `if-single-item`（「1 行で書かれていたものは 1 行のまま」の構造的近似。`never` へ丸めるとその意図を持つ入力すべてが必ず食い違う） |
   | `wrapping.paren-* = preserve` | Eclipse `preserve_positions` | `common-lines` |
   | `wrapping.join-wrapped-lines = false` | Eclipse `join_wrapped_lines=false` / IntelliJ `KEEP_LINE_BREAKS=true` | 常に join（`true`） |
-  | `wrapping.wrap-long-lines = false` | IntelliJ `WRAP_LONG_LINES=false` | 常に wrap（`true`） |
+  | `wrapping.wrap-long-lines = true` | IntelliJ `WRAP_LONG_LINES=true` | `false`（既定）。break 点の無い行は折らない — Doc エンジンは発行された break しか取れない |
   | `comments.preserve-line-breaks = true` | IntelliJ `JD_PRESERVE_LINE_FEEDS` | 常に refill（`false`） |
 
   再検討の条件は §10 に 1 行だけ置いた。
@@ -976,24 +976,23 @@ CLAUDE.md は**ハード不変条件**として明記している:
 
 - **解消した半分（空白依存）**: whitespace-retaining モードを採らないので、冪等は**無条件に**成立し、
   レイアウトは入力空白の関数にならない（§17）。
-- **残る半分（トークン列）**: それでも次の 3 パスは**有意トークン列を変える**。しかも
-  **どれも text-normalization ではない** — 2 つは並べ替え、1 つは削除である。
+- **残る半分（トークン列）**: それでも次の 4 パスは**有意トークン列を変える**。しかも
+  **どれも text-normalization ではない** — 3 つは並べ替え / 再配置、1 つは削除である。
 
   | パス | 変更の種類 | gate |
   |---|---|---|
   | import 整列 (R0.1) | 並べ替え（多重集合保存） | `[imports] order` |
-  | 未使用 import 削除 (R0.2) | **削除**（部分集合） | `[imports]` の削除フラグ |
+  | 未使用 import 削除 (R0.2) | **削除**（部分集合） | `[imports] remove-unused` |
   | modifier 整列 (R0.3) | 並べ替え（多重集合保存） | `[imports] reorder-modifiers` |
-
-  さらに StringWrapper (R4.1) が長い文字列連結を再配置する（`+`/文字列片の多重集合は保存）。
+  | 長文字列再折り (R4.1) | 再配置（`+`/文字列片の多重集合は保存） | `[wrapping] reflow-long-strings` |
   **いずれも `gjf` プロファイルでは既定 on** であり、GJF のネイティブ挙動そのものである。
   加えて rule の非既定値が 2 つ: `[literals]`（綴りを変える）と `[braces] force-*`（`{` `}` を
   挿入する。**トークンが増える唯一の箇所**）。どちらも既定では発生しない。
 
 したがって「不変条件が今や満たされた」とは書けない。**ワークスペースの中核契約を編集する意思決定**
-であることは変わらず、利用者が明示的に判断すべき事項として残る。
+であり、下の改訂を**採用済み**である（4 パスすべてに config ゲートが付き、実装された時点で確定した）。
 
-**推奨する改訂（最小）**: 例外の限定子を "text-normalization rule" の一語から**列挙**へ置き換える。
+**採用した改訂（最小）**: 例外の限定子を "text-normalization rule" の一語から**列挙**へ置き換える。
 
 > *Formatting is idempotent. It preserves the significant token multiset except where an
 > explicitly configured rule applies: the four token-changing passes — import ordering,
@@ -1002,9 +1001,9 @@ CLAUDE.md は**ハード不変条件**として明記している:
 > forcing adds them.*
 
 「sequence（順序）」を「multiset（多重集合）」へ緩めたうえで、例外を「4 パス + `[literals]` +
-`[braces] force-*`」に固定する。現行文言の "text-normalization rule" は `[literals]` しか指していない
+`[braces] force-*`」に固定する。旧文言の "text-normalization rule" は `[literals]` しか指していない
 のに、実際に不変条件を破るのは主に 4 パスの方である、という食い違いを解く。
-**採否は実装着手前に確定すべき。**
+**この文言は `CLAUDE.md` の Invariants に反映済み。**
 
 ---
 

@@ -285,7 +285,14 @@ fn the_gjf_family_profile_is_the_google_preset() {
             method_chain: WrapPolicy::IfLongPerItem,
             case_labels: WrapPolicy::IfLong,
             tabular_array_initializers: true,
+            // `JavaFormatterOptions.reflowLongStrings` — google-java-format runs `StringWrapper`
+            // unless `--skip-reflowing-long-strings`.
+            reflow_long_strings: true,
             ..Wrapping::default()
         }
+    );
+    assert!(
+        config.imports.remove_unused,
+        "google-java-format runs RemoveUnusedImports by default",
     );
 }

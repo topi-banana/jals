@@ -1,24 +1,58 @@
 #![cfg_attr(not(test), no_std)]
-//! **WIP — the formatter is being rewritten from scratch.**
+//! A formatter for JALS/Java source, driven by the `jals-syntax` CST.
 //!
-//! The entire previous implementation (CST lowering, the `Doc` IR, rendering, comment
-//! attachment, and every configurable rule) has been removed. This crate is currently a
-//! no-op skeleton: it keeps the public entry point so its consumers keep compiling, but it
-//! performs **no formatting** at all.
+//! # One engine
 //!
-//! [`FormatOutput::format_source`] returns the input source **byte-for-byte unchanged**. It
-//! still parses the source so that syntax errors continue to surface as [`Warning`]s, but no
-//! layout, spacing, or normalization is applied. Configuration is accepted and ignored.
+//! `jals-fmt` has exactly **one layout engine**: a port of google-java-format's greedy,
+//! single-pass `computeBreaks` over a GJF-shaped [`Doc`](ir::Doc) IR. Every style target —
+//! google-java-format, Eclipse JDT, IntelliJ IDEA, Palantir — is reached by tuning
+//! [`Config`] on top of that engine, never by swapping engines. The four products really do have
+//! four mutually incompatible resolution algorithms; porting all of them was considered and
+//! rejected, and `DESIGN.md` §11 and §18 record both the decision and the differences it makes
+//! permanent. **Do not add an engine trait, a second renderer, or a Wadler/prettier `fits`.**
 //!
-//! The real implementation will be rebuilt here from the ground up.
+//! # The pipeline
+//!
+//! ```text
+//!   L0  passes    import ordering, unused-import removal, modifier ordering  (token order)
+//!   L2  visit     CST → Ops → Doc                                            (emission)
+//!   L1  engine    compute_breaks → write                                     (resolution)
+//!   L4  passes    long-string rewrapping, finalize                           (text)
+//! ```
+//!
+//! Emission is declarative and per-node; resolution is a single left-to-right fold. That split is
+//! why the ~50 syntax rules compose but the break algorithm cannot be decomposed.
+//!
+//! # Invariants
+//!
+//! - **Never panics, never loses input.** A node with no bespoke rule falls through to a generic
+//!   path that still emits all of its tokens; an `ERROR` node is emitted verbatim. If the output
+//!   fails [`TokenBudget`](passes::TokenBudget)'s check, the input is returned unchanged.
+//! - **Idempotent.** `format(format(x)) == format(x)`.
+//! - **Significant tokens are preserved as a multiset**, except for the four configured
+//!   token-changing passes — import ordering, unused-import removal, modifier ordering,
+//!   long-string rewrapping — plus the opt-in `[literals]` rewrites and `[braces] force-*`. Only
+//!   unused-import removal removes tokens; only brace forcing adds them. Every one of the six is
+//!   off (or `preserve`) in [`Config::default`].
+//! - **Comments are never dropped.** Each is anchored to exactly one token and emitted with it.
+//! - **Layout never reads input whitespace**, with one exception the engine shares with
+//!   google-java-format: whether two significant tokens had a blank line between them. Rules that
+//!   would read more are rounded to a canonical value and the rounding is reported as a
+//!   [`Warning`] (`DESIGN.md` §17).
 
 extern crate alloc;
 
+mod comments;
+mod engine;
 pub mod generate;
 pub mod import;
+mod ir;
+mod javadoc;
+mod ops;
 mod output;
-
-use alloc::borrow::ToOwned;
+mod passes;
+mod style;
+mod visit;
 
 use jals_config::fmt::Config;
 
@@ -27,17 +61,19 @@ pub use output::{FormatOutput, Warning};
 impl FormatOutput {
     /// Format `src` according to `config`.
     ///
-    /// **WIP no-op:** returns `src` unchanged, ignoring `config`. Only the parser's syntax
-    /// errors are surfaced as [`Warning`]s.
-    pub async fn format_source(src: &str, _config: &Config) -> Self {
+    /// Parsing is lossless and error-resilient, so a source with syntax errors is still formatted
+    /// best-effort and the errors come back as [`Warning`]s. Configuration diagnostics — a rule
+    /// rounded because it would have read input whitespace — arrive the same way, with no range.
+    pub async fn format_source(src: &str, config: &Config) -> Self {
+        let (style, mut warnings) = style::Style::reify(config, src);
+
         let parse = jals_syntax::Parse::parse(src).await;
-        let warnings = parse
-            .errors()
-            .iter()
-            .map(Warning::from_syntax_error)
-            .collect();
+        let errors = parse.errors().len();
+        warnings.extend(parse.errors().iter().map(Warning::from_syntax_error));
+
+        let formatted = visit::Formatter::run(&parse.syntax(), src, errors, &style).await;
         Self {
-            formatted: src.to_owned(),
+            formatted,
             warnings,
         }
     }

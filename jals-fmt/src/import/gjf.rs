@@ -64,13 +64,14 @@ pub struct GoogleJavaFormatConfig {
     pub format_javadoc: bool,
     /// `JavaFormatterOptions.reorderModifiers` — runs `ModifierOrderer`.
     pub reorder_modifiers: bool,
-    /// `JavaFormatterOptions.reflowLongStrings` — runs `StringWrapper`, which *adds* `+`
-    /// tokens, so it has no jals counterpart yet and is carried for fidelity only.
+    /// `JavaFormatterOptions.reflowLongStrings` — runs `StringWrapper`. Projects onto
+    /// `wrapping.reflow-long-strings`.
     pub reflow_long_strings: bool,
     /// `--skip-sorting-imports` inverted — runs `ImportOrderer`.
     pub sort_imports: bool,
-    /// `--skip-removing-unused-imports` inverted — runs `RemoveUnusedImports`. Semantic rather
-    /// than layout (it deletes declarations), so it too has no jals counterpart.
+    /// `--skip-removing-unused-imports` inverted — runs `RemoveUnusedImports`. Projects onto
+    /// `imports.remove-unused`, whose name test is syntactic — no classpath is consulted, so
+    /// it stays inside the portable crate.
     pub remove_unused_imports: bool,
 }
 
@@ -109,7 +110,8 @@ impl GoogleJavaFormatConfig {
     /// - comments are always reflowed (Javadoc only when `formatJavadoc`), and both
     ///   GJF-specific comment rewrites are on;
     /// - imports: a static block first, then everything else, one blank line between
-    ///   (Google Java Style §3.3.3);
+    ///   (Google Java Style §3.3.3), and an unused one deleted;
+    /// - `reflow-long-strings`: GJF's `StringWrapper` second pass;
     /// - literal rewrites stay `preserve`: GJF never rewrites a literal.
     pub(crate) fn family(
         indent_width: usize,
@@ -143,6 +145,7 @@ impl GoogleJavaFormatConfig {
                 paren_lambda: ParenPositions::CommonLines,
                 paren_record: ParenPositions::CommonLines,
                 tabular_array_initializers: true,
+                reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
             },
             comments: Comments {
@@ -166,6 +169,7 @@ impl GoogleJavaFormatConfig {
                 groups: vec!["static".to_owned(), "*".to_owned()],
                 static_first: true,
                 reorder_modifiers: native.reorder_modifiers,
+                remove_unused: native.remove_unused_imports,
             },
             ..Config::default()
         }

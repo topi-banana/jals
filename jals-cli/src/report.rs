@@ -121,11 +121,20 @@ impl Reporter {
         let _ = builder.finish().eprint(&mut *cache);
     }
 
-    /// Render every formatter warning (parser syntax errors) for one source through `ariadne`.
+    /// Render every formatter warning for one source.
+    ///
+    /// A warning with a range is a parser syntax error and gets an `ariadne` report pointing at
+    /// it. A warning without one is about the *configuration* — a rule that reads input
+    /// whitespace being rounded to the single engine's canonical value — so it has nothing to
+    /// point at and follows the CLI's plain `warning:` convention instead.
     pub(crate) fn report_format_warnings(label: &str, src: &str, out: &FormatOutput) {
         let use_color = Self::color_for(std::io::stderr().is_terminal());
         let mut cache = (label, Source::from(src));
         for w in &out.warnings {
+            let Some(range) = &w.range else {
+                eprintln!("warning: {}", w.message);
+                continue;
+            };
             Self::emit(
                 &mut cache,
                 label,
@@ -134,7 +143,7 @@ impl Reporter {
                 Color::Yellow,
                 None,
                 &w.message,
-                &w.range,
+                range,
                 use_color,
             );
         }
