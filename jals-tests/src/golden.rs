@@ -10,11 +10,13 @@
 //! unformatted source and `Foo.output` is what google-java-format produces from it.
 //! We format each `.input` and compare the result against the paired `.output`.
 //!
-//! jals cannot byte-match google-java-format on line wrapping yet — it has no
-//! separate continuation indent and uses a different (Wadler/Prettier) wrapping
-//! algorithm — so this reports a **similarity** metric (the mean line-level diff
-//! ratio, plus the count of exact matches) to track convergence as formatter
-//! options are added, rather than a hard pass/fail.
+//! `jals-fmt` runs a port of google-java-format's own greedy `computeBreaks`, so
+//! byte-matching it is the stated goal for the `gjf` profile (`DESIGN.md` §18.1's
+//! tier T1) rather than an impossibility. It is not reached yet, and a byte-equal
+//! rate alone would hide progress — one space of difference sinks a whole file —
+//! so this reports a **similarity** metric (the mean line-level diff ratio, plus
+//! the count of exact matches) to track convergence, rather than a hard
+//! pass/fail.
 
 use std::path::{Path, PathBuf};
 
@@ -248,9 +250,9 @@ mod tests {
         assert!(c.comments.normalize_parameter_comments);
         assert!(c.comments.inline_block_comments);
         assert!(c.wrapping.tabular_array_initializers);
-        // A chain that does not fit goes one call per line; a long `case` label list wraps.
+        // A chain that does not fit goes one call per line, and so does a long `case` label list.
         assert_eq!(c.wrapping.method_chain, WrapPolicy::IfLongPerItem);
-        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLong);
+        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLongPerItem);
         // google-java-format spaces the enhanced-`for` colon and never dangles a `)`.
         assert!(c.spacing.before_foreach_colon);
         assert_eq!(

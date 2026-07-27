@@ -546,7 +546,7 @@ rule の一般性とエンジン忠実度が衝突したら、**単一エンジ�
 ### 8.4 rustfmt 風オプションとの関係
 
 前段の考察は rustfmt 風の**設定可能**フォーマッタを志向していた。本書はその語彙を捨て
-（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・174 rule）に
+（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・176 rule）に
 置き換える。単一エンジン方針の下では、rule set はエンジンの上の薄い層であり、**エンジンが表現できない
 rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可能な 2 つのターゲットが食い違う」を課して
 いるのはそのため。列揃えのようにエンジンが表現できない概念は rule にせず、native モデル側に型付きで
@@ -638,7 +638,7 @@ IntelliJ IDEA / Palantir へ拡げ、**「エンジンを増やさずに rule �
    以上 import」の計数＝実 import 解決が要り、pure CST では不可。⇒ **恒久差分**（§18）。
 
 5. **jalsfmt.toml 自動生成は「共通語彙への射影」として行う。** 生成 toml は engine 多重化器ではなく、
-   `jals_config::fmt::Config`（8 節・174 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
+   `jals_config::fmt::Config`（8 節・176 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
    射影は**全単射ではない**（写せない native option は importer の native モデル側に型付きで残る）。
    写像の台帳が `MAPPING.md`、実装が `jals_fmt::import`。§15 が生成の流れと限界を扱う。
 
@@ -765,7 +765,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
         │  jals_fmt::import                              │
         └──────────────┬─────────────────────────────────┘
                        ▼
-        jals_config::fmt::Config  ── 8 節 / 174 rule（唯一の style 表面）
+        jals_config::fmt::Config  ── 8 節 / 176 rule（唯一の style 表面）
                        │  style::reify  ← 解決済みパラメータ束（§8 の seam S1–S4）
  ┌─────────────────────┼──────────────────────────────────────────────┐
  │ 単一パイプライン                                                    │
@@ -789,7 +789,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
 
 ## 15. jalsfmt.toml 自動生成
 
-**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・174 rule）であり、
+**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・176 rule）であり、
 engine 選択子も engine 固有 option の透過テーブルも持たない。生成例（Eclipse `.prefs` 由来）:
 
 ```toml
@@ -887,7 +887,7 @@ call-arguments = "if-long-per-item"  # alignment_for_arguments_in_method_invocat
   | `braces.keep-*-on-one-line = preserve` | Eclipse `one_line_preserve` / IntelliJ `KEEP_SIMPLE_*_IN_ONE_LINE=true` | `if-single-item`（「1 行で書かれていたものは 1 行のまま」の構造的近似。`never` へ丸めるとその意図を持つ入力すべてが必ず食い違う） |
   | `wrapping.paren-* = preserve` | Eclipse `preserve_positions` | `common-lines` |
   | `wrapping.join-wrapped-lines = false` | Eclipse `join_wrapped_lines=false` / IntelliJ `KEEP_LINE_BREAKS=true` | 常に join（`true`） |
-  | `wrapping.wrap-long-lines = false` | IntelliJ `WRAP_LONG_LINES=false` | 常に wrap（`true`） |
+  | `wrapping.wrap-long-lines = true` | IntelliJ `WRAP_LONG_LINES=true` | `false`（既定）。break 点の無い行は折らない — Doc エンジンは発行された break しか取れない |
   | `comments.preserve-line-breaks = true` | IntelliJ `JD_PRESERVE_LINE_FEEDS` | 常に refill（`false`） |
 
   再検討の条件は §10 に 1 行だけ置いた。
@@ -932,10 +932,14 @@ T1 の差分を消すためにエンジンへ特殊分岐を足すことはせ�
 | D6 | **wildcard 集約 / classpath 依存の import 操作** | IntelliJ `CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` ほか（§11 結論 4） | intellij |
 | D7 | **Javadoc / コメント整形の細部** — `comment.javadoc_paragraphs_tags_with_content`, `comment.new_lines_at_javadoc_boundaries` ほか | Eclipse `CommentsPreparator` / `CommentWrapExecutor` | eclipse |
 | D8 | **非対称な paren 位置** — lparen だけ / rparen だけ次行 | IntelliJ `*_LPAREN_ON_NEXT_LINE` と `*_RPAREN_ON_NEXT_LINE` の非対称組合せ（`MAPPING.md` §5.4） | intellij |
+| D10 | **import 削除が残す空行** — `import` を 1 つも残さず削除した block の跡に、GJF は空行が 2 本残る（block の前後の空行が隣接するため）。jals は 1 本に正規化する | GJF は `RemoveUnusedImports` / `ImportOrderer` / `StringWrapper` を **レイアウトの後**にテキストパスとして走らせる（`FormatFileCallable.call`）。GJF 自身もこの出力は冪等でなく、2 回目で 1 本に潰れる | gjf |
+| D9 | **`spacing.after-case-colon` が到達不能** — colon 形 `case` ラベルの `:` の後でエンジンは常に折るため、`:` と同じ行に続くものが存在しない | 単一エンジンの colon 形 switch レイアウト | eclipse |
 
 D1–D4 は**解決アルゴリズムの違い**なので rule では埋まらない。D5 は §17 の方針で意図的に採らない。
 D6 は pure CST の外。D7 は Javadoc 整形器の忠実度の問題で、rule を足せば縮むが完全一致はしない。
-D8 は共通語彙の粒度の問題（native モデルには両 bool が残る）。
+D8 は共通語彙の粒度の問題（native モデルには両 bool が残る）。D10 は**パス順序の違い**で、再現するには「整形は冪等」（`CLAUDE.md` / §16）を捨てるしかないので採らない。D9 は rule 側ではなくエンジンの
+レイアウトが原因で、`jals-fmt/tests/coverage.rs` の `UNREACHABLE` に理由つきで列挙されている
+（そこに載る rule だけが「出力が動かなくてよい」唯一の例外である）。
 
 ### 18.3 byte 一致が本当に必要な場合
 
@@ -976,24 +980,23 @@ CLAUDE.md は**ハード不変条件**として明記している:
 
 - **解消した半分（空白依存）**: whitespace-retaining モードを採らないので、冪等は**無条件に**成立し、
   レイアウトは入力空白の関数にならない（§17）。
-- **残る半分（トークン列）**: それでも次の 3 パスは**有意トークン列を変える**。しかも
-  **どれも text-normalization ではない** — 2 つは並べ替え、1 つは削除である。
+- **残る半分（トークン列）**: それでも次の 4 パスは**有意トークン列を変える**。しかも
+  **どれも text-normalization ではない** — 3 つは並べ替え / 再配置、1 つは削除である。
 
   | パス | 変更の種類 | gate |
   |---|---|---|
   | import 整列 (R0.1) | 並べ替え（多重集合保存） | `[imports] order` |
-  | 未使用 import 削除 (R0.2) | **削除**（部分集合） | `[imports]` の削除フラグ |
+  | 未使用 import 削除 (R0.2) | **削除**（部分集合） | `[imports] remove-unused` |
   | modifier 整列 (R0.3) | 並べ替え（多重集合保存） | `[imports] reorder-modifiers` |
-
-  さらに StringWrapper (R4.1) が長い文字列連結を再配置する（`+`/文字列片の多重集合は保存）。
+  | 長文字列再折り (R4.1) | 再配置（`+`/文字列片の多重集合は保存） | `[wrapping] reflow-long-strings` |
   **いずれも `gjf` プロファイルでは既定 on** であり、GJF のネイティブ挙動そのものである。
   加えて rule の非既定値が 2 つ: `[literals]`（綴りを変える）と `[braces] force-*`（`{` `}` を
   挿入する。**トークンが増える唯一の箇所**）。どちらも既定では発生しない。
 
 したがって「不変条件が今や満たされた」とは書けない。**ワークスペースの中核契約を編集する意思決定**
-であることは変わらず、利用者が明示的に判断すべき事項として残る。
+であり、下の改訂を**採用済み**である（4 パスすべてに config ゲートが付き、実装された時点で確定した）。
 
-**推奨する改訂（最小）**: 例外の限定子を "text-normalization rule" の一語から**列挙**へ置き換える。
+**採用した改訂（最小）**: 例外の限定子を "text-normalization rule" の一語から**列挙**へ置き換える。
 
 > *Formatting is idempotent. It preserves the significant token multiset except where an
 > explicitly configured rule applies: the four token-changing passes — import ordering,
@@ -1002,9 +1005,9 @@ CLAUDE.md は**ハード不変条件**として明記している:
 > forcing adds them.*
 
 「sequence（順序）」を「multiset（多重集合）」へ緩めたうえで、例外を「4 パス + `[literals]` +
-`[braces] force-*`」に固定する。現行文言の "text-normalization rule" は `[literals]` しか指していない
+`[braces] force-*`」に固定する。旧文言の "text-normalization rule" は `[literals]` しか指していない
 のに、実際に不変条件を破るのは主に 4 パスの方である、という食い違いを解く。
-**採否は実装着手前に確定すべき。**
+**この文言は `CLAUDE.md` の Invariants に反映済み。**
 
 ---
 

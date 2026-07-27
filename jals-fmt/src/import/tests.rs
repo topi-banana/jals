@@ -69,8 +69,10 @@ fn skipping_a_google_java_format_pass_shows_up_in_the_config() {
     .into();
 
     assert!(!config.comments.format_javadoc);
-    // Other comment reflow is unconditional in GJF.
-    assert!(config.comments.format_block);
+    // `--skip-javadoc-formatting` reaches only Javadoc. Line comments are still rewrapped, and
+    // block comments are still left alone — `JavaCommentsHelper` never refills one.
+    assert!(config.comments.format_line);
+    assert!(!config.comments.format_block);
     assert_eq!(config.imports.order, ImportOrder::Preserve);
     // `reorderModifiers` is independent of the import passes.
     assert!(config.imports.reorder_modifiers);
@@ -269,7 +271,6 @@ fn the_gjf_family_profile_is_the_google_preset() {
         config.comments,
         Comments {
             format_line: true,
-            format_block: true,
             format_javadoc: true,
             format_header: true,
             width: 100,
@@ -283,9 +284,48 @@ fn the_gjf_family_profile_is_the_google_preset() {
         config.wrapping,
         Wrapping {
             method_chain: WrapPolicy::IfLongPerItem,
-            case_labels: WrapPolicy::IfLong,
+            // `visitConditionalExpression` — `?` and `:` break together.
+            ternary: WrapPolicy::IfLongPerItem,
+            // `visitFormals` separates parameters with a UNIFIED break, so a parameter list that
+            // does not fit goes one per line. An *argument* list is the fill.
+            method_parameters: WrapPolicy::IfLongPerItem,
+            case_labels: WrapPolicy::IfLongPerItem,
+            // `visitEnumDeclaration` forces a break between constants, and `visitTry` between
+            // resources.
+            enum_constants: WrapPolicy::AlwaysPerItem,
+            resource_list: WrapPolicy::AlwaysPerItem,
+            // `classDeclarationTypeList`, `visitThrowsClause`, `visitParameterizedType`, and
+            // `visitAnnotation` also break all-or-nothing.
+            type_arguments: WrapPolicy::IfLongPerItem,
+            type_parameters: WrapPolicy::IfLongPerItem,
+            deconstruction_list: WrapPolicy::IfLongPerItem,
+            multi_catch_types: WrapPolicy::IfLongPerItem,
+            for_statement: WrapPolicy::IfLongPerItem,
+            annotation_arguments: WrapPolicy::IfLongPerItem,
+            extends_list: WrapPolicy::IfLongPerItem,
+            throws_list: WrapPolicy::IfLongPerItem,
             tabular_array_initializers: true,
+            // `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING` — an argument list fills only
+            // while every argument is under 10 source columns.
+            fill_item_width: 10,
+            // `isFormatMethod` — a leading format string takes its own line.
+            format_string_arguments: true,
+            // `fieldAnnotationDirection` asks the same question of every variable.
+            parameter_annotations: WrapPolicy::AlwaysPerItem,
+            variable_annotations: WrapPolicy::AlwaysPerItem,
+            // `visitLabeledStatement` — a forced break after the label's `:`.
+            labeled_statement: WrapPolicy::AlwaysPerItem,
+            // `fieldAnnotationDirection` — a variable's annotations stay on its line unless one
+            // of them takes arguments.
+            inline_argumentless_annotations: true,
+            // `JavaFormatterOptions.reflowLongStrings` — google-java-format runs `StringWrapper`
+            // unless `--skip-reflowing-long-strings`.
+            reflow_long_strings: true,
             ..Wrapping::default()
         }
+    );
+    assert!(
+        config.imports.remove_unused,
+        "google-java-format runs RemoveUnusedImports by default",
     );
 }

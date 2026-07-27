@@ -40,8 +40,11 @@ pub enum LineEnding {
 
 impl LineEnding {
     /// Resolve to a concrete terminator, consulting `src` for [`Auto`](Self::Auto).
+    ///
+    /// Crate-internal: [`Layout::newline`] is the accessor consumers reach for, so a caller never
+    /// has to pair the enum with the source text itself.
     #[must_use]
-    pub fn resolve(self, src: &str) -> &'static str {
+    pub(crate) fn resolve(self, src: &str) -> &'static str {
         match self {
             Self::Lf => "\n",
             Self::Crlf => "\r\n",
