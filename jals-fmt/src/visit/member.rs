@@ -446,9 +446,21 @@ impl Ctx<'_> {
     /// parameter list and the `throws` clause each carry the continuation indent on their own
     /// break.
     pub(super) async fn visit_method(&mut self, node: &SyntaxNode) {
+        // The modifiers go outside the header level, for the reason `visit_type_decl` gives: a
+        // forced break between a vertical annotation run and the declaration would otherwise make
+        // the header unable to fit whatever it says.
+        if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
+            self.visit(&modifiers).await;
+        }
         self.open_flat(Indent::ZERO);
         let mut header_open = true;
         for child in Self::children(node) {
+            if child
+                .as_node()
+                .is_some_and(|node| node.kind() == S::MODIFIERS)
+            {
+                continue;
+            }
             let is_body = child
                 .as_node()
                 .is_some_and(|child| child.kind() == S::BLOCK);

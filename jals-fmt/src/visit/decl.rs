@@ -22,11 +22,24 @@ impl Ctx<'_> {
         } else {
             S::CLASS_BODY
         };
+        // The modifiers go *outside* the header level, as `typeDeclarationModifiers` puts them:
+        // a vertical annotation run breaks between the annotations and the declaration, and a
+        // forced break inside the header would make the header unable to fit whatever it says —
+        // breaking `extends` and `implements` on a line that had room for them.
+        if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
+            self.visit(&modifiers).await;
+        }
         // The header groups without indenting: the pieces that can actually break — the
         // `extends` / `implements` clauses and the type-parameter list — carry the continuation
         // indent on their own break, so adding it here too would double it.
         self.open_flat(Indent::ZERO);
         for child in Self::children(node) {
+            if child
+                .as_node()
+                .is_some_and(|node| node.kind() == S::MODIFIERS)
+            {
+                continue;
+            }
             if child.as_node().is_some_and(|node| node.kind() == body_kind) {
                 self.close();
                 self.brace_before(self.style.cfg.braces.type_declaration);
