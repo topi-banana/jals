@@ -35,7 +35,7 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
   then projected into verified source/classpath artifacts without mutating dependency trees.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-storage`, `jals-config`) are `no_std` and build for
+  `jals-decompile`, `jals-javac`, `jals-storage`, `jals-config`) are `no_std` and build for
   `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
   `jals-build`'s Rhai runner do too (host I/O sits behind `native` features). The browser playground
   therefore runs the same analysis, project-graph, and build-script stack client-side.
@@ -53,6 +53,7 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 | [`jals-hir`](jals-hir)               | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath.                                                                                                                                                                                                         |
 | [`jals-classfile`](jals-classfile)   | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4).                                                                                                                                                                                                                                                                                                                               |
 | [`jals-decompile`](jals-decompile)   | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode.                                                                                                                                                                                                                                |
+| [`jals-javac`](jals-javac)           | The compiler: Java source to executable code. Emits one JVM class file per declared type, or one WebAssembly module for a whole project with the host's garbage collector managing every object. It never checks — diagnostics are `jals-lint`'s job — but it does resolve, because emitting one `invokevirtual` needs the selected overload and its descriptor.                                                       |
 | [`jals-classpath`](jals-classpath)   | Resolves and loads project bytes and verified classpath artifacts (local/remote and bundled/nested jars) for `jals-hir`, the linter, and the LSP; falls back to decompiled `.java` skeletons when a dependency ships no sources.                                                                                                                                                                                    |
 | [`jals-config`](jals-config)         | The pure data model, parsing, discovery, and validation for all three config files (`jals.toml`, `jalsfmt.toml`, `jalslint.toml`).                                                                                                                                                                                                                                                                                  |
 | [`jals-exec`](jals-exec)             | The unified current-thread execution context for native, browser, and inline hosts, including deterministic worker fan-out and runtime-free cooperative yielding.                                                                                                                                                                                                                                                   |
@@ -76,6 +77,7 @@ jals/
 ├── jals-hir/         # name resolution + type inference         (no_std, wasm-compatible)
 ├── jals-classfile/   # JVM .class read/write model              (no_std, wasm-compatible)
 ├── jals-decompile/   # .class -> readable Java                  (no_std, wasm-compatible)
+├── jals-javac/       # Java -> .class / WasmGC compiler         (no_std, wasm-compatible)
 ├── jals-classpath/   # classpath + dependency resolution        (no_std + wasm-compatible core)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (no_std, wasm-compatible)
 ├── jals-exec/        # current-thread execution + worker fan-out (no_std, wasm-compatible)
@@ -553,7 +555,7 @@ cargo check -p jals-project --all-features                    # native path/Git 
 # wasm: the pure `no_std` crate set (built as one package set so their `std` features stay off) …
 cargo build --release --target wasm32-unknown-unknown \
   -p jals-editor -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
-  -p jals-fmt -p jals-lint -p jals-storage -p jals-config
+  -p jals-javac -p jals-fmt -p jals-lint -p jals-storage -p jals-config
 # … plus jals-classpath's wasm-compatible core (host I/O is behind its default `native` feature)
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 # The portable in-memory project graph includes dependency-script preparation and artifact projection
@@ -587,8 +589,8 @@ for any change to the syntax or formatting layers:
 - The formatter preserves the significant-token sequence, never drops or reorders comments,
   and is idempotent.
 - `jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-storage`, and `jals-config` build for `wasm32-unknown-unknown` as
-  `no_std` crates;
+  `jals-decompile`, `jals-javac`, `jals-storage`, and `jals-config` build for
+  `wasm32-unknown-unknown` as `no_std` crates;
   `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`), as does
   `jals-build` with its portable `rhai` feature and `jals-project`'s in-memory graph.
 

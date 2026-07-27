@@ -2,9 +2,13 @@
 //! `jals-javac`: Java source to executable code.
 //!
 //! The compiler proper. It takes the shared CST plus the semantic index and emits either JVM class
-//! files (one per declared type) or a single WebAssembly module for a whole project. Both targets
-//! are reached from one typed intermediate representation, so control flow, name binding, and
-//! constant handling are decided once.
+//! files (one per declared type) or a single WebAssembly module for a whole project.
+//!
+//! Both targets read the same front end — the CST and [`jals_hir`]'s resolution — but there is no
+//! compiler IR between it and them, and the two lowerings are separate on purpose. The JVM's
+//! control flow is a `goto` stream and wasm's is structured (`block` / `loop` / `br`), so sharing
+//! one lowering would mean recovering the tree shape the tree already has. An IR earns its place
+//! where the targets agree; so far they mostly do not.
 //!
 //! # It does not check
 //!

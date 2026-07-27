@@ -86,7 +86,10 @@ filesystem reads into portable interfaces.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
   `FileKey`, and source/config invalidation follows storage revisions.
 - `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
-  environment variables, and classpath separators stay in native/host code.
+  environment variables, and classpath separators stay in native/host code. `[build] backend`
+  selects what compiles the lowered tree: `javac` (a host process), `jals` (in-process, one class
+  file per type), or `jals-wasm` (in-process, one WebAssembly module). Only the `javac` adapter is
+  host-gated — `JalsBackend` is portable, and builds for `wasm32` like the contract it implements.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
@@ -95,6 +98,20 @@ filesystem reads into portable interfaces.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`.
 - `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
   artifacts.
+- `jals-javac`: the compiler. Java source to executable code, for two targets off one front end
+  (the CST plus `jals-hir`'s resolution, with no compiler IR between): JVM class files per declared
+  type, and a single WasmGC module for a whole project. The two lowerings are separate because the
+  JVM's control flow is a `goto` stream and wasm's is structured, so the wasm side lowers from the
+  syntax tree and needs no relooper. It **never checks** — diagnostics are `jals-lint`'s job over
+  `jals-hir` — but it does *resolve*, because emitting one `invokevirtual` needs the selected
+  overload, its descriptor, and whether the owner is a class or an interface. Library signatures
+  come from `jals-hir`'s embedded stubs, not from a host `ct.sym`, so the crate stays portable; a
+  dev-only oracle checks those stubs against a real JDK. `jvm::Assembler` owns the derivations
+  `jals-classfile` deliberately refuses (that crate keeps branch offsets verbatim): label
+  resolution with the widening fixpoint, `max_stack`/`max_locals`, and the `StackMapTable`, which
+  is emitted as `full_frame` only. On the wasm side the host's collector owns every object —
+  `struct.new_default`, declared subtyping, no `memory` section, and no allocator or collector of
+  its own. Portable and featureless; no host filesystem APIs.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
   domain crates; do not add host filesystem APIs. `jals-fmt` is **WIP** — its implementation was
   removed for a from-scratch rewrite and it is currently a no-op that returns its input unchanged
@@ -163,10 +180,12 @@ cargo check -p jals-project --no-default-features
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features
 cargo check -p jals-frontend
+cargo check -p jals-javac --no-default-features
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --features archive --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
+cargo check -p jals-javac --no-default-features --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
