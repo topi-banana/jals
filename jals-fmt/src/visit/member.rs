@@ -706,7 +706,11 @@ impl Ctx<'_> {
             if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
                 self.visit(&modifiers).await;
             }
+            // `declareOne`'s second level: the type, the name, and anything after them indent
+            // together, one step in from the annotations that introduced them.
+            self.open(continuation.clone());
             self.emit_declarators(node).await;
+            self.close_indent(&continuation);
         }
         if annotated {
             self.close_indent(&continuation);

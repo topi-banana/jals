@@ -107,14 +107,23 @@ impl Ctx<'_> {
         // A *trailing* run of well-known type annotations annotates the type that follows, not
         // the declaration, so it stays on the type's line however the declaration's own
         // annotations are placed — `splitModifiers`.
-        let types_start = children
-            .iter()
-            .rposition(|child| {
-                !child
-                    .as_node()
-                    .is_some_and(|node| self.is_type_annotation(node))
-            })
-            .map_or(0, |at| at + 1);
+        // A declaration with no type of its own — a constructor — has nothing for a type
+        // annotation to annotate, so `visitMethod` sends the whole run vertical instead.
+        let typed = node
+            .parent()
+            .is_some_and(|owner| owner.children().any(|child| child.kind() == S::TYPE));
+        let types_start = if typed {
+            children
+                .iter()
+                .rposition(|child| {
+                    !child
+                        .as_node()
+                        .is_some_and(|node| self.is_type_annotation(node))
+                })
+                .map_or(0, |at| at + 1)
+        } else {
+            children.len()
+        };
 
         let mut leading_run = true;
         let mut previous_annotation = false;
