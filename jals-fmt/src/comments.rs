@@ -236,8 +236,9 @@ impl CommentMap {
         match tok.kind() {
             SyntaxKind::LINE_COMMENT => (tok.text().trim_end().into(), false),
             SyntaxKind::BLOCK_COMMENT => {
-                ParameterComment::normalize(tok.text(), normalize_parameter_comments)
-                    .map_or_else(|| (tok.text().into(), false), |text| (text, true))
+                let text = ParameterComment::normalize(tok.text(), normalize_parameter_comments)
+                    .unwrap_or_else(|| tok.text().into());
+                (text, ParameterComment::labels_an_argument(tok.text()))
             }
             _ => (tok.text().into(), false),
         }
@@ -362,6 +363,28 @@ impl ParameterComment {
         out.push_str(name);
         out.push_str("= */");
         Some(out)
+    }
+
+    /// Whether `text` labels an argument at all.
+    ///
+    /// google-java-format asks this with a *looser* pattern than the one it rewrites by
+    /// (`JavaInput.isParamComment` against `CommentsHelper.PARAMETER_COMMENT`): `/*foo-bar=*/`
+    /// hugs the value it labels but is left spelled as the author wrote it, because `foo-bar` is
+    /// not a parameter name.
+    fn labels_an_argument(text: &str) -> bool {
+        let Some(body) = text
+            .strip_prefix("/*")
+            .and_then(|body| body.strip_suffix("*/"))
+        else {
+            return false;
+        };
+        let Some(name) = body.strip_suffix('=').map(str::trim_end) else {
+            return false;
+        };
+        !name.trim().is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || c == '_' || c == '-')
     }
 
     /// Whether `name` is a plain Java identifier — the label has to name a parameter, and
