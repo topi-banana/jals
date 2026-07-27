@@ -401,7 +401,7 @@ impl CommentFormatter {
     /// Whether a token opens a list item.
     fn is_item_tag(text: &str) -> bool {
         let lower = text.to_ascii_lowercase();
-        ["<li", "<dt", "<dd"]
+        ["<li", "<dt", "<dd", "<a "]
             .iter()
             .any(|tag| lower.starts_with(tag))
     }
@@ -550,8 +550,8 @@ impl CommentFormatter {
             if !cfg.format_source_in_comments && Self::opens_fence(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
-                // region they open.
-                if !matches!(blocks.last(), Some(Block::Blank) | None) {
+                // region they open — but not inside a list, which holds none.
+                if depth == 0 && !matches!(blocks.last(), Some(Block::Blank) | None) {
                     blocks.push(Block::Blank);
                 }
                 let lines = alloc::vec![String::from(line)];
