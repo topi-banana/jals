@@ -115,8 +115,15 @@ impl Ctx<'_> {
                 }
                 _ => {}
             }
-            if child.as_node().is_some() {
+            if let Some(argument) = child.as_node() {
                 if seen.is_multiple_of(2) {
+                    // A comment above the row belongs to the row, not to its first cell: emitted
+                    // inside the pair's level its forced break would split the pair.
+                    if let Some(first) = Self::first_token(argument)
+                        && self.hoist_comments_before(&first)
+                    {
+                        self.forced_break(Indent::ZERO);
+                    }
                     self.open(continuation.clone());
                     pair = true;
                 }
