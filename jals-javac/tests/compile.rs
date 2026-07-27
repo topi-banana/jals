@@ -12,13 +12,20 @@ use jals_javac::lower::{Compile, CompiledClass, LowerError};
 /// Java 25, matching the class files the rest of the workspace pins its fixtures to.
 const MAJOR_JAVA_25: u16 = 69;
 
+/// Whether a JVM is on this host. A missing one stands the test down — loudly, because the JVM is
+/// the only authority on whether an emitted class file is correct, and a quiet stand-down reads as
+/// a pass.
 fn java_available() -> bool {
-    Command::new("java")
+    let present = Command::new("java")
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .is_ok_and(|status| status.success());
+    if !present {
+        eprintln!("note: no `java` on this host; this test is checking less than it looks like");
+    }
+    present
 }
 
 /// Compile `source` as a one-file project, with the embedded stdlib stubs available.

@@ -11,13 +11,20 @@ use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
 use jals_javac::wasm::{CompileWasm, WasmError, WasmInput};
 use jals_syntax::SyntaxNode;
 
+/// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
+/// so the tests that need one stand down — but they say so. A silent stand-down reads as "passed",
+/// and the defects these tests exist to catch are exactly the ones only an engine sees.
 fn tool(name: &str) -> bool {
-    Command::new(name)
+    let present = Command::new(name)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .is_ok_and(|status| status.success());
+    if !present {
+        eprintln!("note: `{name}` is not installed; this test is checking less than it looks like");
+    }
+    present
 }
 
 /// Compile every source as one module — which is what "the whole project" means for a target with

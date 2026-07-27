@@ -134,10 +134,15 @@ fn field_signatures(class: &ClassFile) -> BTreeSet<String> {
 /// from it verbatim.
 #[test]
 fn every_stdlib_stub_member_exists_in_the_real_jdk() {
+    // A missing JDK stands the test down. It says so: this is the *only* check that the embedded
+    // stubs match the signatures a real JVM will link against, and a signature that drifted would
+    // otherwise surface as a `NoSuchMethodError` at run time rather than here.
     let Some((home, version)) = jdk() else {
+        eprintln!("note: no JDK on this host; the stdlib stubs went unchecked");
         return;
     };
     let Some(release) = release_letter(version) else {
+        eprintln!("note: JDK {version} has no `ct.sym` release letter; the stubs went unchecked");
         return;
     };
     let jdk_classes = jdk_classes(&home, release);

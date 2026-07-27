@@ -20,13 +20,20 @@ const MAJOR_JAVA_25: u16 = 69;
 const PRINT_STREAM: &str = "java/io/PrintStream";
 const SYSTEM_OUT: &str = "Ljava/io/PrintStream;";
 
+/// Whether a JVM is on this host. A missing one stands the test down — loudly, because the JVM is
+/// the only authority on whether an emitted class file verifies, and a quiet stand-down reads as a
+/// pass.
 fn java_available() -> bool {
-    Command::new("java")
+    let present = Command::new("java")
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .is_ok_and(|status| status.success());
+    if !present {
+        eprintln!("note: no `java` on this host; this test is checking less than it looks like");
+    }
+    present
 }
 
 /// A public class named `name` extending `Object`, with a default constructor and `main`.
