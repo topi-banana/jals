@@ -153,9 +153,10 @@ pub(crate) struct Ctx<'a> {
     /// first item of a file but its header comment, so the blank lines it wants fall between the
     /// two.
     owed_after_comments: usize,
-    /// The indent the next argument list opens at, when a method chain decides it rather than the
-    /// list itself — `addArguments`' `plusIndent` parameter.
-    arg_indent: Option<Indent>,
+    /// The indent the next delimited list opens at, when the construct that owns it decides
+    /// rather than the list itself — `addArguments`' `plusIndent` parameter, and a declaration
+    /// header whose own level already took the step.
+    list_indent: Option<Indent>,
     /// How many comments were emitted, checked against the map in debug builds.
     emitted_comments: usize,
     /// Amortized cooperative yielding across the walk.
@@ -193,7 +194,7 @@ impl<'a> Ctx<'a> {
             header_seen: false,
             hoisted: BTreeSet::new(),
             owed_after_comments: 0,
-            arg_indent: None,
+            list_indent: None,
             emitted_comments: 0,
             yielder: Yielder::new(),
         }

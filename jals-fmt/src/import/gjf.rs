@@ -151,6 +151,8 @@ impl GoogleJavaFormatConfig {
                 // `classDeclarationTypeList` and `visitThrowsClause` separate their types with
                 // `breakOp(" ")`, which is UNIFIED: a clause that does not fit goes one type per
                 // line rather than packing.
+                // `visitParameterizedType` separates type arguments with UNIFIED breaks too.
+                type_arguments: WrapPolicy::IfLongPerItem,
                 extends_list: WrapPolicy::IfLongPerItem,
                 throws_list: WrapPolicy::IfLongPerItem,
                 // `visitEnumDeclaration` forces a break between constants, and `visitTry`

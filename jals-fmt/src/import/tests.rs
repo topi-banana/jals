@@ -294,7 +294,9 @@ fn the_gjf_family_profile_is_the_google_preset() {
             // resources.
             enum_constants: WrapPolicy::AlwaysPerItem,
             resource_list: WrapPolicy::AlwaysPerItem,
-            // `classDeclarationTypeList` and `visitThrowsClause` also break all-or-nothing.
+            // `classDeclarationTypeList`, `visitThrowsClause`, and `visitParameterizedType` also
+            // break all-or-nothing.
+            type_arguments: WrapPolicy::IfLongPerItem,
             extends_list: WrapPolicy::IfLongPerItem,
             throws_list: WrapPolicy::IfLongPerItem,
             tabular_array_initializers: true,

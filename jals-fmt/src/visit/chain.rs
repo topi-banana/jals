@@ -446,11 +446,11 @@ impl Ctx<'_> {
             Indent::when_broken(tag, continuation, Indent::ZERO)
         });
         self.open_flat(outer);
-        self.arg_indent = Some(args_indent);
+        self.list_indent = Some(args_indent);
         for element in &link.args {
             self.visit_element(element).await;
         }
-        self.arg_indent = None;
+        self.list_indent = None;
         self.close();
     }
 

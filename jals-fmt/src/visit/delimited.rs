@@ -192,12 +192,12 @@ impl Ctx<'_> {
             .iter()
             .all(|child| child.as_token().is_some_and(|tok| tok.kind() == S::COMMA));
 
-        // A method chain decides where its arguments indent from, because the answer depends on
-        // whether the dot before the name broke — `addArguments`' `plusIndent` parameter.
+        // The construct that owns a list may decide where it indents from: a method chain, because
+        // the answer depends on whether the dot before the name broke (`addArguments`' `plusIndent`
+        // parameter), and a declaration header, because the header level already took the step.
         let continuation = self
-            .arg_indent
+            .list_indent
             .take()
-            .filter(|_| node.kind() == S::ARG_LIST)
             .unwrap_or_else(|| self.style.continuation());
         // A tag lets the closing delimiter follow the opening one's decision, which is what
         // `separate-lines-if-wrapped` means.

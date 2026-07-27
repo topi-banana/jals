@@ -470,13 +470,79 @@ impl Ctx<'_> {
         if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
             self.visit(&modifiers).await;
         }
+        // The header is one level at the continuation indent, which is `visitMethod`'s
+        // `builder.open(plusFour)`: everything that can break inside a method header — the return
+        // type, the name, the parameters, the `throws` clause — breaks one step in from the
+        // declaration. The parameter list therefore adds nothing of its own (`visitFormals` opens
+        // `ZERO`), or its parameters would land two steps in.
+        let continuation = self.style.continuation();
+        self.open(continuation.clone());
+
+        // Two correlated decisions, exactly `visitMethod`'s two `BreakTag`s: whether the return
+        // type moved onto a line of its own, and whether the name did. Each, when taken, indents
+        // everything after the name — the parameters, the `throws` clause — one step further, so
+        // a signature that wrapped at its type reads as one construct rather than as two columns.
+        let type_tag = self.ops.new_tag();
+        let name_tag = self.ops.new_tag();
+        let children = Self::children(node);
+        let name_at = children.iter().position(|child| {
+            child
+                .as_token()
+                .is_some_and(|tok| matches!(tok.kind(), S::IDENT | S::UNDERSCORE))
+        });
+        let type_at = children
+            .iter()
+            .position(|child| child.as_node().is_some_and(|child| child.kind() == S::TYPE));
+
         self.open_flat(Indent::ZERO);
+        let mut scoped = false;
         let mut header_open = true;
-        for child in Self::children(node) {
+        let mut written = false;
+        for (nth, child) in children.iter().enumerate() {
             if child
                 .as_node()
                 .is_some_and(|node| node.kind() == S::MODIFIERS)
             {
+                continue;
+            }
+            if Some(nth) == type_at {
+                if written {
+                    self.tagged_break(type_tag);
+                }
+                self.open(Indent::when_broken(
+                    type_tag,
+                    continuation.clone(),
+                    Indent::ZERO,
+                ));
+                scoped = true;
+                self.visit_element(child).await;
+                written = true;
+                continue;
+            }
+            if Some(nth) == name_at {
+                if written {
+                    self.tagged_break(name_tag);
+                }
+                self.visit_element(child).await;
+                // The name closes the type's scope and the group the header opened with; what
+                // follows hangs off the two tags instead.
+                if scoped {
+                    self.close();
+                    scoped = false;
+                }
+                self.close();
+                self.open(Indent::when_broken(
+                    name_tag,
+                    continuation.clone(),
+                    Indent::ZERO,
+                ));
+                self.open(Indent::when_broken(
+                    type_tag,
+                    continuation.clone(),
+                    Indent::ZERO,
+                ));
+                self.open_flat(Indent::ZERO);
+                written = true;
                 continue;
             }
             let is_body = child
@@ -484,14 +550,45 @@ impl Ctx<'_> {
                 .is_some_and(|child| child.kind() == S::BLOCK);
             if is_body && header_open {
                 header_open = false;
+                if scoped {
+                    self.close();
+                    scoped = false;
+                }
                 self.close();
+                if name_at.is_some() {
+                    self.close();
+                    self.close();
+                }
+                self.close_indent(&continuation);
                 self.brace_before(self.style.cfg.braces.method_declaration);
             }
-            self.visit_element(&child).await;
+            if child
+                .as_node()
+                .is_some_and(|child| matches!(child.kind(), S::PARAM_LIST | S::RECORD_HEADER))
+            {
+                self.list_indent = Some(Indent::ZERO);
+            }
+            self.visit_element(child).await;
+            written = true;
         }
         if header_open {
+            if scoped {
+                self.close();
+            }
             self.close();
+            if name_at.is_some() {
+                self.close();
+                self.close();
+            }
+            self.close_indent(&continuation);
         }
+    }
+
+    /// An `independent` break that records its decision, so a level after it can indent from it.
+    fn tagged_break(&mut self, tag: crate::ir::BreakTag) {
+        self.ops
+            .brk(FillMode::Independent, " ", Indent::ZERO, Some(tag));
+        self.space_already_emitted();
     }
 
     /// An instance or `static` initializer block.
@@ -514,13 +611,18 @@ impl Ctx<'_> {
         // An array initializer is the exception: it is block-shaped and cancels the continuation
         // indent, so it stays where the declaration put it.
         let children = Self::children(node);
-        let array = children
-            .iter()
-            .any(|child| child.as_node().is_some_and(|value| value.kind() == S::ARRAY_INIT));
+        let array = children.iter().any(|child| {
+            child
+                .as_node()
+                .is_some_and(|value| value.kind() == S::ARRAY_INIT)
+        });
         let continuation = self.style.continuation();
         let mut opened = false;
         for child in &children {
-            if child.as_token().is_some_and(|tok| tok.kind() == S::DEFAULT_KW) {
+            if child
+                .as_token()
+                .is_some_and(|tok| tok.kind() == S::DEFAULT_KW)
+            {
                 self.space();
                 self.visit_element(child).await;
                 if array {
@@ -528,8 +630,7 @@ impl Ctx<'_> {
                 } else {
                     self.open(continuation.clone());
                     opened = true;
-                    self.ops
-                        .brk(FillMode::Independent, " ", Indent::ZERO, None);
+                    self.ops.brk(FillMode::Independent, " ", Indent::ZERO, None);
                     self.space_already_emitted();
                 }
                 continue;

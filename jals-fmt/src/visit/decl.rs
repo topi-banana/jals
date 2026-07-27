@@ -209,17 +209,11 @@ impl Ctx<'_> {
             S::THROWS_CLAUSE => self.style.cfg.wrapping.throws_list,
             _ => self.style.cfg.wrapping.extends_list,
         };
-        // A type declaration opens a header level after its name, so its clauses break from
-        // there. A method header has no such level — `throws` carries the continuation indent
-        // itself, which is the `open(plusFour)` around `visitThrowsClause`.
-        let plus_indent = if node.kind() == S::THROWS_CLAUSE {
-            self.style.continuation()
-        } else {
-            Indent::ZERO
-        };
-        self.clause_break(policy, plus_indent);
-        let types = node.children().count();
+        // Both a type declaration and a method open a header level, so a clause breaks from
+        // there and its own type list breaks one step further in.
         let continuation = self.style.continuation();
+        self.clause_break(policy, Indent::ZERO);
+        let types = node.children().count();
         let indent = if types > 1 {
             continuation.clone()
         } else {
@@ -273,6 +267,14 @@ impl Ctx<'_> {
         } else {
             self.style.cfg.wrapping.type_arguments
         };
+        // A parameterized *type* may break right after its `<`, which is what lets a type too
+        // wide for its line move its arguments down whole instead of splitting between two of
+        // them — `visitParameterizedType`. The explicit type arguments of a call are written
+        // against the name they qualify and get no such break (`addTypeArguments`).
+        let breaks_after_open = node.kind() == S::TYPE_ARGS
+            && node
+                .parent()
+                .is_some_and(|parent| matches!(parent.kind(), S::TYPE | S::TYPE_ARGS));
         let continuation = self.style.continuation();
         self.open_flat(Indent::ZERO);
         let children = Self::children(node);
@@ -280,13 +282,26 @@ impl Ctx<'_> {
             let is_open = matches!(child.as_token().map(SyntaxToken::kind), Some(S::LT));
             let is_close = matches!(child.as_token().map(SyntaxToken::kind), Some(S::GT));
             if is_open {
-                self.visit_element(child).await;
-                self.open(continuation.clone());
+                if breaks_after_open {
+                    self.open(continuation.clone());
+                    self.visit_element(child).await;
+                    self.list_break_tight(policy, Indent::ZERO);
+                    self.open_flat(Indent::ZERO);
+                } else {
+                    self.visit_element(child).await;
+                    self.open(continuation.clone());
+                }
                 continue;
             }
             if is_close {
-                self.close_indent(&continuation);
-                self.visit_element(child).await;
+                if breaks_after_open {
+                    self.close();
+                    self.visit_element(child).await;
+                    self.close_indent(&continuation);
+                } else {
+                    self.close_indent(&continuation);
+                    self.visit_element(child).await;
+                }
                 continue;
             }
             if nth > 0
