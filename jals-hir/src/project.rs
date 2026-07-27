@@ -32,7 +32,7 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LBRACK, METHOD_DECL, RECORD_DECL,
+    LBRACK, METHOD_DECL, MODIFIERS, PRIVATE_KW, RECORD_DECL, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
@@ -43,6 +43,7 @@ use crate::def::DefKind;
 use crate::reference::{Reference, Resolution};
 use crate::resolve::Resolved;
 use crate::resolve::collect::Collect;
+use crate::ty::Ty;
 
 /// Identifies a file within a [`ProjectIndex`]. The host maps it to a path / URL; the index only
 /// ever compares and stores it.
@@ -55,6 +56,13 @@ pub struct FileId(pub u32);
 pub struct Fqn(String);
 
 impl Fqn {
+    /// The dotted name itself. Every level — packages and nested types alike — is separated by a
+    /// `.`, so a consumer that needs another spelling (the JVM's `a/b/Outer$Inner`, say) has to
+    /// decide which segments are packages; this hands over the text, not that decision.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// The simple (unqualified) name: the last dotted segment (`a.b.Outer.Inner` → `Inner`). Correct
     /// because every level — packages and nested types alike — is dotted.
     pub(crate) fn simple_name(&self) -> &str {
@@ -183,6 +191,25 @@ pub struct Supertype {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemberId(u32);
 
+/// The declaration modifiers a consumer needs to know *how* a member is reached, as opposed to
+/// what its type is.
+///
+/// Recorded because they decide an *instruction* rather than a diagnostic: `invokestatic` against
+/// `invokevirtual`, `getstatic` against `getfield`, and `invokespecial` for a `private` method,
+/// which is not dispatched at all. Modifiers that change no instruction (`final`, `abstract`,
+/// `synchronized`, the access levels beyond `private`) are deliberately absent; add one when
+/// something has to act on it.
+///
+/// Implicit modifiers are folded in at capture time — an interface field is `static` whether or
+/// not the source says so — so a consumer never re-derives JLS defaults from the owner's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemberModifiers {
+    /// Belongs to the type rather than to an instance.
+    pub is_static: bool,
+    /// Not visible outside its declaring type, and so never virtually dispatched.
+    pub is_private: bool,
+}
+
 /// A member of an indexed type: a field, method, constructor, or enum constant.
 ///
 /// Methods and constructors live in the [`Method`](Namespace::Method) name-space; fields and enum
@@ -203,10 +230,14 @@ pub struct Member {
     /// resolvable data (no CST handle), to be turned into a concrete type later (type inference) in
     /// this member's *declaring* file context. A constructor has none ([`MemberType::Unknown`]).
     pub ty: MemberType,
-    /// A method's formal parameters, in order (each a name plus a type captured like
-    /// [`ty`](Member::ty), resolved in the declaring file's context). Empty for non-methods. Used to
-    /// check call arguments and to render signature help.
-    pub(crate) params: Vec<Param>,
+    /// How the member is reached — see [`MemberModifiers`], which records `static` and `private`
+    /// and nothing else, with the JLS implicit modifiers already folded in.
+    pub modifiers: MemberModifiers,
+    /// A method's or constructor's formal parameters, in order (each a name plus a type captured
+    /// like [`ty`](Member::ty), resolved in the declaring file's context). Empty for a field or an
+    /// enum constant. Used to select an overload, to check call arguments, to render signature
+    /// help, and — with [`ty`](Member::ty) — to build a descriptor.
+    pub params: Vec<Param>,
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
     pub(crate) varargs: bool,
@@ -223,14 +254,37 @@ pub struct Member {
     pub source_location: Option<(FileId, Range<usize>)>,
 }
 
+impl MemberModifiers {
+    /// The modifiers written on a member declaration `node`, before any implicit ones its owner
+    /// adds. Reads only the `MODIFIERS` child's keyword tokens, so an annotation between them (or
+    /// a `cfg` attribute) makes no difference.
+    fn of(node: &SyntaxNode) -> Self {
+        let Some(modifiers) = node.children().find(|child| child.kind() == MODIFIERS) else {
+            return Self::default();
+        };
+        let mut out = Self::default();
+        for token in modifiers
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+        {
+            match token.kind() {
+                STATIC_KW => out.is_static = true,
+                PRIVATE_KW => out.is_private = true,
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
 /// A method's formal parameter: its declared name (absent for a `_` / unreadable parameter) and its
 /// type, captured as self-contained data like [`Member::ty`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     /// The parameter's declared name, or `None` for an unnamed (`_`) or unreadable parameter.
-    pub(crate) name: Option<String>,
+    pub name: Option<String>,
     /// The parameter's declared type.
-    pub(crate) ty: MemberType,
+    pub ty: MemberType,
 }
 
 /// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
@@ -347,6 +401,13 @@ pub struct ProjectIndex {
     /// type reference (one that resolved to a same-file definition) can be mapped to its project
     /// item — the basis for whole-project find-references.
     decl_to_item: HashMap<(FileId, usize), ItemId>,
+    /// The [`decl_to_item`](Self::decl_to_item) counterpart for members: a field, method,
+    /// constructor, or enum constant's `(file, name-token start)` back to its [`MemberId`].
+    ///
+    /// A map and not a scan, because a consumer walking the syntax tree asks this per *name*, not
+    /// per declaration — every unqualified field reference in every body — and a linear pass over
+    /// the whole project's members made that quadratic in the project's size.
+    decl_to_member: HashMap<(FileId, usize), MemberId>,
 }
 
 /// A project's classpath `.class` files lowered to the index facts they contribute, ready to fold
@@ -722,6 +783,7 @@ impl ProjectIndex {
             members: Vec::new(),
             members_by_owner: HashMap::new(),
             decl_to_item: HashMap::new(),
+            decl_to_member: HashMap::new(),
         };
 
         // Every compilation unit to index, in priority order: the host's project files first, then the
@@ -783,6 +845,23 @@ impl ProjectIndex {
             index
                 .collect_classfile_members_and_supertypes(file, owner, class, sources)
                 .await;
+        }
+        // Member declaration sites, the counterpart of `decl_sites` above. Built once here rather
+        // than scanned per lookup: a code generator asks per *name*, not per declaration.
+        // A classfile member has no source position (`name_range` is `0..0`), so it is skipped —
+        // several would otherwise collide on one key.
+        let member_sites: Vec<((FileId, usize), MemberId)> = index
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| member.name_range != (0..0))
+            .map(|(i, member)| ((member.file, member.name_range.start), MemberId(i as u32)))
+            .collect();
+        for (key, id) in member_sites {
+            yielder.tick().await;
+            // First wins, matching the linear scan this replaced: `position` returned the earliest
+            // match, and two members sharing a declaration site would otherwise swap answers.
+            index.decl_to_member.entry(key).or_insert(id);
         }
         index
     }
@@ -938,6 +1017,7 @@ impl ProjectIndex {
                     file,
                     name_range: 0..0,
                     ty: member.ty.clone(),
+                    modifiers: member.modifiers,
                     params: member.params.clone(),
                     varargs: member.varargs,
                     throws: member.throws.clone(),
@@ -1105,14 +1185,42 @@ impl ProjectIndex {
         &self.items[id.0 as usize]
     }
 
-    /// Every indexed type declaration.
-    pub fn items(&self) -> impl Iterator<Item = &Item> {
-        self.items.iter()
+    /// Every indexed type declaration, with its id — which is what every other lookup on this
+    /// index (its members, its subtypes) is keyed by.
+    pub fn items(&self) -> impl Iterator<Item = (ItemId, &Item)> {
+        self.items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (ItemId(index as u32), item))
     }
 
     /// The member with the given id.
     pub fn member(&self, id: MemberId) -> &Member {
         &self.members[id.0 as usize]
+    }
+
+    /// A member's declared value type — a field's type, a method's return type — resolved to a
+    /// concrete [`Ty`] in its *declaring* file's import and package context.
+    ///
+    /// [`Member::ty`] is a captured spelling ([`MemberType`]), not a resolved type: the index holds
+    /// no CST references, so a member's `List` stays the word "List" until someone resolves it
+    /// against the file that wrote it. A consumer that has to name the type — a code generator
+    /// building a descriptor — needs the resolution, and doing it itself would mean re-implementing
+    /// the import lookup. A constructor has no value type and yields [`Ty::Unknown`].
+    pub fn resolved_member_ty(&self, id: MemberId) -> Ty {
+        let member = self.member(id);
+        self.member_type_to_ty(member.file, member.owner, &member.ty)
+    }
+
+    /// A method's or constructor's formal parameter types, in declaration order, resolved like
+    /// [`resolved_member_ty`](Self::resolved_member_ty). Empty for a field or enum constant.
+    pub fn resolved_param_tys(&self, id: MemberId) -> Vec<Ty> {
+        let member = self.member(id);
+        member
+            .params
+            .iter()
+            .map(|param| self.member_type_to_ty(member.file, member.owner, &param.ty))
+            .collect()
     }
 
     /// The project item declared at `name_start` in `file`, if that position is a type declaration's
@@ -1121,10 +1229,24 @@ impl ProjectIndex {
         self.decl_to_item.get(&(file, name_start)).copied()
     }
 
+    /// The member declared at `name_start` in `file`, if that position is a field, method,
+    /// constructor, or enum constant's name — the [`item_by_decl`](Self::item_by_decl) counterpart
+    /// for members.
+    ///
+    /// Maps a *declaration* back to its id, which is what a consumer walking the syntax tree has:
+    /// it is looking at the declaration it is about to emit, or at a name that resolved to one.
+    ///
+    /// A member with no source position — one lowered from a classpath `.class` — is not
+    /// reachable here: there is no declaration site to ask about.
+    pub fn member_by_decl(&self, file: FileId, name_start: usize) -> Option<MemberId> {
+        self.decl_to_member.get(&(file, name_start)).copied()
+    }
+
     /// The members declared *directly* on `owner` (no inheritance walk), in declaration order. Empty
     /// for a type with no members or an unknown `owner`. Used where inheritance is irrelevant — e.g.
-    /// enumerating a type's own constructors, which are never inherited.
-    pub(crate) fn own_members(&self, owner: ItemId) -> &[MemberId] {
+    /// enumerating a type's own constructors, which are never inherited, or laying out a type's own
+    /// storage on top of its supertype's.
+    pub fn own_members(&self, owner: ItemId) -> &[MemberId] {
         self.members_by_owner.get(&owner).map_or(&[], Vec::as_slice)
     }
 
@@ -1430,6 +1552,8 @@ impl ProjectIndex {
         else {
             return members;
         };
+        // An interface's members carry modifiers the source is allowed to leave unwritten.
+        let in_interface = matches!(node.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL);
         // A member of `owner`/`file` with no params/varargs/throws; each call site overrides (via
         // struct-update) only the fields that apply to its member kind.
         let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
@@ -1439,6 +1563,7 @@ impl ProjectIndex {
             file,
             name_range: Collect::byte_range(name_tok),
             ty,
+            modifiers: MemberModifiers::default(),
             params: Vec::new(),
             varargs: false,
             throws: Vec::new(),
@@ -1454,8 +1579,15 @@ impl ProjectIndex {
                 FIELD_DECL => {
                     if let Some(field) = ast::FieldDecl::cast(member.clone()) {
                         let ty = MemberType::of(field.ty());
+                        // An interface field is implicitly `public static final` (JLS §9.3); only
+                        // `static` changes how it is reached.
+                        let mut modifiers = MemberModifiers::of(&member);
+                        modifiers.is_static |= in_interface;
                         for name in field.names() {
-                            members.push(new_member(&name, DefKind::Field, ty.clone()));
+                            members.push(Member {
+                                modifiers,
+                                ..new_member(&name, DefKind::Field, ty.clone())
+                            });
                         }
                     }
                 }
@@ -1467,6 +1599,7 @@ impl ProjectIndex {
                         let (params, varargs) = Self::params_of(&member);
                         let throws = Self::throws_of(&member);
                         members.push(Member {
+                            modifiers: MemberModifiers::of(&member),
                             params,
                             varargs,
                             throws,
@@ -1476,8 +1609,12 @@ impl ProjectIndex {
                 }
                 CONSTRUCTOR_DECL => {
                     if let Some(name) = Collect::first_ident_token(&member) {
+                        let (params, varargs) = Self::params_of(&member);
                         let throws = Self::throws_of(&member);
                         members.push(Member {
+                            modifiers: MemberModifiers::of(&member),
+                            params,
+                            varargs,
                             throws,
                             ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
                         });
@@ -1491,7 +1628,14 @@ impl ProjectIndex {
                             dims: 0,
                             args: Vec::new(),
                         };
-                        members.push(new_member(&name, DefKind::EnumConstant, ty));
+                        // Every enum constant is implicitly `public static final` (JLS §8.9.3).
+                        members.push(Member {
+                            modifiers: MemberModifiers {
+                                is_static: true,
+                                is_private: false,
+                            },
+                            ..new_member(&name, DefKind::EnumConstant, ty)
+                        });
                     }
                 }
                 _ => {}
@@ -1508,7 +1652,10 @@ impl ProjectIndex {
     fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
         let mut params = Vec::new();
         let mut varargs = false;
-        if let Some(list) = ast::MethodDecl::cast(method.clone()).and_then(|m| m.params()) {
+        // Read the `PARAM_LIST` child directly rather than through a typed cast: a constructor's
+        // parameters are captured by the same shape, and casting to `MethodDecl` would silently
+        // return none for one — leaving every constructor with an empty parameter list.
+        if let Some(list) = method.children().find_map(ast::ParamList::cast) {
             for param in list.params() {
                 if param
                     .syntax()
@@ -1747,10 +1894,9 @@ mod tests {
     fn summary(index: &ProjectIndex) -> Vec<(Item, Vec<Member>)> {
         index
             .items()
-            .enumerate()
-            .map(|(i, item)| {
+            .map(|(id, item)| {
                 let members = index
-                    .members_of(ItemId(i as u32))
+                    .members_of(id)
                     .into_iter()
                     .map(|m| index.member(m).clone())
                     .collect();
@@ -1780,9 +1926,9 @@ mod tests {
 
         assert_eq!(summary(&built), summary(&assembled));
         // Sanity: the cross-file supertype actually resolved, so the comparison is not vacuous.
-        let sub = built
+        let (_, sub) = built
             .items()
-            .find(|i| i.fqn.to_string() == "p.Sub")
+            .find(|(_, item)| item.fqn.to_string() == "p.Sub")
             .expect("Sub is indexed");
         assert_eq!(sub.supertypes.len(), 1, "Sub extends the project type Base");
     }

@@ -7,6 +7,7 @@
 //! straight in.
 
 use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -16,9 +17,56 @@ use crate::bytes::{Input, Reader, Writer};
 use crate::error::{ClassfileError, Result};
 
 /// A class file's constant pool. Indices are 1-based, matching the on-disk encoding.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantPool {
     entries: Vec<ConstantSlot>,
+    /// Where each *interned* entry landed, so [`intern`](Self::intern) does not re-read the pool
+    /// to find out.
+    ///
+    /// Deduplicating by scan makes building a pool quadratic in the pool's own size — interning
+    /// 8000 distinct constants that way costs ~240 ms — and a code generator is the caller that
+    /// notices. Nothing else consults this map: `read`, `add`, `write`, and every accessor behave
+    /// exactly as they did, so the pool remains a codec that happens to be able to build.
+    ///
+    /// Derived state, and excluded from [`PartialEq`] and serialisation for that reason: two pools
+    /// with the same entries are the same pool whether or not the same interns produced them. It is
+    /// filled from the entries on the first intern and cleared by [`replace`](Self::replace), the
+    /// one operation that can change what an index holds — so a pool that is only *read* never
+    /// builds one, and one that is interned into answers exactly as a scan would.
+    #[serde(skip)]
+    interned: BTreeMap<InternKey, u16>,
+}
+
+/// [`ConstantPool`] compares by its entries alone. The intern index is derived from them, and a
+/// pool read from bytes has none, so including it would make a round-trip compare unequal to
+/// itself.
+impl PartialEq for ConstantPool {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+/// What an interned entry is keyed by: the arguments that produced it.
+///
+/// `Float` / `Double` are keyed on their **bit patterns** rather than through `PartialEq`: `0.0`
+/// and `-0.0` compare equal but are different constants (an `ldc` of one is not an `ldc` of the
+/// other), and `NaN` compares unequal to itself, which would miss on every intern and append a
+/// fresh entry each time.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum InternKey {
+    Utf8(Vec<u8>),
+    Class(u16),
+    String(u16),
+    Integer(i32),
+    Long(i64),
+    Float(u32),
+    Double(u64),
+    NameAndType(u16, u16),
+    FieldRef(u16, u16),
+    /// A `MethodRef` and an `InterfaceMethodRef` naming the same member are distinct entries and
+    /// are not interchangeable, so the two are keyed apart.
+    MethodRef(u16, u16),
+    InterfaceMethodRef(u16, u16),
 }
 
 /// One slot of the pool. `Long`/`Double` entries are followed by a [`Gap`](ConstantSlot::Gap) so
@@ -125,6 +173,18 @@ pub enum ConstantPoolEntry {
 }
 
 impl ConstantPool {
+    /// A new, empty pool.
+    ///
+    /// Indices are 1-based on disk, so a fresh pool already holds the index-0
+    /// [`Sentinel`](ConstantSlot::Sentinel) and [`next_index`](Self::next_index) starts at 1.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: alloc::vec![ConstantSlot::Sentinel],
+            interned: BTreeMap::new(),
+        }
+    }
+
     pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let count = r.u16().await?;
         let mut entries = Vec::with_capacity(count as usize);
@@ -144,7 +204,12 @@ impl ConstantPool {
                 i += 1;
             }
         }
-        Ok(Self { entries })
+        // No intern index: reading is the common path — a classpath is thousands of class files —
+        // and nothing that only reads ever consults one. The first intern builds it.
+        Ok(Self {
+            entries,
+            interned: BTreeMap::new(),
+        })
     }
 
     pub(crate) fn write(&self, w: &mut Writer) {
@@ -219,7 +284,175 @@ impl ConstantPool {
         ) {
             return None;
         }
-        Some(core::mem::replace(previous, entry))
+        let previous = core::mem::replace(previous, entry);
+        // The one operation that changes what an index holds, so every cached index may now be
+        // wrong. Dropping the map is exact; the next intern rebuilds it from the entries.
+        self.interned.clear();
+        Some(previous)
+    }
+
+    /// The key an entry interns under, or `None` for a form nothing interns.
+    fn intern_key(entry: &ConstantPoolEntry) -> Option<InternKey> {
+        Some(match entry {
+            ConstantPoolEntry::Utf8(bytes) => InternKey::Utf8(bytes.clone()),
+            ConstantPoolEntry::Class { name_index } => InternKey::Class(*name_index),
+            ConstantPoolEntry::String { string_index } => InternKey::String(*string_index),
+            ConstantPoolEntry::Integer(value) => InternKey::Integer(*value),
+            ConstantPoolEntry::Long(value) => InternKey::Long(*value),
+            ConstantPoolEntry::Float(value) => InternKey::Float(value.to_bits()),
+            ConstantPoolEntry::Double(value) => InternKey::Double(value.to_bits()),
+            ConstantPoolEntry::NameAndType {
+                name_index,
+                descriptor_index,
+            } => InternKey::NameAndType(*name_index, *descriptor_index),
+            ConstantPoolEntry::FieldRef {
+                class_index,
+                name_and_type_index,
+            } => InternKey::FieldRef(*class_index, *name_and_type_index),
+            ConstantPoolEntry::MethodRef {
+                class_index,
+                name_and_type_index,
+            } => InternKey::MethodRef(*class_index, *name_and_type_index),
+            ConstantPoolEntry::InterfaceMethodRef {
+                class_index,
+                name_and_type_index,
+            } => InternKey::InterfaceMethodRef(*class_index, *name_and_type_index),
+            _ => return None,
+        })
+    }
+
+    /// The index of an entry equal to `entry`, appending it only if the pool does not already hold
+    /// one. `None` when the pool is full (see [`add`](Self::add)).
+    ///
+    /// Deduplication is not a nicety: it is what keeps a generated pool small, and what decides
+    /// whether a constant is reachable by `ldc` (a one-byte index) or needs `ldc_w`.
+    ///
+    /// Entries the pool already holds count whether this pool interned them or not, including ones
+    /// [`read`](Self::read) from a class file: the index is seeded from the entries on first use,
+    /// so interning is the same answer it would give by scanning, and a pool that is only read
+    /// never builds one.
+    fn intern(&mut self, entry: ConstantPoolEntry) -> Option<u16> {
+        let Some(key) = Self::intern_key(&entry) else {
+            return self.add(entry);
+        };
+        self.seed_index();
+        if let Some(&index) = self.interned.get(&key) {
+            return Some(index);
+        }
+        let index = self.add(entry)?;
+        self.interned.insert(key, index);
+        Some(index)
+    }
+
+    /// Fill the intern index from the entries, when it is empty but they are not.
+    ///
+    /// That happens on the first intern into a pool that was read or directly
+    /// [`add`](Self::add)ed to, and again after a [`replace`](Self::replace) cleared it. Reading
+    /// alone never triggers it, which is what keeps the map off the path that decodes a classpath's
+    /// worth of class files.
+    ///
+    /// **First wins**: an earlier index is the one existing references already point at, so
+    /// interning must hand back that one rather than a later duplicate.
+    fn seed_index(&mut self) {
+        if !self.interned.is_empty() || self.entries.len() <= 1 {
+            return;
+        }
+        for (position, slot) in self.entries.iter().enumerate() {
+            let ConstantSlot::Entry(entry) = slot else {
+                continue;
+            };
+            let (Some(key), Ok(index)) = (Self::intern_key(entry), u16::try_from(position)) else {
+                continue;
+            };
+            self.interned.entry(key).or_insert(index);
+        }
+    }
+
+    /// Intern a `Utf8` entry holding `text`, encoded as JVM modified UTF-8.
+    pub fn utf8_index(&mut self, text: &str) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Utf8(Self::encode_modified_utf8(text)))
+    }
+
+    /// Intern a `Class` entry (and its name `Utf8`) for an *internal-form* name (`java/lang/String`,
+    /// or `[Ljava/lang/String;` for an array class) — not the dotted source spelling.
+    pub fn class_index(&mut self, internal_name: &str) -> Option<u16> {
+        let name_index = self.utf8_index(internal_name)?;
+        self.intern(ConstantPoolEntry::Class { name_index })
+    }
+
+    /// Intern a `String` literal entry (and its `Utf8`).
+    pub fn string_index(&mut self, text: &str) -> Option<u16> {
+        let string_index = self.utf8_index(text)?;
+        self.intern(ConstantPoolEntry::String { string_index })
+    }
+
+    /// Intern an `Integer` constant.
+    pub fn integer_index(&mut self, value: i32) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Integer(value))
+    }
+
+    /// Intern a `Long` constant. Occupies two slots.
+    pub fn long_index(&mut self, value: i64) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Long(value))
+    }
+
+    /// Intern a `Float` constant, matched on its bit pattern (see [`find`](Self::find)).
+    pub fn float_index(&mut self, value: f32) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Float(value))
+    }
+
+    /// Intern a `Double` constant, matched on its bit pattern. Occupies two slots.
+    pub fn double_index(&mut self, value: f64) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Double(value))
+    }
+
+    /// Intern a `NameAndType` entry (and the two `Utf8`s it points at).
+    fn name_and_type_index(&mut self, name: &str, descriptor: &str) -> Option<u16> {
+        let name_index = self.utf8_index(name)?;
+        let descriptor_index = self.utf8_index(descriptor)?;
+        self.intern(ConstantPoolEntry::NameAndType {
+            name_index,
+            descriptor_index,
+        })
+    }
+
+    /// Intern a `FieldRef` and everything it references. `owner` is an internal-form class name.
+    pub fn field_ref_index(&mut self, owner: &str, name: &str, descriptor: &str) -> Option<u16> {
+        let class_index = self.class_index(owner)?;
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::FieldRef {
+            class_index,
+            name_and_type_index,
+        })
+    }
+
+    /// Intern a `MethodRef` and everything it references — the form `invokevirtual` /
+    /// `invokestatic` / `invokespecial` take when the owner is a *class*.
+    pub fn method_ref_index(&mut self, owner: &str, name: &str, descriptor: &str) -> Option<u16> {
+        let class_index = self.class_index(owner)?;
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::MethodRef {
+            class_index,
+            name_and_type_index,
+        })
+    }
+
+    /// Intern an `InterfaceMethodRef` and everything it references — the form `invokeinterface`
+    /// takes, and the one an `invokestatic` / `invokespecial` on an *interface* owner must use.
+    /// A `MethodRef` and an `InterfaceMethodRef` naming the same member are distinct entries and
+    /// are not interchangeable.
+    pub fn interface_method_ref_index(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<u16> {
+        let class_index = self.class_index(owner)?;
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::InterfaceMethodRef {
+            class_index,
+            name_and_type_index,
+        })
     }
 
     /// `Utf8` carries a `u16` byte length, so anything longer cannot be written.
@@ -341,6 +574,12 @@ impl ConstantPool {
             Some(ConstantPoolEntry::Class { name_index }) => self.utf8(*name_index),
             _ => None,
         }
+    }
+}
+
+impl Default for ConstantPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -516,6 +755,7 @@ mod tests {
     fn empty_pool() -> ConstantPool {
         ConstantPool {
             entries: vec![ConstantSlot::Sentinel],
+            interned: BTreeMap::new(),
         }
     }
 

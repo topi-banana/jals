@@ -6,8 +6,10 @@
 //! length — degrades to [`AttributeBody::Unknown`], which holds the bytes verbatim. So every
 //! attribute round-trips byte-for-byte, and `name_index` is always preserved exactly.
 //!
-//! `StackMapTable` and the instruction stream inside `Code` are modelled in later phases; until then
-//! they ride along as `Unknown` / raw `code` bytes.
+//! `StackMapTable` and the instruction stream inside `Code` are fully modelled
+//! ([`AttributeBody::StackMapTable`], [`CodeAttribute::code`]); an attribute still reaches
+//! [`Unknown`](AttributeBody::Unknown) only when its *name* is one this crate does not model, or
+//! when its body does not parse cleanly.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -125,18 +127,24 @@ pub enum AttributeBody {
         /// `Class` indices of the permitted direct subclasses.
         classes: Vec<u16>,
     },
-    /// An attribute whose name is not modelled (e.g. `StackMapTable` until the bytecode phase), or
-    /// one that failed to parse cleanly: kept verbatim so it round-trips byte-for-byte.
+    /// An attribute whose name is not modelled (a vendor extension, a newer JVMS attribute), or one
+    /// that failed to parse cleanly: kept verbatim so it round-trips byte-for-byte.
     Unknown(Vec<u8>),
 }
 
 /// The body of a `Code` attribute (JVMS §4.7.3).
+///
+/// The two frame limits are stored, not derived. Unlike a count or a byte length, neither follows
+/// from the instruction list: `max_stack` is the depth over every path a verifier can take, and
+/// `max_locals` depends on the slot allocation the *emitter* chose (a `long` or `double` takes two
+/// slots, and slots are reusable across disjoint scopes). Whoever generated the code knows both;
+/// this crate carries them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeAttribute {
     /// Maximum operand-stack depth.
-    max_stack: u16,
+    pub max_stack: u16,
     /// Number of local-variable slots.
-    max_locals: u16,
+    pub max_locals: u16,
     /// The decoded bytecode instructions.
     pub code: Vec<Instruction>,
     /// The exception handlers covering this code.

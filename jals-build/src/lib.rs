@@ -44,6 +44,7 @@ mod clean;
 mod init;
 #[cfg(feature = "native")]
 mod invocation;
+mod jals_backend;
 #[cfg(feature = "native")]
 mod manifest_ext;
 #[cfg(feature = "native")]
@@ -61,12 +62,13 @@ mod native;
 
 pub use backend::{
     Backend, BackendAbsence, BackendError, BackendFuture, BackendOptions, BackendOutcome,
-    BackendRequest, BackendSelection,
+    BackendRequest, BackendSelection, BackendSource,
 };
 #[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
 pub use init::{InitOptions, ScaffoldFile};
+pub use jals_backend::JalsBackend;
 #[cfg(feature = "native")]
 pub use manifest_ext::{ManifestError, ManifestExt};
 #[cfg(feature = "native")]

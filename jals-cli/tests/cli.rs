@@ -1682,3 +1682,161 @@ fn init_in_an_empty_dir_still_writes_only_the_three_scaffold_files() {
         "nothing to migrate ⇒ no config is invented"
     );
 }
+
+/// `[build] backend = { type = "jals" }` compiles with the in-process compiler — no JDK involved —
+/// and the class files it writes are the ones a real JVM then runs.
+///
+/// The `javac` path is exercised throughout the rest of this file; this is the other branch of the
+/// same `jals build`, so the assertion is on the output landing where `javac -d` would have put it.
+#[test]
+fn the_jals_backend_compiles_without_a_jdk() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals\" }\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\n\
+         public class Main {\n\
+         \x20   static int twice(int n) { return n + n; }\n\
+         \x20   public static void main(String[] a) { System.out.println(twice(21)); }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        // Nothing on `PATH` should be consulted; if it were, an absent `javac` would be the error.
+        .env("JAVAC", "/nonexistent/javac")
+        .args(["build", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let classes = dir.path().join("target/classes");
+    let emitted = classes.join("com/example/Main.class");
+    assert!(emitted.is_file(), "no class file at {}", emitted.display());
+
+    if !javac_available() {
+        return;
+    }
+    let run = Command::new("java")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("com.example.Main")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "the JVM rejected the compiled class: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "42\n");
+}
+
+/// `[build] backend = { type = "jals-wasm" }` compiles the whole project into one WebAssembly
+/// module whose objects are managed by the host's garbage collector.
+///
+/// wasm has no dynamic loading and no classpath, so one module — not one artifact per type — is the
+/// unit. The assertion is that a real engine runs it: `wasmtime` validating and executing the
+/// module is the only statement about the encoding that cannot be argued with.
+#[test]
+fn the_wasm_backend_emits_one_module_for_the_project() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals-wasm\" }\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Point.java"),
+        "public class Point {\n\
+         \x20   int x;\n\
+         \x20   Point(int x) { this.x = x; }\n\
+         \x20   int get() { return x; }\n\
+         \x20   public static int roundTrip(int n) { Point p = new Point(n); return p.get(); }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .args(["build", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let module = dir.path().join("target/classes/project.wasm");
+    assert!(module.is_file(), "no module at {}", module.display());
+    // The magic every WebAssembly module starts with.
+    assert_eq!(&std::fs::read(&module).unwrap()[..4], b"\0asm");
+
+    let available = Command::new("wasmtime")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        return;
+    }
+    let run = Command::new("wasmtime")
+        .args(["run", "--invoke", "roundTrip"])
+        .arg(&module)
+        .arg("7")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "wasmtime rejected the module: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "7");
+}
+
+/// `jals run` hands a main class to `java`, which cannot be given a WebAssembly module. Saying so
+/// beats the alternative: a `classes-dir` holding a `.wasm` and a "no main class" error that is
+/// true and useless.
+#[test]
+fn running_a_wasm_backed_project_explains_itself() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n[run]\nmain-class = \"Main\"\n\n\
+         [build]\nbackend = { type = \"jals-wasm\" }\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "public class Main { public static int one() { return 1; } }\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("WebAssembly module") && stderr.contains("wasmtime"),
+        "expected an explanation of the wasm backend, got: {stderr}"
+    );
+}

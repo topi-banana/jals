@@ -9,12 +9,13 @@
 //! roots, which is what makes "the backend only ever sees frontend output" a structural property
 //! rather than a convention.
 //!
-//! TODO(backend-tier): deferred — no `impl Backend` exists yet, and compilation still runs through
-//! the pre-existing `<dyn Compiler>::select` path (`native.rs`). The [`Backend`] trait and its
-//! [`BackendRequest`] / [`BackendOptions`] / [`BackendOutcome`] / [`BackendSelection`] types —
-//! together with `CacheKey::derive` and `CacheNamespace::BackendOutput` in `jals-storage` — are the
-//! stable surface the `javac` backend adapter will implement and wire up in a later PR.
-//! ([`BackendError`] is already in use by `staging.rs` and is not part of the deferral.)
+//! TODO(backend-tier): [`JalsBackend`](crate::JalsBackend) implements this contract and `jals
+//! build` reaches it — but by matching on `[build] backend` in `jals-cli` and constructing the
+//! backend directly, not through [`BackendSelection`]. Two things are therefore still unbuilt:
+//! the selection factory (which is what would let a host report [`BackendAbsence`] instead of
+//! failing later, and what `wasm32` needs to say "no host process" as a *result* rather than an
+//! error), and output memoization under `CacheNamespace::BackendOutput` — without which every
+//! build recompiles every source.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -38,7 +39,10 @@ pub struct BackendOptions {
 
 impl BackendOptions {
     /// Everything about these options that affects output, folded to one digest.
-    pub fn digest(&self) -> ContentDigest {
+    ///
+    /// Crate-internal until backend output is memoized: the only caller that needs it outside is
+    /// the one that would fold it into a `BackendKey`, and nothing builds those yet.
+    pub(crate) fn digest(&self) -> ContentDigest {
         let mut fold = jals_storage::ProvenanceFold::new(b"jals.backend.options\0");
         for value in [self.release, self.source, self.target] {
             // Distinguish "unset" from "0" rather than collapsing both to the same bytes.
@@ -56,24 +60,78 @@ impl BackendOptions {
     }
 }
 
+/// One lowered source file: where it lives, what the frontend published it as, and its content.
+///
+/// All three travel together because each answers a different question and no two backends ask the
+/// same ones. The `key` is provenance — it is what [`BackendKey`](jals_frontend::BackendKey) folds
+/// to decide whether this compile is already cached. The `bytes` are the content, resolved from the
+/// cache by the driver rather than by the backend, because [`Backend`] is object-safe and
+/// `ArtifactCache` is not. The `path` is what a compiler reports errors against and what a
+/// process-based backend writes to disk.
+#[derive(Debug, Clone)]
+pub struct BackendSource {
+    /// The file's project-relative path.
+    pub path: RelativePath,
+    /// The cache key the frontend published it under.
+    pub key: CacheKey,
+    /// The file's contents.
+    pub bytes: Vec<u8>,
+}
+
 /// What a backend compiles.
 #[derive(Debug, Clone, Copy)]
 pub struct BackendRequest<'a> {
     /// The only source input: the frontend's published output, in canonical path order.
-    pub tree: &'a [(RelativePath, CacheKey)],
+    pub tree: &'a [BackendSource],
     /// Resolved classpath artifacts, in manifest order.
     pub classpath: &'a [CacheKey],
     pub options: &'a BackendOptions,
 }
 
-/// The result of a compile: the tool's exit code, or `None` when it was terminated by a signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The result of a compile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendOutcome {
-    pub code: Option<i32>,
+    /// The tool's exit code, or `None` when it was terminated by a signal. An in-process backend
+    /// reports `Some(0)` or `Some(1)`; the field exists because a host process is the case that
+    /// can end without one.
+    ///
+    /// Crate-internal, along with the two constructors that set it: an outcome is *built* here and
+    /// only *read* outside, through [`success`](Self::success). A caller that matched on the code
+    /// would be deciding what a signal means, which is the driver's job and not the same question
+    /// on every host.
+    code: Option<i32>,
+    /// What the compile produced, by project-relative path: one class file per type, or one
+    /// WebAssembly module for the whole project.
+    ///
+    /// Empty for a process-based backend, which writes its own output through `javac -d` and has
+    /// nothing to hand back. An in-process backend cannot write anything — it has no filesystem —
+    /// so its output *is* its return value, and the driver decides where it lands.
+    pub artifacts: Vec<(RelativePath, Vec<u8>)>,
+    /// What the backend has to say about the compile. A backend does not type-check, so these are
+    /// reports of source it could not compile, not of source that is wrong.
+    pub messages: Vec<String>,
 }
 
 impl BackendOutcome {
-    pub const fn success(self) -> bool {
+    /// A compile that produced `artifacts` and nothing to report.
+    pub(crate) const fn compiled(artifacts: Vec<(RelativePath, Vec<u8>)>) -> Self {
+        Self {
+            code: Some(0),
+            artifacts,
+            messages: Vec::new(),
+        }
+    }
+
+    /// A compile that failed, with the reasons.
+    pub(crate) const fn failed(messages: Vec<String>) -> Self {
+        Self {
+            code: Some(1),
+            artifacts: Vec::new(),
+            messages,
+        }
+    }
+
+    pub const fn success(&self) -> bool {
         matches!(self.code, Some(0))
     }
 }

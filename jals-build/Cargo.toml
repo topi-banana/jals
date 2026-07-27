@@ -13,6 +13,11 @@ native = ["jals-storage/std", "jals-exec/tokio"]
 rhai = ["dep:rhai", "dep:serde", "dep:serde_json"]
 
 [dependencies]
+# The in-process compile backend. Portable in every configuration, like the `Backend` contract it
+# implements, so `--no-default-features` still gets a backend that works.
+jals-javac = { workspace = true }
+jals-hir = { workspace = true }
+jals-syntax = { workspace = true }
 # The pure `jals.toml` model (`Manifest` and friends) lives in `jals-config`; `jals-build` adds the
 # host-only `std::path`-based resolution (`ManifestExt`) on top. `toml` remains for `ManifestError`'s
 # `toml::de::Error` field type. `jals-storage` supplies typed project keys, revisions, and the
