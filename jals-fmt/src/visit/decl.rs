@@ -341,16 +341,26 @@ impl Ctx<'_> {
         // also has an `extends` / `implements` / `permits` clause to line them up against; a
         // method's always indent.
         let owner = node.parent();
-        let indented = node.kind() != S::TYPE_PARAMS
-            || owner.is_some_and(|owner| {
-                matches!(owner.kind(), S::METHOD_DECL | S::CONSTRUCTOR_DECL)
-                    || owner.children().any(|child| {
-                        matches!(
-                            child.kind(),
-                            S::EXTENDS_CLAUSE | S::IMPLEMENTS_CLAUSE | S::PERMITS_CLAUSE
-                        )
-                    })
+        // A call's explicit type arguments indent nothing of their own: `addTypeArguments` is
+        // called with `ZERO`, because the chain already opened the level they break into.
+        let qualifier = node.kind() == S::TYPE_ARGS
+            && owner.as_ref().is_some_and(|owner| {
+                matches!(
+                    owner.kind(),
+                    S::CALL_EXPR | S::METHOD_REF_EXPR | S::FIELD_ACCESS
+                )
             });
+        let indented = !qualifier
+            && (node.kind() != S::TYPE_PARAMS
+                || owner.is_some_and(|owner| {
+                    matches!(owner.kind(), S::METHOD_DECL | S::CONSTRUCTOR_DECL)
+                        || owner.children().any(|child| {
+                            matches!(
+                                child.kind(),
+                                S::EXTENDS_CLAUSE | S::IMPLEMENTS_CLAUSE | S::PERMITS_CLAUSE
+                            )
+                        })
+                }));
         let continuation = if indented {
             self.style.continuation()
         } else {

@@ -300,6 +300,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             type_parameters: WrapPolicy::IfLongPerItem,
             deconstruction_list: WrapPolicy::IfLongPerItem,
             multi_catch_types: WrapPolicy::IfLongPerItem,
+            for_statement: WrapPolicy::IfLongPerItem,
             annotation_arguments: WrapPolicy::IfLongPerItem,
             extends_list: WrapPolicy::IfLongPerItem,
             throws_list: WrapPolicy::IfLongPerItem,
