@@ -73,9 +73,12 @@ impl Expr {
             TRUE_KW => asm.const_int(1)?,
             FALSE_KW => asm.const_int(0)?,
             NULL_KW => asm.const_null()?,
-            STRING_LITERAL => asm.const_string(&Self::string_value(text))?,
+            STRING_LITERAL => asm.const_string(&Self::string_value(text)?)?,
             CHAR_LITERAL => {
-                let value = Self::string_value(text).chars().next().unwrap_or('\0');
+                let value = Self::string_value(text)?
+                    .chars()
+                    .next()
+                    .ok_or(LowerError::Unsupported("an empty character literal"))?;
                 asm.const_int(value as i32)?;
             }
             // The lexer has one integer kind and one floating kind; the `L` / `f` suffix decides
@@ -130,31 +133,78 @@ impl Expr {
             .map_err(|_| LowerError::Unsupported("an integer literal this lowering cannot read"))
     }
 
+    /// The text between a literal's delimiters: exactly **one** quote comes off each end.
+    ///
+    /// `trim_end_matches` took every trailing quote, so `"a\""` — whose last two characters are an
+    /// escaped quote and the closing one — lost both and compiled to `a`. An unterminated literal
+    /// the lexer recovered still yields its text rather than nothing.
+    fn unquote(text: &str) -> &str {
+        let open = text
+            .strip_prefix('"')
+            .or_else(|| text.strip_prefix('\''))
+            .unwrap_or(text);
+        open.strip_suffix('"')
+            .or_else(|| open.strip_suffix('\''))
+            .unwrap_or(open)
+    }
+
     /// A string / char literal's value, with its quotes stripped and escapes resolved.
-    fn string_value(text: &str) -> String {
-        let inner = text
-            .trim_start_matches(['"', '\''])
-            .trim_end_matches(['"', '\'']);
+    ///
+    /// An escape this does not know is reported rather than approximated. Pushing the character
+    /// after the backslash — the old fallback — turned `A` into `u0041` and `\101` into `101`,
+    /// which is a string constant that is simply wrong, in a class file nothing downstream checks.
+    fn string_value(text: &str) -> Result<String> {
+        let inner = Self::unquote(text);
+        let unknown = || LowerError::Unsupported("an escape sequence this lowering cannot read");
         let mut out = String::with_capacity(inner.len());
-        let mut chars = inner.chars();
+        let mut chars = inner.chars().peekable();
         while let Some(character) = chars.next() {
             if character != '\\' {
                 out.push(character);
                 continue;
             }
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('b') => out.push('\u{8}'),
-                Some('f') => out.push('\u{c}'),
-                Some('s') => out.push(' '),
-                Some('0') => out.push('\0'),
-                Some(other) => out.push(other),
-                None => {}
+            match chars.next().ok_or_else(unknown)? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'b' => out.push('\u{8}'),
+                'f' => out.push('\u{c}'),
+                's' => out.push(' '),
+                '"' => out.push('"'),
+                '\'' => out.push('\''),
+                '\\' => out.push('\\'),
+                // JLS §3.3: a unicode escape may carry any number of `u`s, and the four hex digits
+                // after the last one name one UTF-16 code unit. A lone surrogate is a code unit
+                // Rust's `char` cannot hold, so it is reported rather than silently replaced.
+                'u' => {
+                    while chars.peek() == Some(&'u') {
+                        chars.next();
+                    }
+                    let mut digits = String::with_capacity(4);
+                    for _ in 0..4 {
+                        digits.push(chars.next().ok_or_else(unknown)?);
+                    }
+                    let unit = u32::from_str_radix(&digits, 16).map_err(|_| unknown())?;
+                    out.push(char::from_u32(unit).ok_or_else(unknown)?);
+                }
+                // JLS §3.10.7: one to three octal digits, and at most `\377` — so a leading digit
+                // above `3` takes only one more.
+                first @ '0'..='7' => {
+                    let mut value = u32::from(first as u8 - b'0');
+                    let remaining = if first <= '3' { 2 } else { 1 };
+                    for _ in 0..remaining {
+                        let Some(&digit @ '0'..='7') = chars.peek() else {
+                            break;
+                        };
+                        chars.next();
+                        value = value * 8 + u32::from(digit as u8 - b'0');
+                    }
+                    out.push(char::from_u32(value).ok_or_else(unknown)?);
+                }
+                _ => return Err(unknown()),
             }
         }
-        out
+        Ok(out)
     }
 
     /// A bare name: a local, a parameter, or an unqualified field of the enclosing type.

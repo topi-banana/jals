@@ -227,6 +227,45 @@ public class Narrow {
     .expect("an `int` comparison still lowers");
 }
 
+/// String and `char` literals reach the constant pool with their escapes resolved, and the JVM
+/// printing them back is the only check that says so. `trim_end_matches` used to take *every*
+/// trailing quote, so a literal ending in `\"` lost it silently.
+#[test]
+fn literal_escapes_survive_to_the_constant_pool() {
+    let source = r#"
+public class Escapes {
+    public static void main(String[] args) {
+        System.out.println("a\"");
+        System.out.println("\\");
+        System.out.println("A\101");
+        System.out.println("tab:\tend");
+    }
+}
+"#;
+    assert_eq!(run(source, "Escapes"), "a\"\n\\\nAA\ntab:\tend\n");
+}
+
+/// An escape this cannot read is reported. Pushing the character after the backslash — the old
+/// fallback — produced a string constant that was quietly wrong.
+#[test]
+fn an_unreadable_escape_is_reported() {
+    let source = r#"
+public class BadEscape {
+    public static void main(String[] args) {
+        System.out.println("\q");
+    }
+}
+"#;
+    let error = compile(source).expect_err("`\\q` is not an escape");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("an escape sequence this lowering cannot read")
+        ),
+        "expected the escape report, got {error}"
+    );
+}
+
 /// A nested type is its own class file. Dropping it silently would produce an outer class that
 /// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
 /// compiler is in a position to report and the run time is not.
