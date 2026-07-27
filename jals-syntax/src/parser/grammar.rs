@@ -2692,9 +2692,11 @@ impl Parser<'_> {
             // Bare untyped parameter (`x` / `_`).
             self.bump_any();
         } else {
-            // Typed parameter (including `var`).
+            // Typed parameter (including `var`), which may be varargs: `(String... s) -> s[0]`
+            // is a legal lambda for a `String[]`-taking functional interface.
             self.modifiers().await;
             self.type_().await;
+            self.eat_varargs().await;
             self.binding_name();
         }
         pm.complete(self, PARAM);

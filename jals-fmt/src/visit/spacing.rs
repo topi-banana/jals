@@ -62,6 +62,12 @@ impl Spacing {
         if pk == S::COLON_COLON || nk == S::COLON_COLON {
             return rules.around_method_ref_double_colon;
         }
+        // An annotation and what it annotates are two words however the annotation ended:
+        // `@A(0x43) String`, not `@A(0x43)String`. Asked before the delimiter rules, which would
+        // otherwise read that `)` as a call's and hug the name to it.
+        if Self::is_word(nk) && Self::ends_annotation(prev) {
+            return true;
+        }
 
         if let Some(space) = Self::delimiters(pk, nk, pp, np, rules) {
             return space;
@@ -102,6 +108,20 @@ impl Spacing {
         tok.parent_ancestors()
             .find(|node| node.kind() == S::ANNOTATION)
             .is_some_and(|anno| anno.text_range().end() == tok.text_range().end())
+    }
+
+    /// Whether `tok` closes a type-argument list that a call or a method reference wrote before
+    /// the name it invokes.
+    fn qualifies_a_name(tok: &SyntaxToken) -> bool {
+        tok.parent().is_some_and(|args| {
+            args.kind() == S::TYPE_ARGS
+                && args.parent().is_some_and(|owner| {
+                    matches!(
+                        owner.kind(),
+                        S::CALL_EXPR | S::METHOD_REF_EXPR | S::FIELD_ACCESS
+                    )
+                })
+        })
     }
 
     /// Whether the two tokens spell one fused `>`-family operator (`>>`, `>=`, `>>>=`).
@@ -333,6 +353,10 @@ impl Spacing {
             // A closing `>` followed by an operator — `Comparable<T> & Cloneable` — is not an
             // angle-bracket decision at all; let the operator's own rule answer it.
             (true, false) if Self::operator_rule(nk, np, rules).is_some() => None,
+            // A call's explicit type arguments are written against the name they qualify —
+            // `List.<String>of()`, `ImmutableList::<String>of` — so that `>` is a selector, not
+            // the end of a type.
+            (true, false) if Self::qualifies_a_name(prev) => Some(false),
             (true, false) => Some(Self::is_word(nk)),
             (false, true) if nk == S::GT => Some(rules.within_angle_brackets),
             // A generic method writes its type parameters *before* the return type, so the `<`
