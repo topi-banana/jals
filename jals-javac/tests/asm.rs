@@ -370,9 +370,9 @@ fn the_resolved_loop_body_is_pinned() {
 }
 
 /// `if_icmp*` compares two `int`s, and "not a reference" is not the same predicate: a `long` is not
-/// a reference either. Accepting one produced a class the JVM rejected with *"Type long_2nd is not
-/// assignable to integer"* — a defect the emitter is in a position to catch and the verifier should
-/// never have to.
+/// a reference either. Accepting one produced a class the JVM rejected with *"Type `long_2nd` is
+/// not assignable to integer"* — a defect the emitter is in a position to catch and the verifier
+/// should never have to.
 #[test]
 fn a_branch_rejects_an_operand_that_is_not_an_int() {
     let mut pool = ConstantPool::new();

@@ -190,7 +190,7 @@ public class Simple {
 }
 
 /// A `long` / `float` / `double` comparison is not an `if_icmp*`. Emitting one produced a class
-/// file that loaded and then failed verification with *"Type long_2nd is not assignable to
+/// file that loaded and then failed verification with *"Type `long_2nd` is not assignable to
 /// integer"* — the compiler had every fact needed to say so first.
 #[test]
 fn a_wide_comparison_is_reported_rather_than_mis_emitted() {

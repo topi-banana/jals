@@ -219,7 +219,7 @@ fn new_target(src: &str, text: &str) -> String {
 /// how many there are. Picking the first same-arity candidate ran `Pair(int)` for `new Pair(1.5)`.
 #[test]
 fn a_new_binds_to_the_constructor_its_arguments_select() {
-    let src = r#"
+    let src = r"
         class Pair {
             Pair(int value) {}
             Pair(double value) {}
@@ -229,7 +229,7 @@ fn a_new_binds_to_the_constructor_its_arguments_select() {
                 Pair b = new Pair(1.5);
             }
         }
-    "#;
+    ";
     assert!(
         new_target(src, "new Pair(1)").ends_with(r#"Pair(Primitive { keyword: "int", dims: 0 })"#),
         "got {}",

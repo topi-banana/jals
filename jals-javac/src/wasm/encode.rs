@@ -86,13 +86,11 @@ impl Bytes {
     /// The element count that prefixes every vector, and every other length the format spells as a
     /// `u32`. A `usize` that does not fit sets [`overflow`](Self::overflow) instead of wrapping.
     fn count(&mut self, len: usize) -> &mut Self {
-        match u32::try_from(len) {
-            Ok(len) => self.u32(len),
-            Err(_) => {
-                self.overflow = true;
-                self.u32(u32::MAX)
-            }
-        }
+        let Ok(len) = u32::try_from(len) else {
+            self.overflow = true;
+            return self.u32(u32::MAX);
+        };
+        self.u32(len)
     }
 
     /// Append `other`'s bytes, carrying its overflow flag with them.

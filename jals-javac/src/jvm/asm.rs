@@ -174,7 +174,7 @@ impl Branch {
     ///
     /// `if_icmp*` and `if*` compare **`int`s** — not "anything that is not a reference". A `long`
     /// on the stack is not a reference either, and `if_icmpeq` over two of them is a class the
-    /// verifier rejects with *"Type long_2nd is not assignable to integer"*. The reference forms
+    /// verifier rejects with *"Type `long_2nd` is not assignable to integer"*. The reference forms
     /// are expressed as [`Null`](VerificationType::Null), which
     /// [`compatible`](Assembler::compatible) already reads as "any reference".
     const fn operands(self) -> (usize, Option<VerificationType>) {
