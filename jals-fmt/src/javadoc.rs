@@ -442,9 +442,18 @@ impl CommentFormatter {
         }
     }
 
-    /// Whether a token opens a list item.
+    /// Whether the token after this one hugs it.
+    ///
+    /// A list item's text starts right after its tag, and `optionalizeSpacesAfterLinks` turns the
+    /// whitespace after an `<a href=…>` into a break that renders as nothing — so a long link and
+    /// the text it labels can share a line boundary without a stray space appearing. The link's
+    /// closing `>` may arrive in a run of its own, since `<a` and its `href` are routinely written
+    /// on separate lines.
     fn is_item_tag(text: &str) -> bool {
         let lower = text.to_ascii_lowercase();
+        if lower.contains("href=") && lower.ends_with('>') {
+            return true;
+        }
         ["<li", "<dt", "<dd", "<a "]
             .iter()
             .any(|tag| lower.starts_with(tag))
@@ -662,6 +671,25 @@ impl CommentFormatter {
             }
             // An HTML block element starts a new paragraph, so list items keep their own lines
             // instead of being refilled into the previous sentence.
+            // A blockquote tag stands alone between blank lines
+            // (`writeBlockquoteOpenOrClose`).
+            if cfg.format_html && Self::is_blockquote(line) {
+                Self::flush(&mut prose, &mut blocks, first, rest);
+                if !matches!(blocks.last(), Some(Block::Blank) | None) {
+                    blocks.push(Block::Blank);
+                }
+                blocks.push(Block::Prose {
+                    words: {
+                        let mut tag = Vec::new();
+                        Self::tokens_of(line, &mut tag);
+                        tag
+                    },
+                    first: 0,
+                    rest: 0,
+                });
+                blocks.push(Block::Blank);
+                continue;
+            }
             if cfg.format_html && Self::is_html_block(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeListOpen` requests a blank line before a classic-Javadoc list.
@@ -944,6 +972,12 @@ impl CommentFormatter {
         ];
         let lower = line.trim_start().to_ascii_lowercase();
         BLOCK_TAGS.iter().any(|tag| lower.starts_with(tag))
+    }
+
+    /// Whether a line is a `<blockquote>` tag.
+    fn is_blockquote(line: &str) -> bool {
+        let lower = line.trim_start().to_ascii_lowercase();
+        lower.starts_with("<blockquote") || lower.starts_with("</blockquote")
     }
 
     /// Whether a line opens an HTML list.
