@@ -72,7 +72,7 @@ impl Spacing {
         // An annotation and what it annotates are two words however the annotation ended:
         // `@A(0x43) String`, not `@A(0x43)String`. Asked before the delimiter rules, which would
         // otherwise read that `)` as a call's and hug the name to it.
-        if Self::is_word(nk) && Self::ends_annotation(prev) {
+        if (Self::is_word(nk) || nk == S::QUESTION) && Self::ends_annotation(prev) {
             return true;
         }
 
