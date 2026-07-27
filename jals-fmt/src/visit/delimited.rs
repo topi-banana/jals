@@ -270,7 +270,14 @@ impl Ctx<'_> {
             self.emit_tabular_array(node).await;
             return;
         }
+        // Same refinement an argument list gets: one element too wide to pack sends the whole
+        // initializer one element per line (`hasOnlyShortItems` in `visitArrayInitializer`).
         let policy = self.style.cfg.wrapping.array_initializer;
+        let policy = if policy == WrapPolicy::IfLong && !self.fills(node) {
+            WrapPolicy::IfLongPerItem
+        } else {
+            policy
+        };
         let indent = self.style.indent();
         let children = Self::children(node);
         let empty = !children.iter().any(|child| child.as_node().is_some());
@@ -357,13 +364,31 @@ impl Ctx<'_> {
     /// destroy information the source encodes and the width cannot recover. A short final row is
     /// tolerated — a table's last line is rarely full.
     fn is_tabular(node: &SyntaxNode) -> bool {
+        let mut elements = node.children().peekable();
+        let Some(first) = elements.peek() else {
+            return false;
+        };
+        let Some(start) = Self::source_column(first) else {
+            return false;
+        };
         let mut rows: Vec<usize> = Vec::new();
         for element in node.children() {
             let leaves = Self::leaf_count(&element);
-            if rows.is_empty() || Self::starts_a_row(&element) {
+            let column = Self::source_column(&element);
+            if rows.is_empty() {
                 rows.push(leaves);
-            } else if let Some(last) = rows.last_mut() {
-                *last += leaves;
+                continue;
+            }
+            match column {
+                // A row continues while its elements sit *past* the column the rows begin at.
+                Some(column) if column > start => {
+                    if let Some(last) = rows.last_mut() {
+                        *last += leaves;
+                    }
+                }
+                Some(column) if column == start => rows.push(leaves),
+                // An element to the left of the first one is not a grid at all.
+                _ => return false,
             }
         }
         let Some((last, full)) = rows.split_last() else {
@@ -406,6 +431,27 @@ impl Ctx<'_> {
             cursor = previous.prev_token();
         }
         false
+    }
+
+    /// The source column an element starts at, in display columns from the line's start.
+    ///
+    /// A table's rows all start at the *same* column. That is the test google-java-format's
+    /// `argumentsAreTabular` applies (`actualColumn`), and it is what tells a grid apart from a
+    /// right-aligned list: the `{"a", x}, {"bb", y}` of a real table line up, while
+    /// `      "a", x,` / `    "bbb", y,` does not — and google-java-format lays the second one out
+    /// one element per line.
+    fn source_column(node: &SyntaxNode) -> Option<usize> {
+        let first = Ctx::first_token(node)?;
+        let mut column = 0usize;
+        let mut cursor = first.prev_token();
+        while let Some(previous) = cursor {
+            if previous.kind() == S::NEWLINE {
+                return Some(column);
+            }
+            column += crate::ir::Width::utf16(previous.text());
+            cursor = previous.prev_token();
+        }
+        Some(column)
     }
 
     /// Emit a grid-shaped initializer, keeping the source's row breaks.
