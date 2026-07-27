@@ -1,0 +1,28 @@
+[package]
+name = "jals-javac"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The class-file model this crate assembles into.
+jals-classfile = { workspace = true }
+# The semantic index: which overload a call selected, how a member is reached, and the resolved
+# types a descriptor is built from. Compiling needs resolution even though it needs no checking.
+jals-hir = { workspace = true }
+# The CST the lowering reads. Both are pure, so this crate stays `no_std + alloc` and builds for
+# `wasm32` like the layers it sits on.
+jals-syntax = { workspace = true }
+
+[dev-dependencies]
+expect-test = "1.5"
+# `block_on_inline` to drive `ClassFile::read` when a test re-reads what it emitted.
+jals-exec = { workspace = true }
+# Scratch directory for the tests that hand a `.class` to a real `java`.
+tempfile = "3"
+# Dev-only oracle, like `jals-classpath` uses it: reads `$JAVA_HOME/lib/ct.sym` so the descriptors
+# this crate builds from the embedded stdlib stubs can be checked against a real JDK's own
+# signatures. Nothing in the product reads a host file.
+zip = { workspace = true }
+
+[lints]
+workspace = true

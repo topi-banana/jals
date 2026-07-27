@@ -1102,7 +1102,10 @@ version = "0.1.0"
 dependencies = [
  "jals-config",
  "jals-exec",
+ "jals-hir",
+ "jals-javac",
  "jals-storage",
+ "jals-syntax",
  "rhai",
  "serde",
  "serde_json",
@@ -1120,6 +1123,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1238,6 +1242,19 @@ dependencies = [
  "jals-exec",
  "jals-syntax",
  "proptest",
+]
+
+[[package]]
+name = "jals-javac"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "jals-classfile",
+ "jals-exec",
+ "jals-hir",
+ "jals-syntax",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]
