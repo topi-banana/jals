@@ -48,9 +48,113 @@ impl StringWrapper {
         Some(Self::splice(formatted, &edits))
     }
 
+    /// Re-indent every text block to the line it starts on — `indentTextBlocks`.
+    ///
+    /// A text block's *incidental* whitespace is decided by its own least-indented line, so
+    /// moving the declaration that holds it changes what its content means. Stripping the
+    /// incidental whitespace and re-adding the line's own indentation is what keeps the string
+    /// the author wrote while letting the layout move.
+    fn text_block_edits(root: &SyntaxNode, src: &str) -> Vec<(TextRange, String)> {
+        let mut edits = Vec::new();
+        for tok in root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == SyntaxKind::TEXT_BLOCK)
+        {
+            let end = usize::from(tok.text_range().end());
+            let start = src[..usize::from(tok.text_range().start())]
+                .rfind('\n')
+                .map_or(0, |at| at + 1);
+            let text = &src[start..end];
+            let Some(indented) = Self::reindent_text_block(text) else {
+                continue;
+            };
+            if indented != text {
+                let range = TextRange::new(
+                    u32::try_from(start).unwrap_or(0).into(),
+                    u32::try_from(end).unwrap_or(0).into(),
+                );
+                edits.push((range, indented));
+            }
+        }
+        edits
+    }
+
+    /// The re-indented form of a text block, measured from the start of its opening line.
+    fn reindent_text_block(text: &str) -> Option<String> {
+        let leading = text.find(|ch: char| !ch.is_whitespace())?;
+        let mut initial = text.split('\n');
+        let first = initial.next()?;
+        let body: Vec<&str> = initial.collect();
+        if body.is_empty() {
+            return None;
+        }
+        let stripped = Self::strip_indent(&body);
+        let last_initial = body.last()?.trim_end().chars().count();
+        let last_stripped = stripped.last()?.trim_end().chars().count();
+        // A block whose closing delimiter already sits at column zero of its own content stays
+        // there: javac would warn that the extra indentation is trailing whitespace anyway.
+        let deindent = last_initial == last_stripped;
+        let prefix: String = if deindent {
+            String::new()
+        } else {
+            " ".repeat(leading)
+        };
+
+        let mut out = prefix.clone();
+        out.push_str(first.trim_start());
+        for (nth, line) in stripped.iter().enumerate() {
+            let trimmed = line.trim_end();
+            out.push('\n');
+            if !trimmed.is_empty() {
+                out.push_str(&prefix);
+            }
+            if nth + 1 == stripped.len() {
+                let without = trimmed
+                    .strip_suffix("\"\"\"")
+                    .map_or(trimmed, str::trim_end);
+                if !without.trim_start().is_empty() {
+                    out.push_str(without);
+                    out.push('\\');
+                    out.push('\n');
+                    out.push_str(&prefix);
+                }
+                out.push_str("\"\"\"");
+            } else {
+                out.push_str(line);
+            }
+        }
+        Some(out)
+    }
+
+    /// Java's `String.stripIndent` over the body lines of a text block.
+    ///
+    /// The common indentation is the least of every non-blank line's *and* of the last line,
+    /// blank or not — that last line is the closing delimiter, and it is what an author moves to
+    /// choose the block's margin.
+    fn strip_indent(lines: &[&str]) -> Vec<String> {
+        let mut common = usize::MAX;
+        for (nth, line) in lines.iter().enumerate() {
+            let last = nth + 1 == lines.len();
+            if line.trim().is_empty() && !last {
+                continue;
+            }
+            let indent = line.len() - line.trim_start().len();
+            common = common.min(indent);
+        }
+        let common = if common == usize::MAX { 0 } else { common };
+        lines
+            .iter()
+            .map(|line| {
+                let cut = common.min(line.len() - line.trim_start().len());
+                line[cut..].trim_end().into()
+            })
+            .collect()
+    }
+
     /// The replacements to make, in source order and non-overlapping.
     fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
-        let mut edits = Vec::new();
+        let mut edits = Self::text_block_edits(root, src);
         for node in root.descendants() {
             // Outermost only: a nested chain is handled by its root, and editing both would
             // produce overlapping ranges. A lone literal inside one is likewise its root's.

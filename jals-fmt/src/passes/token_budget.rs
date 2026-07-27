@@ -17,7 +17,7 @@
 //! | `[literals]` non-`preserve` | by token **kind**, since a literal's text is allowed to change |
 //! | `imports.remove-unused` | output ⊆ input instead of equality |
 //! | `[braces] force-*` ≠ `never` | extra `{` / `}` in the output are allowed |
-//! | `wrapping.reflow-long-strings` | the literals and the `+` between them leave the multiset; what the concatenation *spells* is compared instead |
+//! | `wrapping.reflow-long-strings` | the literals and the `+` between them leave the multiset; what the concatenation *spells* is compared instead. A text block leaves it too: `indentTextBlocks` rewrites its incidental whitespace, which is layout rather than content |
 //!
 //! The new-syntax-error half of the check is unconditional: no rule may make a file stop parsing.
 
@@ -140,7 +140,11 @@ impl TokenBudget {
             .filter(|tok| !tok.kind().is_trivia())
             .filter(|tok| scope.admits(tok))
             .filter(|tok| {
-                !reflows || !matches!(tok.kind(), SyntaxKind::STRING_LITERAL | SyntaxKind::PLUS)
+                !reflows
+                    || !matches!(
+                        tok.kind(),
+                        SyntaxKind::STRING_LITERAL | SyntaxKind::PLUS | SyntaxKind::TEXT_BLOCK
+                    )
             })
         {
             let text = if by_kind {
