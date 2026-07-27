@@ -1,6 +1,7 @@
 //! Expression lowering: every form leaves exactly one value on the operand stack (or none, for a
 //! `void` call).
 
+use alloc::borrow::ToOwned as _;
 use alloc::string::{String, ToString as _};
 
 use jals_classfile::MethodDescriptor;
@@ -298,7 +299,13 @@ impl Expr {
         )?);
         let is_static = info.modifiers.is_static;
         let is_private = info.modifiers.is_private;
-        let name = info.name.clone();
+        // A constructor is declared under its class's name and invoked under `<init>`. The index
+        // records the declaration, so the JVM's spelling is supplied here rather than read.
+        let name = if constructor {
+            "<init>".to_owned()
+        } else {
+            info.name.clone()
+        };
 
         // The receiver comes first on the stack, below the arguments.
         if !is_static {

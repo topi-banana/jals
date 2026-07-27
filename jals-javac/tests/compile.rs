@@ -487,3 +487,73 @@ public class Outer {
         "expected the nested-type report, got {error}"
     );
 }
+
+/// A constructor's prologue emits `super()` and the field initialisers. An explicit `this(…)` or
+/// `super(args)` replaces part of that, so emitting both would run one of them twice — a class that
+/// verifies and initialises wrongly. Reported until the delegation is lowered.
+#[test]
+fn an_explicit_constructor_invocation_is_reported() {
+    for body in ["this(1);", "super();"] {
+        let source = format!(
+            r"
+public class Delegating {{
+    int v = 7;
+
+    Delegating(int v) {{}}
+
+    Delegating() {{ {body} }}
+
+    public static void main(String[] args) {{}}
+}}
+"
+        );
+        let error = compile(&source).expect_err("constructor delegation is not lowered yet");
+        assert!(
+            matches!(
+                error,
+                LowerError::Unsupported("an explicit constructor invocation")
+            ),
+            "`{body}` should be reported, got {error}"
+        );
+    }
+}
+
+/// The prologue's `super()` only exists if the superclass has one. Emitting it regardless produced
+/// a class that loaded and then threw `NoSuchMethodError` at the first `new` — the compiler knows
+/// the superclass's constructors and can say so instead.
+#[test]
+fn a_superclass_without_a_no_argument_constructor_is_reported() {
+    let source = r"
+public class Base {
+    Base(int seed) {}
+}
+
+class Derived extends Base {
+}
+";
+    let error = compile(source).expect_err("there is no `Base()` to call");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a superclass with no no-argument constructor")
+        ),
+        "expected the missing-`super()` report, got {error}"
+    );
+
+    // A superclass that declares *no* constructor has the implicit no-argument one, and a
+    // superclass that declares one among others still has it.
+    compile(
+        r"
+public class Plain {
+    int v;
+}
+
+class Sub extends Plain {
+}
+
+class Widened extends Sub {
+}
+",
+    )
+    .expect("an implicit no-argument constructor is still a `super()`");
+}

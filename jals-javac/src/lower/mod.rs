@@ -174,16 +174,16 @@ impl Compile {
         let this_class = pool.class_index(&internal_name).ok_or(AsmError::PoolFull)?;
         // Only a project-internal supertype can be named here; anything else is `Object`, which is
         // also the right answer for a class with no `extends` clause at all.
-        let super_name = index
+        let super_item = index
             .item(item)
             .supertypes
             .iter()
-            .map(|supertype| index.item(supertype.id))
-            .find(|super_item| super_item.kind != DefKind::Interface)
-            .map_or_else(
-                || "java/lang/Object".to_owned(),
-                |super_item| Descriptor::internal_name(super_item.fqn.as_str()),
-            );
+            .map(|supertype| supertype.id)
+            .find(|&id| index.item(id).kind != DefKind::Interface);
+        let super_name = super_item.map_or_else(
+            || "java/lang/Object".to_owned(),
+            |id| Descriptor::internal_name(index.item(id).fqn.as_str()),
+        );
         let super_class = pool.class_index(&super_name).ok_or(AsmError::PoolFull)?;
 
         let body = node
@@ -217,6 +217,7 @@ impl Compile {
                         &context,
                         &mut pool,
                         &super_name,
+                        super_item,
                         &members,
                     )?);
                 }
@@ -230,6 +231,7 @@ impl Compile {
                 &context,
                 &mut pool,
                 &super_name,
+                super_item,
                 &members,
                 Self::access_level(node),
             )?);
@@ -451,6 +453,7 @@ impl Compile {
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
+        super_item: Option<ItemId>,
         members: &[SyntaxNode],
     ) -> Result<MethodInfo> {
         let name_token = node
@@ -464,12 +467,21 @@ impl Compile {
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
 
+        let body = node.children().find_map(ast::Block::cast);
+        if let Some(body) = &body
+            && Self::has_explicit_constructor_invocation(body.syntax())
+        {
+            return Err(LowerError::Unsupported(
+                "an explicit constructor invocation",
+            ));
+        }
+
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let mut slots = Slots::new(context, params.as_ref(), false);
-        Self::prologue(context, &mut asm, &slots, super_name, members)?;
-        if let Some(body) = node.children().find_map(ast::Block::cast) {
-            stmt::Stmt::block(&body, context, &mut asm, &mut slots)?;
+        Self::prologue(context, &mut asm, &slots, super_name, super_item, members)?;
+        if let Some(body) = &body {
+            stmt::Stmt::block(body, context, &mut asm, &mut slots)?;
         }
         // A constructor is `void`, so it needs the instruction unless every path already returned.
         if asm.reachable() {
@@ -491,6 +503,7 @@ impl Compile {
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
+        super_item: Option<ItemId>,
         members: &[SyntaxNode],
         access: u16,
     ) -> Result<MethodInfo> {
@@ -498,7 +511,7 @@ impl Compile {
         let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), "()V")?;
         let slots = Slots::new(context, None, false);
-        Self::prologue(context, &mut asm, &slots, super_name, members)?;
+        Self::prologue(context, &mut asm, &slots, super_name, super_item, members)?;
         asm.return_(None)?;
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(access),
@@ -508,6 +521,29 @@ impl Compile {
         })
     }
 
+    /// Whether `body` contains an explicit constructor invocation — a bare `this(…)` or `super(…)`.
+    ///
+    /// Both replace part of what [`prologue`](Self::prologue) emits: `super(args)` stands in for
+    /// the no-argument `super()`, and `this(…)` stands in for the field initialisers too, since
+    /// the constructor it delegates to has already run them. Emitting the prologue *and* the
+    /// invocation runs one of them twice, so the shape is reported until it is lowered.
+    ///
+    /// Only the bare forms match. `this.method()` and `super.method()` are qualified calls whose
+    /// callee is a field access, not a name reference.
+    fn has_explicit_constructor_invocation(body: &SyntaxNode) -> bool {
+        use jals_syntax::SyntaxKind::{SUPER_KW, THIS_KW};
+        body.descendants()
+            .filter_map(ast::CallExpr::cast)
+            .any(|call| {
+                matches!(call.callee(), Some(ast::Expr::NameRef(name))
+                    if name
+                        .syntax()
+                        .children_with_tokens()
+                        .filter_map(jals_syntax::SyntaxElement::into_token)
+                        .any(|token| matches!(token.kind(), THIS_KW | SUPER_KW)))
+            })
+    }
+
     /// `super()` followed by every instance field's initialiser — what a constructor runs before
     /// its own body, and the reason a field initialiser is not a statement anywhere in the source.
     fn prologue(
@@ -515,8 +551,27 @@ impl Compile {
         asm: &mut Assembler<'_>,
         slots: &Slots,
         super_name: &str,
+        super_item: Option<ItemId>,
         members: &[SyntaxNode],
     ) -> Result<()> {
+        // `super()` exists only if the superclass declares no constructor at all or declares a
+        // no-argument one. Emitting the call regardless produces a class that loads and then
+        // throws `NoSuchMethodError` at the first `new` — a run-time failure the compiler is in a
+        // position to report instead.
+        if let Some(super_item) = super_item {
+            let mut constructors = context
+                .index
+                .own_members(super_item)
+                .iter()
+                .map(|&member| context.index.member(member))
+                .filter(|member| member.kind == DefKind::Constructor)
+                .peekable();
+            if constructors.peek().is_some() && !constructors.any(|m| m.params.is_empty()) {
+                return Err(LowerError::Unsupported(
+                    "a superclass with no no-argument constructor",
+                ));
+            }
+        }
         asm.load(0)?;
         asm.invoke_special(super_name, "<init>", "()V", false)?;
 
