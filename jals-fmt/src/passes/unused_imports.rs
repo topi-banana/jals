@@ -105,14 +105,22 @@ impl UnusedImports {
         let Some(name) = decl.name() else {
             return true;
         };
-        let Some(last) = name
-            .syntax()
-            .children_with_tokens()
-            .filter_map(SyntaxElement::into_token)
+        let tokens = || {
+            name.syntax()
+                .children_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+        };
+        // `import a.b.*;` names no single type, so there is nothing to test it against — the
+        // trailing `*` is the whole point. Its last *identifier* is the package, which is never
+        // written at a use site, so testing that instead would delete every wildcard import.
+        if tokens().any(|tok| tok.kind() == SyntaxKind::STAR) {
+            return true;
+        }
+        let Some(last) = tokens()
             .filter(|tok| tok.kind() == SyntaxKind::IDENT)
             .last()
         else {
-            // No identifier at all: an on-demand `a.b.*`, or error-recovery debris. Keep it.
+            // No identifier at all: error-recovery debris. Keep it.
             return true;
         };
         used.contains(last.text())

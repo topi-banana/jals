@@ -107,7 +107,19 @@ impl Ctx<'_> {
     /// Which `[wrapping]` rule governs this `MODIFIERS` node's leading annotations.
     fn annotation_policy(&self, node: &SyntaxNode) -> WrapPolicy {
         let wrapping = &self.style.cfg.wrapping;
-        match node.parent().map(|parent| parent.kind()) {
+        let parent = node.parent().map(|parent| parent.kind());
+        // `inline-argumentless-annotations` decides from the annotations themselves, so it is
+        // answered before the per-kind rule it overrides.
+        if wrapping.inline_argumentless_annotations
+            && matches!(
+                parent,
+                Some(S::FIELD_DECL | S::LOCAL_VAR_DECL | S::RESOURCE | S::PARAM)
+            )
+            && !Self::any_annotation_has_arguments(node)
+        {
+            return WrapPolicy::Never;
+        }
+        match parent {
             Some(
                 S::CLASS_DECL
                 | S::INTERFACE_DECL
@@ -124,6 +136,20 @@ impl Ctx<'_> {
             // A type-use annotation is inline by definition — it sits in the middle of a type.
             _ => WrapPolicy::Never,
         }
+    }
+
+    /// Whether any annotation in this `MODIFIERS` node carries an argument list.
+    ///
+    /// The whole run answers together, as google-java-format's `fieldAnnotationDirection` does:
+    /// one `@SuppressWarnings("x")` puts every annotation on the run onto its own line.
+    fn any_annotation_has_arguments(node: &SyntaxNode) -> bool {
+        node.children()
+            .filter(|child| matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE))
+            .any(|annotation| {
+                annotation
+                    .children()
+                    .any(|child| matches!(child.kind(), S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST))
+            })
     }
 
     /// One annotation use: `@Name` with an optional argument list.

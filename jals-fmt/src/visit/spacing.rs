@@ -38,8 +38,21 @@ impl Spacing {
         let (pp, np) = (Self::parent(prev), Self::parent(next));
 
         // Selectors and the annotation sigil bind tighter than anything configurable.
-        if pk == S::DOT || nk == S::DOT || pk == S::AT || nk == S::ELLIPSIS {
+        if pk == S::DOT || nk == S::DOT || pk == S::AT {
             return false;
+        }
+        // A dimension marker hugs the type it follows — `int...`, `String[]` — except behind a
+        // type annotation, where gluing them would read as one name: `Object @Nullable ... xs`,
+        // `new String @A [] {}`.
+        if matches!(nk, S::ELLIPSIS | S::LBRACK) && Self::ends_annotation(prev) {
+            return true;
+        }
+        if nk == S::ELLIPSIS {
+            return false;
+        }
+        // The name a `...` introduces always separates: `Test2... xs`, never `Test2...xs`.
+        if pk == S::ELLIPSIS {
+            return true;
         }
         if pk == S::COLON_COLON || nk == S::COLON_COLON {
             return rules.around_method_ref_double_colon;
@@ -72,6 +85,18 @@ impl Spacing {
     /// The node kind a token hangs off, or `SOURCE_FILE` for the impossible orphan case.
     fn parent(tok: &SyntaxToken) -> S {
         tok.parent().map_or(S::SOURCE_FILE, |node| node.kind())
+    }
+
+    /// Whether `tok` is the last token of an annotation — `@Nullable`, or the `)` of
+    /// `@SuppressWarnings("x")`.
+    ///
+    /// A type annotation is the one thing that separates from the `[` or `...` behind it
+    /// (`Object @Nullable ... xs`, `new String @A [] {}`), because gluing them would read as one
+    /// name. Everywhere else those brackets hug.
+    fn ends_annotation(tok: &SyntaxToken) -> bool {
+        tok.parent_ancestors()
+            .find(|node| node.kind() == S::ANNOTATION)
+            .is_some_and(|anno| anno.text_range().end() == tok.text_range().end())
     }
 
     /// Whether the two tokens spell one fused `>`-family operator (`>>`, `>=`, `>>>=`).
@@ -124,9 +149,14 @@ impl Spacing {
             (S::LBRACK, S::RBRACK) => Some(false),
 
             (S::LPAREN, _) => Some(Self::within_parens(pp, rules)),
+            // A resource list may end with its separator (`try (X x = x; )`). That trailing `;`
+            // is still a separator, so it keeps its after-space rather than hugging the `)`.
+            (S::SEMICOLON, S::RPAREN) if np == S::RESOURCE_LIST => Some(rules.after_semicolon),
             (_, S::RPAREN) => Some(Self::within_parens(np, rules)),
             (S::LBRACK, _) => Some(pp == S::INDEX_EXPR && rules.within_brackets),
             (_, S::RBRACK) => Some(np == S::INDEX_EXPR && rules.within_brackets),
+            // A dimension's `[` hugs what it indexes, except behind a type annotation —
+            // see [`Spacing::ends_annotation`].
             (_, S::LBRACK) => Some(false),
             // `String[][] xs` — an array type's `]` is followed by the name it declares. Only a
             // word is separated, so `a[0] = 1` still reaches the assignment rule and `a[0].b`
@@ -224,8 +254,12 @@ impl Spacing {
             // Only a basic-`for` header's semicolons are separators; a statement terminator
             // never takes a space before it.
             (_, S::SEMICOLON) => Some(np == S::FOR_STMT && rules.before_semicolon),
-            (S::SEMICOLON, _) => Some(pp == S::FOR_STMT && rules.after_semicolon),
-            (_, S::QUESTION) => Some(rules.before_ternary_question),
+            (S::SEMICOLON, _) => {
+                Some(matches!(pp, S::FOR_STMT | S::RESOURCE_LIST) && rules.after_semicolon)
+            }
+            // Only the ternary's `?` is punctuation; a wildcard's is part of the type and hugs
+            // its `<`, so `Stream<?>` never becomes `Stream< ?>`.
+            (_, S::QUESTION) if np == S::TERNARY_EXPR => Some(rules.before_ternary_question),
             (S::QUESTION, _) if pp == S::TERNARY_EXPR => Some(rules.after_ternary_question),
             (_, S::COLON) => Some(Self::before_colon(np, rules)),
             (S::COLON, _) => Some(Self::after_colon(pp, rules)),
@@ -306,13 +340,37 @@ impl Spacing {
         np: S,
         rules: &SpacingRules,
     ) -> Option<bool> {
-        if let Some(space) = Self::operator_rule(next.kind(), np, rules) {
+        // `around-unary-operator` governs the side facing the *operand* — the right of a prefix
+        // `-`, the left of a postfix `++`. The other side belongs to whatever encloses the
+        // expression, so consulting the unary rule there would glue `return` to `-1`.
+        let next_prefix = Self::is_prefix_operator(next);
+        if !next_prefix && let Some(space) = Self::operator_rule(next.kind(), np, rules) {
             return Some(space);
         }
-        if let Some(space) = Self::operator_rule(prev.kind(), pp, rules) {
+        if !Self::is_postfix_operator(prev)
+            && let Some(space) = Self::operator_rule(prev.kind(), pp, rules)
+        {
             return Some(space);
         }
-        None
+        // Nothing else claimed the pair: a word before a prefix operator still separates, which
+        // is what keeps `return -1` and `case -1:` readable.
+        (next_prefix && Self::is_word(prev.kind())).then_some(true)
+    }
+
+    /// Whether `tok` is the operator of a prefix expression — the first token of its
+    /// `UNARY_EXPR`.
+    fn is_prefix_operator(tok: &SyntaxToken) -> bool {
+        tok.parent().is_some_and(|node| {
+            node.kind() == S::UNARY_EXPR && node.text_range().start() == tok.text_range().start()
+        })
+    }
+
+    /// Whether `tok` is the operator of a postfix expression — the last token of its
+    /// `POSTFIX_EXPR`.
+    fn is_postfix_operator(tok: &SyntaxToken) -> bool {
+        tok.parent().is_some_and(|node| {
+            node.kind() == S::POSTFIX_EXPR && node.text_range().end() == tok.text_range().end()
+        })
     }
 
     /// The spacing rule an operator token asks for, by class.

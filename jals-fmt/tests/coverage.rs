@@ -176,14 +176,42 @@ const LONG_STRING: &str = "class T {\n  String s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaa
 /// Bodies the source itself wrote on one line, and empty ones.
 const ONE_LINERS: &str = "class T { void m() { call(); } }\n\ninterface I {}\n\nenum E {}\n\nrecord R() {}\n\n@interface A {}\n\nclass U {\n  void n() {}\n\n  void o() { if (x) { y(); } else { z(); } for (;;) {} while (x) {} do {} while (x); }\n\n  Runnable r = () -> { run(); };\n\n  void p() { switch (x) { default: break; } }\n}\n";
 
+/// Declarations packed with no separation, so every `[blank-lines]` rule has a gap to widen: a
+/// documented field between undocumented ones, a Javadoc whose tags follow its description
+/// immediately, argument-free and argument-carrying annotations, and a three-blank-line run for
+/// the `max-*` caps to trim.
+const PACKED: &str = r#"package p;
+
+
+
+import java.util.List;
+
+class Packed {
+  int a = 1;
+  /**
+   * Documented.
+   * @param x nothing
+   */
+  int b = 2;
+  int c = 3;
+  @Deprecated int d = 4;
+  @SuppressWarnings("x") int e = 5;
+}
+
+
+
+class Second {}
+"#;
+
 /// Every fixture; a rule may be noticed on any of them.
-const FIXTURES: [&str; 6] = [
+const FIXTURES: [&str; 7] = [
     KITCHEN_SINK,
     WRAPPING,
     TAGGED,
     IMPORTS,
     LONG_STRING,
     ONE_LINERS,
+    PACKED,
 ];
 
 /// An import-group list that leaves the static block's position to `static-first`.
@@ -376,7 +404,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 176,
-        "the rule set is documented as 176 keys in jals-fmt/MAPPING.md",
+        total, 178,
+        "the rule set is documented as 178 keys in jals-fmt/MAPPING.md",
     );
 }

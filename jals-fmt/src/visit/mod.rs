@@ -144,6 +144,11 @@ pub(crate) struct Ctx<'a> {
     header_seen: bool,
     /// Token offsets whose own-line leading comments were already hoisted by an enclosing node.
     hoisted: BTreeSet<usize>,
+    /// Separation an item asked for that has no gap above it yet, to be applied *after* its own
+    /// leading comments. This is what `[blank-lines] before-package` names: nothing precedes the
+    /// first item of a file but its header comment, so the blank lines it wants fall between the
+    /// two.
+    owed_after_comments: usize,
     /// How many comments were emitted, checked against the map in debug builds.
     emitted_comments: usize,
     /// Amortized cooperative yielding across the walk.
@@ -180,6 +185,7 @@ impl<'a> Ctx<'a> {
             braced_branch: false,
             header_seen: false,
             hoisted: BTreeSet::new(),
+            owed_after_comments: 0,
             emitted_comments: 0,
             yielder: Yielder::new(),
         }
@@ -455,6 +461,12 @@ impl<'a> Ctx<'a> {
     /// google-java-format spells the same idea as `Token.plusIndentCommentsBefore`; hoisting is
     /// the shape that falls out of a visitor which opens its levels itself.
     fn hoist_leading_comments(&mut self, node: &SyntaxNode) {
+        // The compilation unit opens no level of its own, so hoisting to it gains nothing — and
+        // it would emit the first declaration's own Javadoc *before* that declaration negotiates
+        // its separation, turning `around-type` into a blank line between a type and its doc.
+        if node.kind() == S::SOURCE_FILE {
+            return;
+        }
         let Some(first) = Self::first_token(node) else {
             return;
         };
@@ -484,14 +496,59 @@ impl<'a> Ctx<'a> {
     }
 
     /// Emit the own-line comments anchored before `tok`, each on its own line.
+    ///
+    /// The gap *between the last comment and `tok`* is its own blank line, separate from the one
+    /// before the first comment: `// TODO` followed by a blank line and then a method means the
+    /// comment heads the section, not the method. Only the leading gap reaches the caller through
+    /// [`Ctx::blank_lines_before`], so this restores the trailing one.
     fn emit_own_line_comments(&mut self, tok: &SyntaxToken) {
-        for comment in self.comments.leading(tok).to_vec() {
+        let owed = core::mem::take(&mut self.owed_after_comments);
+        let comments = self.comments.leading(tok).to_vec();
+        if comments.is_empty() {
+            return;
+        }
+        for comment in &comments {
             if !self.ops.level_is_empty() && !self.ops.last_is_break() {
                 self.forced_break(Indent::ZERO);
             }
-            self.emit_comment_line(&comment);
+            self.emit_comment_line(comment);
             self.forced_break(Indent::ZERO);
         }
+        // Only a `//` or a plain `/* … */` may leave a blank line behind it. A Javadoc documents
+        // the declaration that follows, so a blank line between the two is dropped however the
+        // author wrote it — google-java-format's `allowBlankAfterLastComment`.
+        let separable = comments
+            .last()
+            .is_some_and(|comment| comment.kind != S::DOC_COMMENT);
+        let after = Self::source_blank_lines(tok).min(self.style.cfg.blank_lines.max_in_code);
+        let after = if separable { after.max(owed) } else { 0 };
+        if after > 0 {
+            self.ops.ensure_blank_lines(after, Indent::ZERO);
+        }
+    }
+
+    /// Emit the own-line comments before `tok` into the level that is open *now*, leaving the
+    /// break that follows to the caller.
+    ///
+    /// A comment written just before a body's closing brace documents the body, not the brace, so
+    /// it keeps the body's indent — google-java-format spells the same thing as the `plusTwo`
+    /// argument of `token("}", plusTwo)`. Reaching it through the ordinary token path would emit
+    /// the comment after the body level has already closed, at the brace's own indent.
+    ///
+    /// Returns whether anything was emitted.
+    fn hoist_comments_before(&mut self, tok: &SyntaxToken) -> bool {
+        let comments = self.comments.leading(tok).to_vec();
+        if comments.is_empty() {
+            return false;
+        }
+        self.hoisted.insert(usize::from(tok.text_range().start()));
+        for comment in &comments {
+            if !self.ops.level_is_empty() && !self.ops.last_is_break() {
+                self.forced_break(Indent::ZERO);
+            }
+            self.emit_comment_line(comment);
+        }
+        true
     }
 
     /// Emit the comments anchored after `tok`.

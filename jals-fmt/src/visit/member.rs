@@ -89,12 +89,20 @@ impl Ctx<'_> {
             self.token(brace);
         }
         self.open(indent.clone());
+        // `around-*` means *around*: the rule separates a member from its neighbour on either
+        // side, so the gap before member N answers to N's rule and to N-1's. Reading only N's
+        // would put a blank line before a method and none after it.
+        let mut previous_rule = 0usize;
         for (nth, member) in members.iter().enumerate() {
-            let enforced = match member.as_node() {
-                _ if nth == 0 => blank.at_type_body_start,
-                Some(member) => self.enforced_around_member(member, node),
-                None => 0,
+            let rule = member
+                .as_node()
+                .map_or(0, |member| self.enforced_around_member(member, node));
+            let enforced = if nth == 0 {
+                blank.at_type_body_start
+            } else {
+                rule.max(previous_rule)
             };
+            previous_rule = rule;
             let source = member.as_node().map_or(0, |member| {
                 self.blank_lines_before(member)
                     .min(blank.max_in_declarations)
@@ -109,13 +117,22 @@ impl Ctx<'_> {
             self.body_break(collapsible, enforced.max(source), Indent::ZERO);
             self.visit_element(member).await;
         }
+        // Comments written just before the closing brace stay inside the body level, so they keep
+        // the members' indent (see [`Ctx::hoist_comments_before`]).
+        let dangling_before_brace = rbrace
+            .as_ref()
+            .is_some_and(|brace| self.hoist_comments_before(brace));
         self.close_indent(&indent);
 
         if let Some(brace) = &rbrace {
-            let trailing = blank.at_type_body_end.max(
-                self.blank_lines_before_token(brace)
-                    .min(blank.max_before_closing_brace),
-            );
+            let trailing = if dangling_before_brace {
+                0
+            } else {
+                blank.at_type_body_end.max(
+                    self.blank_lines_before_token(brace)
+                        .min(blank.max_before_closing_brace),
+                )
+            };
             self.body_break(collapsible, trailing, Indent::ZERO);
             self.token(brace);
         }
@@ -154,6 +171,11 @@ impl Ctx<'_> {
         let in_interface = body
             .parent()
             .is_some_and(|parent| parent.kind() == S::INTERFACE_DECL);
+        // A documented member is separated whatever its kind says — see
+        // `[blank-lines] around-documented-member`.
+        if self.has_javadoc(member) {
+            return blank.around_documented_member;
+        }
         match member.kind() {
             S::FIELD_DECL => {
                 if in_interface {
@@ -177,6 +199,16 @@ impl Ctx<'_> {
             | S::ANNOTATION_TYPE_DECL => blank.around_type,
             _ => 0,
         }
+    }
+
+    /// Whether `member` carries a Javadoc comment of its own.
+    fn has_javadoc(&self, member: &SyntaxNode) -> bool {
+        Self::first_token(member).is_some_and(|first| {
+            self.comments
+                .leading(&first)
+                .iter()
+                .any(|comment| comment.kind == S::DOC_COMMENT)
+        })
     }
 
     /// Blank lines the source had before a token.
@@ -289,6 +321,15 @@ impl Ctx<'_> {
                     self.blank_lines(enforced.max(source), Indent::ZERO);
                 } else {
                     self.enum_break(trivial, policy);
+                    // Constants have no `around-*` rule of their own, but the blank lines an
+                    // author grouped them with are preserved — google-java-format's
+                    // `BlankLineWanted.PRESERVE` between enum constants.
+                    let source = self
+                        .blank_lines_before(member)
+                        .min(blank.max_in_declarations);
+                    if source > 0 {
+                        self.ensure_blank_lines(source, Indent::ZERO);
+                    }
                 }
             }
             self.visit(member).await;

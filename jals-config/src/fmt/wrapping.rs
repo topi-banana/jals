@@ -137,6 +137,16 @@ pub struct Wrapping {
     pub parameter_annotations: WrapPolicy,
     /// A local-variable declaration's annotations. IntelliJ `VARIABLE_ANNOTATION_WRAP`.
     pub variable_annotations: WrapPolicy,
+    /// Keep a variable declaration's leading annotations on the declaration's own line when
+    /// *none* of them takes arguments, overriding
+    /// [`field_annotations`](Self::field_annotations) and
+    /// [`variable_annotations`](Self::variable_annotations).
+    ///
+    /// `@Deprecated int x;` stays on one line while `@SuppressWarnings("x") int y;` breaks —
+    /// google-java-format's `fieldAnnotationDirection`, which reads an annotation's *shape*
+    /// rather than the available width. No Eclipse or IntelliJ equivalent: both decide the
+    /// direction from the declaration kind alone.
+    pub inline_argumentless_annotations: bool,
     /// Put a wrapped binary operator at the start of the continuation line rather than at the
     /// end of the broken line. Eclipse `wrap_before_additive_operator` and its six siblings /
     /// IntelliJ `BINARY_OPERATION_SIGN_ON_NEXT_LINE`.
@@ -232,6 +242,7 @@ impl Default for Wrapping {
             field_annotations: WrapPolicy::AlwaysPerItem,
             parameter_annotations: WrapPolicy::Never,
             variable_annotations: WrapPolicy::Never,
+            inline_argumentless_annotations: false,
             before_binary_operator: true,
             before_ternary_operator: true,
             before_assignment_operator: false,

@@ -145,6 +145,9 @@ impl GoogleJavaFormatConfig {
                 paren_lambda: ParenPositions::CommonLines,
                 paren_record: ParenPositions::CommonLines,
                 tabular_array_initializers: true,
+                // `fieldAnnotationDirection`: a variable's annotations share its line unless one
+                // of them takes arguments.
+                inline_argumentless_annotations: true,
                 reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
             },
@@ -156,8 +159,13 @@ impl GoogleJavaFormatConfig {
             },
             comments: Comments {
                 format_line: true,
-                format_block: true,
+                // `JavaCommentsHelper.rewrite` sends only a *Javadoc* tok through
+                // `JavadocFormatter`. A `/* … */` comment is trimmed of trailing whitespace and
+                // re-indented (`indentJavadoc` / `preserveIndentation`) — never refilled. Turning
+                // this on would rewrap every license header in the file.
+                format_block: false,
                 format_javadoc: native.format_javadoc,
+                // The file's leading comment gets no special treatment: whatever its kind says.
                 format_header: true,
                 format_html: true,
                 width: max_width,

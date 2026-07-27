@@ -69,8 +69,10 @@ fn skipping_a_google_java_format_pass_shows_up_in_the_config() {
     .into();
 
     assert!(!config.comments.format_javadoc);
-    // Other comment reflow is unconditional in GJF.
-    assert!(config.comments.format_block);
+    // `--skip-javadoc-formatting` reaches only Javadoc. Line comments are still rewrapped, and
+    // block comments are still left alone — `JavaCommentsHelper` never refills one.
+    assert!(config.comments.format_line);
+    assert!(!config.comments.format_block);
     assert_eq!(config.imports.order, ImportOrder::Preserve);
     // `reorderModifiers` is independent of the import passes.
     assert!(config.imports.reorder_modifiers);
@@ -269,7 +271,6 @@ fn the_gjf_family_profile_is_the_google_preset() {
         config.comments,
         Comments {
             format_line: true,
-            format_block: true,
             format_javadoc: true,
             format_header: true,
             width: 100,
@@ -285,6 +286,9 @@ fn the_gjf_family_profile_is_the_google_preset() {
             method_chain: WrapPolicy::IfLongPerItem,
             case_labels: WrapPolicy::IfLong,
             tabular_array_initializers: true,
+            // `fieldAnnotationDirection` — a variable's annotations stay on its line unless one
+            // of them takes arguments.
+            inline_argumentless_annotations: true,
             // `JavaFormatterOptions.reflowLongStrings` — google-java-format runs `StringWrapper`
             // unless `--skip-reflowing-long-strings`.
             reflow_long_strings: true,

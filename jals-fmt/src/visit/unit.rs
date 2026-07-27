@@ -47,7 +47,16 @@ impl Ctx<'_> {
                 continue;
             }
 
-            self.separate(&child, owed.max(self.wanted_before(&child)), first);
+            // The first item of a file is separated by whatever the source had:
+            // `visitCompilationUnit` asks for a blank line only *after* something has been
+            // emitted. The exception is the package declaration, whose own rule is exactly about
+            // the gap under a header comment.
+            let wanted = if first && child.kind() != S::PACKAGE_DECL {
+                0
+            } else {
+                self.wanted_before(&child)
+            };
+            self.separate(&child, owed.max(wanted), first);
             first = false;
             self.visit(&child).await;
             owed = if child.kind() == S::PACKAGE_DECL {
@@ -91,9 +100,17 @@ impl Ctx<'_> {
             },
         );
 
+        // A planned block states its own separation exactly: the plan decides where a group
+        // boundary is, so a blank line the author left *inside* a group is not preserved but
+        // removed. Only an unplanned block (`order = "preserve"`) keeps what the source had.
+        let planned = plan.is_some();
         for (nth, (node, separation)) in entries.iter().enumerate() {
             let enforced = if nth == 0 { lead } else { *separation };
-            self.separate(node, enforced, first && nth == 0);
+            if planned && nth > 0 {
+                self.ensure_blank_lines(enforced, Indent::ZERO);
+            } else {
+                self.separate(node, enforced, first && nth == 0);
+            }
             self.visit(node).await;
         }
     }
@@ -109,10 +126,14 @@ impl Ctx<'_> {
     /// level, so the *first* item is separated exactly when something (a header comment) has
     /// already been emitted — which is what `before-package` means.
     fn separate(&mut self, node: &SyntaxNode, enforced: usize, first: bool) {
-        let _ = first;
         let source = self
             .blank_lines_before(node)
             .min(self.style.cfg.blank_lines.max_in_declarations);
+        if first {
+            // Nothing precedes the first item but its own leading comments, so the separation it
+            // asks for goes *between* those and the item rather than above them.
+            self.owed_after_comments = enforced;
+        }
         self.ensure_blank_lines(enforced.max(source), Indent::ZERO);
     }
 

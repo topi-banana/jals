@@ -149,10 +149,14 @@ impl CommentFormatter {
 
         let mut out = String::from(opener);
         let mut seen_tag = false;
+        let mut previous: Option<&Block> = None;
         for block in &blocks {
             match block {
+                // Once the block tags start there are no more blank lines: only the *first* one
+                // is separated from the description, and `JavadocWriter` requests a plain newline
+                // between the rest.
                 Block::Blank => {
-                    if cfg.preserve_blank_lines {
+                    if cfg.preserve_blank_lines && !seen_tag {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
                 }
@@ -171,7 +175,12 @@ impl CommentFormatter {
                     argument,
                     words,
                 } => {
-                    if !seen_tag && cfg.blank_line_before_tags {
+                    // A blank line the author already wrote satisfies the rule; asking for a
+                    // second one would open the tag section with two.
+                    if !seen_tag
+                        && cfg.blank_line_before_tags
+                        && !matches!(previous, Some(Block::Blank))
+                    {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
                     seen_tag = true;
@@ -186,6 +195,7 @@ impl CommentFormatter {
                     );
                 }
             }
+            previous = Some(block);
         }
         out.push('\n');
         if cfg.leading_asterisks {
@@ -233,8 +243,12 @@ impl CommentFormatter {
             }
         }
 
+        // A continuation line is indented by one continuation step, not aligned under the
+        // description: google-java-format's `innerIndent()` adds a flat `+4` while a footer tag
+        // is being continued. Lining descriptions up under a shared column is
+        // `align-tag-descriptions`, which is a separate rule.
         let continuation = if cfg.indent_tag_description {
-            Width::utf16(&head) + 1
+            style.continuation_cols
         } else {
             0
         };
@@ -294,9 +308,20 @@ impl CommentFormatter {
         let mut blocks: Vec<Block> = Vec::new();
         let mut prose: Vec<String> = Vec::new();
         let mut fence: Option<Vec<String>> = None;
+        // A `<p>` waiting for the word it introduces, so the two are refilled as one unit.
+        let mut pending: Option<String> = None;
 
         for raw in body.split('\n') {
-            let line = raw.trim();
+            let mut line = raw.trim();
+            let stripped;
+            if cfg.format_html && Self::has_paragraph_close(line) {
+                // google-java-format drops `</p>` outright (`case ParagraphCloseTag -> {}`).
+                stripped = Self::drop_paragraph_close(line);
+                line = stripped.trim();
+                if line.is_empty() {
+                    continue;
+                }
+            }
 
             if let Some(lines) = &mut fence {
                 lines.push(line.into());
@@ -326,8 +351,27 @@ impl CommentFormatter {
                 blocks.push(tag);
                 continue;
             }
-            // An HTML block element starts a new paragraph, so `<p>` and list items keep their
-            // own lines instead of being refilled into the previous sentence.
+            // `<p>` opens a paragraph: a blank line before it, and the tag glued to the word it
+            // introduces (`<p>This method …`). An opening `<p>` before any prose is dropped, as
+            // `JavadocWriter.writeParagraphOpen` does when nothing significant has been written.
+            if cfg.format_html
+                && let Some(rest) = Self::paragraph_open(line)
+            {
+                Self::flush(&mut prose, &mut blocks);
+                if !blocks.is_empty() {
+                    // A blank line the author already wrote *is* the paragraph break.
+                    if !matches!(blocks.last(), Some(Block::Blank)) {
+                        blocks.push(Block::Blank);
+                    }
+                    pending = Some("<p>".into());
+                }
+                line = rest;
+                if line.is_empty() {
+                    continue;
+                }
+            }
+            // An HTML block element starts a new paragraph, so list items keep their own lines
+            // instead of being refilled into the previous sentence.
             if cfg.format_html && Self::is_html_block(line) {
                 Self::flush(&mut prose, &mut blocks);
             }
@@ -338,7 +382,16 @@ impl CommentFormatter {
                 words.extend(line.split_whitespace().map(Into::into));
                 continue;
             }
-            prose.extend(line.split_whitespace().map(Into::into));
+            for word in line.split_whitespace() {
+                if let Some(glued) = pending.take() {
+                    prose.push(glued + word);
+                    continue;
+                }
+                prose.push(word.into());
+            }
+        }
+        if let Some(glued) = pending.take() {
+            prose.push(glued);
         }
         if let Some(lines) = fence {
             blocks.push(Block::Verbatim(lines));
@@ -380,6 +433,43 @@ impl CommentFormatter {
         (line.contains("<pre>") && line.contains("</pre>"))
             || (line.contains("<table") && line.contains("</table>"))
             || (line.contains("{@code") && line.contains('}'))
+    }
+
+    /// The rest of `line` after a leading `<p>`, or `None` when it does not open a paragraph.
+    ///
+    /// google-java-format standardizes any simple form — `<P>`, `<p/>`, `<p />` — to `<p>`
+    /// (`standardizePToken`), so all of them are recognized here.
+    fn paragraph_open(line: &str) -> Option<&str> {
+        let rest = line.strip_prefix('<')?;
+        let rest = rest.strip_prefix(['p', 'P'])?;
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        Some(rest.trim_start().strip_prefix('>')?.trim_start())
+    }
+
+    /// Whether `line` holds a `</p>` in any case.
+    fn has_paragraph_close(line: &str) -> bool {
+        line.contains("</p") || line.contains("</P")
+    }
+
+    /// `line` with every `</p>` removed.
+    fn drop_paragraph_close(line: &str) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut rest = line;
+        while let Some(at) = rest.find("</") {
+            let (head, tail) = rest.split_at(at);
+            out.push_str(head);
+            let Some(close) = tail.find('>') else {
+                rest = tail;
+                break;
+            };
+            if !tail[2..close].trim().eq_ignore_ascii_case("p") {
+                out.push_str(&tail[..=close]);
+            }
+            rest = &tail[close + 1..];
+        }
+        out.push_str(rest);
+        out
     }
 
     /// Whether a line starts an HTML block element, which begins its own paragraph.
