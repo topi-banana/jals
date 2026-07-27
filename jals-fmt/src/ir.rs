@@ -286,17 +286,23 @@ impl Doc {
             .fold(0usize, |acc, doc| acc.saturating_add(doc.width()))
     }
 
-    /// How much of `docs` lands on the *current* line: the flat width up to the first break that
-    /// is certain to be taken.
+    /// How much of `docs` is *certain* to land on the current line: the flat width up to the first
+    /// break of any kind.
     ///
-    /// This is not [`Doc::width_of`], which is infinite as soon as anything below it is forced.
-    /// A method body is `{`, a forced break, statements — of which only the `{` shares the header's
-    /// line, and that one column is what decides whether the header fits.
+    /// A break is where the line may end, so nothing past one is certain. That is what keeps this
+    /// from over-counting: `if (cond) stmt;` has a break between the `)` and the statement, so the
+    /// condition's tail is one column — the `)` — and the condition is measured against the width
+    /// it actually has. Counting the statement too would break the condition to make room for a
+    /// statement that was going to move to its own line anyway.
+    ///
+    /// This is also not [`Doc::width_of`], which is infinite as soon as anything below it is
+    /// forced. A method body is `{`, a forced break, statements — of which only the `{` shares the
+    /// header's line, and that one column is what decides whether the header fits.
     pub(crate) fn head_width_of(docs: &[Self]) -> usize {
         let mut total = 0usize;
         for doc in docs {
             match doc {
-                Self::Break(brk) if brk.is_forced() => return total,
+                Self::Break(_) => return total,
                 Self::Level(level) => {
                     let head = Self::head_width_of(&level.docs);
                     total = total.saturating_add(head);
