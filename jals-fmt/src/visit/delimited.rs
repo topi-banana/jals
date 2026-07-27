@@ -90,7 +90,7 @@ impl Ctx<'_> {
         }
         items
             .into_iter()
-            .all(|arg| usize::from(arg.text_range().len()) < limit)
+            .all(|arg| Self::source_width(&arg) < limit)
     }
 
     /// Whether this list is a call whose first argument is a format string — see

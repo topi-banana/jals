@@ -97,7 +97,7 @@ impl Ctx<'_> {
             for child in current.children() {
                 if child.kind() == S::BINARY_EXPR && Self::precedence(&child) == precedence {
                     pending.push(child);
-                } else if usize::from(child.text_range().len()) >= limit {
+                } else if Self::source_width(&child) >= limit {
                     return false;
                 }
             }

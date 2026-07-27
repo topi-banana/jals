@@ -701,6 +701,20 @@ impl<'a> Ctx<'a> {
         node.children().find(|child| child.kind() == kind)
     }
 
+    /// How wide a node's *source text* is, ignoring the whitespace it starts with.
+    ///
+    /// A `rowan` node's range begins at its leading trivia, so an operand written on a
+    /// continuation line measures a dozen columns wider than it reads. Every width test that asks
+    /// "is this item short" has to start at the first token instead — otherwise formatting an
+    /// already-wrapped expression decides differently from formatting the same expression written
+    /// on one line, and the result is not idempotent.
+    fn source_width(node: &SyntaxNode) -> usize {
+        let Some(first) = Self::first_token(node) else {
+            return 0;
+        };
+        usize::from(node.text_range().end()).saturating_sub(usize::from(first.text_range().start()))
+    }
+
     /// The first significant token anywhere under `node`.
     fn first_token(node: &SyntaxNode) -> Option<SyntaxToken> {
         node.descendants_with_tokens()
