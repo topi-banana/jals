@@ -295,7 +295,10 @@ fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
     // Every *project* item's name range stays within its source; stub items live at reserved high
     // file ids and are excluded from this host-source bounds check.
-    for item in index.items().filter(|it| it.origin == ItemOrigin::Project) {
+    for (_, item) in index
+        .items()
+        .filter(|(_, it)| it.origin == ItemOrigin::Project)
+    {
         let src = sources[item.file.0 as usize];
         assert!(
             item.name_range.end <= src.len(),

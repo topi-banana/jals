@@ -25,6 +25,7 @@ const JAVA_LANG: &str = r"
 package java.lang;
 
 public class Object {
+    public Object();
     public String toString();
     public boolean equals(Object o);
     public int hashCode();
@@ -56,6 +57,8 @@ public class String extends Object implements CharSequence, Comparable {
 }
 
 public class StringBuilder extends Object implements CharSequence {
+    public StringBuilder();
+    public StringBuilder(String s);
     public StringBuilder append(String s);
     public StringBuilder append(int i);
     public StringBuilder append(char c);
@@ -119,6 +122,8 @@ public class Math extends Object {
 }
 
 public class System extends Object {
+    public static java.io.PrintStream out;
+    public static java.io.PrintStream err;
     public static long currentTimeMillis();
 }
 
@@ -259,6 +264,19 @@ public class Optional<T> {
 /// implicit `java.lang` import.
 const JAVA_IO: &str = r"
 package java.io;
+
+public class PrintStream extends Object {
+    public void println();
+    public void println(boolean b);
+    public void println(char c);
+    public void println(int i);
+    public void println(long l);
+    public void println(float f);
+    public void println(double d);
+    public void println(String s);
+    public void print(String s);
+    public void print(int i);
+}
 
 public class IOException extends Exception {
 }

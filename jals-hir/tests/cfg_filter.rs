@@ -77,7 +77,7 @@ fn disabled_types_and_members_leave_the_index() {
         jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_disabled(cfgs).build())
     };
     let fqns = |index: &ProjectIndex| -> Vec<String> {
-        index.items().map(|it| it.fqn.to_string()).collect()
+        index.items().map(|(_, it)| it.fqn.to_string()).collect()
     };
     let member_names = |index: &ProjectIndex| -> Vec<String> {
         let TypeResolution::Project(c) = index.resolve_type_name(FileId(0), "C", None) else {

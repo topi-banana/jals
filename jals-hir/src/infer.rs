@@ -35,17 +35,17 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
     CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, EQ, EQ_EQ,
-    FALSE_KW, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW,
-    INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL,
-    MINUS, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT,
-    SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, VAR_KW,
-    VOID_KW,
+    FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
+    INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT,
+    LT_EQ, METHOD_DECL, MINUS, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT,
+    RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW, TEXT_BLOCK, THIS_KW,
+    TILDE, TRUE_KW, VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 use crate::def::{Def, DefId, DefKind, Namespace};
-use crate::project::{FileId, ItemId, MemberType, ProjectIndex, TypeResolution};
+use crate::project::{FileId, ItemId, MemberId, MemberType, ProjectIndex, TypeResolution};
 use crate::reference::Resolution;
 use crate::resolve::Resolved;
 use crate::resolve::collect::Collect;
@@ -63,12 +63,40 @@ pub struct TypeInference {
     /// ([`type_of_expr`](TypeInference::type_of_expr), and internally while a parent reads its
     /// children) and scanned for the innermost cover ([`type_at`](TypeInference::type_at)).
     expr_by_span: HashMap<(usize, usize), Ty>,
+    /// The member each call binds to, keyed by the `CALL_EXPR`'s byte span. Empty without a project
+    /// index, and missing an entry wherever selection found no answer.
+    call_targets: HashMap<(usize, usize), MemberId>,
+    /// The field or enum constant each member access binds to, keyed by the `FIELD_ACCESS`'s span.
+    field_targets: HashMap<(usize, usize), MemberId>,
 }
 
 impl TypeInference {
     /// The type inferred for the definition `id`.
     pub fn type_of_def(&self, id: DefId) -> &Ty {
         &self.def_types[id.0 as usize]
+    }
+
+    /// The member the call spanning exactly `span` binds to.
+    ///
+    /// The decision inference already made, kept rather than discarded. A consumer that only needs
+    /// the call's *type* reads [`type_of_expr`](Self::type_of_expr); one that needs to name the
+    /// method — a code generator emitting an `invokevirtual`, which needs the selected overload's
+    /// exact descriptor — needs the member itself, and re-deriving it downstream would be a second
+    /// selection free to disagree with this one.
+    ///
+    /// `None` when inference ran without a project index, when the receiver is not an indexed type,
+    /// or when no same-arity overload accepts the arguments.
+    pub fn call_target_of(&self, span: Range<usize>) -> Option<MemberId> {
+        self.call_targets.get(&(span.start, span.end)).copied()
+    }
+
+    /// The field or enum constant the member access spanning exactly `span` binds to.
+    ///
+    /// The counterpart of [`call_target_of`](Self::call_target_of) for `receiver.name`. Reading a
+    /// field needs the same three facts a call does — the declaring type, the descriptor, and
+    /// whether it is `static` — so the resolution is recorded rather than left to be redone.
+    pub fn field_target_of(&self, span: Range<usize>) -> Option<MemberId> {
+        self.field_targets.get(&(span.start, span.end)).copied()
     }
 
     /// The type of the expression spanning exactly `span`, if one was inferred there.
@@ -108,6 +136,22 @@ impl TypeInference {
     pub async fn infer_node(root: &SyntaxNode, resolved: &Resolved) -> Self {
         Inferer::new(root, resolved, None).run().await
     }
+}
+
+/// The outcome of [`TypeInference::resolve_call`].
+struct CallResolution<'a> {
+    /// The type the method was looked up on.
+    owner: ItemId,
+    /// The method's simple name.
+    name: String,
+    /// The byte span of each argument expression, in order.
+    arg_spans: Vec<Range<usize>>,
+    /// Each argument's inferred type, or `None` where inference had no answer.
+    arg_tys: Vec<Option<&'a Ty>>,
+    /// Same-arity, non-varargs candidates, nearest declaration first.
+    candidates: Vec<MemberId>,
+    /// The candidate every argument is assignable to, if any.
+    selected: Option<MemberId>,
 }
 
 /// A type error: a value not assignable to the slot it is written into, or a call matching no
@@ -313,52 +357,26 @@ impl TypeInference {
         let Some(call) = ast::CallExpr::cast(node.clone()) else {
             return;
         };
-        let Some((owner, name)) = self.call_target(&call, index, file) else {
+        let Some(resolution) = self.resolve_call(&call, index, file) else {
             return;
-        };
-        let args: Vec<ast::Expr> = call
-            .args()
-            .map(|list| list.args().collect())
-            .unwrap_or_default();
-        // Candidates of the right arity (a varargs method is skipped — its arity is variable).
-        let matching: Vec<&crate::Member> = index
-            .resolve_members_all(owner, &name, Namespace::Method)
-            .into_iter()
-            .map(|id| index.member(id))
-            .filter(|m| !m.varargs && m.params.len() == args.len())
-            .collect();
-        if matching.is_empty() {
-            return;
-        }
-        // Argument spans and inferred types, computed once and reused across every overload (an
-        // un-inferred argument is `None`, and treated as applicable — never blocking).
-        let arg_spans: Vec<Range<usize>> = args
-            .iter()
-            .map(|a| Collect::node_span(a.syntax()))
-            .collect();
-        let arg_tys: Vec<Option<&Ty>> = arg_spans
-            .iter()
-            .map(|s| self.type_of_expr(s.clone()))
-            .collect();
-        // A candidate is applicable when every argument is assignable to its parameter.
-        let applicable = |m: &crate::Member| {
-            arg_tys.iter().zip(&m.params).all(|(arg_ty, param)| {
-                arg_ty.is_none_or(|ty| {
-                    ty.is_assignable_to(
-                        &index.member_type_to_ty(m.file, m.owner, &param.ty),
-                        Some(index),
-                    )
-                })
-            })
         };
         // The call binds to some overload — no argument error to report.
-        if matching.iter().any(|&m| applicable(m)) {
+        if resolution.selected.is_some() {
             return;
         }
+        let CallResolution {
+            owner,
+            name,
+            arg_spans,
+            arg_tys,
+            candidates,
+            ..
+        } = resolution;
         // No overload accepts the arguments; report only when the overload set is fully known.
         if !index.method_set_complete(owner, &name) {
             return;
         }
+        let matching: Vec<&crate::Member> = candidates.iter().map(|&id| index.member(id)).collect();
         if let [only] = matching.as_slice() {
             // A single overload: precise per-argument diagnostics against it.
             for ((arg_ty, span), param) in arg_tys.iter().zip(&arg_spans).zip(&only.params) {
@@ -387,6 +405,152 @@ impl TypeInference {
         }
     }
 
+    /// Bind every call under `root` to the overload it selects, recording the result for
+    /// [`call_target_of`](Self::call_target_of).
+    async fn record_member_targets(
+        &mut self,
+        root: &SyntaxNode,
+        index: &ProjectIndex,
+        file: FileId,
+    ) {
+        let mut yielder = Yielder::new();
+        let (mut calls, mut fields) = (Vec::new(), Vec::new());
+        for node in root.descendants() {
+            yielder.tick().await;
+            let span = Collect::node_span(&node);
+            match node.kind() {
+                CALL_EXPR => {
+                    if let Some(call) = ast::CallExpr::cast(node.clone())
+                        && let Some(selected) = self
+                            .resolve_call(&call, index, file)
+                            .and_then(|resolution| resolution.selected)
+                    {
+                        calls.push(((span.start, span.end), selected));
+                    }
+                }
+                FIELD_ACCESS => {
+                    if let Some(access) = ast::FieldAccess::cast(node.clone())
+                        && let Some(member) = self.resolve_field(&access, index, file)
+                    {
+                        fields.push(((span.start, span.end), member));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.call_targets.extend(calls);
+        self.field_targets.extend(fields);
+    }
+
+    /// Everything selecting a call's overload produced: the owner and name it looked up, the
+    /// arguments it weighed, the same-arity candidates, and which one it picked.
+    ///
+    /// One routine answers both questions asked of a call. Type checking wants to know whether
+    /// *any* overload accepts the arguments, and code generation wants to know *which* — and a
+    /// second implementation of "which" would be free to disagree with the first, which is exactly
+    /// the drift that turns into a `NoSuchMethodError` at run time rather than a diagnostic.
+    ///
+    /// Selection is same arity, then applicability (every argument assignable to its parameter),
+    /// then most-specific among what survives — the part of JLS §15.12.2 that changes *which*
+    /// method is called rather than merely whether one is. Without it, `println(Object)` declared
+    /// before `println(String)` would swallow every string, and the mistake would surface as a
+    /// run-time `NoSuchMethodError` from a descriptor nothing ever checked.
+    ///
+    /// What is *not* modelled: the three phases (strict / loose / variable-arity) are collapsed
+    /// into one, boxing is whatever [`Ty::is_assignable_to`] admits, and a varargs candidate is
+    /// skipped entirely since its arity is not fixed.
+    fn resolve_call(
+        &self,
+        call: &ast::CallExpr,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Option<CallResolution<'_>> {
+        let (owner, name) = self.call_target(call, index, file)?;
+        let args: Vec<ast::Expr> = call
+            .args()
+            .map(|list| list.args().collect())
+            .unwrap_or_default();
+        // Candidates of the right arity (a varargs method is skipped — its arity is variable).
+        let candidates: Vec<MemberId> = index
+            .resolve_members_all(owner, &name, Namespace::Method)
+            .into_iter()
+            .filter(|&id| {
+                let member = index.member(id);
+                !member.varargs && member.params.len() == args.len()
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        // Argument spans and inferred types, computed once and reused across every overload (an
+        // un-inferred argument is `None`, and treated as applicable — never blocking).
+        let arg_spans: Vec<Range<usize>> = args
+            .iter()
+            .map(|a| Collect::node_span(a.syntax()))
+            .collect();
+        let arg_tys: Vec<Option<&Ty>> = arg_spans
+            .iter()
+            .map(|s| self.type_of_expr(s.clone()))
+            .collect();
+        // A candidate is applicable when every argument is assignable to its parameter.
+        let applicable: Vec<MemberId> = candidates
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let member = index.member(id);
+                arg_tys.iter().zip(&member.params).all(|(arg_ty, param)| {
+                    arg_ty.is_none_or(|ty| {
+                        ty.is_assignable_to(
+                            &index.member_type_to_ty(member.file, member.owner, &param.ty),
+                            Some(index),
+                        )
+                    })
+                })
+            })
+            .collect();
+        let selected = Self::most_specific(&applicable, index);
+        Some(CallResolution {
+            owner,
+            name,
+            arg_spans,
+            arg_tys,
+            candidates,
+            selected,
+        })
+    }
+
+    /// The single most specific of `applicable` — the one whose every parameter type is assignable
+    /// to the corresponding parameter of all the others (JLS §15.12.2.5).
+    ///
+    /// Falls back to the first candidate when no single one dominates, which covers both a genuine
+    /// ambiguity (a real compiler would reject it, and this crate does not check) and the far more
+    /// common case of an incomparable pair the shallow subtyping model cannot order. The
+    /// nearest-first order the supertype walk produces makes that fallback the inherited-member
+    /// shadowing answer, which is the right one when the set is one method and its overrides.
+    fn most_specific(applicable: &[MemberId], index: &ProjectIndex) -> Option<MemberId> {
+        let first = applicable.first().copied()?;
+        let at_least_as_specific = |left: MemberId, right: MemberId| {
+            let (left, right) = (index.member(left), index.member(right));
+            left.params.iter().zip(&right.params).all(|(from, to)| {
+                index
+                    .member_type_to_ty(left.file, left.owner, &from.ty)
+                    .is_assignable_to(
+                        &index.member_type_to_ty(right.file, right.owner, &to.ty),
+                        Some(index),
+                    )
+            })
+        };
+        applicable
+            .iter()
+            .copied()
+            .find(|&candidate| {
+                applicable
+                    .iter()
+                    .all(|&other| candidate == other || at_least_as_specific(candidate, other))
+            })
+            .or(Some(first))
+    }
+
     /// The `(owner type, method name)` a call resolves against: a qualified call `recv.m(..)` on the
     /// receiver's project type, or a bare call `m(..)` on the enclosing type (an implicit `this`).
     /// `None` when the receiver is not an indexed project type or the callee is neither a name nor a
@@ -400,8 +564,8 @@ impl TypeInference {
         match call.callee()? {
             ast::Expr::FieldAccess(fa) => {
                 let name = fa.field()?;
-                let receiver = self.type_of_expr(Collect::node_span(fa.receiver()?.syntax()))?;
-                Some((receiver.project_id()?, name))
+                let owner = self.access_owner(&fa.receiver()?, index, file)?;
+                Some((owner, name))
             }
             ast::Expr::NameRef(n) => {
                 let name = Collect::first_ident_token(n.syntax())?.text().to_owned();
@@ -409,6 +573,35 @@ impl TypeInference {
             }
             _ => None,
         }
+    }
+
+    /// The indexed type a member access through `receiver` is looked up on.
+    ///
+    /// A receiver is either a value — its inferred type names the owner — or a *type*, which is
+    /// how every `static` member is reached (`System.out`, `Math.abs(x)`). A class name in
+    /// expression position is not a value and has no inferred type at all, so the second case has
+    /// to be recognised rather than fall out of the first.
+    fn access_owner(
+        &self,
+        receiver: &ast::Expr,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Option<ItemId> {
+        self.type_of_expr(Collect::node_span(receiver.syntax()))
+            .and_then(Ty::project_id)
+            .or_else(|| Cst::type_qualifier(receiver, index, file))
+    }
+
+    /// The field or enum constant the access `receiver.name` binds to.
+    fn resolve_field(
+        &self,
+        access: &ast::FieldAccess,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Option<MemberId> {
+        let name = access.field()?;
+        let owner = self.access_owner(&access.receiver()?, index, file)?;
+        index.resolve_member(owner, &name, Namespace::Value)
     }
 
     /// Pushes a [`TypeMismatch`] for `value` against `expected` when the value's inferred type is not
@@ -496,10 +689,19 @@ impl<'a> Inferer<'a> {
         let root = self.root.clone();
         self.collect_declared_types(&root).await;
         self.infer_in(&root).await;
-        TypeInference {
+        let project = self.project;
+        let mut inference = TypeInference {
             def_types: self.def_types,
             expr_by_span: self.expr_by_span,
+            call_targets: HashMap::new(),
+            field_targets: HashMap::new(),
+        };
+        // Pass 3, once every expression has a type: selecting a call's overload weighs its
+        // arguments, so it cannot run while those arguments are still being inferred.
+        if let Some((index, file)) = project {
+            inference.record_member_targets(&root, index, file).await;
         }
+        inference
     }
 
     // --- Pass 1: declared types ---------------------------------------------------------------
@@ -800,8 +1002,20 @@ impl<'a> Inferer<'a> {
         let Some(name) = fa.field() else {
             return Ty::Unknown;
         };
-        let receiver = self.child_ty(fa.receiver());
-        self.member_ty(&receiver, &name, namespace)
+        let Some(expr) = fa.receiver() else {
+            return Ty::Unknown;
+        };
+        match self.child_ty(Some(expr.clone())) {
+            Ty::Unknown => match self.project {
+                // Not a value: `System.out` names the declaring class, not an instance of it.
+                Some((index, file)) => Cst::type_qualifier(&expr, index, file)
+                    .map_or(Ty::Unknown, |owner| {
+                        self.member_ty_in(owner, &[], &name, namespace)
+                    }),
+                None => Ty::Unknown,
+            },
+            receiver => self.member_ty(&receiver, &name, namespace),
+        }
     }
 
     /// `callee(args)`: the called method's return type. A qualified call `receiver.method()` looks
@@ -1076,6 +1290,29 @@ impl Inferer<'_> {
 /// Namespace for the low-level CST token / span helpers shared across inference, the constant-`if`
 /// analysis, and the checked-exception analysis.
 pub(crate) struct Cst;
+
+impl Cst {
+    /// The indexed type a *type-qualified* member access is looked up on: the `System` of
+    /// `System.out`.
+    ///
+    /// A receiver is normally a value, and its inferred type names the owner. A class name in
+    /// expression position is not a value and has no inferred type at all — nothing declares it, so
+    /// the name-reference lookup finds no definition and the whole access stays `Unknown`. That is
+    /// the shape every access to a `static` member takes, so resolving the qualifier as a *type
+    /// name* is what makes `static` members reachable at all.
+    ///
+    /// Only a simple name is handled. A fully-qualified qualifier (`java.io.PrintStream.out`) is a
+    /// nested field access, not a name reference, and is not modelled.
+    fn type_qualifier(receiver: &ast::Expr, index: &ProjectIndex, file: FileId) -> Option<ItemId> {
+        let ast::Expr::NameRef(name) = receiver else {
+            return None;
+        };
+        let token = Collect::first_ident_token(name.syntax())?;
+        index
+            .resolve_type_name(file, token.text(), None)
+            .project_id()
+    }
+}
 
 impl Cst {
     /// Whether the syntactic type is `var` (local variable type inference).
@@ -1405,7 +1642,7 @@ impl ProjectIndex {
         }
         // Project type names from other files (a sibling type already in scope is deduped away). The
         // simple name completes; the fully-qualified name is the detail.
-        for item in self.items() {
+        for (_, item) in self.items() {
             yielder.tick().await;
             let name = item.fqn.simple_name().to_owned();
             if seen.insert((name.clone(), Namespace::Type)) {
