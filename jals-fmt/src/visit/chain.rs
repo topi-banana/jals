@@ -621,7 +621,11 @@ impl TypePrefix {
         let mut state = Parse::Start;
         let mut found = None;
         for (at, link) in links.iter().enumerate() {
-            let name = link.simple.as_ref()?;
+            // A link with no simple name — `::new` — ends the walk rather than voiding it, as
+            // `simpleNames`' `break OUTER` does.
+            let Some(name) = link.simple.as_ref() else {
+                break;
+            };
             state = Self::next(state, Self::case(name.text()));
             match state {
                 Parse::Reject => break,
