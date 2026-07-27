@@ -634,6 +634,9 @@ impl CommentFormatter {
                 if Self::self_closing_fence(line)
                     && let Some(open) = lower.find("<pre>")
                     && let Some(close) = lower.rfind("</pre>")
+                    // A line may close a region it did not open (`</pre> more <pre>`), in which
+                    // case there is no element on it to split out.
+                    && close > open
                 {
                     let before = line[..open].trim_end();
                     trailing = line[close + "</pre>".len()..].trim_start();
