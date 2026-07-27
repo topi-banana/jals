@@ -690,7 +690,13 @@ impl Ctx<'_> {
                 body_open = true;
             }
             first = false;
-            self.forced_break(Indent::ZERO);
+            // A group's statements keep the blank lines between them, like any other run of
+            // statements: `visitStatements` asks for `BlankLineWanted.PRESERVE`.
+            let blanks = child.as_node().map_or(0, |statement| {
+                self.blank_lines_before(statement)
+                    .min(self.style.cfg.blank_lines.max_in_code)
+            });
+            self.blank_lines(blanks, Indent::ZERO);
             self.visit_element(&child).await;
         }
         if body_open {
