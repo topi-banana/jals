@@ -37,6 +37,13 @@ impl Spacing {
         let (pk, nk) = (prev.kind(), next.kind());
         let (pp, np) = (Self::parent(prev), Self::parent(next));
 
+        // Two operators written against each other would spell a third: `+ + +x` is three unary
+        // pluses, `+++x` is `++` applied to `+x`. Separating them is not a `[spacing]` decision —
+        // it is what keeps the output's token stream the input's.
+        if Self::glues(prev.text(), next.text()) {
+            return true;
+        }
+
         // Selectors and the annotation sigil bind tighter than anything configurable.
         if pk == S::DOT || nk == S::DOT || pk == S::AT {
             return false;
@@ -122,6 +129,26 @@ impl Spacing {
                     )
                 })
         })
+    }
+
+    /// Whether writing `prev` against `next` would re-lex as a different token.
+    ///
+    /// The `>` family is the deliberate exception and is handled by [`Spacing::fused`], which
+    /// requires the two to have been adjacent in the source.
+    fn glues(prev: &str, next: &str) -> bool {
+        let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
+            return false;
+        };
+        matches!(
+            (last, first),
+            ('+', '+')
+                | ('-', '-')
+                | ('&', '&')
+                | ('|', '|')
+                | ('<', '<')
+                | ('=', '=')
+                | ('/', '/' | '*')
+        )
     }
 
     /// Whether the two tokens spell one fused `>`-family operator (`>>`, `>=`, `>>>=`).

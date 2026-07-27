@@ -277,7 +277,25 @@ impl Ctx<'_> {
                 && node
                     .parent()
                     .is_some_and(|parent| matches!(parent.kind(), S::TYPE | S::TYPE_ARGS)));
-        let continuation = self.style.continuation();
+        // `typeParametersRest` indents a type-declaration's parameters only when the declaration
+        // also has an `extends` / `implements` / `permits` clause to line them up against; a
+        // method's always indent.
+        let owner = node.parent();
+        let indented = node.kind() != S::TYPE_PARAMS
+            || owner.is_some_and(|owner| {
+                matches!(owner.kind(), S::METHOD_DECL | S::CONSTRUCTOR_DECL)
+                    || owner.children().any(|child| {
+                        matches!(
+                            child.kind(),
+                            S::EXTENDS_CLAUSE | S::IMPLEMENTS_CLAUSE | S::PERMITS_CLAUSE
+                        )
+                    })
+            });
+        let continuation = if indented {
+            self.style.continuation()
+        } else {
+            Indent::ZERO
+        };
         self.open_flat(Indent::ZERO);
         let children = Self::children(node);
         for (nth, child) in children.iter().enumerate() {
