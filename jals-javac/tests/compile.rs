@@ -290,6 +290,92 @@ public class Mixed {
     );
 }
 
+/// Access flags are what the source wrote, bit for bit.
+///
+/// The four access levels are one choice and `static` / `final` / `abstract` are independent bits;
+/// folding them together dropped `ACC_PUBLIC` from every `public static` method. That only looked
+/// harmless because Java 25's launch protocol accepts a non-`public` `main` — a `public` helper
+/// reached from another package would have failed with `IllegalAccessError`.
+#[test]
+fn the_emitted_access_flags_are_what_the_source_wrote() {
+    let source = r"
+public class Flags {
+    public static final int OPEN = 1;
+    private int hidden;
+    protected volatile int shared;
+    int packaged;
+
+    public final int keep() { return 1; }
+    private static synchronized int inner() { return 2; }
+    protected int guarded() { return 3; }
+    static int plain() { return 4; }
+
+    public static void main(String[] args) {}
+}
+";
+    let classes = compile(source).expect("compile");
+    let bytes = &classes[0].bytes;
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(bytes.as_slice()))
+        .expect("reparse");
+
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let fields: Vec<(String, u16)> = class
+        .fields
+        .iter()
+        .map(|field| (name_of(field.name_index), field.access_flags.0))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            // public | static | final
+            ("OPEN".to_owned(), 0x0001 | 0x0008 | 0x0010),
+            ("hidden".to_owned(), 0x0002),
+            // protected | volatile
+            ("shared".to_owned(), 0x0004 | 0x0040),
+            // package-private is the absence of a bit, not a bit of its own.
+            ("packaged".to_owned(), 0x0000),
+        ]
+    );
+
+    let methods: Vec<(String, u16)> = class
+        .methods
+        .iter()
+        .map(|method| (name_of(method.name_index), method.access_flags.0))
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("keep".to_owned(), 0x0001 | 0x0010),           // public | final
+            ("inner".to_owned(), 0x0002 | 0x0008 | 0x0020), // private | static | synchronized
+            ("guarded".to_owned(), 0x0004),                 // protected
+            ("plain".to_owned(), 0x0008),                   // static, package-private
+            ("main".to_owned(), 0x0001 | 0x0008),           // public | static
+            // The default constructor takes the class's own access level (JLS §8.8.9).
+            ("<init>".to_owned(), 0x0001),
+        ]
+    );
+    // `public class` — and `ACC_SUPER`, which every emitted class carries.
+    assert_eq!(class.access_flags.0, 0x0001 | 0x0020);
+}
+
+/// A package-private class stays package-private, and so does the constructor it did not declare.
+#[test]
+fn a_package_private_class_is_not_widened_to_public() {
+    let classes = compile(
+        r"
+class Quiet {
+    int value;
+}
+",
+    )
+    .expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    assert_eq!(class.access_flags.0, 0x0020, "`ACC_SUPER` only");
+    assert_eq!(class.methods[0].access_flags.0, 0x0000);
+}
+
 /// A nested type is its own class file. Dropping it silently would produce an outer class that
 /// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
 /// compiler is in a position to report and the run time is not.

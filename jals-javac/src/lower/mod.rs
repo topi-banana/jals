@@ -26,8 +26,8 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
 use jals_classfile::{
-    ClassAccessFlags, ClassFile, ConstantPool, FieldInfo, MethodAccessFlags, MethodDescriptor,
-    MethodInfo,
+    ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, FieldInfo, MethodAccessFlags,
+    MethodDescriptor, MethodInfo,
 };
 use jals_hir::{DefKind, FileId, ItemId, ProjectIndex, Resolved, TypeInference};
 use jals_syntax::SyntaxKind::{
@@ -101,6 +101,9 @@ pub(crate) struct Context<'a> {
     file: FileId,
     /// The internal name of the type being emitted, for a `this`-qualified access.
     this_class: String,
+    /// Whether the type being emitted is an interface, which decides the access levels JLS §9.3
+    /// and §9.4 let a declaration leave unwritten.
+    in_interface: bool,
 }
 
 /// The source-to-class-file lowering.
@@ -164,6 +167,7 @@ impl Compile {
             resolved,
             file,
             this_class: internal_name.clone(),
+            in_interface: is_interface,
         };
 
         let mut pool = ConstantPool::new();
@@ -205,9 +209,7 @@ impl Compile {
             }
             match member.kind() {
                 FIELD_DECL => Self::field(member, &context, &mut pool, &mut fields)?,
-                METHOD_DECL => {
-                    methods.push(Self::method(member, &context, &mut pool, is_interface)?);
-                }
+                METHOD_DECL => methods.push(Self::method(member, &context, &mut pool)?),
                 CONSTRUCTOR_DECL => {
                     saw_constructor = true;
                     methods.push(Self::constructor(
@@ -229,6 +231,7 @@ impl Compile {
                 &mut pool,
                 &super_name,
                 &members,
+                Self::access_level(node),
             )?);
         }
 
@@ -244,8 +247,34 @@ impl Compile {
         })
     }
 
+    /// The access-level bit a declaration carries, or `0` for package-private.
+    ///
+    /// The four Java access levels are one *choice*; `static` / `final` / `abstract` are
+    /// independent bits. Folding the two together is what used to clear `ACC_PUBLIC` from every
+    /// `public static` method — a `public` helper that a class in another package then could not
+    /// call, with `IllegalAccessError` as the only report. Package-private is the absence of a bit
+    /// rather than a bit of its own (JVMS §4.6), so there is nothing to set for it.
+    ///
+    /// The three constants coincide across `ClassAccessFlags` / `FieldAccessFlags` /
+    /// `MethodAccessFlags` (JVMS tables 4.1-B, 4.5-A, 4.6-A), so one function answers for all
+    /// three.
+    fn access_level(node: &SyntaxNode) -> u16 {
+        use jals_syntax::SyntaxKind::{PRIVATE_KW, PROTECTED_KW, PUBLIC_KW};
+        if Self::has_modifier(node, PRIVATE_KW) {
+            MethodAccessFlags::PRIVATE
+        } else if Self::has_modifier(node, PROTECTED_KW) {
+            MethodAccessFlags::PROTECTED
+        } else if Self::has_modifier(node, PUBLIC_KW) {
+            MethodAccessFlags::PUBLIC
+        } else {
+            0
+        }
+    }
+
     fn class_flags(node: &SyntaxNode, is_interface: bool) -> u16 {
-        let mut flags = ClassAccessFlags::PUBLIC;
+        // Only `public` is expressible on a top-level type. `private` / `protected` are nested-type
+        // modifiers, and a nested type is reported rather than emitted.
+        let mut flags = Self::access_level(node) & ClassAccessFlags::PUBLIC;
         if is_interface {
             // An interface is implicitly abstract and never has the `super`-call semantics bit.
             flags |= ClassAccessFlags::INTERFACE | ClassAccessFlags::ABSTRACT;
@@ -275,18 +304,57 @@ impl Compile {
             })
     }
 
-    fn member_flags(node: &SyntaxNode, base: u16) -> u16 {
-        use jals_syntax::SyntaxKind::{ABSTRACT_KW, FINAL_KW, PRIVATE_KW, PROTECTED_KW, STATIC_KW};
-        let mut flags = base;
+    /// A method's or constructor's access flags.
+    ///
+    /// `in_interface` supplies the level JLS §9.4 leaves unwritten: an interface method with no
+    /// explicit access level is `public`, and emitting it package-private would produce a class
+    /// the verifier rejects.
+    fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
+        use jals_syntax::SyntaxKind::{
+            ABSTRACT_KW, FINAL_KW, NATIVE_KW, STATIC_KW, STRICTFP_KW, SYNCHRONIZED_KW,
+        };
+        let level = match Self::access_level(node) {
+            0 if in_interface => MethodAccessFlags::PUBLIC,
+            level => level,
+        };
+        let mut flags = level;
         for (keyword, bit) in [
             (STATIC_KW, MethodAccessFlags::STATIC),
             (FINAL_KW, MethodAccessFlags::FINAL),
             (ABSTRACT_KW, MethodAccessFlags::ABSTRACT),
-            (PRIVATE_KW, MethodAccessFlags::PRIVATE),
-            (PROTECTED_KW, MethodAccessFlags::PROTECTED),
+            (NATIVE_KW, MethodAccessFlags::NATIVE),
+            (SYNCHRONIZED_KW, MethodAccessFlags::SYNCHRONIZED),
+            (STRICTFP_KW, MethodAccessFlags::STRICT),
         ] {
             if Self::has_modifier(node, keyword) {
-                flags = (flags & !MethodAccessFlags::PUBLIC) | bit;
+                flags |= bit;
+            }
+        }
+        flags
+    }
+
+    /// A field's access flags, over `FieldAccessFlags`' own table — `transient` and `volatile`
+    /// occupy bits a method uses for `bridge` and `synchronized`, so the two cannot share a
+    /// keyword list even though their access levels coincide.
+    ///
+    /// `in_interface` supplies JLS §9.3: an interface field is implicitly `public static final`.
+    fn field_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
+        use jals_syntax::SyntaxKind::{FINAL_KW, STATIC_KW, TRANSIENT_KW, VOLATILE_KW};
+        let mut flags = match Self::access_level(node) {
+            0 if in_interface => FieldAccessFlags::PUBLIC,
+            level => level,
+        };
+        if in_interface {
+            flags |= FieldAccessFlags::STATIC | FieldAccessFlags::FINAL;
+        }
+        for (keyword, bit) in [
+            (STATIC_KW, FieldAccessFlags::STATIC),
+            (FINAL_KW, FieldAccessFlags::FINAL),
+            (TRANSIENT_KW, FieldAccessFlags::TRANSIENT),
+            (VOLATILE_KW, FieldAccessFlags::VOLATILE),
+        ] {
+            if Self::has_modifier(node, keyword) {
+                flags |= bit;
             }
         }
         flags
@@ -307,10 +375,7 @@ impl Compile {
             let member = context.member_at(&name)?;
             let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
             out.push(FieldInfo {
-                access_flags: jals_classfile::FieldAccessFlags(Self::member_flags(
-                    node,
-                    jals_classfile::FieldAccessFlags::PUBLIC,
-                )),
+                access_flags: FieldAccessFlags(Self::field_flags(node, context.in_interface)),
                 name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes: Vec::new(),
@@ -323,7 +388,6 @@ impl Compile {
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
-        is_interface: bool,
     ) -> Result<MethodInfo> {
         let decl = ast::MethodDecl::cast(node.clone())
             .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
@@ -338,7 +402,7 @@ impl Compile {
         let descriptor = Descriptor::method_descriptor(member, context.index, false)?;
         let is_static = context.index.member(member).modifiers.is_static;
 
-        let flags = Self::member_flags(node, MethodAccessFlags::PUBLIC);
+        let flags = Self::method_flags(node, context.in_interface);
         let text = MethodDescriptor::to_string(&descriptor);
         let name_index = pool.utf8_index(&name).ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
@@ -361,12 +425,14 @@ impl Compile {
             // An abstract or interface method has no `Code` attribute at all.
             None => Vec::new(),
         };
+        // No body means no `Code` attribute, which the JVM only accepts for a method that declares
+        // it has none. A `static` method must always have one, so it is left alone and the class
+        // is rejected at load time rather than silently made abstract.
         let flags = if attributes.is_empty() && !is_static {
             flags | MethodAccessFlags::ABSTRACT
         } else {
             flags
         };
-        let _ = is_interface;
 
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(flags),
@@ -404,18 +470,22 @@ impl Compile {
         let _ = asm.return_(None);
 
         Ok(MethodInfo {
-            access_flags: MethodAccessFlags(Self::member_flags(node, MethodAccessFlags::PUBLIC)),
+            access_flags: MethodAccessFlags(Self::method_flags(node, context.in_interface)),
             name_index,
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
         })
     }
 
+    /// The constructor a class with none of its own gets. `access` is the *class's* access level,
+    /// which JLS §8.8.9 gives the default constructor — a `public` one on a package-private class
+    /// would widen the type's reachable surface past what the source wrote.
     fn default_constructor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
         members: &[SyntaxNode],
+        access: u16,
     ) -> Result<MethodInfo> {
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
@@ -424,7 +494,7 @@ impl Compile {
         Self::prologue(context, &mut asm, &slots, super_name, members)?;
         asm.return_(None)?;
         Ok(MethodInfo {
-            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC),
+            access_flags: MethodAccessFlags(access),
             name_index,
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
