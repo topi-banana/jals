@@ -115,7 +115,13 @@ impl Ctx<'_> {
             .iter()
             .all(|child| child.as_token().is_some_and(|tok| tok.kind() == S::COMMA));
 
-        let continuation = self.style.continuation();
+        // A method chain decides where its arguments indent from, because the answer depends on
+        // whether the dot before the name broke — `addArguments`' `plusIndent` parameter.
+        let continuation = self
+            .arg_indent
+            .take()
+            .filter(|_| node.kind() == S::ARG_LIST)
+            .unwrap_or_else(|| self.style.continuation());
         // A tag lets the closing delimiter follow the opening one's decision, which is what
         // `separate-lines-if-wrapped` means.
         let tag = self.ops.new_tag();
