@@ -184,3 +184,61 @@ fn a_constructor_records_its_parameters() {
         ["x", "y"]
     );
 }
+
+/// The member a `new` binds to, rendered like [`call_target`].
+///
+/// Keyed by the `NEW_EXPR`'s own span, because that is what a code generator emitting the
+/// allocation is looking at.
+fn new_target(src: &str, text: &str) -> String {
+    let (node, index, inference) = analyse(src);
+    let new = node
+        .descendants()
+        .filter_map(jals_syntax::ast::NewExpr::cast)
+        .find(|new| new.syntax().text().to_string().trim() == text)
+        .unwrap_or_else(|| panic!("no `new` spelled `{text}`"));
+    let range = new.syntax().text_range();
+    let id = inference
+        .call_target_of(usize::from(range.start())..usize::from(range.end()))
+        .unwrap_or_else(|| panic!("`{text}` bound to no constructor"));
+
+    let member = index.member(id);
+    let params: Vec<String> = member
+        .params
+        .iter()
+        .map(|param| format!("{:?}", param.ty))
+        .collect();
+    format!(
+        "{}.{}({})",
+        index.item(member.owner).fqn,
+        member.name,
+        params.join(", ")
+    )
+}
+
+/// A `new` selects its constructor the same way a call selects its method: by the arguments, not by
+/// how many there are. Picking the first same-arity candidate ran `Pair(int)` for `new Pair(1.5)`.
+#[test]
+fn a_new_binds_to_the_constructor_its_arguments_select() {
+    let src = r#"
+        class Pair {
+            Pair(int value) {}
+            Pair(double value) {}
+
+            void run() {
+                Pair a = new Pair(1);
+                Pair b = new Pair(1.5);
+            }
+        }
+    "#;
+    assert!(
+        new_target(src, "new Pair(1)").ends_with(r#"Pair(Primitive { keyword: "int", dims: 0 })"#),
+        "got {}",
+        new_target(src, "new Pair(1)")
+    );
+    assert!(
+        new_target(src, "new Pair(1.5)")
+            .ends_with(r#"Pair(Primitive { keyword: "double", dims: 0 })"#),
+        "got {}",
+        new_target(src, "new Pair(1.5)")
+    );
+}

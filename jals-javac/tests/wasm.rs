@@ -216,6 +216,38 @@ public class Guarded {
     assert_invoke(&[source], "run", &["7"], "7");
 }
 
+/// Which constructor a `new` runs is the analysis's answer, not a re-derivation. Matching on the
+/// argument *count* alone took the first of any same-arity pair, so `new Pair(1.5)` ran the `int`
+/// constructor.
+#[test]
+fn an_overloaded_constructor_is_selected_by_type() {
+    let source = r"
+public class Pair {
+    int tag;
+
+    Pair(int value) {
+        this.tag = 1;
+    }
+
+    Pair(double value) {
+        this.tag = 2;
+    }
+
+    public static int fromDouble() {
+        Pair p = new Pair(1.5);
+        return p.tag;
+    }
+
+    public static int fromInt() {
+        Pair p = new Pair(3);
+        return p.tag;
+    }
+}
+";
+    assert_invoke(&[source], "fromDouble", &[], "2");
+    assert_invoke(&[source], "fromInt", &[], "1");
+}
+
 /// Inheritance becomes *declared* subtyping, so a subclass instance flows where the superclass is
 /// expected with no conversion — the host checks it, not the generator.
 #[test]

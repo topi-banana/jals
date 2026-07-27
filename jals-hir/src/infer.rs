@@ -37,9 +37,9 @@ use jals_syntax::SyntaxKind::{
     CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, EQ, EQ_EQ,
     FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
     INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT,
-    LT_EQ, METHOD_DECL, MINUS, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT,
-    RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW, TEXT_BLOCK, THIS_KW,
-    TILDE, TRUE_KW, VAR_KW, VOID_KW,
+    LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS,
+    RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW,
+    TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -428,6 +428,16 @@ impl TypeInference {
                         calls.push(((span.start, span.end), selected));
                     }
                 }
+                // A `new` selects a constructor exactly as a call selects a method, so it is
+                // recorded in the same map: a consumer emitting the allocation asks
+                // `call_target_of` for the `NEW_EXPR`'s own span.
+                NEW_EXPR => {
+                    if let Some(new) = ast::NewExpr::cast(node.clone())
+                        && let Some(selected) = self.resolve_new(&new, index)
+                    {
+                        calls.push(((span.start, span.end), selected));
+                    }
+                }
                 FIELD_ACCESS => {
                     if let Some(access) = ast::FieldAccess::cast(node.clone())
                         && let Some(member) = self.resolve_field(&access, index, file)
@@ -492,6 +502,28 @@ impl TypeInference {
             .iter()
             .map(|s| self.type_of_expr(s.clone()))
             .collect();
+        let selected = Self::select_overload(&candidates, &arg_tys, index);
+        Some(CallResolution {
+            owner,
+            name,
+            arg_spans,
+            arg_tys,
+            candidates,
+            selected,
+        })
+    }
+
+    /// Which of `candidates` the arguments select: applicable first, then most specific.
+    ///
+    /// Every call shape shares this. A method call and a `new` differ in how the candidate set is
+    /// *found* — inherited members against a type's own constructors — and not at all in how one
+    /// of them is chosen, so writing the choice twice is exactly the drift
+    /// [`call_target_of`](Self::call_target_of) exists to prevent.
+    fn select_overload(
+        candidates: &[MemberId],
+        arg_tys: &[Option<&Ty>],
+        index: &ProjectIndex,
+    ) -> Option<MemberId> {
         // A candidate is applicable when every argument is assignable to its parameter.
         let applicable: Vec<MemberId> = candidates
             .iter()
@@ -508,15 +540,42 @@ impl TypeInference {
                 })
             })
             .collect();
-        let selected = Self::most_specific(&applicable, index);
-        Some(CallResolution {
-            owner,
-            name,
-            arg_spans,
-            arg_tys,
-            candidates,
-            selected,
-        })
+        Self::most_specific(&applicable, index)
+    }
+
+    /// The constructor `new C(args)` binds to.
+    ///
+    /// Constructors are never inherited, so the candidate set is the instantiated type's *own*
+    /// members rather than a supertype walk; the choice among them is
+    /// [`select_overload`](Self::select_overload), the same one a method call makes. `None` when
+    /// the type declares no constructor at all — the implicit default one is not an indexed member
+    /// — or when none of them accepts the arguments.
+    fn resolve_new(&self, new: &ast::NewExpr, index: &ProjectIndex) -> Option<MemberId> {
+        let owner = self
+            .type_of_expr(Collect::node_span(new.syntax()))?
+            .project_id()?;
+        let args: Vec<ast::Expr> = new
+            .syntax()
+            .children()
+            .find_map(ast::ArgList::cast)
+            .map(|list| list.args().collect())
+            .unwrap_or_default();
+        let candidates: Vec<MemberId> = index
+            .own_members(owner)
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let member = index.member(id);
+                member.kind == DefKind::Constructor
+                    && !member.varargs
+                    && member.params.len() == args.len()
+            })
+            .collect();
+        let arg_tys: Vec<Option<&Ty>> = args
+            .iter()
+            .map(|argument| self.type_of_expr(Collect::node_span(argument.syntax())))
+            .collect();
+        Self::select_overload(&candidates, &arg_tys, index)
     }
 
     /// The single most specific of `applicable` — the one whose every parameter type is assignable

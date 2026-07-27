@@ -1024,15 +1024,18 @@ impl Lowering<'_> {
             .find_map(ast::ArgList::cast)
             .map(|list| list.args().collect())
             .unwrap_or_default();
+        // Which constructor, read from the index rather than re-picked here. Matching on argument
+        // *count* alone took the first of any same-arity pair, and a second selection free to
+        // disagree with the analysis is the drift `call_target_of` exists to prevent.
         let constructor = self
+            .input
+            .inference
+            .call_target_of(Self::span(new.syntax()));
+        let declares_constructor = self
             .index
             .own_members(item)
             .iter()
-            .copied()
-            .find(|&member| {
-                let info = self.index.member(member);
-                info.kind == DefKind::Constructor && info.params.len() == arguments.len()
-            });
+            .any(|&member| self.index.member(member).kind == DefKind::Constructor);
 
         insn.struct_new_default(struct_type);
         match constructor {
@@ -1054,9 +1057,9 @@ impl Lowering<'_> {
                 }
                 insn.call(function).local_get(slot);
             }
-            // No declared constructor: the default one initialises nothing, so the allocation is
-            // already the finished object.
-            None if arguments.is_empty() => {}
+            // No declared constructor: the implicit default one initialises nothing, so the
+            // allocation is already the finished object.
+            None if !declares_constructor && arguments.is_empty() => {}
             None => return Err(WasmError::Unresolved("a matching constructor".into())),
         }
         Ok(ty)
