@@ -167,17 +167,24 @@ impl Ctx<'_> {
         }
         let indent = self.style.indent();
         self.open(indent.clone());
+        // A run of directives of the same kind is a group, and `visitModule` puts a blank line
+        // between groups — the only separation a module body has, since nothing else about it
+        // varies.
+        let mut previous: Option<S> = None;
         for child in &body {
             self.forced_break(Indent::ZERO);
-            // Directives group by kind, and the grouping is the author's — nothing in the syntax
-            // says a `requires` run has ended, so the blank lines they wrote are what separates
-            // one group from the next.
+            let kind = child.as_node().map(SyntaxNode::kind);
+            let enforced = usize::from(previous.is_some() && kind.is_some() && previous != kind);
             let source = child.as_node().map_or(0, |directive| {
                 self.blank_lines_before(directive)
                     .min(self.style.cfg.blank_lines.max_in_declarations)
             });
-            if source > 0 {
-                self.ensure_blank_lines(source, Indent::ZERO);
+            let blanks = enforced.max(source);
+            if blanks > 0 {
+                self.ensure_blank_lines(blanks, Indent::ZERO);
+            }
+            if kind.is_some() {
+                previous = kind;
             }
             self.visit_element(child).await;
         }
@@ -194,16 +201,38 @@ impl Ctx<'_> {
     ///
     /// A `to` / `with` list wraps at the continuation indent like any other comma list.
     pub(super) async fn visit_directive(&mut self, node: &SyntaxNode) {
+        // `visitDirective` opens its level at the `to` / `with`, breaks after the keyword, and
+        // puts one name per line: a module's exports are a list to be read down, not prose to be
+        // packed.
         let continuation = self.style.continuation();
-        self.open(continuation.clone());
-        for child in Self::children(node) {
-            if let Some(tok) = child.as_token()
-                && matches!(tok.kind(), S::TO_KW | S::WITH_KW)
-            {
-                self.break_op(Indent::ZERO);
+        let children = Self::children(node);
+        let separator = children.iter().position(|child| {
+            child
+                .as_token()
+                .is_some_and(|tok| matches!(tok.kind(), S::TO_KW | S::WITH_KW))
+        });
+        let mut opened = false;
+        for (nth, child) in children.iter().enumerate() {
+            if Some(nth) == separator {
+                self.open(continuation.clone());
+                opened = true;
+                self.visit_element(child).await;
+                self.forced_break(Indent::ZERO);
+                continue;
             }
-            self.visit_element(&child).await;
+            if opened
+                && nth > 0
+                && matches!(
+                    children[nth - 1].as_token().map(SyntaxToken::kind),
+                    Some(S::COMMA)
+                )
+            {
+                self.forced_break(Indent::ZERO);
+            }
+            self.visit_element(child).await;
         }
-        self.close_indent(&continuation);
+        if opened {
+            self.close_indent(&continuation);
+        }
     }
 }

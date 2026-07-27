@@ -107,6 +107,14 @@ impl CommentMap {
                     continue;
                 }
                 map.anchored += 1;
+                // `/***…` is a block comment, not a Javadoc: google-java-format's
+                // `isJavadocComment` excludes it because the Javadoc formatter would reflow a
+                // banner nobody wrote as prose.
+                let kind = if kind == SyntaxKind::DOC_COMMENT && tok.text().starts_with("/***") {
+                    SyntaxKind::BLOCK_COMMENT
+                } else {
+                    kind
+                };
                 let (text, mut hugs) = Self::classify(&tok, normalize_parameter_comments);
                 // A Javadoc documents the declaration below it and always takes its own line,
                 // however the author wrote it — only a plain `/* … */` may hug.
