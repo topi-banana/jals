@@ -170,14 +170,20 @@ impl Branch {
         }
     }
 
-    /// How many stack values the branch consumes, and whether they are references.
-    const fn operands(self) -> (usize, bool) {
+    /// How many stack values the branch consumes, and what each has to be.
+    ///
+    /// `if_icmp*` and `if*` compare **`int`s** — not "anything that is not a reference". A `long`
+    /// on the stack is not a reference either, and `if_icmpeq` over two of them is a class the
+    /// verifier rejects with *"Type long_2nd is not assignable to integer"*. The reference forms
+    /// are expressed as [`Null`](VerificationType::Null), which
+    /// [`compatible`](Assembler::compatible) already reads as "any reference".
+    const fn operands(self) -> (usize, Option<VerificationType>) {
         match self {
-            Self::Always => (0, false),
-            Self::IntZero(_) => (1, false),
-            Self::IntCmp(_) => (2, false),
-            Self::RefSame(_) => (2, true),
-            Self::RefNull(_) => (1, true),
+            Self::Always => (0, None),
+            Self::IntZero(_) => (1, Some(VerificationType::Integer)),
+            Self::IntCmp(_) => (2, Some(VerificationType::Integer)),
+            Self::RefSame(_) => (2, Some(VerificationType::Null)),
+            Self::RefNull(_) => (1, Some(VerificationType::Null)),
         }
     }
 }
@@ -360,10 +366,12 @@ impl<'pool> Assembler<'pool> {
     /// Branch to `label`. `Branch::Always` ends the basic block.
     pub fn branch(&mut self, branch: Branch, target: Label) -> Result<()> {
         self.require_reachable()?;
-        let (operands, reference) = branch.operands();
+        let (operands, expected) = branch.operands();
         for _ in 0..operands {
             let popped = self.state.pop().ok_or(AsmError::StackUnderflow)?;
-            if reference != Self::is_reference(&popped) {
+            if let Some(expected) = &expected
+                && !Self::compatible(expected, &popped)
+            {
                 return Err(AsmError::TypeMismatch);
             }
         }

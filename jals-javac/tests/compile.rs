@@ -189,6 +189,44 @@ public class Simple {
     .expect("a simple assignment still lowers");
 }
 
+/// A `long` / `float` / `double` comparison is not an `if_icmp*`. Emitting one produced a class
+/// file that loaded and then failed verification with *"Type long_2nd is not assignable to
+/// integer"* — the compiler had every fact needed to say so first.
+#[test]
+fn a_wide_comparison_is_reported_rather_than_mis_emitted() {
+    for (ty, literal) in [("long", "1L"), ("double", "1.0"), ("float", "1.0f")] {
+        let source = format!(
+            r"
+public class Wide {{
+    static boolean f({ty} a) {{
+        return a == {literal};
+    }}
+
+    public static void main(String[] args) {{}}
+}}
+"
+        );
+        let error = compile(&source).expect_err("wide comparisons are not lowered yet");
+        assert!(
+            matches!(error, LowerError::Unsupported("a comparison of this type")),
+            "`{ty}` comparison should be reported, got {error}"
+        );
+    }
+    // An `int` comparison still lowers: the check is on the operand type, not on comparison itself.
+    compile(
+        r"
+public class Narrow {
+    static boolean f(int a) {
+        return a == 1;
+    }
+
+    public static void main(String[] args) {}
+}
+",
+    )
+    .expect("an `int` comparison still lowers");
+}
+
 /// A nested type is its own class file. Dropping it silently would produce an outer class that
 /// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
 /// compiler is in a position to report and the run time is not.

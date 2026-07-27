@@ -335,6 +335,14 @@ impl Expr {
         asm: &mut Assembler<'_>,
         slots: &Slots,
     ) -> Result<()> {
+        // `if_icmp*` compares two `int`s. A `long` / `float` / `double` needs an `lcmp` / `fcmp` /
+        // `dcmp` first and a reference needs `if_acmp*`; neither is lowered yet. Checking here
+        // rather than leaving it to the assembler names the construct instead of the opcode.
+        for operand in [left, right] {
+            if !Self::is_int_like(Self::ty(context, operand.syntax())?) {
+                return Err(LowerError::Unsupported("a comparison of this type"));
+            }
+        }
         Self::lower(left, context, asm, slots)?;
         Self::lower(right, context, asm, slots)?;
         let taken = asm.label();
@@ -406,6 +414,22 @@ impl Expr {
             .map(|token| token.kind())
             .filter(|kind| !kind.is_trivia())
             .collect()
+    }
+
+    /// Whether a value of `ty` occupies one stack word as an `int` — the representation every
+    /// integral type narrower than `long` shares, and the only one `if_icmp*` accepts.
+    const fn is_int_like(ty: &Ty) -> bool {
+        use jals_hir::Primitive;
+        matches!(
+            ty,
+            Ty::Primitive(
+                Primitive::Boolean
+                    | Primitive::Byte
+                    | Primitive::Short
+                    | Primitive::Char
+                    | Primitive::Int
+            )
+        )
     }
 
     /// The verification type an arithmetic result has, which is what selects the opcode family.

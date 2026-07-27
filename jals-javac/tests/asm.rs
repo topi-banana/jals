@@ -368,3 +368,39 @@ fn the_resolved_loop_body_is_pinned() {
     "]]
     .assert_eq(&rendered);
 }
+
+/// `if_icmp*` compares two `int`s, and "not a reference" is not the same predicate: a `long` is not
+/// a reference either. Accepting one produced a class the JVM rejected with *"Type long_2nd is not
+/// assignable to integer"* — a defect the emitter is in a position to catch and the verifier should
+/// never have to.
+#[test]
+fn a_branch_rejects_an_operand_that_is_not_an_int() {
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "(JJ)Z").expect("assembler");
+    asm.load(0).expect("lload_0");
+    asm.load(2).expect("lload_2");
+    let taken = asm.label();
+    assert_eq!(
+        asm.branch(Branch::IntCmp(Compare::Eq), taken),
+        Err(jals_javac::jvm::AsmError::TypeMismatch),
+        "two `long`s are not an `if_icmpeq`"
+    );
+}
+
+/// The reference forms still accept any reference, which is the other half of the same check.
+#[test]
+fn a_reference_branch_still_accepts_any_reference() {
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm =
+        Assembler::new(&mut pool, Receiver::Static, "([Ljava/lang/String;)V").expect("assembler");
+    asm.load(0).expect("aload_0");
+    let taken = asm.label();
+    asm.branch(Branch::RefNull(true), taken)
+        .expect("`ifnull` over a `String[]`");
+    asm.return_(None).expect("return");
+    asm.bind(taken).expect("bind");
+    asm.return_(None).expect("return");
+    asm.finish().expect("finish");
+}
