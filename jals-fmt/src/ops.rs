@@ -96,9 +96,21 @@ impl Ops {
     }
 
     /// Append a node to the innermost level.
+    ///
+    /// A pending `force_next` is honored here and not only at the next [`Ops::brk`]: a `//`
+    /// comment swallows the rest of its line, so *anything* emitted after one has to start a new
+    /// line. Leaving it to the next break assumes a break is coming, and an empty block whose `{`
+    /// carries a trailing comment has none — its `}` would end up inside the comment.
     fn push(&mut self, doc: Doc) {
         if self.suppressed {
             return;
+        }
+        if self.force_next && !matches!(doc, Doc::Break(_) | Doc::Space) {
+            self.force_next = false;
+            let brk = Break::new(FillMode::Forced, "", Indent::ZERO, None);
+            if let Some(level) = self.stack.last_mut() {
+                level.docs.push(Doc::Break(brk));
+            }
         }
         if let Some(level) = self.stack.last_mut() {
             level.docs.push(doc);

@@ -41,6 +41,11 @@ impl Spacing {
         if pk == S::DOT || nk == S::DOT || pk == S::AT {
             return false;
         }
+        // `non-sealed` is one modifier spelled with three tokens, and its `-` is not an operator:
+        // spacing it would turn the modifier into a subtraction.
+        if pp == S::NON_SEALED_KW && np == S::NON_SEALED_KW {
+            return false;
+        }
         // A dimension marker hugs the type it follows — `int...`, `String[]` — except behind a
         // type annotation, where gluing them would read as one name: `Object @Nullable ... xs`,
         // `new String @A [] {}`.
