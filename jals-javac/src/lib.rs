@@ -33,6 +33,17 @@
 
 extern crate alloc;
 
+/// This compiler's version.
+///
+/// A process-based backend folds the *installed tool's* identity into its cache key, because
+/// upgrading the JDK has to invalidate class files the previous `javac` produced. The in-process
+/// compiler's counterpart is the crate that shipped in the running binary, and this is how a
+/// backend names it — reading `CARGO_PKG_VERSION` at the caller would name the caller instead.
+///
+/// Within one workspace build this moves only when the workspace version does, so it separates
+/// releases and not individual commits. That is the same granularity a `javac` version string has.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod desc;
 pub mod jvm;
 pub mod lower;

@@ -230,8 +230,8 @@ pub struct Member {
     /// resolvable data (no CST handle), to be turned into a concrete type later (type inference) in
     /// this member's *declaring* file context. A constructor has none ([`MemberType::Unknown`]).
     pub ty: MemberType,
-    /// How the member is reached — `static` / `abstract` / `final` / `private`, with the JLS
-    /// implicit modifiers already folded in.
+    /// How the member is reached — see [`MemberModifiers`], which records `static` and `private`
+    /// and nothing else, with the JLS implicit modifiers already folded in.
     pub modifiers: MemberModifiers,
     /// A method's or constructor's formal parameters, in order (each a name plus a type captured
     /// like [`ty`](Member::ty), resolved in the declaring file's context). Empty for a field or an

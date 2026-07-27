@@ -158,18 +158,22 @@ impl JalsBackend {
 }
 
 impl Backend for JalsBackend {
+    /// The manifest's own `type` tag, not a literal beside it: `[build.backend]` and the cache key
+    /// have to name this backend with one string, or the two drift apart silently.
     fn id(&self) -> &'static str {
         match self.target {
-            Target::ClassFiles { .. } => "jals",
-            Target::Wasm => "jals-wasm",
+            Target::ClassFiles { .. } => jals_config::BackendKind::Jals {}.tag_name(),
+            Target::Wasm => jals_config::BackendKind::JalsWasm {}.tag_name(),
         }
     }
 
     fn config_digest(&self, request: &BackendRequest<'_>) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"jals.backend.jals\0");
         // The "tool identity" a subprocess backend has to fold in is, for this one, the compiler
-        // that shipped in this binary — so the crate version stands in for the installed JDK.
-        fold.bytes(env!("CARGO_PKG_VERSION").as_bytes())
+        // that shipped in this binary — so `jals-javac`'s version stands in for the installed JDK.
+        // Reading `CARGO_PKG_VERSION` here would name *this* crate instead, which is the wrong
+        // tool: `jals-build` only routes to the compiler.
+        fold.bytes(jals_javac::VERSION.as_bytes())
             .bytes(match self.target {
                 Target::ClassFiles { .. } => b"class",
                 Target::Wasm => b"wasm",
@@ -280,6 +284,43 @@ mod tests {
                 .any(|m| m.starts_with("Arrays.java")),
             "expected a message naming the file, got {:?}",
             outcome.messages
+        );
+    }
+
+    /// A backend's `id` is the manifest's own `type` tag. Two literals that merely agree today
+    /// would let `[build.backend]` and the cache key drift apart with nothing to notice.
+    #[test]
+    fn a_backend_is_named_by_its_manifest_tag() {
+        assert_eq!(
+            JalsBackend::new(None).id(),
+            jals_config::BackendKind::Jals {}.tag_name()
+        );
+        assert_eq!(
+            JalsBackend::wasm().id(),
+            jals_config::BackendKind::JalsWasm {}.tag_name()
+        );
+    }
+
+    /// The compiler that shipped in this binary is the tool whose identity the key folds — the
+    /// counterpart of the installed JDK's version for the `javac` backend.
+    #[test]
+    fn the_config_digest_folds_the_compiler_and_the_target() {
+        let tree = [source("Main.java", "public class Main {}")];
+        let options = BackendOptions::default();
+        let request = BackendRequest {
+            tree: &tree,
+            classpath: &[],
+            options: &options,
+        };
+        assert_ne!(
+            JalsBackend::new(Some(25)).config_digest(&request),
+            JalsBackend::wasm().config_digest(&request),
+            "two targets are two sets of artifacts"
+        );
+        assert_ne!(
+            JalsBackend::new(Some(21)).config_digest(&request),
+            JalsBackend::new(Some(25)).config_digest(&request),
+            "a class-file version is part of the output"
         );
     }
 

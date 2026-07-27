@@ -1067,9 +1067,11 @@ impl BackendKind {
     /// The value of the backend's serialized `type` tag, which is also its cache identity.
     ///
     /// A stable string rather than the enum discriminant, so adding or reordering variants can
-    /// never renumber a shipped backend's cache keys.
-    #[cfg(test)]
-    const fn tag_name(self) -> &'static str {
+    /// never renumber a shipped backend's cache keys. Public because that identity has to be one
+    /// string and not two: `Backend::id` returns this, rather than a literal beside it that
+    /// happens to match.
+    #[must_use]
+    pub const fn tag_name(self) -> &'static str {
         match self {
             Self::Javac {} => "javac",
             Self::Jals {} => "jals",
