@@ -431,22 +431,36 @@ impl Ctx<'_> {
     /// not see it; the wrap policy and the paren positions are otherwise the same decision.
     pub(super) async fn visit_resource_list(&mut self, node: &SyntaxNode) {
         let policy = self.resource_policy();
-        let continuation = self.style.continuation();
         let children = Self::children(node);
         let last = children.iter().rposition(|child| child.as_node().is_some());
+        // One resource carries no continuation indent of the list's own: whatever it wraps to is
+        // its own business. Several do, so the second and later ones line up under the first.
+        let several = children
+            .iter()
+            .filter(|child| child.as_node().is_some())
+            .count()
+            > 1;
+        let indent = if several {
+            self.style.continuation()
+        } else {
+            Indent::ZERO
+        };
         let mut opened = false;
         for (nth, child) in children.iter().enumerate() {
             match child.as_token().map(SyntaxToken::kind) {
                 Some(S::LPAREN) => {
                     self.visit_element(child).await;
-                    self.open(continuation.clone());
+                    self.open(indent.clone());
                     opened = true;
-                    self.break_tight(Indent::ZERO);
+                    // No break after the `(`: a resource list is a statement header, so its first
+                    // resource stays on the `try` line however it wraps, exactly as `if (…)`
+                    // keeps its condition there. google-java-format's `visitTry` opens its level
+                    // straight after the token.
                     continue;
                 }
                 Some(S::RPAREN) => {
                     if opened {
-                        self.close_indent(&continuation);
+                        self.close_indent(&indent);
                         opened = false;
                     }
                     self.visit_element(child).await;
@@ -465,7 +479,7 @@ impl Ctx<'_> {
             self.visit_element(child).await;
         }
         if opened {
-            self.close_indent(&continuation);
+            self.close_indent(&indent);
         }
     }
 

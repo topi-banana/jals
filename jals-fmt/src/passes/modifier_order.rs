@@ -9,9 +9,12 @@
 //! final transient volatile synchronized native strictfp
 //! ```
 //!
-//! Annotations are hoisted ahead of every keyword, keeping their relative order. Neither Eclipse
-//! nor IntelliJ has an equivalent, so `[imports] reorder-modifiers` is off by default (that
-//! section owns it because it is a token-reordering pass, not a layout rule).
+//! Only **runs of consecutive keyword modifiers** are sorted, and each within itself: an
+//! annotation ends a run and never moves, so `final @A C c` is left exactly as written. That is
+//! `ModifierOrderer`'s own shape — it walks the token stream and stops a run at the first token
+//! that is not a modifier. Neither Eclipse nor IntelliJ has an equivalent, so
+//! `[imports] reorder-modifiers` is off by default (that section owns it because it is a
+//! token-reordering pass, not a layout rule).
 //!
 //! Like [`ImportPlan`](super::import_order::ImportPlan) this is a **reordering of the original
 //! nodes**, so the token multiset is preserved and each modifier's comments travel with it.
@@ -65,15 +68,32 @@ impl ModifierOrder {
             return None;
         }
 
-        let mut ordered: Vec<(usize, usize, SyntaxElement)> = children
-            .iter()
-            .enumerate()
-            .map(|(at, child)| (Self::rank(child), at, child.clone()))
-            .collect();
-        ordered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        // Each *run* of consecutive keyword modifiers is sorted within itself; an annotation ends
+        // a run and never moves. `final @A C c` is left alone, and `@A public static` keeps the
+        // annotation in front of the pair it already precedes.
+        let mut ordered: Vec<SyntaxElement> = Vec::with_capacity(children.len());
+        let mut run: Vec<SyntaxElement> = Vec::new();
+        for child in &children {
+            if Self::rank(child).is_some() {
+                run.push(child.clone());
+                continue;
+            }
+            Self::flush_run(&mut run, &mut ordered);
+            ordered.push(child.clone());
+        }
+        Self::flush_run(&mut run, &mut ordered);
 
-        let moved = ordered.iter().enumerate().any(|(at, entry)| entry.1 != at);
-        moved.then(|| ordered.into_iter().map(|entry| entry.2).collect())
+        let moved = ordered
+            .iter()
+            .zip(&children)
+            .any(|(after, before)| after != before);
+        moved.then_some(ordered)
+    }
+
+    /// Append `run` to `ordered` in canonical order, emptying it.
+    fn flush_run(run: &mut Vec<SyntaxElement>, ordered: &mut Vec<SyntaxElement>) {
+        run.sort_by_key(|child| Self::rank(child).unwrap_or(usize::MAX));
+        ordered.append(run);
     }
 
     /// Whether a child is error-recovery debris that makes reordering unsafe.
@@ -87,19 +107,15 @@ impl ModifierOrder {
         }
     }
 
-    /// A child's sort rank: annotations and jals attributes first, then the JLS order, then
-    /// anything unrecognized.
-    fn rank(child: &SyntaxElement) -> usize {
+    /// A keyword modifier's rank in the JLS order, or `None` for anything that is not one — an
+    /// annotation, a jals attribute, or a keyword this list does not know.
+    fn rank(child: &SyntaxElement) -> Option<usize> {
         let kind = match child {
             SyntaxElement::Node(node) => node.kind(),
             SyntaxElement::Token(tok) => tok.kind(),
         };
-        if matches!(kind, SyntaxKind::ANNOTATION | SyntaxKind::ATTRIBUTE) {
-            return 0;
-        }
         Self::CANONICAL
             .iter()
             .position(|canonical| *canonical == kind)
-            .map_or(Self::CANONICAL.len() + 2, |at| at + 1)
     }
 }

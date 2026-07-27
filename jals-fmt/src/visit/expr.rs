@@ -21,12 +21,21 @@ impl Ctx<'_> {
     pub(super) async fn visit_binary(&mut self, node: &SyntaxNode) {
         let policy = self.style.cfg.wrapping.binary_operation;
         let before = self.style.cfg.wrapping.before_binary_operator;
-        // A nested run of the same precedence is already inside its parent's level; opening a new
-        // one there would let the inner half fit while the outer half did not, which is exactly
-        // the ragged output "break at the highest level first" exists to avoid.
-        let nested = node
-            .parent()
-            .is_some_and(|parent| parent.kind() == S::BINARY_EXPR);
+        // Operators of the *same* precedence are one run, laid out as one level: `a + b + c`
+        // wraps all-or-nothing rather than letting the inner half fit while the outer half does
+        // not. A sub-expression that binds tighter is a different run, and opens a level of its
+        // own — which is what indents `x * y` one step further than the `+` it hangs off, and
+        // what makes the lowest-precedence operator the first to break.
+        let nested = node.parent().is_some_and(|parent| {
+            parent.kind() == S::BINARY_EXPR && Self::precedence(&parent) == Self::precedence(node)
+        });
+        // Same rule as an argument list: a run whose operands are all short fills, and one long
+        // operand makes that packing arbitrary, so the run goes one operator per line.
+        let policy = if policy == WrapPolicy::IfLong && !self.run_operands_are_short(node) {
+            WrapPolicy::IfLongPerItem
+        } else {
+            policy
+        };
         let continuation = self.style.continuation();
         if !nested {
             self.open(continuation.clone());
@@ -35,6 +44,49 @@ impl Ctx<'_> {
         if !nested {
             self.close_indent(&continuation);
         }
+    }
+
+    /// The binding strength of the operator a `BINARY_EXPR` is built around, higher binding
+    /// tighter. `0` for a node with no operator token (error recovery).
+    fn precedence(node: &SyntaxNode) -> u8 {
+        node.children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find_map(|tok| match tok.kind() {
+                S::PIPE_PIPE => Some(1),
+                S::AMP_AMP => Some(2),
+                S::PIPE => Some(3),
+                S::CARET => Some(4),
+                S::AMP => Some(5),
+                S::EQ_EQ | S::BANG_EQ => Some(6),
+                S::LT | S::GT | S::LT_EQ | S::INSTANCEOF_KW => Some(7),
+                S::LSHIFT => Some(8),
+                S::PLUS | S::MINUS => Some(9),
+                S::STAR | S::SLASH | S::PERCENT => Some(10),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    /// Whether every operand of the same-precedence run rooted at `node` is under
+    /// `[wrapping] fill-item-width` columns of source.
+    fn run_operands_are_short(&self, node: &SyntaxNode) -> bool {
+        let limit = self.style.cfg.wrapping.fill_item_width;
+        if limit == 0 {
+            return true;
+        }
+        let precedence = Self::precedence(node);
+        // Iterative: an operator run is a left-leaning spine as deep as the expression is long.
+        let mut pending = alloc::vec![node.clone()];
+        while let Some(current) = pending.pop() {
+            for child in current.children() {
+                if child.kind() == S::BINARY_EXPR && Self::precedence(&child) == precedence {
+                    pending.push(child);
+                } else if usize::from(child.text_range().len()) >= limit {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Emit a node's children, placing a break on the chosen side of each operator token.

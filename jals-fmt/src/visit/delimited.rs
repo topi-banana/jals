@@ -32,13 +32,10 @@ impl Ctx<'_> {
 
     /// Which `[wrapping]` rule governs this list.
     ///
-    /// An argument list gets one refinement google-java-format applies and no vendor setting
-    /// expresses: a list of **simple** arguments (names, literals, `X.class`) packs by width,
-    /// but as soon as one argument is itself a call, a lambda, or an initializer, the list goes
-    /// one argument per line. Packing complex arguments produces lines that read as one
-    /// expression when they are several, which is the readability problem the rule exists for.
-    /// The refinement only ever *tightens* `if-long`; the other three policies say what they mean
-    /// and are left alone.
+    /// An argument list gets one refinement: `[wrapping] fill-item-width` turns a fill into a
+    /// one-per-line list once any argument is wide enough that packing would read as one
+    /// expression when it is several. The refinement only ever *tightens* `if-long`; the other
+    /// three policies say what they mean and are left alone.
     #[allow(
         clippy::match_same_arms,
         reason = "a named arm documents that the kind was considered, even when it falls back"

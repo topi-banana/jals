@@ -447,8 +447,9 @@ impl CommentFormatter {
                 continue;
             }
             for word in line.split_whitespace() {
-                if let Some(glued) = pending.take() {
-                    prose.push(glued + word);
+                if let Some(mut glued) = pending.take() {
+                    glued.push_str(word);
+                    prose.push(glued);
                     continue;
                 }
                 prose.push(word.into());

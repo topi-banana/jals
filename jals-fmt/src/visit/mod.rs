@@ -393,12 +393,6 @@ impl<'a> Ctx<'a> {
         self.spaced = true;
     }
 
-    /// A break that renders as nothing when it stays on the line.
-    fn break_tight(&mut self, plus_indent: Indent) {
-        self.ops.break_tight(plus_indent);
-        self.spaced = true;
-    }
-
     /// A break that always goes.
     fn forced_break(&mut self, plus_indent: Indent) {
         self.ops.forced_break(plus_indent);

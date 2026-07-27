@@ -178,11 +178,6 @@ impl Ops {
         self.brk(FillMode::Unified, " ", plus_indent, None);
     }
 
-    /// A break that renders as nothing when it stays (before a `.`, after a `(`).
-    pub(crate) fn break_tight(&mut self, plus_indent: Indent) {
-        self.brk(FillMode::Unified, "", plus_indent, None);
-    }
-
     /// A break that always goes, making its level unable to render flat.
     pub(crate) fn forced_break(&mut self, plus_indent: Indent) {
         self.brk(FillMode::Forced, "", plus_indent, None);
