@@ -170,10 +170,13 @@ impl Spacing {
 
             // A cast's `)` is followed by the value it converts, parenthesized or not.
             (S::RPAREN, _) if pp == S::CAST_EXPR => Some(rules.after_type_cast),
-            (_, S::LPAREN) => Some(
-                Self::before_parens(np, rules).unwrap_or(false)
-                    || Self::separated_paren(pk, np, rules),
-            ),
+            // A parenthesis no rule owns — a cast's, a group's — is not a decision of its own.
+            // A word before it still separates (`return (T) x`); anything else is the previous
+            // token's business, so this falls through to the operator rules rather than
+            // answering `false` and silencing them (`a && (b)`).
+            (_, S::LPAREN) => {
+                Self::before_parens(np, rules).or_else(|| Self::is_word(pk).then_some(true))
+            }
             (_, S::LBRACE) => Some(Self::before_brace(pk, np, rules)),
             (S::LBRACE, _) => Some(pp == S::ARRAY_INIT && rules.within_array_initializer_braces),
             (_, S::RBRACE) => Some(np == S::ARRAY_INIT && rules.within_array_initializer_braces),
@@ -184,16 +187,6 @@ impl Spacing {
             }
             _ => None,
         }
-    }
-
-    /// Whether a `(` that opens neither a call nor a declaration still separates from the token
-    /// before it.
-    ///
-    /// `return (T) x` and `throw (RuntimeException) e` put a word straight against a cast's or a
-    /// group's parenthesis, and the `before-*-parentheses` rules have nothing to say about it —
-    /// they are about the parenthesis a call or a declaration owns.
-    fn separated_paren(previous: S, parent: S, rules: &SpacingRules) -> bool {
-        Self::before_parens(parent, rules).is_none() && Self::is_word(previous)
     }
 
     /// The `within-*-parentheses` rule for a parenthesis owned by `parent`.

@@ -34,6 +34,14 @@ inline-argumentless-annotations = true
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
 
+[braces]
+# GJF collapses an empty body to `{}` and never joins a non-empty one, and `visitStatement`
+# separates a braceless body from its header with a break whose flat form is a space, so
+# `if (a) return;` stays on one line when it fits.
+keep-type-body-on-one-line = "if-empty"
+keep-method-body-on-one-line = "if-empty"
+keep-control-statement-on-one-line = true
+
 [spacing]
 # `new String[] { … }` takes a space before the initializer's brace.
 before-array-initializer-left-brace = true

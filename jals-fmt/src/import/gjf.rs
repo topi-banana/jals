@@ -133,6 +133,9 @@ impl GoogleJavaFormatConfig {
             braces: jals_config::fmt::Braces {
                 keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
                 keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
+                // `visitStatement` separates a braceless body from its header with a break whose
+                // flat form is a space, so `if (a) return;` stays on one line when it fits.
+                keep_control_statement_on_one_line: true,
                 ..jals_config::fmt::Braces::default()
             },
             wrapping: Wrapping {
