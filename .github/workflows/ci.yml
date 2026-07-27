@@ -353,19 +353,28 @@ jobs:
       contents: read
       pull-requests: write
     env:
-      # Pinned google-java-format release used to generate the OpenJDK src/ golden corpus.
+      # Pinned reference-formatter releases the generated OpenJDK corpora are built with.
+      # A similarity score is only defined against a fixed reference version
+      # (`jals-fmt/DESIGN.md` §7.1), so these are part of the metric, not build trivia.
+      # `jals_tests::golden::TOOL_PINS` restates them and `the_tool_pins_match_ci` fails
+      # when the two drift — bump both together (and, for JDT, the coordinate list in
+      # `jals-tests/scripts/fetch-eclipse-jdt.sh`).
       GJF_VERSION: "1.35.0"
+      PJF_VERSION: "2.96.0"
+      ECLIPSE_JDT_VERSION: "3.46.0"
+      IDEA_VERSION: "2025.3"
     steps:
       - uses: actions/checkout@v7
         with:
-          # Both corpora: OpenJDK (parse soundness) and google-java-format (fidelity).
+          # Every corpus: OpenJDK (parse soundness) plus the google-java-format and
+          # palantir-java-format regression suites (fidelity).
           submodules: true
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the corpus tools
         run: cargo build --release -p jals-tests --bins
-      - name: Set up JDK (for google-java-format)
+      - name: Set up JDK (for google-java-format and Eclipse JDT)
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -383,25 +392,114 @@ jobs:
           curl -fL --retry 3 --create-dirs \
             -o "jals-tests/vendor/google-java-format-${GJF_VERSION}-all-deps.jar" \
             "https://github.com/google/google-java-format/releases/download/v${GJF_VERSION}/google-java-format-${GJF_VERSION}-all-deps.jar"
+      - name: Cache the palantir-java-format binary
+        id: pjf-bin
+        uses: actions/cache@v6
+        with:
+          path: jals-tests/vendor/palantir-java-format-${{ env.PJF_VERSION }}
+          key: pjf-bin-${{ env.PJF_VERSION }}
+      - name: Download the palantir-java-format binary
+        if: steps.pjf-bin.outputs.cache-hit != 'true'
+        # A GraalVM native image published to Maven Central: one self-contained x86-64
+        # Linux binary, so unlike google-java-format there is no JVM or dependency
+        # closure to assemble. Palantir attaches no assets to its GitHub releases.
+        run: |
+          curl -fL --retry 3 --create-dirs \
+            -o "jals-tests/vendor/palantir-java-format-${PJF_VERSION}" \
+            "https://repo1.maven.org/maven2/com/palantir/javaformat/palantir-java-format-native/${PJF_VERSION}/palantir-java-format-native-${PJF_VERSION}-nativeImage-linux-glibc_x86-64.bin"
+          chmod +x "jals-tests/vendor/palantir-java-format-${PJF_VERSION}"
+      - name: Cache the Eclipse JDT jars
+        id: jdt-jars
+        uses: actions/cache@v6
+        with:
+          path: jals-tests/vendor/eclipse-jdt
+          key: jdt-jars-${{ env.ECLIPSE_JDT_VERSION }}-${{ hashFiles('jals-tests/scripts/fetch-eclipse-jdt.sh') }}
+      - name: Resolve the Eclipse JDT classpath
+        id: jdt
+        # Fetches only what is missing, so this is a no-op on a cache hit and still yields
+        # the classpath the generator needs.
+        run: echo "classpath=$(jals-tests/scripts/fetch-eclipse-jdt.sh)" >> "$GITHUB_OUTPUT"
       - name: Resolve the OpenJDK submodule commit
         id: openjdk
         # Reads the gitlink the superproject pins, no submodule history needed.
         run: echo "sha=$(git rev-parse HEAD:jals-tests/sources/openjdk)" >> "$GITHUB_OUTPUT"
+
+      # One cache + one generation step per reference formatter. Each corpus is generated,
+      # never committed (they are GPL'd OpenJDK derivatives), and regenerated only when the
+      # submodule pin, that tool's version, or the shared generator changes. The steps are
+      # independent: a formatter that fails still leaves the others' rows in the report,
+      # which is what `--allow-missing` below is for.
       - name: Cache the OpenJDK src/ gjf corpus
-        id: corpus-cache
+        id: gjf-corpus
         uses: actions/cache@v6
         with:
-          # Generated, never committed (GPL'd OpenJDK derivative). Regenerated only when
-          # the submodule pin, the google-java-format version, or the generator changes.
           path: jals-tests/sources/openjdk-gjf
-          key: openjdk-gjf-src-${{ env.GJF_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-gjf.sh') }}
+          key: openjdk-gjf-src-${{ env.GJF_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh') }}
       - name: Generate the OpenJDK src/ gjf corpus
-        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        if: steps.gjf-corpus.outputs.cache-hit != 'true'
         env:
           GJF_JAR: jals-tests/vendor/google-java-format-${{ env.GJF_VERSION }}-all-deps.jar
           SUBTREE: src
           JOBS: "2"
-        run: jals-tests/scripts/gen-openjdk-gjf.sh 0
+        run: jals-tests/scripts/gen-openjdk-corpus.sh gjf 0
+
+      - name: Cache the OpenJDK src/ palantir corpus
+        id: palantir-corpus
+        uses: actions/cache@v6
+        with:
+          path: jals-tests/sources/openjdk-palantir
+          key: openjdk-palantir-src-${{ env.PJF_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh') }}
+      - name: Generate the OpenJDK src/ palantir corpus
+        if: steps.palantir-corpus.outputs.cache-hit != 'true'
+        env:
+          PJF_BIN: jals-tests/vendor/palantir-java-format-${{ env.PJF_VERSION }}
+          SUBTREE: src
+          JOBS: "2"
+        run: jals-tests/scripts/gen-openjdk-corpus.sh palantir 0
+
+      - name: Cache the OpenJDK src/ eclipse corpus
+        id: eclipse-corpus
+        uses: actions/cache@v6
+        with:
+          # The committed profile is part of the key: change the style and the corpus it
+          # produced is no longer the one the harness scores against.
+          path: jals-tests/sources/openjdk-eclipse
+          key: openjdk-eclipse-src-${{ env.ECLIPSE_JDT_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh', 'jals-tests/scripts/eclipse/EclipseFormat.java', 'jals-tests/config/eclipse-jals.prefs') }}
+      - name: Generate the OpenJDK src/ eclipse corpus
+        if: steps.eclipse-corpus.outputs.cache-hit != 'true'
+        env:
+          ECLIPSE_CP: ${{ steps.jdt.outputs.classpath }}
+          SUBTREE: src
+          JOBS: "2"
+        run: jals-tests/scripts/gen-openjdk-corpus.sh eclipse 0
+
+      - name: Cache the OpenJDK java.base intellij corpus
+        id: intellij-corpus
+        uses: actions/cache@v6
+        with:
+          path: jals-tests/sources/openjdk-intellij
+          key: openjdk-intellij-javabase-${{ env.IDEA_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh', 'jals-tests/config/intellij-jals.xml') }}
+      - name: Download IntelliJ IDEA Community
+        id: idea
+        # Only on a corpus cache miss: this is a ~1.5 GB download that would otherwise
+        # crowd out the corpus caches themselves, so the IDE is fetched rather than cached.
+        if: steps.intellij-corpus.outputs.cache-hit != 'true'
+        run: |
+          curl -fL --retry 3 -o idea.tar.gz \
+            "https://download.jetbrains.com/idea/ideaIC-${IDEA_VERSION}.tar.gz"
+          mkdir -p jals-tests/vendor/idea
+          tar xzf idea.tar.gz -C jals-tests/vendor/idea --strip-components=1
+          rm idea.tar.gz
+      - name: Generate the OpenJDK java.base intellij corpus
+        if: steps.intellij-corpus.outputs.cache-hit != 'true'
+        env:
+          IDEA_HOME: jals-tests/vendor/idea
+          # Only `java.base`, not all of `src/`: the IDEA formatter runs a whole IDE and is
+          # an order of magnitude slower than the other three. The narrower subtree is
+          # named in the corpus description so the report cannot read as full coverage.
+          SUBTREE: src/java.base
+        run: jals-tests/scripts/gen-openjdk-corpus.sh intellij 0
+
       - name: Generate corpus reports
         shell: bash
         run: |
@@ -409,7 +507,8 @@ jobs:
           {
             cargo run --release -p jals-tests --bin jals-tests -- --markdown
             echo
-            cargo run --release -p jals-tests --bin jals-golden -- gjf-testdata openjdk-gjf --worst 20 --markdown
+            cargo run --release -p jals-tests --bin jals-golden -- \
+              --worst 20 --allow-missing --markdown
           } | tee corpus.md >> "$GITHUB_STEP_SUMMARY"
       - name: Comment corpus reports on PR
         if: always() && github.event_name == 'pull_request' && hashFiles('corpus.md') != ''

@@ -22,7 +22,10 @@ path = "src/bin/golden.rs"
 clap.workspace = true
 jals-config.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
-jals-fmt.workspace = true
+# `std` brings in the XML config importers: the Eclipse and IntelliJ golden corpora are
+# scored with the very profile/scheme files their generators hand the native tool, and
+# IntelliJ's is a code-style XML.
+jals-fmt = { workspace = true, features = ["std"] }
 jals-syntax.workspace = true
 rayon.workspace = true
 similar.workspace = true

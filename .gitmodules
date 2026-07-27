@@ -4,3 +4,6 @@
 [submodule "jals-tests/sources/google-java-format"]
 	path = jals-tests/sources/google-java-format
 	url = https://github.com/google/google-java-format
+[submodule "jals-tests/sources/palantir-java-format"]
+	path = jals-tests/sources/palantir-java-format
+	url = https://github.com/palantir/palantir-java-format
