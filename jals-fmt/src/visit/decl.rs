@@ -152,7 +152,15 @@ impl Ctx<'_> {
             )
             && !Self::any_annotation_has_arguments(node)
         {
-            return WrapPolicy::Never;
+            // Horizontal is not *pinned* horizontal for a declaration: `fieldAnnotationDirection`'s
+            // `breakList` is a UNIFIED break, so an argumentless run shares the declaration's line
+            // while it fits and moves above it when it does not. A parameter has no line of its
+            // own to move off, so it stays put.
+            return if matches!(parent, Some(S::PARAM | S::RECORD_COMPONENT)) {
+                WrapPolicy::Never
+            } else {
+                WrapPolicy::IfLongPerItem
+            };
         }
         match parent {
             Some(
