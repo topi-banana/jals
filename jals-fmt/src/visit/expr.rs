@@ -271,7 +271,22 @@ impl Ctx<'_> {
 
     /// A cast: `(Type) value`. The space after the `)` is `[spacing] after-type-cast`.
     pub(super) async fn visit_cast(&mut self, node: &SyntaxNode) {
-        self.visit_children(node).await;
+        // `visitTypeCast` opens a level and puts a break between the `)` and the value, so a cast
+        // whose value does not fit moves the *value* to the next line rather than breaking inside
+        // it: `(Foo)\n    bar(a, b)`, not `(Foo) bar(\n    a, b)`.
+        let continuation = self.style.continuation();
+        self.open(continuation.clone());
+        let children = Self::children(node);
+        for child in &children {
+            if child.as_token().is_some_and(|tok| tok.kind() == S::RPAREN) {
+                self.visit_element(child).await;
+                let flat = Self::flat_space(self.style.cfg.spacing.after_type_cast);
+                self.list_break_flat(self.style.cfg.wrapping.binary_operation, flat, Indent::ZERO);
+                continue;
+            }
+            self.visit_element(child).await;
+        }
+        self.close_indent(&continuation);
     }
 
     /// `new Type(args)`, `new Type[…]`, `new Type() { … }`.
