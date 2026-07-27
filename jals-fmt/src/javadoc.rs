@@ -59,7 +59,14 @@ enum Block {
         rest: usize,
     },
     /// Lines to be emitted exactly as they are — fenced code, `<pre>`, a table.
-    Verbatim(Vec<String>),
+    Verbatim {
+        /// The lines, already stripped of the `*` prefix.
+        lines: Vec<String>,
+        /// Columns of extra indent on the *opening* line. The region's content keeps its own
+        /// indentation and takes none: only the tag that opens it belongs to the surrounding
+        /// paragraph.
+        first: usize,
+    },
     /// A block tag: its name (`@param`), an optional first argument, and its description words.
     Tag {
         /// The tag itself, `@`-prefixed.
@@ -262,9 +269,10 @@ impl CommentFormatter {
                         Self::push_indented(&mut out, line, pad, cfg.leading_asterisks);
                     }
                 }
-                Block::Verbatim(lines) => {
-                    for line in lines {
-                        Self::push_line(&mut out, line, cfg.leading_asterisks);
+                Block::Verbatim { lines, first } => {
+                    for (nth, line) in lines.iter().enumerate() {
+                        let pad = if nth == 0 { *first } else { 0 };
+                        Self::push_indented(&mut out, line, pad, cfg.leading_asterisks);
                     }
                 }
                 Block::Tag {
@@ -517,6 +525,8 @@ impl CommentFormatter {
         // by four more — `JavadocWriter`'s `continuingListStack` and `continuingListItemStack`.
         let mut depth = 0usize;
         let (mut first, mut rest) = (0usize, 0usize);
+        // The indent the region currently being collected opens at.
+        let mut fence_indent = 0usize;
 
         for raw in body.split('\n') {
             let mut line = raw.trim();
@@ -542,7 +552,10 @@ impl CommentFormatter {
                     Self::closes_fence(line)
                 };
                 if closed {
-                    blocks.push(Block::Verbatim(core::mem::take(lines)));
+                    blocks.push(Block::Verbatim {
+                        lines: core::mem::take(lines),
+                        first: fence_indent,
+                    });
                     fence = None;
                 }
                 continue;
@@ -554,9 +567,19 @@ impl CommentFormatter {
                 if depth == 0 && !matches!(blocks.last(), Some(Block::Blank) | None) {
                     blocks.push(Block::Blank);
                 }
+                // The opening tag belongs to whatever paragraph it interrupts: a tag's
+                // description continues at its continuation indent, a list item at the item's.
+                fence_indent = if matches!(blocks.last(), Some(Block::Tag { .. })) {
+                    style.continuation_cols
+                } else {
+                    rest
+                };
                 let lines = alloc::vec![String::from(line)];
                 if Self::self_closing_fence(line) {
-                    blocks.push(Block::Verbatim(lines));
+                    blocks.push(Block::Verbatim {
+                        lines,
+                        first: fence_indent,
+                    });
                 } else {
                     fence = Some((lines, line.contains("{@snippet")));
                 }
@@ -669,7 +692,10 @@ impl CommentFormatter {
             while lines.last().is_some_and(|line| line.trim().is_empty()) {
                 lines.pop();
             }
-            blocks.push(Block::Verbatim(lines));
+            blocks.push(Block::Verbatim {
+                lines,
+                first: fence_indent,
+            });
         }
         Self::flush(&mut prose, &mut blocks, first, rest);
 
