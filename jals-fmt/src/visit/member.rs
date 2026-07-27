@@ -356,7 +356,8 @@ impl Ctx<'_> {
     /// like an array initializer, forced once it has a member section.
     fn enum_break(&mut self, trivial: bool, policy: WrapPolicy) {
         if trivial {
-            self.list_break_tight(policy, Indent::ZERO);
+            let flat = Self::flat_space(self.style.cfg.spacing.after_comma);
+            self.list_break_flat(policy, flat, Indent::ZERO);
         } else {
             self.forced_break(Indent::ZERO);
         }
