@@ -659,13 +659,36 @@ impl Ctx<'_> {
 
     /// `synchronized (lock) { … }`.
     pub(super) async fn visit_synchronized(&mut self, node: &SyntaxNode) {
+        // `visitSynchronized` opens `plusFour` after the `(` and breaks there, so a long lock
+        // expression moves onto its own line instead of trailing off the header.
+        let continuation = self.style.continuation();
+        let parens = self.style.cfg.wrapping.paren_control;
+        let tag = self.ops.new_tag();
+        let mut opened = false;
         for child in Self::children(node) {
             if let Some(block) = child.as_node()
                 && block.kind() == S::BLOCK
             {
                 self.brace_before(self.style.cfg.braces.block);
             }
+            if !opened && child.as_token().is_some_and(|tok| tok.kind() == S::LPAREN) {
+                self.visit_element(&child).await;
+                self.open(continuation.clone());
+                opened = true;
+                self.delimiter_break(parens, Some(tag));
+                continue;
+            }
+            if opened && child.as_token().is_some_and(|tok| tok.kind() == S::RPAREN) {
+                self.closing_break(parens, tag);
+                self.visit_element(&child).await;
+                self.close_indent(&continuation);
+                opened = false;
+                continue;
+            }
             self.visit_element(&child).await;
+        }
+        if opened {
+            self.close_indent(&continuation);
         }
     }
 

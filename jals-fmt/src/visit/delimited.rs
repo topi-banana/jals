@@ -448,7 +448,11 @@ impl Ctx<'_> {
     }
 
     /// The break just inside an opening delimiter.
-    fn delimiter_break(&mut self, parens: ParenPositions, tag: Option<crate::ir::BreakTag>) {
+    pub(super) fn delimiter_break(
+        &mut self,
+        parens: ParenPositions,
+        tag: Option<crate::ir::BreakTag>,
+    ) {
         match parens {
             // google-java-format's shape: the first item shares the opener's line. The
             // "if wrapped" variant opens the same way and differs only at the *closing*
@@ -472,7 +476,7 @@ impl Ctx<'_> {
     /// Under `common-lines` there is none — the `)` hugs the last item, which is what
     /// google-java-format always does. The `separate-lines*` variants dedent it back to the line
     /// that opened the list.
-    fn closing_break(&mut self, parens: ParenPositions, tag: crate::ir::BreakTag) {
+    pub(super) fn closing_break(&mut self, parens: ParenPositions, tag: crate::ir::BreakTag) {
         let dedent = Indent::columns(-i32::try_from(self.style.continuation_cols).unwrap_or(0));
         match parens {
             ParenPositions::CommonLines | ParenPositions::Preserve => {}
