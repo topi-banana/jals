@@ -220,7 +220,12 @@ impl CommentMap {
         }
     }
 
-    /// Whether the next significant token after `tok` is on the same line.
+    /// Whether the next significant token after `tok` is on the same line, and is one a comment
+    /// can hug.
+    ///
+    /// A closer or a separator is never hugged: `f(x /* why */, y)` is a note about `x`, and
+    /// hugging it onto the `,` would put a space where the `[spacing]` rules say there is none,
+    /// spelling `x /* why */ ,`.
     fn followed_by_same_line_token(tok: &SyntaxToken) -> bool {
         let mut cursor = tok.next_token();
         while let Some(next) = cursor {
@@ -229,7 +234,14 @@ impl CommentMap {
                 return false;
             }
             if !kind.is_trivia() {
-                return true;
+                return !matches!(
+                    kind,
+                    SyntaxKind::COMMA
+                        | SyntaxKind::SEMICOLON
+                        | SyntaxKind::RPAREN
+                        | SyntaxKind::RBRACK
+                        | SyntaxKind::RBRACE
+                );
             }
             cursor = next.next_token();
         }
