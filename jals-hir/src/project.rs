@@ -401,6 +401,13 @@ pub struct ProjectIndex {
     /// type reference (one that resolved to a same-file definition) can be mapped to its project
     /// item — the basis for whole-project find-references.
     decl_to_item: HashMap<(FileId, usize), ItemId>,
+    /// The [`decl_to_item`](Self::decl_to_item) counterpart for members: a field, method,
+    /// constructor, or enum constant's `(file, name-token start)` back to its [`MemberId`].
+    ///
+    /// A map and not a scan, because a consumer walking the syntax tree asks this per *name*, not
+    /// per declaration — every unqualified field reference in every body — and a linear pass over
+    /// the whole project's members made that quadratic in the project's size.
+    decl_to_member: HashMap<(FileId, usize), MemberId>,
 }
 
 /// A project's classpath `.class` files lowered to the index facts they contribute, ready to fold
@@ -776,6 +783,7 @@ impl ProjectIndex {
             members: Vec::new(),
             members_by_owner: HashMap::new(),
             decl_to_item: HashMap::new(),
+            decl_to_member: HashMap::new(),
         };
 
         // Every compilation unit to index, in priority order: the host's project files first, then the
@@ -837,6 +845,21 @@ impl ProjectIndex {
             index
                 .collect_classfile_members_and_supertypes(file, owner, class, sources)
                 .await;
+        }
+        // Member declaration sites, the counterpart of `decl_sites` above. Built once here rather
+        // than scanned per lookup: a code generator asks per *name*, not per declaration.
+        // A classfile member has no source position (`name_range` is `0..0`), so it is skipped —
+        // several would otherwise collide on one key.
+        let member_sites: Vec<((FileId, usize), MemberId)> = index
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| member.name_range != (0..0))
+            .map(|(i, member)| ((member.file, member.name_range.start), MemberId(i as u32)))
+            .collect();
+        for (key, id) in member_sites {
+            yielder.tick().await;
+            index.decl_to_member.insert(key, id);
         }
         index
     }
@@ -1209,15 +1232,12 @@ impl ProjectIndex {
     /// for members.
     ///
     /// Maps a *declaration* back to its id, which is what a consumer walking the syntax tree has:
-    /// it is looking at the declaration it is about to emit, not at a use of it. A linear scan
-    /// rather than an index, because the lookup happens once per emitted member and the index is
-    /// built once; add a map if that ever stops being true.
+    /// it is looking at the declaration it is about to emit, or at a name that resolved to one.
+    ///
+    /// A member with no source position — one lowered from a classpath `.class` — is not
+    /// reachable here: there is no declaration site to ask about.
     pub fn member_by_decl(&self, file: FileId, name_start: usize) -> Option<MemberId> {
-        self.members
-            .iter()
-            .position(|member| member.file == file && member.name_range.start == name_start)
-            .and_then(|index| u32::try_from(index).ok())
-            .map(MemberId)
+        self.decl_to_member.get(&(file, name_start)).copied()
     }
 
     /// The members declared *directly* on `owner` (no inheritance walk), in declaration order. Empty

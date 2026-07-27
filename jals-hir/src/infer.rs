@@ -405,8 +405,14 @@ impl TypeInference {
         }
     }
 
-    /// Bind every call under `root` to the overload it selects, recording the result for
+    /// Bind every call and `new` under `root` to the member it selects, recording the result for
     /// [`call_target_of`](Self::call_target_of).
+    ///
+    /// Selection therefore runs twice per call: once in [`check_call`](Self::check_call) during
+    /// pass 2, and once here. That is not redundancy to remove — pass 2 weighs argument types that
+    /// are still being inferred, so its answer is provisional, which is the whole reason this pass
+    /// exists. Merging them would mean either checking against incomplete types or reporting
+    /// diagnostics a pass later than the rest.
     async fn record_member_targets(
         &mut self,
         root: &SyntaxNode,

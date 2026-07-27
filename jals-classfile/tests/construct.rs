@@ -236,3 +236,27 @@ fn the_pool_of_a_minimal_class_is_pinned() {
     "#]]
     .assert_eq(&rendered);
 }
+
+/// `replace` is the one operation that changes what an index holds, so the intern index it
+/// invalidates has to go with it. An intern that handed back a stale index would point a
+/// `getstatic` or an `ldc` at whatever the replacement put there.
+#[test]
+fn replacing_an_entry_invalidates_interning() {
+    let mut pool = ConstantPool::new();
+    let a = pool.utf8_index("a").expect("a");
+    let keep = pool.utf8_index("keep").expect("keep");
+
+    pool.replace(
+        a,
+        jals_classfile::ConstantPoolEntry::Utf8(ConstantPool::encode_modified_utf8("b")),
+    )
+    .expect("replace");
+
+    // The index `a` used to have now holds `b`, so interning `a` must not hand it back.
+    let again = pool.utf8_index("a").expect("a again");
+    assert_ne!(again, a, "`a` must not resolve to the slot `b` took over");
+    assert_eq!(pool.utf8(again).as_deref(), Some("a"));
+    assert_eq!(pool.utf8(a).as_deref(), Some("b"));
+    // Entries the replacement did not touch keep their indices and their contents.
+    assert_eq!(pool.utf8(keep).as_deref(), Some("keep"));
+}

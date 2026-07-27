@@ -211,7 +211,7 @@ impl AssignmentExpr {
     /// A simple assignment is one `EQ`. A compound one is either a single fused token (`PLUS_EQ`,
     /// `STAR_EQ`, …) or — for the shift forms, whose `>` the lexer never joins to what follows so
     /// that `List<List<T>>` still closes — several: `>>=` arrives as `GT GT EQ`.
-    pub fn operator(&self) -> impl Iterator<Item = SyntaxToken> {
+    fn operator(&self) -> impl Iterator<Item = SyntaxToken> {
         self.syntax
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
