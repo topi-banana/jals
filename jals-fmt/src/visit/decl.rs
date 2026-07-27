@@ -123,7 +123,9 @@ impl Ctx<'_> {
                 .as_node()
                 .is_some_and(|node| matches!(node.kind(), S::ANNOTATION | S::ATTRIBUTE));
             if previous_annotation && leading_run {
-                if nth >= types_start {
+                // The break *before* the first type annotation still belongs to the declaration
+                // run — it is `visitModifiers`' trailing break, not one between type annotations.
+                if nth > types_start {
                     self.type_annotation_break();
                 } else {
                     self.annotation_break(policy);
