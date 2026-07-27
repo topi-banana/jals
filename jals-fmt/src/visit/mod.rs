@@ -271,6 +271,7 @@ impl<'a> Ctx<'a> {
             // `TYPE_PARAM` has no bespoke rule of its own — its `&` bound is a spacing decision —
             // but naming it here documents that the omission is deliberate.
             S::TYPE_PARAM => self.visit_children(node).await,
+            S::TYPE => self.visit_type(node).await,
             S::PARAM | S::RECORD_COMPONENT => self.visit_param(node).await,
             S::ANNOTATION_PAIR => self.visit_annotation_pair(node).await,
 
