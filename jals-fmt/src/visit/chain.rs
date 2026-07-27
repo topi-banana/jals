@@ -531,31 +531,22 @@ impl Ctx<'_> {
         if link.indices.is_empty() {
             return;
         }
-        // `formatArrayIndices`: an index may move onto its own line inside the brackets, and its
-        // own continuation one step further — a subscript computed from a long expression has
-        // nowhere else to go.
-        let continuation = self.style.continuation();
-        // The break stands where `[spacing] within-brackets` would put its space, so it carries
-        // that decision as its flat form.
+        // `formatArrayIndices`: an index may move onto its own line inside the brackets — a
+        // subscript computed from a long expression has nowhere else to go. Only the *opening*
+        // bracket takes a break; the `]` hugs whatever the index ended with. The break stands
+        // where `[spacing] within-brackets` would put its space, so it carries that decision as
+        // its flat form.
         let flat = Self::flat_space(self.style.cfg.spacing.within_brackets);
         self.open_flat(Indent::ZERO);
         for element in &link.indices {
-            match element.as_token().map(SyntaxToken::kind) {
-                Some(S::LBRACK) => {
-                    self.visit_element(element).await;
-                    self.ops
-                        .brk(FillMode::Independent, flat, Indent::ZERO, None);
-                    self.space_already_emitted();
-                    self.open(continuation.clone());
-                }
-                Some(S::RBRACK) => {
-                    self.close_indent(&continuation);
-                    self.ops
-                        .brk(FillMode::Independent, flat, Indent::ZERO, None);
-                    self.space_already_emitted();
-                    self.visit_element(element).await;
-                }
-                _ => self.visit_element(element).await,
+            self.visit_element(element).await;
+            if element
+                .as_token()
+                .is_some_and(|tok| tok.kind() == S::LBRACK)
+            {
+                self.ops
+                    .brk(FillMode::Independent, flat, Indent::ZERO, None);
+                self.space_already_emitted();
             }
         }
         self.close();
