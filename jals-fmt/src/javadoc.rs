@@ -626,6 +626,22 @@ impl CommentFormatter {
                 continue;
             }
             if !cfg.format_source_in_comments && Self::opens_fence(line) {
+                // A `<pre>…</pre>` written inside a sentence is an *element* of that sentence,
+                // not a line of its own: `writePreOpen` asks for a blank line around the region
+                // and leaves the prose on either side to reflow.
+                let lower = line.to_ascii_lowercase();
+                let mut trailing = "";
+                if Self::self_closing_fence(line)
+                    && let Some(open) = lower.find("<pre>")
+                    && let Some(close) = lower.rfind("</pre>")
+                {
+                    let before = line[..open].trim_end();
+                    trailing = line[close + "</pre>".len()..].trim_start();
+                    if !before.is_empty() {
+                        Self::tokens_of(before, &mut prose);
+                    }
+                    line = line[open..close + "</pre>".len()].trim_end();
+                }
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
                 // region they open — but not inside a list, which holds none.
@@ -645,6 +661,14 @@ impl CommentFormatter {
                         lines,
                         first: fence_indent,
                     });
+                    // `writePreClose` asks for a blank line after the region too, and whatever
+                    // followed it on the line goes on reflowing after that.
+                    if !trailing.is_empty() {
+                        if depth == 0 {
+                            blocks.push(Block::Blank);
+                        }
+                        Self::tokens_of(trailing, &mut prose);
+                    }
                 } else {
                     let snippet = line.contains("{@snippet");
                     if snippet {
