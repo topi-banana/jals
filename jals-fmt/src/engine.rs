@@ -462,14 +462,23 @@ impl<'s> Writer<'s> {
             return;
         }
 
+        // A `/* … */` continuation aligns its `*` under the opener's second character, so it is
+        // indented one past the comment's own column. A wrapped `//` run has no such marker and
+        // its continuations line up with the first `//` — google-java-format's `indentJavadoc`
+        // and `indentLineComments` respectively.
+        let indent = if first.starts_with("//") {
+            start
+        } else {
+            start + 1
+        };
         self.out.push_str(first.trim_end_matches('\r'));
         let mut last_width = Width::utf16(first);
         for line in text.split('\n').skip(1) {
             self.out.push('\n');
-            self.style.write_indent(start + 1, &mut self.out);
+            self.style.write_indent(indent, &mut self.out);
             let body = line.trim_end_matches('\r').trim_start();
             self.out.push_str(body);
-            last_width = start + 1 + Width::utf16(body);
+            last_width = indent + Width::utf16(body);
         }
         self.column = last_width;
     }

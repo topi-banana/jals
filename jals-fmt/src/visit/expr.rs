@@ -26,12 +26,15 @@ impl Ctx<'_> {
         // not. A sub-expression that binds tighter is a different run, and opens a level of its
         // own — which is what indents `x * y` one step further than the `+` it hangs off, and
         // what makes the lowest-precedence operator the first to break.
+        let root = Self::run_root(node);
         let nested = node.parent().is_some_and(|parent| {
             parent.kind() == S::BINARY_EXPR && Self::precedence(&parent) == Self::precedence(node)
         });
         // Same rule as an argument list: a run whose operands are all short fills, and one long
-        // operand makes that packing arbitrary, so the run goes one operator per line.
-        let policy = if policy == WrapPolicy::IfLong && !self.run_operands_are_short(node) {
+        // operand makes that packing arbitrary, so the run goes one operator per line. The
+        // question is asked of the **run**, not of this node: `("a" + b) + long` is one run, and
+        // deciding its inner half separately would fill there and break here.
+        let policy = if policy == WrapPolicy::IfLong && !self.run_operands_are_short(&root) {
             WrapPolicy::IfLongPerItem
         } else {
             policy
@@ -44,6 +47,19 @@ impl Ctx<'_> {
         if !nested {
             self.close_indent(&continuation);
         }
+    }
+
+    /// The outermost node of the same-precedence operator run `node` belongs to.
+    fn run_root(node: &SyntaxNode) -> SyntaxNode {
+        let precedence = Self::precedence(node);
+        let mut root = node.clone();
+        while let Some(parent) = root.parent() {
+            if parent.kind() != S::BINARY_EXPR || Self::precedence(&parent) != precedence {
+                break;
+            }
+            root = parent;
+        }
+        root
     }
 
     /// The binding strength of the operator a `BINARY_EXPR` is built around, higher binding

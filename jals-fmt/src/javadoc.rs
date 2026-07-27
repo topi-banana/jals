@@ -371,7 +371,9 @@ impl CommentFormatter {
         let cfg = style.comments();
         let mut blocks: Vec<Block> = Vec::new();
         let mut prose: Vec<String> = Vec::new();
-        let mut fence: Option<Vec<String>> = None;
+        // `Some((lines, snippet))` — the region being collected verbatim, and whether it is a
+        // `{@snippet …}` (which ends at a `}` rather than at a closing HTML tag).
+        let mut fence: Option<(Vec<String>, bool)> = None;
         // A `<p>` waiting for the word it introduces, so the two are refilled as one unit.
         let mut pending: Option<String> = None;
 
@@ -387,9 +389,14 @@ impl CommentFormatter {
                 }
             }
 
-            if let Some(lines) = &mut fence {
+            if let Some((lines, snippet)) = &mut fence {
                 lines.push(line.into());
-                if Self::closes_fence(line) {
+                let closed = if *snippet {
+                    line.starts_with('}')
+                } else {
+                    Self::closes_fence(line)
+                };
+                if closed {
                     blocks.push(Block::Verbatim(core::mem::take(lines)));
                     fence = None;
                 }
@@ -401,7 +408,7 @@ impl CommentFormatter {
                 if Self::self_closing_fence(line) {
                     blocks.push(Block::Verbatim(lines));
                 } else {
-                    fence = Some(lines);
+                    fence = Some((lines, line.contains("{@snippet")));
                 }
                 continue;
             }
@@ -466,7 +473,13 @@ impl CommentFormatter {
         if let Some(glued) = pending.take() {
             prose.push(glued);
         }
-        if let Some(lines) = fence {
+        if let Some((mut lines, _)) = fence {
+            // The region never closed — an unbalanced `{@code`, a `<pre>` with no `</pre>`. Its
+            // trailing blank lines are the gap above `*/`, not content, and keeping them would
+            // grow the comment by one line on every run.
+            while lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.pop();
+            }
             blocks.push(Block::Verbatim(lines));
         }
         Self::flush(&mut prose, &mut blocks);
@@ -528,6 +541,7 @@ impl CommentFormatter {
         lower.starts_with("```")
             || lower.contains("<pre>")
             || lower.contains("<table")
+            || (line.contains("{@snippet") && !line.contains('}'))
             || (lower.starts_with("{@code") && !lower.contains('}'))
     }
 
@@ -543,6 +557,7 @@ impl CommentFormatter {
         (lower.contains("<pre>") && lower.contains("</pre>"))
             || (lower.contains("<table") && lower.contains("</table>"))
             || (lower.contains("{@code") && lower.contains('}'))
+            || (line.contains("{@snippet") && line.contains('}'))
     }
 
     /// The rest of `line` after a leading `<p>`, or `None` when it does not open a paragraph.
@@ -625,6 +640,11 @@ impl CommentFormatter {
     }
 
     /// Refill with a different budget for the first line than for the rest.
+    ///
+    /// One word never starts a line: a word beginning with `@`. At the start of a line that is a
+    /// block tag, so refilling prose into that position would turn `… the @Override annotation`
+    /// into a tag on the next run. Keeping it on the line it is already on costs a few columns of
+    /// overflow and keeps the comment a fixed point.
     fn fill_two(words: &[String], first: usize, rest: usize) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut current = String::new();
@@ -635,7 +655,7 @@ impl CommentFormatter {
                 current.push_str(word);
                 continue;
             }
-            if Width::utf16(&current) + 1 + width > budget {
+            if Width::utf16(&current) + 1 + width > budget && !word.starts_with('@') {
                 lines.push(core::mem::take(&mut current));
             } else {
                 current.push(' ');
