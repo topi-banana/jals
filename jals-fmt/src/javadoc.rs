@@ -32,8 +32,19 @@ use crate::style::Style;
 
 /// One logical piece of a comment body.
 enum Block {
-    /// Prose to be refilled. Holds the words.
-    Prose(Vec<String>),
+    /// Prose to be refilled, with the extra indent its first and continuation lines take.
+    ///
+    /// Only an HTML list moves either off zero: `<li>` sits one list level in and the lines that
+    /// continue it one item level further, which is `JavadocWriter`'s `continuingListStack` plus
+    /// `continuingListItemStack`.
+    Prose {
+        /// The words to refill.
+        words: Vec<String>,
+        /// Columns of extra indent on the first line.
+        first: usize,
+        /// Columns of extra indent on every line after it.
+        rest: usize,
+    },
     /// Lines to be emitted exactly as they are — fenced code, `<pre>`, a table.
     Verbatim(Vec<String>),
     /// A block tag: its name (`@param`), an optional first argument, and its description words.
@@ -180,7 +191,12 @@ impl CommentFormatter {
 
         // A comment that is one short paragraph collapses to a single line, which is what
         // google-java-format does and what most one-line Javadoc already looks like.
-        if let [Block::Prose(words)] = blocks.as_slice() {
+        if let [
+            Block::Prose {
+                words, first: 0, ..
+            },
+        ] = blocks.as_slice()
+        {
             let inline = words.join(" ");
             let width = indent + Width::utf16(opener) + Width::utf16(&inline) + 4;
             if width <= style.comment_width(indent) && !inline.is_empty() {
@@ -222,9 +238,15 @@ impl CommentFormatter {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
                 }
-                Block::Prose(words) => {
-                    for line in Self::fill(words, budget) {
-                        Self::push_line(&mut out, &line, cfg.leading_asterisks);
+                Block::Prose { words, first, rest } => {
+                    let lines = Self::fill_two(
+                        words,
+                        budget.saturating_sub(*first).max(16),
+                        budget.saturating_sub(*rest).max(16),
+                    );
+                    for (nth, line) in lines.iter().enumerate() {
+                        let pad = if nth == 0 { *first } else { *rest };
+                        Self::push_indented(&mut out, line, pad, cfg.leading_asterisks);
                     }
                 }
                 Block::Verbatim(lines) => {
@@ -282,6 +304,20 @@ impl CommentFormatter {
             }
         }
         out.push_str(text);
+    }
+
+    /// Emit one body line with `pad` columns of extra indent.
+    fn push_indented(out: &mut String, text: &str, pad: usize, asterisks: bool) {
+        if pad == 0 {
+            Self::push_line(out, text, asterisks);
+            return;
+        }
+        let mut padded = String::with_capacity(pad + text.len());
+        for _ in 0..pad {
+            padded.push(' ');
+        }
+        padded.push_str(text);
+        Self::push_line(out, &padded, asterisks);
     }
 
     /// Emit a block tag and its refilled description.
@@ -376,6 +412,11 @@ impl CommentFormatter {
         let mut fence: Option<(Vec<String>, bool)> = None;
         // A `<p>` waiting for the word it introduces, so the two are refilled as one unit.
         let mut pending: Option<String> = None;
+        // The HTML list nesting depth, and the indents the prose being accumulated belongs at.
+        // A list indents its contents by two columns per level and an item's continuation lines
+        // by four more — `JavadocWriter`'s `continuingListStack` and `continuingListItemStack`.
+        let mut depth = 0usize;
+        let (mut first, mut rest) = (0usize, 0usize);
 
         for raw in body.split('\n') {
             let mut line = raw.trim();
@@ -403,7 +444,7 @@ impl CommentFormatter {
                 continue;
             }
             if !cfg.format_source_in_comments && Self::opens_fence(line) {
-                Self::flush(&mut prose, &mut blocks);
+                Self::flush(&mut prose, &mut blocks, first, rest);
                 let lines = alloc::vec![String::from(line)];
                 if Self::self_closing_fence(line) {
                     blocks.push(Block::Verbatim(lines));
@@ -413,7 +454,7 @@ impl CommentFormatter {
                 continue;
             }
             if line.is_empty() {
-                Self::flush(&mut prose, &mut blocks);
+                Self::flush(&mut prose, &mut blocks, first, rest);
                 // A run of blank lines is one paragraph break: `JavadocWriter.requestBlankLine`
                 // sets a flag, so asking twice still yields one. And the footer section has no
                 // blank lines at all, so one written inside it is not a break in the text either
@@ -424,7 +465,7 @@ impl CommentFormatter {
                 continue;
             }
             if let Some(tag) = Self::block_tag(line) {
-                Self::flush(&mut prose, &mut blocks);
+                Self::flush(&mut prose, &mut blocks, first, rest);
                 blocks.push(tag);
                 continue;
             }
@@ -432,9 +473,9 @@ impl CommentFormatter {
             // introduces (`<p>This method …`). An opening `<p>` before any prose is dropped, as
             // `JavadocWriter.writeParagraphOpen` does when nothing significant has been written.
             if cfg.format_html
-                && let Some(rest) = Self::paragraph_open(line)
+                && let Some(after) = Self::paragraph_open(line)
             {
-                Self::flush(&mut prose, &mut blocks);
+                Self::flush(&mut prose, &mut blocks, first, rest);
                 // "Nothing significant written yet" is what makes an opening `<p>` disappear, and
                 // a run of blank lines is not significant.
                 if blocks.iter().any(|block| !matches!(block, Block::Blank)) {
@@ -444,7 +485,7 @@ impl CommentFormatter {
                     }
                     pending = Some("<p>".into());
                 }
-                line = rest;
+                line = after;
                 if line.is_empty() {
                     continue;
                 }
@@ -452,7 +493,18 @@ impl CommentFormatter {
             // An HTML block element starts a new paragraph, so list items keep their own lines
             // instead of being refilled into the previous sentence.
             if cfg.format_html && Self::is_html_block(line) {
-                Self::flush(&mut prose, &mut blocks);
+                Self::flush(&mut prose, &mut blocks, first, rest);
+            }
+            if cfg.format_html {
+                // The indents belong to the *block*, decided by the line that starts it: a line
+                // continuing an item is at the item's continuation indent whatever it looks like
+                // on its own, and re-deciding per line would move the item's first line too.
+                // They are read *before* this line's own tags, so a line that opens a list is
+                // still at the enclosing level.
+                if prose.is_empty() {
+                    (first, rest) = Self::list_indents(depth, line);
+                }
+                depth = Self::list_depth(depth, line);
             }
             // A tag's description continues onto the following lines.
             if let Some(Block::Tag { words, .. }) = blocks.last_mut()
@@ -482,7 +534,7 @@ impl CommentFormatter {
             }
             blocks.push(Block::Verbatim(lines));
         }
-        Self::flush(&mut prose, &mut blocks);
+        Self::flush(&mut prose, &mut blocks, first, rest);
 
         // Trailing blank lines are layout, not content.
         while matches!(blocks.last(), Some(Block::Blank)) {
@@ -505,11 +557,15 @@ impl CommentFormatter {
     /// block tag or a `<pre>` region opens nothing.
     fn infer_paragraph_tags(blocks: &mut [Block]) {
         for at in 2..blocks.len() {
-            if !matches!(blocks[at - 1], Block::Blank) || !matches!(blocks[at - 2], Block::Prose(_))
+            if !matches!(blocks[at - 1], Block::Blank)
+                || !matches!(blocks[at - 2], Block::Prose { .. })
             {
                 continue;
             }
-            let Block::Prose(words) = &mut blocks[at] else {
+            let Block::Prose {
+                words, first: 0, ..
+            } = &mut blocks[at]
+            else {
                 continue;
             };
             let Some(first) = words.first_mut() else {
@@ -521,10 +577,14 @@ impl CommentFormatter {
         }
     }
 
-    /// Move any accumulated prose into `blocks`.
-    fn flush(prose: &mut Vec<String>, blocks: &mut Vec<Block>) {
+    /// Move any accumulated prose into `blocks`, at `first` / `rest` columns of extra indent.
+    fn flush(prose: &mut Vec<String>, blocks: &mut Vec<Block>, first: usize, rest: usize) {
         if !prose.is_empty() {
-            blocks.push(Block::Prose(core::mem::take(prose)));
+            blocks.push(Block::Prose {
+                words: core::mem::take(prose),
+                first,
+                rest,
+            });
         }
     }
 
@@ -558,6 +618,57 @@ impl CommentFormatter {
             || (lower.contains("<table") && lower.contains("</table>"))
             || (lower.contains("{@code") && lower.contains('}'))
             || (line.contains("{@snippet") && line.contains('}'))
+    }
+
+    /// The list nesting depth after `line`.
+    ///
+    /// Counted over the whole line rather than its start: refilling can leave a `<ul>` at the end
+    /// of a prose line, and a depth that only saw line-initial tags would then forget the list
+    /// exists on the next run.
+    fn list_depth(depth: usize, line: &str) -> usize {
+        const OPEN: [&str; 3] = ["<ul", "<ol", "<dl"];
+        const CLOSE: [&str; 3] = ["</ul", "</ol", "</dl"];
+        let lower = line.to_ascii_lowercase();
+        let count =
+            |tags: [&str; 3]| -> usize { tags.iter().map(|tag| lower.matches(tag).count()).sum() };
+        // `</ul` also matches `<ul`, so the opens have to have the closes taken back out of them.
+        let closes = count(CLOSE);
+        let opens = count(OPEN).saturating_sub(closes);
+        depth.saturating_add(opens).saturating_sub(closes)
+    }
+
+    /// The `(first, rest)` indents a line at list `depth` takes.
+    ///
+    /// The list's own tags sit at the enclosing level; an item tag opens one level in and its
+    /// continuations one item level further.
+    fn list_indents(depth: usize, line: &str) -> (usize, usize) {
+        /// Columns a list indents its contents by (`writeListOpen`).
+        const LIST: usize = 2;
+        /// Columns an item's continuation lines take on top of that (`writeListItemOpen`, which
+        /// pushes the length of the `<li>` token).
+        const ITEM: usize = 4;
+
+        let lower = line.to_ascii_lowercase();
+        // A closing tag belongs to the level it closes *out of*.
+        let closes = ["</ul", "</ol", "</dl"]
+            .iter()
+            .any(|tag| lower.starts_with(tag));
+        let level = if closes {
+            depth.saturating_sub(1)
+        } else {
+            depth
+        };
+        if level == 0 {
+            return (0, 0);
+        }
+        let inner = level * LIST;
+        if ["<li", "<dt", "<dd"]
+            .iter()
+            .any(|tag| lower.starts_with(tag))
+        {
+            return (inner, inner + ITEM);
+        }
+        (inner + ITEM, inner + ITEM)
     }
 
     /// The rest of `line` after a leading `<p>`, or `None` when it does not open a paragraph.
@@ -632,11 +743,6 @@ impl CommentFormatter {
             argument,
             words: parts.map(Into::into).collect(),
         })
-    }
-
-    /// Greedily refill `words` into lines of at most `budget` columns.
-    fn fill(words: &[String], budget: usize) -> Vec<String> {
-        Self::fill_two(words, budget, budget)
     }
 
     /// Refill with a different budget for the first line than for the rest.
