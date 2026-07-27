@@ -428,7 +428,41 @@ impl Ctx<'_> {
     /// `for (T x : xs) body`. The `:` is an assignment-shaped separator, so the break falls after
     /// it — the same rule `=` follows.
     pub(super) async fn visit_for_each(&mut self, node: &SyntaxNode) {
-        self.visit_loop(node, self.style.cfg.braces.force_for).await;
+        // `visitEnhancedForLoop` declares the variable with `:` as its `=`, so the sequence gets
+        // a level of its own and moves down whole rather than breaking inside itself.
+        let force = self.style.cfg.braces.force_for;
+        let continuation = self.style.continuation();
+        let mut past_header = false;
+        let mut opened = false;
+        for child in Self::children(node) {
+            if child.as_token().is_some_and(|tok| tok.kind() == S::COLON) {
+                self.visit_element(&child).await;
+                self.open(continuation.clone());
+                opened = true;
+                self.list_break(self.style.cfg.wrapping.for_statement, Indent::ZERO);
+                continue;
+            }
+            if child.as_token().is_some_and(|tok| tok.kind() == S::RPAREN) {
+                if opened {
+                    self.close_indent(&continuation);
+                    opened = false;
+                }
+                self.visit_element(&child).await;
+                past_header = true;
+                continue;
+            }
+            if let Some(body) = child.as_node()
+                && past_header
+                && Self::is_statement(body.kind())
+            {
+                self.emit_branch(body, force, false).await;
+                continue;
+            }
+            self.visit_element(&child).await;
+        }
+        if opened {
+            self.close_indent(&continuation);
+        }
     }
 
     /// The shared `header (…) body` shape of `while` and `for`-each.
