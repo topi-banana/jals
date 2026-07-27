@@ -43,6 +43,50 @@ impl Ctx<'_> {
         self.close_indent(&continuation);
     }
 
+    /// One type parameter, whose bound list may wrap.
+    ///
+    /// `visitTypeParameter` breaks after `extends` at one continuation and puts the bounds at
+    /// another, so `T extends A & B & …` has somewhere to go when it outgrows its line.
+    pub(super) async fn visit_type_param(&mut self, node: &SyntaxNode) {
+        let children = Self::children(node);
+        let bounded = children.iter().any(|child| {
+            child
+                .as_token()
+                .is_some_and(|tok| tok.kind() == S::EXTENDS_KW)
+        });
+        if !bounded {
+            self.visit_children(node).await;
+            return;
+        }
+        let continuation = self.style.continuation();
+        let mut opened = 0usize;
+        for child in &children {
+            // The `&` starts its continuation line, like every other operator that joins a list
+            // of types.
+            if opened > 0 && child.as_token().is_some_and(|tok| tok.kind() == S::AMP) {
+                let flat = Self::flat_space(self.style.cfg.spacing.around_type_bounds);
+                self.ops
+                    .brk(crate::ir::FillMode::Independent, flat, Indent::ZERO, None);
+                self.space_already_emitted();
+            }
+            self.visit_element(child).await;
+            if child
+                .as_token()
+                .is_some_and(|tok| tok.kind() == S::EXTENDS_KW)
+            {
+                self.open(continuation.clone());
+                self.ops
+                    .brk(crate::ir::FillMode::Independent, " ", Indent::ZERO, None);
+                self.space_already_emitted();
+                self.open(continuation.clone());
+                opened = 2;
+            }
+        }
+        for _ in 0..opened {
+            self.close_indent(&continuation);
+        }
+    }
+
     pub(super) async fn visit_record_pattern(&mut self, node: &SyntaxNode) {
         self.visit_delimited(node).await;
     }
