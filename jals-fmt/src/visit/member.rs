@@ -201,6 +201,11 @@ impl Ctx<'_> {
         }
     }
 
+    /// Whether `node` carries any own-line comment above it.
+    fn is_documented(&self, node: &SyntaxNode) -> bool {
+        Self::first_token(node).is_some_and(|first| !self.comments.leading(&first).is_empty())
+    }
+
     /// Whether `member` carries a Javadoc comment of its own.
     fn has_javadoc(&self, member: &SyntaxNode) -> bool {
         Self::first_token(member).is_some_and(|first| {
@@ -245,11 +250,17 @@ impl Ctx<'_> {
         // An enum with no member section and no constant body is laid out like an array
         // initializer — one line if it fits. A `;` marks a member section even when the section
         // turns out to be empty, and google-java-format keeps such an enum multi-line.
+        // A commented constant is never trivial either: an own-line comment has to start a line,
+        // so a body holding one cannot collapse — the same reason `Ctx::collapses` refuses a
+        // dangling comment.
         let trivial = !has_members
             && Self::token_of(node, S::SEMICOLON).is_none()
             && constants
                 .iter()
-                .all(|constant| Self::child_of(constant, S::CLASS_BODY).is_none());
+                .all(|constant| Self::child_of(constant, S::CLASS_BODY).is_none())
+            && !constants
+                .iter()
+                .any(|constant| self.is_documented(constant));
         let policy = self.style.cfg.wrapping.enum_constants;
         let blank = self.style.cfg.blank_lines;
         let indent = self.style.indent();

@@ -91,25 +91,30 @@ impl UnusedImports {
         /// where most `{@link Foo}` references actually live.
         const INLINE_TAGS: [&str; 3] = ["{@link", "{@linkplain", "{@value"];
 
+        let mut joined = String::with_capacity(text.len());
         for line in text.lines() {
             let trimmed = line.trim_start().trim_start_matches('*').trim_start();
             if let Some(tag) = BLOCK_TAGS.iter().find(|tag| trimmed.starts_with(**tag)) {
                 Self::collect_names(&trimmed[tag.len()..], used);
             }
-            // An inline tag can appear anywhere on the line, including several times, and
-            // including on a line that also opens a block tag.
-            let mut rest = trimmed;
-            while let Some(at) = rest.find("{@") {
-                let tail = &rest[at..];
-                let Some(tag) = INLINE_TAGS.iter().find(|tag| tail.starts_with(**tag)) else {
-                    rest = &tail[2..];
-                    continue;
-                };
-                let body = &tail[tag.len()..];
-                let end = body.find('}').unwrap_or(body.len());
-                Self::collect_names(&body[..end], used);
-                rest = &body[end..];
-            }
+            joined.push_str(trimmed);
+            joined.push(' ');
+        }
+        // An inline tag is scanned on the *joined* text: reflow can leave `{@link` at the end of
+        // one line and its argument at the start of the next, and a per-line scan would then stop
+        // seeing the reference — which would delete the import on the second run and never on the
+        // first.
+        let mut rest = joined.as_str();
+        while let Some(at) = rest.find("{@") {
+            let tail = &rest[at..];
+            let Some(tag) = INLINE_TAGS.iter().find(|tag| tail.starts_with(**tag)) else {
+                rest = &tail[2..];
+                continue;
+            };
+            let body = &tail[tag.len()..];
+            let end = body.find('}').unwrap_or(body.len());
+            Self::collect_names(&body[..end], used);
+            rest = &body[end..];
         }
     }
 

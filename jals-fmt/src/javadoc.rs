@@ -408,8 +408,10 @@ impl CommentFormatter {
             if line.is_empty() {
                 Self::flush(&mut prose, &mut blocks);
                 // A run of blank lines is one paragraph break: `JavadocWriter.requestBlankLine`
-                // sets a flag, so asking twice still yields one.
-                if !matches!(blocks.last(), Some(Block::Blank)) {
+                // sets a flag, so asking twice still yields one. And the footer section has no
+                // blank lines at all, so one written inside it is not a break in the text either
+                // — dropping it here is what keeps a tag's description continuing across it.
+                if !matches!(blocks.last(), Some(Block::Blank | Block::Tag { .. })) {
                     blocks.push(Block::Blank);
                 }
                 continue;
@@ -514,23 +516,33 @@ impl CommentFormatter {
     }
 
     /// Whether a line opens a region whose layout must be preserved.
+    /// A multi-line `{@code …}` region has to *start* a line to count. Refilling can leave a
+    /// wrapped inline `{@code X}` with its opener at the end of a line, and treating that as a
+    /// fence would freeze the rest of the comment on the next run.
+    ///
+    /// HTML tag names are case-insensitive, and hand-written Javadoc really does close a `<pre>`
+    /// with `</PRE>`. Matching only the lower-case spelling leaves the fence open to the end of
+    /// the comment, which grows a blank line on every run.
     fn opens_fence(line: &str) -> bool {
-        line.starts_with("```")
-            || line.contains("<pre>")
-            || line.contains("<table")
-            || (line.contains("{@code") && !line.contains('}'))
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("```")
+            || lower.contains("<pre>")
+            || lower.contains("<table")
+            || (lower.starts_with("{@code") && !lower.contains('}'))
     }
 
     /// Whether a line closes such a region.
     fn closes_fence(line: &str) -> bool {
-        line.starts_with("```") || line.contains("</pre>") || line.contains("</table>")
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("```") || lower.contains("</pre>") || lower.contains("</table>")
     }
 
     /// Whether a line both opens and closes a region, so it is verbatim on its own.
     fn self_closing_fence(line: &str) -> bool {
-        (line.contains("<pre>") && line.contains("</pre>"))
-            || (line.contains("<table") && line.contains("</table>"))
-            || (line.contains("{@code") && line.contains('}'))
+        let lower = line.to_ascii_lowercase();
+        (lower.contains("<pre>") && lower.contains("</pre>"))
+            || (lower.contains("<table") && lower.contains("</table>"))
+            || (lower.contains("{@code") && lower.contains('}'))
     }
 
     /// The rest of `line` after a leading `<p>`, or `None` when it does not open a paragraph.

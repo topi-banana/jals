@@ -122,6 +122,15 @@ impl Ops {
         self.stack.last().is_some_and(|level| level.docs.is_empty())
     }
 
+    /// Whether *nothing at all* has been emitted yet.
+    ///
+    /// Distinct from [`Ops::level_is_empty`]: a body's level is empty the moment it opens, but the
+    /// `{` above it is already out, so an own-line comment there still needs a line of its own.
+    /// Only at the very start of the document does a leading break have nothing to separate.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.stack.iter().all(|level| level.docs.is_empty())
+    }
+
     /// The last node emitted into the innermost level.
     fn last(&self) -> Option<&Doc> {
         self.stack.last().and_then(|level| level.docs.last())

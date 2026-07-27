@@ -506,7 +506,7 @@ impl<'a> Ctx<'a> {
             return;
         }
         for comment in &comments {
-            if !self.ops.level_is_empty() && !self.ops.last_is_break() {
+            if !self.ops.is_empty() && !self.ops.last_is_break() {
                 self.forced_break(Indent::ZERO);
             }
             self.emit_comment_line(comment);
@@ -541,7 +541,7 @@ impl<'a> Ctx<'a> {
         }
         self.hoisted.insert(usize::from(tok.text_range().start()));
         for comment in &comments {
-            if !self.ops.level_is_empty() && !self.ops.last_is_break() {
+            if !self.ops.is_empty() && !self.ops.last_is_break() {
                 self.forced_break(Indent::ZERO);
             }
             self.emit_comment_line(comment);
