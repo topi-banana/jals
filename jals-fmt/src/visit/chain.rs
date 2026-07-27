@@ -32,6 +32,7 @@
 //! resolution algorithm, not a different rule, so the single engine cannot express it and does
 //! not try — it is difference **D3** in `DESIGN.md` §18.2.
 
+use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
 
 use jals_config::fmt::WrapPolicy;
@@ -211,6 +212,12 @@ impl Ctx<'_> {
         if self.style.cfg.wrapping.wrap_first_method_in_chain {
             return prefixes;
         }
+        // A Flogger statement is one call spelled across several: `logger.atInfo().log(…)` wraps
+        // inside its arguments, never between its dots — `handleLogStatement`.
+        if !based && Self::is_log_statement(links) {
+            prefixes.push(links.len() - 1);
+            return prefixes;
+        }
         if let Some(at) = TypePrefix::length(links) {
             prefixes.push(at);
         }
@@ -239,6 +246,48 @@ impl Ctx<'_> {
         prefixes.dedup();
         prefixes.retain(|at| *at < links.len());
         prefixes
+    }
+
+    /// The method names a Flogger chain is built from.
+    const LOG_METHODS: [&'static str; 16] = [
+        "at",
+        "atConfig",
+        "atDebug",
+        "atFine",
+        "atFiner",
+        "atFinest",
+        "atInfo",
+        "atMostEvery",
+        "atSevere",
+        "atWarning",
+        "every",
+        "log",
+        "logVarargs",
+        "perUnique",
+        "withCause",
+        "withStackTrace",
+    ];
+
+    /// Whether the chain is a Flogger log statement: a plain name, then nothing but fluent
+    /// logging calls, ending at `log` or `logVarargs`.
+    fn is_log_statement(links: &[Link]) -> bool {
+        let Some((last, rest)) = links.split_last() else {
+            return false;
+        };
+        let name_of = |link: &Link| link.simple.as_ref().map(|tok| tok.text().to_owned());
+        if !name_of(last).is_some_and(|name| matches!(name.as_str(), "log" | "logVarargs")) {
+            return false;
+        }
+        let Some((first, middle)) = rest.split_first() else {
+            return false;
+        };
+        !first.is_call()
+            && first.dot.is_none()
+            && middle.iter().all(|link| {
+                link.is_call()
+                    && name_of(link)
+                        .is_some_and(|name| Self::LOG_METHODS.contains(&name.as_str()))
+            })
     }
 
     /// The links after which a stream pipeline begins.

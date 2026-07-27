@@ -24,9 +24,23 @@ use crate::visit::Ctx;
 impl Ctx<'_> {
     /// A paren-delimited list.
     pub(super) async fn visit_delimited(&mut self, node: &SyntaxNode) {
-        let policy = self.list_policy(node);
+        // A format call's policy is decided by the values it interpolates, not by the template:
+        // the template is long by nature and would send every value onto a line of its own.
+        let format = self.is_format_call(node);
+        let policy = if format {
+            let rest = node.children().skip(1);
+            if self.style.cfg.wrapping.call_arguments == WrapPolicy::IfLong
+                && !self.fills_items(rest)
+            {
+                WrapPolicy::IfLongPerItem
+            } else {
+                self.style.cfg.wrapping.call_arguments
+            }
+        } else {
+            self.list_policy(node)
+        };
         let parens = self.paren_positions(node);
-        self.emit_delimited(node, policy, parens, S::LPAREN, S::RPAREN)
+        self.emit_delimited(node, policy, parens, S::LPAREN, S::RPAREN, format)
             .await;
     }
 
@@ -65,12 +79,69 @@ impl Ctx<'_> {
     /// Whether every item is short enough for the list to keep filling — see
     /// `[wrapping] fill-item-width`.
     fn fills(&self, node: &SyntaxNode) -> bool {
+        self.fills_items(node.children())
+    }
+
+    /// The same test over an arbitrary run of items.
+    fn fills_items(&self, items: impl Iterator<Item = SyntaxNode>) -> bool {
         let limit = self.style.cfg.wrapping.fill_item_width;
         if limit == 0 {
             return true;
         }
-        node.children()
-            .all(|arg| usize::from(arg.text_range().len()) < limit)
+        items.into_iter().all(|arg| usize::from(arg.text_range().len()) < limit)
+    }
+
+    /// Whether this list is a call whose first argument is a format string — see
+    /// `[wrapping] format-string-arguments`.
+    fn is_format_call(&self, node: &SyntaxNode) -> bool {
+        self.style.cfg.wrapping.format_string_arguments
+            && node.kind() == S::ARG_LIST
+            && node.children().count() >= 2
+            && node.children().next().is_some_and(|first| Self::is_format_string(&first))
+    }
+
+    /// Whether an expression is a string literal — or a concatenation of them — carrying a format
+    /// specifier.
+    ///
+    /// `isStringConcat`: the whole argument has to be literal text, because an interpolation the
+    /// formatter cannot see the shape of is not a template.
+    fn is_format_string(node: &SyntaxNode) -> bool {
+        let mut placeholder = false;
+        for element in node.descendants_with_tokens() {
+            match element {
+                SyntaxElement::Node(inner) => {
+                    if !matches!(inner.kind(), S::LITERAL | S::BINARY_EXPR) {
+                        return false;
+                    }
+                }
+                SyntaxElement::Token(tok) if tok.kind().is_trivia() => {}
+                SyntaxElement::Token(tok) => match tok.kind() {
+                    S::STRING_LITERAL | S::TEXT_BLOCK => {
+                        placeholder |= Self::has_placeholder(tok.text());
+                    }
+                    S::PLUS => {}
+                    _ => return false,
+                },
+            }
+        }
+        placeholder
+    }
+
+    /// Whether a literal's text holds a `%` or a `{0}`-style placeholder.
+    fn has_placeholder(text: &str) -> bool {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                return true;
+            }
+            if ch == '{'
+                && chars.peek().is_some_and(char::is_ascii_digit)
+                && chars.clone().nth(1) == Some('}')
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Which `[wrapping] paren-*` rule governs this list's delimiters.
@@ -100,6 +171,7 @@ impl Ctx<'_> {
         parens: ParenPositions,
         open: S,
         close: S,
+        format: bool,
     ) {
         let children = Self::children(node);
         let items: Vec<&SyntaxElement> = children
@@ -127,6 +199,10 @@ impl Ctx<'_> {
         let tag = self.ops.new_tag();
 
         let mut opened = false;
+        // A format call's values get a level of their own after the template, so they pack
+        // together instead of inheriting the break the template forced.
+        let mut values = false;
+        let mut seen = 0usize;
         for child in &children {
             let kind = child.as_token().map(SyntaxToken::kind);
             if kind == Some(open) {
@@ -147,6 +223,10 @@ impl Ctx<'_> {
             if kind == Some(close) {
                 if opened {
                     if !empty {
+                        if values {
+                            self.close();
+                            values = false;
+                        }
                         self.close();
                         self.closing_break(parens, tag);
                     }
@@ -170,12 +250,28 @@ impl Ctx<'_> {
                 }
             } else if Self::follows_comma(&children, child) {
                 let flat = Self::flat_space(self.style.cfg.spacing.after_comma);
-                self.list_break_flat(policy, flat, Indent::ZERO);
+                if format && seen == 1 && !values {
+                    // `isFormatMethod`: the break after the template is all-or-nothing, and the
+                    // values that follow it fill among themselves.
+                    self.ops
+                        .brk(crate::ir::FillMode::Unified, flat, Indent::ZERO, None);
+                    self.space_already_emitted();
+                    self.open_flat(Indent::ZERO);
+                    values = true;
+                } else {
+                    self.list_break_flat(policy, flat, Indent::ZERO);
+                }
+            }
+            if child.as_node().is_some() {
+                seen += 1;
             }
             self.visit_element(child).await;
         }
         if opened {
             if !empty {
+                if values {
+                    self.close();
+                }
                 self.close();
             }
             self.close_indent(&continuation);

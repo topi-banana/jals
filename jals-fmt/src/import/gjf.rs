@@ -162,6 +162,9 @@ impl GoogleJavaFormatConfig {
                 // `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`: an argument list fills
                 // only while every argument is under 10 source columns.
                 fill_item_width: 10,
+                // `isFormatMethod`: a leading format string takes the first continuation line and
+                // the values it interpolates pack onto the next.
+                format_string_arguments: true,
                 // `visitLabeledStatement` forces a break after the label's `:`.
                 labeled_statement: WrapPolicy::AlwaysPerItem,
                 // `fieldAnnotationDirection`: every *variable* — field, local, parameter,

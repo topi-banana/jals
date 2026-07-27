@@ -134,6 +134,17 @@ pub struct Wrapping {
     /// spells the same distinction as two separate `alignment_for_*` bits (`M_COMPACT_SPLIT` vs
     /// `M_ONE_PER_LINE_SPLIT`) chosen per construct, never by item width.
     pub fill_item_width: usize,
+    /// Give a leading format string a line of its own, and pack the arguments after it.
+    ///
+    /// `String.format("%s: %s at %s", a, b, c)` reads as a template and its fillers, so the
+    /// template gets the first continuation line whole and the fillers pack onto the next —
+    /// rather than each argument taking a line because the template made the list long. An
+    /// argument counts as a format string when it is a string literal, or a concatenation of
+    /// them, holding a `%` or a `{0}`-style placeholder.
+    ///
+    /// google-java-format's `isFormatMethod`. No Eclipse or IntelliJ equivalent: neither reads
+    /// what an argument *says*.
+    pub format_string_arguments: bool,
     /// The statement a label introduces: whether it starts a line of its own. Eclipse
     /// `insert_new_line_after_label` (false by default, so `LABEL: stmt` stays on one line);
     /// google-java-format always breaks (`visitLabeledStatement`'s `forcedBreak`).
@@ -253,6 +264,7 @@ impl Default for Wrapping {
             assert_statement: WrapPolicy::IfLong,
             labeled_statement: WrapPolicy::Never,
             fill_item_width: 0,
+            format_string_arguments: false,
             switch_expression: WrapPolicy::IfLong,
             type_annotations: WrapPolicy::AlwaysPerItem,
             method_annotations: WrapPolicy::AlwaysPerItem,
