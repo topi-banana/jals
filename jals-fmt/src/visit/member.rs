@@ -703,7 +703,10 @@ impl Ctx<'_> {
         if node.kind() == S::RESOURCE {
             self.visit_field(node).await;
         } else {
-            self.visit_children(node).await;
+            if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
+                self.visit(&modifiers).await;
+            }
+            self.emit_declarators(node).await;
         }
         if annotated {
             self.close_indent(&continuation);
