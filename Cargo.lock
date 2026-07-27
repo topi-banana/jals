@@ -406,7 +406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1908,7 +1908,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2233,7 +2233,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2813,7 +2813,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3045,7 +3045,7 @@ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 [[package]]
 name = "yew"
 version = "0.23.0"
-source = "git+https://github.com/yewstack/yew/#0539d37ba48bd1a39fd792b5bf10366ea8288413"
+source = "git+https://github.com/yewstack/yew/#0e4a05472fac4e5fce1befe60fa4a1e43a36b6a3"
 dependencies = [
  "console_error_panic_hook",
  "futures",
@@ -3069,7 +3069,7 @@ dependencies = [
 [[package]]
 name = "yew-macro"
 version = "0.23.0"
-source = "git+https://github.com/yewstack/yew/#0539d37ba48bd1a39fd792b5bf10366ea8288413"
+source = "git+https://github.com/yewstack/yew/#0e4a05472fac4e5fce1befe60fa4a1e43a36b6a3"
 dependencies = [
  "prettyplease",
  "proc-macro-error",
