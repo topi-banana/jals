@@ -660,6 +660,7 @@ impl CommentFormatter {
                 // and leaves the prose on either side to reflow.
                 let lower = line.to_ascii_lowercase();
                 let mut trailing = "";
+                let mut split = false;
                 if Self::self_closing_fence(line)
                     && let Some(open) = lower.find("<pre>")
                     && let Some(close) = lower.rfind("</pre>")
@@ -673,6 +674,7 @@ impl CommentFormatter {
                         Self::tokens_of(before, &mut prose);
                     }
                     line = line[open..close + "</pre>".len()].trim_end();
+                    split = true;
                 }
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
@@ -695,10 +697,10 @@ impl CommentFormatter {
                     });
                     // `writePreClose` asks for a blank line after the region too, and whatever
                     // followed it on the line goes on reflowing after that.
+                    if depth == 0 && split {
+                        blocks.push(Block::Blank);
+                    }
                     if !trailing.is_empty() {
-                        if depth == 0 {
-                            blocks.push(Block::Blank);
-                        }
                         Self::tokens_of(trailing, &mut prose);
                     }
                 } else {
