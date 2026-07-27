@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use jals_config::fmt::{KeepOnOneLine, WrapPolicy};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
-use crate::ir::Indent;
+use crate::ir::{FillMode, Indent};
 use crate::visit::Ctx;
 
 impl Ctx<'_> {
@@ -509,7 +509,36 @@ impl Ctx<'_> {
 
     /// An annotation element's `default value`.
     pub(super) async fn visit_annotation_default(&mut self, node: &SyntaxNode) {
-        self.visit_children(node).await;
+        // The value gets a level of its own so it moves down whole rather than breaking inside
+        // itself on the `default` line — `methodDeclaration`'s `open(ZERO) { breakToFill(" ") … }`.
+        // An array initializer is the exception: it is block-shaped and cancels the continuation
+        // indent, so it stays where the declaration put it.
+        let children = Self::children(node);
+        let array = children
+            .iter()
+            .any(|child| child.as_node().is_some_and(|value| value.kind() == S::ARRAY_INIT));
+        let continuation = self.style.continuation();
+        let mut opened = false;
+        for child in &children {
+            if child.as_token().is_some_and(|tok| tok.kind() == S::DEFAULT_KW) {
+                self.space();
+                self.visit_element(child).await;
+                if array {
+                    self.space();
+                } else {
+                    self.open(continuation.clone());
+                    opened = true;
+                    self.ops
+                        .brk(FillMode::Independent, " ", Indent::ZERO, None);
+                    self.space_already_emitted();
+                }
+                continue;
+            }
+            self.visit_element(child).await;
+        }
+        if opened {
+            self.close_indent(&continuation);
+        }
     }
 
     /// The one-line rule a block should use, chosen by what owns it.
