@@ -147,7 +147,8 @@ impl GoogleJavaFormatConfig {
                 // parameter list that does not fit goes one parameter per line rather than
                 // packing. An *argument* list is the fill, and `fill-item-width` decides it.
                 method_parameters: WrapPolicy::IfLongPerItem,
-                case_labels: WrapPolicy::IfLong,
+                // `visitCase` separates a rule's labels with a UNIFIED break.
+                case_labels: WrapPolicy::IfLongPerItem,
                 // `classDeclarationTypeList` and `visitThrowsClause` separate their types with
                 // `breakOp(" ")`, which is UNIFIED: a clause that does not fit goes one type per
                 // line rather than packing.

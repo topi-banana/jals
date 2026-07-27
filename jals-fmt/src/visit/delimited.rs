@@ -49,16 +49,22 @@ impl Ctx<'_> {
         });
         // …and the columns are *parallel*: the same kind of expression down each one. Rows that
         // merely happened to wrap that way are not a table, and refilling them is right.
-        gridded
-            && (0..2).all(|column| {
-                let mut kinds = arguments
-                    .iter()
-                    .skip(column)
-                    .step_by(2)
-                    .map(SyntaxNode::kind);
-                let first = kinds.next();
-                kinds.all(|kind| Some(kind) == first)
-            })
+        // The first column has to agree throughout; a later one only needs a majority, since a
+        // table of values routinely has one row computing what the others spell out
+        // (`expressionsAreParallel`).
+        let parallel = |column: usize, needed: usize| {
+            let kinds: Vec<S> = arguments
+                .iter()
+                .skip(column)
+                .step_by(2)
+                .map(SyntaxNode::kind)
+                .collect();
+            kinds
+                .iter()
+                .any(|candidate| kinds.iter().filter(|kind| *kind == candidate).count() >= needed)
+        };
+        let rows = arguments.len() / 2;
+        gridded && parallel(0, rows) && parallel(1, rows / 2 + 1)
     }
 
     /// Emit a two-column grid of arguments, keeping the source's rows.

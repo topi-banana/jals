@@ -289,7 +289,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             // `visitFormals` separates parameters with a UNIFIED break, so a parameter list that
             // does not fit goes one per line. An *argument* list is the fill.
             method_parameters: WrapPolicy::IfLongPerItem,
-            case_labels: WrapPolicy::IfLong,
+            case_labels: WrapPolicy::IfLongPerItem,
             // `visitEnumDeclaration` forces a break between constants, and `visitTry` between
             // resources.
             enum_constants: WrapPolicy::AlwaysPerItem,

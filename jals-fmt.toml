@@ -24,7 +24,7 @@ method-chain = "if-long-per-item"
 ternary = "if-long-per-item"
 # `visitFormals` uses a UNIFIED break, so a parameter list goes one per line when it wraps.
 method-parameters = "if-long-per-item"
-case-labels = "if-long"
+case-labels = "if-long-per-item"
 # `visitEnumDeclaration` forces a break between enum constants, and `visitTry` between resources.
 enum-constants = "always-per-item"
 resource-list = "always-per-item"

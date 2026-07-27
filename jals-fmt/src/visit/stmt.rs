@@ -732,10 +732,19 @@ impl Ctx<'_> {
         let policy = self.style.cfg.wrapping.switch_expression;
         let continuation = self.style.continuation();
         self.open(continuation.clone());
-        for child in Self::children(node) {
+        let children = Self::children(node);
+        for (nth, child) in children.iter().enumerate() {
             if child.as_token().is_some_and(|tok| tok.kind() == S::ARROW) {
-                self.visit_element(&child).await;
-                self.list_break(policy, Indent::ZERO);
+                self.visit_element(child).await;
+                // A block body follows the `->` on its line — `visitCase` closes the arm's level
+                // and writes a space. Only an expression body may move down.
+                let block = children
+                    .get(nth + 1)
+                    .and_then(SyntaxElement::as_node)
+                    .is_some_and(|next| next.kind() == S::BLOCK);
+                if !block {
+                    self.list_break(policy, Indent::ZERO);
+                }
                 continue;
             }
             if let Some(block) = child.as_node()
@@ -743,10 +752,10 @@ impl Ctx<'_> {
             {
                 self.close_indent(&continuation);
                 self.brace_before(self.style.cfg.braces.block);
-                self.visit_element(&child).await;
+                self.visit_element(child).await;
                 return;
             }
-            self.visit_element(&child).await;
+            self.visit_element(child).await;
         }
         self.close_indent(&continuation);
     }

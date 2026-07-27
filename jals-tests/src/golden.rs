@@ -250,9 +250,9 @@ mod tests {
         assert!(c.comments.normalize_parameter_comments);
         assert!(c.comments.inline_block_comments);
         assert!(c.wrapping.tabular_array_initializers);
-        // A chain that does not fit goes one call per line; a long `case` label list wraps.
+        // A chain that does not fit goes one call per line, and so does a long `case` label list.
         assert_eq!(c.wrapping.method_chain, WrapPolicy::IfLongPerItem);
-        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLong);
+        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLongPerItem);
         // google-java-format spaces the enhanced-`for` colon and never dangles a `)`.
         assert!(c.spacing.before_foreach_colon);
         assert_eq!(

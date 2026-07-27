@@ -380,18 +380,17 @@ impl Ctx<'_> {
                 // receiver — `when(something.happens()).thenReturn(result)`, not
                 // `when(\n    something\n        .happens())\n    .thenReturn(result)`.
                 self.open_flat(Indent::ZERO);
-                self.open_flat(Indent::ZERO);
                 for element in &link.name {
                     self.visit_element(element).await;
                 }
-                let (open, rest) = link.args.split_at(1);
-                for element in open {
-                    self.visit_element(element).await;
+                // The argument list is written out by hand: `fillFirstArgument` emits the parens
+                // and the value with no level and no break of their own, which is the whole point
+                // — the receiver reads as one unit.
+                for args in link.args.iter().filter_map(SyntaxElement::as_node) {
+                    for element in Self::children(args) {
+                        self.visit_element(&element).await;
+                    }
                 }
-                for element in rest {
-                    self.visit_element(element).await;
-                }
-                self.close();
                 self.close();
                 length += link.length;
                 continue;
