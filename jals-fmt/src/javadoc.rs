@@ -351,9 +351,7 @@ impl CommentFormatter {
             }
             let tag = Self::standardize_tag(&rest[at..end]);
             // A list item's text starts right after its tag — `<dd>ISO 639`, never `<dd> ISO`.
-            let item = ["<li", "<dt", "<dd"]
-                .iter()
-                .any(|open| tag.to_ascii_lowercase().starts_with(open));
+            let item = Self::is_item_tag(&tag);
             out.push(Word { text: tag, space });
             space = false;
             rest = &rest[end..];
@@ -394,8 +392,18 @@ impl CommentFormatter {
     /// Every whitespace-delimited run of `line`, tokenized.
     fn tokens_of(line: &str, out: &mut Vec<Word>) {
         for run in line.split_whitespace() {
-            Self::tokenize(run, true, out);
+            // A list item's text starts right after its tag however the author spaced it.
+            let space = !out.last().is_some_and(|last| Self::is_item_tag(&last.text));
+            Self::tokenize(run, space, out);
         }
+    }
+
+    /// Whether a token opens a list item.
+    fn is_item_tag(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        ["<li", "<dt", "<dd"]
+            .iter()
+            .any(|tag| lower.starts_with(tag))
     }
 
     /// Emit one body line with `pad` columns of extra indent.
@@ -555,7 +563,9 @@ impl CommentFormatter {
                 // sets a flag, so asking twice still yields one. And the footer section has no
                 // blank lines at all, so one written inside it is not a break in the text either
                 // — dropping it here is what keeps a tag's description continuing across it.
-                if !matches!(blocks.last(), Some(Block::Blank | Block::Tag { .. })) {
+                // A list has no blank lines in it: `writeListItemOpen` requests a newline, not a
+                // blank one, and the footer section has none either.
+                if depth == 0 && !matches!(blocks.last(), Some(Block::Blank | Block::Tag { .. })) {
                     blocks.push(Block::Blank);
                 }
                 continue;
@@ -628,12 +638,16 @@ impl CommentFormatter {
                 continue;
             }
             for run in line.split_whitespace() {
+                // A list item's text starts right after its tag however the author spaced it.
+                let space = !prose
+                    .last()
+                    .is_some_and(|last| Self::is_item_tag(&last.text));
                 if let Some(mut glued) = pending.take() {
                     glued.push_str(run);
-                    Self::tokenize(&glued, true, &mut prose);
+                    Self::tokenize(&glued, space, &mut prose);
                     continue;
                 }
-                Self::tokenize(run, true, &mut prose);
+                Self::tokenize(run, space, &mut prose);
             }
         }
         if let Some(glued) = pending.take() {
