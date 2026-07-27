@@ -20,6 +20,8 @@ continuation-indent = 4
 # limit — so most constructs keep the default `if-long` fill. A method chain that does not fit
 # goes one call per line, and a long `case` label list wraps (its `ExpressionSwitch` behavior).
 method-chain = "if-long-per-item"
+# `visitConditionalExpression` uses a UNIFIED break, so `?` and `:` go together.
+ternary = "if-long-per-item"
 # `visitFormals` uses a UNIFIED break, so a parameter list goes one per line when it wraps.
 method-parameters = "if-long-per-item"
 case-labels = "if-long"

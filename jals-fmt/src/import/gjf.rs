@@ -140,6 +140,9 @@ impl GoogleJavaFormatConfig {
             },
             wrapping: Wrapping {
                 method_chain: WrapPolicy::IfLongPerItem,
+                // `visitConditionalExpression` separates `?` and `:` with `breakOp(" ")`, which
+                // is UNIFIED: a ternary that does not fit breaks at both or at neither.
+                ternary: WrapPolicy::IfLongPerItem,
                 // `visitFormals` separates parameters with `breakOp(" ")`, which is UNIFIED: a
                 // parameter list that does not fit goes one parameter per line rather than
                 // packing. An *argument* list is the fill, and `fill-item-width` decides it.
