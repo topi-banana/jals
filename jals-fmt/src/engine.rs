@@ -3,15 +3,22 @@
 //! # The algorithm, and what it is not
 //!
 //! Resolution is **greedy, single-pass, left-to-right, and never backtracks**. A [`Level`] is
-//! measured by its own precomputed flat width; if that fits from the current column it renders on
-//! one line and the walk **stops there** — it does not look past the level to see what follows.
-//! Otherwise the level breaks, its indent is added, and its top-level breaks are decided one at a
-//! time, each seeing only the state the ones before it left.
+//! measured by its own precomputed flat width plus its **tail** — how much of what follows lands
+//! on the same line, which is one column for the `;` of a declaration and one for the `{` of a
+//! body. If that fits from the current column the level renders on one line; otherwise it breaks,
+//! its indent is added, and its top-level breaks are decided one at a time, each seeing only the
+//! state the ones before it left.
+//!
+//! The tail is what makes the limit a *line* limit rather than a level limit. Without it a
+//! parameter list that ends at exactly column 100 stays flat and its `;` lands at 101 — which is
+//! not what google-java-format does, and the difference is not rare: it is every declaration
+//! whose header lands on the boundary.
 //!
 //! Three details carry most of the difference from a Wadler/prettier printer:
 //!
-//! 1. **Level-local fit.** Prettier's `fits` scans forward past the group to the next hard
-//!    newline. This does not.
+//! 1. **Bounded lookahead.** Prettier's `fits` scans forward past the group to the next hard
+//!    newline, through arbitrarily many groups. The tail stops at the first break that is certain
+//!    to be taken ([`Doc::head_width_of`]) and is never re-derived while breaking.
 //! 2. **Mixed fill modes.** One level may hold both [`FillMode::Unified`] breaks (all-or-nothing)
 //!    and [`FillMode::Independent`] ones (fill). Prettier needs two different node types.
 //! 3. **`must_break` propagates forward.** When a split overflows, the *next* break is forced
@@ -92,7 +99,7 @@ impl<'s> Engine<'s> {
                 column: 0,
                 must_break: false,
             };
-            self.compute_level(level, state).await;
+            self.compute_level(level, state, 0).await;
         }
         let mut writer = Writer::new(self.style);
         writer.write(doc).await;
@@ -102,9 +109,12 @@ impl<'s> Engine<'s> {
     // ===== Pass 2: break decisions =====
 
     /// Resolve one node, returning the state after it.
-    async fn compute(&mut self, doc: &mut Doc, state: State) -> State {
+    ///
+    /// `tail` is how much of what follows lands on the same line — see
+    /// [`Doc::head_width_of`]. A node has to leave room for it.
+    async fn compute(&mut self, doc: &mut Doc, state: State, tail: usize) -> State {
         match doc {
-            Doc::Level(level) => self.compute_level_boxed(level, state).await,
+            Doc::Level(level) => self.compute_level_boxed(level, state, tail).await,
             Doc::Break(_) => state, // decided by the enclosing level, never on its own
             Doc::Space => state.with_column(state.column.saturating_add(1)),
             Doc::Token { text } | Doc::Tok { text, .. } => {
@@ -118,14 +128,20 @@ impl<'s> Engine<'s> {
         &'a mut self,
         level: &'a mut Level,
         state: State,
+        tail: usize,
     ) -> LocalBoxFuture<'a, State> {
-        Box::pin(self.compute_level(level, state))
+        Box::pin(self.compute_level(level, state, tail))
     }
 
     /// `Doc.Level.computeBreaks`: fit the level flat by its own width, or break it.
-    async fn compute_level(&mut self, level: &mut Level, state: State) -> State {
+    async fn compute_level(&mut self, level: &mut Level, state: State, tail: usize) -> State {
         self.yielder.tick().await;
-        if state.column.saturating_add(level.width) <= self.style.max_width() {
+        if state
+            .column
+            .saturating_add(level.width)
+            .saturating_add(tail)
+            <= self.style.max_width()
+        {
             level.one_line = true;
             return state.with_column(state.column + level.width);
         }
@@ -137,13 +153,13 @@ impl<'s> Engine<'s> {
             column: state.column,
             must_break: false,
         };
-        let broken = self.compute_broken(level, inner).await;
+        let broken = self.compute_broken(level, inner, tail).await;
         state.with_column(broken.column)
     }
 
     /// `Doc.Level.computeBroken`: walk the level as `split (break split)*`, deciding each break
     /// against the state the previous split left behind.
-    async fn compute_broken(&mut self, level: &mut Level, mut state: State) -> State {
+    async fn compute_broken(&mut self, level: &mut Level, mut state: State, tail: usize) -> State {
         let breaks: Vec<usize> = level
             .docs
             .iter()
@@ -152,14 +168,31 @@ impl<'s> Engine<'s> {
             .map(|(index, _)| index)
             .collect();
 
+        // Only the *last* split shares a line with whatever follows the level.
+        let last = breaks.is_empty();
         let first_end = breaks.first().copied().unwrap_or(level.docs.len());
         state = self
-            .compute_break_and_split(level, None, 0, first_end, state)
+            .compute_break_and_split(
+                level,
+                None,
+                0,
+                first_end,
+                state,
+                if last { tail } else { 0 },
+            )
             .await;
         for (nth, &at) in breaks.iter().enumerate() {
             let end = breaks.get(nth + 1).copied().unwrap_or(level.docs.len());
+            let last = nth + 1 == breaks.len();
             state = self
-                .compute_break_and_split(level, Some(at), at + 1, end, state)
+                .compute_break_and_split(
+                    level,
+                    Some(at),
+                    at + 1,
+                    end,
+                    state,
+                    if last { tail } else { 0 },
+                )
                 .await;
         }
         state
@@ -178,10 +211,11 @@ impl<'s> Engine<'s> {
         start: usize,
         end: usize,
         mut state: State,
+        tail: usize,
     ) -> State {
         let max = self.style.max_width();
         let break_width = at.map_or(0, |index| level.docs[index].width());
-        let split_width = Doc::width_of(&level.docs[start..end]);
+        let split_width = Doc::width_of(&level.docs[start..end]).saturating_add(tail);
 
         let unified = at.is_some_and(
             |index| matches!(&level.docs[index], Doc::Break(brk) if brk.fill == FillMode::Unified),
@@ -201,7 +235,8 @@ impl<'s> Engine<'s> {
         let enough_room = state.column.saturating_add(split_width) <= max;
         state.must_break = false;
         for index in start..end {
-            state = self.compute(&mut level.docs[index], state).await;
+            let rest = Doc::head_width_of(&level.docs[index + 1..end]).saturating_add(tail);
+            state = self.compute(&mut level.docs[index], state, rest).await;
         }
         if !enough_room {
             state.must_break = true;

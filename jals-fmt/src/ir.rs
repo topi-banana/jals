@@ -286,6 +286,36 @@ impl Doc {
             .fold(0usize, |acc, doc| acc.saturating_add(doc.width()))
     }
 
+    /// How much of `docs` lands on the *current* line: the flat width up to the first break that
+    /// is certain to be taken.
+    ///
+    /// This is not [`Doc::width_of`], which is infinite as soon as anything below it is forced.
+    /// A method body is `{`, a forced break, statements — of which only the `{` shares the header's
+    /// line, and that one column is what decides whether the header fits.
+    pub(crate) fn head_width_of(docs: &[Self]) -> usize {
+        let mut total = 0usize;
+        for doc in docs {
+            match doc {
+                Self::Break(brk) if brk.is_forced() => return total,
+                Self::Level(level) => {
+                    let head = Self::head_width_of(&level.docs);
+                    total = total.saturating_add(head);
+                    if head != level.width {
+                        return total;
+                    }
+                }
+                other => {
+                    let width = other.width();
+                    if width == Width::INFINITE {
+                        return total;
+                    }
+                    total = total.saturating_add(width);
+                }
+            }
+        }
+        total
+    }
+
     /// Append this node's flat rendering to `out` — what a level emits when it fits on one line.
     pub(crate) fn write_flat(&self, out: &mut String) {
         match self {

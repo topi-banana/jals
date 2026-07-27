@@ -137,8 +137,13 @@ impl Ctx<'_> {
                     if !empty {
                         self.closing_break(parens, tag);
                     }
+                    // The closing delimiter is *inside* the level, so the level's width is the
+                    // whole list including its `)`. Closing first would measure one column short
+                    // and let a list that ends exactly at the limit stay flat.
+                    self.visit_element(child).await;
                     self.close_indent(&continuation);
                     opened = false;
+                    continue;
                 }
                 self.visit_element(child).await;
                 continue;
