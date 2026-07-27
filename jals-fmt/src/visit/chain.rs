@@ -50,6 +50,8 @@ struct Link {
     name: Vec<SyntaxElement>,
     /// The argument list, when this link invokes something.
     args: Vec<SyntaxElement>,
+    /// The array indices written after it, if any.
+    indices: Vec<SyntaxElement>,
     /// The simple name, for [`TypePrefix`].
     simple: Option<SyntaxToken>,
     /// How many source columns the sub-expression ending here spans — the input to
@@ -132,6 +134,7 @@ impl Ctx<'_> {
         let start = Self::first_token(node).map_or(0, |tok| usize::from(tok.text_range().start()));
         let mut links: Vec<Link> = Vec::new();
         let mut pending: Vec<SyntaxElement> = Vec::new();
+        let mut indices: Vec<SyntaxElement> = Vec::new();
         let mut base = None;
         let mut cursor = Some(node.clone());
 
@@ -145,12 +148,27 @@ impl Ctx<'_> {
                     pending = own;
                     cursor = receiver;
                 }
+                // So does an index, at the far end: `a[0][1].b()` dereferences `a`, and the two
+                // subscripts ride with it — `getArrayBase` / `formatArrayIndices`.
+                S::INDEX_EXPR => {
+                    indices.splice(0..0, own);
+                    cursor = receiver;
+                }
                 S::FIELD_ACCESS | S::METHOD_REF_EXPR => {
-                    links.push(Self::link(own, core::mem::take(&mut pending), length));
+                    links.push(Self::link(
+                        own,
+                        core::mem::take(&mut pending),
+                        core::mem::take(&mut indices),
+                        length,
+                    ));
                     let spine = receiver.as_ref().is_some_and(|receiver| {
                         matches!(
                             receiver.kind(),
-                            S::CALL_EXPR | S::FIELD_ACCESS | S::METHOD_REF_EXPR | S::NAME_REF
+                            S::CALL_EXPR
+                                | S::FIELD_ACCESS
+                                | S::METHOD_REF_EXPR
+                                | S::NAME_REF
+                                | S::INDEX_EXPR
                         )
                     });
                     if spine {
@@ -164,6 +182,7 @@ impl Ctx<'_> {
                     links.push(Self::link(
                         Self::children(&current),
                         core::mem::take(&mut pending),
+                        core::mem::take(&mut indices),
                         length,
                     ));
                     cursor = None;
@@ -188,7 +207,12 @@ impl Ctx<'_> {
     }
 
     /// Build a link from the elements it owns.
-    fn link(own: Vec<SyntaxElement>, args: Vec<SyntaxElement>, length: usize) -> Link {
+    fn link(
+        own: Vec<SyntaxElement>,
+        args: Vec<SyntaxElement>,
+        indices: Vec<SyntaxElement>,
+        length: usize,
+    ) -> Link {
         let mut name = own;
         let dot = name
             .first()
@@ -207,6 +231,7 @@ impl Ctx<'_> {
             dot,
             name,
             args,
+            indices,
             simple,
             length,
         }
@@ -438,20 +463,22 @@ impl Ctx<'_> {
 
     /// A link's argument list, opened at `args_indent` inside the type-argument level.
     async fn emit_link_args(&mut self, link: &Link, tyarg: Option<BreakTag>, args_indent: Indent) {
-        if link.args.is_empty() {
-            return;
+        if !link.args.is_empty() {
+            let continuation = self.style.continuation();
+            let outer = tyarg.map_or(Indent::ZERO, |tag| {
+                Indent::when_broken(tag, continuation, Indent::ZERO)
+            });
+            self.open_flat(outer);
+            self.list_indent = Some(args_indent);
+            for element in &link.args {
+                self.visit_element(element).await;
+            }
+            self.list_indent = None;
+            self.close();
         }
-        let continuation = self.style.continuation();
-        let outer = tyarg.map_or(Indent::ZERO, |tag| {
-            Indent::when_broken(tag, continuation, Indent::ZERO)
-        });
-        self.open_flat(outer);
-        self.list_indent = Some(args_indent);
-        for element in &link.args {
+        for element in &link.indices {
             self.visit_element(element).await;
         }
-        self.list_indent = None;
-        self.close();
     }
 
     /// Emit the `.` or `::` with the break that may stand beside it.
@@ -551,7 +578,7 @@ impl TypePrefix {
             }
             // A name stops at the first invocation: `Foo.bar()` is a type and a call, and
             // whatever follows the call is a dereference.
-            if link.is_call() {
+            if link.is_call() || !link.indices.is_empty() {
                 break;
             }
         }
