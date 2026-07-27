@@ -572,6 +572,8 @@ impl CommentFormatter {
         let (mut first, mut rest) = (0usize, 0usize);
         // The indent the region currently being collected opens at.
         let mut fence_indent = 0usize;
+        // The brace depth of the `{@snippet …}` being collected.
+        let mut snippet_depth = 0i32;
         // Everything after a block tag belongs to that tag's description, so it sits at the
         // description's continuation indent — headings, paragraphs and lists included.
         let mut tag_indent = 0usize;
@@ -589,13 +591,18 @@ impl CommentFormatter {
             }
 
             if let Some((lines, snippet)) = &mut fence {
+                // A `{@snippet …}` ends at the `}` that balances its `{`, wherever on the line
+                // that falls — `SnippetEnd` is a token, not a line.
+                if *snippet {
+                    snippet_depth += Self::brace_delta(line);
+                }
                 // Preformatted content keeps its own indentation — that is what makes it
                 // preformatted. Only the single space that conventionally follows the `*` is
                 // dropped, and `JavadocWriter` writes these lines with no auto-indent at all.
                 let verbatim = raw.strip_prefix(' ').unwrap_or(raw).trim_end();
                 lines.push(verbatim.into());
                 let closed = if *snippet {
-                    line.starts_with('}')
+                    snippet_depth <= 0
                 } else {
                     Self::closes_fence(line)
                 };
@@ -629,7 +636,11 @@ impl CommentFormatter {
                         first: fence_indent,
                     });
                 } else {
-                    fence = Some((lines, line.contains("{@snippet")));
+                    let snippet = line.contains("{@snippet");
+                    if snippet {
+                        snippet_depth = Self::brace_delta(line);
+                    }
+                    fence = Some((lines, snippet));
                 }
                 continue;
             }
@@ -870,6 +881,19 @@ impl CommentFormatter {
             || lower.contains("<table")
             || (line.contains("{@snippet") && !line.contains('}'))
             || (lower.starts_with("{@code") && !lower.contains('}'))
+    }
+
+    /// A line's net brace count, ignoring the braces inside a string or a character literal.
+    fn brace_delta(line: &str) -> i32 {
+        let mut delta = 0i32;
+        for ch in line.chars() {
+            match ch {
+                '{' => delta += 1,
+                '}' => delta -= 1,
+                _ => {}
+            }
+        }
+        delta
     }
 
     /// Whether a line closes such a region.
