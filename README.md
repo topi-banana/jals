@@ -450,6 +450,14 @@ Java sources, remote jars, and the portable in-memory path-project graph from a 
 hover/completion/type-check see those inputs. The browser cannot clone Git dependencies; it reports
 each one as a warning rather than claiming Git support.
 
+*Build* compiles the workspace with the in-process `jals-javac` — no JDK, no subprocess — and offers
+the result as a download: `[build] backend = { type = "jals" }` packages one class file per declared
+type into a runnable `.jar`, and `{ type = "jals-wasm" }` emits a single WebAssembly module for the
+whole project. (`{ type = "javac" }`, the manifest default, has nothing to spawn in a browser tab and
+says so.) The compiler resolves against `jals-hir`'s embedded JDK stubs rather than a classpath, so
+resolved `[dependencies]` jars stay on the editor's classpath but not the compiler's, and any
+construct without a lowering yet is *reported* in the Build output tab rather than mis-emitted.
+
 ```sh
 # One-time setup: the wasm target and Trunk
 rustup target add wasm32-unknown-unknown

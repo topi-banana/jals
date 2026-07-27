@@ -37,7 +37,7 @@ use crate::host::{
 
 /// Seed files, deliberately unformatted so the formatter has visible work to do, and
 /// cross-referencing so the project index resolves `Main`'s use of `Greeter` across files.
-const SAMPLE_FILES: &[(&str, &str)] = &[
+pub const SAMPLE_FILES: &[(&str, &str)] = &[
     (
         "com/example/Greeter.java",
         "package com.example;\n\

@@ -44,7 +44,9 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use crate::components::{EditorPane, FileTree, Header, SyntaxPane, TreeEntry};
+use crate::compile::Compile;
+use crate::components::{EditorPane, FileTree, Header, PaneTab, ResultPane, TreeEntry};
+use crate::download::Download;
 use crate::fetcher::BrowserFetcher;
 use crate::host::{MonacoRange, PlaygroundDiagnostic};
 use crate::workspace::{BUILD_SCRIPT_PATH, MANIFEST_PATH, Workspace};
@@ -81,11 +83,24 @@ impl ConfigKind {
     /// (default) config — co-located with the kind, like [`ConfigKind::path`].
     const fn seed(self) -> &'static str {
         match self {
-            // An empty (commented) `[dependencies]` table. A CORS-permissive jar resolves directly;
-            // Maven Central needs the header's CORS proxy.
+            // The backend is spelled out rather than left to default: the default is `javac`, and
+            // the *Build* button would then only ever report that a browser tab has no process to
+            // spawn it in. An empty (commented) `[dependencies]` table follows — a CORS-permissive
+            // jar resolves directly; Maven Central needs the header's CORS proxy.
             ConfigKind::Manifest => {
-                "[build]\n\
+                "[package]\n\
+                 name = \"playground\"\n\
+                 \n\
+                 [build]\n\
+                 # What compiles the project. `jals` compiles in-process and packages a downloadable\n\
+                 # .jar; `jals-wasm` emits one WebAssembly module for the whole project instead.\n\
+                 # `javac` needs a host process to spawn, which a browser tab does not have.\n\
+                 backend = { type = \"jals\" }\n\
                  script = { type = \"rhai\", file = \"build.rhai\" }\n\
+                 \n\
+                 [run]\n\
+                 # The jar's `Main-Class`. Without it Build still produces a library jar.\n\
+                 main-class = \"com.example.Main\"\n\
                  \n\
                  [dependencies]\n\
                  # A CORS-permissive jar resolves directly; Maven Central needs the CORS proxy in the header.\n\
@@ -296,8 +311,9 @@ struct SelectionToken {
     captured: u64,
 }
 
-/// A build generation captured by an async script/classpath pipeline. New valid manifest or script
-/// edits invalidate all older results, while the workspace lock still serializes aggregate writes.
+/// A generation captured by an async pipeline — the script/classpath one, or a compile. Newer work
+/// of the same kind invalidates all older results, while the workspace lock still serializes
+/// aggregate writes.
 struct BuildToken {
     generation: Rc<Cell<u64>>,
     captured: u64,
@@ -377,6 +393,21 @@ pub enum Msg {
         script_path: Option<String>,
         position: Option<(u32, u32)>,
     },
+    /// Compile the workspace with the backend `jals.toml`'s `[build] backend` selects.
+    Compile,
+    /// A compile produced a downloadable artifact.
+    CompileFinished {
+        generation: u64,
+        name: String,
+        bytes: Vec<u8>,
+        summary: String,
+    },
+    /// A compile produced no artifact, with the reason to show in the Build output tab.
+    CompileFailed { generation: u64, message: String },
+    /// The user pressed *Download* in the Build output tab.
+    Download,
+    /// The right pane's tab selection changed.
+    SelectTab(PaneTab),
 }
 
 /// The playground's root component. Owns every piece of state; the children are presentational.
@@ -400,6 +431,14 @@ pub struct App {
     active_source: String,
     /// The most recent syntax-tree dump shown in the right pane, if any.
     syntax_dump: Option<String>,
+    /// The most recent compile's report, shown in the right pane's Build output tab.
+    compile_output: Option<String>,
+    /// The last successful compile's downloadable artifact, as `(file name, bytes)`. Held here
+    /// rather than in the pane's props so a render never clones the bytes and the download stays a
+    /// direct response to the user's click.
+    compile_artifact: Option<(String, Vec<u8>)>,
+    /// Which tab the right pane shows.
+    result_tab: PaneTab,
     /// The latest build-script/classpath status line shown in the [`Header`], if any.
     deps_status: Option<String>,
     /// The `jals.toml` editor buffer. Held here (not in the workspace's Java file tree) so it is
@@ -416,6 +455,10 @@ pub struct App {
     selection_generation: Rc<Cell<u64>>,
     /// Monotonically increasing identity of the latest valid manifest/build-script edit.
     build_generation: Rc<Cell<u64>>,
+    /// Monotonically increasing identity of the latest compile. Separate from `build_generation`:
+    /// a compile neither runs the build script nor re-resolves dependencies, so starting one must
+    /// not cancel that pipeline — or be cancelled by it.
+    compile_generation: Rc<Cell<u64>>,
     /// Whether Monaco has been created; generated model/marker writes wait for this point.
     editor_ready: bool,
     /// Diagnostics reported by the most recent successful script execution.
@@ -470,6 +513,37 @@ impl App {
         out
     }
 
+    /// The state [`Component::create`] starts from, with the workspace still loading.
+    ///
+    /// Split out of `create` because that function also schedules the async load, which needs a
+    /// yew `Context` — this half needs nothing, so state transitions can be exercised on the host.
+    fn initial() -> Self {
+        App {
+            workspace: None,
+            config: Rc::new(RefCell::new(Config::default())),
+            tree_entries: Vec::new(),
+            active_path: String::new(),
+            active_source: String::new(),
+            syntax_dump: None,
+            compile_output: None,
+            compile_artifact: None,
+            result_tab: PaneTab::Syntax,
+            deps_status: None,
+            manifest_src: ConfigKind::Manifest.seed().to_string(),
+            fmt_src: ConfigKind::Fmt.seed().to_string(),
+            build_src: ConfigKind::Script.seed().to_string(),
+            active_config: None,
+            selection_generation: Rc::new(Cell::new(0)),
+            build_generation: Rc::new(Cell::new(0)),
+            compile_generation: Rc::new(Cell::new(0)),
+            editor_ready: false,
+            build_diagnostics: Vec::new(),
+            build_error: None,
+            build_inputs: BuildInputTracker::default(),
+            proxy: String::new(),
+        }
+    }
+
     /// The shared workspace handle, or `None` while the async construction is still running (the
     /// editor pane is not mounted yet, so handlers needing it have nothing to do).
     fn workspace(&self) -> Option<Rc<Mutex<Workspace>>> {
@@ -498,6 +572,16 @@ impl App {
         BuildToken {
             generation: Rc::clone(&self.build_generation),
             captured: self.build_generation.get(),
+        }
+    }
+
+    /// Invalidate older compiles and capture the new compile generation.
+    fn advance_compile(&self) -> BuildToken {
+        self.compile_generation
+            .set(self.compile_generation.get().wrapping_add(1));
+        BuildToken {
+            generation: Rc::clone(&self.compile_generation),
+            captured: self.compile_generation.get(),
         }
     }
 
@@ -1147,26 +1231,7 @@ impl Component for App {
                 source,
             }
         });
-        App {
-            workspace: None,
-            config: Rc::new(RefCell::new(Config::default())),
-            tree_entries: Vec::new(),
-            active_path: String::new(),
-            active_source: String::new(),
-            syntax_dump: None,
-            deps_status: None,
-            manifest_src: ConfigKind::Manifest.seed().to_string(),
-            fmt_src: ConfigKind::Fmt.seed().to_string(),
-            build_src: ConfigKind::Script.seed().to_string(),
-            active_config: None,
-            selection_generation: Rc::new(Cell::new(0)),
-            build_generation: Rc::new(Cell::new(0)),
-            editor_ready: false,
-            build_diagnostics: Vec::new(),
-            build_error: None,
-            build_inputs: BuildInputTracker::default(),
-            proxy: String::new(),
-        }
+        Self::initial()
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Msg) -> bool {
@@ -1326,13 +1391,16 @@ impl Component for App {
                 };
                 let live = monaco::current_value();
                 let link = ctx.link().clone();
+                // Asking for a dump while the Build output is showing must bring the dump forward,
+                // or the button looks broken.
+                self.result_tab = PaneTab::Syntax;
                 spawn_local(async move {
                     let mut ws = workspace.lock().await;
                     // Flush the live buffer first, so the dump matches what the editor shows.
                     ws.sync_active(&live).await;
                     link.send_message(Msg::SyntaxDumped(App::dump_of(&ws).await));
                 });
-                false
+                true
             }
             Msg::SyntaxDumped(dump) => {
                 self.syntax_dump = Some(dump);
@@ -1508,6 +1576,110 @@ impl Component for App {
                 }
                 true
             }
+            Msg::Compile => {
+                let Some(workspace) = self.workspace() else {
+                    return false;
+                };
+                // Unlike Format and Syntax, this must *not* early-return while a config buffer is
+                // open: editing `jals.toml` and pressing Build is how the backend gets switched.
+                // What it skips instead is the Java flush. `current_value()` is empty before the
+                // editor mounts, so it is only trusted once Monaco owns real text.
+                let live = self.editor_ready.then(monaco::current_value);
+                let outgoing_java = match (self.active_config, live) {
+                    // Committing stores the buffer without starting the dependency pipeline — a
+                    // compile is not an edit. The debounce may not have fired, so this is what
+                    // makes a just-typed `backend = …` count.
+                    (Some(kind), Some(value)) => {
+                        self.commit_config_buffer(kind, value);
+                        None
+                    }
+                    (None, live) => live,
+                    (Some(_), None) => None,
+                };
+                self.result_tab = PaneTab::Output;
+                // Dropped before the compile rather than after it fails, so a stale jar is never
+                // downloadable while a newer compile is in flight.
+                self.compile_artifact = None;
+                let manifest = match ConfigParseError::parse_manifest(&self.manifest_src) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        self.compile_output = Some(format!("{MANIFEST_PATH}: {}", error.message));
+                        return true;
+                    }
+                };
+                let token = self.advance_compile();
+                self.compile_output = Some("compiling…".to_owned());
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    let files = {
+                        let mut ws = workspace.lock().await;
+                        if !token.is_current() {
+                            return;
+                        }
+                        if let Some(text) = outgoing_java {
+                            ws.sync_active(&text).await;
+                        }
+                        ws.file_texts()
+                    };
+                    // The lock is released before compiling: it is the longest-running thing the
+                    // playground does, and the language-feature providers queue behind that lock.
+                    if !token.is_current() {
+                        return;
+                    }
+                    let message = match Compile::workspace(&manifest, &files).await {
+                        Ok(artifact) => Msg::CompileFinished {
+                            generation: token.captured,
+                            name: artifact.name,
+                            bytes: artifact.bytes,
+                            summary: artifact.summary,
+                        },
+                        Err(error) => Msg::CompileFailed {
+                            generation: token.captured,
+                            message: error.to_string(),
+                        },
+                    };
+                    if token.is_current() {
+                        link.send_message(message);
+                    }
+                });
+                true
+            }
+            Msg::CompileFinished {
+                generation,
+                name,
+                bytes,
+                summary,
+            } => {
+                if generation != self.compile_generation.get() {
+                    return false;
+                }
+                self.compile_output = Some(summary);
+                self.compile_artifact = Some((name, bytes));
+                self.result_tab = PaneTab::Output;
+                true
+            }
+            Msg::CompileFailed {
+                generation,
+                message,
+            } => {
+                if generation != self.compile_generation.get() {
+                    return false;
+                }
+                self.compile_output = Some(message);
+                self.compile_artifact = None;
+                self.result_tab = PaneTab::Output;
+                true
+            }
+            Msg::Download => {
+                if let Some((name, bytes)) = &self.compile_artifact {
+                    Download::save(name, bytes);
+                }
+                false
+            }
+            Msg::SelectTab(tab) => {
+                self.result_tab = tab;
+                true
+            }
         }
     }
 
@@ -1548,6 +1720,7 @@ impl Component for App {
                 <Header
                     on_format={link.callback(|_| Msg::Format)}
                     on_syntax={link.callback(|_| Msg::Syntax)}
+                    on_compile={link.callback(|_| Msg::Compile)}
                     on_proxy_change={link.callback(Msg::SetProxy)}
                     deps_status={self.deps_status.clone()}
                 />
@@ -1560,7 +1733,14 @@ impl Component for App {
                     />
                     <main class="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-2">
                         { editor }
-                        <SyntaxPane dump={self.syntax_dump.clone()} />
+                        <ResultPane
+                            tab={self.result_tab}
+                            on_tab={link.callback(Msg::SelectTab)}
+                            dump={self.syntax_dump.clone()}
+                            output={self.compile_output.clone()}
+                            artifact={self.compile_artifact.as_ref().map(|(name, _)| name.clone())}
+                            on_download={link.callback(|_| Msg::Download)}
+                        />
                     </main>
                 </div>
             </div>
@@ -1574,6 +1754,44 @@ mod tests {
     use jals_storage::{CodeTree, Entry};
 
     use super::*;
+
+    /// Switching backend is a `jals.toml` edit followed by *Build*, with no file switch in
+    /// between — the case `Msg::Compile`'s "commit the live buffer first" rule exists for. What it
+    /// relies on is that committing the manifest buffer is what the next `parse_manifest` reads,
+    /// and that committing does not restart the dependency pipeline (a compile is not an edit).
+    #[test]
+    fn committing_the_open_manifest_buffer_is_what_a_compile_reads() {
+        let mut app = App::initial();
+        let edited = "[package]\nname = \"playground\"\n\n\
+                      [build]\nbackend = { type = \"jals-wasm\" }\n";
+        app.active_config = Some(ConfigKind::Manifest);
+        app.commit_config_buffer(ConfigKind::Manifest, edited.to_owned());
+
+        let Ok(manifest) = ConfigParseError::parse_manifest(&app.manifest_src) else {
+            panic!("the committed buffer is what a compile parses");
+        };
+        assert_eq!(
+            manifest.build.backend,
+            jals_config::BackendKind::JalsWasm {}
+        );
+        // A commit must not have advanced the script/classpath pipeline behind the user's back.
+        assert_eq!(app.build_generation.get(), 0);
+    }
+
+    /// There is one *Build* button and it follows `[build] backend`, so the seed has to name a
+    /// backend that exists in a browser — the default is `javac`, which does not.
+    #[test]
+    fn the_seed_manifest_selects_the_in_process_backend() {
+        let manifest: Manifest = ConfigKind::Manifest
+            .seed()
+            .parse()
+            .expect("seed manifest is valid");
+        assert_eq!(manifest.build.backend, jals_config::BackendKind::Jals {});
+        assert_eq!(
+            jals_build::RunTarget::resolve(&manifest, None),
+            Ok("com.example.Main")
+        );
+    }
 
     #[test]
     fn build_failure_marker_uses_structured_rhai_position_or_fallback() {

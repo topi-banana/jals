@@ -100,7 +100,10 @@ filesystem reads into portable interfaces.
   `jals_fmt::generate`.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`.
 - `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
-  artifacts.
+  artifacts. `compile.rs` is the *Build* pipeline — frontend seam, then `JalsBackend`, then
+  `JarPackage` — taking sources as `(path, text)` and returning bytes, so it is host-testable and
+  cannot reach the DOM; `download.rs` is the browser-only shim that saves those bytes. It honours
+  `[build] backend`, and passes an empty classpath exactly as `jals-cli` does.
 - `jals-javac`: the compiler. Java source to executable code, for two targets off one front end
   (the CST plus `jals-hir`'s resolution, with no compiler IR between): JVM class files per declared
   type, and a single WasmGC module for a whole project. The two lowerings are separate because the

@@ -439,6 +439,15 @@ portable な in-memory path-project graph もブラウザ内で解決するた�
 認識できます。browser は Git dependency を clone できず、Git support を提供すると見なさず各 entry
 を warning として報告します。
 
+*Build* は in-process の `jals-javac` でワークスペースをコンパイルし（JDK もサブプロセスも不要）、
+成果物をダウンロードとして提供します。`[build] backend = { type = "jals" }` は宣言された型ごとの
+class file を実行可能な `.jar` にパッケージし、`{ type = "jals-wasm" }` はプロジェクト全体を 1 つの
+WebAssembly module として出力します（manifest の既定値 `{ type = "javac" }` はブラウザタブに起動
+できるプロセスがないため、その旨を報告します）。コンパイラは classpath ではなく `jals-hir` の埋め込み
+JDK stub に対して解決するので、解決済みの `[dependencies]` jar は editor の classpath には載っても
+コンパイラの classpath には載りません。まだ lowering のない構文は誤ったコードを吐かず、Build output
+タブに*報告*されます。
+
 ```sh
 # 初回のみ: wasm ターゲットと Trunk を用意
 rustup target add wasm32-unknown-unknown

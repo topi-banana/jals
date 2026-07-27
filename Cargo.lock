@@ -1305,6 +1305,7 @@ dependencies = [
  "jals-editor",
  "jals-exec",
  "jals-fmt",
+ "jals-frontend",
  "jals-hir",
  "jals-project",
  "jals-storage",
