@@ -349,12 +349,17 @@ impl CommentFormatter {
                 });
                 space = false;
             }
-            out.push(Word {
-                text: Self::standardize_tag(&rest[at..end]),
-                space,
-            });
+            let tag = Self::standardize_tag(&rest[at..end]);
+            // A list item's text starts right after its tag — `<dd>ISO 639`, never `<dd> ISO`.
+            let item = ["<li", "<dt", "<dd"]
+                .iter()
+                .any(|open| tag.to_ascii_lowercase().starts_with(open));
+            out.push(Word { text: tag, space });
             space = false;
             rest = &rest[end..];
+            if item {
+                rest = rest.trim_start();
+            }
         }
         if !rest.is_empty() {
             out.push(Word {
@@ -809,9 +814,14 @@ impl CommentFormatter {
         Some(rest.trim_start().strip_prefix('>')?.trim_start())
     }
 
-    /// Whether `line` holds a `</p>` in any case.
+    /// The close tags google-java-format throws away: `ParagraphCloseTag` and
+    /// `ListItemCloseTag` are both `-> {}` in its `render`, because the writer decides where a
+    /// paragraph or a list item ends and the tag adds nothing.
+    const IGNORED_CLOSE: [&'static str; 4] = ["p", "li", "dt", "dd"];
+
+    /// Whether `line` holds one of them.
     fn has_paragraph_close(line: &str) -> bool {
-        line.contains("</p") || line.contains("</P")
+        line.contains("</") || line.contains("</")
     }
 
     /// `line` with every `</p>` removed.
@@ -825,7 +835,11 @@ impl CommentFormatter {
                 rest = tail;
                 break;
             };
-            if !tail[2..close].trim().eq_ignore_ascii_case("p") {
+            let inner = tail[2..close].trim();
+            if !Self::IGNORED_CLOSE
+                .iter()
+                .any(|tag| inner.eq_ignore_ascii_case(tag))
+            {
                 out.push_str(&tail[..=close]);
             }
             rest = &tail[close + 1..];
