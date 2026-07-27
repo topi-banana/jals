@@ -131,11 +131,6 @@ impl Ops {
         self.stack.iter().all(|level| level.docs.is_empty())
     }
 
-    /// The last node emitted into the innermost level.
-    fn last(&self) -> Option<&Doc> {
-        self.stack.last().and_then(|level| level.docs.last())
-    }
-
     // ===== Leaves =====
 
     /// A significant token.
@@ -172,9 +167,18 @@ impl Ops {
         self.force_next = true;
     }
 
-    /// Whether the last node emitted into the innermost level is a break.
+    /// Whether the last node emitted is a break, looking through levels that are still empty.
+    ///
+    /// A level opens with nothing in it, so asking only the innermost one would miss the break an
+    /// enclosing level just emitted — and an own-line comment would then add a second break beside
+    /// it, spelling a blank line the author never wrote.
     pub(crate) fn last_is_break(&self) -> bool {
-        matches!(self.last(), Some(Doc::Break(_)))
+        matches!(self.innermost_written(), Some(Doc::Break(_)))
+    }
+
+    /// The last node emitted anywhere, looking outward through empty levels.
+    fn innermost_written(&self) -> Option<&Doc> {
+        self.stack.iter().rev().find_map(|level| level.docs.last())
     }
 
     /// Raise the last emitted break to a forced one.
@@ -183,7 +187,11 @@ impl Ops {
     /// to be taken. Emitting a second, forced break instead would leave the first one to render as
     /// a space and put a stray blank column before the comment.
     pub(crate) fn force_last_break(&mut self) {
-        if let Some(level) = self.stack.last_mut()
+        if let Some(level) = self
+            .stack
+            .iter_mut()
+            .rev()
+            .find(|level| !level.docs.is_empty())
             && let Some(Doc::Break(brk)) = level.docs.last_mut()
         {
             brk.fill = FillMode::Forced;
