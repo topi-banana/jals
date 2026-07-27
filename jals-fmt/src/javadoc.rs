@@ -549,6 +549,11 @@ impl CommentFormatter {
             }
             if !cfg.format_source_in_comments && Self::opens_fence(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
+                // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
+                // region they open.
+                if !matches!(blocks.last(), Some(Block::Blank) | None) {
+                    blocks.push(Block::Blank);
+                }
                 let lines = alloc::vec![String::from(line)];
                 if Self::self_closing_fence(line) {
                     blocks.push(Block::Verbatim(lines));
@@ -600,6 +605,10 @@ impl CommentFormatter {
             // instead of being refilled into the previous sentence.
             if cfg.format_html && Self::is_html_block(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
+                // `writeListOpen` requests a blank line before a classic-Javadoc list.
+                if Self::opens_list(line) && !matches!(blocks.last(), Some(Block::Blank) | None) {
+                    blocks.push(Block::Blank);
+                }
             }
             // A heading stands alone between blank lines, and what follows it starts a paragraph
             // of its own rather than continuing the heading's line.
@@ -873,6 +882,14 @@ impl CommentFormatter {
         ];
         let lower = line.trim_start().to_ascii_lowercase();
         BLOCK_TAGS.iter().any(|tag| lower.starts_with(tag))
+    }
+
+    /// Whether a line opens an HTML list.
+    fn opens_list(line: &str) -> bool {
+        let lower = line.trim_start().to_ascii_lowercase();
+        ["<ul", "<ol", "<dl"]
+            .iter()
+            .any(|tag| lower.starts_with(tag))
     }
 
     /// Whether a line is a section heading, which stands alone between blank lines.
