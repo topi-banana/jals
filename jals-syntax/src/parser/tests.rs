@@ -73,6 +73,7 @@ fn package_and_imports() {
         expect![[r#"
             SOURCE_FILE@0..73
               PACKAGE_DECL@0..14
+                MODIFIERS@0..0
                 PACKAGE_KW@0..7 "package"
                 QUALIFIED_NAME@7..13
                   WHITESPACE@7..8 " "

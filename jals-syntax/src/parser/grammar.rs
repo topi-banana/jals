@@ -205,7 +205,14 @@ impl Parser<'_> {
     /// Entry point. Parses a compilation unit.
     pub(crate) async fn root(&mut self) {
         let m = self.start();
-        if self.at(PACKAGE_KW) {
+        // A package declaration may carry annotations (JLS 7.4.1), which conventionally live in
+        // `package-info.java`. They belong to the declaration, so the lookahead skips them before
+        // deciding whether one is there at all.
+        if self.at(PACKAGE_KW)
+            || (self.at(AT)
+                && !self.nth_at(1, INTERFACE_KW)
+                && self.nth_nofuel(self.skip_annotations_lookahead(0)) == PACKAGE_KW)
+        {
             self.package_decl().await;
         }
         while self.at(IMPORT_KW) || self.at_attributed_import() {
@@ -225,7 +232,12 @@ impl Parser<'_> {
 
     async fn package_decl(&mut self) {
         let m = self.start();
-        self.bump(PACKAGE_KW);
+        let modifiers = self.start();
+        while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
+            self.annotation().await;
+        }
+        modifiers.complete(self, MODIFIERS);
+        self.expect(PACKAGE_KW);
         self.qualified_name(false).await;
         self.expect(SEMICOLON);
         m.complete(self, PACKAGE_DECL);

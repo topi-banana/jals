@@ -221,7 +221,9 @@ impl Ctx<'_> {
                 | S::ENUM_DECL
                 | S::RECORD_DECL
                 | S::ANNOTATION_TYPE_DECL
-                | S::MODULE_DECL,
+                | S::MODULE_DECL
+                // `visitPackage` forces a break after each package annotation.
+                | S::PACKAGE_DECL,
             ) => wrapping.type_annotations,
             Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL) => wrapping.method_annotations,
             // `visitEnumConstantDeclaration` forces a break after every constant annotation,
