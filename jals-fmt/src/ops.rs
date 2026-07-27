@@ -220,11 +220,13 @@ impl Ops {
         plus_indent: Indent,
         tag: Option<BreakTag>,
     ) {
-        let fill = if core::mem::take(&mut self.force_next) {
-            FillMode::Forced
-        } else {
-            fill
-        };
+        // A `//` forces the line to end, but that is the *comment's* break, not this one:
+        // google-java-format emits it as an op of its own with no tag. Keeping the tag here would
+        // let a comment decide a correlated indent — `void // c` would indent everything after
+        // the method's name as though the name had wrapped.
+        let forced = core::mem::take(&mut self.force_next);
+        let tag = if forced { None } else { tag };
+        let fill = if forced { FillMode::Forced } else { fill };
         self.push(Doc::Break(Break::new(fill, flat, plus_indent, tag)));
     }
 
