@@ -641,6 +641,7 @@ impl<'a> Ctx<'a> {
             &comment.text,
             comment.kind,
             self.indent,
+            comment.column,
             is_header,
             self.style,
         );

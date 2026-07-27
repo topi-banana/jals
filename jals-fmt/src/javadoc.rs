@@ -92,6 +92,7 @@ impl CommentFormatter {
         text: &str,
         kind: SyntaxKind,
         indent: usize,
+        column: usize,
         is_header: bool,
         style: &Style,
     ) -> String {
@@ -103,12 +104,38 @@ impl CommentFormatter {
             _ => false,
         };
         if !enabled || (is_header && !cfg.format_header) {
-            return text.into();
+            return Self::shift(text, indent, column);
         }
         match kind {
             SyntaxKind::LINE_COMMENT => Self::render_line(text, indent, style),
             _ => Self::render_block(text, kind, indent, style),
         }
+    }
+
+    /// Move a comment the formatter does not reflow to its new column.
+    ///
+    /// A block comment's continuation lines are laid out against its opening `/*`, so a comment
+    /// that moved has to take them with it. Only a *shift* is applied: the relative shape is the
+    /// information such a comment carries, and ASCII art is exactly the case where reflowing it
+    /// would be destruction.
+    fn shift(text: &str, indent: usize, column: usize) -> String {
+        if indent <= column || !text.contains('\n') {
+            return text.into();
+        }
+        let extra = indent - column;
+        let mut out = String::new();
+        for (nth, line) in text.split('\n').enumerate() {
+            if nth > 0 {
+                out.push('\n');
+                if !line.trim().is_empty() {
+                    for _ in 0..extra {
+                        out.push(' ');
+                    }
+                }
+            }
+            out.push_str(line);
+        }
+        out
     }
 
     /// Wrap a `//` comment, continuing with further `//` lines.

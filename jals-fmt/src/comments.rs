@@ -45,6 +45,9 @@ pub(crate) struct Comment {
     pub(crate) text: String,
     /// Blank lines between this comment and whatever preceded it in the source.
     pub(crate) blank_lines_before: usize,
+    /// The column the comment opened at in the source, so a comment the formatter does not
+    /// reflow can move its continuation lines with it.
+    pub(crate) column: usize,
     /// Whether a break stands in front of this comment.
     ///
     /// `OpsBuilder.build` inserts one for every comment it puts in a token's `toksBefore` — a
@@ -144,6 +147,7 @@ impl CommentMap {
                     kind,
                     text,
                     blank_lines_before: newlines.saturating_sub(1),
+                    column: Self::column_of(&tok),
                     breaks,
                 };
 
@@ -202,6 +206,20 @@ impl CommentMap {
     /// How many comments the map holds — the denominator of the completeness assertion.
     pub(crate) const fn anchored(&self) -> usize {
         self.anchored
+    }
+
+    /// The column a token starts at in its source line.
+    fn column_of(tok: &SyntaxToken) -> usize {
+        let mut column = 0usize;
+        let mut cursor = tok.prev_token();
+        while let Some(previous) = cursor {
+            if previous.kind() == SyntaxKind::NEWLINE {
+                break;
+            }
+            column += previous.text().chars().count();
+            cursor = previous.prev_token();
+        }
+        column
     }
 
     /// The byte offset a token is keyed by.
