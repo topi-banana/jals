@@ -20,7 +20,7 @@
 //!   node kind is what tells them apart — there is no lexical difference.
 
 use jals_config::fmt::Spacing as SpacingRules;
-use jals_syntax::{SyntaxKind as S, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxToken};
 
 use crate::style::Style;
 
@@ -278,6 +278,8 @@ impl Spacing {
             // its `<`, so `Stream<?>` never becomes `Stream< ?>`.
             (_, S::QUESTION) if np == S::TERNARY_EXPR => Some(rules.before_ternary_question),
             (S::QUESTION, _) if pp == S::TERNARY_EXPR => Some(rules.after_ternary_question),
+            // A wildcard's bound is a word after the `?`: `<? extends Tree>`.
+            (S::QUESTION, _) => Some(Self::is_word(next.kind())),
             (_, S::COLON) => Some(Self::before_colon(np, rules)),
             (S::COLON, _) => Some(Self::after_colon(pp, rules)),
             _ => None,
@@ -379,19 +381,38 @@ impl Spacing {
         (next_prefix && Self::is_word(prev.kind())).then_some(true)
     }
 
-    /// Whether `tok` is the operator of a prefix expression — the first token of its
+    /// Whether `tok` is the operator of a prefix expression — the first significant token of its
     /// `UNARY_EXPR`.
     fn is_prefix_operator(tok: &SyntaxToken) -> bool {
-        tok.parent().is_some_and(|node| {
-            node.kind() == S::UNARY_EXPR && node.text_range().start() == tok.text_range().start()
-        })
+        Self::is_edge_operator(tok, S::UNARY_EXPR, true)
     }
 
-    /// Whether `tok` is the operator of a postfix expression — the last token of its
+    /// Whether `tok` is the operator of a postfix expression — the last significant token of its
     /// `POSTFIX_EXPR`.
     fn is_postfix_operator(tok: &SyntaxToken) -> bool {
+        Self::is_edge_operator(tok, S::POSTFIX_EXPR, false)
+    }
+
+    /// Whether `tok` is its parent's first (or last) significant token, and that parent is `kind`.
+    ///
+    /// Compared by position among the significant children rather than by text range: a node's
+    /// range starts at its leading whitespace, so `assert !x` would make the `!` look like it is
+    /// not first.
+    fn is_edge_operator(tok: &SyntaxToken, kind: S, first: bool) -> bool {
         tok.parent().is_some_and(|node| {
-            node.kind() == S::POSTFIX_EXPR && node.text_range().end() == tok.text_range().end()
+            if node.kind() != kind {
+                return false;
+            }
+            let mut significant = node
+                .children_with_tokens()
+                .filter(|child| !child.as_token().is_some_and(|tok| tok.kind().is_trivia()));
+            let edge = if first {
+                significant.next()
+            } else {
+                significant.last()
+            };
+            edge.and_then(SyntaxElement::into_token)
+                .is_some_and(|edge| &edge == tok)
         })
     }
 

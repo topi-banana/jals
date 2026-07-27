@@ -65,23 +65,27 @@ impl Formatter {
         src_errors: usize,
         style: &Style,
     ) -> String {
-        let text = Self::format_tree(root, src, style).await;
+        let laid_out = Self::format_tree(root, src, style).await;
 
         // L4: re-wrap long string concatenations, but only when re-formatting the candidate
-        // reproduces it exactly (`DESIGN.md` §R4.1).
-        let text = match StringWrapper::candidate(&text, style).await {
+        // reproduces it exactly (`DESIGN.md` §R4.1) *and* the result still holds the input's
+        // tokens. Checking the budget here rather than only at the end is what keeps a rewrap the
+        // formatter cannot vouch for from costing the whole file: it costs the rewrap.
+        let text = match StringWrapper::candidate(&laid_out, style).await {
             Some(candidate) => {
                 // The candidate is a re-split concatenation on one logical line; the engine
                 // places the breaks. Adopt its formatting only if formatting *that* is a fixed
                 // point, which is the guarantee `DESIGN.md` §R4.1 asks for.
-                let laid_out = Self::format_source_text(&candidate, style).await;
-                if Self::format_source_text(&laid_out, style).await == laid_out {
-                    laid_out
+                let wrapped = Self::format_source_text(&candidate, style).await;
+                if Self::format_source_text(&wrapped, style).await == wrapped
+                    && TokenBudget::accepts(src, root, src_errors, &wrapped, style).await
+                {
+                    wrapped
                 } else {
-                    text
+                    laid_out
                 }
             }
-            None => text,
+            None => laid_out,
         };
 
         if TokenBudget::accepts(src, root, src_errors, &text, style).await {

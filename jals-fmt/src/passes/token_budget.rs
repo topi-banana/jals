@@ -17,7 +17,7 @@
 //! | `[literals]` non-`preserve` | by token **kind**, since a literal's text is allowed to change |
 //! | `imports.remove-unused` | output ⊆ input instead of equality |
 //! | `[braces] force-*` ≠ `never` | extra `{` / `}` in the output are allowed |
-//! | `wrapping.reflow-long-strings` | multiset equality still holds; only arrangement changes |
+//! | `wrapping.reflow-long-strings` | the literals and the `+` between them leave the multiset; what the concatenation *spells* is compared instead |
 //!
 //! The new-syntax-error half of the check is unconditional: no rule may make a file stop parsing.
 
@@ -86,9 +86,18 @@ impl TokenBudget {
         let by_kind = LiteralRewrite::is_active(style.cfg.literals);
         let allow_extra_braces = Self::forces_braces(style);
 
+        // A reflowed concatenation is re-split at different boundaries, so neither the literals'
+        // texts nor the number of `+` between them survives. What does survive — and what the
+        // pass is actually promising — is the *text* the concatenation evaluates to, so that is
+        // what gets compared, and the two token kinds it rearranges leave the multiset.
+        let reflows = style.cfg.wrapping.reflow_long_strings;
+        if reflows && Self::string_content(src_tree) != Self::string_content(&reparsed.syntax()) {
+            return false;
+        }
+
         if !style.cfg.imports.remove_unused {
-            let before = Self::collect(src_tree, by_kind, Scope::Everything);
-            let after = Self::collect(&reparsed.syntax(), by_kind, Scope::Everything);
+            let before = Self::collect(src_tree, by_kind, Scope::Everything, reflows);
+            let after = Self::collect(&reparsed.syntax(), by_kind, Scope::Everything, reflows);
             return Self::compare(&before, &after, false, allow_extra_braces);
         }
 
@@ -96,13 +105,13 @@ impl TokenBudget {
         // *subset* — but only the import block. Splitting the two scopes keeps the allowance from
         // masking a token dropped anywhere else, which is exactly the class of bug this check
         // exists to catch.
-        let before_code = Self::collect(src_tree, by_kind, Scope::OutsideImports);
-        let after_code = Self::collect(&reparsed.syntax(), by_kind, Scope::OutsideImports);
+        let before_code = Self::collect(src_tree, by_kind, Scope::OutsideImports, reflows);
+        let after_code = Self::collect(&reparsed.syntax(), by_kind, Scope::OutsideImports, reflows);
         if !Self::compare(&before_code, &after_code, false, allow_extra_braces) {
             return false;
         }
-        let before_imports = Self::collect(src_tree, by_kind, Scope::ImportsOnly);
-        let after_imports = Self::collect(&reparsed.syntax(), by_kind, Scope::ImportsOnly);
+        let before_imports = Self::collect(src_tree, by_kind, Scope::ImportsOnly, reflows);
+        let after_imports = Self::collect(&reparsed.syntax(), by_kind, Scope::ImportsOnly, reflows);
         Self::compare(&before_imports, &after_imports, true, false)
     }
 
@@ -123,13 +132,16 @@ impl TokenBudget {
     ///
     /// `by_kind` drops the text, which is what makes the check survive `[literals]` rewriting a
     /// literal's spelling while still catching a literal that turned into something else.
-    fn collect(root: &SyntaxNode, by_kind: bool, scope: Scope) -> Budget {
+    fn collect(root: &SyntaxNode, by_kind: bool, scope: Scope, reflows: bool) -> Budget {
         let mut budget = Budget::new();
         for tok in root
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| !tok.kind().is_trivia())
             .filter(|tok| scope.admits(tok))
+            .filter(|tok| {
+                !reflows || !matches!(tok.kind(), SyntaxKind::STRING_LITERAL | SyntaxKind::PLUS)
+            })
         {
             let text = if by_kind {
                 String::new()
@@ -139,6 +151,25 @@ impl TokenBudget {
             *budget.entry((tok.kind(), text)).or_insert(0) += 1;
         }
         budget
+    }
+
+    /// Every string literal's body, in source order, concatenated.
+    ///
+    /// The one thing a reflow may not change: where the pieces are cut is layout, what they spell
+    /// together is the program.
+    fn string_content(root: &SyntaxNode) -> String {
+        root.descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == SyntaxKind::STRING_LITERAL)
+            .map(|tok| {
+                let text = tok.text();
+                let body = text
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                    .unwrap_or(text);
+                String::from(body)
+            })
+            .collect()
     }
 
     /// Compare two multisets under the configured allowances.

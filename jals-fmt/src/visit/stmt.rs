@@ -77,12 +77,21 @@ impl Ctx<'_> {
             self.block_break(collapsible, enforced.max(source));
             self.visit(statement).await;
         }
+        // A comment written just before the closing brace documents the block, so it keeps the
+        // statements' indent (see [`Ctx::hoist_comments_before`]).
+        let dangling_before_brace = rbrace
+            .as_ref()
+            .is_some_and(|brace| self.hoist_comments_before(brace));
         self.close_indent(&indent);
 
         if let Some(brace) = &rbrace {
-            let trailing = blank
-                .at_block_end
-                .max(Self::source_blank_lines_of(brace).min(blank.max_before_closing_brace));
+            let trailing = if dangling_before_brace {
+                0
+            } else {
+                blank
+                    .at_block_end
+                    .max(Self::source_blank_lines_of(brace).min(blank.max_before_closing_brace))
+            };
             self.block_break(collapsible, trailing);
             self.token(brace);
         }

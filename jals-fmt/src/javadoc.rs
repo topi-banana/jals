@@ -237,10 +237,12 @@ impl CommentFormatter {
                     argument,
                     words,
                 } => {
-                    // A blank line the author already wrote satisfies the rule; asking for a
-                    // second one would open the tag section with two.
+                    // The blank line separates the tags from a *description*: a comment that is
+                    // nothing but tags opens with none. And a blank line the author already
+                    // wrote satisfies the rule, so asking for a second would open with two.
                     if !seen_tag
                         && cfg.blank_line_before_tags
+                        && previous.is_some()
                         && !matches!(previous, Some(Block::Blank))
                     {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
@@ -470,7 +472,34 @@ impl CommentFormatter {
         while matches!(blocks.first(), Some(Block::Blank)) {
             blocks.remove(0);
         }
+        if cfg.format_html {
+            Self::infer_paragraph_tags(&mut blocks);
+        }
         blocks
+    }
+
+    /// Insert a `<p>` wherever a blank line separates two runs of prose.
+    ///
+    /// A blank line between paragraphs is a paragraph break the author made in the *comment*; the
+    /// rendered Javadoc only sees it if an HTML tag says so. google-java-format's
+    /// `inferParagraphTags` does the same, and only between two literals — a blank line before a
+    /// block tag or a `<pre>` region opens nothing.
+    fn infer_paragraph_tags(blocks: &mut [Block]) {
+        for at in 2..blocks.len() {
+            if !matches!(blocks[at - 1], Block::Blank) || !matches!(blocks[at - 2], Block::Prose(_))
+            {
+                continue;
+            }
+            let Block::Prose(words) = &mut blocks[at] else {
+                continue;
+            };
+            let Some(first) = words.first_mut() else {
+                continue;
+            };
+            if !first.starts_with('<') {
+                first.insert_str(0, "<p>");
+            }
+        }
     }
 
     /// Move any accumulated prose into `blocks`.
@@ -557,7 +586,10 @@ impl CommentFormatter {
         let rest = line.strip_prefix('@')?;
         let mut parts = rest.split_whitespace();
         let name = parts.next()?;
-        if name.is_empty() || !name.chars().all(char::is_alphanumeric) {
+        // A block tag is `@` and a *lowercase* word — google-java-format's `FOOTER_TAG_PATTERN`.
+        // What follows the word is description, even when no space separates it: `@xerces.internal`
+        // is the `@xerces` tag, and keeping the whole run as the name renders it back unchanged.
+        if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
             return None;
         }
         let takes_argument = matches!(name, "param" | "throws" | "exception");
