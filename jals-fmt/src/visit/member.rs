@@ -655,6 +655,28 @@ impl Ctx<'_> {
         self.space_already_emitted();
     }
 
+    /// One parameter or record component.
+    ///
+    /// A parameter carrying a *declaration* annotation opens a level of its own —
+    /// `declareOne`'s `kind == PARAMETER && hasDeclarationAnnotation ? plusFour : ZERO`. That is
+    /// what indents the type under the annotations when a parameter's annotation run wraps,
+    /// instead of leaving the type flush with them.
+    pub(super) async fn visit_param(&mut self, node: &SyntaxNode) {
+        let annotated = Self::child_of(node, S::MODIFIERS).is_some_and(|modifiers| {
+            modifiers
+                .children()
+                .any(|child| matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE))
+        });
+        if !annotated {
+            self.visit_children(node).await;
+            return;
+        }
+        let continuation = self.style.continuation();
+        self.open(continuation.clone());
+        self.visit_children(node).await;
+        self.close_indent(&continuation);
+    }
+
     /// An instance or `static` initializer block.
     pub(super) async fn visit_initializer(&mut self, node: &SyntaxNode) {
         for child in Self::children(node) {
