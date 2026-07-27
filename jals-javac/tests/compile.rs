@@ -232,6 +232,9 @@ public class Narrow {
 /// trailing quote, so a literal ending in `\"` lost it silently.
 #[test]
 fn literal_escapes_survive_to_the_constant_pool() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Escapes {
     public static void main(String[] args) {
@@ -374,6 +377,59 @@ class Quiet {
             .expect("reparse");
     assert_eq!(class.access_flags.0, 0x0020, "`ACC_SUPER` only");
     assert_eq!(class.methods[0].access_flags.0, 0x0000);
+}
+
+/// An arm that returns has nothing to jump *from*, so the jump over the `else` is not emitted.
+/// Emitting it unconditionally made `if (c) { return …; } …` — one of the most ordinary shapes in
+/// Java — fail with "code was emitted after an unconditional transfer".
+#[test]
+fn an_arm_that_returns_still_compiles() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Guard {
+    static int classify(int n) {
+        if (n == 0) {
+            return 10;
+        }
+        if (n == 1) {
+            return 20;
+        } else {
+            return 30;
+        }
+    }
+
+    static void act(int n) {
+        if (n == 0) {
+            return;
+        }
+        System.out.println(n);
+    }
+
+    static int firstEven(int limit) {
+        int i = 0;
+        while (i < limit) {
+            if (i == 4) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 99;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(classify(0));
+        System.out.println(classify(1));
+        System.out.println(classify(2));
+        act(0);
+        act(7);
+        System.out.println(firstEven(9));
+        System.out.println(firstEven(2));
+    }
+}
+";
+    assert_eq!(run(source, "Guard"), "10\n20\n30\n7\n4\n99\n");
 }
 
 /// A nested type is its own class file. Dropping it silently would produce an outer class that

@@ -325,6 +325,16 @@ impl<'pool> Assembler<'pool> {
         self.state.peek().cloned()
     }
 
+    /// Whether control can arrive at the next instruction emitted.
+    ///
+    /// `false` after a `return` or an unconditional branch, until a label is bound. A lowering
+    /// needs this because the *source* has statements a finished basic block does not: the jump
+    /// over an `else` arm exists only when the `then` arm can fall out of it, and `if (c) { return;
+    /// } …` is the ordinary shape where it cannot.
+    pub(crate) const fn reachable(&self) -> bool {
+        self.reachable
+    }
+
     /// A fresh, unbound label.
     pub fn label(&mut self) -> Label {
         self.labels.push(LabelInfo {

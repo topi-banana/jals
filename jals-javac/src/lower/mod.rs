@@ -417,8 +417,12 @@ impl Compile {
                 let mut slots = Slots::new(context, decl.params().as_ref(), is_static);
                 stmt::Stmt::block(&body, context, &mut asm, &mut slots)?;
                 // A `void` body may simply run off its end; the JVM needs the instruction anyway.
-                if matches!(descriptor.return_type, jals_classfile::ReturnType::Void) {
-                    let _ = asm.return_(None);
+                // One that already returned on every path does not — and asking the assembler for
+                // an unreachable `return` would be an error, not a no-op.
+                if matches!(descriptor.return_type, jals_classfile::ReturnType::Void)
+                    && asm.reachable()
+                {
+                    asm.return_(None)?;
                 }
                 alloc::vec![asm.finish()?]
             }
@@ -467,7 +471,10 @@ impl Compile {
         if let Some(body) = node.children().find_map(ast::Block::cast) {
             stmt::Stmt::block(&body, context, &mut asm, &mut slots)?;
         }
-        let _ = asm.return_(None);
+        // A constructor is `void`, so it needs the instruction unless every path already returned.
+        if asm.reachable() {
+            asm.return_(None)?;
+        }
 
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(Self::method_flags(node, context.in_interface)),

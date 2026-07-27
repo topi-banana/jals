@@ -140,12 +140,22 @@ impl Stmt {
         if let Some(then) = then_branch {
             Self::lower(&then, context, asm, slots)?;
         }
-        asm.branch(Branch::Always, done)?;
+        // The jump over the `else` arm exists only when the `then` arm can fall out of it. A
+        // `then` ending in `return` leaves nothing to jump *from*, and `if (c) { return; } …` is
+        // the ordinary shape of exactly that.
+        let joins = asm.reachable();
+        if joins {
+            asm.branch(Branch::Always, done)?;
+        }
         asm.bind(otherwise)?;
         if let Some(otherwise) = else_branch {
             Self::lower(&otherwise, context, asm, slots)?;
         }
-        asm.bind(done)?;
+        // `done` is a label only if something arrives there. When both arms returned, nothing
+        // does, and binding it would report a label control cannot reach.
+        if joins || asm.reachable() {
+            asm.bind(done)?;
+        }
         Ok(())
     }
 
@@ -167,7 +177,11 @@ impl Stmt {
         if let Some(body) = statement.body() {
             Self::lower(&body, context, asm, slots)?;
         }
-        asm.branch(Branch::Always, test)?;
+        // A body that ends in `return` never reaches the back edge. `done` still has the exit
+        // branch arriving at it either way, so it binds regardless.
+        if asm.reachable() {
+            asm.branch(Branch::Always, test)?;
+        }
         asm.bind(done)?;
         Ok(())
     }
