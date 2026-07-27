@@ -397,6 +397,12 @@ impl Ctx<'_> {
     /// declaration's own indent — inside the continuation level it would push `private int x;`
     /// four columns past the `@Deprecated` above it.
     pub(super) async fn visit_field(&mut self, node: &SyntaxNode) {
+        // The declaration is a level of its own, *outside* the header — `declareOne`'s first
+        // `open`. That is what a horizontal annotation run's break is measured against: a run
+        // that shares the declaration's line while the declaration fits, and moves above it when
+        // it does not. Emitted into the body's level instead, the break would sit among the
+        // forced breaks that separate members and fire unconditionally.
+        self.open_flat(Indent::ZERO);
         if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
             self.visit(&modifiers).await;
         }
@@ -404,6 +410,7 @@ impl Ctx<'_> {
         self.open(continuation.clone());
         self.emit_declarators(node).await;
         self.close_indent(&continuation);
+        self.close();
     }
 
     /// The `type name = init, name2 = init2` part shared by fields, locals, and resources.
@@ -424,8 +431,44 @@ impl Ctx<'_> {
                     .is_none_or(|node| node.kind() != S::MODIFIERS)
             })
             .collect();
+        // `declareOne`'s `typeBreak`: when the type had to span lines, the name and the
+        // initializer indent one step further than the type did, so the declaration still reads
+        // as one construct rather than as two columns.
+        let continuation = self.style.continuation();
+        let type_tag = self.ops.new_tag();
+        let typed = children
+            .iter()
+            .any(|child| child.as_node().is_some_and(|child| child.kind() == S::TYPE));
+        let name_at = children.iter().position(|child| {
+            child
+                .as_token()
+                .is_some_and(|tok| matches!(tok.kind(), S::IDENT | S::UNDERSCORE))
+        });
+        let conditional = || Indent::when_broken(type_tag, continuation.clone(), Indent::ZERO);
+        let mut open_levels = 0usize;
+        // The type and the name are one group, so a long initializer breaking the declaration
+        // does not by itself put the name on a line of its own.
+        if typed && name_at.is_some() {
+            self.open_flat(Indent::ZERO);
+            open_levels += 1;
+        }
         for (nth, child) in children.iter().enumerate() {
             let kind = child.as_token().map(SyntaxToken::kind);
+            if typed && Some(nth) == name_at {
+                self.ops
+                    .brk(FillMode::Independent, " ", Indent::ZERO, Some(type_tag));
+                self.space_already_emitted();
+                self.open(conditional());
+                open_levels += 1;
+                self.visit_element(child).await;
+                // Close the name level and the type-and-name group: what follows — an
+                // initializer, a dimension, the `;` — hangs off the tag instead.
+                while open_levels > 0 {
+                    self.close();
+                    open_levels -= 1;
+                }
+                continue;
+            }
             if kind == Some(S::EQ) {
                 // A bare array initializer is *block-shaped*: it opens on this line and closes on
                 // its own, so it has nowhere better to go and breaking before it would leave `=`
@@ -434,6 +477,10 @@ impl Ctx<'_> {
                     .get(nth + 1)
                     .and_then(|next| next.as_node())
                     .is_some_and(|next| next.kind() == S::ARRAY_INIT);
+                if !block_shaped {
+                    self.open(conditional());
+                    open_levels += 1;
+                }
                 if before && !block_shaped {
                     self.list_break(policy, Indent::ZERO);
                 }
@@ -442,6 +489,12 @@ impl Ctx<'_> {
                     self.list_break(policy, Indent::ZERO);
                 }
                 continue;
+            }
+            if matches!(kind, Some(S::SEMICOLON | S::COMMA)) {
+                while open_levels > 0 {
+                    self.close();
+                    open_levels -= 1;
+                }
             }
             if nth > 0
                 && matches!(
@@ -455,6 +508,10 @@ impl Ctx<'_> {
                 self.list_break(WrapPolicy::IfLongPerItem, Indent::ZERO);
             }
             self.visit_element(child).await;
+        }
+        while open_levels > 0 {
+            self.close();
+            open_levels -= 1;
         }
     }
 
