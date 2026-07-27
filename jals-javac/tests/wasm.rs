@@ -310,6 +310,29 @@ public class Compound {
     );
 }
 
+/// One opcode names one operand type, and wasm converts nothing implicitly. Choosing the family
+/// from the left operand alone emitted `i64.add` over an `i32` for `n + 1` on a `long` — a module
+/// `wasm-tools` rejects with "expected i64, found i32".
+#[test]
+fn a_mixed_numeric_binary_is_reported_rather_than_mis_emitted() {
+    let source = r"
+public class Mixed {
+    public static long run(long n) {
+        long x = n + 1;
+        return x;
+    }
+}
+";
+    let error = compile(&[source]).expect_err("numeric promotion is not lowered yet");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a binary operator over two different numeric types")
+        ),
+        "expected the mixed-operand report, got {error}"
+    );
+}
+
 /// Arrays are wasm array types, allocated by the host like every other object: `new int[n]` is one
 /// instruction whose elements start at their type's default, which is Java's own rule.
 #[test]

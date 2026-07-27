@@ -266,6 +266,30 @@ public class BadEscape {
     );
 }
 
+/// `ladd` takes two `long`s, so `n + 1` on a `long` needs the literal widened first. Until binary
+/// numeric promotion is lowered, the mixed pair is reported — and it names the construct rather
+/// than surfacing as the assembler's bare `TypeMismatch`.
+#[test]
+fn a_mixed_numeric_binary_is_reported() {
+    let source = r"
+public class Mixed {
+    static long f(long n) {
+        return n + 1;
+    }
+
+    public static void main(String[] args) {}
+}
+";
+    let error = compile(source).expect_err("numeric promotion is not lowered yet");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a binary operator over two different numeric types")
+        ),
+        "expected the mixed-operand report, got {error}"
+    );
+}
+
 /// A nested type is its own class file. Dropping it silently would produce an outer class that
 /// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
 /// compiler is in a position to report and the run time is not.

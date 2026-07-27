@@ -848,10 +848,18 @@ impl Lowering<'_> {
             _ => return Err(WasmError::Unsupported("this binary operator")),
         };
 
-        let operand = self.expr(&left, insn)?.ok_or(WasmError::Unsupported(
-            "a binary operand that produced no value",
-        ))?;
-        self.expr(&right, insn)?;
+        let no_value = || WasmError::Unsupported("a binary operand that produced no value");
+        let operand = self.expr(&left, insn)?.ok_or_else(no_value)?;
+        let other = self.expr(&right, insn)?.ok_or_else(no_value)?;
+        // wasm has no implicit conversion, and the opcode names one type for both operands:
+        // `i64.add` over an `i32` is a module the validator rejects. Java's binary numeric
+        // promotion would widen the narrower side here; until it is lowered, a mixed pair is
+        // reported rather than emitted as a module nothing will load.
+        if operand != other {
+            return Err(WasmError::Unsupported(
+                "a binary operator over two different numeric types",
+            ));
+        }
         insn.numeric(op, operand)
             .ok_or(WasmError::Unsupported("this operator on this type"))?;
         // A comparison is a `boolean`, which is an `i32`; arithmetic keeps its operand type.

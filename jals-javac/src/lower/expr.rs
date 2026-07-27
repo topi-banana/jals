@@ -368,9 +368,20 @@ impl Expr {
             // milestone that models the chain rather than a single `+`.
             return Err(LowerError::Unsupported("string concatenation"));
         }
+        // One opcode family, one operand type: `ladd` takes two `long`s. Java's binary numeric
+        // promotion would widen the narrower side first, and until that is lowered a mixed pair is
+        // reported here rather than left to the assembler's `TypeMismatch`, which names no
+        // construct.
+        let verification = Self::verification_type(&result)?;
+        for operand in [&left, &right] {
+            if Self::verification_type(Self::ty(context, operand.syntax())?)? != verification {
+                return Err(LowerError::Unsupported(
+                    "a binary operator over two different numeric types",
+                ));
+            }
+        }
         Self::lower(&left, context, asm, slots)?;
         Self::lower(&right, context, asm, slots)?;
-        let verification = Self::verification_type(&result)?;
         asm.binary(arithmetic, &verification)?;
         Ok(())
     }
