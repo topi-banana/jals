@@ -408,6 +408,8 @@ impl ParameterComment {
     /// Whether `name` is a plain Java identifier — the label has to name a parameter, and
     /// anything else is prose that must not be rewritten.
     fn is_identifier(name: &str) -> bool {
+        // A varargs parameter is named with its `...`: `PARAMETER_COMMENT`'s `(\Q...\E)?`.
+        let name = name.strip_suffix("...").unwrap_or(name);
         let mut chars = name.chars();
         chars
             .next()
