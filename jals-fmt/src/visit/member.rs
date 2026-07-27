@@ -435,7 +435,10 @@ impl Ctx<'_> {
                     Some(S::COMMA)
                 )
             {
-                self.list_break(WrapPolicy::IfLong, Indent::ZERO);
+                // One declarator per line once they stop fitting: `declareMany` separates them
+                // with a UNIFIED break, so `int a = 1, b = 2, c = 3;` is all on one line or all
+                // on lines of its own.
+                self.list_break(WrapPolicy::IfLongPerItem, Indent::ZERO);
             }
             self.visit_element(child).await;
         }
