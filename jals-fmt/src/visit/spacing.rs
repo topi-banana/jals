@@ -318,6 +318,11 @@ impl Spacing {
             (true, false) if Self::operator_rule(nk, np, rules).is_some() => None,
             (true, false) => Some(Self::is_word(nk)),
             (false, true) if nk == S::GT => Some(rules.within_angle_brackets),
+            // A generic method writes its type parameters *before* the return type, so the `<`
+            // follows a modifier keyword and has to separate from it: `public static <T, U> …`.
+            // A list that follows the declared name (`class Foo<T>`) hugs unless
+            // `before-type-parameter-list` says otherwise.
+            (false, true) if np == S::TYPE_PARAMS && Self::is_keyword(pk) => Some(true),
             (false, true) => Some(pp != S::IDENT && Self::before_angle(np, rules)),
             (false, false) => None,
         }

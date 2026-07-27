@@ -41,6 +41,12 @@ impl Ctx<'_> {
                     .take_while(|node| node.kind() == S::IMPORT_DECL)
                     .collect();
                 at += run.len();
+                // An import block that loses every member leaves *one* blank line here, not the
+                // two google-java-format is left with. Its `RemoveUnusedImports` runs as a text
+                // pass after layout and deletes only the import's own line, so the blank lines
+                // that framed the block survive next to each other — output its own second pass
+                // would then collapse. Reproducing that would trade this crate's idempotence for
+                // one file; it is difference **D10** in `DESIGN.md` §18.2.
                 self.visit_import_block(&run, first, owed).await;
                 first = false;
                 owed = blank.after_imports;

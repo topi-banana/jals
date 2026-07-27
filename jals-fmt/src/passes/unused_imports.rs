@@ -66,25 +66,43 @@ impl UnusedImports {
     /// counts, which over-approximates — and over-approximating is the safe direction, since the
     /// cost is keeping an import that could have gone.
     fn collect_javadoc_names(text: &str, used: &mut BTreeSet<String>) {
-        /// The tags whose argument is a type reference.
-        const REFERENCE_TAGS: [&str; 6] = [
-            "@link",
-            "@linkplain",
-            "@see",
-            "@throws",
-            "@exception",
-            "@value",
-        ];
+        /// The block tags whose argument is a type reference. These start a line.
+        const BLOCK_TAGS: [&str; 4] = ["@see", "@throws", "@exception", "@param"];
+        /// The inline tags whose argument is a type reference. These appear mid-prose, which is
+        /// where most `{@link Foo}` references actually live.
+        const INLINE_TAGS: [&str; 3] = ["{@link", "{@linkplain", "{@value"];
 
         for line in text.lines() {
             let trimmed = line.trim_start().trim_start_matches('*').trim_start();
-            let Some(tag) = REFERENCE_TAGS.iter().find(|tag| trimmed.starts_with(**tag)) else {
-                continue;
-            };
-            for word in trimmed[tag.len()..].split(|c: char| !Self::is_name_char(c)) {
-                if !word.is_empty() && word.chars().next().is_some_and(char::is_alphabetic) {
-                    used.insert(word.into());
-                }
+            if let Some(tag) = BLOCK_TAGS.iter().find(|tag| trimmed.starts_with(**tag)) {
+                Self::collect_names(&trimmed[tag.len()..], used);
+            }
+            // An inline tag can appear anywhere on the line, including several times, and
+            // including on a line that also opens a block tag.
+            let mut rest = trimmed;
+            while let Some(at) = rest.find("{@") {
+                let tail = &rest[at..];
+                let Some(tag) = INLINE_TAGS.iter().find(|tag| tail.starts_with(**tag)) else {
+                    rest = &tail[2..];
+                    continue;
+                };
+                let body = &tail[tag.len()..];
+                let end = body.find('}').unwrap_or(body.len());
+                Self::collect_names(&body[..end], used);
+                rest = &body[end..];
+            }
+        }
+    }
+
+    /// Add every identifier-shaped run in `text` to `used`.
+    ///
+    /// This over-approximates — a reference is `Foo#bar(Baz)`, and every component of it counts —
+    /// and over-approximating is the safe direction, since the cost is keeping an import that
+    /// could have gone.
+    fn collect_names(text: &str, used: &mut BTreeSet<String>) {
+        for word in text.split(|c: char| !Self::is_name_char(c)) {
+            if !word.is_empty() && word.chars().next().is_some_and(char::is_alphabetic) {
+                used.insert(word.into());
             }
         }
     }

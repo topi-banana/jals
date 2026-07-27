@@ -80,26 +80,88 @@ impl CommentFormatter {
         }
     }
 
-    /// Refill a `//` comment, continuing with further `//` lines.
+    /// Wrap a `//` comment, continuing with further `//` lines.
+    ///
+    /// A line comment is **never refilled**. Its words are not redistributed and its internal
+    /// spacing is left alone — `// a    b` keeps its run of spaces, because a `//` line is as
+    /// often a hand-aligned table or a commented-out statement as it is prose. All that happens
+    /// is the missing space after the slashes and a break when the line overruns the limit,
+    /// which is exactly `JavaCommentsHelper.wrapLineComments`.
     fn render_line(text: &str, indent: usize, style: &Style) -> String {
-        let body = text.trim_start_matches('/').trim();
-        let budget = style
-            .comment_width(indent)
-            .saturating_sub(indent + 3)
-            .max(16);
-        let words: Vec<String> = body.split_whitespace().map(Into::into).collect();
-        if words.is_empty() {
-            return "//".into();
+        let line = Self::space_after_slashes(text.trim());
+        // `// MOE:` marks a region another tool owns, and wrapping it would break that tool.
+        if line.starts_with("// MOE:") {
+            return line;
         }
-        let mut out = String::new();
-        for (nth, line) in Self::fill(&words, budget).into_iter().enumerate() {
-            if nth > 0 {
-                out.push('\n');
+        let limit = style.comment_width(indent);
+        Self::wrap_line(&line, indent, limit).join("\n")
+    }
+
+    /// `//foo` → `// foo`.
+    ///
+    /// `//noinspection` and `//$NON-NLS-1$` are IDE directives that stop working with a space in
+    /// them, so they are left alone — google-java-format's
+    /// `LINE_COMMENT_MISSING_SPACE_PREFIX` lookahead.
+    fn space_after_slashes(line: &str) -> String {
+        let slashes = line.len() - line.trim_start_matches('/').len();
+        if slashes < 2 {
+            return line.into();
+        }
+        let rest = &line[slashes..];
+        let directive = rest.starts_with("noinspection") || Self::is_non_nls(rest);
+        // A leading space, an empty body, or another slash: nothing to separate.
+        if directive || rest.starts_with(|c: char| c.is_whitespace()) || rest.is_empty() {
+            return line.into();
+        }
+        let slashes = &line[..slashes];
+        alloc::format!("{slashes} {rest}")
+    }
+
+    /// Whether `rest` opens with an Eclipse externalized-string marker, `$NON-NLS-<digits>$`.
+    fn is_non_nls(rest: &str) -> bool {
+        let Some(body) = rest.strip_prefix("$NON-NLS-") else {
+            return false;
+        };
+        let digits: &str = body.split('$').next().unwrap_or("");
+        !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+            && body.len() > digits.len()
+    }
+
+    /// Break `line` at whitespace until it fits, restarting each continuation with `//`.
+    fn wrap_line(line: &str, column: usize, limit: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut current = String::from(line);
+        while column + Width::utf16(&current) > limit {
+            let Some(at) = Self::break_at(&current, limit.saturating_sub(column)) else {
+                break;
+            };
+            let (head, tail) = current.split_at(at);
+            let next = alloc::format!("//{tail}");
+            lines.push(head.trim_end().into());
+            current = next;
+        }
+        lines.push(current.trim_end().into());
+        lines
+    }
+
+    /// The byte offset of the last whitespace at or before `budget` columns, past the `//`.
+    ///
+    /// `None` means there is nowhere to break — a single long word, or a URL — and the line stays
+    /// over the limit rather than being cut mid-token.
+    fn break_at(line: &str, budget: usize) -> Option<usize> {
+        let mut best = None;
+        let mut column = 0usize;
+        for (at, ch) in line.char_indices() {
+            if column > budget {
+                break;
             }
-            out.push_str("// ");
-            out.push_str(&line);
+            if column > 2 && ch.is_whitespace() {
+                best = Some(at);
+            }
+            column += ch.len_utf16();
         }
-        out
+        best
     }
 
     /// Reflow a `/* … */` or `/** … */` comment.
@@ -358,7 +420,9 @@ impl CommentFormatter {
                 && let Some(rest) = Self::paragraph_open(line)
             {
                 Self::flush(&mut prose, &mut blocks);
-                if !blocks.is_empty() {
+                // "Nothing significant written yet" is what makes an opening `<p>` disappear, and
+                // a run of blank lines is not significant.
+                if blocks.iter().any(|block| !matches!(block, Block::Blank)) {
                     // A blank line the author already wrote *is* the paragraph break.
                     if !matches!(blocks.last(), Some(Block::Blank)) {
                         blocks.push(Block::Blank);
