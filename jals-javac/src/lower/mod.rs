@@ -12,25 +12,23 @@
 //!
 //! # Scope
 //!
-//! Classes and interfaces with fields and methods; local variables and literals; the whole
-//! expression grammar bar object and array *creation* — arithmetic with Java's numeric promotions,
-//! bitwise and shift operators, comparisons at every width, casts, `instanceof`, the conditional
-//! operator, the short-circuiting `&&` / `||`, assignment (simple and compound) to a local, a field,
-//! or an array element, and `++` / `--` in both positions; `if`, `while`, `do`-`while`, `for`,
-//! `for`-each over an array, `break` and `continue` with or without a label; and calls (`static`,
-//! virtual, and interface). Constructors run `super()` and their field initialisers.
+//! Classes and interfaces with fields and methods; the whole expression grammar bar lambdas —
+//! arithmetic with Java's numeric promotions, bitwise and shift operators, comparisons at every
+//! width, casts, `instanceof`, the conditional operator, the short-circuiting `&&` / `||`, assignment
+//! (simple and compound) to a local, a field, or an array element, `++` / `--` in both positions,
+//! object creation, every array-creation form, and string concatenation; `if`, `while`, `do`-`while`,
+//! `for`, `for`-each over an array or an `Iterable`, `break` and `continue` with or without a label;
+//! and calls (`static`, virtual, and interface). A constructor runs `super()` and the instance
+//! initialisers; a `<clinit>` runs the `static` ones.
 //!
-//! Two of those are narrower than they sound, and each is *reported* where it stops rather than
-//! approximated:
+//! One thing is narrower than it sounds, and it is *reported* where it stops rather than approximated:
+//! **a method needs a body** unless it is `abstract` or an interface method, because `native` has no
+//! body and no flag pair that could say so legally.
 //!
-//! - **A `for`-each needs an array.** One over an `Iterable` is a call to `iterator()`, which the
-//!   embedded stubs do not declare on `Iterable` itself.
-//! - **A method needs a body** unless it is `abstract` or an interface method. `native` has no body
-//!   and no flag pair that could say so legally.
-//!
-//! Not yet at all: `new` and array creation, string concatenation, `switch`, exceptions,
-//! `synchronized`, boxing, varargs, generics beyond erasure, lambdas, inner classes, and constructor
-//! delegation (`this(…)` / `super(args)`). Each arrives with the milestone that can test it.
+//! Not yet at all: `switch`, exceptions (`throw` / `try` / `finally`), `synchronized`, `assert`,
+//! boxing, varargs, generics beyond erasure, lambdas, method references, `.class` literals, inner
+//! classes, and constructor delegation (`this(…)` / `super(args)`). Each arrives with the milestone
+//! that can test it.
 
 mod emit;
 mod expr;
@@ -447,7 +445,7 @@ impl Compile {
                 let mut asm = Assembler::new(pool, receiver, &text)?;
                 let slots = Slots::new(context, decl.params().as_ref(), is_static);
                 let returns = context.index.resolved_member_ty(member);
-                let mut emit = Emit::new(&mut asm, slots, returns);
+                let mut emit = Emit::new(&mut asm, slots, returns, !is_static);
                 stmt::Stmt::block(&body, context, &mut emit)?;
                 // A `void` body may simply run off its end; the JVM needs the instruction anyway.
                 // One that already returned on every path does not — and asking the assembler for
@@ -519,7 +517,7 @@ impl Compile {
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::new(context, params.as_ref(), false);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void);
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
         Self::prologue(context, &mut emit, super_name, super_item, members)?;
         if let Some(body) = &body {
             stmt::Stmt::block(body, context, &mut emit)?;
@@ -552,7 +550,7 @@ impl Compile {
         let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), "()V")?;
         let slots = Slots::new(context, None, false);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void);
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
         Self::prologue(context, &mut emit, super_name, super_item, members)?;
         asm.return_(None)?;
         Ok(MethodInfo {
@@ -583,7 +581,7 @@ impl Compile {
         let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Static, "()V")?;
         let slots = Slots::new(context, None, true);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void);
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, false);
         Self::initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
             asm.return_(None)?;

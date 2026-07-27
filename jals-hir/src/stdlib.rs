@@ -42,6 +42,9 @@ public interface Comparable {
 }
 
 public interface Iterable<T> {
+    // Qualified because `java.lang` imports nothing: the return type has to name the `java.util`
+    // stub outright or it resolves to an external `Iterator` with no descriptor.
+    public java.util.Iterator<T> iterator();
 }
 
 public class String extends Object implements CharSequence, Comparable {
@@ -56,12 +59,20 @@ public class String extends Object implements CharSequence, Comparable {
     public String concat(String s);
 }
 
+// The `append` overloads are the whole set a string concatenation lowers to: `a + b` becomes a
+// builder chain, and each operand picks the overload its own static type names. A missing one would
+// send a `long` to `append(int)`, which compiles and prints the wrong number.
 public class StringBuilder extends Object implements CharSequence {
     public StringBuilder();
     public StringBuilder(String s);
     public StringBuilder append(String s);
-    public StringBuilder append(int i);
+    public StringBuilder append(Object o);
+    public StringBuilder append(boolean b);
     public StringBuilder append(char c);
+    public StringBuilder append(int i);
+    public StringBuilder append(long l);
+    public StringBuilder append(float f);
+    public StringBuilder append(double d);
     public int length();
     public char charAt(int index);
     public String toString();
@@ -226,6 +237,7 @@ public interface Map<K, V> {
 }
 
 public class ArrayList<E> implements List<E> {
+    public ArrayList();
     public int size();
     public boolean isEmpty();
     public boolean add(E e);
@@ -235,6 +247,7 @@ public class ArrayList<E> implements List<E> {
 }
 
 public class HashSet<E> implements Set<E> {
+    public HashSet();
     public int size();
     public boolean add(E e);
     public boolean contains(Object o);
@@ -242,6 +255,7 @@ public class HashSet<E> implements Set<E> {
 }
 
 public class HashMap<K, V> implements Map<K, V> {
+    public HashMap();
     public int size();
     public V get(Object key);
     public V put(K key, V value);
@@ -274,8 +288,10 @@ public class PrintStream extends Object {
     public void println(float f);
     public void println(double d);
     public void println(String s);
+    public void println(Object o);
     public void print(String s);
     public void print(int i);
+    public void print(Object o);
 }
 
 public class IOException extends Exception {

@@ -427,9 +427,7 @@ impl Stmt {
             "a `for`-each with nothing to iterate",
         ))?;
         let Ty::Array(element) = Expr::type_of(iterable.syntax(), context)? else {
-            // An `Iterable` needs `iterator()` / `hasNext()` / `next()`, and the embedded stubs do
-            // not declare `iterator()` on `Iterable` itself.
-            return Err(LowerError::Unsupported("a `for`-each over an `Iterable`"));
+            return Self::for_each_iterator(statement, &iterable, labels, context, emit);
         };
         let descriptor = Descriptor::descriptor_of(&element, context.index)?.to_string();
 
@@ -471,6 +469,79 @@ impl Stmt {
         if emit.asm.reachable() || emit.asm.is_targeted(next)? {
             emit.asm.bind(next)?;
             emit.asm.increment(cursor, 1)?;
+            emit.asm.branch(Branch::Always, test)?;
+        }
+        Self::join(done, emit)
+    }
+
+    /// `for (T v : iterable) body` over something that is not an array, which JLS §14.14.2 defines as
+    /// a loop over `iterable.iterator()`.
+    ///
+    /// The three calls are named on the *interfaces* that declare them rather than on the receiver's
+    /// own type. That resolves for any receiver assignable to `Iterable`, which is exactly the
+    /// condition checked before emitting — and it means one pair of descriptors serves every
+    /// collection instead of one per static type.
+    ///
+    /// `next()` returns `Object` after erasure, so the element needs a `checkcast` on the way into
+    /// the loop variable. Without it the variable would hold an `Object` the frame describes as one,
+    /// and the first method call on it would fail verification.
+    fn for_each_iterator(
+        statement: &ast::ForEachStmt,
+        iterable: &ast::Expr,
+        labels: Vec<String>,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        const ITERABLE: &str = "java/lang/Iterable";
+        const ITERATOR: &str = "java/util/Iterator";
+
+        // Only a type whose members the index holds can be checked for `iterator()`, and a receiver
+        // that does not have one is a program the linter reports rather than one to emit for.
+        let Ty::Class(jals_hir::ClassTy::Project { id, .. }) =
+            Expr::type_of(iterable.syntax(), context)?
+        else {
+            return Err(LowerError::Unsupported("a `for`-each over this type"));
+        };
+        if context
+            .index
+            .resolve_member(id, "iterator", jals_hir::Namespace::Method)
+            .is_none()
+        {
+            return Err(LowerError::Unsupported(
+                "a `for`-each over a non-`Iterable`",
+            ));
+        }
+
+        let cursor = emit.slots.declare_temporary(1);
+        Expr::lower(iterable, context, emit)?;
+        emit.asm
+            .invoke_interface(ITERABLE, "iterator", "()Ljava/util/Iterator;")?;
+        emit.asm.store(cursor)?;
+
+        let test = emit.asm.label();
+        let next = emit.asm.label();
+        let done = emit.asm.label();
+        emit.asm.bind(test)?;
+        emit.asm.load(cursor)?;
+        emit.asm.invoke_interface(ITERATOR, "hasNext", "()Z")?;
+        emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
+
+        let binding = Self::for_each_binding(statement.syntax(), context)?;
+        let element = context.inference.type_of_def(binding).clone();
+        let variable = emit.slots.declare(binding, Slots::ty_width(&element));
+        emit.asm.load(cursor)?;
+        emit.asm
+            .invoke_interface(ITERATOR, "next", "()Ljava/lang/Object;")?;
+        emit.asm
+            .check_cast(&Descriptor::class_entry(&element, context.index)?)?;
+        emit.asm.store(variable)?;
+
+        Self::in_scope(labels, done, Some(next), emit, |emit| {
+            Self::body(statement.body().as_ref(), context, emit)
+        })?;
+
+        if emit.asm.reachable() || emit.asm.is_targeted(next)? {
+            emit.asm.bind(next)?;
             emit.asm.branch(Branch::Always, test)?;
         }
         Self::join(done, emit)

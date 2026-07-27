@@ -38,16 +38,28 @@ pub(crate) struct Emit<'a, 'pool> {
     /// whatever the expression happened to leave behind emitted `ireturn` for
     /// `long f() { return 1; }` — a class file that verifies against the wrong descriptor.
     returns: Ty,
+    /// Whether local slot 0 holds `this`.
+    ///
+    /// A `static` method's slot 0 is its *first parameter*, so lowering `this` to an `aload_0` there
+    /// would silently read an argument. The assembler cannot catch it — the slot is written and its
+    /// type is whatever the parameter's is.
+    has_this: bool,
     /// Innermost last.
     scopes: Vec<Scope>,
 }
 
 impl<'a, 'pool> Emit<'a, 'pool> {
-    pub(crate) const fn new(asm: &'a mut Assembler<'pool>, slots: Slots, returns: Ty) -> Self {
+    pub(crate) const fn new(
+        asm: &'a mut Assembler<'pool>,
+        slots: Slots,
+        returns: Ty,
+        has_this: bool,
+    ) -> Self {
         Self {
             asm,
             slots,
             returns,
+            has_this,
             scopes: Vec::new(),
         }
     }
@@ -55,6 +67,14 @@ impl<'a, 'pool> Emit<'a, 'pool> {
     /// The method's declared return type.
     pub(crate) const fn returns(&self) -> &Ty {
         &self.returns
+    }
+
+    /// Push `this`, or report that there is none.
+    pub(crate) fn load_this(&mut self) -> Result<()> {
+        if !self.has_this {
+            return Err(LowerError::Unsupported("`this` in a `static` method"));
+        }
+        Ok(self.asm.load(0)?)
     }
 
     /// Enter a construct a `break` (and maybe a `continue`) can leave.

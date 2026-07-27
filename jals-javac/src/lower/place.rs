@@ -71,6 +71,10 @@ impl Place {
 
     /// A bare name: a local, or an unqualified field of the enclosing type.
     fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<Self> {
+        // `this = …` is not a Java program, and `this` is the one name with nothing to resolve.
+        if Expr::is_this(name.syntax()) {
+            return Err(LowerError::Unsupported("an assignment to `this`"));
+        }
         let text = || LowerError::Unresolved(name.syntax().text().to_string().trim().into());
         let id = context.def_at(name.syntax()).ok_or_else(text)?;
         if let Some(slot) = emit.slots.slot_of(id) {
@@ -91,7 +95,7 @@ impl Place {
             })
         } else {
             // The `this` the source left unwritten. It is the receiver, so it goes on the stack now.
-            emit.asm.load(0)?;
+            emit.load_this()?;
             Ok(Self::Field {
                 owner,
                 name: field,

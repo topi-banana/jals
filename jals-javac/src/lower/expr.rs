@@ -37,6 +37,9 @@ use crate::jvm::{BinOp, Branch, Compare, Numeric};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, Result};
 
+/// The builder a string concatenation runs through.
+const STRING_BUILDER: &str = "java/lang/StringBuilder";
+
 /// How a type is represented where a conversion has to decide what to emit.
 ///
 /// Coarser than a [`Ty`] and finer than a
@@ -107,6 +110,14 @@ impl Expr {
             ast::Expr::Index(index) => Self::index(index, context, emit),
             ast::Expr::Cast(cast) => Self::cast(cast, context, emit),
             ast::Expr::Ternary(ternary) => Self::ternary(ternary, context, emit),
+            ast::Expr::New(new) => Self::new_expr(new, context, emit),
+            // An array initialiser has no type of its own — `{1, 2, 3}` is an array of whatever it is
+            // assigned to — so it is normally reached through `lower_as`, which knows the target.
+            // Inference does record one where it could work it out, which covers a declaration.
+            ast::Expr::ArrayInit(init) => {
+                let ty = Self::type_of(init.syntax(), context)?;
+                Self::array_initializer(init, &ty, context, emit)
+            }
             _ => Err(LowerError::Unsupported("this expression form")),
         }
     }
@@ -121,6 +132,12 @@ impl Expr {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
+        // An array initialiser is the one expression whose type comes from its *target*: `{1, 2, 3}`
+        // has none of its own, and `byte[] b = {1, 2, 3}` stores bytes where `int[] i = {1, 2, 3}`
+        // stores ints. So the conversion runs before the value rather than after it.
+        if let ast::Expr::ArrayInit(init) = expr {
+            return Self::array_initializer(init, target, context, emit);
+        }
         Self::lower(expr, context, emit)?;
         let target = Repr::of(target)?;
         let source = Self::source_repr(expr, context, emit)?;
@@ -388,6 +405,11 @@ impl Expr {
 
     /// A bare name: a local, a parameter, or an unqualified field of the enclosing type.
     fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        // `this` is not a name that resolves to anything — it is slot 0, which is why it has no
+        // identifier token to look up.
+        if Self::is_this(name.syntax()) {
+            return emit.load_this();
+        }
         let text = name.syntax().text().to_string();
         let unresolved = || LowerError::Unresolved(text.trim().into());
         let id = context.def_at(name.syntax()).ok_or_else(unresolved)?;
@@ -400,7 +422,7 @@ impl Expr {
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &field, &descriptor)?;
         } else {
-            emit.asm.load(0)?;
+            emit.load_this()?;
             emit.asm.get_field(&owner, &field, &descriptor)?;
         }
         Ok(())
@@ -412,6 +434,13 @@ impl Expr {
     /// A name that is not a local is one of the enclosing type's own fields, written without the
     /// `this.` the JVM still requires. A field declaration is a file-local definition like any
     /// other, so its id maps straight back to the indexed member.
+    /// Whether a `NAME_REF` node is the bare `this`.
+    pub(crate) fn is_this(node: &SyntaxNode) -> bool {
+        node.children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW)
+    }
+
     pub(crate) fn own_field(id: DefId, context: &Context<'_>) -> Option<MemberId> {
         let declaration = context.resolved.def(id);
         context
@@ -501,7 +530,7 @@ impl Expr {
                     Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
                 // A bare call in an instance method is an implicit `this`.
-                _ => emit.asm.load(0)?,
+                _ => emit.load_this()?,
             }
         }
         // Each argument is converted to the *declared* parameter type: `f(1)` against `f(long)` is
@@ -540,6 +569,170 @@ impl Expr {
     fn index(index: &ast::IndexExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let place = Place::resolve(&ast::Expr::Index(index.clone()), context, emit)?;
         place.read(emit.asm)
+    }
+
+    /// `new Foo(args)`, `new T[n]`, `new T[n][m]`, or `new T[]{…}`.
+    ///
+    /// One node kind, two unrelated operations, told apart by whether an argument list is present:
+    /// the grammar puts an object creation's `(…)` and an array creation's `[…]` in the same place.
+    fn new_expr(new: &ast::NewExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        if new.args().is_none() {
+            return Self::new_array(new, context, emit);
+        }
+        if new.body().is_some() {
+            return Err(LowerError::Unsupported("an anonymous class"));
+        }
+        if new.qualifier().is_some() {
+            return Err(LowerError::Unsupported("a qualified inner-class creation"));
+        }
+        let unresolved = || LowerError::Unresolved(new.syntax().text().to_string().trim().into());
+        let arguments: alloc::vec::Vec<ast::Expr> = new
+            .args()
+            .into_iter()
+            .flat_map(|list| list.args())
+            .collect();
+        let selected = context
+            .inference
+            .call_target_of(Context::span(new.syntax()));
+        // A class that declares no constructor has the implicit no-argument one (JLS §8.8.9), and
+        // *nothing declared it* — so there is no indexed member for selection to have found, and
+        // `new Foo()` on the most ordinary class in Java arrives with none. Its descriptor is fixed.
+        let (owner, descriptor, params) = if let Some(member) = selected {
+            (
+                Descriptor::internal_name(
+                    context
+                        .index
+                        .item(context.index.member(member).owner)
+                        .fqn
+                        .as_str(),
+                ),
+                MethodDescriptor::to_string(&Descriptor::method_descriptor(
+                    member,
+                    context.index,
+                    true,
+                )?),
+                context.index.resolved_param_tys(member),
+            )
+        } else {
+            let Ty::Class(jals_hir::ClassTy::Project { id, .. }) =
+                Self::type_of(new.syntax(), context)?
+            else {
+                return Err(unresolved());
+            };
+            let declares_one = context
+                .index
+                .own_members(id)
+                .iter()
+                .any(|&member| context.index.member(member).kind == DefKind::Constructor);
+            if declares_one || !arguments.is_empty() {
+                // Either the class has constructors and none of them accepted these arguments, or it
+                // has none and was handed some anyway. Both are the linter's to report.
+                return Err(unresolved());
+            }
+            (
+                Descriptor::internal_name(context.index.item(id).fqn.as_str()),
+                "()V".to_owned(),
+                alloc::vec::Vec::new(),
+            )
+        };
+
+        emit.asm.new_object(&owner)?;
+        // The constructor consumes one reference and returns nothing, so the expression's own value
+        // has to be a second copy — made *before* the arguments go on top of it.
+        emit.asm.dup()?;
+        for (index, argument) in arguments.iter().enumerate() {
+            match params.get(index) {
+                Some(declared) => Self::lower_as(argument, declared, context, emit)?,
+                None => return Err(LowerError::Unsupported("a varargs constructor")),
+            }
+        }
+        Ok(emit
+            .asm
+            .invoke_special(&owner, "<init>", &descriptor, false)?)
+    }
+
+    /// An array creation.
+    ///
+    /// Three shapes with three different instructions. `new T[n]` is a `newarray` or an `anewarray`;
+    /// `new T[n][m]` is one `multianewarray` allocating both levels at once, and `new T[n][]` is the
+    /// same instruction with only the levels it was given; `new T[]{…}` allocates and then stores.
+    fn new_array(new: &ast::NewExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        let created = Self::type_of(new.syntax(), context)?;
+        let Ty::Array(element) = &created else {
+            return Err(LowerError::Unsupported("a `new` of an unindexed type"));
+        };
+
+        // An initialiser supplies the length, so it is checked for before the bracket forms.
+        if let Some(init) = new.syntax().children().find_map(ast::ArrayInit::cast) {
+            return Self::array_initializer(&init, &created, context, emit);
+        }
+
+        // The lengths are the bracket contents, in order; the *dimensions* are the bracket pairs,
+        // which `new T[n][]` gives more of than lengths.
+        let lengths: alloc::vec::Vec<ast::Expr> = new
+            .syntax()
+            .children()
+            .filter(|child| child.kind() != jals_syntax::SyntaxKind::ARRAY_INIT)
+            .filter_map(ast::Expr::cast)
+            .collect();
+        let dimensions = new
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::LBRACK)
+            .count();
+        if lengths.is_empty() {
+            return Err(LowerError::Unsupported("an array creation with no length"));
+        }
+
+        let int = Ty::Primitive(Primitive::Int);
+        for length in &lengths {
+            Self::lower_as(length, &int, context, emit)?;
+        }
+        if dimensions <= 1 {
+            let descriptor = Descriptor::descriptor_of(element, context.index)?.to_string();
+            return Ok(emit.asm.new_array(&descriptor)?);
+        }
+        let descriptor = Descriptor::descriptor_of(&created, context.index)?.to_string();
+        let given = u8::try_from(lengths.len())
+            .map_err(|_| LowerError::Unsupported("an array of this many dimensions"))?;
+        Ok(emit.asm.new_multi_array(&descriptor, given)?)
+    }
+
+    /// `{a, b, c}` as an array of `target`'s element type.
+    ///
+    /// Allocate, then store each element through a duplicated reference — which is what makes the
+    /// array itself the expression's value while every `*astore` consumed a copy of it.
+    fn array_initializer(
+        init: &ast::ArrayInit,
+        target: &Ty,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let Ty::Array(element) = target else {
+            return Err(LowerError::Unsupported(
+                "an array initialiser outside an array type",
+            ));
+        };
+        let descriptor = Descriptor::descriptor_of(element, context.index)?.to_string();
+        let elements: alloc::vec::Vec<ast::Expr> = init.elements().collect();
+        let length = i32::try_from(elements.len())
+            .map_err(|_| LowerError::Unsupported("an array initialiser this long"))?;
+
+        emit.asm.const_int(length)?;
+        emit.asm.new_array(&descriptor)?;
+        for (index, value) in elements.iter().enumerate() {
+            emit.asm.dup()?;
+            emit.asm.const_int(
+                i32::try_from(index)
+                    .map_err(|_| LowerError::Unsupported("an array initialiser this long"))?,
+            )?;
+            // A nested initialiser is an array of the element type, which is itself an array type —
+            // so the same routine answers `{{1, 2}, {3}}`.
+            Self::lower_as(value, element, context, emit)?;
+            emit.asm.array_store(&descriptor)?;
+        }
+        Ok(())
     }
 
     /// `(T) e`.
@@ -794,12 +987,12 @@ impl Expr {
                 .binary(operation, &jals_classfile::VerificationType::Integer)?);
         }
 
-        // A `+` whose result is a reference is string concatenation, not addition, and it shares
-        // this node kind.
+        // A `+` whose result is a `String` is concatenation, not addition, and it shares this node
+        // kind.
         if operation == BinOp::Add
-            && matches!(Self::type_of(binary.syntax(), context)?, Ty::Class(_))
+            && Self::is_string(&Self::type_of(binary.syntax(), context)?, context)
         {
-            return Err(LowerError::Unsupported("string concatenation"));
+            return Self::concat(binary, context, emit);
         }
 
         let left_numeric = Self::numeric_of(left.syntax(), context)?;
@@ -817,6 +1010,94 @@ impl Expr {
         Self::lower_to(&left, promoted, context, emit)?;
         Self::lower_to(&right, promoted, context, emit)?;
         Ok(emit.asm.binary(operation, &promoted.stack())?)
+    }
+
+    /// `a + b` where the result is a `String`.
+    ///
+    /// A `StringBuilder` chain, which is what javac emitted before it moved to `invokedynamic`:
+    /// allocate one builder for the whole expression, `append` each operand at its own static type,
+    /// and `toString`.
+    ///
+    /// **The flattening is the point.** `a + b + c` parses as `(a + b) + c`, and lowering each `+`
+    /// on its own would build the left string, hand it to a second builder, and throw it away. So the
+    /// tree is walked to its leaves first, and only a `+` whose own result is a `String` continues the
+    /// chain — `"x" + (1 + 2)` appends the sum 3, not the digits.
+    fn concat(
+        binary: &ast::BinaryExpr,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        emit.asm.new_object(STRING_BUILDER)?;
+        emit.asm.dup()?;
+        emit.asm
+            .invoke_special(STRING_BUILDER, "<init>", "()V", false)?;
+        Self::append(&ast::Expr::Binary(binary.clone()), context, emit)?;
+        Ok(emit
+            .asm
+            .invoke_virtual(STRING_BUILDER, "toString", "()Ljava/lang/String;")?)
+    }
+
+    /// Append `expr` to the builder on top of the stack, flattening a nested concatenation.
+    fn append(expr: &ast::Expr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        match expr {
+            // Parentheses group the *tree*, not the chain: `("a" + 1) + 2` is still one chain.
+            ast::Expr::Paren(paren) => {
+                return Self::append(&Self::inner(paren.expr())?, context, emit);
+            }
+            ast::Expr::Binary(binary)
+                if Self::operator(binary.syntax()).as_slice() == [PLUS]
+                    && Self::is_string(&Self::type_of(binary.syntax(), context)?, context) =>
+            {
+                Self::append(&Self::inner(binary.lhs())?, context, emit)?;
+                return Self::append(&Self::inner(binary.rhs())?, context, emit);
+            }
+            _ => {}
+        }
+        Self::lower(expr, context, emit)?;
+        // Which overload the operand's own type names. Getting this wrong is not a verification
+        // failure: sending a `char` to `append(int)` prints its code point.
+        let descriptor = match Self::source_repr(expr, context, emit)? {
+            Repr::Boolean => "(Z)Ljava/lang/StringBuilder;",
+            Repr::Number(Numeric::Char) => "(C)Ljava/lang/StringBuilder;",
+            Repr::Number(Numeric::Long) => "(J)Ljava/lang/StringBuilder;",
+            Repr::Number(Numeric::Float) => "(F)Ljava/lang/StringBuilder;",
+            Repr::Number(Numeric::Double) => "(D)Ljava/lang/StringBuilder;",
+            // `byte` and `short` have no overload of their own; they are already `int`s here.
+            Repr::Number(_) => "(I)Ljava/lang/StringBuilder;",
+            Repr::Reference => {
+                if Self::type_of(expr.syntax(), context)
+                    .is_ok_and(|ty| Self::is_string(&ty, context))
+                {
+                    "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+                } else {
+                    // `append(Object)` runs `String.valueOf`, which is what turns a `null` into
+                    // `"null"` rather than throwing.
+                    "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+                }
+            }
+        };
+        // `append` consumes the builder as its receiver and hands the same one back, which is what
+        // makes the chain a chain: the stack has exactly one builder on it before and after.
+        Ok(emit
+            .asm
+            .invoke_virtual(STRING_BUILDER, "append", descriptor)?)
+    }
+
+    /// Whether `ty` is `java.lang.String`, however it was named.
+    ///
+    /// Both spellings count. A concatenation's own type comes out of inference as an *external*
+    /// `String` rather than as the indexed stub, because the operator synthesises it rather than
+    /// reading it off a declaration.
+    fn is_string(ty: &Ty, context: &Context<'_>) -> bool {
+        match ty {
+            Ty::Class(jals_hir::ClassTy::Project { id, .. }) => {
+                context.index.item(*id).fqn.as_str() == "java.lang.String"
+            }
+            Ty::Class(jals_hir::ClassTy::External { name, .. }) => {
+                name == "String" || name == "java.lang.String"
+            }
+            _ => false,
+        }
     }
 
     /// `e instanceof T`.
@@ -1019,12 +1300,32 @@ impl Expr {
             return place.write(emit.asm, true);
         }
 
+        // `s += x` on a `String` is a concatenation, and the only compound assignment whose operator
+        // is not an arithmetic one.
+        if operation == BinOp::Add && Self::is_string(place.ty(), context) {
+            place.dup_address(emit.asm)?;
+            place.read(emit.asm)?;
+            emit.asm.new_object(STRING_BUILDER)?;
+            emit.asm.dup()?;
+            emit.asm
+                .invoke_special(STRING_BUILDER, "<init>", "()V", false)?;
+            // The old value was read before the builder existed, so the two are the wrong way round.
+            emit.asm.swap()?;
+            emit.asm.invoke_virtual(
+                STRING_BUILDER,
+                "append",
+                "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            )?;
+            Self::append(value, context, emit)?;
+            emit.asm
+                .invoke_virtual(STRING_BUILDER, "toString", "()Ljava/lang/String;")?;
+            return place.write(emit.asm, true);
+        }
+
         let Some(declared) = declared.number() else {
-            return Err(LowerError::Unsupported(if operation == BinOp::Add {
-                "a compound string concatenation"
-            } else {
-                "a compound assignment of this type"
-            }));
+            return Err(LowerError::Unsupported(
+                "a compound assignment of this type",
+            ));
         };
         let promoted = if operation.is_shift() {
             Self::promote_one(declared)

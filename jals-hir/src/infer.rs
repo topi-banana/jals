@@ -894,10 +894,25 @@ impl<'a> Inferer<'a> {
 
     fn nameref_ty(&self, node: &SyntaxNode) -> Ty {
         // A reference is keyed by its identifier *token* start, which excludes the leading trivia
-        // that the `NAME_REF` node carries; look that token up, not the node. `this` / `super` have
-        // no identifier token (and are never recorded as references), so they yield `Unknown`.
+        // that the `NAME_REF` node carries; look that token up, not the node.
         let Some(tok) = Collect::first_ident_token(node) else {
-            return Ty::Unknown;
+            // `this` has no identifier token and is never recorded as a reference, so its type has to
+            // come from where it appears: the enclosing type. That is what makes `this.field` and
+            // `this.method()` resolve at all — a constructor writing `this.x = x` is the ordinary
+            // shape, and without it the access binds to nothing.
+            //
+            // `super` is deliberately left unknown. Its member lookup has to start at the
+            // *superclass*, and answering it with the enclosing type would bind an overridden member
+            // to the override rather than to the one `super` names.
+            let is_this = node
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .any(|token| token.kind() == THIS_KW);
+            return if is_this {
+                self.self_ty(node)
+            } else {
+                Ty::Unknown
+            };
         };
         if let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
             && let Resolution::Def(id) = self.resolved.references[ri].resolution
@@ -905,6 +920,22 @@ impl<'a> Inferer<'a> {
             return self.def_types[id.0 as usize].clone();
         }
         Ty::Unknown
+    }
+
+    /// The type `this` has where `node` appears: the enclosing type declaration, raw.
+    ///
+    /// Raw — no type arguments — because inside a generic type's own body its parameters stand for
+    /// themselves, and a member read through `this` substitutes them by name.
+    fn self_ty(&self, node: &SyntaxNode) -> Ty {
+        let (Some(item), Some((index, _))) = (self.enclosing_item(node), self.project) else {
+            return Ty::Unknown;
+        };
+        let fqn = index.item(item).fqn.as_str();
+        Ty::Class(ClassTy::Project {
+            id: item,
+            name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
+            args: Vec::new(),
+        })
     }
 
     fn unary_ty(&self, u: &ast::UnaryExpr) -> Ty {

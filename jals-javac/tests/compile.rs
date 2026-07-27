@@ -65,6 +65,10 @@ fn run(source: &str, main_class: &str) -> String {
     }
 
     let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
         .arg("-cp")
         .arg(directory.path())
         .arg(main_class)
@@ -150,11 +154,11 @@ fn an_unsupported_construct_is_reported() {
     let source = r"
 public class Unsupported {
     public static void main(String[] args) {
-        int[] values = new int[3];
+        Runnable r = () -> {};
     }
 }
 ";
-    let error = compile(source).expect_err("array creation is not lowered yet");
+    let error = compile(source).expect_err("a lambda is not lowered yet");
     assert!(
         matches!(error, LowerError::Unsupported(_)),
         "expected an Unsupported error, got {error}"
@@ -739,6 +743,10 @@ public interface Shape {
     let directory = tempfile::tempdir().expect("temp dir");
     std::fs::write(directory.path().join("Shape.class"), &classes[0].bytes).expect("write");
     let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
         .arg("-cp")
         .arg(directory.path())
         .arg("Shape")
@@ -922,6 +930,10 @@ public class Walk {
     let directory = tempfile::tempdir().expect("temp dir");
     std::fs::write(directory.path().join("Walk.class"), &classes[0].bytes).expect("write");
     let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
         .arg("-cp")
         .arg(directory.path())
         .arg("Walk")
@@ -1159,9 +1171,6 @@ public class Several {
 #[test]
 fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
-        ("int[] v = new int[3];", "this expression form"),
-        ("Object o = new Object();", "this expression form"),
-        (r#"String s = "a" + "b";"#, "string concatenation"),
         ("switch (1) { default: break; }", "this statement form"),
         ("throw null;", "this statement form"),
         ("synchronized (args) { }", "this statement form"),
@@ -1183,4 +1192,236 @@ public class Later {{
             "`{source}` should report {expected:?}, got {error}"
         );
     }
+}
+
+/// `new Foo(args)`, with the overload the arguments selected.
+#[test]
+fn object_creation_runs_the_constructor_it_selected() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Point {
+    int x;
+    int y;
+    String tag = "made";
+
+    Point() {
+        x = 1;
+        y = 1;
+    }
+
+    Point(int both) {
+        x = both;
+        y = both;
+    }
+
+    Point(int x, long y) {
+        this.x = x;
+        this.y = (int) y;
+    }
+
+    int sum() { return x * 100 + y; }
+
+    public static void main(String[] args) {
+        System.out.println(new Point().sum());
+        System.out.println(new Point(3).sum());
+        // The `long` parameter is what makes this overload the one an `int` literal widens into.
+        System.out.println(new Point(4, 5).sum());
+        System.out.println(new Point().tag);
+        // A constructor's field initialisers run before its own body, so `tag` is set either way.
+        Point moved = new Point(7);
+        moved.x = 9;
+        System.out.println(moved.sum());
+        System.out.println(new StringBuilder("ab").append(1).append('c').toString());
+    }
+}
+"#;
+    assert_eq!(run(source, "Point"), "101\n303\n405\nmade\n907\nab1c\n");
+}
+
+/// A `new` whose argument list contains a branch keeps an *uninitialised* reference live across it.
+///
+/// That is the one shape where a stack-map frame has to name the `new`'s own bytecode offset — and the
+/// offset does not exist until branch widening has run, so it is carried as an item index and
+/// translated at the end. A wrong translation reparses perfectly and then fails to load.
+#[test]
+fn a_new_with_a_conditional_argument_verifies() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Fresh {
+    int value;
+
+    Fresh(int value) { this.value = value; }
+
+    public static void main(String[] args) {
+        Fresh chosen = new Fresh(args.length == 0 ? 10 : 20);
+        System.out.println(chosen.value);
+        System.out.println(new StringBuilder(args.length == 0 ? "none" : "some").append('!').toString());
+    }
+}
+"#;
+    assert_eq!(run(source, "Fresh"), "10\nnone!\n");
+}
+
+/// Every array-creation form, and the element types whose opcodes differ.
+#[test]
+fn every_array_creation_form_runs() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Made {
+    static int[] sized(int n) { return new int[n]; }
+
+    public static void main(String[] args) {
+        int[] a = new int[3];
+        a[2] = 42;
+        System.out.println(a[2] + a.length);
+
+        // Both levels at once, and only the outer one.
+        int[][] both = new int[2][3];
+        both[1][2] = 5;
+        System.out.println(both.length * 100 + both[0].length * 10 + both[1][2]);
+        int[][] outer = new int[2][];
+        System.out.println(outer.length);
+        outer[0] = sized(4);
+        System.out.println(outer[0].length);
+
+        // An initialiser, with and without the `new T[]` in front of it.
+        int[] listed = new int[]{1, 2, 3};
+        int[] bare = {4, 5};
+        System.out.println(listed[2] + bare[0] + bare[1]);
+        int[][] nested = {{1, 2}, {3}};
+        System.out.println(nested[0][1] * 100 + nested[1][0] * 10 + nested[1].length);
+
+        // The four narrow element types have their own opcodes, and `boolean` shares `byte`'s.
+        byte[] bytes = {1, (byte) 200};
+        System.out.println(bytes[1]);
+        char[] chars = {'x', (char) 65535};
+        System.out.println(chars[0]);
+        System.out.println((int) chars[1]);
+        short[] shorts = {(short) 40000};
+        System.out.println(shorts[0]);
+        boolean[] flags = {true, false};
+        System.out.println(flags[0]);
+        long[] longs = {4294967296L};
+        System.out.println(longs[0]);
+        double[] doubles = {1.5, 2.5};
+        System.out.println(doubles[0] + doubles[1]);
+        String[] names = {"first", "second"};
+        System.out.println(names[1]);
+        // An element assignment yields the value it wrote.
+        System.out.println(a[0] = 8);
+        a[1] += 3;
+        System.out.println(a[1]);
+        a[1]++;
+        System.out.println(a[1]);
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Made"),
+        "45\n235\n2\n4\n12\n231\n-56\nx\n65535\n-25536\ntrue\n4294967296\n4.0\nsecond\n8\n3\n4\n"
+    );
+}
+
+/// String concatenation, at every operand type and through the flattening a chain needs.
+///
+/// `a + b + c` parses as `(a + b) + c`. Lowering each `+` on its own builds the left string, hands it
+/// to a second builder, and throws it away — correct but quadratic. And which `append` overload an
+/// operand takes is not a verification question: sending a `char` to `append(int)` prints its code
+/// point in a class file that loads and runs.
+#[test]
+fn string_concatenation_appends_each_operand_at_its_own_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Joined {
+    static String describe(int n) { return "n=" + n; }
+
+    public static void main(String[] args) {
+        System.out.println("x" + 1 + 'c' + 2L + true + 1.5 + 1.5f);
+        System.out.println(describe(7));
+        // A `+` inside a concatenation whose own result is numeric is an *addition*.
+        System.out.println("sum=" + (1 + 2));
+        System.out.println("digits=" + 1 + 2);
+        // The other way round: a numeric prefix turns into a string as soon as one operand is one.
+        System.out.println(1 + 2 + "x");
+        // A `null` reference appends as the four characters, not as a thrown exception.
+        String missing = null;
+        System.out.println("[" + missing + "]");
+        Object boxed = null;
+        System.out.println("[" + boxed + "]");
+        // A `byte` and a `short` have no overload of their own; they are already `int`s.
+        byte b = 7;
+        short s = 8;
+        System.out.println("" + b + s);
+        // Compound concatenation reads the target and writes it back.
+        String acc = "a";
+        acc += "b";
+        acc += 1;
+        acc += 'c';
+        System.out.println(acc);
+        // And on a field, where the address has to survive the read.
+        System.out.println(new Joined().grow());
+    }
+
+    String label = "L";
+
+    String grow() {
+        label += "-";
+        label += 2;
+        return label;
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Joined"),
+        "x1c2true1.51.5\n\
+         n=7\n\
+         sum=3\n\
+         digits=12\n\
+         3x\n\
+         [null]\n\
+         [null]\n\
+         78\n\
+         ab1c\n\
+         L-2\n"
+    );
+}
+
+/// A `for`-each over an `Iterable`, which JLS §14.14.2 defines as a loop over `iterator()`.
+///
+/// `next()` returns `Object` after erasure, so the element needs a `checkcast` on the way into the
+/// loop variable — without it the variable holds an `Object` the frame says so about, and the first
+/// method call on it fails verification.
+#[test]
+fn a_for_each_over_an_iterable_runs() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Walked {
+    public static void main(String[] args) {
+        java.util.List<String> names = new java.util.ArrayList<String>();
+        names.add("one");
+        names.add("two");
+        int total = 0;
+        for (String name : names) {
+            System.out.println(name);
+            total += name.length();
+        }
+        System.out.println(total);
+        for (String name : names) {
+            if (name.equals("one")) { continue; }
+            System.out.println("kept " + name);
+        }
+    }
+}
+"#;
+    assert_eq!(run(source, "Walked"), "one\ntwo\n6\nkept two\n");
 }

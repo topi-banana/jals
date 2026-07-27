@@ -149,6 +149,10 @@ fn run(name: &str, class: &ClassFile) -> String {
     .expect("write class");
 
     let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
         .arg("-cp")
         .arg(directory.path())
         .arg(name)

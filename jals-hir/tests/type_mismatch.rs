@@ -169,11 +169,30 @@ fn upcast_and_unrelated_project_types() {
     assert_eq!(indexed(&[bad], 0).len(), 1);
 }
 
+/// An external target is lenient about the *hierarchy* it cannot see, not about boxing.
+///
+/// Boxing produces one wrapper per primitive (JLS §5.1.7), and a name that is not that wrapper is not
+/// a boxing target however little is known about it. Admitting any external name made `String s = 1;`
+/// pass — and, worse, made every primitive argument applicable to every reference parameter, which
+/// overload selection then resolved by declaration order.
 #[test]
-fn external_target_stays_lenient_even_with_an_index() {
-    // `String` is java.lang (external): boxing-style leniency means no mismatch is reported yet.
-    let src = "class C { void m() { String s = 1; } }";
-    assert!(indexed(&[src], 0).is_empty());
+fn an_external_target_is_lenient_about_hierarchy_not_about_boxing() {
+    // `int` does not box to a `String`, however external `String` is.
+    assert_eq!(
+        indexed(&["class C { void m() { String s = 1; } }"], 0).len(),
+        1
+    );
+    // It does box to its own wrapper and to what every wrapper is.
+    for target in ["Integer", "Object", "Number", "Comparable"] {
+        let src = format!("class C {{ void m() {{ {target} n = 1; }} }}");
+        assert!(
+            indexed(&[&src], 0).is_empty(),
+            "`int` boxes to {target}, so nothing should be flagged"
+        );
+    }
+    // An unindexed type's *hierarchy* is still unknown, so a reference-to-reference assignment stays
+    // lenient.
+    assert!(indexed(&["class C { void m() { Runnable r = \"s\"; } }"], 0).is_empty());
 }
 
 // ===== method argument checking (index-only) =====
@@ -214,13 +233,17 @@ fn argument_project_subtyping() {
 
 #[test]
 fn an_applicable_overload_silences_the_call() {
-    // `f(String)` leniently accepts a `double` (external boxing target), so the call binds — nothing
-    // is flagged even though `f(int)` rejects it.
-    let src = "class C { void f(int x) {} void f(String s) {} void g() { f(1.0); } }";
-    assert!(indexed(&[src], 0).is_empty());
-    // An exactly-applicable overload also silences it.
+    // An exactly-applicable overload silences the call even where a sibling rejects the argument.
     let ok = "class C { void f(int x) {} void f(boolean b) {} void g() { f(1); f(true); } }";
     assert!(indexed(&[ok], 0).is_empty());
+    // A widening one does too.
+    let widened = "class C { void f(long x) {} void f(String s) {} void g() { f(1); } }";
+    assert!(indexed(&[widened], 0).is_empty());
+    // But a `double` fits neither an `int` nor a `String`, so the call is flagged. `f(String)` used
+    // to accept it — every primitive was assignable to every external name — which silenced a call
+    // no JVM would ever link.
+    let bad = "class C { void f(int x) {} void f(String s) {} void g() { f(1.0); } }";
+    assert_eq!(indexed(&[bad], 0).len(), 1);
 }
 
 #[test]
