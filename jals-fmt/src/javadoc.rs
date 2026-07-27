@@ -748,8 +748,13 @@ impl CommentFormatter {
             }
             if cfg.format_html && Self::is_html_block(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
-                // `writeListOpen` requests a blank line before a classic-Javadoc list.
-                if Self::opens_list(line) && !matches!(blocks.last(), Some(Block::Blank) | None) {
+                // `writeListOpen` requests a blank line before a classic-Javadoc list — but a
+                // list is a *block*, and `requestBlankLine` is ignored inside one, so a nested
+                // list continues its item rather than starting a paragraph.
+                if depth == 0
+                    && Self::opens_list(line)
+                    && !matches!(blocks.last(), Some(Block::Blank) | None)
+                {
                     blocks.push(Block::Blank);
                 }
             }
@@ -989,7 +994,9 @@ impl CommentFormatter {
         if level == 0 {
             return (0, 0);
         }
-        let inner = level * LIST;
+        // Each level sits inside the previous level's *item continuation*, so nesting costs a
+        // list indent on top of an item indent: `writeListOpen` inside `writeListItemOpen`.
+        let inner = level * (LIST + ITEM) - ITEM;
         if ["<li", "<dt", "<dd"]
             .iter()
             .any(|tag| lower.starts_with(tag))
