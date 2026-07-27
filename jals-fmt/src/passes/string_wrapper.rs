@@ -375,6 +375,12 @@ impl StringWrapper {
                 }
             }
 
+            // The break falls *before* a space, so the space itself is a break point: a chunk that
+            // ends exactly at the budget is a chunk that fits. google-java-format reaches the same
+            // answer by adding whole words — each already carrying its leading space.
+            if c == ' ' {
+                last_space = Some(current.len());
+            }
             let unit_width = Width::utf16(&unit);
             let mut budget = if chunks.is_empty() { first } else { rest };
             // Once what is left fits, this is the last chunk and it shares its line with whatever
@@ -400,11 +406,6 @@ impl StringWrapper {
                 last_space = None;
             }
 
-            // The break falls *before* a space, so the space opens the continuation chunk —
-            // `"… and then some" + " more"`.
-            if c == ' ' {
-                last_space = Some(current.len());
-            }
             current.push_str(&unit);
             width += unit_width;
         }
