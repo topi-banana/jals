@@ -346,8 +346,9 @@ impl CommentFormatter {
                 break;
             };
             let end = at + close + 1;
-            // A `<` that opens nothing (`a < b`, a generic in prose) is not a tag.
-            if !rest[at + 1..end - 1].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/') {
+            // Only a tag google-java-format's lexer knows is a token of its own; a `<` that opens
+            // nothing (`a < b`) is not one either.
+            if !Self::is_known_tag(&rest[at + 1..end - 1]) {
                 break;
             }
             if at > 0 {
@@ -373,6 +374,41 @@ impl CommentFormatter {
                 space,
             });
         }
+    }
+
+    /// Whether `inner` — a tag's body, without its `<` and `>` — is a tag `JavadocLexer` lexes.
+    ///
+    /// Its patterns name exactly these: `pre`, `code`, `table`, `ul|ol|dl`, `li|dt|dd`, `h[1-6]`,
+    /// `p`, `blockquote`, `br`, and `a`. Everything else — `<em>`, `<i>` — is part of the literal
+    /// around it, which is what keeps `<em>locale-sensitive</em>` one unbreakable unit.
+    fn is_known_tag(inner: &str) -> bool {
+        const TAGS: [&str; 13] = [
+            "pre",
+            "code",
+            "table",
+            "ul",
+            "ol",
+            "dl",
+            "li",
+            "dt",
+            "dd",
+            "p",
+            "blockquote",
+            "br",
+            "a",
+        ];
+        let inner = inner.trim().trim_start_matches('/').trim_start();
+        let name: &str = inner
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("");
+        if name.len() == 2
+            && name.starts_with(['h', 'H'])
+            && name[1..].starts_with(|c: char| ('1'..='6').contains(&c))
+        {
+            return true;
+        }
+        TAGS.iter().any(|tag| name.eq_ignore_ascii_case(tag))
     }
 
     /// `<BR/>` and `<P />` in their canonical spelling.
