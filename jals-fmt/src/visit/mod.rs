@@ -506,7 +506,9 @@ impl<'a> Ctx<'a> {
             // token — UNIFIED for a block comment, so a list whose items carry comments goes one
             // per line as soon as it wraps at all, and stays on one line while it fits.
             if self.spaced {
-                self.ops.unify_last_break();
+                if comment.breaks {
+                    self.ops.unify_last_break();
+                }
             } else if self.previous.is_some() {
                 let space = self
                     .previous

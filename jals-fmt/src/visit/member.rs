@@ -301,6 +301,7 @@ impl Ctx<'_> {
         self.open_flat(Indent::ZERO);
         let mut opened = false;
         let mut past_constants = false;
+        let mut first_constant = true;
         // Whether a break is owed before the next item. A `;` that directly follows a constant
         // terminates it (`B;`) and takes no break; a further `;` is an item of its own and does.
         let mut pending = false;
@@ -364,10 +365,15 @@ impl Ctx<'_> {
                     self.enum_break(trivial, policy);
                     // Constants have no `around-*` rule of their own, but the blank lines an
                     // author grouped them with are preserved — google-java-format's
-                    // `BlankLineWanted.PRESERVE` between enum constants.
-                    let source = self
-                        .blank_lines_before(member)
-                        .min(blank.max_in_declarations);
+                    // `BlankLineWanted.PRESERVE` between enum constants. Not above the *first*
+                    // one: `visitEnumDeclaration` asks for `NO` right after the `{`.
+                    let source = if first_constant {
+                        0
+                    } else {
+                        self.blank_lines_before(member)
+                            .min(blank.max_in_declarations)
+                    };
+                    first_constant = false;
                     if source > 0 {
                         self.ensure_blank_lines(source, Indent::ZERO);
                     }

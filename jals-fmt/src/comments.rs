@@ -45,6 +45,12 @@ pub(crate) struct Comment {
     pub(crate) text: String,
     /// Blank lines between this comment and whatever preceded it in the source.
     pub(crate) blank_lines_before: usize,
+    /// Whether a break stands in front of this comment.
+    ///
+    /// `OpsBuilder.build` inserts one for every comment it puts in a token's `toksBefore` — a
+    /// parameter comment, or one written after the `(` / `<` / `.` it belongs inside. A comment
+    /// that merely happens to precede a token on the same line stays where the author put it.
+    pub(crate) breaks: bool,
 }
 
 impl Comment {
@@ -118,6 +124,15 @@ impl CommentMap {
                 let (text, mut hugs) = Self::classify(&tok, normalize_parameter_comments);
                 // A Javadoc documents the declaration below it and always takes its own line,
                 // however the author wrote it — only a plain `/* … */` may hug.
+                // A parameter comment always starts its own token; so does a comment written
+                // after an opener, which is what `may_trail` sends here.
+                let opener = last_sig.as_ref().is_some_and(|prev| {
+                    matches!(
+                        prev.kind(),
+                        SyntaxKind::LPAREN | SyntaxKind::LT | SyntaxKind::DOT
+                    )
+                });
+                let breaks = hugs || (newlines == 0 && opener);
                 if inline_block_comments
                     && !hugs
                     && kind == SyntaxKind::BLOCK_COMMENT
@@ -129,6 +144,7 @@ impl CommentMap {
                     kind,
                     text,
                     blank_lines_before: newlines.saturating_sub(1),
+                    breaks,
                 };
 
                 let trails = newlines == 0
