@@ -217,10 +217,15 @@ impl CommentFormatter {
             },
         ] = blocks.as_slice()
         {
-            let inline = Self::fill_two(words, usize::MAX, usize::MAX).join(" ");
-            let width = indent + Width::utf16(opener) + Width::utf16(&inline) + 4;
-            if width <= style.comment_width(indent) && !inline.is_empty() {
-                return alloc::format!("{opener} {inline} */");
+            // `makeSingleLineIfPossible` collapses a comment that renders as *one* content line.
+            // A `<br>` ends its line however wide the comment is, so a paragraph holding one is
+            // several lines and stays that way.
+            let lines = Self::fill_two(words, usize::MAX, usize::MAX);
+            if let [inline] = lines.as_slice() {
+                let width = indent + Width::utf16(opener) + Width::utf16(inline) + 4;
+                if width <= style.comment_width(indent) && !inline.is_empty() {
+                    return alloc::format!("{opener} {inline} */");
+                }
             }
         }
 
@@ -451,7 +456,12 @@ impl CommentFormatter {
     /// on separate lines.
     fn is_item_tag(text: &str) -> bool {
         let lower = text.to_ascii_lowercase();
-        if lower.contains("href=") && lower.ends_with('>') {
+        // A tag the whitespace split cut in half — `<dt` of `<dt id="x">` — is not a tag yet, and
+        // hugging the next token to it would delete the space inside the tag.
+        if !lower.ends_with('>') {
+            return false;
+        }
+        if lower.contains("href=") {
             return true;
         }
         ["<li", "<dt", "<dd", "<a "]
