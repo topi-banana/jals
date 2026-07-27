@@ -28,9 +28,11 @@ case-labels = "if-long"
 # `visitEnumDeclaration` forces a break between enum constants, and `visitTry` between resources.
 enum-constants = "always-per-item"
 resource-list = "always-per-item"
-# `classDeclarationTypeList`, `visitThrowsClause`, and `visitParameterizedType` also use UNIFIED
-# breaks, so a clause or a type-argument list that does not fit goes one type per line.
+# `classDeclarationTypeList`, `visitThrowsClause`, `visitParameterizedType`, and `visitAnnotation`
+# also use UNIFIED breaks, so a clause, a type-argument list, or an annotation's member-value pairs
+# go one item per line when they do not fit.
 type-arguments = "if-long-per-item"
+annotation-arguments = "if-long-per-item"
 extends-list = "if-long-per-item"
 throws-list = "if-long-per-item"
 # `hasOnlyShortItems`: an argument list fills only while every argument is under 10 columns of

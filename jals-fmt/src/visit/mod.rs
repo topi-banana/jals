@@ -487,10 +487,15 @@ impl<'a> Ctx<'a> {
         if !self.hoisted.contains(&offset) {
             self.emit_own_line_comments(tok);
         }
-        // A hugging comment sits immediately before the token, on the same line.
+        // A hugging comment sits immediately before the token, on the same line, and takes that
+        // token's own spacing on its left: `java.lang./* @A */ String` writes the comment against
+        // the `.` because the name it annotates would be written there too.
         let hugging = self.comments.leading_inline(tok).to_vec();
         for comment in &hugging {
-            if !self.spaced && self.previous.is_some() {
+            if !self.spaced
+                && let Some(previous) = &self.previous
+                && Spacing::between(previous, tok, self.style)
+            {
                 self.space();
             }
             self.emit_comment(comment);
@@ -713,7 +718,29 @@ impl<'a> Ctx<'a> {
         let Some(first) = Self::first_token(node) else {
             return 0;
         };
-        usize::from(node.text_range().end()).saturating_sub(usize::from(first.text_range().start()))
+        let start = usize::from(first.text_range().start());
+        let own = usize::from(node.text_range().end()).saturating_sub(start);
+        // An item runs to the token that ends it, which is how javac reports an expression's
+        // extent and therefore what google-java-format measures: a comment written after the item
+        // counts as part of it, and `f(false /* why */, …)` goes one argument per line. The walk
+        // stops at a newline so that an item the input had already wrapped measures the same as
+        // one written inline — otherwise formatting would not be idempotent.
+        let mut cursor = node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| !tok.kind().is_trivia())
+            .last()
+            .and_then(|tok| tok.next_token());
+        while let Some(tok) = cursor {
+            if tok.kind() == S::NEWLINE {
+                break;
+            }
+            if !tok.kind().is_trivia() {
+                return usize::from(tok.text_range().start()).saturating_sub(start);
+            }
+            cursor = tok.next_token();
+        }
+        own
     }
 
     /// The first significant token anywhere under `node`.
