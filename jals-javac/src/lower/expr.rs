@@ -1,20 +1,88 @@
 //! Expression lowering: every form leaves exactly one value on the operand stack (or none, for a
 //! `void` call).
+//!
+//! # One opcode names one type
+//!
+//! This is what most of the file is about. `ladd` adds two `long`s and there is no opcode that adds a
+//! `long` to an `int`, so Java's numeric promotions (JLS §5.6) are not a formality here — they are
+//! instructions, and leaving one out produces a class file the verifier rejects or, worse, one that
+//! runs and computes something else. Three separate rules apply:
+//!
+//! - **Binary numeric promotion** (§5.6.2) converts both operands of an arithmetic or comparison
+//!   operator to one type. Both operand types therefore have to be known *before* either is lowered,
+//!   because the left one is converted while it is still alone on the stack.
+//! - **Unary numeric promotion** (§5.6.1) takes anything narrower than `int` to `int`, which is what
+//!   makes `-aByte` an `int` expression and what a shift applies to each side separately.
+//! - **Assignment conversion** (§5.2) is [`lower_as`](Expr::lower_as): the conversion an argument, a
+//!   `return` value, or an assigned value goes through on its way to a known target type.
+//!
+//! The narrow integral types (`byte` / `short` / `char`) are the ones a conversion gets wrong
+//! silently, because all three share the `int` representation on the operand stack. That is why
+//! [`Repr`] exists rather than reading a [`VerificationType`](jals_classfile::VerificationType).
 
 use alloc::borrow::ToOwned as _;
 use alloc::string::{String, ToString as _};
 
 use jals_classfile::MethodDescriptor;
-use jals_hir::{DefKind, MemberId, Ty};
+use jals_hir::{DefId, DefKind, MemberId, Primitive, Ty};
 use jals_syntax::SyntaxKind::{
-    AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, LT, LT_EQ, MINUS, PERCENT, PIPE, PLUS, SLASH, STAR,
+    AMP, AMP_AMP, BANG, BANG_EQ, CARET, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
+    MINUS_MINUS, PERCENT, PIPE, PIPE_PIPE, PLUS, PLUS_PLUS, SLASH, STAR, TILDE,
 };
 use jals_syntax::ast::{self, AstNode as _};
+use jals_syntax::{SyntaxKind, SyntaxNode};
 
-use crate::desc::Descriptor;
-use crate::jvm::{Assembler, BinOp, Branch, Compare};
-use crate::lower::slots::Slots;
-use crate::lower::{Context, LowerError, Result};
+use crate::desc::{DescError, Descriptor};
+use crate::jvm::{BinOp, Branch, Compare, Numeric};
+use crate::lower::place::Place;
+use crate::lower::{Context, Emit, LowerError, Result};
+
+/// How a type is represented where a conversion has to decide what to emit.
+///
+/// Coarser than a [`Ty`] and finer than a
+/// [`VerificationType`](jals_classfile::VerificationType). Coarser because every reference behaves
+/// the same here — a widening reference conversion costs nothing. Finer because `byte`, `short`,
+/// `char`, and `int` are one verification type and four different conversion targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repr {
+    /// A numeric primitive, converted with one of the `x2y` opcodes.
+    Number(Numeric),
+    /// `boolean`. It shares the `int` representation and has no conversion to or from anything, so
+    /// it is neither a number nor a reference.
+    Boolean,
+    /// A reference — a class, an array, `null`, or an erased type variable.
+    Reference,
+}
+
+impl Repr {
+    fn of(ty: &Ty) -> Result<Self> {
+        Ok(match ty {
+            Ty::Primitive(Primitive::Boolean) => Self::Boolean,
+            Ty::Primitive(primitive) => Self::Number(match primitive {
+                Primitive::Byte => Numeric::Byte,
+                Primitive::Short => Numeric::Short,
+                Primitive::Char => Numeric::Char,
+                Primitive::Int => Numeric::Int,
+                Primitive::Long => Numeric::Long,
+                Primitive::Float => Numeric::Float,
+                Primitive::Double => Numeric::Double,
+                // Matched above; the compiler cannot see that from the outer arm.
+                Primitive::Boolean => return Err(DescError::Unknown.into()),
+            }),
+            Ty::Class(_) | Ty::Array(_) | Ty::Null | Ty::TypeVar { .. } => Self::Reference,
+            Ty::Void => return Err(DescError::Void.into()),
+            Ty::Unknown => return Err(DescError::Unknown.into()),
+        })
+    }
+
+    /// The numeric type this is, or `None` for a `boolean` or a reference.
+    const fn number(self) -> Option<Numeric> {
+        match self {
+            Self::Number(numeric) => Some(numeric),
+            Self::Boolean | Self::Reference => None,
+        }
+    }
+}
 
 /// Expression lowering.
 pub(crate) struct Expr;
@@ -24,21 +92,97 @@ impl Expr {
     pub(crate) fn lower(
         expr: &ast::Expr,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         match expr {
-            ast::Expr::Literal(literal) => Self::literal(literal, context, asm),
-            ast::Expr::Paren(paren) => {
-                Self::lower(&Self::inner(paren.expr())?, context, asm, slots)
-            }
-            ast::Expr::NameRef(name) => Self::name(name, context, asm, slots),
-            ast::Expr::FieldAccess(access) => Self::field(access, context, asm, slots),
-            ast::Expr::Call(call) => Self::call(call, context, asm, slots),
-            ast::Expr::Binary(binary) => Self::binary(binary, context, asm, slots),
-            ast::Expr::Assignment(assignment) => Self::assignment(assignment, context, asm, slots),
-            ast::Expr::Unary(unary) => Self::unary(unary, context, asm, slots),
+            ast::Expr::Literal(literal) => Self::literal(literal, context, emit),
+            ast::Expr::Paren(paren) => Self::lower(&Self::inner(paren.expr())?, context, emit),
+            ast::Expr::NameRef(name) => Self::name(name, context, emit),
+            ast::Expr::FieldAccess(access) => Self::field(access, context, emit),
+            ast::Expr::Call(call) => Self::call(call, context, emit),
+            ast::Expr::Binary(binary) => Self::binary(binary, context, emit),
+            ast::Expr::Assignment(assignment) => Self::assignment(assignment, context, emit),
+            ast::Expr::Unary(unary) => Self::unary(unary, context, emit),
+            ast::Expr::Postfix(postfix) => Self::postfix(postfix, context, emit),
+            ast::Expr::Index(index) => Self::index(index, context, emit),
+            ast::Expr::Cast(cast) => Self::cast(cast, context, emit),
+            ast::Expr::Ternary(ternary) => Self::ternary(ternary, context, emit),
             _ => Err(LowerError::Unsupported("this expression form")),
+        }
+    }
+
+    /// Emit `expr` and convert its value to `target`.
+    ///
+    /// The assignment and method-invocation conversions of JLS §5.2 / §5.3, which is where
+    /// `long x = 1;` gets its `i2l` and `f(1)` gets its widening to a `double` parameter.
+    pub(crate) fn lower_as(
+        expr: &ast::Expr,
+        target: &Ty,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        Self::lower(expr, context, emit)?;
+        let target = Repr::of(target)?;
+        let source = Self::source_repr(expr, context, emit)?;
+        Self::coerce(source, target, emit)
+    }
+
+    /// Emit `expr` and convert its value to the numeric type `target`.
+    fn lower_to(
+        expr: &ast::Expr,
+        target: Numeric,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        Self::lower(expr, context, emit)?;
+        let source = Self::source_repr(expr, context, emit)?;
+        Self::coerce(source, Repr::Number(target), emit)
+    }
+
+    /// The representation of the value `expr` just left on the stack.
+    ///
+    /// Inference's record first, and the *stack* when it has none. The fallback is coarser — every
+    /// integral type narrower than `long` reads as `int` there — but it is never wrong, because it
+    /// reads what is actually on the stack rather than guessing: converting a `char` value as if it
+    /// were an `int` is the same instruction, and precision below `int` only matters on the target
+    /// side, which is always known. That keeps a gap in inference from failing a whole method.
+    fn source_repr(expr: &ast::Expr, context: &Context<'_>, emit: &Emit<'_, '_>) -> Result<Repr> {
+        use jals_classfile::VerificationType as Vt;
+        if let Ok(ty) = Self::type_of(expr.syntax(), context)
+            && let Ok(repr) = Repr::of(&ty)
+        {
+            return Ok(repr);
+        }
+        let top = emit.asm.stack_top().ok_or(DescError::Unknown)?;
+        Ok(match top {
+            Vt::Integer => Repr::Number(Numeric::Int),
+            Vt::Long => Repr::Number(Numeric::Long),
+            Vt::Float => Repr::Number(Numeric::Float),
+            Vt::Double => Repr::Number(Numeric::Double),
+            _ => Repr::Reference,
+        })
+    }
+
+    /// Convert the value on top of the stack between two representations.
+    fn coerce(source: Repr, target: Repr, emit: &mut Emit<'_, '_>) -> Result<()> {
+        match (source, target) {
+            (Repr::Number(from), Repr::Number(to)) => Ok(emit.asm.convert(from, to)?),
+            // Two references need nothing: a widening reference conversion is free, and a narrowing
+            // one only happens through a cast, which emits its own `checkcast`.
+            //
+            // `boolean` against `boolean` needs nothing either, and so does `boolean` against `int`:
+            // they are the same word on the stack and Java defines no conversion between them, so a
+            // pair landing there is a gap in inference rather than a program, and emitting nothing is
+            // the honest answer.
+            (Repr::Reference, Repr::Reference)
+            | (Repr::Boolean, Repr::Boolean | Repr::Number(Numeric::Int))
+            | (Repr::Number(Numeric::Int), Repr::Boolean) => Ok(()),
+            // Crossing the primitive / reference boundary is boxing, which is a `valueOf` or an
+            // `intValue` call rather than a conversion opcode.
+            (Repr::Reference, _) | (_, Repr::Reference) => {
+                Err(LowerError::Unsupported("a boxing conversion"))
+            }
+            _ => Err(LowerError::Unsupported("a conversion between these types")),
         }
     }
 
@@ -46,20 +190,50 @@ impl Expr {
         expr.ok_or(LowerError::Unsupported("an expression with no operand"))
     }
 
-    /// The type inference recorded for `node`.
-    fn ty<'a>(context: &'a Context<'_>, node: &jals_syntax::SyntaxNode) -> Result<&'a Ty> {
-        context
-            .inference
-            .type_of_expr(Context::span(node))
-            .ok_or(LowerError::Descriptor(crate::desc::DescError::Unknown))
+    /// The type inference recorded for `node`, if it worked one out.
+    ///
+    /// [`Ty::Unknown`] counts as no answer rather than as an answer: it is what inference records
+    /// where it gave up, and treating it as a type would turn a gap into a wrong descriptor.
+    pub(crate) fn type_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Ty> {
+        match context.inference.type_of_expr(Context::span(node)) {
+            Some(Ty::Unknown) | None => Err(DescError::Unknown.into()),
+            Some(ty) => Ok(ty.clone()),
+        }
+    }
+
+    /// Binary numeric promotion (JLS §5.6.2): the one type both operands are converted to.
+    const fn promote(left: Numeric, right: Numeric) -> Numeric {
+        match (left, right) {
+            (Numeric::Double, _) | (_, Numeric::Double) => Numeric::Double,
+            (Numeric::Float, _) | (_, Numeric::Float) => Numeric::Float,
+            (Numeric::Long, _) | (_, Numeric::Long) => Numeric::Long,
+            // Everything narrower than `long` computes as `int`.
+            _ => Numeric::Int,
+        }
+    }
+
+    /// Unary numeric promotion (JLS §5.6.1): everything narrower than `int` becomes `int`.
+    const fn promote_one(numeric: Numeric) -> Numeric {
+        match numeric {
+            Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => Numeric::Int,
+            other => other,
+        }
+    }
+
+    /// The numeric type `node`'s recorded type is, reported if it is not one.
+    fn numeric_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Numeric> {
+        Repr::of(&Self::type_of(node, context)?)?
+            .number()
+            .ok_or(LowerError::Unsupported(
+                "an arithmetic operand of this type",
+            ))
     }
 
     fn literal(
         literal: &ast::Literal,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        use jals_hir::Primitive;
         use jals_syntax::SyntaxKind::{
             CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL, TRUE_KW,
         };
@@ -71,16 +245,16 @@ impl Expr {
             .ok_or(LowerError::Unsupported("an empty literal"))?;
         let text = token.text();
         match token.kind() {
-            TRUE_KW => asm.const_int(1)?,
-            FALSE_KW => asm.const_int(0)?,
-            NULL_KW => asm.const_null()?,
-            STRING_LITERAL => asm.const_string(&Self::string_value(text)?)?,
+            TRUE_KW => emit.asm.const_int(1)?,
+            FALSE_KW => emit.asm.const_int(0)?,
+            NULL_KW => emit.asm.const_null()?,
+            STRING_LITERAL => emit.asm.const_string(&Self::string_value(text)?)?,
             CHAR_LITERAL => {
                 let value = Self::string_value(text)?
                     .chars()
                     .next()
                     .ok_or(LowerError::Unsupported("an empty character literal"))?;
-                asm.const_int(value as i32)?;
+                emit.asm.const_int(value as i32)?;
             }
             // The lexer has one integer kind and one floating kind; the `L` / `f` suffix decides
             // the width, and inference has already turned that suffix into a type. Reading the type
@@ -88,17 +262,17 @@ impl Expr {
             INT_LITERAL => {
                 let value = Self::integer(text.trim_end_matches(['l', 'L']))?;
                 if matches!(
-                    Self::ty(context, literal.syntax())?,
-                    Ty::Primitive(Primitive::Long)
+                    Self::type_of(literal.syntax(), context),
+                    Ok(Ty::Primitive(Primitive::Long))
                 ) {
-                    asm.const_long(value)?;
+                    emit.asm.const_long(value)?;
                 } else {
                     // Every integer literal is parsed as `i64` so that a `long` one fits; an
                     // `int`-typed literal is in range by construction, and an out-of-range one is
                     // the linter's to report. Masking to the low 32 bits makes the narrowing
                     // explicit and total rather than a truncating cast.
                     let low = u32::try_from(value.cast_unsigned() & 0xFFFF_FFFF).unwrap_or(0);
-                    asm.const_int(low.cast_signed())?;
+                    emit.asm.const_int(low.cast_signed())?;
                 }
             }
             FLOAT_LITERAL => {
@@ -106,11 +280,15 @@ impl Expr {
                 let unreadable = || {
                     LowerError::Unsupported("a floating-point literal this lowering cannot read")
                 };
-                match Self::ty(context, literal.syntax())? {
-                    Ty::Primitive(Primitive::Float) => {
-                        asm.const_float(text.parse().map_err(|_| unreadable())?)?;
-                    }
-                    _ => asm.const_double(text.parse().map_err(|_| unreadable())?)?,
+                if matches!(
+                    Self::type_of(literal.syntax(), context),
+                    Ok(Ty::Primitive(Primitive::Float))
+                ) {
+                    emit.asm
+                        .const_float(text.parse().map_err(|_| unreadable())?)?;
+                } else {
+                    emit.asm
+                        .const_double(text.parse().map_err(|_| unreadable())?)?;
                 }
             }
             _ => return Err(LowerError::Unsupported("this literal kind")),
@@ -209,60 +387,73 @@ impl Expr {
     }
 
     /// A bare name: a local, a parameter, or an unqualified field of the enclosing type.
-    fn name(
-        name: &ast::NameRef,
-        context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
-    ) -> Result<()> {
+    fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let text = name.syntax().text().to_string();
         let unresolved = || LowerError::Unresolved(text.trim().into());
         let id = context.def_at(name.syntax()).ok_or_else(unresolved)?;
-        if let Some(slot) = slots.slot_of(id) {
-            asm.load(slot)?;
+        if let Some(slot) = emit.slots.slot_of(id) {
+            emit.asm.load(slot)?;
             return Ok(());
         }
-        // Not a local, so the name is one of the enclosing type's own fields, written without the
-        // `this.` the JVM still requires. A field declaration is a file-local definition like any
-        // other, so its id maps straight back to the indexed member.
-        let declaration = context.resolved.def(id);
-        let member = context
-            .index
-            .member_by_decl(context.file, declaration.name_range.start)
-            .ok_or_else(unresolved)?;
+        let member = Self::own_field(id, context).ok_or_else(unresolved)?;
         let (owner, field, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
-            asm.get_static(&owner, &field, &descriptor)?;
+            emit.asm.get_static(&owner, &field, &descriptor)?;
         } else {
-            asm.load(0)?;
-            asm.get_field(&owner, &field, &descriptor)?;
+            emit.asm.load(0)?;
+            emit.asm.get_field(&owner, &field, &descriptor)?;
         }
         Ok(())
+    }
+
+    /// The indexed member a file-local definition declares, when that definition is a field of the
+    /// enclosing type rather than a local.
+    ///
+    /// A name that is not a local is one of the enclosing type's own fields, written without the
+    /// `this.` the JVM still requires. A field declaration is a file-local definition like any
+    /// other, so its id maps straight back to the indexed member.
+    pub(crate) fn own_field(id: DefId, context: &Context<'_>) -> Option<MemberId> {
+        let declaration = context.resolved.def(id);
+        context
+            .index
+            .member_by_decl(context.file, declaration.name_range.start)
     }
 
     /// `receiver.name`: a field read, `static` or instance.
     fn field(
         access: &ast::FieldAccess,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
+        // `a.length` on an array is not a field at all: the JVM answers it with an instruction, so
+        // there is no member for the index to have resolved.
+        if access.field().as_deref() == Some("length")
+            && let Some(receiver) = access.receiver()
+            && matches!(Self::type_of(receiver.syntax(), context), Ok(Ty::Array(_)))
+        {
+            Self::lower(&receiver, context, emit)?;
+            emit.asm.array_length()?;
+            return Ok(());
+        }
         let member = context
             .inference
             .field_target_of(Context::span(access.syntax()))
             .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
         let (owner, name, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
-            asm.get_static(&owner, &name, &descriptor)?;
+            emit.asm.get_static(&owner, &name, &descriptor)?;
         } else {
-            Self::lower(&Self::inner(access.receiver())?, context, asm, slots)?;
-            asm.get_field(&owner, &name, &descriptor)?;
+            Self::lower(&Self::inner(access.receiver())?, context, emit)?;
+            emit.asm.get_field(&owner, &name, &descriptor)?;
         }
         Ok(())
     }
 
     /// The `(owner, name, descriptor)` triple a `Fieldref` names.
-    fn field_ref(member: MemberId, context: &Context<'_>) -> Result<(String, String, String)> {
+    pub(crate) fn field_ref(
+        member: MemberId,
+        context: &Context<'_>,
+    ) -> Result<(String, String, String)> {
         let owner = Descriptor::internal_name(
             context
                 .index
@@ -275,12 +466,7 @@ impl Expr {
     }
 
     /// A call, dispatched by how the selected member is reached.
-    fn call(
-        call: &ast::CallExpr,
-        context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
-    ) -> Result<()> {
+    fn call(call: &ast::CallExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let member = context
             .inference
             .call_target_of(Context::span(call.syntax()))
@@ -306,90 +492,393 @@ impl Expr {
         } else {
             info.name.clone()
         };
+        let params = context.index.resolved_param_tys(member);
 
         // The receiver comes first on the stack, below the arguments.
         if !is_static {
             match call.callee() {
                 Some(ast::Expr::FieldAccess(access)) => {
-                    Self::lower(&Self::inner(access.receiver())?, context, asm, slots)?;
+                    Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
                 // A bare call in an instance method is an implicit `this`.
-                _ => asm.load(0)?,
+                _ => emit.asm.load(0)?,
             }
         }
-        for argument in call.args().into_iter().flat_map(|list| list.args()) {
-            Self::lower(&argument, context, asm, slots)?;
+        // Each argument is converted to the *declared* parameter type: `f(1)` against `f(long)` is
+        // an `i2l`, which JLS §5.3 calls the method-invocation conversion.
+        for (index, argument) in call
+            .args()
+            .into_iter()
+            .flat_map(|list| list.args())
+            .enumerate()
+        {
+            match params.get(index) {
+                Some(declared) => Self::lower_as(&argument, declared, context, emit)?,
+                // More arguments than parameters means a varargs call, whose trailing arguments
+                // have to be packed into an array first.
+                None => return Err(LowerError::Unsupported("a varargs call")),
+            }
         }
 
         if is_static {
-            asm.invoke_static(&owner, &name, &descriptor, interface_owner)?;
+            emit.asm
+                .invoke_static(&owner, &name, &descriptor, interface_owner)?;
         } else if is_private || constructor {
             // A `private` method is not dispatched: the call site already knows the one body it can
             // reach, and `invokevirtual` would look it up in a table it is not in.
-            asm.invoke_special(&owner, &name, &descriptor, interface_owner)?;
+            emit.asm
+                .invoke_special(&owner, &name, &descriptor, interface_owner)?;
         } else if interface_owner {
-            asm.invoke_interface(&owner, &name, &descriptor)?;
+            emit.asm.invoke_interface(&owner, &name, &descriptor)?;
         } else {
-            asm.invoke_virtual(&owner, &name, &descriptor)?;
+            emit.asm.invoke_virtual(&owner, &name, &descriptor)?;
         }
         Ok(())
     }
 
-    fn unary(
-        unary: &ast::UnaryExpr,
+    /// `array[index]`.
+    fn index(index: &ast::IndexExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        let place = Place::resolve(&ast::Expr::Index(index.clone()), context, emit)?;
+        place.read(emit.asm)
+    }
+
+    /// `(T) e`.
+    ///
+    /// Two unrelated operations under one syntax. A primitive cast is a conversion opcode — and the
+    /// only place a *narrowing* one appears without an assignment. A reference cast is a
+    /// `checkcast`, which computes nothing and exists so the failure happens here rather than at the
+    /// next `invokevirtual`.
+    fn cast(cast: &ast::CastExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        let target = Self::type_of(cast.syntax(), context)?;
+        let operand = Self::inner(cast.expr())?;
+        match Repr::of(&target)? {
+            Repr::Number(_) | Repr::Boolean => Self::lower_as(&operand, &target, context, emit),
+            Repr::Reference => {
+                Self::lower(&operand, context, emit)?;
+                if !matches!(Self::source_repr(&operand, context, emit)?, Repr::Reference) {
+                    return Err(LowerError::Unsupported("a boxing conversion"));
+                }
+                let entry = Descriptor::class_entry(&target, context.index)?;
+                emit.asm.check_cast(&entry)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// `c ? a : b`.
+    fn ternary(
+        ternary: &ast::TernaryExpr,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
+        let mut parts = ternary.parts();
+        let condition = Self::inner(parts.next())?;
+        let then = Self::inner(parts.next())?;
+        let otherwise = Self::inner(parts.next())?;
+        let result = Self::conditional_ty(&then, &otherwise, ternary.syntax(), context)?;
+
+        let else_arm = emit.asm.label();
+        let done = emit.asm.label();
+        Self::lower(&condition, context, emit)?;
+        emit.asm.branch(Branch::IntZero(Compare::Eq), else_arm)?;
+        Self::lower_as(&then, &result, context, emit)?;
+        emit.asm.branch(Branch::Always, done)?;
+        emit.asm.bind(else_arm)?;
+        Self::lower_as(&otherwise, &result, context, emit)?;
+        emit.asm.bind(done)?;
+
+        // Two different references merge to `Object`, because that is all a frame can say without a
+        // class hierarchy to walk. The static type has to be put back, or the next instruction that
+        // uses the value is verified against `Object` and rejected.
+        let arms_agree = Self::type_of(then.syntax(), context).ok()
+            == Self::type_of(otherwise.syntax(), context).ok();
+        if matches!(Repr::of(&result)?, Repr::Reference) && !arms_agree {
+            let entry = Descriptor::class_entry(&result, context.index)?;
+            emit.asm.check_cast(&entry)?;
+        }
+        Ok(())
+    }
+
+    /// The type a conditional expression produces.
+    ///
+    /// Inference answers this when the two arms agree exactly and deliberately not otherwise: it
+    /// keeps a "never a false type" guarantee that a least-upper-bound walk over a class hierarchy
+    /// would break. The numeric half of JLS §15.25 needs no such walk, though — two numeric arms
+    /// produce their binary numeric promotion, the same rule every arithmetic operator follows — so
+    /// that case is worked out here rather than reported.
+    fn conditional_ty(
+        then: &ast::Expr,
+        otherwise: &ast::Expr,
+        node: &SyntaxNode,
+        context: &Context<'_>,
+    ) -> Result<Ty> {
+        if let Ok(ty) = Self::type_of(node, context) {
+            return Ok(ty);
+        }
+        let left = Self::numeric_of(then.syntax(), context)?;
+        let right = Self::numeric_of(otherwise.syntax(), context)?;
+        Ok(Self::ty_of(Self::promote(left, right)))
+    }
+
+    /// The [`Ty`] a numeric type is, for handing back to a conversion that speaks in types.
+    const fn ty_of(numeric: Numeric) -> Ty {
+        Ty::Primitive(match numeric {
+            Numeric::Byte => Primitive::Byte,
+            Numeric::Short => Primitive::Short,
+            Numeric::Char => Primitive::Char,
+            Numeric::Int => Primitive::Int,
+            Numeric::Long => Primitive::Long,
+            Numeric::Float => Primitive::Float,
+            Numeric::Double => Primitive::Double,
+        })
+    }
+
+    fn unary(unary: &ast::UnaryExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let operand = Self::inner(unary.operand())?;
         match Self::operator(unary.syntax()).as_slice() {
-            // Unary `+` is a no-op past numeric promotion, which the operand's own type already is.
-            [PLUS] => Self::lower(&operand, context, asm, slots),
+            // `+` is not a no-op: unary numeric promotion still applies, so `+aByte` is an `int`.
+            [PLUS] => {
+                let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
+                Self::lower_to(&operand, promoted, context, emit)
+            }
+            [MINUS] => {
+                let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
+                Self::lower_to(&operand, promoted, context, emit)?;
+                Ok(emit.asm.negate(&promoted.stack())?)
+            }
+            // `!b` is `b ^ 1`, which is what javac emits too. Verified code guarantees a canonical
+            // 0 / 1 in a `boolean`, so the flip is exact and needs no branch.
+            [BANG] => {
+                Self::lower(&operand, context, emit)?;
+                emit.asm.const_int(1)?;
+                Ok(emit
+                    .asm
+                    .binary(BinOp::Xor, &jals_classfile::VerificationType::Integer)?)
+            }
+            // `~n` is `n ^ -1`, at the promoted width.
+            [TILDE] => {
+                let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
+                Self::lower_to(&operand, promoted, context, emit)?;
+                if promoted == Numeric::Long {
+                    emit.asm.const_long(-1)?;
+                } else {
+                    emit.asm.const_int(-1)?;
+                }
+                Ok(emit.asm.binary(BinOp::Xor, &promoted.stack())?)
+            }
+            [PLUS_PLUS] => Self::update(&operand, 1, true, context, emit),
+            [MINUS_MINUS] => Self::update(&operand, -1, true, context, emit),
             _ => Err(LowerError::Unsupported("this unary operator")),
         }
+    }
+
+    fn postfix(
+        postfix: &ast::PostfixExpr,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let operand = Self::inner(postfix.operand())?;
+        match Self::operator(postfix.syntax()).as_slice() {
+            [PLUS_PLUS] => Self::update(&operand, 1, false, context, emit),
+            [MINUS_MINUS] => Self::update(&operand, -1, false, context, emit),
+            _ => Err(LowerError::Unsupported("this postfix operator")),
+        }
+    }
+
+    /// `++x` / `x++` / `--x` / `x--`.
+    ///
+    /// One shape for all four, because JLS §15.14 / §15.15 give them one meaning: read the place, add
+    /// `delta` at the promoted type, narrow the result back to the place's own type, and write. Only
+    /// *which* value the expression yields differs — the prefix form the new one, the postfix form
+    /// the old.
+    ///
+    /// The narrowing is not optional. `byte b = 127; b++` has to wrap to -128, which is the `i2b`
+    /// after the `iadd`; without it the `byte` field would hold 128.
+    fn update(
+        target: &ast::Expr,
+        delta: i8,
+        prefix: bool,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let place = Place::resolve(target, context, emit)?;
+        let declared = Repr::of(place.ty())?
+            .number()
+            .ok_or(LowerError::Unsupported("an increment of this type"))?;
+
+        // An `int` local is the one place the JVM updates without going through the stack. `i++` in a
+        // `for` header is this one instruction; the general path below is five.
+        if let Place::Local { slot, .. } = &place
+            && declared == Numeric::Int
+        {
+            if prefix {
+                emit.asm.increment(*slot, i16::from(delta))?;
+                emit.asm.load(*slot)?;
+            } else {
+                emit.asm.load(*slot)?;
+                emit.asm.increment(*slot, i16::from(delta))?;
+            }
+            return Ok(());
+        }
+
+        place.dup_address(emit.asm)?;
+        place.read(emit.asm)?;
+        if !prefix {
+            // The postfix form yields the value from *before* the update, so it is re-seated under
+            // the address now — the same move an assignment makes for the value it wrote.
+            emit.asm.dup_below(place.words())?;
+        }
+        let promoted = Self::promote_one(declared);
+        emit.asm.convert(declared, promoted)?;
+        match promoted {
+            Numeric::Long => emit.asm.const_long(i64::from(delta))?,
+            Numeric::Float => emit.asm.const_float(f32::from(delta))?,
+            Numeric::Double => emit.asm.const_double(f64::from(delta))?,
+            _ => emit.asm.const_int(i32::from(delta))?,
+        }
+        emit.asm.binary(BinOp::Add, &promoted.stack())?;
+        emit.asm.convert(promoted, declared)?;
+        place.write(emit.asm, prefix)
     }
 
     fn binary(
         binary: &ast::BinaryExpr,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let (left, right) = (Self::inner(binary.lhs())?, Self::inner(binary.rhs())?);
         let operator = Self::operator(binary.syntax());
-        if let Some(compare) = Self::comparison(&operator) {
-            return Self::compare(&left, &right, compare, context, asm, slots);
+        // `instanceof` has no right *operand*: its right-hand side is a type or a pattern, so it is
+        // recognised before the two operands are taken apart.
+        if operator.first() == Some(&INSTANCEOF_KW) {
+            return Self::instance_of(binary, context, emit);
         }
-        let arithmetic = match operator.as_slice() {
+        let (left, right) = (Self::inner(binary.lhs())?, Self::inner(binary.rhs())?);
+        match operator.as_slice() {
+            [AMP_AMP] => return Self::short_circuit(&left, &right, true, context, emit),
+            [PIPE_PIPE] => return Self::short_circuit(&left, &right, false, context, emit),
+            _ => {}
+        }
+        if let Some(compare) = Self::comparison(&operator) {
+            return Self::compare(&left, &right, compare, context, emit);
+        }
+
+        let operation = match operator.as_slice() {
             [PLUS] => BinOp::Add,
             [MINUS] => BinOp::Sub,
             [STAR] => BinOp::Mul,
             [SLASH] => BinOp::Div,
             [PERCENT] => BinOp::Rem,
-            [AMP | PIPE | CARET] => return Err(LowerError::Unsupported("a bitwise operator")),
+            [AMP] => BinOp::And,
+            [PIPE] => BinOp::Or,
+            [CARET] => BinOp::Xor,
+            [LSHIFT] => BinOp::Shl,
+            // `>>` and `>>>` are separate `>` tokens: the lexer never joins a `>` to what follows,
+            // so that `List<List<T>>` still closes as two of them.
+            [GT, GT] => BinOp::Shr,
+            [GT, GT, GT] => BinOp::Ushr,
             _ => return Err(LowerError::Unsupported("this binary operator")),
         };
-        let result = Self::ty(context, binary.syntax())?.clone();
-        if matches!(result, Ty::Class(_)) {
-            // String concatenation lowers to a `StringBuilder` chain, which arrives with the
-            // milestone that models the chain rather than a single `+`.
+
+        // `&`, `|`, and `^` are also the *boolean* operators, evaluated without short-circuiting.
+        // Both operands are already the same `int` on the stack, so there is no promotion to do.
+        if matches!(operation, BinOp::And | BinOp::Or | BinOp::Xor)
+            && matches!(
+                Repr::of(&Self::type_of(left.syntax(), context)?)?,
+                Repr::Boolean
+            )
+        {
+            Self::lower(&left, context, emit)?;
+            Self::lower(&right, context, emit)?;
+            return Ok(emit
+                .asm
+                .binary(operation, &jals_classfile::VerificationType::Integer)?);
+        }
+
+        // A `+` whose result is a reference is string concatenation, not addition, and it shares
+        // this node kind.
+        if operation == BinOp::Add
+            && matches!(Self::type_of(binary.syntax(), context)?, Ty::Class(_))
+        {
             return Err(LowerError::Unsupported("string concatenation"));
         }
-        // One opcode family, one operand type: `ladd` takes two `long`s. Java's binary numeric
-        // promotion would widen the narrower side first, and until that is lowered a mixed pair is
-        // reported here rather than left to the assembler's `TypeMismatch`, which names no
-        // construct.
-        let verification = Self::verification_type(&result)?;
-        for operand in [&left, &right] {
-            if Self::verification_type(Self::ty(context, operand.syntax())?)? != verification {
-                return Err(LowerError::Unsupported(
-                    "a binary operator over two different numeric types",
-                ));
-            }
+
+        let left_numeric = Self::numeric_of(left.syntax(), context)?;
+        if operation.is_shift() {
+            // A shift promotes each side on its own (JLS §5.6.1 twice, not §5.6.2 once): the result
+            // has the *left* operand's promoted type, and the count is always an `int` because that
+            // is the only thing `lshl` takes.
+            let promoted = Self::promote_one(left_numeric);
+            Self::lower_to(&left, promoted, context, emit)?;
+            Self::lower_to(&right, Numeric::Int, context, emit)?;
+            return Ok(emit.asm.binary(operation, &promoted.stack())?);
         }
-        Self::lower(&left, context, asm, slots)?;
-        Self::lower(&right, context, asm, slots)?;
-        asm.binary(arithmetic, &verification)?;
+
+        let promoted = Self::promote(left_numeric, Self::numeric_of(right.syntax(), context)?);
+        Self::lower_to(&left, promoted, context, emit)?;
+        Self::lower_to(&right, promoted, context, emit)?;
+        Ok(emit.asm.binary(operation, &promoted.stack())?)
+    }
+
+    /// `e instanceof T`.
+    fn instance_of(
+        binary: &ast::BinaryExpr,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        // A pattern binds a name that is in scope only where the test succeeded, which is a
+        // flow-sensitive scoping rule this lowering does not model. A plain type test binds nothing.
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        if binary.syntax().children().any(|child| {
+            matches!(
+                child.kind(),
+                TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+            )
+        }) {
+            return Err(LowerError::Unsupported("an `instanceof` pattern"));
+        }
+        let operand = Self::inner(binary.lhs())?;
+        let ty = binary
+            .syntax()
+            .children()
+            .find_map(ast::Type::cast)
+            .ok_or(LowerError::Unsupported("an `instanceof` with no type"))?;
+        let target = context.ty_of_type(&ty)?;
+        Self::lower(&operand, context, emit)?;
+        Ok(emit
+            .asm
+            .instance_of(&Descriptor::class_entry(&target, context.index)?)?)
+    }
+
+    /// `a && b` / `a || b`, which evaluate `b` only when `a` did not already decide the answer.
+    ///
+    /// Materialised as a `boolean` rather than folded into the enclosing branch. A `boolean` is what
+    /// the expression *is* — it can be assigned, returned, or passed — and the enclosing `if` tests
+    /// it with the one `ifeq` it would have emitted anyway.
+    fn short_circuit(
+        left: &ast::Expr,
+        right: &ast::Expr,
+        conjunction: bool,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        // `&&` jumps out on a false operand and `||` on a true one, and the value it jumps *to* is
+        // the answer that operand already settled — false for `&&`, true for `||`.
+        let decided = emit.asm.label();
+        let done = emit.asm.label();
+        let escape = if conjunction {
+            Branch::IntZero(Compare::Eq)
+        } else {
+            Branch::IntZero(Compare::Ne)
+        };
+        for operand in [left, right] {
+            Self::lower(operand, context, emit)?;
+            emit.asm.branch(escape, decided)?;
+        }
+        emit.asm.const_int(i32::from(conjunction))?;
+        emit.asm.branch(Branch::Always, done)?;
+        emit.asm.bind(decided)?;
+        emit.asm.const_int(i32::from(!conjunction))?;
+        emit.asm.bind(done)?;
         Ok(())
     }
 
@@ -400,65 +889,166 @@ impl Expr {
         right: &ast::Expr,
         compare: Compare,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        // `if_icmp*` compares two `int`s. A `long` / `float` / `double` needs an `lcmp` / `fcmp` /
-        // `dcmp` first and a reference needs `if_acmp*`; neither is lowered yet. Checking here
-        // rather than leaving it to the assembler names the construct instead of the opcode.
-        for operand in [left, right] {
-            if !Self::is_int_like(Self::ty(context, operand.syntax())?) {
-                return Err(LowerError::Unsupported("a comparison of this type"));
-            }
-        }
-        Self::lower(left, context, asm, slots)?;
-        Self::lower(right, context, asm, slots)?;
-        let taken = asm.label();
-        let done = asm.label();
-        asm.branch(Branch::IntCmp(compare), taken)?;
-        asm.const_int(0)?;
-        asm.branch(Branch::Always, done)?;
-        asm.bind(taken)?;
-        asm.const_int(1)?;
-        asm.bind(done)?;
+        let taken = emit.asm.label();
+        let done = emit.asm.label();
+        Self::branch_compare(left, right, compare, taken, context, emit)?;
+        emit.asm.const_int(0)?;
+        emit.asm.branch(Branch::Always, done)?;
+        emit.asm.bind(taken)?;
+        emit.asm.const_int(1)?;
+        emit.asm.bind(done)?;
         Ok(())
+    }
+
+    /// Emit `left <compare> right` as a branch taken exactly when it holds.
+    ///
+    /// Dispatched on the operands' *representation* rather than on the operator, because that is what
+    /// decides which comparison the JVM has: two numbers are promoted to one type first, two
+    /// `boolean`s already share the `int` one, and two references have `if_acmp*` — for equality
+    /// only, which the assembler enforces.
+    fn branch_compare(
+        left: &ast::Expr,
+        right: &ast::Expr,
+        compare: Compare,
+        target: crate::jvm::Label,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        use jals_classfile::VerificationType as Vt;
+        let (left_repr, right_repr) = (
+            Repr::of(&Self::type_of(left.syntax(), context)?)?,
+            Repr::of(&Self::type_of(right.syntax(), context)?)?,
+        );
+        if let (Some(a), Some(b)) = (left_repr.number(), right_repr.number()) {
+            let promoted = Self::promote(a, b);
+            Self::lower_to(left, promoted, context, emit)?;
+            Self::lower_to(right, promoted, context, emit)?;
+            return Ok(emit
+                .asm
+                .branch_compare(&promoted.stack(), compare, target)?);
+        }
+        // Not a numeric pair. Both `boolean`s compare as `int`s; anything else is a reference pair,
+        // which `Null` names for the assembler's "any reference" check.
+        let ty = match (left_repr, right_repr) {
+            (Repr::Boolean, Repr::Boolean) => Vt::Integer,
+            (Repr::Reference, Repr::Reference) => Vt::Null,
+            _ => return Err(LowerError::Unsupported("a comparison of these two types")),
+        };
+        Self::lower(left, context, emit)?;
+        Self::lower(right, context, emit)?;
+        Ok(emit.asm.branch_compare(&ty, compare, target)?)
     }
 
     fn assignment(
         assignment: &ast::AssignmentExpr,
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        // `x = v` and `x += v` are the same node kind, so the operator has to be read: a compound
-        // assignment reads the target, applies an operator, and narrows the result back to the
-        // target's type, none of which this lowers. Emitting it as a plain store would be a silent
-        // miscompile — the one outcome this crate reports rather than produces.
-        if !assignment.is_simple() {
-            return Err(LowerError::Unsupported("a compound assignment"));
-        }
         let target = Self::inner(assignment.target())?;
         let value = Self::inner(assignment.value())?;
-        let ast::Expr::NameRef(name) = &target else {
-            return Err(LowerError::Unsupported("assignment to this target"));
-        };
-        let id = context
-            .def_at(name.syntax())
-            .ok_or_else(|| LowerError::Unresolved(name.syntax().text().to_string()))?;
-        let slot = slots
-            .slot_of(id)
-            .ok_or_else(|| LowerError::Unresolved(name.syntax().text().to_string()))?;
+        if assignment.is_simple() {
+            let place = Place::resolve(&target, context, emit)?;
+            let ty = place.ty().clone();
+            Self::lower_as(&value, &ty, context, emit)?;
+            return place.write(emit.asm, true);
+        }
+        let operation = Self::compound_operator(assignment.syntax())?;
+        Self::compound(&target, &value, operation, context, emit)
+    }
 
-        Self::lower(&value, context, asm, slots)?;
-        // An assignment is an expression whose value is the assigned one, so the value has to
-        // survive the store. `dup` before storing is how javac does it too.
-        asm.dup()?;
-        asm.store(slot)?;
-        Ok(())
+    /// The operator a compound assignment fuses in.
+    ///
+    /// Most arrive as one token (`PLUS_EQ`), but the right shifts do not: the lexer never joins a `>`
+    /// to what follows, so `>>=` is `GT GT EQ` and `>>>=` is `GT GT GT EQ`.
+    fn compound_operator(node: &SyntaxNode) -> Result<BinOp> {
+        use jals_syntax::SyntaxKind::{
+            AMP_EQ, CARET_EQ, EQ, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
+            STAR_EQ,
+        };
+        let operator: alloc::vec::Vec<_> = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .map(|token| token.kind())
+            .filter(|kind| !kind.is_trivia())
+            .collect();
+        Ok(match operator.as_slice() {
+            [PLUS_EQ] => BinOp::Add,
+            [MINUS_EQ] => BinOp::Sub,
+            [STAR_EQ] => BinOp::Mul,
+            [SLASH_EQ] => BinOp::Div,
+            [PERCENT_EQ] => BinOp::Rem,
+            [AMP_EQ] => BinOp::And,
+            [PIPE_EQ] => BinOp::Or,
+            [CARET_EQ] => BinOp::Xor,
+            [LSHIFT_EQ] => BinOp::Shl,
+            [GT, GT, EQ] => BinOp::Shr,
+            [GT, GT, GT, EQ] => BinOp::Ushr,
+            _ => return Err(LowerError::Unsupported("this compound assignment operator")),
+        })
+    }
+
+    /// `E1 op= E2`.
+    ///
+    /// JLS §15.26.2 defines it as `E1 = (T)((E1) op (E2))`, where `T` is `E1`'s type — so the operator
+    /// runs at the *promoted* type and the result is narrowed back. Both narrowings are load-bearing:
+    /// `int i; i += 1L` is `i2l`, `ladd`, `l2i`, and `byte b; b += 1` is `iadd`, `i2b`. Dropping
+    /// either stores a value outside the variable's range, in a class file that verifies.
+    fn compound(
+        target: &ast::Expr,
+        value: &ast::Expr,
+        operation: BinOp,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let place = Place::resolve(target, context, emit)?;
+        let declared = Repr::of(place.ty())?;
+
+        // `boolean &= …` is the one compound assignment with no numeric type in it. Both sides are
+        // already the same `int`, so there is nothing to promote or narrow.
+        if declared == Repr::Boolean {
+            if !matches!(operation, BinOp::And | BinOp::Or | BinOp::Xor) {
+                return Err(LowerError::Unsupported("this operator on a `boolean`"));
+            }
+            place.dup_address(emit.asm)?;
+            place.read(emit.asm)?;
+            Self::lower(value, context, emit)?;
+            emit.asm
+                .binary(operation, &jals_classfile::VerificationType::Integer)?;
+            return place.write(emit.asm, true);
+        }
+
+        let Some(declared) = declared.number() else {
+            return Err(LowerError::Unsupported(if operation == BinOp::Add {
+                "a compound string concatenation"
+            } else {
+                "a compound assignment of this type"
+            }));
+        };
+        let promoted = if operation.is_shift() {
+            Self::promote_one(declared)
+        } else {
+            Self::promote(declared, Self::numeric_of(value.syntax(), context)?)
+        };
+
+        place.dup_address(emit.asm)?;
+        place.read(emit.asm)?;
+        emit.asm.convert(declared, promoted)?;
+        let right = if operation.is_shift() {
+            Numeric::Int
+        } else {
+            promoted
+        };
+        Self::lower_to(value, right, context, emit)?;
+        emit.asm.binary(operation, &promoted.stack())?;
+        // The implicit cast back to `E1`'s type, which is the half of §15.26.2 that is easy to lose.
+        emit.asm.convert(promoted, declared)?;
+        place.write(emit.asm, true)
     }
 
     /// The comparison a token sequence spells, if it is one.
-    fn comparison(operator: &[jals_syntax::SyntaxKind]) -> Option<Compare> {
+    fn comparison(operator: &[SyntaxKind]) -> Option<Compare> {
         Some(match operator {
             [EQ_EQ] => Compare::Eq,
             [BANG_EQ] => Compare::Ne,
@@ -467,7 +1057,7 @@ impl Expr {
             [GT] => Compare::Gt,
             // `>=` is two tokens. The lexer never joins a `>` to what follows, so that `List<List<T>>`
             // closes as two `>` rather than one shift operator.
-            [GT, EQ] => Compare::Ge,
+            [GT, jals_syntax::SyntaxKind::EQ] => Compare::Ge,
             _ => return None,
         })
     }
@@ -476,41 +1066,11 @@ impl Expr {
     ///
     /// The CST holds them as plain tokens between the operands rather than in a labelled slot, and
     /// there can be more than one — see [`comparison`](Self::comparison).
-    fn operator(node: &jals_syntax::SyntaxNode) -> alloc::vec::Vec<jals_syntax::SyntaxKind> {
+    fn operator(node: &SyntaxNode) -> alloc::vec::Vec<SyntaxKind> {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .map(|token| token.kind())
             .filter(|kind| !kind.is_trivia())
             .collect()
-    }
-
-    /// Whether a value of `ty` occupies one stack word as an `int` — the representation every
-    /// integral type narrower than `long` shares, and the only one `if_icmp*` accepts.
-    const fn is_int_like(ty: &Ty) -> bool {
-        use jals_hir::Primitive;
-        matches!(
-            ty,
-            Ty::Primitive(
-                Primitive::Boolean
-                    | Primitive::Byte
-                    | Primitive::Short
-                    | Primitive::Char
-                    | Primitive::Int
-            )
-        )
-    }
-
-    /// The verification type an arithmetic result has, which is what selects the opcode family.
-    const fn verification_type(ty: &Ty) -> Result<jals_classfile::VerificationType> {
-        use jals_classfile::VerificationType as Vt;
-        use jals_hir::Primitive;
-        Ok(match ty {
-            Ty::Primitive(Primitive::Long) => Vt::Long,
-            Ty::Primitive(Primitive::Float) => Vt::Float,
-            Ty::Primitive(Primitive::Double) => Vt::Double,
-            // Every narrower integral type computes as `int` on the operand stack.
-            Ty::Primitive(_) => Vt::Integer,
-            _ => return Err(LowerError::Unsupported("arithmetic on a reference type")),
-        })
     }
 }

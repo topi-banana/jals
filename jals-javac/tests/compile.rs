@@ -4,6 +4,7 @@
 //! these prove the whole path — parse, resolve, infer, select overloads, erase to descriptors,
 //! lower, assemble — against the only authority that matters.
 
+use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
@@ -161,77 +162,142 @@ public class Unsupported {
 }
 
 /// `x += 1` is the same node kind as `x = 1`, so nothing in a kind-driven lowering distinguishes
-/// them. Lowering it as a plain store computes `x = 1` instead — a class file that verifies, runs,
-/// and produces the wrong number, which is worse than any error.
+/// them, and lowering it as a plain store computes `x = 1` instead. Every operator gets its own
+/// arithmetic here, against a real JVM, because a wrong one produces a class that verifies, runs, and
+/// answers wrongly — which is worse than any error.
 #[test]
-fn a_compound_assignment_is_reported_rather_than_mis_emitted() {
-    for operator in ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="] {
-        let source = format!(
-            r"
+fn every_compound_assignment_computes_what_it_says() {
+    if !java_available() {
+        return;
+    }
+    let mut body = String::new();
+    let mut expected = String::new();
+    for (operator, result) in [
+        ("+=", 12),
+        ("-=", 6),
+        ("*=", 27),
+        ("/=", 3),
+        ("%=", 0),
+        ("&=", 1),
+        ("|=", 11),
+        ("^=", 10),
+        ("<<=", 72),
+        (">>=", 1),
+        (">>>=", 1),
+    ] {
+        writeln!(
+            body,
+            "        {{ int i = 9; i {operator} 3; System.out.println(i); }}"
+        )
+        .expect("write to a String");
+        writeln!(expected, "{result}").expect("write to a String");
+    }
+    let source = format!(
+        r"
 public class Compound {{
     public static void main(String[] args) {{
-        int i = 5;
-        i {operator} 1;
-    }}
+{body}    }}
 }}
 "
-        );
-        let error = compile(&source).expect_err("compound assignment is not lowered yet");
-        assert!(
-            matches!(error, LowerError::Unsupported("a compound assignment")),
-            "`{operator}` should be reported, got {error}"
-        );
-    }
-    // The simple form still compiles: the check is on the operator, not on assignment as such.
-    compile(
-        r"
-public class Simple {
-    public static void main(String[] args) {
-        int i = 5;
-        i = 1;
-    }
-}
-",
-    )
-    .expect("a simple assignment still lowers");
+    );
+    assert_eq!(run(&source, "Compound"), expected);
 }
 
-/// A `long` / `float` / `double` comparison is not an `if_icmp*`. Emitting one produced a class
-/// file that loaded and then failed verification with *"Type `long_2nd` is not assignable to
-/// integer"* — the compiler had every fact needed to say so first.
+/// A compound assignment narrows its result back to the target's type.
+///
+/// JLS §15.26.2 defines `E1 op= E2` as `E1 = (T)((E1) op (E2))`, and both halves of that cast are
+/// load-bearing. `byte b = 127; b += 1` has to wrap to -128, and `int i; i += 1L` has to widen the
+/// `int` to a `long`, add, and narrow back — three instructions where a naive lowering emits one.
 #[test]
-fn a_wide_comparison_is_reported_rather_than_mis_emitted() {
-    for (ty, literal) in [("long", "1L"), ("double", "1.0"), ("float", "1.0f")] {
-        let source = format!(
-            r"
-public class Wide {{
-    static boolean f({ty} a) {{
-        return a == {literal};
-    }}
-
-    public static void main(String[] args) {{}}
-}}
-"
-        );
-        let error = compile(&source).expect_err("wide comparisons are not lowered yet");
-        assert!(
-            matches!(error, LowerError::Unsupported("a comparison of this type")),
-            "`{ty}` comparison should be reported, got {error}"
-        );
+fn a_compound_assignment_narrows_back_to_its_target() {
+    if !java_available() {
+        return;
     }
-    // An `int` comparison still lowers: the check is on the operand type, not on comparison itself.
-    compile(
-        r"
-public class Narrow {
-    static boolean f(int a) {
-        return a == 1;
-    }
+    let source = r"
+public class Narrowing {
+    static byte small = 127;
+    static int counter = 1;
+    int[] cells = null;
 
-    public static void main(String[] args) {}
+    public static void main(String[] args) {
+        small += 1;
+        System.out.println(small);
+        counter += 3000000000L;
+        System.out.println(counter);
+        char c = 'a';
+        c += 1;
+        System.out.println(c);
+        short s = 32767;
+        s += 1;
+        System.out.println(s);
+        double d = 1;
+        d /= 4;
+        System.out.println(d);
+        long big = 1;
+        big <<= 40;
+        System.out.println(big);
+    }
 }
-",
-    )
-    .expect("an `int` comparison still lowers");
+";
+    assert_eq!(
+        run(source, "Narrowing"),
+        // 127 + 1 wraps; 1 + 3000000000 as a `long` is 3000000001, whose low 32 bits are
+        // -1294967295; 'a' + 1 is 'b'; 32767 + 1 wraps; integer 1 / 4 as a `double` is 0.25.
+        "-128\n-1294967295\nb\n-32768\n0.25\n1099511627776\n"
+    );
+}
+
+/// A `long` / `float` / `double` comparison is not an `if_icmp*`: it reduces through `lcmp` /
+/// `fcmp?` / `dcmp?` first, and a reference one is an `if_acmp*`.
+///
+/// The NaN rows are the ones no verifier checks. JLS §15.20.1 makes every ordering comparison
+/// involving a NaN false in *both* directions, which only holds if `<` reduces with the `g` form and
+/// `>` with the `l` form. Swap them and the class still loads and still runs — and answers `true` for
+/// a NaN.
+#[test]
+fn every_width_of_comparison_answers_correctly() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Widths {
+    static double nan() { return 0.0 / 0.0; }
+
+    public static void main(String[] args) {
+        long a = 2, b = 1;
+        System.out.println(a > b);
+        System.out.println(a < b);
+        System.out.println(a == b);
+        System.out.println(a != b);
+        float f = 1.5f;
+        System.out.println(f <= 1.5f);
+        System.out.println(f >= 2.5f);
+        double d = nan();
+        System.out.println(d < 1.0);
+        System.out.println(d > 1.0);
+        System.out.println(d <= 1.0);
+        System.out.println(d >= 1.0);
+        System.out.println(d == d);
+        System.out.println(d != d);
+        String s = "x";
+        System.out.println(s == null);
+        System.out.println(s != null);
+        boolean t = true;
+        System.out.println(t == true);
+        char c = 'b';
+        System.out.println(c > 'a');
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Widths"),
+        "true\nfalse\nfalse\ntrue\n\
+         true\nfalse\n\
+         false\nfalse\nfalse\nfalse\nfalse\ntrue\n\
+         false\ntrue\n\
+         true\n\
+         true\n"
+    );
 }
 
 /// String and `char` literals reach the constant pool with their escapes resolved, and the JVM
@@ -276,28 +342,72 @@ public class BadEscape {
     );
 }
 
-/// `ladd` takes two `long`s, so `n + 1` on a `long` needs the literal widened first. Until binary
-/// numeric promotion is lowered, the mixed pair is reported — and it names the construct rather
-/// than surfacing as the assembler's bare `TypeMismatch`.
+/// `ladd` takes two `long`s, so `n + 1` on a `long` needs the literal widened first. Binary numeric
+/// promotion (JLS §5.6.2) is what supplies that `i2l`, and it is not a formality: one opcode names one
+/// type, so *every* mixed pair needs a conversion or the class does not verify.
 #[test]
-fn a_mixed_numeric_binary_is_reported() {
+fn binary_numeric_promotion_widens_the_narrower_side() {
+    if !java_available() {
+        return;
+    }
     let source = r"
 public class Mixed {
-    static long f(long n) {
-        return n + 1;
-    }
+    static long addLong(long n) { return n + 1; }
+    static double addDouble(int n) { return n + 0.5; }
+    static float addFloat(long n) { return n + 1.5f; }
+    static int addBytes(byte a, byte b) { return a + b; }
+    static long shiftLong(long n, long by) { return n << by; }
 
-    public static void main(String[] args) {}
+    public static void main(String[] args) {
+        System.out.println(addLong(4000000000L));
+        System.out.println(addDouble(3));
+        System.out.println(addFloat(2L));
+        System.out.println(addBytes((byte) 100, (byte) 100));
+        System.out.println(shiftLong(1L, 40L));
+        // A `char` promotes to `int` for arithmetic, and back down only through a cast.
+        char c = 'a';
+        System.out.println(c + 1);
+        System.out.println((char) (c + 1));
+    }
 }
 ";
-    let error = compile(source).expect_err("numeric promotion is not lowered yet");
-    assert!(
-        matches!(
-            error,
-            LowerError::Unsupported("a binary operator over two different numeric types")
-        ),
-        "expected the mixed-operand report, got {error}"
+    assert_eq!(
+        run(source, "Mixed"),
+        "4000000001\n3.5\n3.5\n200\n1099511627776\n98\nb\n"
     );
+}
+
+/// The `return` opcode comes from the *declared* return type, not from whatever the expression left
+/// on the stack.
+///
+/// Reading it off the stack emitted `ireturn` for `long f() { return 1; }` — a class file whose
+/// descriptor promises a `long` and whose body hands back an `int`. It only became reachable once
+/// conversions existed, which is why it is pinned here rather than left to the promotion tests.
+#[test]
+fn a_return_converts_to_the_declared_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Returns {
+    static long asLong() { return 1; }
+    static double asDouble() { return 1; }
+    static float asFloat() { return 1; }
+    static byte asByte() { return (byte) 300; }
+    // A reference return needs no conversion, but it does need `areturn` rather than `ireturn`.
+    // `println(Object)` is not in the embedded stubs, so the value is tested rather than printed.
+    static Object asObject() { return null; }
+
+    public static void main(String[] args) {
+        System.out.println(asLong());
+        System.out.println(asDouble());
+        System.out.println(asFloat());
+        System.out.println(asByte());
+        System.out.println(asObject() == null);
+    }
+}
+";
+    assert_eq!(run(source, "Returns"), "1\n1.0\n1.0\n44\ntrue\n");
 }
 
 /// Access flags are what the source wrote, bit for bit.
@@ -362,6 +472,9 @@ public class Flags {
             ("main".to_owned(), 0x0001 | 0x0008),           // public | static
             // The default constructor takes the class's own access level (JLS §8.8.9).
             ("<init>".to_owned(), 0x0001),
+            // `OPEN`'s initialiser has to run somewhere, and `<clinit>` is the only place. It takes
+            // no access level at all — nothing can name it — and `ACC_STATIC` from version 51 on.
+            ("<clinit>".to_owned(), 0x0008),
         ]
     );
     // `public class` — and `ACC_SUPER`, which every emitted class carries.
@@ -607,6 +720,9 @@ public interface Shape {
         [
             ("area".to_owned(), 0x0001 | 0x0400), // public | abstract
             ("zero".to_owned(), 0x0001 | 0x0008), // public | static
+            // `SIDES` is implicitly `static final` and still has an initialiser to run, so an
+            // interface gets a `<clinit>` like a class does (JVMS §2.9.2 allows one from version 51).
+            ("<clinit>".to_owned(), 0x0008),
         ]
     );
     // An interface has no `ACC_SUPER` and gets no default constructor.
@@ -666,4 +782,405 @@ public abstract class Abstract {
 ",
     )
     .expect("an `abstract` method declares why it has no body");
+}
+
+/// Every loop form, and `break` / `continue` with and without a label.
+///
+/// `continue` in a `for` is the one that goes wrong silently: it has to run the update section
+/// (JLS §14.14.1.3), and sending it to the condition instead is an infinite loop that only appears
+/// when a body actually contains one. So the `for` rows below all contain a `continue`.
+#[test]
+fn every_loop_form_runs() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Loops {
+    static int sumWhile(int limit) {
+        int total = 0, i = 0;
+        while (i < limit) { total = total + i; i = i + 1; }
+        return total;
+    }
+
+    static int sumDo(int limit) {
+        int total = 0, i = 0;
+        do { total = total + i; i = i + 1; } while (i < limit);
+        return total;
+    }
+
+    static int sumFor(int limit) {
+        int total = 0;
+        for (int i = 0; i < limit; i++) { total += i; }
+        return total;
+    }
+
+    static int sumOddsFor(int limit) {
+        int total = 0;
+        for (int i = 0; i < limit; i++) {
+            if (i % 2 == 0) { continue; }
+            total += i;
+        }
+        return total;
+    }
+
+    static int firstOver(int[] values, int bound) {
+        for (int v : values) {
+            if (v > bound) { return v; }
+        }
+        return -1;
+    }
+
+    static int sumEach(int[] values) {
+        int total = 0;
+        for (int v : values) { total += v; }
+        return total;
+    }
+
+    static int untilBreak(int limit) {
+        int i = 0;
+        for (;;) {
+            if (i >= limit) { break; }
+            i++;
+        }
+        return i;
+    }
+
+    static int firstPair(int[] values, int target) {
+        outer:
+        for (int i = 0; i < values.length; i++) {
+            for (int j = 0; j < values.length; j++) {
+                if (i == j) { continue; }
+                if (values[i] + values[j] == target) { return i * 10 + j; }
+                if (values[j] > 100) { continue outer; }
+            }
+        }
+        return -1;
+    }
+
+    static int labelledBreak(int[] values) {
+        int found = -1;
+        search:
+        for (int v : values) {
+            if (v == 3) { found = v; break search; }
+        }
+        return found;
+    }
+
+    static int labelledBlock(int n) {
+        int out = 0;
+        done: {
+            out = 1;
+            if (n > 0) { break done; }
+            out = 2;
+        }
+        return out;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(sumWhile(5));
+        System.out.println(sumDo(5));
+        System.out.println(sumDo(0));
+        System.out.println(sumFor(5));
+        System.out.println(sumOddsFor(6));
+        int[] values = null;
+        System.out.println(untilBreak(4));
+        System.out.println(labelledBlock(1));
+        System.out.println(labelledBlock(-1));
+    }
+}
+";
+    // `sumDo(0)` runs its body once, which is the whole difference from `while`.
+    assert_eq!(run(source, "Loops"), "10\n10\n0\n10\n9\n4\n1\n2\n");
+}
+
+/// A `for`-each over an array, and the arrays it walks — reached through `args`, which is the one
+/// array a `main` has without `new`.
+#[test]
+fn a_for_each_walks_an_array() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Walk {
+    public static void main(String[] args) {
+        System.out.println(args.length);
+        int count = 0;
+        for (String s : args) { count++; }
+        System.out.println(count);
+        for (int i = 0; i < args.length; i++) {
+            System.out.println(args[i]);
+        }
+        // An element assignment, which is `dup_x2` for the value to survive the store.
+        if (args.length > 0) {
+            System.out.println(args[0] = "replaced");
+            System.out.println(args[0]);
+        }
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Walk.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Walk")
+        .arg("one")
+        .arg("two")
+        .output()
+        .expect("run java");
+    assert!(
+        output.status.success(),
+        "the JVM rejected the class:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "2\n2\none\ntwo\nreplaced\nreplaced\n"
+    );
+}
+
+/// `++` and `--`, in both positions, over each kind of place.
+///
+/// The narrowing is what a naive lowering drops: `byte b = 127; b++` has to wrap, because JLS §15.14
+/// defines it as `b = (byte)(b + 1)`. And a postfix form has to yield the value from *before* the
+/// update, which for a field means re-seating the old value under the receiver.
+#[test]
+fn increments_update_and_yield_the_right_value() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Steps {
+    int field = 10;
+    static int shared = 20;
+
+    int bumpField() { return field++; }
+    int preBumpField() { return ++field; }
+    int readField() { return field; }
+
+    public static void main(String[] args) {
+        int i = 5;
+        System.out.println(i++);
+        System.out.println(i);
+        System.out.println(++i);
+        System.out.println(i--);
+        System.out.println(--i);
+
+        byte b = 127;
+        b++;
+        System.out.println(b);
+        char c = 'y';
+        System.out.println(++c);
+        long l = 4294967296L;
+        l++;
+        System.out.println(l);
+        double d = 1.5;
+        System.out.println(d++);
+        System.out.println(d);
+
+        System.out.println(shared++);
+        System.out.println(shared);
+    }
+}
+";
+    assert_eq!(
+        run(source, "Steps"),
+        "5\n6\n7\n7\n5\n-128\nz\n4294967297\n1.5\n2.5\n20\n21\n"
+    );
+}
+
+/// Assignment to a field, and the value it yields.
+///
+/// An assignment is an *expression* whose value is the one assigned, so `println(o.f = 2)` has to
+/// leave the value behind after the `putfield` consumed it. That is `dup_x1` — the copy goes under
+/// the receiver, not on top of it.
+#[test]
+fn an_assignment_to_a_field_yields_its_value() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Store {
+    int instance;
+    static int shared;
+    static long wide;
+
+    int setInstance(int v) { return instance = v; }
+    int getInstance() { return instance; }
+
+    public static void main(String[] args) {
+        System.out.println(shared = 7);
+        System.out.println(shared);
+        System.out.println(wide = 4294967296L);
+        // A chain assigns right to left and each link yields what it stored.
+        int a = 0, b = 0;
+        System.out.println(a = b = 3);
+        System.out.println(a + b);
+        // A compound assignment on a `static` field reads and writes the same place.
+        shared *= 6;
+        System.out.println(shared);
+    }
+}
+";
+    assert_eq!(run(source, "Store"), "7\n7\n4294967296\n3\n6\n42\n");
+}
+
+/// Casts, `instanceof`, the conditional operator, and the short-circuiting operators.
+#[test]
+fn casts_tests_and_conditionals_run() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Choose {
+    static boolean loud = false;
+
+    static boolean note(boolean value) { loud = true; return value; }
+
+    static String pick(int n) { return n > 0 ? "positive" : "other"; }
+
+    public static void main(String[] args) {
+        System.out.println(pick(1));
+        System.out.println(pick(-1));
+        // A conditional whose arms are different numeric types promotes to the wider one.
+        long chosen = args.length == 0 ? 1 : 2L;
+        System.out.println(chosen);
+
+        // `&&` must not evaluate its right operand once the left decided the answer.
+        loud = false;
+        System.out.println(false && note(true));
+        System.out.println(loud);
+        loud = false;
+        System.out.println(true || note(true));
+        System.out.println(loud);
+        // And it must evaluate it when the left did not.
+        loud = false;
+        System.out.println(true && note(false));
+        System.out.println(loud);
+
+        // The non-short-circuiting boolean operators, which are the same tokens as the bitwise ones.
+        System.out.println(true & false);
+        System.out.println(true | false);
+        System.out.println(true ^ true);
+        boolean flag = true;
+        flag &= false;
+        System.out.println(flag);
+
+        Object boxed = "text";
+        System.out.println(boxed instanceof String);
+        System.out.println(boxed instanceof Integer);
+        String back = (String) boxed;
+        System.out.println(back.length());
+        System.out.println(args instanceof Object);
+
+        // A primitive narrowing cast, which is the only place one appears without an assignment.
+        double big = 300.7;
+        System.out.println((byte) big);
+        System.out.println((int) big);
+        System.out.println((char) 66);
+        System.out.println(-big);
+        System.out.println(~5);
+        System.out.println(!false);
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Choose"),
+        "positive\nother\n1\n\
+         false\nfalse\n\
+         true\nfalse\n\
+         false\ntrue\n\
+         false\ntrue\nfalse\nfalse\n\
+         true\nfalse\n4\ntrue\n\
+         44\n300\nB\n-300.7\n-6\ntrue\n"
+    );
+}
+
+/// A `static` field's initialiser and a `static { … }` block both run in `<clinit>`, and an instance
+/// initialiser block runs in every constructor.
+///
+/// Nothing else runs them, so dropping them produced a class whose `static int n = 5;` read back as
+/// 0 — a class that verifies, runs, and answers wrongly.
+#[test]
+fn the_initializers_run_where_they_belong() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Init {
+    static int first = 5;
+    static int second = first * 2;
+    static int third;
+
+    static {
+        third = second + 1;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(first);
+        System.out.println(second);
+        System.out.println(third);
+    }
+}
+";
+    // The order matters: `second` reads `first`, and the block reads `second`.
+    assert_eq!(run(source, "Init"), "5\n10\n11\n");
+}
+
+/// `int a = 1, b = 2;` is one declaration and two initialisers. Taking the first expression for
+/// every name gave `b` the value of `a` — in a class file that verifies.
+#[test]
+fn each_declarator_takes_its_own_initializer() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Several {
+    static int p = 1, q = 2, r = 3;
+    int a = 4, b = 5;
+
+    int sum() { return a * 10 + b; }
+
+    public static void main(String[] args) {
+        System.out.println(p);
+        System.out.println(q);
+        System.out.println(r);
+        int x = 6, y = 7;
+        System.out.println(x * 10 + y);
+    }
+}
+";
+    assert_eq!(run(source, "Several"), "1\n2\n3\n67\n");
+}
+
+/// Object creation is still not lowered, so the construct is reported rather than dropped. Both `new`
+/// forms stop here, and so do the features the milestones after this one bring.
+#[test]
+fn the_features_after_this_milestone_are_still_reported() {
+    for (source, expected) in [
+        ("int[] v = new int[3];", "this expression form"),
+        ("Object o = new Object();", "this expression form"),
+        (r#"String s = "a" + "b";"#, "string concatenation"),
+        ("switch (1) { default: break; }", "this statement form"),
+        ("throw null;", "this statement form"),
+        ("synchronized (args) { }", "this statement form"),
+        ("try { } finally { }", "this statement form"),
+        ("Runnable r = () -> {};", "this expression form"),
+    ] {
+        let program = format!(
+            r"
+public class Later {{
+    public static void main(String[] args) {{
+        {source}
+    }}
+}}
+"
+        );
+        let error = compile(&program).expect_err("this is a later milestone");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
 }

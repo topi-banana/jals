@@ -673,7 +673,7 @@ fn the_wide_and_reference_comparisons_run() {
             &VerificationType::Null,
             Compare::Ne,
             |asm| asm.load(0),
-            |asm| asm.const_null(),
+            |asm: &mut Assembler<'_>| asm.const_null(),
         )?;
         asm.return_(None)
     });

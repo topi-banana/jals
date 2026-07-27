@@ -989,15 +989,52 @@ impl<'a> Inferer<'a> {
         Self::join_exact(s.result_exprs().map(|e| self.expr_ty(e.syntax())))
     }
 
-    /// The exact-equality join shared by the branching expressions (ternary, switch): the arms'
-    /// common type when they all agree, else [`Ty::Unknown`] — also for an empty join or an
-    /// un-inferable arm. No numeric promotion, `null` widening, or least-upper-bound over a
-    /// common supertype (a mixed-numeric or subtype join is `Ty::Unknown`), which keeps the
-    /// "never a false type" guarantee. Short-circuits on the first disagreeing arm.
+    /// The join shared by the branching expressions (ternary, switch): the arms' common type when
+    /// they all agree, and [`Ty::Unknown`] for an empty join or an un-inferable arm.
+    ///
+    /// When the arms disagree, one case is still answerable without a class-hierarchy walk. JLS
+    /// §15.25 gives a *numeric* conditional the binary numeric promotion of its arms, and where that
+    /// promotion is `long` / `float` / `double` the answer is unambiguous: the wide type wins
+    /// outright, with none of §15.25's constant-narrowing special cases in play. `cond ? 1 : 2L` is a
+    /// `long`, and leaving it unknown made every overload taking it unselectable.
+    ///
+    /// Everything else stays `Ty::Unknown`, which keeps the "never a false type" guarantee. A
+    /// promotion among the sub-`long` integrals depends on whether an arm is a constant in range
+    /// (`cond ? aByte : aShort` is `short`, not `int`) and there is no constant evaluator here; a
+    /// mixed *reference* join needs a least upper bound over a hierarchy; `null` widening would need
+    /// the other arm to be known reference-typed.
     fn join_exact(tys: impl IntoIterator<Item = Ty>) -> Ty {
-        let mut tys = tys.into_iter();
-        match tys.next() {
-            Some(first) if tys.all(|t| t == first) => first,
+        let tys: Vec<Ty> = tys.into_iter().collect();
+        let Some(first) = tys.first() else {
+            return Ty::Unknown;
+        };
+        if tys.iter().all(|ty| ty == first) {
+            return first.clone();
+        }
+        Self::join_numeric(&tys)
+    }
+
+    /// The binary numeric promotion of every arm, when they are all numeric and it lands on one of
+    /// the three wide types. See [`join_exact`](Inferer::join_exact) for why the narrow ones do not.
+    fn join_numeric(tys: &[Ty]) -> Ty {
+        let mut widest = 0u8;
+        for ty in tys {
+            let Ty::Primitive(primitive) = ty else {
+                return Ty::Unknown;
+            };
+            widest = widest.max(match primitive {
+                Primitive::Double => 3,
+                Primitive::Float => 2,
+                Primitive::Long => 1,
+                Primitive::Byte | Primitive::Short | Primitive::Char | Primitive::Int => 0,
+                // `boolean` takes part in no numeric promotion at all.
+                Primitive::Boolean => return Ty::Unknown,
+            });
+        }
+        match widest {
+            3 => Ty::Primitive(Primitive::Double),
+            2 => Ty::Primitive(Primitive::Float),
+            1 => Ty::Primitive(Primitive::Long),
             _ => Ty::Unknown,
         }
     }
@@ -1070,7 +1107,14 @@ impl<'a> Inferer<'a> {
         let Some(expr) = fa.receiver() else {
             return Ty::Unknown;
         };
-        match self.child_ty(Some(expr.clone())) {
+        let receiver = self.child_ty(Some(expr.clone()));
+        // JLS §10.7: every array type has exactly one member, a `public final int length`. It is
+        // declared nowhere, so no index lookup can find it — leaving `a.length` untyped, which is
+        // the type every `for (int i = 0; i < a.length; i++)` in Java depends on.
+        if namespace == Namespace::Value && name == "length" && matches!(receiver, Ty::Array(_)) {
+            return Ty::Primitive(Primitive::Int);
+        }
+        match receiver {
             Ty::Unknown => match self.project {
                 // Not a value: `System.out` names the declaring class, not an instance of it.
                 Some((index, file)) => Cst::type_qualifier(&expr, index, file)

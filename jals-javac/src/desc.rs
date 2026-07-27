@@ -28,6 +28,9 @@ pub enum DescError {
     Unresolved(String),
     /// `void` appeared where a value type is required.
     Void,
+    /// A primitive appeared where the class file wants a `Class` entry — the operand of a
+    /// `checkcast`, an `instanceof`, or an `anewarray`, none of which name a primitive.
+    NotAClass,
 }
 
 impl core::fmt::Display for DescError {
@@ -41,6 +44,9 @@ impl core::fmt::Display for DescError {
                 )
             }
             Self::Void => f.write_str("`void` is not a value type"),
+            Self::NotAClass => {
+                f.write_str("a primitive type has no `Class` entry in the constant pool")
+            }
         }
     }
 }
@@ -122,6 +128,28 @@ impl Descriptor {
     /// The field descriptor of the member `id`.
     pub fn field_descriptor(id: MemberId, index: &ProjectIndex) -> Result<FieldType> {
         Self::field_type(&index.resolved_member_ty(id), index)
+    }
+
+    /// The field descriptor of `ty` itself, for a value the index has no member for — an array's
+    /// element, a local, or the target of a cast.
+    pub fn descriptor_of(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
+        Self::field_type(ty, index)
+    }
+
+    /// The `Class` entry a `checkcast` / `instanceof` / `anewarray` names for `ty`.
+    ///
+    /// Two spellings in one place, because the class file uses both: a class is named by its internal
+    /// binary name (`java/lang/String`) and an array by its own *descriptor* (`[Ljava/lang/String;`),
+    /// which JVMS §4.4.1 permits precisely so an array type can be named at all.
+    pub fn class_entry(ty: &Ty, index: &ProjectIndex) -> Result<String> {
+        match Self::field_type(ty, index)? {
+            FieldType::Object(name) => Ok(name),
+            array @ FieldType::Array(_) => {
+                use alloc::string::ToString as _;
+                Ok(array.to_string())
+            }
+            FieldType::Base(_) => Err(DescError::NotAClass),
+        }
     }
 
     const fn base_type(primitive: Primitive) -> BaseType {

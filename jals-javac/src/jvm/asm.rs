@@ -235,7 +235,8 @@ impl BinOp {
     /// `lshl` shifts a `long` by an **`int`** (JVMS §6.5), which is the one place the JVM's binary
     /// operators are not symmetric — and the reason `ladd`'s "two of the same" rule cannot simply be
     /// applied to every entry in this enum.
-    const fn is_shift(self) -> bool {
+    #[must_use]
+    pub const fn is_shift(self) -> bool {
         matches!(self, Self::Shl | Self::Shr | Self::Ushr)
     }
 }
@@ -437,6 +438,17 @@ impl<'pool> Assembler<'pool> {
     /// } …` is the ordinary shape where it cannot.
     pub const fn reachable(&self) -> bool {
         self.reachable
+    }
+
+    /// Whether anything jumps to `label` yet.
+    ///
+    /// A lowering needs this because the *source* has positions a finished basic block does not. A
+    /// loop's update section is reachable if the body can fall out of it **or** a `continue` jumped
+    /// there, and `for (;;) { return; }` is the ordinary shape where neither holds — binding the
+    /// label then would report a position control cannot arrive at, which is true and not the
+    /// caller's mistake.
+    pub fn is_targeted(&self, label: Label) -> Result<bool> {
+        Ok(self.info(label)?.targeted)
     }
 
     /// A fresh, unbound label.

@@ -12,28 +12,33 @@
 //!
 //! # Scope
 //!
-//! Classes and interfaces with fields and methods, local variables, literals, `if` / `while`, and
-//! calls (`static`, virtual, and interface). Constructors run `super()` and their field
-//! initialisers.
+//! Classes and interfaces with fields and methods; local variables and literals; the whole
+//! expression grammar bar object and array *creation* — arithmetic with Java's numeric promotions,
+//! bitwise and shift operators, comparisons at every width, casts, `instanceof`, the conditional
+//! operator, the short-circuiting `&&` / `||`, assignment (simple and compound) to a local, a field,
+//! or an array element, and `++` / `--` in both positions; `if`, `while`, `do`-`while`, `for`,
+//! `for`-each over an array, `break` and `continue` with or without a label; and calls (`static`,
+//! virtual, and interface). Constructors run `super()` and their field initialisers.
 //!
-//! Three of those are narrower than they sound, and each is *reported* where it stops rather than
+//! Two of those are narrower than they sound, and each is *reported* where it stops rather than
 //! approximated:
 //!
-//! - **Assignment** is the simple `=` to a local. A compound assignment (`+=`) reads its target and
-//!   narrows the result back, and neither is lowered.
-//! - **Arithmetic and comparison** need both operands to share one representation, because one
-//!   opcode names one type. Java's binary numeric promotion is not lowered, so `long + int` and a
-//!   `long` / `float` / `double` comparison stop here.
+//! - **A `for`-each needs an array.** One over an `Iterable` is a call to `iterator()`, which the
+//!   embedded stubs do not declare on `Iterable` itself.
 //! - **A method needs a body** unless it is `abstract` or an interface method. `native` has no body
 //!   and no flag pair that could say so legally.
 //!
-//! Not yet at all: `new`, arrays, `switch`, exceptions, generics beyond erasure, lambdas, inner
-//! classes, constructor delegation (`this(…)` / `super(args)`), and assignment to a field. Each
-//! arrives with the milestone that can test it.
+//! Not yet at all: `new` and array creation, string concatenation, `switch`, exceptions,
+//! `synchronized`, boxing, varargs, generics beyond erasure, lambdas, inner classes, and constructor
+//! delegation (`this(…)` / `super(args)`). Each arrives with the milestone that can test it.
 
+mod emit;
 mod expr;
+mod place;
 mod slots;
 mod stmt;
+
+pub(crate) use crate::lower::emit::Emit;
 
 use alloc::borrow::ToOwned as _;
 use alloc::string::{String, ToString as _};
@@ -250,6 +255,13 @@ impl Compile {
                 Self::access_level(node),
             )?);
         }
+        // A `static` field's initialiser and a `static { … }` block both run in `<clinit>`, once,
+        // when the class is first used. Nothing else runs them — so dropping them produced a class
+        // whose `static int n = 5;` read back as 0, which is a silent miscompile rather than a
+        // missing feature.
+        if let Some(class_init) = Self::class_initializer(&context, &mut pool, &members)? {
+            methods.push(class_init);
+        }
 
         let mut class = ClassFile::new(class_version, 0, pool);
         class.access_flags = ClassAccessFlags(Self::class_flags(node, is_interface));
@@ -433,8 +445,10 @@ impl Compile {
                     Receiver::Instance(&context.this_class)
                 };
                 let mut asm = Assembler::new(pool, receiver, &text)?;
-                let mut slots = Slots::new(context, decl.params().as_ref(), is_static);
-                stmt::Stmt::block(&body, context, &mut asm, &mut slots)?;
+                let slots = Slots::new(context, decl.params().as_ref(), is_static);
+                let returns = context.index.resolved_member_ty(member);
+                let mut emit = Emit::new(&mut asm, slots, returns);
+                stmt::Stmt::block(&body, context, &mut emit)?;
                 // A `void` body may simply run off its end; the JVM needs the instruction anyway.
                 // One that already returned on every path does not — and asking the assembler for
                 // an unreachable `return` would be an error, not a no-op.
@@ -504,10 +518,11 @@ impl Compile {
 
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
-        let mut slots = Slots::new(context, params.as_ref(), false);
-        Self::prologue(context, &mut asm, &slots, super_name, super_item, members)?;
+        let slots = Slots::new(context, params.as_ref(), false);
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void);
+        Self::prologue(context, &mut emit, super_name, super_item, members)?;
         if let Some(body) = &body {
-            stmt::Stmt::block(body, context, &mut asm, &mut slots)?;
+            stmt::Stmt::block(body, context, &mut emit)?;
         }
         // A constructor is `void`, so it needs the instruction unless every path already returned.
         if asm.reachable() {
@@ -537,7 +552,8 @@ impl Compile {
         let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), "()V")?;
         let slots = Slots::new(context, None, false);
-        Self::prologue(context, &mut asm, &slots, super_name, super_item, members)?;
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void);
+        Self::prologue(context, &mut emit, super_name, super_item, members)?;
         asm.return_(None)?;
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(access),
@@ -545,6 +561,114 @@ impl Compile {
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
         })
+    }
+
+    /// `<clinit>`: every `static` field initialiser and `static { … }` block, in source order.
+    ///
+    /// `None` when the type has neither, because an empty `<clinit>` is still a method the JVM loads
+    /// and calls. `ACC_STATIC` is required on it from major version 51 (JVMS §2.9.2), and it takes no
+    /// access level at all — nothing can name it.
+    fn class_initializer(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        members: &[SyntaxNode],
+    ) -> Result<Option<MethodInfo>> {
+        if !members
+            .iter()
+            .any(|member| Self::initializes(member, context.in_interface, true))
+        {
+            return Ok(None);
+        }
+        let name_index = pool.utf8_index("<clinit>").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(pool, Receiver::Static, "()V")?;
+        let slots = Slots::new(context, None, true);
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void);
+        Self::initializers(context, &mut emit, members, true)?;
+        if asm.reachable() {
+            asm.return_(None)?;
+        }
+        Ok(Some(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::STATIC),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        }))
+    }
+
+    /// Whether `member` contributes to the class initialiser (`statics`) or to every constructor.
+    fn initializes(member: &SyntaxNode, in_interface: bool, statics: bool) -> bool {
+        use jals_syntax::SyntaxKind::{INITIALIZER, STATIC_KW};
+        match member.kind() {
+            // An interface field is implicitly `static` (JLS §9.3), so it is written without the
+            // keyword and still runs in `<clinit>`.
+            FIELD_DECL => {
+                (Self::has_modifier(member, STATIC_KW) || in_interface) == statics
+                    && ast::FieldDecl::cast(member.clone())
+                        .is_some_and(|decl| decl.value().is_some())
+            }
+            INITIALIZER => Self::has_modifier(member, STATIC_KW) == statics,
+            _ => false,
+        }
+    }
+
+    /// Emit the field initialisers and initialiser blocks that run in one of the two places they can.
+    ///
+    /// One walk in source order, because JLS §12.4.2 / §12.5 run them in the order they are written
+    /// and a later one may read what an earlier one assigned.
+    fn initializers(
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+        members: &[SyntaxNode],
+        statics: bool,
+    ) -> Result<()> {
+        use jals_syntax::SyntaxKind::INITIALIZER;
+        for member in members {
+            if !Self::initializes(member, context.in_interface, statics) {
+                continue;
+            }
+            if member.kind() == INITIALIZER {
+                let block = ast::Initializer::cast(member.clone())
+                    .and_then(|initializer| initializer.block());
+                if let Some(block) = block {
+                    stmt::Stmt::block(&block, context, emit)?;
+                }
+                continue;
+            }
+            let Some(decl) = ast::FieldDecl::cast(member.clone()) else {
+                continue;
+            };
+            // The CST is flat, like a local declaration's: `int a = 1, b = 2;` is one declaration
+            // whose two names take the two expression siblings in order. `value()` returns only the
+            // first, which gave `b` the value of `a`.
+            let values: Vec<_> = decl
+                .syntax()
+                .children()
+                .filter_map(ast::Expr::cast)
+                .collect();
+            for (index, name) in decl.names().enumerate() {
+                let Some(value) = values.get(index) else {
+                    continue;
+                };
+                let field = context.member_at(&name)?;
+                let ty = context.index.resolved_member_ty(field);
+                let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
+                if !statics {
+                    emit.asm.load(0)?;
+                }
+                // Converted to the field's declared type, which is where `long total = 0;` gets its
+                // `i2l`.
+                expr::Expr::lower_as(value, &ty, context, emit)?;
+                if statics {
+                    emit.asm
+                        .put_static(&context.this_class, name.text(), &descriptor)?;
+                } else {
+                    emit.asm
+                        .put_field(&context.this_class, name.text(), &descriptor)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether `body` contains an explicit constructor invocation — a bare `this(…)` or `super(…)`.
@@ -574,8 +698,7 @@ impl Compile {
     /// its own body, and the reason a field initialiser is not a statement anywhere in the source.
     fn prologue(
         context: &Context<'_>,
-        asm: &mut Assembler<'_>,
-        slots: &Slots,
+        emit: &mut Emit<'_, '_>,
         super_name: &str,
         super_item: Option<ItemId>,
         members: &[SyntaxNode],
@@ -598,31 +721,10 @@ impl Compile {
                 ));
             }
         }
-        asm.load(0)?;
-        asm.invoke_special(super_name, "<init>", "()V", false)?;
-
-        for member in members {
-            if member.kind() != FIELD_DECL {
-                continue;
-            }
-            if Self::has_modifier(member, jals_syntax::SyntaxKind::STATIC_KW) {
-                continue;
-            }
-            let Some(decl) = ast::FieldDecl::cast(member.clone()) else {
-                continue;
-            };
-            let Some(value) = decl.value() else {
-                continue;
-            };
-            for name in decl.names() {
-                let field = context.member_at(&name)?;
-                let descriptor = Descriptor::field_descriptor(field, context.index)?.to_string();
-                asm.load(0)?;
-                expr::Expr::lower(&value, context, asm, slots)?;
-                asm.put_field(&context.this_class, name.text(), &descriptor)?;
-            }
-        }
-        Ok(())
+        emit.asm.load(0)?;
+        emit.asm
+            .invoke_special(super_name, "<init>", "()V", false)?;
+        Self::initializers(context, emit, members, false)
     }
 }
 
@@ -632,6 +734,68 @@ impl Context<'_> {
         self.index
             .member_by_decl(self.file, usize::from(token.text_range().start()))
             .ok_or_else(|| LowerError::Unresolved(token.text().into()))
+    }
+
+    /// The type a `TYPE` node names.
+    ///
+    /// Inference keys its record by *expression* span and a `TYPE` node is not an expression, so an
+    /// `instanceof`'s target has nowhere to be read from and is resolved here instead. Only what a
+    /// `Class` entry needs is recovered — the array dimensions and the item the name binds to — and a
+    /// name the index does not hold is reported rather than guessed at, because an invented package
+    /// produces a class that loads and then throws `NoClassDefFoundError`.
+    fn ty_of_type(&self, node: &ast::Type) -> Result<jals_hir::Ty> {
+        use jals_syntax::SyntaxKind::LBRACK;
+        let dimensions = node
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == LBRACK)
+            .count();
+
+        let mut ty = if node.is_primitive_or_var() {
+            jals_hir::Ty::Primitive(Self::primitive_of(node).ok_or(DescError::Unknown)?)
+        } else {
+            let name = node.simple_name().ok_or(DescError::Unknown)?;
+            let qualified = node.is_qualified().then(|| node.qualified_text()).flatten();
+            let id = self
+                .index
+                .resolve_type_name(self.file, &name, qualified.as_deref())
+                .project_id()
+                .ok_or_else(|| DescError::Unresolved(name.clone()))?;
+            jals_hir::Ty::Class(jals_hir::ClassTy::Project {
+                id,
+                name,
+                args: Vec::new(),
+            })
+        };
+        for _ in 0..dimensions {
+            ty = jals_hir::Ty::Array(alloc::boxed::Box::new(ty));
+        }
+        Ok(ty)
+    }
+
+    /// The primitive a `TYPE` node's keyword names.
+    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
+        use jals_hir::Primitive;
+        use jals_syntax::SyntaxKind::{
+            BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,
+        };
+        node.syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find_map(|token| {
+                Some(match token.kind() {
+                    BOOLEAN_KW => Primitive::Boolean,
+                    BYTE_KW => Primitive::Byte,
+                    SHORT_KW => Primitive::Short,
+                    CHAR_KW => Primitive::Char,
+                    INT_KW => Primitive::Int,
+                    LONG_KW => Primitive::Long,
+                    FLOAT_KW => Primitive::Float,
+                    DOUBLE_KW => Primitive::Double,
+                    _ => return None,
+                })
+            })
     }
 
     /// A node's byte span, keyed the way the inference memo is: the node's own range, leading

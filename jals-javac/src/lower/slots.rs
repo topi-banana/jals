@@ -56,6 +56,17 @@ impl Slots {
         slot
     }
 
+    /// Take `width` slots for a value the source never named.
+    ///
+    /// A lowering needs its own storage for things the program does not declare: a `for`-each over
+    /// an array holds the array, an index, and the length, and none of the three has a `DefId` to
+    /// look up. Nothing can refer to such a slot by name, so it gets no map entry — only the number.
+    pub(crate) const fn declare_temporary(&mut self, width: u16) -> u16 {
+        let slot = self.next;
+        self.next += width;
+        slot
+    }
+
     /// The slot `id` was placed in.
     pub(crate) fn slot_of(&self, id: DefId) -> Option<u16> {
         self.entries
