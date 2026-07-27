@@ -109,7 +109,7 @@ impl Ctx<'_> {
     }
 
     /// The separation after a leading annotation, by its `[wrapping]` rule.
-    fn annotation_break(&mut self, policy: WrapPolicy) {
+    pub(super) fn annotation_break(&mut self, policy: WrapPolicy) {
         match policy {
             WrapPolicy::AlwaysPerItem => self.forced_break(Indent::ZERO),
             WrapPolicy::IfLong | WrapPolicy::IfLongPerItem => self.break_op(Indent::ZERO),
@@ -126,7 +126,13 @@ impl Ctx<'_> {
         if wrapping.inline_argumentless_annotations
             && matches!(
                 parent,
-                Some(S::FIELD_DECL | S::LOCAL_VAR_DECL | S::RESOURCE | S::PARAM)
+                Some(
+                    S::FIELD_DECL
+                        | S::LOCAL_VAR_DECL
+                        | S::RESOURCE
+                        | S::PARAM
+                        | S::RECORD_COMPONENT
+                )
             )
             && !Self::any_annotation_has_arguments(node)
         {
@@ -138,10 +144,13 @@ impl Ctx<'_> {
                 | S::INTERFACE_DECL
                 | S::ENUM_DECL
                 | S::RECORD_DECL
-                | S::ANNOTATION_TYPE_DECL,
+                | S::ANNOTATION_TYPE_DECL
+                | S::MODULE_DECL,
             ) => wrapping.type_annotations,
             Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL) => wrapping.method_annotations,
-            Some(S::FIELD_DECL) => wrapping.field_annotations,
+            // `visitEnumConstantDeclaration` forces a break after every constant annotation,
+            // whether or not it takes arguments — the constant is a field of the enum.
+            Some(S::FIELD_DECL | S::ENUM_CONSTANT) => wrapping.field_annotations,
             Some(S::PARAM | S::RECORD_COMPONENT | S::LAMBDA_PARAMS) => {
                 wrapping.parameter_annotations
             }

@@ -169,6 +169,16 @@ impl Ctx<'_> {
         self.open(indent.clone());
         for child in &body {
             self.forced_break(Indent::ZERO);
+            // Directives group by kind, and the grouping is the author's — nothing in the syntax
+            // says a `requires` run has ended, so the blank lines they wrote are what separates
+            // one group from the next.
+            let source = child.as_node().map_or(0, |directive| {
+                self.blank_lines_before(directive)
+                    .min(self.style.cfg.blank_lines.max_in_declarations)
+            });
+            if source > 0 {
+                self.ensure_blank_lines(source, Indent::ZERO);
+            }
             self.visit_element(child).await;
         }
         self.close_indent(&indent);

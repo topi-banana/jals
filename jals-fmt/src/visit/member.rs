@@ -367,7 +367,19 @@ impl Ctx<'_> {
 
     /// One enum constant: `NAME(args)` with an optional class body.
     pub(super) async fn visit_enum_constant(&mut self, node: &SyntaxNode) {
+        // A constant carries its annotations directly rather than in a `MODIFIERS` node, so the
+        // break after each one is placed here. `visitEnumConstantDeclaration` forces it whether
+        // or not the annotation takes arguments, which is `[wrapping] field-annotations`.
+        let policy = self.style.cfg.wrapping.field_annotations;
+        let mut previous_annotation = false;
         for child in Self::children(node) {
+            let is_annotation = child
+                .as_node()
+                .is_some_and(|child| matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE));
+            if previous_annotation {
+                self.annotation_break(policy);
+            }
+            previous_annotation = is_annotation;
             if child
                 .as_node()
                 .is_some_and(|child| child.kind() == S::CLASS_BODY)

@@ -164,8 +164,11 @@ impl GoogleJavaFormatConfig {
                 fill_item_width: 10,
                 // `visitLabeledStatement` forces a break after the label's `:`.
                 labeled_statement: WrapPolicy::AlwaysPerItem,
-                // `fieldAnnotationDirection`: a variable's annotations share its line unless one
-                // of them takes arguments.
+                // `fieldAnnotationDirection`: every *variable* — field, local, parameter,
+                // record component, resource, `catch` parameter — puts its annotations on their
+                // own lines, unless none of them takes arguments.
+                parameter_annotations: WrapPolicy::AlwaysPerItem,
+                variable_annotations: WrapPolicy::AlwaysPerItem,
                 inline_argumentless_annotations: true,
                 reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
