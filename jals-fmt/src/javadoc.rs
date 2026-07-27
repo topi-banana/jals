@@ -495,6 +495,20 @@ impl CommentFormatter {
             if cfg.format_html && Self::is_html_block(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
             }
+            // A heading stands alone between blank lines, and what follows it starts a paragraph
+            // of its own rather than continuing the heading's line.
+            if cfg.format_html && Self::is_heading(line) {
+                if !matches!(blocks.last(), Some(Block::Blank) | None) {
+                    blocks.push(Block::Blank);
+                }
+                blocks.push(Block::Prose {
+                    words: line.split_whitespace().map(Into::into).collect(),
+                    first: 0,
+                    rest: 0,
+                });
+                blocks.push(Block::Blank);
+                continue;
+            }
             if cfg.format_html {
                 // The indents belong to the *block*, decided by the line that starts it: a line
                 // continuing an item is at the item's continuation indent whatever it looks like
@@ -549,6 +563,24 @@ impl CommentFormatter {
         blocks
     }
 
+    /// Whether a block is a section heading.
+    ///
+    /// `inferParagraphTags` only inserts a `<p>` between two *literals*; a heading's close tag is
+    /// its own token, so the paragraph after a heading opens without one.
+    fn ends_heading(block: &Block) -> bool {
+        let Block::Prose { words, .. } = block else {
+            return false;
+        };
+        words.last().is_some_and(|word| {
+            word.to_ascii_lowercase().ends_with("</h1>")
+                || word.to_ascii_lowercase().ends_with("</h2>")
+                || word.to_ascii_lowercase().ends_with("</h3>")
+                || word.to_ascii_lowercase().ends_with("</h4>")
+                || word.to_ascii_lowercase().ends_with("</h5>")
+                || word.to_ascii_lowercase().ends_with("</h6>")
+        })
+    }
+
     /// Insert a `<p>` wherever a blank line separates two runs of prose.
     ///
     /// A blank line between paragraphs is a paragraph break the author made in the *comment*; the
@@ -559,6 +591,7 @@ impl CommentFormatter {
         for at in 2..blocks.len() {
             if !matches!(blocks[at - 1], Block::Blank)
                 || !matches!(blocks[at - 2], Block::Prose { .. })
+                || Self::ends_heading(&blocks[at - 2])
             {
                 continue;
             }
@@ -709,15 +742,27 @@ impl CommentFormatter {
     }
 
     /// Whether a line starts an HTML block element, which begins its own paragraph.
+    ///
+    /// Matched case-insensitively: HTML tag names are, and hand-written Javadoc really does say
+    /// `<UL>`.
     fn is_html_block(line: &str) -> bool {
-        const BLOCK_TAGS: [&str; 10] = [
-            "<p>", "<p ", "<br>", "<ul>", "<ol>", "<li>", "<dl>", "<dt>", "<dd>", "<h",
+        const BLOCK_TAGS: [&str; 13] = [
+            "<p>", "<p ", "<br>", "<ul", "<ol", "<li", "<dl", "<dt", "<dd", "<h", "</ul", "</ol",
+            "</dl",
         ];
-        let lower = line.trim_start();
+        let lower = line.trim_start().to_ascii_lowercase();
         BLOCK_TAGS.iter().any(|tag| lower.starts_with(tag))
-            || lower.starts_with("</ul>")
-            || lower.starts_with("</ol>")
-            || lower.starts_with("</dl>")
+    }
+
+    /// Whether a line is a section heading, which stands alone between blank lines.
+    ///
+    /// `JavadocWriter` requests one before `writeHeaderOpen` and one after `writeHeaderClose`.
+    fn is_heading(line: &str) -> bool {
+        let lower = line.trim_start().to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("<h") else {
+            return false;
+        };
+        rest.starts_with(|c: char| ('1'..='6').contains(&c))
     }
 
     /// Parse a line that starts a block tag.
