@@ -706,11 +706,17 @@ impl Ctx<'_> {
         }
         self.open(indent.clone());
         for (nth, arm) in arms.iter().enumerate() {
-            let enforced = if nth == 0 { 0 } else { between };
-            let source = self
-                .blank_lines_before(arm)
-                .min(self.style.cfg.blank_lines.max_in_code);
-            self.blank_lines(enforced.max(source), Indent::ZERO);
+            // `visitSwitch` asks for `BlankLineWanted.NO` right after the `{`: the first arm sits
+            // against the header however the author spaced it.
+            let blanks = if nth == 0 {
+                0
+            } else {
+                between.max(
+                    self.blank_lines_before(arm)
+                        .min(self.style.cfg.blank_lines.max_in_code),
+                )
+            };
+            self.blank_lines(blanks, Indent::ZERO);
             self.visit(arm).await;
         }
         self.close_indent(&indent);
