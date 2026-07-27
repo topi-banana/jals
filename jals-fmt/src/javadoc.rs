@@ -776,19 +776,32 @@ impl CommentFormatter {
         blocks
     }
 
-    /// Whether a block is a section heading.
+    /// Whether a block ends with a tag that is not a literal to google-java-format's lexer.
     ///
-    /// `inferParagraphTags` only inserts a `<p>` between two *literals*; a heading's close tag is
-    /// its own token, so the paragraph after a heading opens without one.
-    fn ends_heading(block: &Block) -> bool {
+    /// `inferParagraphTags` inserts a `<p>` only *between two literals*. A heading's, a
+    /// blockquote's or a list's close tag is its own token, so the paragraph after one opens
+    /// without a `<p>`.
+    fn ends_block_tag(block: &Block) -> bool {
+        const TAGS: [&str; 9] = [
+            "</h1>",
+            "</h2>",
+            "</h3>",
+            "</h4>",
+            "</h5>",
+            "</h6>",
+            "</blockquote>",
+            "</pre>",
+            "</table>",
+        ];
         let Block::Prose { words, .. } = block else {
             return false;
         };
         words.last().is_some_and(|word| {
             let lower = word.text.to_ascii_lowercase();
-            ["</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>"]
-                .iter()
-                .any(|tag| lower.ends_with(tag))
+            TAGS.iter().any(|tag| lower.ends_with(tag))
+                || ["</ul>", "</ol>", "</dl>"]
+                    .iter()
+                    .any(|tag| lower.ends_with(tag))
         })
     }
 
@@ -802,7 +815,7 @@ impl CommentFormatter {
         for at in 2..blocks.len() {
             if !matches!(blocks[at - 1], Block::Blank)
                 || !matches!(blocks[at - 2], Block::Prose { .. })
-                || Self::ends_heading(&blocks[at - 2])
+                || Self::ends_block_tag(&blocks[at - 2])
             {
                 continue;
             }
