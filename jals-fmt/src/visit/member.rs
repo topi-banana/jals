@@ -114,6 +114,26 @@ impl Ctx<'_> {
                 }
                 continue;
             }
+            // A stray `;` after a nested type terminates that declaration, so it is written
+            // against its closing brace rather than given a line of its own.
+            if member
+                .as_token()
+                .is_some_and(|tok| tok.kind() == S::SEMICOLON)
+                && nth > 0
+                && members[nth - 1].as_node().is_some_and(|previous| {
+                    matches!(
+                        previous.kind(),
+                        S::CLASS_DECL
+                            | S::INTERFACE_DECL
+                            | S::ENUM_DECL
+                            | S::RECORD_DECL
+                            | S::ANNOTATION_TYPE_DECL
+                    )
+                })
+            {
+                self.visit_element(member).await;
+                continue;
+            }
             self.body_break(collapsible, enforced.max(source), Indent::ZERO);
             self.visit_element(member).await;
         }
