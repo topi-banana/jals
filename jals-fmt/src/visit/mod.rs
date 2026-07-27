@@ -312,6 +312,7 @@ impl<'a> Ctx<'a> {
             S::SWITCH_RULE => self.visit_switch_rule(node).await,
             S::SWITCH_GROUP => self.visit_switch_group(node).await,
             S::SWITCH_LABEL => self.visit_switch_label(node).await,
+            S::GUARD => self.visit_guard(node).await,
             S::LABELED_STMT => self.visit_labeled(node).await,
             S::ASSERT_STMT => self.visit_assert(node).await,
 

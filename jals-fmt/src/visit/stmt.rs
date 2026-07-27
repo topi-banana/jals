@@ -792,10 +792,22 @@ impl Ctx<'_> {
     /// A `case` / `default` label, whose constant list wraps under `case-labels`.
     pub(super) async fn visit_switch_label(&mut self, node: &SyntaxNode) {
         let policy = self.style.cfg.wrapping.case_labels;
-        let continuation = self.style.continuation();
-        self.open(continuation.clone());
+        // The label list groups without indenting — `visitCase`'s `builder.open(ZERO)`. The arm
+        // itself already opened the continuation the labels break into, and adding another here
+        // would indent a deconstruction pattern's components twice over.
+        self.open_flat(Indent::ZERO);
         self.emit_comma_list(node, policy, Indent::ZERO).await;
-        self.close_indent(&continuation);
+        self.close();
+    }
+
+    /// A `when` guard: `case Foo f when f.isBar() ->`.
+    pub(super) async fn visit_guard(&mut self, node: &SyntaxNode) {
+        // `visitCase` separates the guard from the pattern with a fill break, so it moves onto
+        // its own line only when the label would not fit otherwise.
+        self.ops
+            .brk(crate::ir::FillMode::Independent, " ", Indent::ZERO, None);
+        self.space_already_emitted();
+        self.visit_children(node).await;
     }
 
     /// `label: stmt`, indented by `[layout] label-indent`.
