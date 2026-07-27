@@ -125,6 +125,17 @@ pub enum ConstantPoolEntry {
 }
 
 impl ConstantPool {
+    /// A new, empty pool.
+    ///
+    /// Indices are 1-based on disk, so a fresh pool already holds the index-0
+    /// [`Sentinel`](ConstantSlot::Sentinel) and [`next_index`](Self::next_index) starts at 1.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: alloc::vec![ConstantSlot::Sentinel],
+        }
+    }
+
     pub(crate) async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         let count = r.u16().await?;
         let mut entries = Vec::with_capacity(count as usize);
@@ -220,6 +231,127 @@ impl ConstantPool {
             return None;
         }
         Some(core::mem::replace(previous, entry))
+    }
+
+    /// The index of the first entry equal to `entry`, or `None` when the pool holds no such entry.
+    ///
+    /// `Float` / `Double` are compared on their **bit patterns** rather than through `PartialEq`:
+    /// `0.0` and `-0.0` compare equal but are different constants (an `ldc` of one is not an `ldc`
+    /// of the other), and `NaN` compares unequal to itself, which would append a fresh entry on
+    /// every intern.
+    fn find(&self, entry: &ConstantPoolEntry) -> Option<u16> {
+        let position = self.entries.iter().position(|slot| match (slot, entry) {
+            (
+                ConstantSlot::Entry(ConstantPoolEntry::Float(existing)),
+                ConstantPoolEntry::Float(wanted),
+            ) => existing.to_bits() == wanted.to_bits(),
+            (
+                ConstantSlot::Entry(ConstantPoolEntry::Double(existing)),
+                ConstantPoolEntry::Double(wanted),
+            ) => existing.to_bits() == wanted.to_bits(),
+            (ConstantSlot::Entry(existing), _) => existing == entry,
+            _ => false,
+        })?;
+        u16::try_from(position).ok()
+    }
+
+    /// The index of an entry equal to `entry`, appending it only if the pool does not already hold
+    /// one. `None` when the pool is full (see [`add`](Self::add)).
+    ///
+    /// Deduplication is what keeps a generated pool small, and it decides whether a constant is
+    /// reachable by `ldc` (a one-byte index) or needs `ldc_w`. The lookup is a linear scan: the
+    /// pool is a flat `Vec` with no index structure, which is what keeps this crate a codec rather
+    /// than a builder. A caller generating very large pools can layer its own map over
+    /// [`add`](Self::add) instead.
+    fn intern(&mut self, entry: ConstantPoolEntry) -> Option<u16> {
+        self.find(&entry).map_or_else(|| self.add(entry), Some)
+    }
+
+    /// Intern a `Utf8` entry holding `text`, encoded as JVM modified UTF-8.
+    pub fn utf8_index(&mut self, text: &str) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Utf8(Self::encode_modified_utf8(text)))
+    }
+
+    /// Intern a `Class` entry (and its name `Utf8`) for an *internal-form* name (`java/lang/String`,
+    /// or `[Ljava/lang/String;` for an array class) — not the dotted source spelling.
+    pub fn class_index(&mut self, internal_name: &str) -> Option<u16> {
+        let name_index = self.utf8_index(internal_name)?;
+        self.intern(ConstantPoolEntry::Class { name_index })
+    }
+
+    /// Intern a `String` literal entry (and its `Utf8`).
+    pub fn string_index(&mut self, text: &str) -> Option<u16> {
+        let string_index = self.utf8_index(text)?;
+        self.intern(ConstantPoolEntry::String { string_index })
+    }
+
+    /// Intern an `Integer` constant.
+    pub fn integer_index(&mut self, value: i32) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Integer(value))
+    }
+
+    /// Intern a `Long` constant. Occupies two slots.
+    pub fn long_index(&mut self, value: i64) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Long(value))
+    }
+
+    /// Intern a `Float` constant, matched on its bit pattern (see [`find`](Self::find)).
+    pub fn float_index(&mut self, value: f32) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Float(value))
+    }
+
+    /// Intern a `Double` constant, matched on its bit pattern. Occupies two slots.
+    pub fn double_index(&mut self, value: f64) -> Option<u16> {
+        self.intern(ConstantPoolEntry::Double(value))
+    }
+
+    /// Intern a `NameAndType` entry (and the two `Utf8`s it points at).
+    fn name_and_type_index(&mut self, name: &str, descriptor: &str) -> Option<u16> {
+        let name_index = self.utf8_index(name)?;
+        let descriptor_index = self.utf8_index(descriptor)?;
+        self.intern(ConstantPoolEntry::NameAndType {
+            name_index,
+            descriptor_index,
+        })
+    }
+
+    /// Intern a `FieldRef` and everything it references. `owner` is an internal-form class name.
+    pub fn field_ref_index(&mut self, owner: &str, name: &str, descriptor: &str) -> Option<u16> {
+        let class_index = self.class_index(owner)?;
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::FieldRef {
+            class_index,
+            name_and_type_index,
+        })
+    }
+
+    /// Intern a `MethodRef` and everything it references — the form `invokevirtual` /
+    /// `invokestatic` / `invokespecial` take when the owner is a *class*.
+    pub fn method_ref_index(&mut self, owner: &str, name: &str, descriptor: &str) -> Option<u16> {
+        let class_index = self.class_index(owner)?;
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::MethodRef {
+            class_index,
+            name_and_type_index,
+        })
+    }
+
+    /// Intern an `InterfaceMethodRef` and everything it references — the form `invokeinterface`
+    /// takes, and the one an `invokestatic` / `invokespecial` on an *interface* owner must use.
+    /// A `MethodRef` and an `InterfaceMethodRef` naming the same member are distinct entries and
+    /// are not interchangeable.
+    pub fn interface_method_ref_index(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<u16> {
+        let class_index = self.class_index(owner)?;
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::InterfaceMethodRef {
+            class_index,
+            name_and_type_index,
+        })
     }
 
     /// `Utf8` carries a `u16` byte length, so anything longer cannot be written.
@@ -341,6 +473,12 @@ impl ConstantPool {
             Some(ConstantPoolEntry::Class { name_index }) => self.utf8(*name_index),
             _ => None,
         }
+    }
+}
+
+impl Default for ConstantPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
