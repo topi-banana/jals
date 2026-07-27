@@ -73,7 +73,7 @@ mod tests {
     /// A module whose types form a two-level hierarchy, plus a function that allocates the subtype
     /// and reads a field *through the supertype's* accessor — which only validates because the
     /// subtyping is declared.
-    fn hierarchy_module() -> Vec<u8> {
+    fn hierarchy_module() -> Option<Vec<u8>> {
         let mut module = Module::new();
         let mutable_i32 = FieldType {
             storage: StorageType::Val(ValType::I32),
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn a_hand_encoded_gc_module_validates() {
-        validate(&hierarchy_module());
+        validate(&hierarchy_module().expect("a module whose lengths all fit"));
     }
 
     /// LEB128 is where a hand-written encoder goes wrong first: the signed form has to stop on the

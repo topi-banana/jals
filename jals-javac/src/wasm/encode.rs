@@ -17,11 +17,20 @@ use alloc::vec::Vec;
 #[derive(Debug, Default)]
 pub(crate) struct Bytes {
     out: Vec<u8>,
+    /// Set when a length or an index did not fit the `u32` the format spells it with.
+    ///
+    /// Sticky, and merged whenever one buffer is appended to another, so [`Module::finish`] can
+    /// refuse to hand out a module rather than one carrying a length that is simply wrong. A
+    /// truncated length is not a smaller module: it is bytes an engine reads as something else.
+    overflow: bool,
 }
 
 impl Bytes {
     pub(crate) const fn new() -> Self {
-        Self { out: Vec::new() }
+        Self {
+            out: Vec::new(),
+            overflow: false,
+        }
     }
 
     pub(crate) fn byte(&mut self, value: u8) -> &mut Self {
@@ -70,13 +79,26 @@ impl Bytes {
 
     /// A length-prefixed UTF-8 name.
     fn name(&mut self, text: &str) -> &mut Self {
-        self.u32(u32::try_from(text.len()).unwrap_or(u32::MAX));
+        self.count(text.len());
         self.raw(text.as_bytes())
     }
 
-    /// The element count that prefixes every vector.
+    /// The element count that prefixes every vector, and every other length the format spells as a
+    /// `u32`. A `usize` that does not fit sets [`overflow`](Self::overflow) instead of wrapping.
     fn count(&mut self, len: usize) -> &mut Self {
-        self.u32(u32::try_from(len).unwrap_or(u32::MAX))
+        match u32::try_from(len) {
+            Ok(len) => self.u32(len),
+            Err(_) => {
+                self.overflow = true;
+                self.u32(u32::MAX)
+            }
+        }
+    }
+
+    /// Append `other`'s bytes, carrying its overflow flag with them.
+    fn append(&mut self, other: &Self) -> &mut Self {
+        self.overflow |= other.overflow;
+        self.raw(&other.out)
     }
 
     const fn len(&self) -> usize {
@@ -310,6 +332,10 @@ impl Module {
     }
 
     /// Append `ty` and return its index.
+    ///
+    /// A saturated index would be wrong, but it is also unreachable *and* caught: a type section
+    /// with more than `u32::MAX` entries cannot write its own count either, so
+    /// [`finish`](Self::finish) refuses the module before an index that large can be read.
     pub(crate) fn add_type(&mut self, ty: SubType) -> u32 {
         self.types.push(ty);
         u32::try_from(self.types.len() - 1).unwrap_or(u32::MAX)
@@ -322,8 +348,10 @@ impl Module {
         u32::try_from(defined).unwrap_or(u32::MAX)
     }
 
-    /// Encode the whole module.
-    pub(crate) fn finish(&self) -> Vec<u8> {
+    /// Encode the whole module, or `None` when a length did not fit the `u32` the format spells it
+    /// with — a module whose own lengths are wrong is not a smaller module, it is bytes an engine
+    /// reads as something else.
+    pub(crate) fn finish(&self) -> Option<Vec<u8>> {
         let mut out = Bytes::new();
         out.raw(b"\0asm").raw(&1u32.to_le_bytes());
 
@@ -371,18 +399,18 @@ impl Module {
                     local.write(&mut body);
                 }
                 body.raw(&func.body).byte(0x0B);
-                let body = body.into_vec();
-                section.count(body.len()).raw(&body);
+                section.count(body.len());
+                section.append(&body);
             }
             Self::section(&mut out, 10, &section);
         }
 
-        out.into_vec()
+        (!out.overflow).then(|| out.into_vec())
     }
 
     /// Write one section: its id, its byte length, then its contents.
     fn section(out: &mut Bytes, id: u8, content: &Bytes) {
         out.byte(id).count(content.len());
-        out.raw(&content.out);
+        out.append(content);
     }
 }

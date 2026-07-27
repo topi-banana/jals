@@ -50,6 +50,10 @@ pub enum WasmError {
     Unresolved(String),
     /// A type with no wasm representation — every library type, by design.
     NoRepresentation(String),
+    /// A length or an index outgrew the `u32` the binary format spells it with. Not reachable from
+    /// a project that fits in memory, and reported rather than truncated because a wrong length is
+    /// bytes an engine reads as something else.
+    TooLarge,
 }
 
 impl core::fmt::Display for WasmError {
@@ -62,6 +66,7 @@ impl core::fmt::Display for WasmError {
                 "`{ty}` has no wasm representation: this backend compiles primitives and \
                  project-declared classes, and a wasm host has no `java.base` to supply the rest"
             ),
+            Self::TooLarge => f.write_str("the module exceeded a WebAssembly format limit"),
         }
     }
 }
@@ -154,7 +159,7 @@ impl CompileWasm {
                     .push((name.clone(), ExportKind::Func, method.index));
             }
         }
-        Ok(module.finish())
+        module.finish().ok_or(WasmError::TooLarge)
     }
 
     /// Every project class, supertypes first.
