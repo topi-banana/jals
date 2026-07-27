@@ -89,7 +89,8 @@ impl StringWrapper {
         if body.is_empty() {
             return None;
         }
-        let stripped = Self::strip_indent(&body);
+        let body_owned = Self::strip_indent(&body);
+        let stripped = &body_owned;
         let last_initial = body.last()?.trim_end().chars().count();
         let last_stripped = stripped.last()?.trim_end().chars().count();
         // A block whose closing delimiter already sits at column zero of its own content stays
@@ -132,24 +133,53 @@ impl StringWrapper {
     /// The common indentation is the least of every non-blank line's *and* of the last line,
     /// blank or not — that last line is the closing delimiter, and it is what an author moves to
     /// choose the block's margin.
-    fn strip_indent(lines: &[&str]) -> Vec<String> {
+    pub(crate) fn strip_indent(lines: &[&str]) -> Vec<String> {
+        // Counted in *characters*, as `String.stripIndent` does. Bytes would let a line indented
+        // with a multi-byte space and one indented with an ASCII space agree on a cut that falls
+        // inside a character.
+        let indent_of = |line: &str| line.chars().take_while(|ch| ch.is_whitespace()).count();
         let mut common = usize::MAX;
         for (nth, line) in lines.iter().enumerate() {
             let last = nth + 1 == lines.len();
             if line.trim().is_empty() && !last {
                 continue;
             }
-            let indent = line.len() - line.trim_start().len();
-            common = common.min(indent);
+            common = common.min(indent_of(line));
         }
         let common = if common == usize::MAX { 0 } else { common };
         lines
             .iter()
             .map(|line| {
-                let cut = common.min(line.len() - line.trim_start().len());
-                line[cut..].trim_end().into()
+                let cut = common.min(indent_of(line));
+                let rest: String = line.chars().skip(cut).collect();
+                rest.trim_end().into()
             })
             .collect()
+    }
+
+    /// What a text block *says*, with its incidental whitespace removed.
+    ///
+    /// [`reindent_text_block`](Self::reindent_text_block) rewrites that whitespace, so the token's
+    /// text is not comparable across the pass — but what the block spells is, and
+    /// [`TokenBudget`](super::TokenBudget) checks it the way it checks a reflowed concatenation.
+    pub(crate) fn text_block_content(text: &str) -> String {
+        let mut lines = text.split('\n');
+        let Some(first) = lines.next() else {
+            return String::new();
+        };
+        let body: Vec<&str> = lines.collect();
+        if body.is_empty() {
+            return first.into();
+        }
+        let mut stripped = Self::strip_indent(&body);
+        if let Some(last) = stripped.last_mut() {
+            *last = last
+                .strip_suffix("\"\"\"")
+                .map_or_else(|| last.clone(), |rest| rest.trim_end().into());
+        }
+        // A `\` at end of line continues it, so `foo\` + newline spells what `foo` alone does —
+        // which is the one rewrite re-indenting is allowed to make.
+        stripped.join("\n").replace("\\\n", "")
     }
 
     /// The replacements to make, in source order and non-overlapping.

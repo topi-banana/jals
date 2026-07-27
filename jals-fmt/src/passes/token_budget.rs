@@ -23,10 +23,12 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use jals_config::fmt::ForceBraces;
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
+use crate::passes::StringWrapper;
 use crate::passes::literals::LiteralRewrite;
 use crate::style::Style;
 
@@ -91,6 +93,11 @@ impl TokenBudget {
         // pass is actually promising — is the *text* the concatenation evaluates to, so that is
         // what gets compared, and the two token kinds it rearranges leave the multiset.
         let reflows = style.cfg.wrapping.reflow_long_strings;
+        if reflows
+            && Self::text_block_content(src_tree) != Self::text_block_content(&reparsed.syntax())
+        {
+            return false;
+        }
         if reflows && Self::string_content(src_tree) != Self::string_content(&reparsed.syntax()) {
             return false;
         }
@@ -161,6 +168,17 @@ impl TokenBudget {
     ///
     /// The one thing a reflow may not change: where the pieces are cut is layout, what they spell
     /// together is the program.
+    /// The one thing re-indenting a text block may not change: what it spells once its
+    /// incidental whitespace is stripped.
+    fn text_block_content(root: &SyntaxNode) -> String {
+        root.descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == SyntaxKind::TEXT_BLOCK)
+            .map(|tok| StringWrapper::text_block_content(tok.text()))
+            .collect::<Vec<_>>()
+            .join("\u{1}")
+    }
+
     fn string_content(root: &SyntaxNode) -> String {
         root.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
