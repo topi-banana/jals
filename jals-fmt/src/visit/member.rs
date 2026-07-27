@@ -742,7 +742,6 @@ impl Ctx<'_> {
                 .as_node()
                 .is_some_and(|value| value.kind() == S::ARRAY_INIT)
         });
-        let continuation = self.style.continuation();
         let mut opened = false;
         for child in &children {
             if child
@@ -754,7 +753,9 @@ impl Ctx<'_> {
                 if array {
                     self.space();
                 } else {
-                    self.open(continuation.clone());
+                    // The level is `ZERO`: the value's own supplies whatever continuation it
+                    // needs, and adding one here would indent a wrapped expression twice.
+                    self.open_flat(Indent::ZERO);
                     opened = true;
                     self.ops.brk(FillMode::Independent, " ", Indent::ZERO, None);
                     self.space_already_emitted();
@@ -764,7 +765,7 @@ impl Ctx<'_> {
             self.visit_element(child).await;
         }
         if opened {
-            self.close_indent(&continuation);
+            self.close();
         }
     }
 
