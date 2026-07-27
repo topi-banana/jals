@@ -572,6 +572,9 @@ impl CommentFormatter {
         let (mut first, mut rest) = (0usize, 0usize);
         // The indent the region currently being collected opens at.
         let mut fence_indent = 0usize;
+        // Everything after a block tag belongs to that tag's description, so it sits at the
+        // description's continuation indent — headings, paragraphs and lists included.
+        let mut tag_indent = 0usize;
 
         for raw in body.split('\n') {
             let mut line = raw.trim();
@@ -646,6 +649,11 @@ impl CommentFormatter {
             if let Some(tag) = Self::block_tag(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 blocks.push(tag);
+                if cfg.indent_tag_description {
+                    tag_indent = style.continuation_cols;
+                }
+                first = tag_indent;
+                rest = tag_indent;
                 continue;
             }
             // `<p>` opens a paragraph: a blank line before it, and the tag glued to the word it
@@ -684,8 +692,8 @@ impl CommentFormatter {
                         Self::tokens_of(line, &mut tag);
                         tag
                     },
-                    first: 0,
-                    rest: 0,
+                    first: tag_indent,
+                    rest: tag_indent,
                 });
                 blocks.push(Block::Blank);
                 continue;
@@ -709,8 +717,8 @@ impl CommentFormatter {
                         Self::tokens_of(line, &mut heading);
                         heading
                     },
-                    first: 0,
-                    rest: 0,
+                    first: tag_indent,
+                    rest: tag_indent,
                 });
                 blocks.push(Block::Blank);
                 continue;
@@ -722,7 +730,9 @@ impl CommentFormatter {
                 // They are read *before* this line's own tags, so a line that opens a list is
                 // still at the enclosing level.
                 if prose.is_empty() {
-                    (first, rest) = Self::list_indents(depth, line);
+                    let (list_first, list_rest) = Self::list_indents(depth, line);
+                    first = list_first + tag_indent;
+                    rest = list_rest + tag_indent;
                 }
                 depth = Self::list_depth(depth, line);
             }
