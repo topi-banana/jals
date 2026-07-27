@@ -104,14 +104,30 @@ impl Ctx<'_> {
         // keyword modifier (`non-sealed @A class B`) stays where the author put it — which is
         // what google-java-format does, and the reason this tracks a run rather than a predicate
         // on each child.
+        // A *trailing* run of well-known type annotations annotates the type that follows, not
+        // the declaration, so it stays on the type's line however the declaration's own
+        // annotations are placed — `splitModifiers`.
+        let types_start = children
+            .iter()
+            .rposition(|child| {
+                !child
+                    .as_node()
+                    .is_some_and(|node| self.is_type_annotation(node))
+            })
+            .map_or(0, |at| at + 1);
+
         let mut leading_run = true;
         let mut previous_annotation = false;
-        for child in &children {
+        for (nth, child) in children.iter().enumerate() {
             let is_annotation = child
                 .as_node()
                 .is_some_and(|node| matches!(node.kind(), S::ANNOTATION | S::ATTRIBUTE));
             if previous_annotation && leading_run {
-                self.annotation_break(policy);
+                if nth >= types_start {
+                    self.type_annotation_break();
+                } else {
+                    self.annotation_break(policy);
+                }
             }
             self.visit_element(child).await;
             leading_run = leading_run && is_annotation;
@@ -120,8 +136,22 @@ impl Ctx<'_> {
         // A declaration whose modifiers are *only* annotations still needs separating from the
         // `class` / `void` that follows, and that keyword is not part of this node.
         if previous_annotation && leading_run {
-            self.annotation_break(policy);
+            if types_start < children.len() {
+                self.type_annotation_break();
+            } else {
+                self.annotation_break(policy);
+            }
         }
+    }
+
+    /// The separation after a type annotation.
+    ///
+    /// `visitMethod` emits these *inside* the header level, where they only ever break with the
+    /// return type itself. Emitted here — outside it, among the forced breaks that separate
+    /// members — even a fill break would be taken every time, so the space is what reproduces
+    /// google-java-format's placement.
+    fn type_annotation_break(&mut self) {
+        self.space();
     }
 
     /// The separation after a leading annotation, by its `[wrapping]` rule.

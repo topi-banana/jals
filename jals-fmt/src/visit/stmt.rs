@@ -439,7 +439,8 @@ impl Ctx<'_> {
                 self.visit_element(&child).await;
                 self.open(continuation.clone());
                 opened = true;
-                self.list_break(self.style.cfg.wrapping.for_statement, Indent::ZERO);
+                let flat = Self::flat_space(self.style.cfg.spacing.after_foreach_colon);
+                self.list_break_flat(self.style.cfg.wrapping.for_statement, flat, Indent::ZERO);
                 continue;
             }
             if child.as_token().is_some_and(|tok| tok.kind() == S::RPAREN) {

@@ -165,7 +165,18 @@ impl Ctx<'_> {
             S::ARG_LIST => wrapping.call_arguments,
             S::PARAM_LIST | S::LAMBDA_PARAMS => wrapping.method_parameters,
             S::RECORD_HEADER => wrapping.record_components,
-            S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST => wrapping.annotation_arguments,
+            // `visitAnnotation`: one member-value pair holding an array sends the whole list
+            // one per line, so the array's own rows are not read as the annotation's.
+            S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST => {
+                if node
+                    .descendants()
+                    .any(|child| child.kind() == S::ARRAY_INIT)
+                {
+                    WrapPolicy::AlwaysPerItem
+                } else {
+                    wrapping.annotation_arguments
+                }
+            }
             S::RESOURCE_LIST => self.resource_policy(),
             S::RECORD_PATTERN => wrapping.deconstruction_list,
             // A list the grammar can produce but no rule names: an argument list is the closest

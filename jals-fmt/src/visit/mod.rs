@@ -153,6 +153,9 @@ pub(crate) struct Ctx<'a> {
     /// first item of a file but its header comment, so the blank lines it wants fall between the
     /// two.
     owed_after_comments: usize,
+    /// Simple names imported from a well-known type-annotation package. A trailing run of these
+    /// on a declaration annotates the *type*, not the declaration, so it stays on the type's line.
+    type_annotations: BTreeSet<String>,
     /// The indent the next delimited list opens at, when the construct that owns it decides
     /// rather than the list itself — `addArguments`' `plusIndent` parameter, and a declaration
     /// header whose own level already took the step.
@@ -195,6 +198,7 @@ impl<'a> Ctx<'a> {
             hoisted: BTreeSet::new(),
             owed_after_comments: 0,
             list_indent: None,
+            type_annotations: Self::imported_type_annotations(root),
             emitted_comments: 0,
             yielder: Yielder::new(),
         }
@@ -716,6 +720,54 @@ impl<'a> Ctx<'a> {
     /// The node's first child node of `kind`, if any.
     fn child_of(node: &SyntaxNode, kind: S) -> Option<SyntaxNode> {
         node.children().find(|child| child.kind() == kind)
+    }
+
+    /// The simple names of the well-known type annotations this file imports.
+    ///
+    /// google-java-format's `TYPE_ANNOTATIONS` / `checkForTypeAnnotation`: the judgement is by
+    /// *import*, because `@Nullable` alone says nothing about which `Nullable` it is.
+    fn imported_type_annotations(root: &SyntaxNode) -> BTreeSet<String> {
+        const WELL_KNOWN: [&str; 4] = [
+            "org.jspecify.annotations.NonNull",
+            "org.jspecify.annotations.Nullable",
+            "org.checkerframework.checker.nullness.qual.NonNull",
+            "org.checkerframework.checker.nullness.qual.Nullable",
+        ];
+        let mut names = BTreeSet::new();
+        for import in root.children().filter(|node| node.kind() == S::IMPORT_DECL) {
+            let text: String = import
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .filter(|tok| !tok.kind().is_trivia())
+                .skip(1)
+                .fold(String::new(), |mut text, tok| {
+                    text.push_str(tok.text());
+                    text
+                });
+            let qualified = text.trim_end_matches(';');
+            if WELL_KNOWN.contains(&qualified)
+                && let Some(simple) = qualified.rsplit('.').next()
+            {
+                names.insert(simple.to_owned());
+            }
+        }
+        names
+    }
+
+    /// Whether an annotation node is one of the imported type annotations.
+    fn is_type_annotation(&self, node: &SyntaxNode) -> bool {
+        if !matches!(node.kind(), S::ANNOTATION | S::ATTRIBUTE) {
+            return false;
+        }
+        let mut names = node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == S::IDENT);
+        let Some(first) = names.next() else {
+            return false;
+        };
+        // Only a bare simple name qualifies, as `isTypeAnnotation` requires.
+        names.next().is_none() && self.type_annotations.contains(first.text())
     }
 
     /// How wide a node's *source text* is, ignoring the whitespace it starts with.
