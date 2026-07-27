@@ -145,7 +145,9 @@ impl Ctx<'_> {
                 if nth > types_start {
                     self.type_annotation_break();
                 } else {
-                    if run_open && nth >= types_start {
+                    // The run's level holds only the annotations; the break that separates them
+                    // from what they annotate is measured against the whole declaration.
+                    if run_open && (!is_annotation || nth >= types_start) {
                         self.close();
                         run_open = false;
                     }
