@@ -292,12 +292,19 @@ impl Ctx<'_> {
                     continue;
                 }
                 Some(S::RBRACE) => {
+                    // A comment written just before the brace documents the body, so it keeps the
+                    // constants' indent — the same rule a class body follows.
+                    let dangling = child
+                        .as_token()
+                        .is_some_and(|brace| self.hoist_comments_before(brace));
                     if opened {
                         self.close_indent(&indent);
                         opened = false;
                     }
-                    if has_content {
+                    if has_content && !dangling {
                         self.enum_break(trivial, policy);
+                    } else if dangling {
+                        self.forced_break(Indent::ZERO);
                     }
                     self.visit_element(child).await;
                     continue;

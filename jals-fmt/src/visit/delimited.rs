@@ -659,7 +659,13 @@ impl Ctx<'_> {
     /// `      "a", x,` / `    "bbb", y,` does not — and google-java-format lays the second one out
     /// one element per line.
     fn source_column(node: &SyntaxNode) -> Option<usize> {
-        let first = Ctx::first_token(node)?;
+        let mut first = Ctx::first_token(node)?;
+        // A comment written in front of the item is part of where the item starts —
+        // `actualStartColumn`. Measuring from the value instead would read `/* x */ 1, /* xx */ 2`
+        // as two columns because the two comments are different widths.
+        while let Some(comment) = Self::comment_before(&first) {
+            first = comment;
+        }
         let mut column = 0usize;
         let mut cursor = first.prev_token();
         while let Some(previous) = cursor {
@@ -670,6 +676,20 @@ impl Ctx<'_> {
             cursor = previous.prev_token();
         }
         Some(column)
+    }
+
+    /// The comment written immediately before `tok` on the same line, if any.
+    fn comment_before(tok: &SyntaxToken) -> Option<SyntaxToken> {
+        let mut cursor = tok.prev_token();
+        while let Some(previous) = cursor {
+            match previous.kind() {
+                S::WHITESPACE => {}
+                S::LINE_COMMENT | S::BLOCK_COMMENT | S::DOC_COMMENT => return Some(previous),
+                _ => return None,
+            }
+            cursor = previous.prev_token();
+        }
+        None
     }
 
     /// Emit a grid-shaped initializer, keeping the source's row breaks.
