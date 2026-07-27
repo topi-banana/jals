@@ -39,14 +39,6 @@ crate = "jals_syntax"
 module = "ast::generated"
 reason = "generated AST; uniform pub surface from xtask codegen, consumer (jals-fmt) is WIP"
 
-# The compile-backend tier is a documented, deliberately-unimplemented seam: no
-# `impl Backend` exists yet, so nothing reaches its declarations from a shipped
-# binary. See the `TODO(backend-tier)` note atop `jals-build/src/backend.rs`.
-[[exclude]]
-crate = "jals_build"
-module = "backend"
-reason = "deferred backend-tier compile seam; no impl exists yet (TODO(backend-tier))"
-
 # `jals_fmt::import` lowers native formatter configs (Eclipse / IntelliJ / GJF /
 # Palantir / Spotless) into a jals `Config`. `jals fmt` / `jals init` now reach the
 # file-backed importers through `jals-cli/src/migrate.rs`, but three things here
@@ -72,77 +64,59 @@ module = "fmt"
 reason = "serde-read/written formatter config schema; the formatter that names its fields is the WIP rewrite"
 
 # --- Overrides --------------------------------------------------------------
-# The backend seam's crate-root re-exports live outside the `backend` module,
-# so they need per-item allows. Kept public as the stable surface the future
-# `javac` backend adapter will implement and wire up (TODO(backend-tier)).
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_build"
-item = "Backend"
-level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_build"
-item = "BackendFuture"
-level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
-
+# `BackendSelection` / `BackendAbsence` are the one part of the backend tier the
+# CLI does not reach: it matches `[build] backend` and constructs the backend
+# directly, so nothing yet reports absence as a *result*. That is what `wasm32`
+# needs in order to run the frontend and stop without treating it as a failure.
+# See the `TODO(backend-tier)` note atop `jals-build/src/backend.rs`.
 [[override]]
 lint = "hawk::dead_public"
 crate = "jals_build"
 item = "BackendSelection"
 level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_build"
+item = "backend::BackendSelection::Available"
+level = "allow"
+reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "jals_build"
+item = "backend::BackendSelection::Absent"
+level = "allow"
+reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
 
 [[override]]
 lint = "hawk::unnecessary_public"
 crate = "jals_build"
 item = "BackendAbsence"
 level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
+reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
 
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "jals_build"
-item = "BackendOptions"
-level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "jals_build"
-item = "BackendOutcome"
-level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "jals_build"
-item = "BackendRequest"
-level = "allow"
-reason = "deferred backend-tier seam; stable surface for the future javac adapter"
-
-# `BackendKey` folds the frontend→backend pipeline provenance; part of the same
-# deferred backend tier.
+# `BackendKey` folds the frontend→backend pipeline provenance. Still unreached
+# because backend output is not memoized yet: every build recompiles every
+# source, so nothing asks the cache whether this compile already happened.
 [[override]]
 lint = "hawk::dead_public"
 crate = "jals_frontend"
 item = "BackendKey"
 level = "allow"
-reason = "deferred backend-tier seam; frontend→backend cache-key provenance"
+reason = "backend output is not memoized yet (CacheNamespace::BackendOutput unused)"
 
 [[override]]
 lint = "hawk::dead_public"
 crate = "jals_frontend"
 item = "key::BackendKey::output"
 level = "allow"
-reason = "deferred backend-tier seam; frontend→backend cache-key provenance"
+reason = "backend output is not memoized yet (CacheNamespace::BackendOutput unused)"
 
 [[override]]
 lint = "hawk::dead_public"
 crate = "jals_frontend"
 item = "key::BackendKey::classpath"
 level = "allow"
-reason = "deferred backend-tier seam; frontend→backend cache-key provenance"
+reason = "backend output is not memoized yet (CacheNamespace::BackendOutput unused)"

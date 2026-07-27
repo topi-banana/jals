@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use jals_build::build_script::{
     BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession,
@@ -556,7 +556,7 @@ impl BuildArgs {
         // Assemble the root script outputs and complete transitive dependency graph. Structural graph
         // and dependency-script failures abort before javac; lower-level classpath misses remain
         // warnings so the resolver can report all deterministic diagnostics.
-        let (sources, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
@@ -569,6 +569,16 @@ impl BuildArgs {
             },
         )
         .await?;
+        // `[build.backend]` picks *what* compiles the lowered tree. The in-process compiler needs
+        // no JDK and reads the sources straight from the artifact cache; `javac` needs them on
+        // disk and a host process to run in.
+        if matches!(
+            manifest.build.backend,
+            jals_config::BackendKind::Jals {} | jals_config::BackendKind::JalsWasm {}
+        ) {
+            return App::compile_in_process(&manifest, &root, &tree, self.dry_run, self.verbose)
+                .await;
+        }
         let request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
         // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
         // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
@@ -594,6 +604,21 @@ impl RunArgs {
     /// run; `--dry-run` prints both commands without executing either.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        // `jals run` is `java`, and a WebAssembly module is not something `java` can be handed. The
+        // check is here rather than at the launch because the failure would otherwise surface as a
+        // missing main class in a `classes-dir` that holds a `.wasm` — true, and useless.
+        if matches!(
+            manifest.build.backend,
+            jals_config::BackendKind::JalsWasm {}
+        ) {
+            bail!(
+                "`jals run` runs a main class on a JVM, and `[build] backend` is `jals-wasm`, \
+                 which compiles the project to a WebAssembly module instead. Run the module with a \
+                 wasm engine (`wasmtime run --invoke <method> {}/project.wasm`), or switch the \
+                 backend to `jals` or `javac` to produce class files.",
+                manifest.build.classes_dir
+            );
+        }
         let features = self.features.resolve(&manifest)?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
@@ -605,7 +630,7 @@ impl RunArgs {
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
-        let (sources, inputs) = App::prepare_compile_inputs(
+        let (sources, _tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
@@ -1087,7 +1112,11 @@ impl App {
         features: &ResolvedBuildFeatures,
         offline: bool,
         publications: jals_project::SourcePublication,
-    ) -> Result<(jals_build::StagedTree, HostProjectInputs)> {
+    ) -> Result<(
+        jals_build::StagedTree,
+        Vec<(RelativePath, jals_storage::CacheKey)>,
+        HostProjectInputs,
+    )> {
         let environment = Self::build_script_environment(manifest, features);
         let script =
             Self::run_build_script(manifest, root, exec, &environment, offline, publications)
@@ -1128,7 +1157,7 @@ impl App {
                 to_lower.push(path.clone());
             }
         }
-        let staged = Self::lower_sources(manifest, root, &to_lower, features).await?;
+        let (staged, tree) = Self::lower_sources(manifest, root, &to_lower, features).await?;
         // Whatever was lowered is now represented by its staged copy; leaving the original in
         // `extra_sources` would hand javac the pre-frontend file as well.
         inputs
@@ -1147,7 +1176,7 @@ impl App {
         // rewriting frontend that relies on implicit resolution would have to stage under the
         // original source-dir prefix instead.
         manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
-        Ok((staged, inputs))
+        Ok((staged, tree, inputs))
     }
 
     fn print_graph_warning(warning: &jals_project::GraphWarning) {
@@ -1355,7 +1384,10 @@ impl App {
         root: &Path,
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
-    ) -> Result<jals_build::StagedTree> {
+    ) -> Result<(
+        jals_build::StagedTree,
+        Vec<(RelativePath, jals_storage::CacheKey)>,
+    )> {
         // Enabling a jals dialect feature (`[package] features`) drives the build to desugar it,
         // so it compiles without a separate `[build.frontend]` selection. When no dialect feature
         // is on, fall back to vanilla so the cache identity of ordinary projects is unchanged.
@@ -1409,9 +1441,103 @@ impl App {
             .map(|file| (file.path.clone(), file.key.clone()))
             .collect();
 
-        jals_build::StagedTree::write(&cache, &tree, root.join(jals_build::FRONTEND_OUT_DIR))
+        // The tree is staged for *both* backends: a process-based compiler needs the files on
+        // disk, and having them there keeps `--verbose` and post-mortem debugging identical
+        // whichever backend ran.
+        let staged =
+            jals_build::StagedTree::write(&cache, &tree, root.join(jals_build::FRONTEND_OUT_DIR))
+                .await
+                .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
+        Ok((staged, tree))
+    }
+
+    /// Resolve a lowered tree's cache keys to the bytes an in-process backend compiles.
+    ///
+    /// The [`Backend`](jals_build::Backend) contract is object-safe and `ArtifactCache` is not, so
+    /// this resolution is the host's job rather than the backend's.
+    async fn backend_sources(
+        root: &Path,
+        tree: &[(RelativePath, jals_storage::CacheKey)],
+    ) -> Result<Vec<jals_build::BackendSource>> {
+        let cache = jals_storage::ArtifactCache::new(jals_storage::NativeCache::new(
+            root.join(NativeStorage::PROJECT_CACHE_DIR),
+        ));
+        let mut out = Vec::with_capacity(tree.len());
+        for (path, key) in tree {
+            let bytes = cache
+                .lookup(key)
+                .await
+                .map_err(|error| anyhow!("reading lowered source `{path}`: {error}"))?
+                .ok_or_else(|| anyhow!("lowered source `{path}` is not in the artifact cache"))?;
+            out.push(jals_build::BackendSource {
+                path: path.clone(),
+                key: key.clone(),
+                bytes,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Compile with the in-process backend and write its class files under `classes_dir`.
+    ///
+    /// Output goes to the filesystem directly, exactly where `javac -d` would have put it: this is
+    /// build output, not tracked project source, and `jals clean` already owns removing it.
+    async fn compile_in_process(
+        manifest: &Manifest,
+        root: &Path,
+        tree: &[(RelativePath, jals_storage::CacheKey)],
+        dry_run: bool,
+        verbose: bool,
+    ) -> Result<ExitCode> {
+        let sources = Self::backend_sources(root, tree).await?;
+        let options = jals_build::BackendOptions {
+            release: manifest.build.release,
+            source: manifest.build.source,
+            target: manifest.build.target,
+            extra_args: manifest.build.javac_flags.clone(),
+        };
+        let request = jals_build::BackendRequest {
+            tree: &sources,
+            // The compiler reads its library signatures from the embedded stubs rather than from
+            // the classpath; wiring dependency classes in is what lets it compile against them.
+            classpath: &[],
+            options: &options,
+        };
+        let backend = match manifest.build.backend {
+            // wasm is a different *target*, not just a different tool: one module for the whole
+            // project, and the host's collector rather than a JVM's.
+            jals_config::BackendKind::JalsWasm {} => jals_build::JalsBackend::wasm(),
+            _ => jals_build::JalsBackend::new(manifest.build.release),
+        };
+
+        if dry_run || verbose {
+            println!("{}", jals_build::Backend::describe(&backend, &request));
+        }
+        if dry_run {
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        let outcome = jals_build::Backend::compile(&backend, &request)
             .await
-            .map_err(|error| anyhow!("staging frontend output failed: {error}"))
+            .map_err(|error| anyhow!("{error}"))?;
+        for message in &outcome.messages {
+            eprintln!("error: {message}");
+        }
+        if !outcome.success() {
+            return Ok(ExitCode::FAILURE);
+        }
+
+        let classes_dir = root.join(&manifest.build.classes_dir);
+        for (path, bytes) in &outcome.artifacts {
+            let target = classes_dir.join(path.to_string());
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(&target, bytes)
+                .with_context(|| format!("writing {}", target.display()))?;
+        }
+        Ok(ExitCode::SUCCESS)
     }
 
     /// The staged tree expressed as manifest `source-dirs`, relative to the project root when

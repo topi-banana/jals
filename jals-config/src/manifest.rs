@@ -953,6 +953,11 @@ pub struct Build {
     /// Defaults to [`FrontendKind::Vanilla`], the identity lowering, so an existing manifest
     /// keeps compiling exactly the sources it always did.
     pub frontend: FrontendKind,
+    /// Which backend turns the lowered Java into class files.
+    ///
+    /// Defaults to [`BackendKind::Javac`], so an existing manifest keeps invoking the JDK it
+    /// always did; `backend = { type = "jals" }` selects the in-process compiler instead.
+    pub backend: BackendKind,
     /// Source roots, relative to the manifest directory. These feed `javac`'s `-sourcepath` and
     /// are the roots scanned for `.java` files. Defaults to `["src/main/java"]`.
     pub source_dirs: Vec<String>,
@@ -1030,6 +1035,49 @@ impl FrontendKind {
     }
 }
 
+/// The compile backend, selected by its `type` field (`[build.backend]`).
+///
+/// Where [`FrontendKind`] decides what Java the backend sees, this decides what compiles it. Both
+/// are tagged from the start for the same reason: adding a backend is a new variant, not a schema
+/// change, and the tag string — not the enum discriminant — is the backend's cache identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BackendKind {
+    /// Hand the sources to the JDK's `javac`, in a host process.
+    Javac {},
+    /// Compile in-process with `jals-javac`. Needs no JDK and runs anywhere the rest of jals does,
+    /// including `wasm32`, but only compiles the language subset that crate has reached.
+    Jals {},
+    /// Compile in-process to a single WebAssembly module for the whole project, with the host's
+    /// garbage collector managing every object.
+    ///
+    /// A different *target*, not just a different tool: wasm has no dynamic loading and no
+    /// classpath, so one module is the unit rather than one file per type, and there is no
+    /// `java.base` for a library type to come from.
+    JalsWasm {},
+}
+
+impl Default for BackendKind {
+    fn default() -> Self {
+        Self::Javac {}
+    }
+}
+
+impl BackendKind {
+    /// The value of the backend's serialized `type` tag, which is also its cache identity.
+    ///
+    /// A stable string rather than the enum discriminant, so adding or reordering variants can
+    /// never renumber a shipped backend's cache keys.
+    #[cfg(test)]
+    const fn tag_name(self) -> &'static str {
+        match self {
+            Self::Javac {} => "javac",
+            Self::Jals {} => "jals",
+            Self::JalsWasm {} => "jals-wasm",
+        }
+    }
+}
+
 /// Run settings (`[run]`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -1061,6 +1109,7 @@ impl Default for Build {
         Self {
             script: None,
             frontend: FrontendKind::Vanilla {},
+            backend: BackendKind::Javac {},
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
             release: None,
@@ -3196,6 +3245,30 @@ mod tests {
         let m: Manifest = toml::from_str("[build.frontend]\ntype = \"vanilla\"\n").unwrap();
         assert_eq!(m.build.frontend, FrontendKind::Vanilla {});
         assert_eq!(m.build.frontend.tag_name(), "vanilla");
+    }
+
+    #[test]
+    fn explicit_backends_parse() {
+        // Same serde edge cases as the frontend stanza, and the same closed-enum guarantee: a
+        // backend jals does not have is a parse error rather than a silent default.
+        let javac: Manifest = toml::from_str("[build.backend]\ntype = \"javac\"\n").unwrap();
+        assert_eq!(javac.build.backend, BackendKind::Javac {});
+        assert_eq!(javac.build.backend.tag_name(), "javac");
+
+        let jals: Manifest = toml::from_str("[build.backend]\ntype = \"jals\"\n").unwrap();
+        assert_eq!(jals.build.backend, BackendKind::Jals {});
+        assert_eq!(jals.build.backend.tag_name(), "jals");
+
+        // Defaulting to `javac` is what keeps an existing manifest compiling as it always did.
+        let absent: Manifest = toml::from_str("[package]\nname = \"p\"\n").unwrap();
+        assert_eq!(absent.build.backend, BackendKind::Javac {});
+
+        let wasm: Manifest = toml::from_str("[build.backend]\ntype = \"jals-wasm\"\n").unwrap();
+        assert_eq!(wasm.build.backend, BackendKind::JalsWasm {});
+        assert_eq!(wasm.build.backend.tag_name(), "jals-wasm");
+
+        let unknown: Result<Manifest, _> = toml::from_str("[build.backend]\ntype = \"gcj\"\n");
+        assert!(unknown.is_err());
     }
 
     #[test]
