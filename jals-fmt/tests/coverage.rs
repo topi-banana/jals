@@ -170,8 +170,10 @@ const TAGGED: &str = "class T {\n  // @formatter:off\n  int   x   =   1;\n  // @
 /// An unused import, imports out of order, and modifiers in non-canonical order.
 const IMPORTS: &str = "package p;\n\nimport javax.tools.Tool;\nimport java.util.Map;\nimport java.util.List;\nimport static java.lang.Math.PI;\n\nclass T {\n  static final public List<String> xs = null;\n}\n";
 
-/// A string concatenation far past any column limit.
-const LONG_STRING: &str = "class T {\n  String s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbb\" + \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccc\" + \"cccccccccccccccccccccccccccc\";\n}\n";
+/// A single string literal too long for its line, which is what `reflow-long-strings` splits.
+/// A concatenation the author already broke into short pieces is *not* reflowed, so it would
+/// leave the rule with nothing to do.
+const LONG_STRING: &str = "class T {\n  void m() {\n    throw new RuntimeException(\"a single very long literal that runs well past the hundred column limit and then some more\");\n  }\n}\n";
 
 /// Bodies the source itself wrote on one line, and empty ones.
 const ONE_LINERS: &str = "class T { void m() { call(); } }\n\ninterface I {}\n\nenum E {}\n\nrecord R() {}\n\n@interface A {}\n\nclass U {\n  void n() {}\n\n  void o() { if (x) { y(); } else { z(); } for (;;) {} while (x) {} do {} while (x); }\n\n  Runnable r = () -> { run(); };\n\n  void p() { switch (x) { default: break; } }\n}\n";

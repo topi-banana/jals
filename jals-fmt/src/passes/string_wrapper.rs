@@ -52,26 +52,42 @@ impl StringWrapper {
     fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
         let mut edits = Vec::new();
         for node in root.descendants() {
-            if node.kind() != SyntaxKind::BINARY_EXPR {
-                continue;
-            }
             // Outermost only: a nested chain is handled by its root, and editing both would
-            // produce overlapping ranges.
+            // produce overlapping ranges. A lone literal inside one is likewise its root's.
             if node
                 .parent()
                 .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR)
             {
                 continue;
             }
-            let Some(pieces) = Self::concatenation(&node) else {
+            let pieces = match node.kind() {
+                SyntaxKind::BINARY_EXPR => Self::concatenation(&node),
+                // A single literal too long for its line is split into a concatenation of its
+                // own — this is the case `reflow-long-strings` mostly exists for, and the one
+                // place in the crate where `+` operators are added.
+                SyntaxKind::LITERAL => Self::literal_body(&node).map(|body| alloc::vec![body]),
+                _ => continue,
+            };
+            let Some(pieces) = pieces else {
                 continue;
             };
             let range = node.text_range();
-            let column = Self::column_of(src, usize::from(range.start()));
-            if !Self::overflows(src, range, column, style) {
+            if !Self::overflows(src, range, style) {
                 continue;
             }
-            if let Some(text) = Self::rewrap(&pieces, column, style) {
+            // The node's range starts at its leading trivia; the column that matters is where
+            // its first significant token lands.
+            let start = node
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .find(|tok| !tok.kind().is_trivia())
+                .map_or_else(|| range.start(), |tok| tok.text_range().start());
+            let column = Self::column_of(src, usize::from(start));
+            // What follows the concatenation on its line — the `);` of `foo("…");` — has to
+            // fit after the last chunk, so the last line's budget answers for it.
+            let end = usize::from(range.end());
+            let trailing = src[end..].find('\n').map_or(src.len() - end, |at| at);
+            if let Some(text) = Self::rewrap(&pieces, column, trailing, style) {
                 edits.push((range, text));
             }
         }
@@ -136,10 +152,20 @@ impl StringWrapper {
         Width::utf16(&src[start..offset])
     }
 
-    /// Whether the concatenation is worth touching: it spans lines, or its line is over the limit.
-    fn overflows(src: &str, range: TextRange, column: usize, style: &Style) -> bool {
-        let text = &src[usize::from(range.start())..usize::from(range.end())];
-        text.contains('\n') || column + Width::utf16(text) > style.max_width()
+    /// Whether the concatenation is worth touching: one of the lines it occupies is over the
+    /// limit.
+    ///
+    /// Spanning lines is *not* enough. A concatenation the author already broken into short
+    /// pieces — a generated table of `"\u0000\u0000…"` rows, say — is under the limit on every
+    /// line and google-java-format leaves it exactly as written: its `LongStringsAndTextBlockScanner`
+    /// only collects a literal whose own line runs past the column limit.
+    fn overflows(src: &str, range: TextRange, style: &Style) -> bool {
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        let from = src[..start].rfind('\n').map_or(0, |at| at + 1);
+        let to = src[end..].find('\n').map_or(src.len(), |at| end + at);
+        src[from..to]
+            .split('\n')
+            .any(|line| Width::utf16(line) > style.max_width())
     }
 
     /// Re-chunk the pieces so each one fits a continuation line.
@@ -152,16 +178,18 @@ impl StringWrapper {
     ///
     /// Returns `None` when the budget is too small to make progress — a deeply indented
     /// concatenation with a narrow limit — rather than emitting one character per line.
-    fn rewrap(pieces: &[String], column: usize, style: &Style) -> Option<String> {
-        let indent = column + style.continuation_cols;
-        // `+ "` … `"` is four columns of overhead on a continuation line.
-        let budget = style.max_width().checked_sub(indent + 4)?;
+    fn rewrap(pieces: &[String], column: usize, trailing: usize, style: &Style) -> Option<String> {
+        // The first chunk starts where the literal already is and pays only for its quotes; a
+        // continuation line pays for its indent and for `+ ` on top of that
+        // (`width -= 6` in google-java-format's `reflow`, for its four-column indent).
+        let first = style.max_width().checked_sub(column + 2)?;
+        let budget = first.checked_sub(style.continuation_cols + 2)?;
         if budget < 16 {
             return None;
         }
 
         let joined: String = pieces.concat();
-        let chunks = Self::split(&joined, budget);
+        let chunks = Self::split(&joined, first, budget, trailing);
         // Nothing to gain when the re-split reproduces the pieces it started from.
         if chunks.len() < 2 || chunks == pieces {
             return None;
@@ -181,11 +209,13 @@ impl StringWrapper {
 
     /// Split a literal body into chunks of at most `budget` columns, breaking after a space where
     /// possible and never inside an escape sequence.
-    fn split(body: &str, budget: usize) -> Vec<String> {
+    fn split(body: &str, first: usize, rest: usize, trailing: usize) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current = String::new();
         let mut width = 0usize;
         let mut last_space: Option<usize> = None;
+        let total = Width::utf16(body);
+        let mut consumed = 0usize;
 
         let mut chars = body.chars().peekable();
         while let Some(c) = chars.next() {
@@ -212,15 +242,23 @@ impl StringWrapper {
             }
 
             let unit_width = Width::utf16(&unit);
+            let mut budget = if chunks.is_empty() { first } else { rest };
+            // Once what is left fits, this is the last chunk and it shares its line with whatever
+            // follows the concatenation.
+            if total - consumed <= budget {
+                budget = budget.saturating_sub(trailing);
+            }
             if width + unit_width > budget && !current.is_empty() {
                 match last_space {
                     Some(at) if at > 0 => {
-                        let rest = current.split_off(at);
+                        let tail = current.split_off(at);
+                        consumed += Width::utf16(&current);
                         chunks.push(core::mem::take(&mut current));
-                        current = rest;
+                        current = tail;
                         width = Width::utf16(&current);
                     }
                     _ => {
+                        consumed += width;
                         chunks.push(core::mem::take(&mut current));
                         width = 0;
                     }
@@ -228,11 +266,13 @@ impl StringWrapper {
                 last_space = None;
             }
 
-            current.push_str(&unit);
-            width += unit_width;
+            // The break falls *before* a space, so the space opens the continuation chunk —
+            // `"… and then some" + " more"`.
             if c == ' ' {
                 last_space = Some(current.len());
             }
+            current.push_str(&unit);
+            width += unit_width;
         }
         if !current.is_empty() {
             chunks.push(current);
