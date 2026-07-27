@@ -291,9 +291,10 @@ impl<'a> Ctx<'a> {
             | S::ATTR_ARG_LIST
             | S::LAMBDA_PARAMS => self.visit_delimited(node).await,
             S::RESOURCE_LIST => self.visit_resource_list(node).await,
-            // A resource is declared exactly as a field is — `visitToDeclare` calls the same
-            // `declareOne` — so its initializer moves down whole rather than breaking inside.
-            S::RESOURCE => self.visit_field(node).await,
+            // A resource is declared exactly as a parameter is — `visitTry` calls `declareOne`
+            // with `DeclarationKind.PARAMETER` — so its initializer moves down whole rather than
+            // breaking inside, and an annotation run on it indents what follows.
+            S::RESOURCE => self.visit_param(node).await,
             S::ARRAY_INIT => self.visit_array_init(node).await,
             S::RECORD_PATTERN => self.visit_record_pattern(node).await,
 

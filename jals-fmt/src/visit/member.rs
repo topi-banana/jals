@@ -696,14 +696,18 @@ impl Ctx<'_> {
                 .children()
                 .any(|child| matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE))
         });
-        if !annotated {
-            self.visit_children(node).await;
-            return;
-        }
         let continuation = self.style.continuation();
-        self.open(continuation.clone());
-        self.visit_children(node).await;
-        self.close_indent(&continuation);
+        if annotated {
+            self.open(continuation.clone());
+        }
+        if node.kind() == S::RESOURCE {
+            self.visit_field(node).await;
+        } else {
+            self.visit_children(node).await;
+        }
+        if annotated {
+            self.close_indent(&continuation);
+        }
     }
 
     /// An instance or `static` initializer block.
