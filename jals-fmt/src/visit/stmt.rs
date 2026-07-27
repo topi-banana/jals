@@ -405,8 +405,21 @@ impl Ctx<'_> {
                 }
                 Some(S::SEMICOLON) if in_header => {
                     self.visit_element(child).await;
-                    let flat = Self::flat_space(self.style.cfg.spacing.after_semicolon);
-                    self.list_break_flat(policy, flat, Indent::ZERO);
+                    // An omitted update clause has nothing to separate: `for (i = 0; p(i); )`
+                    // closes on the condition's line rather than opening an empty one.
+                    let empty = children
+                        .iter()
+                        .skip_while(|other| *other != child)
+                        .nth(1)
+                        .is_some_and(|next| {
+                            next.as_token().is_some_and(|tok| tok.kind() == S::RPAREN)
+                        });
+                    if empty {
+                        self.space_if(self.style.cfg.spacing.after_semicolon);
+                    } else {
+                        let flat = Self::flat_space(self.style.cfg.spacing.after_semicolon);
+                        self.list_break_flat(policy, flat, Indent::ZERO);
+                    }
                     continue;
                 }
                 Some(S::RPAREN) if in_header => {
