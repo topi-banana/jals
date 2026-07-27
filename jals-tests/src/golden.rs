@@ -17,9 +17,9 @@
 //! `.output` files, the [`Config`] jals scores it with, and the accuracy
 //! [`Tier`] `DESIGN.md` §18.1 promises for it.
 //!
-//! - **T1** (`gjf`) — the layout engine is to be a port of google-java-format's
-//!   own greedy `computeBreaks`, so byte-matching it is the stated goal rather
-//!   than an impossibility.
+//! - **T1** (`gjf`) — `jals-fmt` runs a port of google-java-format's own greedy
+//!   `computeBreaks`, so byte-matching it is the stated goal rather than an
+//!   impossibility. It is not reached yet.
 //! - **T2** (`palantir`, `eclipse`, `intellij`) — these three resolve layout with
 //!   algorithms jals deliberately does not port (`DESIGN.md` §11 conclusion 1),
 //!   so byte match is **not promised**. Their exact-match column sits near zero
@@ -29,12 +29,6 @@
 //! sinks a whole file — every target reports a **similarity** metric (the mean
 //! line-level diff ratio, plus the count of exact matches) rather than a hard
 //! pass/fail.
-//!
-//! **What the numbers mean today.** `jals-fmt`'s layout engine is a no-op pending
-//! its from-scratch rewrite (`jals-fmt/src/lib.rs`): `FormatOutput::format_source`
-//! returns its input unchanged. Every score below is therefore the *floor* — how
-//! close unformatted source already is to the reference's output — and the harness
-//! exists so the engine's arrival is measured against it rather than asserted.
 //!
 //! # Version pins
 //!
@@ -434,10 +428,7 @@ impl GoldenReport {
              formatter's own output. Only **T1** (google-java-format) promises a byte match; \
              the **T2** targets resolve line breaks with algorithms jals does not port \
              (`jals-fmt/DESIGN.md` §18), so their exact rate is near zero by design and mean \
-             similarity is the number that tracks convergence.\n\n\
-             `jals-fmt`'s layout engine is a no-op pending its rewrite, so today every row is \
-             the **floor**: how close unformatted source already is to the reference output.\
-             \n\n",
+             similarity is the number that tracks convergence.\n\n",
         );
         out.push_str(
             "| corpus | reference | tier | pairs | exact | exact rate | mean similarity |\n",
@@ -507,9 +498,9 @@ mod tests {
         assert!(c.comments.normalize_parameter_comments);
         assert!(c.comments.inline_block_comments);
         assert!(c.wrapping.tabular_array_initializers);
-        // A chain that does not fit goes one call per line; a long `case` label list wraps.
+        // A chain that does not fit goes one call per line, and so does a long `case` label list.
         assert_eq!(c.wrapping.method_chain, WrapPolicy::IfLongPerItem);
-        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLong);
+        assert_eq!(c.wrapping.case_labels, WrapPolicy::IfLongPerItem);
         // google-java-format spaces the enhanced-`for` colon and never dangles a `)`.
         assert!(c.spacing.before_foreach_colon);
         assert_eq!(

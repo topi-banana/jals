@@ -38,7 +38,7 @@ given, and the accuracy tier `jals-fmt/DESIGN.md` §18.1 promises:
 
 | target | reference | tier | promise |
 | --- | --- | --- | --- |
-| `gjf` | google-java-format | T1 | byte match (the engine is to be a port of GJF's own `computeBreaks`) |
+| `gjf` | google-java-format | T1 | byte match (the engine is a port of GJF's own `computeBreaks`) |
 | `palantir` | palantir-java-format | T2 | layout approximation only |
 | `eclipse` | Eclipse JDT | T2 | layout approximation only |
 | `intellij` | IntelliJ IDEA | T2 | layout approximation only |
@@ -50,11 +50,9 @@ given, and the accuracy tier `jals-fmt/DESIGN.md` §18.1 promises:
 > byte-equal rate alone would also hide progress — one space of difference sinks a whole
 > file — which is why every target reports similarity.
 
-> **What the numbers mean today.** `jals-fmt`'s layout engine is a no-op pending its
-> from-scratch rewrite — `FormatOutput::format_source` returns its input unchanged — so every
-> score is currently the **floor**: how close unformatted source already is to the reference's
-> output. That is the point of landing the harness first. The engine's arrival gets measured
-> against a baseline instead of asserted, and each of the four targets moves on its own row.
+> **What the numbers mean today.** The `gjf` byte match is the goal, not a reached state. The
+> harness exists so convergence is measured rather than asserted, and each of the four targets
+> moves on its own row.
 
 ```sh
 cargo run -p jals-tests --bin jals-golden -- gjf-testdata --worst 20

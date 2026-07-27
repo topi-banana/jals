@@ -9,14 +9,17 @@ use jals_syntax::SyntaxError;
 
 /// A non-fatal diagnostic surfaced while formatting.
 ///
-/// Currently these are the syntax errors recorded by the parser; formatting still
-/// proceeds best-effort because the CST is lossless.
+/// Two kinds arrive here. The parser's syntax errors carry a source range and formatting still
+/// proceeds best-effort, because the CST is lossless. Configuration diagnostics — a rule that
+/// reads input whitespace being rounded to the single engine's canonical value
+/// (`DESIGN.md` §17) — belong to the `Config`, not to any position in the file, so their
+/// [`range`](Self::range) is `None`. Rounding is reported rather than applied silently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Warning {
     /// Human-readable message.
     pub message: String,
-    /// Byte range in the original source.
-    pub range: Range<usize>,
+    /// Byte range in the original source, or `None` for a diagnostic about the configuration.
+    pub range: Option<Range<usize>>,
 }
 
 impl Warning {
@@ -24,7 +27,15 @@ impl Warning {
         let range = err.range();
         Self {
             message: err.message().to_owned(),
-            range: usize::from(range.start())..usize::from(range.end()),
+            range: Some(usize::from(range.start())..usize::from(range.end())),
+        }
+    }
+
+    /// A diagnostic about the configuration itself, with no position in the source.
+    pub(crate) const fn config(message: String) -> Self {
+        Self {
+            message,
+            range: None,
         }
     }
 }

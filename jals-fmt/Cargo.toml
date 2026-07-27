@@ -4,12 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# WIP: the formatter is being rewritten from scratch, so the *formatter* is currently a no-op
-# skeleton (see `src/lib.rs`). What is implemented ahead of it is the `import` module — the
-# ConfigImporter surface that lowers native Java-formatter configs (google-/palantir-java-format,
-# Eclipse JDT, IntelliJ IDEA) into a jals `jals-config::fmt::Config`.
 jals-config.workspace = true
 jals-syntax.workspace = true
+# Cooperative yielding only (`yield_now` / `Yielder`): the formatter is pure CPU work on a `!Send`
+# future and never names a runtime, so the portable `no_std` core is all it needs.
+jals-exec.workspace = true
+# `TextRange` / `TextSize`, the units `jals-syntax` reports token positions in.
+text-size.workspace = true
 # The importer models derive `Deserialize`; the KV → struct bridge routes through
 # `serde_json::Value` (both `no_std + alloc`, so the default build stays wasm-safe).
 serde.workspace = true

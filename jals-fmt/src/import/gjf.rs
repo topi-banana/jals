@@ -24,7 +24,7 @@ use alloc::vec;
 
 use jals_config::fmt::{
     Comments, Config, ImportOrder, Imports, IndentStyle, KeepOnOneLine, Layout, ParenPositions,
-    WrapPolicy, Wrapping,
+    Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -64,13 +64,14 @@ pub struct GoogleJavaFormatConfig {
     pub format_javadoc: bool,
     /// `JavaFormatterOptions.reorderModifiers` — runs `ModifierOrderer`.
     pub reorder_modifiers: bool,
-    /// `JavaFormatterOptions.reflowLongStrings` — runs `StringWrapper`, which *adds* `+`
-    /// tokens, so it has no jals counterpart yet and is carried for fidelity only.
+    /// `JavaFormatterOptions.reflowLongStrings` — runs `StringWrapper`. Projects onto
+    /// `wrapping.reflow-long-strings`.
     pub reflow_long_strings: bool,
     /// `--skip-sorting-imports` inverted — runs `ImportOrderer`.
     pub sort_imports: bool,
-    /// `--skip-removing-unused-imports` inverted — runs `RemoveUnusedImports`. Semantic rather
-    /// than layout (it deletes declarations), so it too has no jals counterpart.
+    /// `--skip-removing-unused-imports` inverted — runs `RemoveUnusedImports`. Projects onto
+    /// `imports.remove-unused`, whose name test is syntactic — no classpath is consulted, so
+    /// it stays inside the portable crate.
     pub remove_unused_imports: bool,
 }
 
@@ -109,7 +110,8 @@ impl GoogleJavaFormatConfig {
     /// - comments are always reflowed (Javadoc only when `formatJavadoc`), and both
     ///   GJF-specific comment rewrites are on;
     /// - imports: a static block first, then everything else, one blank line between
-    ///   (Google Java Style §3.3.3);
+    ///   (Google Java Style §3.3.3), and an unused one deleted;
+    /// - `reflow-long-strings`: GJF's `StringWrapper` second pass;
     /// - literal rewrites stay `preserve`: GJF never rewrites a literal.
     pub(crate) fn family(
         indent_width: usize,
@@ -131,11 +133,41 @@ impl GoogleJavaFormatConfig {
             braces: jals_config::fmt::Braces {
                 keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
                 keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
+                // `visitStatement` separates a braceless body from its header with a break whose
+                // flat form is a space, so `if (a) return;` stays on one line when it fits.
+                keep_control_statement_on_one_line: true,
                 ..jals_config::fmt::Braces::default()
             },
             wrapping: Wrapping {
                 method_chain: WrapPolicy::IfLongPerItem,
-                case_labels: WrapPolicy::IfLong,
+                // `visitConditionalExpression` separates `?` and `:` with `breakOp(" ")`, which
+                // is UNIFIED: a ternary that does not fit breaks at both or at neither.
+                ternary: WrapPolicy::IfLongPerItem,
+                // `visitFormals` separates parameters with `breakOp(" ")`, which is UNIFIED: a
+                // parameter list that does not fit goes one parameter per line rather than
+                // packing. An *argument* list is the fill, and `fill-item-width` decides it.
+                method_parameters: WrapPolicy::IfLongPerItem,
+                // `visitCase` separates a rule's labels with a UNIFIED break.
+                case_labels: WrapPolicy::IfLongPerItem,
+                // `classDeclarationTypeList` and `visitThrowsClause` separate their types with
+                // `breakOp(" ")`, which is UNIFIED: a clause that does not fit goes one type per
+                // line rather than packing.
+                // `visitParameterizedType` separates type arguments with UNIFIED breaks too, and
+                // `visitAnnotation` its member-value pairs.
+                type_arguments: WrapPolicy::IfLongPerItem,
+                type_parameters: WrapPolicy::IfLongPerItem,
+                deconstruction_list: WrapPolicy::IfLongPerItem,
+                // `visitUnionType` separates a multi-catch's alternatives the same way.
+                multi_catch_types: WrapPolicy::IfLongPerItem,
+                // `visitForLoop` separates the header's three clauses the same way.
+                for_statement: WrapPolicy::IfLongPerItem,
+                annotation_arguments: WrapPolicy::IfLongPerItem,
+                extends_list: WrapPolicy::IfLongPerItem,
+                throws_list: WrapPolicy::IfLongPerItem,
+                // `visitEnumDeclaration` forces a break between constants, and `visitTry`
+                // between resources.
+                enum_constants: WrapPolicy::AlwaysPerItem,
+                resource_list: WrapPolicy::AlwaysPerItem,
                 paren_method_declaration: ParenPositions::CommonLines,
                 paren_method_invocation: ParenPositions::CommonLines,
                 paren_control: ParenPositions::CommonLines,
@@ -143,12 +175,38 @@ impl GoogleJavaFormatConfig {
                 paren_lambda: ParenPositions::CommonLines,
                 paren_record: ParenPositions::CommonLines,
                 tabular_array_initializers: true,
+                // `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`: an argument list fills
+                // only while every argument is under 10 source columns.
+                fill_item_width: 10,
+                // `isFormatMethod`: a leading format string takes the first continuation line and
+                // the values it interpolates pack onto the next.
+                format_string_arguments: true,
+                // `visitLabeledStatement` forces a break after the label's `:`.
+                labeled_statement: WrapPolicy::AlwaysPerItem,
+                // `fieldAnnotationDirection`: every *variable* — field, local, parameter,
+                // record component, resource, `catch` parameter — puts its annotations on their
+                // own lines, unless none of them takes arguments.
+                parameter_annotations: WrapPolicy::AlwaysPerItem,
+                variable_annotations: WrapPolicy::AlwaysPerItem,
+                inline_argumentless_annotations: true,
+                reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
+            },
+            // `new String[] {…}` and `{{1}, {2}}` both take a space before the initializer's
+            // brace; every other spacing decision is already the jals default.
+            spacing: Spacing {
+                before_array_initializer_left_brace: true,
+                ..Spacing::default()
             },
             comments: Comments {
                 format_line: true,
-                format_block: true,
+                // `JavaCommentsHelper.rewrite` sends only a *Javadoc* tok through
+                // `JavadocFormatter`. A `/* … */` comment is trimmed of trailing whitespace and
+                // re-indented (`indentJavadoc` / `preserveIndentation`) — never refilled. Turning
+                // this on would rewrap every license header in the file.
+                format_block: false,
                 format_javadoc: native.format_javadoc,
+                // The file's leading comment gets no special treatment: whatever its kind says.
                 format_header: true,
                 format_html: true,
                 width: max_width,
@@ -166,6 +224,7 @@ impl GoogleJavaFormatConfig {
                 groups: vec!["static".to_owned(), "*".to_owned()],
                 static_first: true,
                 reorder_modifiers: native.reorder_modifiers,
+                remove_unused: native.remove_unused_imports,
             },
             ..Config::default()
         }

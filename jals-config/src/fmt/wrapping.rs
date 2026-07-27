@@ -123,6 +123,32 @@ pub struct Wrapping {
     /// An `assert` statement. Eclipse `alignment_for_assertion_message` / IntelliJ
     /// `ASSERT_STATEMENT_WRAP`.
     pub assert_statement: WrapPolicy,
+    /// How wide an item may be before an `if-long` argument list stops *filling*.
+    ///
+    /// A list of short items reads well packed several to a line; one long item in the same list
+    /// makes that packing arbitrary, so the list goes one item per line instead. The width is
+    /// measured on the item's **source text**, so it is a property of what the author wrote
+    /// rather than of the layout being decided. `0` disables the test and always fills.
+    ///
+    /// google-java-format's `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING` (10). Eclipse
+    /// spells the same distinction as two separate `alignment_for_*` bits (`M_COMPACT_SPLIT` vs
+    /// `M_ONE_PER_LINE_SPLIT`) chosen per construct, never by item width.
+    pub fill_item_width: usize,
+    /// Give a leading format string a line of its own, and pack the arguments after it.
+    ///
+    /// `String.format("%s: %s at %s", a, b, c)` reads as a template and its fillers, so the
+    /// template gets the first continuation line whole and the fillers pack onto the next —
+    /// rather than each argument taking a line because the template made the list long. An
+    /// argument counts as a format string when it is a string literal, or a concatenation of
+    /// them, holding a `%` or a `{0}`-style placeholder.
+    ///
+    /// google-java-format's `isFormatMethod`. No Eclipse or IntelliJ equivalent: neither reads
+    /// what an argument *says*.
+    pub format_string_arguments: bool,
+    /// The statement a label introduces: whether it starts a line of its own. Eclipse
+    /// `insert_new_line_after_label` (false by default, so `LABEL: stmt` stays on one line);
+    /// google-java-format always breaks (`visitLabeledStatement`'s `forcedBreak`).
+    pub labeled_statement: WrapPolicy,
     /// A `switch` expression's arms. Eclipse
     /// `alignment_for_expressions_in_switch_case_with_arrow` / IntelliJ `SWITCH_EXPRESSIONS_WRAP`.
     pub switch_expression: WrapPolicy,
@@ -137,6 +163,16 @@ pub struct Wrapping {
     pub parameter_annotations: WrapPolicy,
     /// A local-variable declaration's annotations. IntelliJ `VARIABLE_ANNOTATION_WRAP`.
     pub variable_annotations: WrapPolicy,
+    /// Keep a variable declaration's leading annotations on the declaration's own line when
+    /// *none* of them takes arguments, overriding
+    /// [`field_annotations`](Self::field_annotations) and
+    /// [`variable_annotations`](Self::variable_annotations).
+    ///
+    /// `@Deprecated int x;` stays on one line while `@SuppressWarnings("x") int y;` breaks —
+    /// google-java-format's `fieldAnnotationDirection`, which reads an annotation's *shape*
+    /// rather than the available width. No Eclipse or IntelliJ equivalent: both decide the
+    /// direction from the declaration kind alone.
+    pub inline_argumentless_annotations: bool,
     /// Put a wrapped binary operator at the start of the continuation line rather than at the
     /// end of the broken line. Eclipse `wrap_before_additive_operator` and its six siblings /
     /// IntelliJ `BINARY_OPERATION_SIGN_ON_NEXT_LINE`.
@@ -188,9 +224,22 @@ pub struct Wrapping {
     /// Break lines that exceed the column limit even where no policy allows a break.
     /// IntelliJ `WRAP_LONG_LINES`.
     pub wrap_long_lines: bool,
-    /// Preserve the *tabular* layout of a grid-shaped array initializer instead of reflowing it
-    /// by width. google-java-format keeps such tables; Eclipse and IntelliJ reflow them.
+    /// Preserve the *tabular* layout of a grid — an array initializer, or a call whose arguments
+    /// were written two to a row — instead of reflowing it by width.
+    ///
+    /// A grid carries column structure the width alone cannot recover, so google-java-format keeps
+    /// its rows (`argumentsAreTabular`); Eclipse and IntelliJ reflow them.
     pub tabular_array_initializers: bool,
+    /// Re-wrap a string concatenation that overflows the column limit, redistributing the
+    /// pieces across the `+` operators. google-java-format's `StringWrapper` — its
+    /// `JavaFormatterOptions.reflowLongStrings`, which it always runs.
+    ///
+    /// This is a *second pass* over the formatted text, not part of the layout engine: the
+    /// output is re-parsed, the concatenation flattened and re-split at word / escape
+    /// boundaries, and the result adopted only when re-formatting it is a fixed point. It
+    /// never splits a single literal into new tokens, so the `+` and string-piece multiset is
+    /// preserved and only their arrangement changes. Eclipse and IntelliJ have no equivalent.
+    pub reflow_long_strings: bool,
 }
 
 impl Default for Wrapping {
@@ -216,12 +265,16 @@ impl Default for Wrapping {
             assignment: WrapPolicy::IfLong,
             for_statement: WrapPolicy::IfLong,
             assert_statement: WrapPolicy::IfLong,
+            labeled_statement: WrapPolicy::Never,
+            fill_item_width: 0,
+            format_string_arguments: false,
             switch_expression: WrapPolicy::IfLong,
             type_annotations: WrapPolicy::AlwaysPerItem,
             method_annotations: WrapPolicy::AlwaysPerItem,
             field_annotations: WrapPolicy::AlwaysPerItem,
             parameter_annotations: WrapPolicy::Never,
             variable_annotations: WrapPolicy::Never,
+            inline_argumentless_annotations: false,
             before_binary_operator: true,
             before_ternary_operator: true,
             before_assignment_operator: false,
@@ -238,6 +291,7 @@ impl Default for Wrapping {
             join_wrapped_lines: true,
             wrap_long_lines: false,
             tabular_array_initializers: false,
+            reflow_long_strings: false,
         }
     }
 }
