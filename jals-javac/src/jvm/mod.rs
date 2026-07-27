@@ -7,4 +7,4 @@
 mod asm;
 mod frame;
 
-pub use asm::{AsmError, Assembler, BinOp, Branch, Compare, Label, Receiver};
+pub use asm::{AsmError, Assembler, BinOp, Branch, Compare, Label, Numeric, Receiver};

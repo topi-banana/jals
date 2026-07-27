@@ -553,6 +553,22 @@ impl CodeAttribute {
 }
 
 impl ExceptionTableEntry {
+    /// One handler covering `[start_pc, end_pc)`, entered at `handler_pc`.
+    ///
+    /// `catch_type` is a `Class` index, or `0` for the catch-all a `finally` clause and a
+    /// `synchronized` block's unlock path both need (JVMS §4.7.3). The four offsets are the
+    /// emitter's to get right — this crate keeps them verbatim, exactly as it keeps a branch
+    /// offset — so a code generator constructing an entry is stating what it already resolved.
+    #[must_use]
+    pub const fn new(start_pc: u16, end_pc: u16, handler_pc: u16, catch_type: u16) -> Self {
+        Self {
+            start_pc,
+            end_pc,
+            handler_pc,
+            catch_type,
+        }
+    }
+
     async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16().await?,
