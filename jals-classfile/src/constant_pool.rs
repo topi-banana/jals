@@ -29,9 +29,10 @@ pub struct ConstantPool {
     /// exactly as they did, so the pool remains a codec that happens to be able to build.
     ///
     /// Derived state, and excluded from [`PartialEq`] and serialisation for that reason: two pools
-    /// with the same entries are the same pool whether or not the same interns produced them.
-    /// [`replace`](Self::replace) clears it, since that is the one operation that can change what
-    /// an index holds.
+    /// with the same entries are the same pool whether or not the same interns produced them. It is
+    /// filled from the entries on the first intern and cleared by [`replace`](Self::replace), the
+    /// one operation that can change what an index holds — so a pool that is only *read* never
+    /// builds one, and one that is interned into answers exactly as a scan would.
     #[serde(skip)]
     interned: BTreeMap<InternKey, u16>,
 }
@@ -203,8 +204,8 @@ impl ConstantPool {
                 i += 1;
             }
         }
-        // A pool *read* from a class file has no intern index: every index it hands out came from
-        // the file, and interning into a pool being edited is not a thing any caller does.
+        // No intern index: reading is the common path — a classpath is thousands of class files —
+        // and nothing that only reads ever consults one. The first intern builds it.
         Ok(Self {
             entries,
             interned: BTreeMap::new(),
@@ -285,8 +286,7 @@ impl ConstantPool {
         }
         let previous = core::mem::replace(previous, entry);
         // The one operation that changes what an index holds, so every cached index may now be
-        // wrong. Dropping the whole map is exact and costs nothing a remapper notices: `replace` is
-        // an editing operation and interning is a building one, and no caller does both.
+        // wrong. Dropping the map is exact; the next intern rebuilds it from the entries.
         self.interned.clear();
         Some(previous)
     }
@@ -327,20 +327,45 @@ impl ConstantPool {
     /// Deduplication is not a nicety: it is what keeps a generated pool small, and what decides
     /// whether a constant is reachable by `ldc` (a one-byte index) or needs `ldc_w`.
     ///
-    /// Only entries this pool interned are candidates. One read from a class file is not, which is
-    /// deliberate — a pool being *edited* keeps every index it was read with, and an intern that
-    /// silently reused a read entry would make "the pool this crate wrote back" depend on what it
-    /// had read. Building starts from [`new`](Self::new), where there is nothing to miss.
+    /// Entries the pool already holds count whether this pool interned them or not, including ones
+    /// [`read`](Self::read) from a class file: the index is seeded from the entries on first use,
+    /// so interning is the same answer it would give by scanning, and a pool that is only read
+    /// never builds one.
     fn intern(&mut self, entry: ConstantPoolEntry) -> Option<u16> {
         let Some(key) = Self::intern_key(&entry) else {
             return self.add(entry);
         };
+        self.seed_index();
         if let Some(&index) = self.interned.get(&key) {
             return Some(index);
         }
         let index = self.add(entry)?;
         self.interned.insert(key, index);
         Some(index)
+    }
+
+    /// Fill the intern index from the entries, when it is empty but they are not.
+    ///
+    /// That happens on the first intern into a pool that was read or directly
+    /// [`add`](Self::add)ed to, and again after a [`replace`](Self::replace) cleared it. Reading
+    /// alone never triggers it, which is what keeps the map off the path that decodes a classpath's
+    /// worth of class files.
+    ///
+    /// **First wins**: an earlier index is the one existing references already point at, so
+    /// interning must hand back that one rather than a later duplicate.
+    fn seed_index(&mut self) {
+        if !self.interned.is_empty() || self.entries.len() <= 1 {
+            return;
+        }
+        for (position, slot) in self.entries.iter().enumerate() {
+            let ConstantSlot::Entry(entry) = slot else {
+                continue;
+            };
+            let (Some(key), Ok(index)) = (Self::intern_key(entry), u16::try_from(position)) else {
+                continue;
+            };
+            self.interned.entry(key).or_insert(index);
+        }
     }
 
     /// Intern a `Utf8` entry holding `text`, encoded as JVM modified UTF-8.

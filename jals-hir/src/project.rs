@@ -859,7 +859,9 @@ impl ProjectIndex {
             .collect();
         for (key, id) in member_sites {
             yielder.tick().await;
-            index.decl_to_member.insert(key, id);
+            // First wins, matching the linear scan this replaced: `position` returned the earliest
+            // match, and two members sharing a declaration site would otherwise swap answers.
+            index.decl_to_member.entry(key).or_insert(id);
         }
         index
     }

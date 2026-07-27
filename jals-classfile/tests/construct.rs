@@ -260,3 +260,32 @@ fn replacing_an_entry_invalidates_interning() {
     // Entries the replacement did not touch keep their indices and their contents.
     assert_eq!(pool.utf8(keep).as_deref(), Some("keep"));
 }
+
+/// Interning into a pool that was *read* has to find what the file already put there. Handing back
+/// a fresh index instead would append a duplicate of an entry existing references already point at
+/// — legal, and silently wasteful, which is why it needs a test rather than a reader's attention.
+#[test]
+fn interning_into_a_read_pool_reuses_its_entries() {
+    let original = {
+        let mut pool = ConstantPool::new();
+        pool.utf8_index("java/lang/Object").expect("utf8");
+        pool.class_index("java/lang/Object").expect("class");
+        let mut class = jals_classfile::ClassFile::new(MAJOR_JAVA_25, 0, pool);
+        class.this_class = 2;
+        class.super_class = 2;
+        class.write()
+    };
+
+    let mut reparsed = read(&original).expect("reparse").constant_pool;
+    let before = reparsed.next_index();
+    assert_eq!(
+        reparsed.class_index("java/lang/Object"),
+        Some(2),
+        "the `Class` the file already holds"
+    );
+    assert_eq!(
+        reparsed.next_index(),
+        before,
+        "nothing was appended for an entry that was already there"
+    );
+}

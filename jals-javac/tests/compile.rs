@@ -564,3 +564,106 @@ class Widened extends Sub {
     )
     .expect("an implicit no-argument constructor is still a `super()`");
 }
+
+/// An interface's members carry the modifiers JLS lets the source leave unwritten: a field is
+/// implicitly `public static final` (§9.3) and a method implicitly `public abstract` (§9.4).
+/// Emitting them package-private produces a class file the verifier rejects.
+#[test]
+fn an_interface_gets_the_modifiers_its_source_left_unwritten() {
+    let source = r"
+public interface Shape {
+    int SIDES = 3;
+
+    int area();
+
+    static int zero() {
+        return 0;
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+
+    // public | interface | abstract
+    assert_eq!(class.access_flags.0, 0x0001 | 0x0200 | 0x0400);
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|f| (name_of(f.name_index), f.access_flags.0))
+            .collect::<Vec<_>>(),
+        // public | static | final
+        [("SIDES".to_owned(), 0x0001 | 0x0008 | 0x0010)]
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|m| (name_of(m.name_index), m.access_flags.0))
+            .collect::<Vec<_>>(),
+        [
+            ("area".to_owned(), 0x0001 | 0x0400), // public | abstract
+            ("zero".to_owned(), 0x0001 | 0x0008), // public | static
+        ]
+    );
+    // An interface has no `ACC_SUPER` and gets no default constructor.
+    assert!(
+        !class
+            .methods
+            .iter()
+            .any(|m| name_of(m.name_index) == "<init>")
+    );
+
+    if !java_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Shape.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Shape")
+        .output()
+        .expect("run java");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ClassFormatError") && !stderr.contains("VerifyError"),
+        "the JVM rejected the interface: {stderr}"
+    );
+}
+
+/// A method with no body has to say *why* it has none. `abstract` says so and an interface method
+/// says so implicitly; `native` says so with its own flag, and `ACC_NATIVE | ACC_ABSTRACT` is a
+/// pair JVMS §4.6 forbids — a JVM rejects the class with "illegal modifiers: 0x500".
+#[test]
+fn a_body_less_method_that_is_not_abstract_is_reported() {
+    let error = compile(
+        r"
+public class Bodyless {
+    native int f();
+
+    public static void main(String[] args) {}
+}
+",
+    )
+    .expect_err("`native` has no body this can lower, and no flag pair that would say so");
+    assert!(
+        matches!(error, LowerError::Unsupported("a method with no body")),
+        "expected the body-less report, got {error}"
+    );
+
+    // `abstract` does say why, and still compiles.
+    compile(
+        r"
+public abstract class Abstract {
+    abstract int f();
+
+    public static void main(String[] args) {}
+}
+",
+    )
+    .expect("an `abstract` method declares why it has no body");
+}

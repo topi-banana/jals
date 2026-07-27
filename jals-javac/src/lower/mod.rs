@@ -12,10 +12,24 @@
 //!
 //! # Scope
 //!
-//! Classes with fields and methods, local variables, literals, arithmetic and comparison, `if` /
-//! `while`, assignment, and calls (`static`, virtual, and interface). Constructors run `super()`
-//! and their field initialisers. Not yet: `new`, arrays, `switch`, exceptions, generics beyond
-//! erasure, lambdas, and inner classes — each arrives with the milestone that can test it.
+//! Classes and interfaces with fields and methods, local variables, literals, `if` / `while`, and
+//! calls (`static`, virtual, and interface). Constructors run `super()` and their field
+//! initialisers.
+//!
+//! Three of those are narrower than they sound, and each is *reported* where it stops rather than
+//! approximated:
+//!
+//! - **Assignment** is the simple `=` to a local. A compound assignment (`+=`) reads its target and
+//!   narrows the result back, and neither is lowered.
+//! - **Arithmetic and comparison** need both operands to share one representation, because one
+//!   opcode names one type. Java's binary numeric promotion is not lowered, so `long + int` and a
+//!   `long` / `float` / `double` comparison stop here.
+//! - **A method needs a body** unless it is `abstract` or an interface method. `native` has no body
+//!   and no flag pair that could say so legally.
+//!
+//! Not yet at all: `new`, arrays, `switch`, exceptions, generics beyond erasure, lambdas, inner
+//! classes, constructor delegation (`this(…)` / `super(args)`), and assignment to a field. Each
+//! arrives with the milestone that can test it.
 
 mod expr;
 mod slots;
@@ -311,10 +325,15 @@ impl Compile {
     /// `in_interface` supplies the level JLS §9.4 leaves unwritten: an interface method with no
     /// explicit access level is `public`, and emitting it package-private would produce a class
     /// the verifier rejects.
+    /// A method's or constructor's access flags.
+    ///
+    /// `strictfp` is deliberately not emitted. `ACC_STRICT` is a method flag only for major
+    /// versions 46–60 (JVMS §4.6); from 61 on, strict floating point is the *only* semantics there
+    /// is, so dropping the bit changes nothing about the program and setting it would set a bit the
+    /// version reserves. `native` is not emitted either, but that one cannot be dropped silently —
+    /// see [`method`](Self::method).
     fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
-        use jals_syntax::SyntaxKind::{
-            ABSTRACT_KW, FINAL_KW, NATIVE_KW, STATIC_KW, STRICTFP_KW, SYNCHRONIZED_KW,
-        };
+        use jals_syntax::SyntaxKind::{ABSTRACT_KW, FINAL_KW, STATIC_KW, SYNCHRONIZED_KW};
         let level = match Self::access_level(node) {
             0 if in_interface => MethodAccessFlags::PUBLIC,
             level => level,
@@ -324,9 +343,7 @@ impl Compile {
             (STATIC_KW, MethodAccessFlags::STATIC),
             (FINAL_KW, MethodAccessFlags::FINAL),
             (ABSTRACT_KW, MethodAccessFlags::ABSTRACT),
-            (NATIVE_KW, MethodAccessFlags::NATIVE),
             (SYNCHRONIZED_KW, MethodAccessFlags::SYNCHRONIZED),
-            (STRICTFP_KW, MethodAccessFlags::STRICT),
         ] {
             if Self::has_modifier(node, keyword) {
                 flags |= bit;
@@ -431,11 +448,20 @@ impl Compile {
             // An abstract or interface method has no `Code` attribute at all.
             None => Vec::new(),
         };
-        // No body means no `Code` attribute, which the JVM only accepts for a method that declares
-        // it has none. A `static` method must always have one, so it is left alone and the class
-        // is rejected at load time rather than silently made abstract.
-        let flags = if attributes.is_empty() && !is_static {
-            flags | MethodAccessFlags::ABSTRACT
+        // No body means no `Code` attribute, and the JVM accepts that only from a method whose
+        // flags say why it has none. `abstract` says so, and an interface method says so
+        // implicitly (JLS §9.4). `native` also has no body, but *its* flag is the explanation, and
+        // `ACC_NATIVE | ACC_ABSTRACT` is a pair JVMS §4.6 forbids — a JVM rejects the whole class
+        // with "illegal modifiers: 0x500". Calling every body-less method abstract produced exactly
+        // that, so anything else with no body is reported instead.
+        let flags = if attributes.is_empty() {
+            if context.in_interface
+                || Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
+            {
+                flags | MethodAccessFlags::ABSTRACT
+            } else {
+                return Err(LowerError::Unsupported("a method with no body"));
+            }
         } else {
             flags
         };
