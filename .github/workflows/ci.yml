@@ -74,9 +74,13 @@ jobs:
           java-version: "25"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `wasm-tools` and `wasmtime` are the WasmGC backend's oracles: the tests that run a compiled
+      # module skip themselves when the engine is absent (the same shape as `javac_available()`), so
+      # without these installed the whole "a real engine executes it" half of `jals-javac` would
+      # quietly pass by doing nothing.
       - uses: taiki-e/install-action@v2.85.0
         with:
-          tool: nextest
+          tool: nextest,wasm-tools,wasmtime
       - run: cargo nextest run --workspace --all-features
       # nextest does not run doctests, so keep them covered with a separate `cargo test --doc`.
       - run: cargo test --workspace --all-features --doc
