@@ -233,6 +233,26 @@ impl Ctx<'_> {
         }
     }
 
+    /// The level a variable's array initializer opens at.
+    ///
+    /// A declaration opens a continuation level for its initializer, but a block-shaped one does
+    /// not use it: `int[] xs = {` stays on the declaration's line, so its contents belong one
+    /// block indent from *that* line and its `}` at the line's own indent. Cancelling the
+    /// continuation here is google-java-format's `minusFour`.
+    fn initializer_base(&self, node: &SyntaxNode) -> Indent {
+        let is_initializer = node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                S::FIELD_DECL | S::LOCAL_VAR_DECL | S::RESOURCE
+            )
+        });
+        if is_initializer {
+            Indent::columns(-i32::try_from(self.style.continuation_cols).unwrap_or(0))
+        } else {
+            Indent::ZERO
+        }
+    }
+
     /// An array initializer `{ a, b, c }`.
     ///
     /// `tabular-array-initializers` keeps a grid-shaped initializer's source rows instead of
@@ -259,8 +279,9 @@ impl Ctx<'_> {
         // token that survives either way; only the layout responds to it.
         let trailing_comma = Self::has_trailing_comma(&children);
         let last_element = children.iter().rposition(|child| child.as_node().is_some());
+        let base = self.initializer_base(node);
 
-        self.open_flat(Indent::ZERO);
+        self.open_flat(base.clone());
         let mut opened = false;
         for (nth, child) in children.iter().enumerate() {
             match child.as_token().map(SyntaxToken::kind) {
@@ -390,7 +411,8 @@ impl Ctx<'_> {
     /// Emit a grid-shaped initializer, keeping the source's row breaks.
     async fn emit_tabular_array(&mut self, node: &SyntaxNode) {
         let indent = self.style.indent();
-        self.open_flat(Indent::ZERO);
+        let base = self.initializer_base(node);
+        self.open_flat(base.clone());
         let mut opened = false;
         for child in Self::children(node) {
             match child.as_token().map(SyntaxToken::kind) {
