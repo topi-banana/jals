@@ -155,6 +155,7 @@ impl GoogleJavaFormatConfig {
                 // `visitAnnotation` its member-value pairs.
                 type_arguments: WrapPolicy::IfLongPerItem,
                 type_parameters: WrapPolicy::IfLongPerItem,
+                deconstruction_list: WrapPolicy::IfLongPerItem,
                 annotation_arguments: WrapPolicy::IfLongPerItem,
                 extends_list: WrapPolicy::IfLongPerItem,
                 throws_list: WrapPolicy::IfLongPerItem,

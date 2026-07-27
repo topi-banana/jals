@@ -76,6 +76,12 @@ impl Spacing {
             return true;
         }
 
+        // A record pattern's component list is written against the type it deconstructs, the way
+        // a call's arguments are: `case Point(int x, int y)`.
+        if nk == S::LPAREN && np == S::RECORD_PATTERN {
+            return false;
+        }
+
         if let Some(space) = Self::delimiters(pk, nk, pp, np, rules) {
             return space;
         }
@@ -84,11 +90,6 @@ impl Spacing {
         // `(@NonNull String x)` still hugs its parenthesis.
         if nk == S::AT {
             return Self::is_word(pk) || matches!(pk, S::RPAREN | S::RBRACK | S::GT);
-        }
-        // A record pattern's component list is written against the type it deconstructs, the way
-        // a call's arguments are: `case Point(int x, int y)`.
-        if nk == S::LPAREN && np == S::RECORD_PATTERN {
-            return false;
         }
         if let Some(space) = Self::separators(prev, next, pp, np, rules) {
             return space;

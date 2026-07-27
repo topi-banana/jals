@@ -298,6 +298,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             // `visitAnnotation` also break all-or-nothing.
             type_arguments: WrapPolicy::IfLongPerItem,
             type_parameters: WrapPolicy::IfLongPerItem,
+            deconstruction_list: WrapPolicy::IfLongPerItem,
             annotation_arguments: WrapPolicy::IfLongPerItem,
             extends_list: WrapPolicy::IfLongPerItem,
             throws_list: WrapPolicy::IfLongPerItem,
