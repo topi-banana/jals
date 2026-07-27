@@ -224,8 +224,11 @@ pub struct Wrapping {
     /// Break lines that exceed the column limit even where no policy allows a break.
     /// IntelliJ `WRAP_LONG_LINES`.
     pub wrap_long_lines: bool,
-    /// Preserve the *tabular* layout of a grid-shaped array initializer instead of reflowing it
-    /// by width. google-java-format keeps such tables; Eclipse and IntelliJ reflow them.
+    /// Preserve the *tabular* layout of a grid — an array initializer, or a call whose arguments
+    /// were written two to a row — instead of reflowing it by width.
+    ///
+    /// A grid carries column structure the width alone cannot recover, so google-java-format keeps
+    /// its rows (`argumentsAreTabular`); Eclipse and IntelliJ reflow them.
     pub tabular_array_initializers: bool,
     /// Re-wrap a string concatenation that overflows the column limit, redistributing the
     /// pieces across the `+` operators. google-java-format's `StringWrapper` — its

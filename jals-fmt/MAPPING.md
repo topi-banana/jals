@@ -326,6 +326,7 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `blank-lines.around-documented-member` | — | — | `hasJavaDoc(bodyDeclaration)` → `thisOneGetsBlankLineBefore`（固定 1） |
 | `wrapping.fill-item-width` | —（構文ごとの split bit で表す） | — | `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`（固定 10） |
 | `wrapping.format-string-arguments` | — | — | `isFormatMethod`（先頭引数が `%` / `{0}` を含む文字列リテラル連結なら、それだけを 1 行に。固定 true） |
+| `wrapping.tabular-array-initializers` | — | — | `argumentsAreTabular` / 配列初期化子の table 判定（引数リストにも効く。固定 true） |
 | `literals.*` | — | — | すべて `preserve`（GJF はリテラルを書き換えない） |
 
 ---

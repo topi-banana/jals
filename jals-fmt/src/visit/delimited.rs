@@ -22,8 +22,113 @@ use crate::ir::Indent;
 use crate::visit::Ctx;
 
 impl Ctx<'_> {
+    /// Whether a call's arguments were written as a two-column grid.
+    ///
+    /// `argumentsAreTabular`: the same question `is_tabular` asks of an array initializer, and the
+    /// same answer — a grid carries column structure the width alone cannot recover, so its rows
+    /// are kept rather than refilled. google-java-format acts on it only at exactly two columns.
+    fn arguments_are_tabular(&self, node: &SyntaxNode) -> bool {
+        if !self.style.cfg.wrapping.tabular_array_initializers || node.kind() != S::ARG_LIST {
+            return false;
+        }
+        let arguments: Vec<SyntaxNode> = node.children().collect();
+        if arguments.len() < 4 || !arguments.len().is_multiple_of(2) {
+            return false;
+        }
+        let Some(start) = Self::source_column(&arguments[0]) else {
+            return false;
+        };
+        // Every row starts at the same column and holds exactly two arguments.
+        let gridded = arguments.iter().enumerate().all(|(nth, argument)| {
+            let column = Self::source_column(argument);
+            if nth % 2 == 0 {
+                column == Some(start)
+            } else {
+                column.is_some_and(|column| column > start)
+            }
+        });
+        // …and the columns are *parallel*: the same kind of expression down each one. Rows that
+        // merely happened to wrap that way are not a table, and refilling them is right.
+        gridded
+            && (0..2).all(|column| {
+                let mut kinds = arguments
+                    .iter()
+                    .skip(column)
+                    .step_by(2)
+                    .map(SyntaxNode::kind);
+                let first = kinds.next();
+                kinds.all(|kind| Some(kind) == first)
+            })
+    }
+
+    /// Emit a two-column grid of arguments, keeping the source's rows.
+    async fn emit_tabular_arguments(&mut self, node: &SyntaxNode) {
+        let continuation = self.style.continuation();
+        let list = self
+            .list_indent
+            .take()
+            .unwrap_or_else(|| self.style.continuation());
+        let children = Self::children(node);
+        let mut seen = 0usize;
+        let mut pair = false;
+        for child in &children {
+            match child.as_token().map(SyntaxToken::kind) {
+                Some(S::LPAREN) => {
+                    self.visit_element(child).await;
+                    self.open(list.clone());
+                    self.forced_break(Indent::ZERO);
+                    self.open_flat(Indent::ZERO);
+                    continue;
+                }
+                Some(S::RPAREN) => {
+                    if pair {
+                        self.close_indent(&continuation);
+                        pair = false;
+                    }
+                    self.close();
+                    self.visit_element(child).await;
+                    self.close_indent(&list);
+                    continue;
+                }
+                Some(S::COMMA) => {
+                    self.visit_element(child).await;
+                    if seen.is_multiple_of(2) {
+                        if pair {
+                            self.close_indent(&continuation);
+                            pair = false;
+                        }
+                        self.forced_break(Indent::ZERO);
+                    } else {
+                        self.list_break_flat(
+                            WrapPolicy::IfLongPerItem,
+                            Self::flat_space(self.style.cfg.spacing.after_comma),
+                            Indent::ZERO,
+                        );
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            if child.as_node().is_some() {
+                if seen.is_multiple_of(2) {
+                    self.open(continuation.clone());
+                    pair = true;
+                }
+                seen += 1;
+            }
+            self.visit_element(child).await;
+        }
+        if pair {
+            self.close_indent(&continuation);
+        }
+    }
+
     /// A paren-delimited list.
     pub(super) async fn visit_delimited(&mut self, node: &SyntaxNode) {
+        if self.arguments_are_tabular(node) {
+            self.emit_tabular_arguments(node).await;
+            return;
+        }
         // A format call's policy is decided by the values it interpolates, not by the template:
         // the template is long by nature and would send every value onto a line of its own.
         let format = self.is_format_call(node);
