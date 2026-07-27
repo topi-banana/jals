@@ -691,10 +691,13 @@ impl Ctx<'_> {
     /// what indents the type under the annotations when a parameter's annotation run wraps,
     /// instead of leaving the type flush with them.
     pub(super) async fn visit_param(&mut self, node: &SyntaxNode) {
+        // Only a *declaration* annotation opens the level — `hasDeclarationAnnotation`. A
+        // well-known type annotation belongs to the type and moves nothing.
         let annotated = Self::child_of(node, S::MODIFIERS).is_some_and(|modifiers| {
-            modifiers
-                .children()
-                .any(|child| matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE))
+            modifiers.children().any(|child| {
+                matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE)
+                    && !self.is_type_annotation(&child)
+            })
         });
         let continuation = self.style.continuation();
         if annotated {
