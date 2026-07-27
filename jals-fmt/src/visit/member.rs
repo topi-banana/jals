@@ -485,6 +485,13 @@ impl Ctx<'_> {
     /// The one-line rule a block should use, chosen by what owns it.
     pub(super) fn keep_for_block(&self, block: &SyntaxNode) -> KeepOnOneLine {
         let braces = &self.style.cfg.braces;
+        // A block that has a sibling clause never collapses: `try {} catch (E e) {}` reads as one
+        // statement with the braces gone, so google-java-format writes `try {\n} catch (E e) {\n}`
+        // and only collapses a `try` with nothing after it (`CollapseEmptyOrNot.valueOf(
+        // !trailingClauses)` in `visitTry`).
+        if Self::has_sibling_clause(block) {
+            return KeepOnOneLine::Never;
+        }
         match block.parent().map(|parent| parent.kind()) {
             Some(S::METHOD_DECL | S::CONSTRUCTOR_DECL | S::INITIALIZER) => {
                 braces.keep_method_body_on_one_line
@@ -492,5 +499,22 @@ impl Ctx<'_> {
             Some(S::LAMBDA_EXPR) => braces.keep_lambda_body_on_one_line,
             _ => braces.keep_block_on_one_line,
         }
+    }
+
+    /// Whether `block` belongs to a `try` statement that has a `catch` or a `finally`.
+    fn has_sibling_clause(block: &SyntaxNode) -> bool {
+        let Some(parent) = block.parent() else {
+            return false;
+        };
+        // A `catch`'s and a `finally`'s own block never collapse.
+        if matches!(parent.kind(), S::CATCH_CLAUSE | S::FINALLY_CLAUSE) {
+            return true;
+        }
+        if parent.kind() != S::TRY_STMT {
+            return false;
+        }
+        parent
+            .children()
+            .any(|child| matches!(child.kind(), S::CATCH_CLAUSE | S::FINALLY_CLAUSE))
     }
 }
