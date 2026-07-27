@@ -150,7 +150,9 @@ PJF_BIN=jals-tests/vendor/pjf SUBTREE=src jals-tests/scripts/gen-openjdk-corpus.
 ECLIPSE_CP="$(jals-tests/scripts/fetch-eclipse-jdt.sh)" \
   SUBTREE=src jals-tests/scripts/gen-openjdk-corpus.sh eclipse 0
 
-# intellij — an unpacked IntelliJ IDEA; the generator drives bin/format.sh headless.
+# intellij — an unpacked IntelliJ IDEA (the unified distribution; Community stopped
+# shipping separately at 2025.3 and the formatter stays in the free tier). The generator
+# drives bin/format.sh headless.
 IDEA_HOME=/path/to/idea SUBTREE=src/java.base \
   jals-tests/scripts/gen-openjdk-corpus.sh intellij 0
 ```

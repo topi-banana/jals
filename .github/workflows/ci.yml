@@ -426,9 +426,14 @@ jobs:
 
       # One cache + one generation step per reference formatter. Each corpus is generated,
       # never committed (they are GPL'd OpenJDK derivatives), and regenerated only when the
-      # submodule pin, that tool's version, or the shared generator changes. The steps are
-      # independent: a formatter that fails still leaves the others' rows in the report,
-      # which is what `--allow-missing` below is for.
+      # submodule pin, that tool's version, or the shared generator changes.
+      #
+      # Every generation step is `continue-on-error`, which is what actually makes the steps
+      # independent: without it a failing generator fails the job, the report step never
+      # runs, and no comment is posted at all — one broken formatter would cost every row.
+      # Soft-failing instead leaves the corpus directory absent, which `--allow-missing`
+      # below turns into a skipped row with a note. This report is informational by
+      # construction (see `jals-tests/README.md`), so it is never the thing gating a PR.
       - name: Cache the OpenJDK src/ gjf corpus
         id: gjf-corpus
         uses: actions/cache@v6
@@ -436,6 +441,7 @@ jobs:
           path: jals-tests/sources/openjdk-gjf
           key: openjdk-gjf-src-${{ env.GJF_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh') }}
       - name: Generate the OpenJDK src/ gjf corpus
+        continue-on-error: true
         if: steps.gjf-corpus.outputs.cache-hit != 'true'
         env:
           GJF_JAR: jals-tests/vendor/google-java-format-${{ env.GJF_VERSION }}-all-deps.jar
@@ -450,6 +456,7 @@ jobs:
           path: jals-tests/sources/openjdk-palantir
           key: openjdk-palantir-src-${{ env.PJF_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh') }}
       - name: Generate the OpenJDK src/ palantir corpus
+        continue-on-error: true
         if: steps.palantir-corpus.outputs.cache-hit != 'true'
         env:
           PJF_BIN: jals-tests/vendor/palantir-java-format-${{ env.PJF_VERSION }}
@@ -466,6 +473,7 @@ jobs:
           path: jals-tests/sources/openjdk-eclipse
           key: openjdk-eclipse-src-${{ env.ECLIPSE_JDT_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh', 'jals-tests/scripts/eclipse/EclipseFormat.java', 'jals-tests/config/eclipse-jals.prefs') }}
       - name: Generate the OpenJDK src/ eclipse corpus
+        continue-on-error: true
         if: steps.eclipse-corpus.outputs.cache-hit != 'true'
         env:
           ECLIPSE_CP: ${{ steps.jdt.outputs.classpath }}
@@ -479,18 +487,25 @@ jobs:
         with:
           path: jals-tests/sources/openjdk-intellij
           key: openjdk-intellij-javabase-${{ env.IDEA_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh', 'jals-tests/config/intellij-jals.xml') }}
-      - name: Download IntelliJ IDEA Community
+      - name: Download IntelliJ IDEA
         id: idea
+        continue-on-error: true
         # Only on a corpus cache miss: this is a ~1.5 GB download that would otherwise
         # crowd out the corpus caches themselves, so the IDE is fetched rather than cached.
+        #
+        # The unified distribution, not `ideaIC-*`: IntelliJ IDEA Community Edition stopped
+        # shipping as a separate download at 2025.3, and everything it used to contain —
+        # the Java code formatter this step drives included — stays free in the one
+        # distribution, for commercial use as well. No license is involved.
         if: steps.intellij-corpus.outputs.cache-hit != 'true'
         run: |
           curl -fL --retry 3 -o idea.tar.gz \
-            "https://download.jetbrains.com/idea/ideaIC-${IDEA_VERSION}.tar.gz"
+            "https://download.jetbrains.com/idea/idea-${IDEA_VERSION}.tar.gz"
           mkdir -p jals-tests/vendor/idea
           tar xzf idea.tar.gz -C jals-tests/vendor/idea --strip-components=1
           rm idea.tar.gz
       - name: Generate the OpenJDK java.base intellij corpus
+        continue-on-error: true
         if: steps.intellij-corpus.outputs.cache-hit != 'true'
         env:
           IDEA_HOME: jals-tests/vendor/idea
