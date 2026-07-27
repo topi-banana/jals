@@ -73,7 +73,12 @@ impl JalsBackend {
     }
 
     /// Parse, index, and lower every source together, collecting the class files.
-    fn compile_all(&self, request: &BackendRequest<'_>) -> BackendOutcome {
+    ///
+    /// `async` all the way down rather than `block_on_inline` at each step: the parser, the index
+    /// builder, and inference all yield cooperatively, and driving them on an inline executor from
+    /// inside this future would swallow every one of those yields — the host's current-thread
+    /// runtime would sit on one compile for its whole duration.
+    async fn compile_all(&self, request: &BackendRequest<'_>) -> BackendOutcome {
         let mut roots: Vec<(FileId, SyntaxNode)> = Vec::with_capacity(request.tree.len());
         let mut messages = Vec::new();
         for (index, source) in request.tree.iter().enumerate() {
@@ -82,10 +87,7 @@ impl JalsBackend {
                 continue;
             };
             let file = FileId(u32::try_from(index).unwrap_or(u32::MAX));
-            roots.push((
-                file,
-                jals_exec::block_on_inline(Parse::parse(text)).syntax(),
-            ));
+            roots.push((file, Parse::parse(text).await.syntax()));
         }
         if !messages.is_empty() {
             return BackendOutcome::failed(messages);
@@ -93,18 +95,14 @@ impl JalsBackend {
 
         // The stdlib stubs stand in for `java.base`: the JVM supplies the implementations at run
         // time, so a compile only ever needs the signatures.
-        let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+        let index = ProjectIndex::builder(&roots).with_stdlib().build().await;
 
-        let analyses: Vec<(Resolved, TypeInference)> = roots
-            .iter()
-            .map(|(file, root)| {
-                let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
-                let inference = jals_exec::block_on_inline(TypeInference::infer(
-                    root, &resolved, &index, *file,
-                ));
-                (resolved, inference)
-            })
-            .collect();
+        let mut analyses: Vec<(Resolved, TypeInference)> = Vec::with_capacity(roots.len());
+        for (file, root) in &roots {
+            let resolved = Resolved::resolve_node(root).await;
+            let inference = TypeInference::infer(root, &resolved, &index, *file).await;
+            analyses.push((resolved, inference));
+        }
 
         let class_version = match self.target {
             Target::ClassFiles { class_version } => class_version,
@@ -185,7 +183,7 @@ impl Backend for JalsBackend {
     }
 
     fn compile<'a>(&'a self, request: &'a BackendRequest<'a>) -> BackendFuture<'a> {
-        Box::pin(async move { Ok(self.compile_all(request)) })
+        Box::pin(async move { Ok(self.compile_all(request).await) })
     }
 
     fn describe(&self, request: &BackendRequest<'_>) -> String {
