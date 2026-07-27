@@ -247,6 +247,14 @@ impl Ctx<'_> {
         self.open(continuation.clone());
         let mut past_arrow = false;
         for child in Self::children(node) {
+            // `visitLambdaExpression` opens the continuation *once*, around the parameter list;
+            // the list itself adds nothing, or a parameter that wrapped would land two steps in.
+            if child
+                .as_node()
+                .is_some_and(|child| child.kind() == S::LAMBDA_PARAMS)
+            {
+                self.list_indent = Some(Indent::ZERO);
+            }
             if child.as_token().is_some_and(|tok| tok.kind() == S::ARROW) {
                 self.visit_element(&child).await;
                 past_arrow = true;
