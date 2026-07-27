@@ -21,6 +21,11 @@ continuation-indent = 4
 # goes one call per line, and a long `case` label list wraps (its `ExpressionSwitch` behavior).
 method-chain = "if-long-per-item"
 case-labels = "if-long"
+# `hasOnlyShortItems`: an argument list fills only while every argument is under 10 columns of
+# source; one longer argument sends the whole list one-per-line.
+fill-item-width = 10
+# `visitLabeledStatement` always breaks after a label's `:`.
+labeled-statement = "always-per-item"
 # Preserve the source row breaks of a grid-shaped array initializer instead of reflowing it.
 tabular-array-initializers = true
 # `fieldAnnotationDirection`: `@Deprecated int x;` stays on one line, but one annotation with

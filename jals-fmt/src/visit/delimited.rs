@@ -58,22 +58,22 @@ impl Ctx<'_> {
         };
         if policy == WrapPolicy::IfLong
             && matches!(node.kind(), S::ARG_LIST | S::ANNOTATION_ARG_LIST)
-            && !node.children().all(|arg| Self::is_simple_argument(&arg))
+            && !self.fills(node)
         {
             return WrapPolicy::IfLongPerItem;
         }
         policy
     }
 
-    /// Whether an argument is simple enough to share a line with its neighbours.
-    fn is_simple_argument(node: &SyntaxNode) -> bool {
-        match node.kind() {
-            S::NAME_REF | S::LITERAL | S::CLASS_LITERAL | S::TYPE => true,
-            S::FIELD_ACCESS | S::PAREN_EXPR | S::UNARY_EXPR | S::POSTFIX_EXPR => node
-                .children()
-                .all(|child| Self::is_simple_argument(&child)),
-            _ => false,
+    /// Whether every item is short enough for the list to keep filling — see
+    /// `[wrapping] fill-item-width`.
+    fn fills(&self, node: &SyntaxNode) -> bool {
+        let limit = self.style.cfg.wrapping.fill_item_width;
+        if limit == 0 {
+            return true;
         }
+        node.children()
+            .all(|arg| usize::from(arg.text_range().len()) < limit)
     }
 
     /// Which `[wrapping] paren-*` rule governs this list's delimiters.

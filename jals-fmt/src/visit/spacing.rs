@@ -163,7 +163,12 @@ impl Spacing {
             // still hugs its selector.
             (S::RBRACK, _) if Self::is_word(nk) => Some(true),
 
-            (_, S::LPAREN) => Some(Self::before_parens(np, rules)),
+            // A cast's `)` is followed by the value it converts, parenthesized or not.
+            (S::RPAREN, _) if pp == S::CAST_EXPR => Some(rules.after_type_cast),
+            (_, S::LPAREN) => Some(
+                Self::before_parens(np, rules).unwrap_or(false)
+                    || Self::separated_paren(pk, np, rules),
+            ),
             (_, S::LBRACE) => Some(Self::before_brace(pk, np, rules)),
             (S::LBRACE, _) => Some(pp == S::ARRAY_INIT && rules.within_array_initializer_braces),
             (_, S::RBRACE) => Some(np == S::ARRAY_INIT && rules.within_array_initializer_braces),
@@ -172,10 +177,18 @@ impl Spacing {
             (S::RBRACE, S::ELSE_KW | S::CATCH_KW | S::FINALLY_KW | S::WHILE_KW) => {
                 Some(rules.before_continuation_keyword)
             }
-            // A cast's `)` is followed by the value it converts.
-            (S::RPAREN, _) if pp == S::CAST_EXPR => Some(rules.after_type_cast),
             _ => None,
         }
+    }
+
+    /// Whether a `(` that opens neither a call nor a declaration still separates from the token
+    /// before it.
+    ///
+    /// `return (T) x` and `throw (RuntimeException) e` put a word straight against a cast's or a
+    /// group's parenthesis, and the `before-*-parentheses` rules have nothing to say about it —
+    /// they are about the parenthesis a call or a declaration owns.
+    fn separated_paren(previous: S, parent: S, rules: &SpacingRules) -> bool {
+        Self::before_parens(parent, rules).is_none() && Self::is_word(previous)
     }
 
     /// The `within-*-parentheses` rule for a parenthesis owned by `parent`.
@@ -200,9 +213,14 @@ impl Spacing {
         }
     }
 
-    /// The `before-*-parentheses` rule for an opening parenthesis owned by `parent`.
-    const fn before_parens(parent: S, rules: &SpacingRules) -> bool {
-        match parent {
+    /// The `before-*-parentheses` rule for an opening parenthesis owned by `parent`, or `None`
+    /// when no rule owns that parenthesis.
+    ///
+    /// `None` is not "no space": it is "nobody configured this one", which is what lets
+    /// [`Spacing::separated_paren`] answer for a cast's or a group's parenthesis without
+    /// overriding a rule that did have an opinion.
+    const fn before_parens(parent: S, rules: &SpacingRules) -> Option<bool> {
+        Some(match parent {
             S::ARG_LIST => rules.before_method_call_parentheses,
             S::PARAM_LIST => rules.before_method_parentheses,
             S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST => rules.before_annotation_parentheses,
@@ -217,11 +235,10 @@ impl Spacing {
             | S::SYNCHRONIZED_STMT
             | S::TRY_STMT
             | S::RESOURCE_LIST => rules.before_keyword_parentheses,
-            // A record header and a lambda parameter list hug their name; a parenthesized
-            // expression after a keyword or an operator was already spaced by that token's own
-            // rule. Neither adds a space of its own.
-            _ => false,
-        }
+            // A record header and a lambda parameter list hug their name.
+            S::RECORD_HEADER | S::LAMBDA_PARAMS => false,
+            _ => return None,
+        })
     }
 
     /// The `before-*-brace` rule for an opening brace owned by `parent`.

@@ -684,8 +684,18 @@ impl Ctx<'_> {
     pub(super) async fn visit_labeled(&mut self, node: &SyntaxNode) {
         let label_indent = self.style.cfg.layout.label_indent;
         let indent = Indent::columns(i32::try_from(label_indent).unwrap_or(0));
+        let policy = self.style.cfg.wrapping.labeled_statement;
         self.open_flat(indent);
-        self.visit_children(node).await;
+        // The label and its `:` are the level; `labeled-statement` decides whether what they
+        // introduce starts a line of its own.
+        for child in Self::children(node) {
+            let colon = child.as_token().is_some_and(|tok| tok.kind() == S::COLON);
+            self.visit_element(&child).await;
+            if colon {
+                let flat = Self::flat_space(self.style.cfg.spacing.after_label_colon);
+                self.list_break_flat(policy, flat, Indent::ZERO);
+            }
+        }
         self.close();
     }
 

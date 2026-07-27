@@ -123,6 +123,21 @@ pub struct Wrapping {
     /// An `assert` statement. Eclipse `alignment_for_assertion_message` / IntelliJ
     /// `ASSERT_STATEMENT_WRAP`.
     pub assert_statement: WrapPolicy,
+    /// How wide an item may be before an `if-long` argument list stops *filling*.
+    ///
+    /// A list of short items reads well packed several to a line; one long item in the same list
+    /// makes that packing arbitrary, so the list goes one item per line instead. The width is
+    /// measured on the item's **source text**, so it is a property of what the author wrote
+    /// rather than of the layout being decided. `0` disables the test and always fills.
+    ///
+    /// google-java-format's `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING` (10). Eclipse
+    /// spells the same distinction as two separate `alignment_for_*` bits (`M_COMPACT_SPLIT` vs
+    /// `M_ONE_PER_LINE_SPLIT`) chosen per construct, never by item width.
+    pub fill_item_width: usize,
+    /// The statement a label introduces: whether it starts a line of its own. Eclipse
+    /// `insert_new_line_after_label` (false by default, so `LABEL: stmt` stays on one line);
+    /// google-java-format always breaks (`visitLabeledStatement`'s `forcedBreak`).
+    pub labeled_statement: WrapPolicy,
     /// A `switch` expression's arms. Eclipse
     /// `alignment_for_expressions_in_switch_case_with_arrow` / IntelliJ `SWITCH_EXPRESSIONS_WRAP`.
     pub switch_expression: WrapPolicy,
@@ -236,6 +251,8 @@ impl Default for Wrapping {
             assignment: WrapPolicy::IfLong,
             for_statement: WrapPolicy::IfLong,
             assert_statement: WrapPolicy::IfLong,
+            labeled_statement: WrapPolicy::Never,
+            fill_item_width: 0,
             switch_expression: WrapPolicy::IfLong,
             type_annotations: WrapPolicy::AlwaysPerItem,
             method_annotations: WrapPolicy::AlwaysPerItem,

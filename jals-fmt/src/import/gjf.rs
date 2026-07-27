@@ -145,6 +145,11 @@ impl GoogleJavaFormatConfig {
                 paren_lambda: ParenPositions::CommonLines,
                 paren_record: ParenPositions::CommonLines,
                 tabular_array_initializers: true,
+                // `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`: an argument list fills
+                // only while every argument is under 10 source columns.
+                fill_item_width: 10,
+                // `visitLabeledStatement` forces a break after the label's `:`.
+                labeled_statement: WrapPolicy::AlwaysPerItem,
                 // `fieldAnnotationDirection`: a variable's annotations share its line unless one
                 // of them takes arguments.
                 inline_argumentless_annotations: true,

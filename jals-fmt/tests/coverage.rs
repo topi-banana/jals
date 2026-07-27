@@ -404,7 +404,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 178,
-        "the rule set is documented as 178 keys in jals-fmt/MAPPING.md",
+        total, 180,
+        "the rule set is documented as 180 keys in jals-fmt/MAPPING.md",
     );
 }

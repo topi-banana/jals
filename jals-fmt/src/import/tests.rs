@@ -286,6 +286,11 @@ fn the_gjf_family_profile_is_the_google_preset() {
             method_chain: WrapPolicy::IfLongPerItem,
             case_labels: WrapPolicy::IfLong,
             tabular_array_initializers: true,
+            // `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING` — an argument list fills only
+            // while every argument is under 10 source columns.
+            fill_item_width: 10,
+            // `visitLabeledStatement` — a forced break after the label's `:`.
+            labeled_statement: WrapPolicy::AlwaysPerItem,
             // `fieldAnnotationDirection` — a variable's annotations stay on its line unless one
             // of them takes arguments.
             inline_argumentless_annotations: true,
