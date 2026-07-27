@@ -88,7 +88,9 @@ impl Ctx<'_> {
         if limit == 0 {
             return true;
         }
-        items.into_iter().all(|arg| usize::from(arg.text_range().len()) < limit)
+        items
+            .into_iter()
+            .all(|arg| usize::from(arg.text_range().len()) < limit)
     }
 
     /// Whether this list is a call whose first argument is a format string — see
@@ -97,7 +99,10 @@ impl Ctx<'_> {
         self.style.cfg.wrapping.format_string_arguments
             && node.kind() == S::ARG_LIST
             && node.children().count() >= 2
-            && node.children().next().is_some_and(|first| Self::is_format_string(&first))
+            && node
+                .children()
+                .next()
+                .is_some_and(|first| Self::is_format_string(&first))
     }
 
     /// Whether an expression is a string literal — or a concatenation of them — carrying a format

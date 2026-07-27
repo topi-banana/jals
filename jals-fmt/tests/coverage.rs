@@ -142,6 +142,8 @@ const WRAPPING: &str = r#"class Overflow {
             throws IllegalStateException, IllegalArgumentException, UnsupportedOperationException {
         int computed = firstOperandName + secondOperandName + thirdOperandName + fourthOperandName;
         String chained = builderFactory.newBuilder().withTheFirstOption().withTheSecondOption().withTheThirdOption().build();
+        String tiny = api.withTheFirstOption().withTheSecondOption().withTheThirdOption().withTheFourthOption().build();
+        String formatted = fmt("a format string %s with several placeholders %s and more %s", firstValue, secondValue, thirdValue);
         String conditional = computed > 0 ? "the affirmative branch text goes here" : "and the negative branch text goes over here";
         consume(/* note */ theFirstArgumentName, theSecondArgumentName, theThirdArgumentName, theFourthArgumentName, theFifth);
         assert computed > 0 : "a message long enough that the assert statement has to wrap somewhere";
@@ -406,7 +408,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 180,
-        "the rule set is documented as 180 keys in jals-fmt/MAPPING.md",
+        total, 181,
+        "the rule set is documented as 181 keys in jals-fmt/MAPPING.md",
     );
 }

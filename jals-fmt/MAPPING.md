@@ -71,7 +71,7 @@ option ではなく不変条件（有意トークン列保存）そのものに�
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
 | **native モデル** | `jals_fmt::import::{eclipse, intellij, gjf, palantir, spotless}` | **全数**。ベンダー option は 1 つも落とさない。jals に写像先が無い option も**型付きで保持**する | Eclipse 416 / IntelliJ 297 |
-| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・180 |
+| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・181 |
 
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は
@@ -258,6 +258,7 @@ per-construct の対応（抜粋。全数は `inventory.tsv` と各 importer の
 | `inline-argumentless-annotations` | —（宣言の種別だけで決める） | —（同左） |
 | `labeled-statement` | `insert_new_line_after_label` | — |
 | `fill-item-width` | —（`M_COMPACT_SPLIT` / `M_ONE_PER_LINE_SPLIT` を構文ごとに選ぶ） | — |
+| `format-string-arguments` | —（引数の *内容* を見る設定は無い） | —（同左） |
 | `before-binary-operator` | `wrap_before_additive_operator` ほか 7（旧 `wrap_before_binary_operator` は legacy fan-out 元） | `BINARY_OPERATION_SIGN_ON_NEXT_LINE` |
 | `before-ternary-operator` | `wrap_before_conditional_operator` | `TERNARY_OPERATION_SIGNS_ON_NEXT_LINE` |
 | `before-assignment-operator` | `wrap_before_assignment_operator` | `PLACE_ASSIGNMENT_SIGN_ON_NEXT_LINE` |
@@ -324,6 +325,7 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `wrapping.inline-argumentless-annotations` | — | — | `fieldAnnotationDirection`（引数付き注釈が 1 つでもあれば縦、なければ横。固定 true） |
 | `blank-lines.around-documented-member` | — | — | `hasJavaDoc(bodyDeclaration)` → `thisOneGetsBlankLineBefore`（固定 1） |
 | `wrapping.fill-item-width` | —（構文ごとの split bit で表す） | — | `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`（固定 10） |
+| `wrapping.format-string-arguments` | — | — | `isFormatMethod`（先頭引数が `%` / `{0}` を含む文字列リテラル連結なら、それだけを 1 行に。固定 true） |
 | `literals.*` | — | — | すべて `preserve`（GJF はリテラルを書き換えない） |
 
 ---

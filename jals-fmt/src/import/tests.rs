@@ -294,10 +294,18 @@ fn the_gjf_family_profile_is_the_google_preset() {
             // resources.
             enum_constants: WrapPolicy::AlwaysPerItem,
             resource_list: WrapPolicy::AlwaysPerItem,
+            // `classDeclarationTypeList` and `visitThrowsClause` also break all-or-nothing.
+            extends_list: WrapPolicy::IfLongPerItem,
+            throws_list: WrapPolicy::IfLongPerItem,
             tabular_array_initializers: true,
             // `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING` — an argument list fills only
             // while every argument is under 10 source columns.
             fill_item_width: 10,
+            // `isFormatMethod` — a leading format string takes its own line.
+            format_string_arguments: true,
+            // `fieldAnnotationDirection` asks the same question of every variable.
+            parameter_annotations: WrapPolicy::AlwaysPerItem,
+            variable_annotations: WrapPolicy::AlwaysPerItem,
             // `visitLabeledStatement` — a forced break after the label's `:`.
             labeled_statement: WrapPolicy::AlwaysPerItem,
             // `fieldAnnotationDirection` — a variable's annotations stay on its line unless one

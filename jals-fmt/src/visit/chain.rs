@@ -64,6 +64,17 @@ impl Link {
     }
 }
 
+/// What may stand beside a chain's selector.
+#[derive(Clone, Copy)]
+enum Selector {
+    /// Nothing — the selector is written against what precedes it.
+    Tight,
+    /// The break `[wrapping] method-chain` asks for.
+    Plain,
+    /// A tagged break, so the argument list that follows can indent from its decision.
+    Tagged(FillMode, BreakTag),
+}
+
 impl Ctx<'_> {
     /// A selector chain, flattened at its outermost node.
     pub(super) async fn visit_chain(&mut self, node: &SyntaxNode) {
@@ -84,7 +95,7 @@ impl Ctx<'_> {
         // A chain that starts from a primary expression — `new Foo().bar()`, `(a + b).c()` —
         // emits that expression first and indents everything after it. An anonymous class body is
         // the exception: after its `}` there is nothing to gain by breaking.
-        let mut based = false;
+        let based = base.is_some();
         if let Some(base) = &base {
             let anonymous = base.kind() == S::NEW_EXPR
                 && base.children().any(|child| child.kind() == S::CLASS_BODY);
@@ -95,9 +106,8 @@ impl Ctx<'_> {
             }
             self.visit(base).await;
             if !anonymous {
-                self.chain_break(None);
+                self.chain_break(Selector::Plain);
             }
-            based = true;
         }
 
         let prefixes = self.prefixes(&links, based);
@@ -235,8 +245,10 @@ impl Ctx<'_> {
             prefixes.push(at);
         }
         if prefixes.is_empty()
-            && links.first().and_then(|link| link.simple.as_ref()).
-                is_some_and(|tok| matches!(tok.kind(), S::THIS_KW | S::SUPER_KW))
+            && links
+                .first()
+                .and_then(|link| link.simple.as_ref())
+                .is_some_and(|tok| matches!(tok.kind(), S::THIS_KW | S::SUPER_KW))
             && links.len() > 1
         {
             prefixes.push(1);
@@ -285,8 +297,7 @@ impl Ctx<'_> {
             && first.dot.is_none()
             && middle.iter().all(|link| {
                 link.is_call()
-                    && name_of(link)
-                        .is_some_and(|name| Self::LOG_METHODS.contains(&name.as_str()))
+                    && name_of(link).is_some_and(|name| Self::LOG_METHODS.contains(&name.as_str()))
             })
     }
 
@@ -325,7 +336,12 @@ impl Ctx<'_> {
         for link in links {
             if let Some(dot) = &link.dot {
                 let breaks = length > minimum || self.style.cfg.wrapping.wrap_first_method_in_chain;
-                self.emit_selector(dot, breaks.then_some(None));
+                let selector = if breaks {
+                    Selector::Plain
+                } else {
+                    Selector::Tight
+                };
+                self.emit_selector(dot, selector);
                 length += 1;
             }
             let args_indent = if trailing || link.dot.is_some() {
@@ -363,8 +379,12 @@ impl Ctx<'_> {
         for (at, link) in links.iter().enumerate() {
             if let Some(dot) = &link.dot {
                 let inside = unconsumed.peek().is_some_and(|first| at <= *first);
-                let fill = if inside { prefix_fill } else { FillMode::Unified };
-                self.emit_selector(dot, Some(Some((fill, name_tag))));
+                let fill = if inside {
+                    prefix_fill
+                } else {
+                    FillMode::Unified
+                };
+                self.emit_selector(dot, Selector::Tagged(fill, name_tag));
             }
             let tyarg = self.emit_link_name(link).await;
             if unconsumed.peek().is_some_and(|first| at == *first) {
@@ -407,8 +427,7 @@ impl Ctx<'_> {
         if let Some(first) = link.name.first() {
             self.visit_element(first).await;
         }
-        self.ops
-            .brk(FillMode::Unified, "", Indent::ZERO, Some(tag));
+        self.ops.brk(FillMode::Unified, "", Indent::ZERO, Some(tag));
         self.space_already_emitted();
         self.close_indent(&continuation);
         for element in link.name.iter().skip(1) {
@@ -418,12 +437,7 @@ impl Ctx<'_> {
     }
 
     /// A link's argument list, opened at `args_indent` inside the type-argument level.
-    async fn emit_link_args(
-        &mut self,
-        link: &Link,
-        tyarg: Option<BreakTag>,
-        args_indent: Indent,
-    ) {
+    async fn emit_link_args(&mut self, link: &Link, tyarg: Option<BreakTag>, args_indent: Indent) {
         if link.args.is_empty() {
             return;
         }
@@ -442,28 +456,26 @@ impl Ctx<'_> {
 
     /// Emit the `.` or `::` with the break that may stand beside it.
     ///
-    /// `break_at` is `None` for a selector no break may fall against, `Some(spec)` otherwise;
-    /// `spec` is `None` for the plain policy break and `Some((fill, tag))` for a tagged one. Which
-    /// **side** of the dot the break falls on is `[wrapping] before-method-chain-dot`.
-    fn emit_selector(&mut self, dot: &SyntaxToken, break_at: Option<Option<(FillMode, BreakTag)>>) {
-        let Some(spec) = break_at else {
+    /// Which **side** of the dot the break falls on is `[wrapping] before-method-chain-dot`.
+    fn emit_selector(&mut self, dot: &SyntaxToken, selector: Selector) {
+        if matches!(selector, Selector::Tight) {
             self.token(dot);
             return;
-        };
+        }
         let before = self.style.cfg.wrapping.before_method_chain_dot;
         if before {
-            self.chain_break(spec);
+            self.chain_break(selector);
         }
         self.token(dot);
         if !before {
-            self.chain_break(spec);
+            self.chain_break(selector);
         }
     }
 
     /// The break standing beside a link's selector.
-    fn chain_break(&mut self, spec: Option<(FillMode, BreakTag)>) {
+    fn chain_break(&mut self, selector: Selector) {
         let policy = self.style.cfg.wrapping.method_chain;
-        let Some((fill, tag)) = spec else {
+        let Selector::Tagged(fill, tag) = selector else {
             self.list_break_tight(policy, Indent::ZERO);
             return;
         };

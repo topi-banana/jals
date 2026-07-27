@@ -148,6 +148,11 @@ impl GoogleJavaFormatConfig {
                 // packing. An *argument* list is the fill, and `fill-item-width` decides it.
                 method_parameters: WrapPolicy::IfLongPerItem,
                 case_labels: WrapPolicy::IfLong,
+                // `classDeclarationTypeList` and `visitThrowsClause` separate their types with
+                // `breakOp(" ")`, which is UNIFIED: a clause that does not fit goes one type per
+                // line rather than packing.
+                extends_list: WrapPolicy::IfLongPerItem,
+                throws_list: WrapPolicy::IfLongPerItem,
                 // `visitEnumDeclaration` forces a break between constants, and `visitTry`
                 // between resources.
                 enum_constants: WrapPolicy::AlwaysPerItem,

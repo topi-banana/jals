@@ -29,11 +29,19 @@ impl Ctx<'_> {
         if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
             self.visit(&modifiers).await;
         }
-        // The header groups without indenting: the pieces that can actually break — the
-        // `extends` / `implements` clauses and the type-parameter list — carry the continuation
-        // indent on their own break, so adding it here too would double it.
-        self.open_flat(Indent::ZERO);
-        for child in Self::children(node) {
+        // Everything after the declared name is one level at the continuation indent, exactly
+        // where `visitClassDeclaration` opens `plusFour`: the type parameters and the
+        // `extends` / `implements` / `permits` clauses break from *there*, and each clause's own
+        // type list breaks one step further in.
+        let continuation = self.style.continuation();
+        let children = Self::children(node);
+        let name = children.iter().position(|child| {
+            child
+                .as_token()
+                .is_some_and(|tok| matches!(tok.kind(), S::IDENT | S::UNDERSCORE))
+        });
+        let mut opened = false;
+        for (nth, child) in children.iter().enumerate() {
             if child
                 .as_node()
                 .is_some_and(|node| node.kind() == S::MODIFIERS)
@@ -41,14 +49,22 @@ impl Ctx<'_> {
                 continue;
             }
             if child.as_node().is_some_and(|node| node.kind() == body_kind) {
-                self.close();
+                if opened {
+                    self.close_indent(&continuation);
+                }
                 self.brace_before(self.style.cfg.braces.type_declaration);
-                self.visit_element(&child).await;
+                self.visit_element(child).await;
                 return;
             }
-            self.visit_element(&child).await;
+            self.visit_element(child).await;
+            if !opened && name == Some(nth) {
+                self.open(continuation.clone());
+                opened = true;
+            }
         }
-        self.close();
+        if opened {
+            self.close_indent(&continuation);
+        }
     }
 
     /// Emit whatever separates a header from the `{` that follows it.
@@ -182,17 +198,72 @@ impl Ctx<'_> {
     /// `extends` / `implements` / `permits` / `throws`.
     ///
     /// The keyword starts the continuation line when the clause wraps, which is what puts the
-    /// break at the highest level of the declaration rather than inside the type list.
+    /// break at the highest level of the declaration rather than inside the type list. The break
+    /// *before* the keyword is a fill, so `class A extends S` keeps its superclass on the header's
+    /// line while a long `implements` moves down on its own — `classDeclarationTypeList`.
+    ///
+    /// A clause with more than one type opens a level of its own, so its list breaks one step
+    /// further in than the keyword: the reader sees the clause, then its members.
     pub(super) async fn visit_type_clause(&mut self, node: &SyntaxNode) {
         let policy = match node.kind() {
             S::THROWS_CLAUSE => self.style.cfg.wrapping.throws_list,
             _ => self.style.cfg.wrapping.extends_list,
         };
+        // A type declaration opens a header level after its name, so its clauses break from
+        // there. A method header has no such level — `throws` carries the continuation indent
+        // itself, which is the `open(plusFour)` around `visitThrowsClause`.
+        let plus_indent = if node.kind() == S::THROWS_CLAUSE {
+            self.style.continuation()
+        } else {
+            Indent::ZERO
+        };
+        self.clause_break(policy, plus_indent);
+        let types = node.children().count();
         let continuation = self.style.continuation();
-        self.break_op(continuation.clone());
-        self.open(continuation.clone());
-        self.emit_comma_list(node, policy, Indent::ZERO).await;
-        self.close_indent(&continuation);
+        let indent = if types > 1 {
+            continuation.clone()
+        } else {
+            Indent::ZERO
+        };
+        self.open(indent.clone());
+        let children = Self::children(node);
+        for (nth, child) in children.iter().enumerate() {
+            // A `throws` keyword is followed by a fill break rather than a space: its list is a
+            // continuation of the method header, not a clause of its own. `visitThrowsClause`.
+            if nth == 0
+                && node.kind() == S::THROWS_CLAUSE
+                && child
+                    .as_token()
+                    .is_some_and(|tok| tok.kind() == S::THROWS_KW)
+            {
+                self.visit_element(child).await;
+                self.clause_break(policy, Indent::ZERO);
+                continue;
+            }
+            if nth > 0
+                && matches!(
+                    children[nth - 1].as_token().map(SyntaxToken::kind),
+                    Some(S::COMMA)
+                )
+            {
+                self.list_break(policy, Indent::ZERO);
+            }
+            self.visit_element(child).await;
+        }
+        self.close_indent(&indent);
+    }
+
+    /// The break standing before a clause keyword — a fill, so one clause may wrap while the
+    /// next stays put.
+    fn clause_break(&mut self, policy: WrapPolicy, plus_indent: Indent) {
+        match policy {
+            WrapPolicy::Never => self.space(),
+            WrapPolicy::AlwaysPerItem => self.forced_break(plus_indent),
+            WrapPolicy::IfLong | WrapPolicy::IfLongPerItem => {
+                self.ops.brk(FillMode::Independent, " ", plus_indent, None);
+                self.space_already_emitted();
+            }
+        }
     }
 
     /// A type-argument or type-parameter list — `<K, V>`, `<T extends A & B>`.

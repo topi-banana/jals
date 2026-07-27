@@ -28,15 +28,25 @@ case-labels = "if-long"
 # `visitEnumDeclaration` forces a break between enum constants, and `visitTry` between resources.
 enum-constants = "always-per-item"
 resource-list = "always-per-item"
+# `classDeclarationTypeList` and `visitThrowsClause` also use UNIFIED breaks, so a clause that
+# does not fit goes one type per line.
+extends-list = "if-long-per-item"
+throws-list = "if-long-per-item"
 # `hasOnlyShortItems`: an argument list fills only while every argument is under 10 columns of
 # source; one longer argument sends the whole list one-per-line.
 fill-item-width = 10
+# `isFormatMethod`: a leading format string takes the first continuation line whole, and the
+# values it interpolates pack onto the next.
+format-string-arguments = true
 # `visitLabeledStatement` always breaks after a label's `:`.
 labeled-statement = "always-per-item"
 # Preserve the source row breaks of a grid-shaped array initializer instead of reflowing it.
 tabular-array-initializers = true
-# `fieldAnnotationDirection`: `@Deprecated int x;` stays on one line, but one annotation with
-# arguments puts the whole run onto its own lines.
+# `fieldAnnotationDirection` asks the same question of every variable — field, local, parameter,
+# record component, resource, `catch` parameter: `@Deprecated int x;` stays on one line, but one
+# annotation with arguments puts the whole run onto its own lines.
+parameter-annotations = "always-per-item"
+variable-annotations = "always-per-item"
 inline-argumentless-annotations = true
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
