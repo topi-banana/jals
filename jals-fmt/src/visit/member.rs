@@ -344,7 +344,9 @@ impl Ctx<'_> {
                 }
             }
             self.visit(member).await;
-            pending = false;
+            // A constant is separated by the `,` that follows it, which sets this itself. A
+            // member is not: the next one has to ask for its own separation.
+            pending = past_constants;
         }
         if opened {
             self.close_indent(&indent);

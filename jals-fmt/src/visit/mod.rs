@@ -506,8 +506,12 @@ impl<'a> Ctx<'a> {
             return;
         }
         for comment in &comments {
-            if !self.ops.is_empty() && !self.ops.last_is_break() {
-                self.forced_break(Indent::ZERO);
+            if !self.ops.is_empty() {
+                if self.ops.last_is_break() {
+                    self.ops.force_last_break();
+                } else {
+                    self.forced_break(Indent::ZERO);
+                }
             }
             self.emit_comment_line(comment);
             self.forced_break(Indent::ZERO);

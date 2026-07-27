@@ -177,6 +177,19 @@ impl Ops {
         matches!(self.last(), Some(Doc::Break(_)))
     }
 
+    /// Raise the last emitted break to a forced one.
+    ///
+    /// An own-line comment starts a line by definition, so a break already standing before it has
+    /// to be taken. Emitting a second, forced break instead would leave the first one to render as
+    /// a space and put a stray blank column before the comment.
+    pub(crate) fn force_last_break(&mut self) {
+        if let Some(level) = self.stack.last_mut()
+            && let Some(Doc::Break(brk)) = level.docs.last_mut()
+        {
+            brk.fill = FillMode::Forced;
+        }
+    }
+
     /// The general form.
     pub(crate) fn brk(
         &mut self,

@@ -108,9 +108,11 @@ impl CommentMap {
                 }
                 map.anchored += 1;
                 let (text, mut hugs) = Self::classify(&tok, normalize_parameter_comments);
+                // A Javadoc documents the declaration below it and always takes its own line,
+                // however the author wrote it — only a plain `/* … */` may hug.
                 if inline_block_comments
                     && !hugs
-                    && matches!(kind, SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT)
+                    && kind == SyntaxKind::BLOCK_COMMENT
                     && Self::followed_by_same_line_token(&tok)
                 {
                     hugs = true;
@@ -199,11 +201,8 @@ impl CommentMap {
             SyntaxKind::BLOCK_COMMENT => {
                 !matches!(prev, SyntaxKind::LPAREN | SyntaxKind::LT | SyntaxKind::DOT)
             }
-            // Javadoc after a `;` documents what follows, not what ended.
-            SyntaxKind::DOC_COMMENT => !matches!(
-                prev,
-                SyntaxKind::LPAREN | SyntaxKind::LT | SyntaxKind::DOT | SyntaxKind::SEMICOLON
-            ),
+            // A Javadoc documents what follows it, never what preceded it, so it never trails.
+            SyntaxKind::DOC_COMMENT => false,
             _ => true,
         }
     }
