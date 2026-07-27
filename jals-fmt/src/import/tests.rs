@@ -297,6 +297,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             // `classDeclarationTypeList`, `visitThrowsClause`, `visitParameterizedType`, and
             // `visitAnnotation` also break all-or-nothing.
             type_arguments: WrapPolicy::IfLongPerItem,
+            type_parameters: WrapPolicy::IfLongPerItem,
             annotation_arguments: WrapPolicy::IfLongPerItem,
             extends_list: WrapPolicy::IfLongPerItem,
             throws_list: WrapPolicy::IfLongPerItem,

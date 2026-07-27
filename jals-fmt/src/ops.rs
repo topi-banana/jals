@@ -190,6 +190,20 @@ impl Ops {
         }
     }
 
+    /// Raise the last emitted break to all-or-nothing.
+    ///
+    /// `OpsBuilder.build` puts a UNIFIED break in front of every comment it inserts before a
+    /// token. When a break already stands there, raising that one says the same thing without
+    /// emitting a second break beside it.
+    pub(crate) fn unify_last_break(&mut self) {
+        if let Some(level) = self.stack.last_mut()
+            && let Some(Doc::Break(brk)) = level.docs.last_mut()
+            && brk.fill == FillMode::Independent
+        {
+            brk.fill = FillMode::Unified;
+        }
+    }
+
     /// The general form.
     pub(crate) fn brk(
         &mut self,

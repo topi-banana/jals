@@ -32,6 +32,7 @@ resource-list = "always-per-item"
 # also use UNIFIED breaks, so a clause, a type-argument list, or an annotation's member-value pairs
 # go one item per line when they do not fit.
 type-arguments = "if-long-per-item"
+type-parameters = "if-long-per-item"
 annotation-arguments = "if-long-per-item"
 extends-list = "if-long-per-item"
 throws-list = "if-long-per-item"

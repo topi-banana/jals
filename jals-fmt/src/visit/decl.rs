@@ -267,14 +267,16 @@ impl Ctx<'_> {
         } else {
             self.style.cfg.wrapping.type_arguments
         };
-        // A parameterized *type* may break right after its `<`, which is what lets a type too
-        // wide for its line move its arguments down whole instead of splitting between two of
-        // them — `visitParameterizedType`. The explicit type arguments of a call are written
-        // against the name they qualify and get no such break (`addTypeArguments`).
-        let breaks_after_open = node.kind() == S::TYPE_ARGS
-            && node
-                .parent()
-                .is_some_and(|parent| matches!(parent.kind(), S::TYPE | S::TYPE_ARGS));
+        // A parameterized *type* and a type-parameter list may break right after their `<`,
+        // which lets a list too wide for its line move down whole instead of splitting between
+        // two of its members — `visitParameterizedType` and `typeParametersRest`. The explicit
+        // type arguments of a call are written against the name they qualify and get no such
+        // break (`addTypeArguments`).
+        let breaks_after_open = node.kind() == S::TYPE_PARAMS
+            || (node.kind() == S::TYPE_ARGS
+                && node
+                    .parent()
+                    .is_some_and(|parent| matches!(parent.kind(), S::TYPE | S::TYPE_ARGS)));
         let continuation = self.style.continuation();
         self.open_flat(Indent::ZERO);
         let children = Self::children(node);

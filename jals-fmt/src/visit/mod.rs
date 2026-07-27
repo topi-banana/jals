@@ -492,11 +492,22 @@ impl<'a> Ctx<'a> {
         // the `.` because the name it annotates would be written there too.
         let hugging = self.comments.leading_inline(tok).to_vec();
         for comment in &hugging {
-            if !self.spaced
-                && let Some(previous) = &self.previous
-                && Spacing::between(previous, tok, self.style)
-            {
-                self.space();
+            // `OpsBuilder.build` puts a break in front of every comment it inserts before a
+            // token — UNIFIED for a block comment, so a list whose items carry comments goes one
+            // per line as soon as it wraps at all, and stays on one line while it fits.
+            if self.spaced {
+                self.ops.unify_last_break();
+            } else if self.previous.is_some() {
+                let space = self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|previous| Spacing::between(previous, tok, self.style));
+                self.ops.brk(
+                    crate::ir::FillMode::Unified,
+                    Self::flat_space(space),
+                    Indent::ZERO,
+                    None,
+                );
             }
             self.emit_comment(comment);
             self.space();

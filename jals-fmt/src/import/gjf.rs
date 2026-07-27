@@ -154,6 +154,7 @@ impl GoogleJavaFormatConfig {
                 // `visitParameterizedType` separates type arguments with UNIFIED breaks too, and
                 // `visitAnnotation` its member-value pairs.
                 type_arguments: WrapPolicy::IfLongPerItem,
+                type_parameters: WrapPolicy::IfLongPerItem,
                 annotation_arguments: WrapPolicy::IfLongPerItem,
                 extends_list: WrapPolicy::IfLongPerItem,
                 throws_list: WrapPolicy::IfLongPerItem,
