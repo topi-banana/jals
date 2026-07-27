@@ -404,3 +404,36 @@ fn a_reference_branch_still_accepts_any_reference() {
     asm.return_(None).expect("return");
     asm.finish().expect("finish");
 }
+
+/// A back edge may bring locals the loop head never described — that is what a body declaring its
+/// own variables does — but it may not take away one the head *did* describe. The code after the
+/// label was emitted against that frame.
+#[test]
+fn a_back_edge_may_add_slots_but_not_lose_them() {
+    // Adding: the head describes slot 0, the body writes slot 1, and the arrival still describes
+    // slot 0.
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "(I)V").expect("assembler");
+    let head = asm.label();
+    asm.bind(head).expect("bind");
+    asm.const_int(0).expect("iconst_0");
+    asm.store(1).expect("istore_1");
+    asm.branch(Branch::Always, head).expect("back edge");
+    asm.finish().expect("a wider arrival is not a conflict");
+
+    // Losing: the head describes slot 0 as an `int`, and the arrival has overwritten it with a
+    // reference, so the merge can keep neither.
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "(I)V").expect("assembler");
+    let head = asm.label();
+    asm.bind(head).expect("bind");
+    asm.const_null().expect("aconst_null");
+    asm.store(0).expect("astore_0");
+    assert_eq!(
+        asm.branch(Branch::Always, head),
+        Err(jals_javac::jvm::AsmError::IncompatibleFrame),
+        "slot 0 stopped being the `int` the head's frame describes"
+    );
+}

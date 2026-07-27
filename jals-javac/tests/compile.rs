@@ -432,6 +432,41 @@ public class Guard {
     assert_eq!(run(source, "Guard"), "10\n20\n30\n7\n4\n99\n");
 }
 
+/// A loop body declaring its own locals is ordinary Java, and the back edge arrives with slots the
+/// loop head's frame never described. Requiring the two states to be *equal* rejected it as
+/// "incompatible"; what the head's frame actually needs preserved is only what it described.
+#[test]
+fn a_loop_body_may_declare_locals() {
+    let source = r"
+public class Locals {
+    static int run(int limit) {
+        int total = 0;
+        int i = 0;
+        while (i < limit) {
+            int doubled = i + i;
+            int shifted = doubled + 1;
+            total = total + shifted;
+            i = i + 1;
+            while (i == 100) {
+                int unused = 0;
+                i = i + unused;
+            }
+        }
+        return total;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(run(4));
+    }
+}
+";
+    if !java_available() {
+        return;
+    }
+    // (0+1) + (2+1) + (4+1) + (6+1) = 16.
+    assert_eq!(run(source, "Locals"), "16\n");
+}
+
 /// A nested type is its own class file. Dropping it silently would produce an outer class that
 /// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
 /// compiler is in a position to report and the run time is not.

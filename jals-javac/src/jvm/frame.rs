@@ -216,6 +216,27 @@ impl State {
         Some(Self { stack, slots })
     }
 
+    /// Whether `self` still says everything `previous` said.
+    ///
+    /// What a backward jump has to preserve is not *equality* with the state recorded at the
+    /// label: a loop body declares locals of its own, so the arriving state carries slots the
+    /// label's frame never described, and merging them in only ever turns them into
+    /// [`Slot::Empty`] — a `Top` the frame drops. Demanding equality rejected
+    /// `while (…) { int x = …; }`, which is ordinary Java.
+    ///
+    /// What may not change is anything the label *did* describe: a slot it held a value in, and
+    /// the operand stack. Those are what the already-emitted code after the label assumes, and a
+    /// frame that stopped describing them is one the verifier would reject far from the emission
+    /// that caused it.
+    pub(crate) fn describes(&self, previous: &Self) -> bool {
+        self.stack == previous.stack
+            && previous
+                .slots
+                .iter()
+                .enumerate()
+                .all(|(index, slot)| *slot == Slot::Empty || self.slots.get(index) == Some(slot))
+    }
+
     fn join_type(
         left: &VerificationType,
         right: &VerificationType,

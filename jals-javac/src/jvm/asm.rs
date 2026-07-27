@@ -827,6 +827,10 @@ impl<'pool> Assembler<'pool> {
     /// widen that state has to be rejected — the frame written into the class would no longer
     /// describe what the following instructions assume, and the verifier would refuse the method
     /// with a message far from the emission that caused it.
+    ///
+    /// "Widen" is [`State::describes`], not inequality. A loop body declares locals of its own, so
+    /// the arriving state has slots the label never described; folding them in loses nothing the
+    /// frame says, and demanding equality rejected `while (…) { int x = …; }`.
     fn record_arrival(&mut self, target: Label) -> Result<()> {
         let arriving = self.state.clone();
         let object = self.object;
@@ -836,7 +840,7 @@ impl<'pool> Assembler<'pool> {
                 let merged = existing
                     .join(&arriving, object)
                     .ok_or(AsmError::IncompatibleFrame)?;
-                if info.bound.is_some() && merged != existing {
+                if info.bound.is_some() && !merged.describes(&existing) {
                     return Err(AsmError::IncompatibleFrame);
                 }
                 merged
