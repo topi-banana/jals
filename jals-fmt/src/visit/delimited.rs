@@ -129,12 +129,19 @@ impl Ctx<'_> {
                 opened = true;
                 if !empty {
                     self.delimiter_break(parens, Some(tag));
+                    // The items get a level of their own, inside the one the delimiters own.
+                    // Breaking after the `(` and packing the items onto the continuation line are
+                    // then two decisions rather than one, which is what lets
+                    // `f(\n    a, b, c)` exist at all — google-java-format's `builder.open(ZERO)`
+                    // around `argList` / `visitFormals`.
+                    self.open_flat(Indent::ZERO);
                 }
                 continue;
             }
             if kind == Some(close) {
                 if opened {
                     if !empty {
+                        self.close();
                         self.closing_break(parens, tag);
                     }
                     // The closing delimiter is *inside* the level, so the level's width is the
@@ -162,6 +169,9 @@ impl Ctx<'_> {
             self.visit_element(child).await;
         }
         if opened {
+            if !empty {
+                self.close();
+            }
             self.close_indent(&continuation);
         }
     }

@@ -140,6 +140,10 @@ impl GoogleJavaFormatConfig {
             },
             wrapping: Wrapping {
                 method_chain: WrapPolicy::IfLongPerItem,
+                // `visitFormals` separates parameters with `breakOp(" ")`, which is UNIFIED: a
+                // parameter list that does not fit goes one parameter per line rather than
+                // packing. An *argument* list is the fill, and `fill-item-width` decides it.
+                method_parameters: WrapPolicy::IfLongPerItem,
                 case_labels: WrapPolicy::IfLong,
                 paren_method_declaration: ParenPositions::CommonLines,
                 paren_method_invocation: ParenPositions::CommonLines,
