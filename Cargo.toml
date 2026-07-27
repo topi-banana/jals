@@ -13,6 +13,7 @@ members = [
   "jals-frontend",
   "jals-storage",
   "jals-hir",
+  "jals-javac",
   "jals-lint",
   "jals-lsp",
   "jals-playground",
@@ -57,6 +58,9 @@ jals-fmt = { path = "jals-fmt" }
 jals-frontend = { path = "jals-frontend" }
 jals-storage = { path = "jals-storage", default-features = false }
 jals-hir = { path = "jals-hir" }
+# Featureless by design: turning Java into bytecode (and, later, wasm) is pure computation, so the
+# compiler is portable in every configuration.
+jals-javac = { path = "jals-javac" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
 jals-project = { path = "jals-project", default-features = false }

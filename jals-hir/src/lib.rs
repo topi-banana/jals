@@ -66,8 +66,8 @@ pub use def::{Def, DefId, DefKind, Namespace};
 pub use infer::{Completion, Signature, SignatureHelp, TypeInference, TypeMismatch};
 pub use project::{
     FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId,
-    MemberType, Param, ProjectIndex, ProjectIndexBuilder, SourceLocations, Supertype,
-    TypeParamDecl, TypeResolution,
+    MemberModifiers, MemberType, Param, ProjectIndex, ProjectIndexBuilder, SourceLocations,
+    Supertype, TypeParamDecl, TypeResolution,
 };
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;

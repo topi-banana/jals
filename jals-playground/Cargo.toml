@@ -21,6 +21,9 @@ jals-editor = { workspace = true }
 # so the page paints during long parses. Host-side tests use `Exec::inline`/`block_on_inline`.
 jals-exec = { workspace = true, features = ["wasm"] }
 jals-fmt = { workspace = true }
+# The compile frontend seam. Featureless and portable, so the wasm bundle gains only the lowering
+# driver; the backend it feeds (`jals_build::JalsBackend`) is already linked through `jals-build`.
+jals-frontend = { workspace = true }
 jals-storage = { workspace = true }
 jals-hir = { workspace = true }
 jals-syntax = { workspace = true }

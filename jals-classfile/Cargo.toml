@@ -18,6 +18,8 @@ expect-test = "1.5"
 jals-storage = { workspace = true, features = ["std-io"] }
 proptest = "1"
 serde_json = { workspace = true }
+# Scratch directory for the constructed-class test, which hands a `.class` to a real `java`.
+tempfile = "3"
 
 [lints]
 workspace = true

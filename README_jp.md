@@ -35,10 +35,11 @@ linter・language server（LSP）を提供しており、いずれも名前解�
   dependency tree を変更せず検証済み source/classpath artifact だけを投影します。
 - **`wasm32` 対応のコア。** エディタ座標変換・構文・フォーマット・lint・セマンティック解析の各層
   （`jals-editor` / `jals-syntax` / `jals-fmt` / `jals-lint` / `jals-hir` / `jals-classfile` /
-  `jals-decompile` / `jals-storage` / `jals-config`）は `no_std` で `wasm32-unknown-unknown` 向けに
-  ビルドでき、`jals-classpath` の解決コア、`jals-project` の in-memory graph、`jals-build` の Rhai
-  runner も同様です（ホスト I/O は `native` feature の背後にあります）。これによりブラウザ
-  playground は同じ解析・project-graph・build-script stack をクライアント側だけで動かせます。
+  `jals-decompile` / `jals-javac` / `jals-storage` / `jals-config`）は `no_std` で
+  `wasm32-unknown-unknown` 向けにビルドでき、`jals-classpath` の解決コア、`jals-project` の
+  in-memory graph、`jals-build` の Rhai runner も同様です（ホスト I/O は `native` feature の背後に
+  あります）。これによりブラウザ playground は同じ解析・project-graph・build-script stack を
+  クライアント側だけで動かせます。
 
 ## ワークスペース構成
 
@@ -53,6 +54,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-hir`](jals-hir)               | CST 上での名前解決・ファイル横断の型インデックス・型推論/型検査。linter と LSP が拠り所とするセマンティック層で、コンパイル済み classpath からの外部型の橋渡しも行います。                                                                                                                                                                                      |
 | [`jals-classfile`](jals-classfile)   | JVM の `.class` ファイル形式（JVMS 第 4 章）を完全にバイト一致で読み書きするモデル。                                                                                                                                                                                                                                                                            |
 | [`jals-decompile`](jals-decompile)   | パース済みの `.class` から読める Java を再構築します。型/シグネチャのレンダリング、初期化子、宣言された `throws`、そして（段階的に）バイトコードからのメソッド本体の完全な逆コンパイル。                                                                                                                                                                        |
+| [`jals-javac`](jals-javac)           | コンパイラ本体。Java ソースを実行可能なコードにします。宣言された型ごとの JVM クラスファイル、またはプロジェクト全体を 1 つの WebAssembly モジュール（オブジェクトの管理はホストの GC 任せ）にします。型検査は一切しません（診断は `jals-lint` の担当）が、解決は行います。`invokevirtual` を 1 つ出すには選ばれたオーバーロードとそのディスクリプタが要るためです。 |
 | [`jals-classpath`](jals-classpath)   | project byte と検証済み classpath artifact（ローカル/リモート jar、同梱/ネストした jar）を解決・ロードし、`jals-hir`・linter・LSP に供給します。依存に source が無い場合は逆コンパイルした `.java` skeleton にフォールバックします。                                                                                                                            |
 | [`jals-config`](jals-config)         | 3 つの設定ファイル（`jals.toml`、`jalsfmt.toml`、`jalslint.toml`）すべての純粋なデータモデル・パース・探索・検証。                                                                                                                                                                                                                                              |
 | [`jals-exec`](jals-exec)             | native・browser・inline host 共通の current-thread 実行コンテキスト。確定的な worker fan-out と runtime に依存しない協調 yield を提供します。                                                                                                                                                                                                                   |
@@ -76,6 +78,7 @@ jals/
 ├── jals-hir/         # 名前解決 + 型推論                (no_std, wasm 対応)
 ├── jals-classfile/   # JVM .class 読み書きモデル        (no_std, wasm 対応)
 ├── jals-decompile/   # .class -> 読める Java            (no_std, wasm 対応)
+├── jals-javac/       # Java -> .class / WasmGC コンパイラ (no_std, wasm 対応)
 ├── jals-classpath/   # classpath + 依存関係の解決      (no_std + wasm 対応コア)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml モデル (no_std, wasm 対応)
 ├── jals-exec/        # current-thread 実行 + worker fan-out (no_std, wasm 対応)
@@ -436,6 +439,15 @@ portable な in-memory path-project graph もブラウザ内で解決するた�
 認識できます。browser は Git dependency を clone できず、Git support を提供すると見なさず各 entry
 を warning として報告します。
 
+*Build* は in-process の `jals-javac` でワークスペースをコンパイルし（JDK もサブプロセスも不要）、
+成果物をダウンロードとして提供します。`[build] backend = { type = "jals" }` は宣言された型ごとの
+class file を実行可能な `.jar` にパッケージし、`{ type = "jals-wasm" }` はプロジェクト全体を 1 つの
+WebAssembly module として出力します（manifest の既定値 `{ type = "javac" }` はブラウザタブに起動
+できるプロセスがないため、その旨を報告します）。コンパイラは classpath ではなく `jals-hir` の埋め込み
+JDK stub に対して解決するので、解決済みの `[dependencies]` jar は editor の classpath には載っても
+コンパイラの classpath には載りません。まだ lowering のない構文は誤ったコードを吐かず、Build output
+タブに*報告*されます。
+
 ```sh
 # 初回のみ: wasm ターゲットと Trunk を用意
 rustup target add wasm32-unknown-unknown
@@ -540,7 +552,7 @@ cargo check -p jals-project --all-features                    # native path/Git 
 # wasm: pure な `no_std` クレート群（1 つのパッケージ集合としてビルドし `std` feature を無効に保つ)…
 cargo build --release --target wasm32-unknown-unknown \
   -p jals-editor -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
-  -p jals-fmt -p jals-lint -p jals-storage -p jals-config
+  -p jals-javac -p jals-fmt -p jals-lint -p jals-storage -p jals-config
 # … に加えて jals-classpath の wasm 対応コア（ホスト I/O はデフォルトの `native` feature の背後）
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 # portable in-memory project graph は dependency-script preparation と artifact projection を含む
@@ -574,7 +586,7 @@ free function はできる限り避けます。associated function は親とな�
 - parser は常に木を返し、panic しない。
 - フォーマッタは意味のあるトークン列を保持し、コメントを削除・並べ替えせず、冪等である。
 - `jals-editor` / `jals-syntax` / `jals-fmt` / `jals-lint` / `jals-hir` / `jals-classfile` /
-  `jals-decompile` / `jals-storage` / `jals-config` は `no_std` crate として
+  `jals-decompile` / `jals-javac` / `jals-storage` / `jals-config` は `no_std` crate として
   `wasm32-unknown-unknown` 向けにビルドできる。
   `jals-classpath` の解決コア（`--no-default-features`）と、portable な `rhai` feature を有効にした
   `jals-build`、`jals-project` の in-memory graph も `wasm32` 向けにビルドできる。

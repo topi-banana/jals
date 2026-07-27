@@ -1,0 +1,451 @@
+//! Compiling the in-browser workspace: frontend seam in, downloadable artifact out.
+//!
+//! The same pipeline `jals build` runs, minus the filesystem. Sources go through the frontend
+//! ([`jals_frontend::Driver`]) so the backend only ever sees what a frontend emitted, then through
+//! [`jals_build::JalsBackend`] — the in-process compiler, portable by construction, which is why a
+//! browser tab can run it at all. Class files are packaged into a jar here; a WebAssembly module is
+//! already one artifact and passes straight through.
+//!
+//! Deliberately free of the workspace lock, Monaco, and the DOM: sources arrive as `(path, text)`
+//! and the result is bytes. That keeps the whole thing testable on the host and makes it impossible
+//! for the tested path to reach a browser API.
+//!
+//! What this does *not* do: feed the resolved `[dependencies]` classpath to the compiler. Library
+//! signatures come from `jals-hir`'s embedded stubs, so a downloaded jar is on the *editor's*
+//! classpath but not the compiler's — the same limitation `jals build` has today.
+
+use std::collections::BTreeSet;
+use std::fmt;
+
+use jals_build::{
+    Backend, BackendAbsence, BackendOptions, BackendRequest, BackendSource, JalsBackend, RunTarget,
+};
+use jals_classpath::JarPackage;
+use jals_config::{BackendKind, Manifest};
+use jals_frontend::{
+    DialectFlags, DialectFrontend, Driver, Frontend, FrontendKey, IrFile, VanillaFrontend,
+};
+use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
+
+/// The name a project with no usable `[package] name` is packaged under.
+const FALLBACK_JAR: &str = "project.jar";
+
+/// The whole-project WebAssembly module's name, matching what `jals build` writes to disk.
+const WASM_ARTIFACT: &str = "project.wasm";
+
+/// What one compile produced: a downloadable file plus a line describing it.
+pub struct CompileArtifact {
+    /// The download file name — `{package.name}.jar` or `project.wasm`.
+    pub name: String,
+    pub bytes: Vec<u8>,
+    /// One human-readable line about what was produced, shown in the Build output pane.
+    pub summary: String,
+}
+
+/// Why a compile produced no artifact. The [`Display`](fmt::Display) is what the pane shows.
+#[derive(Debug)]
+pub enum CompileFailure {
+    /// `[build] backend = { type = "javac" }` — a browser tab has no process to spawn.
+    NoHostProcess,
+    /// A workspace path that is not a portable project-relative path.
+    InvalidPath(String),
+    /// The frontend rejected its input or could not publish its output.
+    Lower(String),
+    /// The backend could not be driven at all (as opposed to compiling and reporting).
+    Backend(String),
+    /// The compiler ran and reported source it cannot compile yet. Not "your code is wrong":
+    /// `jals-javac` reports every construct it has no lowering for rather than mis-emitting it.
+    NotCompiled(Vec<String>),
+    /// The class files compiled but could not be packaged into a jar.
+    Package(String),
+    /// There is nothing to compile.
+    NoSources,
+}
+
+impl fmt::Display for CompileFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // The absence is the shipped contract's own wording; the rest points at the two
+            // backends that *do* run here, since the manifest is one edit away.
+            Self::NoHostProcess => write!(
+                f,
+                "javac needs a host process, and {}.\n\
+                 Set `[build] backend = {{ type = \"jals\" }}` in jals.toml for a downloadable \
+                 .jar, or `{{ type = \"jals-wasm\" }}` for a WebAssembly module.",
+                BackendAbsence::NoHostProcess
+            ),
+            Self::InvalidPath(path) => write!(f, "`{path}` is not a project-relative path"),
+            Self::Lower(message) => write!(f, "the frontend failed: {message}"),
+            Self::Backend(message) => write!(f, "the compiler could not run: {message}"),
+            Self::NotCompiled(messages) => {
+                write!(f, "{} construct(s) not compiled yet:", messages.len())?;
+                for message in messages {
+                    write!(f, "\n  {message}")?;
+                }
+                Ok(())
+            }
+            Self::Package(message) => write!(f, "packaging the jar failed: {message}"),
+            Self::NoSources => f.write_str("there is nothing to compile"),
+        }
+    }
+}
+
+/// Namespace for compiling the in-browser workspace.
+pub struct Compile;
+
+impl Compile {
+    /// Compile `files` with the backend `manifest` selects, in this process.
+    ///
+    /// `files` are `(project-relative path, text)` — every indexed Java file, generated sources
+    /// included, exactly as the editor sees them.
+    pub async fn workspace(
+        manifest: &Manifest,
+        files: &[(String, String)],
+    ) -> Result<CompileArtifact, CompileFailure> {
+        // Decided before any work: `javac` is not a "compile then fail" case, it is a host this
+        // backend cannot exist on.
+        let wasm = match manifest.build.backend {
+            BackendKind::Javac {} => return Err(CompileFailure::NoHostProcess),
+            BackendKind::Jals {} => false,
+            BackendKind::JalsWasm {} => true,
+        };
+        if files.is_empty() {
+            return Err(CompileFailure::NoSources);
+        }
+
+        let sources = Self::lower(manifest, files).await?;
+        let options = BackendOptions {
+            release: manifest.build.release,
+            source: manifest.build.source,
+            target: manifest.build.target,
+            extra_args: manifest.build.javac_flags.clone(),
+        };
+        let request = BackendRequest {
+            tree: &sources,
+            // The in-process compiler reads library signatures from the embedded stubs rather than
+            // from the classpath, so resolved dependency jars do not participate — the same `&[]`
+            // `jals-cli` passes.
+            classpath: &[],
+            options: &options,
+        };
+        // wasm is a different *target*, not just a different tool: one module for the whole project,
+        // and the host's collector rather than a JVM's.
+        let backend = if wasm {
+            JalsBackend::wasm()
+        } else {
+            JalsBackend::new(manifest.build.release)
+        };
+
+        let outcome = Backend::compile(&backend, &request)
+            .await
+            .map_err(|error| CompileFailure::Backend(error.to_string()))?;
+        if !outcome.success() {
+            return Err(CompileFailure::NotCompiled(outcome.messages));
+        }
+
+        if wasm {
+            let (_, bytes) = outcome.artifacts.into_iter().next().ok_or_else(|| {
+                CompileFailure::Backend("the wasm backend emitted no module".to_owned())
+            })?;
+            return Ok(CompileArtifact {
+                name: WASM_ARTIFACT.to_owned(),
+                summary: format!(
+                    "compiled {} source(s) into {WASM_ARTIFACT} ({} bytes)",
+                    sources.len(),
+                    bytes.len()
+                ),
+                bytes,
+            });
+        }
+
+        // A project that declares no entry point still packages — as a library jar. Refusing here
+        // would make `[run] main-class` a compile-time requirement it has never been.
+        let main_class = RunTarget::resolve(manifest, None).ok();
+        let name = Self::jar_file_name(manifest);
+        let bytes =
+            JarPackage::write(&outcome.artifacts, main_class).map_err(CompileFailure::Package)?;
+        let summary = match main_class {
+            Some(main_class) => format!(
+                "packaged {} class file(s) into {name} (Main-Class: {main_class})",
+                outcome.artifacts.len()
+            ),
+            None => format!(
+                "packaged {} class file(s) into {name} (a library jar: no `[run] main-class`)",
+                outcome.artifacts.len()
+            ),
+        };
+        Ok(CompileArtifact {
+            name,
+            bytes,
+            summary,
+        })
+    }
+
+    /// Run the project's frontend over `files` and resolve its output back to the bytes a backend
+    /// compiles.
+    ///
+    /// The published keys are looked up again rather than the input bytes reused: `BackendSource`
+    /// carries the frontend's `CacheKey` as provenance, and reading the content back through it is
+    /// what makes "the backend only ever sees frontend output" structural instead of assumed.
+    async fn lower(
+        manifest: &Manifest,
+        files: &[(String, String)],
+    ) -> Result<Vec<BackendSource>, CompileFailure> {
+        let mut ir = Vec::with_capacity(files.len());
+        for (path, text) in files {
+            let relative =
+                RelativePath::parse(path).map_err(|_| CompileFailure::InvalidPath(path.clone()))?;
+            ir.push(IrFile::new(relative, text.as_bytes().to_vec().into()));
+        }
+        // `Driver::lower` binary-searches this slice to attribute each emitted file to its origin, so
+        // canonical order is a precondition, not a tidiness pass.
+        FrontendKey::canonical_order(&mut ir);
+
+        // Mirrors `App::lower_sources` in `jals-cli` (the original): enabling a jals dialect feature
+        // drives the build to desugar it, without a separate `[build.frontend]` selection.
+        let feature_set = manifest.feature_set();
+        let attributes = feature_set.contains(jals_config::Feature::Attributes);
+        let dialect_flags = DialectFlags {
+            grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
+            attributes,
+            // No command line in a browser, so `#[cfg(feature = "…")]` sees the manifest's own
+            // `default` list — the same selection the Rhai build script ran under.
+            build_features: if attributes {
+                manifest
+                    .resolve_build_features(&[], false, false)
+                    .unwrap_or_default()
+                    .features()
+                    .clone()
+            } else {
+                BTreeSet::new()
+            },
+        };
+        let use_dialect = dialect_flags.any();
+        let dialect = DialectFrontend::new(dialect_flags);
+        let frontend: &dyn Frontend = match manifest.build.frontend {
+            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
+            jals_config::FrontendKind::Vanilla {} => &VanillaFrontend,
+        };
+
+        // A throwaway cache: lowering reads its inputs from `ir`, never from a `ProjectView`, and
+        // nothing memoizes backend output yet — so publishing into the workspace's own artifacts
+        // would grow it every compile for no reuse.
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let lowered = Driver::lower(frontend, &mut cache, &ir)
+            .await
+            .map_err(|error| CompileFailure::Lower(error.to_string()))?;
+
+        let mut sources = Vec::with_capacity(lowered.tree.files().len());
+        for file in lowered.tree.files() {
+            let bytes = cache
+                .lookup(&file.key)
+                .await
+                .map_err(|error| CompileFailure::Lower(error.to_string()))?
+                .ok_or_else(|| {
+                    CompileFailure::Lower(format!(
+                        "lowered source `{}` was not published",
+                        file.path
+                    ))
+                })?;
+            sources.push(BackendSource {
+                path: file.path.clone(),
+                key: file.key.clone(),
+                bytes,
+            });
+        }
+        Ok(sources)
+    }
+
+    /// The jar's download name, from `[package] name`.
+    ///
+    /// The value becomes an `<a download>` attribute, so a name carrying a separator or a leading dot
+    /// falls back rather than being sanitized into something the user did not write.
+    fn jar_file_name(manifest: &Manifest) -> String {
+        manifest
+            .package
+            .name
+            .as_deref()
+            .filter(|name| {
+                !name.is_empty()
+                    && !name.starts_with('.')
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            })
+            .map_or_else(|| FALLBACK_JAR.to_owned(), |name| format!("{name}.jar"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jals_exec::block_on_inline;
+
+    use super::*;
+    use crate::workspace::SAMPLE_FILES;
+
+    fn manifest(text: &str) -> Manifest {
+        text.parse::<Manifest>().expect("test manifest parses")
+    }
+
+    /// Two files in the language subset both backends lower: primitives, `static` methods, a
+    /// `while` loop, and a cross-file call.
+    fn subset_sources() -> Vec<(String, String)> {
+        vec![
+            (
+                "com/example/Greeter.java".to_owned(),
+                "package com.example;\n\
+                 public class Greeter {\n\
+                 public static int twice(int n) { return n + n; }\n\
+                 }\n"
+                .to_owned(),
+            ),
+            (
+                "com/example/Main.java".to_owned(),
+                "package com.example;\n\
+                 public class Main {\n\
+                 public static int run() {\n\
+                 int total = 0;\n\
+                 int i = 0;\n\
+                 while (i < 3) { total = total + Greeter.twice(i); i = i + 1; }\n\
+                 return total;\n\
+                 }\n\
+                 }\n"
+                .to_owned(),
+            ),
+        ]
+    }
+
+    /// The seed Rhai script generates a `public static final String MESSAGE = …` class, and every
+    /// compile sees it — the build script runs on page load and its output joins the index. A
+    /// `String`-typed `static` field must therefore be inert on *both* backends, or flipping
+    /// `[build] backend` to `jals-wasm` would fail on a file the user never wrote.
+    #[test]
+    fn a_generated_static_string_field_does_not_block_either_backend() {
+        let generated = (
+            "target/jals/build/rhai/out/com/example/BuildInfo.java".to_owned(),
+            "package com.example;\n\
+             public final class BuildInfo {\n\
+             public static final String MESSAGE = \"Generated in the browser\";\n\
+             }\n"
+            .to_owned(),
+        );
+        for backend in ["jals", "jals-wasm"] {
+            let manifest = manifest(&format!("[build]\nbackend = {{ type = \"{backend}\" }}\n"));
+            let mut files = subset_sources();
+            files.push(generated.clone());
+            files.sort();
+            assert!(
+                block_on_inline(Compile::workspace(&manifest, &files)).is_ok(),
+                "`{backend}` must compile alongside the generated class"
+            );
+        }
+    }
+
+    /// The default backend is `javac`, which needs a process this host cannot spawn. The message
+    /// has to name the way out, not just the wall.
+    #[test]
+    fn the_javac_backend_reports_that_a_browser_has_no_host_process() {
+        let manifest = manifest("[package]\nname = \"demo\"\n");
+        let error = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+            .err()
+            .expect("javac cannot run here");
+        let message = error.to_string();
+        assert!(
+            message.contains("this host cannot run external compilers"),
+            "{message}"
+        );
+        assert!(message.contains("jals-wasm"), "{message}");
+    }
+
+    /// The whole point: packaged classes, compiled in-process, packaged into a named jar. Every
+    /// `jals-javac` test compiles default-package types, so this is the first proof that a
+    /// `package com.example;` project reaches a jar at all.
+    #[test]
+    fn a_packaged_project_compiles_into_a_jar() {
+        let manifest = manifest(
+            "[package]\nname = \"demo\"\n\n\
+             [build]\nbackend = { type = \"jals\" }\n\n\
+             [run]\nmain-class = \"com.example.Main\"\n",
+        );
+        let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+            .expect("the subset compiles");
+        assert_eq!(artifact.name, "demo.jar");
+        assert!(artifact.bytes.starts_with(b"PK\x03\x04"), "not a zip");
+        assert!(
+            artifact.summary.contains("com.example.Main"),
+            "{}",
+            artifact.summary
+        );
+    }
+
+    /// The same sources through the other backend: one module for the whole project.
+    #[test]
+    fn the_wasm_backend_yields_one_module() {
+        let manifest = manifest("[build]\nbackend = { type = \"jals-wasm\" }\n");
+        let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+            .expect("the subset compiles");
+        assert_eq!(artifact.name, "project.wasm");
+        assert!(artifact.bytes.starts_with(b"\0asm"), "not a wasm module");
+    }
+
+    /// The playground's seed project uses `new`, string concatenation and arrays, none of which
+    /// the JVM lowering compiles yet. That it *reports* rather than mis-emits is the behaviour the
+    /// default experience shows off — pinned here so it stays deliberate.
+    #[test]
+    fn the_seed_java_is_reported_as_not_compiled_yet() {
+        let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
+        let files: Vec<(String, String)> = SAMPLE_FILES
+            .iter()
+            .map(|(path, text)| ((*path).to_owned(), (*text).to_owned()))
+            .collect();
+        let error = block_on_inline(Compile::workspace(&manifest, &files))
+            .err()
+            .expect("the seed is outside the compiled subset");
+        assert!(
+            matches!(error, CompileFailure::NotCompiled(_)),
+            "expected a report, got: {error}"
+        );
+        assert!(error.to_string().contains("not compiled yet"), "{error}");
+    }
+
+    /// A path the storage layer would refuse is rejected with the path named, not unwrapped.
+    #[test]
+    fn an_unrepresentable_path_is_rejected_rather_than_panicking() {
+        let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
+        let files = vec![("a/../b.java".to_owned(), "class B {}\n".to_owned())];
+        let error = block_on_inline(Compile::workspace(&manifest, &files))
+            .err()
+            .expect("the path is not project-relative");
+        assert!(matches!(error, CompileFailure::InvalidPath(_)), "{error}");
+    }
+
+    /// A `[package] name` that is not a plain file name must not become a download attribute.
+    #[test]
+    fn an_unsafe_package_name_falls_back_to_a_neutral_jar_name() {
+        for name in ["../escape", "with/slash", ".hidden", ""] {
+            let manifest = manifest(&format!("[package]\nname = \"{name}\"\n"));
+            assert_eq!(
+                Compile::jar_file_name(&manifest),
+                FALLBACK_JAR,
+                "for `{name}`"
+            );
+        }
+        assert_eq!(
+            Compile::jar_file_name(&manifest("[package]\nname = \"my-app_1.0\"\n")),
+            "my-app_1.0.jar"
+        );
+    }
+
+    /// Nothing in the pipeline reads a clock, so the same project always packages to the same jar.
+    #[test]
+    fn two_compiles_of_the_same_sources_are_byte_identical() {
+        let manifest =
+            manifest("[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals\" }\n");
+        let sources = subset_sources();
+        let first =
+            block_on_inline(Compile::workspace(&manifest, &sources)).expect("first compile");
+        let second =
+            block_on_inline(Compile::workspace(&manifest, &sources)).expect("second compile");
+        assert_eq!(first.bytes, second.bytes);
+    }
+}

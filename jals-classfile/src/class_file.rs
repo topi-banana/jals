@@ -24,8 +24,10 @@ const MAGIC: u32 = 0xCAFE_BABE;
 pub struct ClassFile {
     /// The minor version number.
     pub minor_version: u16,
-    /// The major version number (e.g. 69 for Java 25).
-    major_version: u16,
+    /// The major version number (e.g. 69 for Java 25). It selects which class-file features a JVM
+    /// will accept — `StackMapTable` from 50, `invokedynamic` from 51 — so changing it under a
+    /// finished member set invalidates the file rather than converting it.
+    pub major_version: u16,
     /// The constant pool.
     pub constant_pool: ConstantPool,
     /// The class's access flags.
@@ -46,6 +48,29 @@ pub struct ClassFile {
 }
 
 impl ClassFile {
+    /// An empty class file at `major_version` / `minor_version`, carrying `constant_pool`.
+    ///
+    /// Everything else a class needs is a `pub` field, so construction is "make one, then assign":
+    /// `access_flags`, `this_class`, `super_class`, `interfaces`, `fields`, `methods`, and
+    /// `attributes` are all set directly. Counts and byte lengths are derived on
+    /// [`write`](Self::write), so there is no invariant to maintain while filling it in — the value
+    /// is simply incomplete (`this_class` 0 denotes no entry) until the caller has.
+    #[must_use]
+    pub const fn new(major_version: u16, minor_version: u16, constant_pool: ConstantPool) -> Self {
+        Self {
+            minor_version,
+            major_version,
+            constant_pool,
+            access_flags: ClassAccessFlags(0),
+            this_class: 0,
+            super_class: 0,
+            interfaces: Vec::new(),
+            fields: Vec::new(),
+            methods: Vec::new(),
+            attributes: Vec::new(),
+        }
+    }
+
     /// Parse a class file from any portable byte source ([`jals_storage::io::Read`]) — a
     /// `&[u8]` slice, or a host-side reader bridged through `jals_storage::io::StdReader`.
     /// In-memory sources complete without suspending; the parse yields cooperatively inside

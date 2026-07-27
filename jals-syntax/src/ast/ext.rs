@@ -20,7 +20,7 @@ use super::{
 #[cfg(test)]
 use crate::language::SyntaxNode;
 use crate::language::SyntaxToken;
-use crate::syntax_kind::SyntaxKind::{self, DOT, IDENT, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT};
+use crate::syntax_kind::SyntaxKind::{self, DOT, EQ, IDENT, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT};
 #[cfg(test)]
 use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
 
@@ -204,6 +204,28 @@ impl AssignmentExpr {
     /// The assigned value (the second operand).
     pub fn value(&self) -> Option<Expr> {
         self.parts().nth(1)
+    }
+
+    /// The operator tokens between the two operands, in order.
+    ///
+    /// A simple assignment is one `EQ`. A compound one is either a single fused token (`PLUS_EQ`,
+    /// `STAR_EQ`, …) or — for the shift forms, whose `>` the lexer never joins to what follows so
+    /// that `List<List<T>>` still closes — several: `>>=` arrives as `GT GT EQ`.
+    fn operator(&self) -> impl Iterator<Item = SyntaxToken> {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .filter(|t| !t.kind().is_trivia())
+    }
+
+    /// Whether this is a plain `=` rather than a compound assignment.
+    ///
+    /// The distinction is invisible in the node kind — `x = 1` and `x += 1` are both
+    /// `ASSIGNMENT_EXPR` — so a consumer that lowers only the simple form has to ask, or it will
+    /// silently emit the wrong program.
+    pub fn is_simple(&self) -> bool {
+        let mut operator = self.operator();
+        operator.next().is_some_and(|token| token.kind() == EQ) && operator.next().is_none()
     }
 }
 

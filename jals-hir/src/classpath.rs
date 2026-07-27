@@ -16,12 +16,12 @@ use alloc::vec::Vec;
 
 use jals_classfile::{
     Attribute, AttributeBody, ClassFile, ClassSignature, ClassTypeSignature, ConstantPool,
-    FieldType, MethodDescriptor, MethodSignature, ResultSignature, ReturnType, TypeArgument,
-    TypeParameter, TypeSignature,
+    FieldAccessFlags, FieldType, MethodAccessFlags, MethodDescriptor, MethodSignature,
+    ResultSignature, ReturnType, TypeArgument, TypeParameter, TypeSignature,
 };
 
 use crate::def::DefKind;
-use crate::project::{Fqn, MemberType, Param, TypeParamDecl};
+use crate::project::{Fqn, MemberModifiers, MemberType, Param, TypeParamDecl};
 
 /// A `.class` file reduced to the type-level facts the index needs.
 pub(crate) struct ClassfileClass {
@@ -44,6 +44,9 @@ pub(crate) struct ClassfileMember {
     pub name: String,
     /// What kind of member it is.
     pub kind: DefKind,
+    /// How the member is reached, read straight off its access flags — the one place these are
+    /// already explicit, since a class file spells out every modifier the source left implicit.
+    pub modifiers: MemberModifiers,
     /// The field type or method return type (a constructor has none — [`MemberType::Unknown`]).
     pub ty: MemberType,
     /// The method's parameters (empty for a field).
@@ -169,6 +172,10 @@ impl ClasspathLower {
             out.push(ClassfileMember {
                 name,
                 kind: DefKind::Field,
+                modifiers: MemberModifiers {
+                    is_static: field.access_flags.contains(FieldAccessFlags::STATIC),
+                    is_private: field.access_flags.contains(FieldAccessFlags::PRIVATE),
+                },
                 ty: Self::field_member_type(&field.attributes, field.descriptor_index, pool),
                 params: Vec::new(),
                 varargs: false,
@@ -203,6 +210,10 @@ impl ClasspathLower {
             out.push(ClassfileMember {
                 name,
                 kind,
+                modifiers: MemberModifiers {
+                    is_static: method.access_flags.contains(MethodAccessFlags::STATIC),
+                    is_private: method.access_flags.contains(MethodAccessFlags::PRIVATE),
+                },
                 ty,
                 params,
                 varargs,

@@ -13,6 +13,8 @@ pub struct HeaderProps {
     pub on_format: Callback<()>,
     /// Invoked when the *Syntax tree* button is pressed.
     pub on_syntax: Callback<()>,
+    /// Invoked when the *Build* button is pressed.
+    pub on_compile: Callback<()>,
     /// Emitted with the CORS-proxy URL as it changes — used to download the `jals.toml`
     /// `[dependencies]` jars (Maven Central needs it; CORS-permissive hosts do not).
     pub on_proxy_change: Callback<String>,
@@ -21,9 +23,9 @@ pub struct HeaderProps {
 }
 
 /// The top application bar: the `jals playground` wordmark on the left, and — on the right — the
-/// build/classpath status, the CORS-proxy input, and the *Syntax tree* / *Format* actions.
-/// Purely presentational — it forwards clicks and the proxy value to the root [`App`] via its
-/// [`HeaderProps`] callbacks.
+/// build/classpath status, the CORS-proxy input, and the *Syntax tree* / *Format* / *Build*
+/// actions. Purely presentational — it forwards clicks and the proxy value to the root [`App`] via
+/// its [`HeaderProps`] callbacks.
 ///
 /// [`App`]: crate::app::App
 pub struct Header;
@@ -41,6 +43,7 @@ impl Component for Header {
         // The buttons hand Monaco's `MouseEvent` back as `()` to the parent's action callbacks.
         let on_format = props.on_format.reform(|_| ());
         let on_syntax = props.on_syntax.reform(|_| ());
+        let on_compile = props.on_compile.reform(|_| ());
         // The proxy input is uncontrolled — each keystroke pushes its value up so the next resolve
         // reads the latest.
         let on_proxy = {
@@ -76,14 +79,19 @@ impl Component for Header {
                         placeholder="CORS proxy (optional, e.g. https://corsproxy.io/?)"
                         oninput={on_proxy}
                     />
-                    <button onclick={on_syntax} class={secondary}>
+                    <button onclick={on_syntax} class={secondary.clone()}>
                         { "Syntax tree" }
                     </button>
+                    <button onclick={on_format} class={secondary}>
+                        { "Format" }
+                    </button>
+                    // The one primary action: compiling the workspace is what the other two
+                    // inspect the input of.
                     <button
-                        onclick={on_format}
+                        onclick={on_compile}
                         class={classes!(BTN_BASE, "bg-ink", "text-canvas", "hover:opacity-90")}
                     >
-                        { "Format" }
+                        { "Build" }
                     </button>
                 </div>
             </header>

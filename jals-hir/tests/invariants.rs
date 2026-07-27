@@ -112,7 +112,7 @@ proptest! {
                 let _ = index.definition_at(*file, &resolved, r.range.start);
             }
         }
-        for item in index.items() {
+        for (_, item) in index.items() {
             prop_assert!(item.name_range.start <= item.name_range.end);
             prop_assert!(item.name_range.end <= srcs[item.file.0 as usize].len());
         }

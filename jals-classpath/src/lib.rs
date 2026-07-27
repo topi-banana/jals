@@ -14,6 +14,8 @@ mod resolve;
 mod skeleton;
 
 #[cfg(feature = "archive")]
+mod jar;
+#[cfg(feature = "archive")]
 mod load;
 #[cfg(feature = "archive")]
 mod mappings;
@@ -34,6 +36,8 @@ pub use resolve::{
 };
 pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 
+#[cfg(feature = "archive")]
+pub use jar::JarPackage;
 #[cfg(feature = "archive")]
 pub use load::{
     CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree, SourceTreeExtraction,
