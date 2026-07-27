@@ -33,7 +33,10 @@ pub struct JarPackage;
 
 impl JarPackage {
     /// The manifest member every jar carries, and the first member this writer emits.
-    pub const MANIFEST_PATH: &'static str = "META-INF/MANIFEST.MF";
+    ///
+    /// Private: a caller never supplies this path — it is generated — and the one place a caller
+    /// could collide with it names it in the error message instead.
+    const MANIFEST_PATH: &'static str = "META-INF/MANIFEST.MF";
 
     /// Package compiled class files into a deterministic, stored-only jar.
     ///
@@ -47,9 +50,9 @@ impl JarPackage {
     /// and the archive is otherwise reproducible from its inputs alone.
     ///
     /// # Errors
-    /// Returns a message when an entry claims [`MANIFEST_PATH`](Self::MANIFEST_PATH), and passes
-    /// through the writer's own refusals — an unsafe member name, two entries sharing a path, or an
-    /// archive beyond what the stored encoding's 32-bit fields can describe.
+    /// Returns a message when an entry claims `META-INF/MANIFEST.MF`, and passes through the
+    /// writer's own refusals — an unsafe member name, two entries sharing a path, or an archive
+    /// beyond what the stored encoding's 32-bit fields can describe.
     pub fn write(
         entries: &[(RelativePath, Vec<u8>)],
         main_class: Option<&str>,
