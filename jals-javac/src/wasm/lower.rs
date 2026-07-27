@@ -1035,9 +1035,12 @@ impl Lowering<'_> {
                     .get(&constructor)
                     .ok_or(WasmError::Unsupported("a constructor with no body"))?;
                 // The receiver has to survive the call, so it is stored and re-read rather than
-                // duplicated: wasm has no `dup`.
+                // duplicated: wasm has no `dup`. `local.set` and not `local.tee` — a `tee` leaves
+                // the value as well, and the copy it left behind outlived the call, so `new`
+                // finished one value deep. A trailing `return` discards a surplus, which is why
+                // that only surfaced once a `new` sat inside a `block`.
                 let slot = self.scratch(ty);
-                insn.local_tee(slot).local_get(slot);
+                insn.local_set(slot).local_get(slot);
                 for argument in &arguments {
                     self.expr(argument, insn)?;
                 }

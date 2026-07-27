@@ -185,6 +185,37 @@ public class Point {
     assert_invoke(&[source], "make", &["20", "22"], "42");
 }
 
+/// `new` has to leave exactly one value. Inside a `block` that is the only thing keeping the module
+/// well-formed: a function body's trailing `return` discards a surplus, so an extra copy of the
+/// object survived every test until one sat inside an `if`.
+#[test]
+fn a_new_inside_a_block_leaves_the_stack_balanced() {
+    let source = r"
+public class Guarded {
+    int x;
+
+    Guarded(int v) {
+        this.x = v;
+    }
+
+    public static int run(int n) {
+        int r = 0;
+        if (n > 0) {
+            Guarded g = new Guarded(n);
+            r = g.x;
+        }
+        while (n > 100) {
+            Guarded g = new Guarded(n);
+            r = g.x;
+            n = 0;
+        }
+        return r;
+    }
+}
+";
+    assert_invoke(&[source], "run", &["7"], "7");
+}
+
 /// Inheritance becomes *declared* subtyping, so a subclass instance flows where the superclass is
 /// expected with no conversion — the host checks it, not the generator.
 #[test]
