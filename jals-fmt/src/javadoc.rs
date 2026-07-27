@@ -644,8 +644,10 @@ impl CommentFormatter {
                     Self::closes_fence(line)
                 };
                 if closed {
+                    let mut region = core::mem::take(lines);
+                    Self::dedent_code_region(&mut region);
                     blocks.push(Block::Verbatim {
-                        lines: core::mem::take(lines),
+                        lines: region,
                         first: fence_indent,
                     });
                     fence = None;
@@ -963,6 +965,41 @@ impl CommentFormatter {
             }
         }
         delta
+    }
+
+    /// Strip the common indentation from the body of a `{@code …}` region.
+    ///
+    /// The braces make it one token, and google-java-format writes that token's content against
+    /// the comment's own margin — the indentation that lined it up under `<pre>{@code` in the
+    /// source is not part of what the snippet says. Relative indentation inside the snippet is,
+    /// so only the common prefix goes. The opening and closing lines are excluded: they carry the
+    /// delimiters, not the code.
+    fn dedent_code_region(lines: &mut [String]) {
+        let Some(first) = lines.first() else {
+            return;
+        };
+        if !first.contains("{@code") {
+            return;
+        }
+        let Some(body) = lines.get(1..lines.len().saturating_sub(1)) else {
+            return;
+        };
+        let indent_of = |line: &str| line.chars().take_while(|ch| ch.is_whitespace()).count();
+        let Some(common) = body
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| indent_of(line))
+            .min()
+        else {
+            return;
+        };
+        if common == 0 {
+            return;
+        }
+        let end = lines.len() - 1;
+        for line in &mut lines[1..end] {
+            *line = line.chars().skip(common).collect();
+        }
     }
 
     /// Whether a line closes such a region.
