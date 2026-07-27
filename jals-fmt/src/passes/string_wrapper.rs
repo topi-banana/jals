@@ -133,7 +133,7 @@ impl StringWrapper {
     /// The common indentation is the least of every non-blank line's *and* of the last line,
     /// blank or not — that last line is the closing delimiter, and it is what an author moves to
     /// choose the block's margin.
-    pub(crate) fn strip_indent(lines: &[&str]) -> Vec<String> {
+    fn strip_indent(lines: &[&str]) -> Vec<String> {
         // Counted in *characters*, as `String.stripIndent` does. Bytes would let a line indented
         // with a multi-byte space and one indented with an ASCII space agree on a cut that falls
         // inside a character.
