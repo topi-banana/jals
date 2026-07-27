@@ -496,7 +496,11 @@ impl CommentFormatter {
             }
 
             if let Some((lines, snippet)) = &mut fence {
-                lines.push(line.into());
+                // Preformatted content keeps its own indentation — that is what makes it
+                // preformatted. Only the single space that conventionally follows the `*` is
+                // dropped, and `JavadocWriter` writes these lines with no auto-indent at all.
+                let verbatim = raw.strip_prefix(' ').unwrap_or(raw).trim_end();
+                lines.push(verbatim.into());
                 let closed = if *snippet {
                     line.starts_with('}')
                 } else {
