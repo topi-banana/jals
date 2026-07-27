@@ -156,6 +156,8 @@ impl GoogleJavaFormatConfig {
                 type_arguments: WrapPolicy::IfLongPerItem,
                 type_parameters: WrapPolicy::IfLongPerItem,
                 deconstruction_list: WrapPolicy::IfLongPerItem,
+                // `visitUnionType` separates a multi-catch's alternatives the same way.
+                multi_catch_types: WrapPolicy::IfLongPerItem,
                 annotation_arguments: WrapPolicy::IfLongPerItem,
                 extends_list: WrapPolicy::IfLongPerItem,
                 throws_list: WrapPolicy::IfLongPerItem,

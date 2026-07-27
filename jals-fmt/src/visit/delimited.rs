@@ -333,6 +333,7 @@ impl Ctx<'_> {
         let tag = self.ops.new_tag();
 
         let mut opened = false;
+        let annotation = matches!(node.kind(), S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST);
         // A format call's values get a level of their own after the template, so they pack
         // together instead of inheriting the break the template forced.
         let mut values = false;
@@ -345,12 +346,17 @@ impl Ctx<'_> {
                 opened = true;
                 if !empty {
                     self.delimiter_break(parens, Some(tag));
+                    // `visitAnnotation` emits its member-value pairs straight into the level the
+                    // `(` opened, so they break with it rather than packing inside one of their
+                    // own.
                     // The items get a level of their own, inside the one the delimiters own.
                     // Breaking after the `(` and packing the items onto the continuation line are
                     // then two decisions rather than one, which is what lets
                     // `f(\n    a, b, c)` exist at all — google-java-format's `builder.open(ZERO)`
                     // around `argList` / `visitFormals`.
-                    self.open_flat(Indent::ZERO);
+                    if !annotation {
+                        self.open_flat(Indent::ZERO);
+                    }
                 }
                 continue;
             }
@@ -361,7 +367,9 @@ impl Ctx<'_> {
                             self.close();
                             values = false;
                         }
-                        self.close();
+                        if !annotation {
+                            self.close();
+                        }
                         self.closing_break(parens, tag);
                     }
                     // The closing delimiter is *inside* the level, so the level's width is the
@@ -406,7 +414,9 @@ impl Ctx<'_> {
                 if values {
                     self.close();
                 }
-                self.close();
+                if !annotation {
+                    self.close();
+                }
             }
             self.close_indent(&continuation);
         }

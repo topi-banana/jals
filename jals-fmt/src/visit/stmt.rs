@@ -178,7 +178,9 @@ impl Ctx<'_> {
     /// google-java-format never splits one declaration into several; the declarators wrap as a
     /// list and the initializer breaks after `=`.
     pub(super) async fn visit_local_var(&mut self, node: &SyntaxNode) {
-        // The modifiers go outside the continuation level, for the reason `visit_field` gives.
+        // The declaration is a level of its own outside the header, and the modifiers go outside
+        // the continuation level — both for the reasons `visit_field` gives.
+        self.open_flat(Indent::ZERO);
         if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
             self.visit(&modifiers).await;
         }
@@ -186,6 +188,7 @@ impl Ctx<'_> {
         self.open(continuation.clone());
         self.emit_declarators(node).await;
         self.close_indent(&continuation);
+        self.close();
     }
 
     /// `expr;`, `return expr;`, `throw expr;`, `yield expr;`.
