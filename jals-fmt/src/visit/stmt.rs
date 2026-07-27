@@ -85,17 +85,55 @@ impl Ctx<'_> {
         self.close_indent(&indent);
 
         if let Some(brace) = &rbrace {
+            // A block another clause follows may keep a blank line above its `}`:
+            // `visitTry` passes `AllowTrailingBlankLine.valueOf(trailingClauses)`, and the same
+            // holds for a `then` branch an `else` follows. The last clause of the chain does not.
+            let cap = if Self::followed_by_clause(node) {
+                blank.max_before_closing_brace.max(1)
+            } else {
+                blank.max_before_closing_brace
+            };
             let trailing = if dangling_before_brace {
                 0
             } else {
                 blank
                     .at_block_end
-                    .max(Self::source_blank_lines_of(brace).min(blank.max_before_closing_brace))
+                    .max(Self::source_blank_lines_of(brace).min(cap))
             };
             self.block_break(collapsible, trailing);
             self.token(brace);
         }
         self.close();
+    }
+
+    /// Whether another clause of the same statement follows this block.
+    ///
+    /// A `try` with a `catch` after it, a `catch` with another `catch` or a `finally`, a `then`
+    /// branch with an `else`. The last clause of a chain has nothing after it and closes tight.
+    fn followed_by_clause(block: &SyntaxNode) -> bool {
+        let Some(parent) = block.parent() else {
+            return false;
+        };
+        let after = |from: &SyntaxNode| {
+            let start = from.text_range().end();
+            from.parent().is_some_and(|owner| {
+                owner
+                    .children_with_tokens()
+                    .filter(|sibling| sibling.text_range().start() >= start)
+                    .any(|sibling| match sibling {
+                        SyntaxElement::Node(node) => {
+                            matches!(node.kind(), S::CATCH_CLAUSE | S::FINALLY_CLAUSE)
+                        }
+                        SyntaxElement::Token(tok) => tok.kind() == S::ELSE_KW,
+                    })
+            })
+        };
+        match parent.kind() {
+            S::TRY_STMT | S::IF_STMT => after(block),
+            // A `catch`'s own block asks about the clause, not about itself.
+            S::CATCH_CLAUSE => after(&parent),
+            _ => false,
+        }
     }
 
     /// Blank lines the source had before a token, ignoring comments.
