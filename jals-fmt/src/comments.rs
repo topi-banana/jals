@@ -298,6 +298,18 @@ impl CommentMap {
         self.leading.contains_key(&offset) || self.leading_inline.contains_key(&offset)
     }
 
+    /// Whether any comment is anchored to `tok`, on either side.
+    ///
+    /// A body holding a comment is not empty however the author wrote it — `{ /* why */ }`
+    /// carries the same note as three lines do, and collapsing it would hide the note on the
+    /// header's line.
+    pub(crate) fn touches(&self, tok: &SyntaxToken) -> bool {
+        let offset = Self::offset(tok);
+        self.has_dangling(tok)
+            || self.trailing.contains_key(&offset)
+            || self.trailing_below.contains_key(&offset)
+    }
+
     /// Blank lines the source had before `tok`'s first leading comment, or before `tok` itself
     /// when it has none.
     pub(crate) fn blank_lines_before(&self, tok: &SyntaxToken) -> usize {

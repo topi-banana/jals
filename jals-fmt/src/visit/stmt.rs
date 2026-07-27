@@ -27,7 +27,10 @@ impl Ctx<'_> {
 
         let dangling = rbrace
             .as_ref()
-            .is_some_and(|brace| self.comments.has_dangling(brace));
+            .is_some_and(|brace| self.comments.has_dangling(brace))
+            || lbrace
+                .as_ref()
+                .is_some_and(|brace| self.comments.touches(brace));
         if statements.is_empty() && !dangling {
             if let Some(brace) = &lbrace {
                 self.token(brace);
@@ -674,7 +677,10 @@ impl Ctx<'_> {
 
         let dangling = rbrace
             .as_ref()
-            .is_some_and(|brace| self.comments.has_dangling(brace));
+            .is_some_and(|brace| self.comments.has_dangling(brace))
+            || lbrace
+                .as_ref()
+                .is_some_and(|brace| self.comments.touches(brace));
         if arms.is_empty() && !dangling {
             if let Some(brace) = &lbrace {
                 self.token(brace);

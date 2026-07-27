@@ -587,6 +587,18 @@ impl<'a> Ctx<'a> {
     /// Emit the comments anchored after `tok`.
     fn emit_trailing(&mut self, tok: &SyntaxToken) {
         for comment in self.comments.trailing(tok).to_vec() {
+            // `tokenBreakTrailingComment`: a block comment written after an opening brace belongs
+            // to the body that brace opens, so it takes a line at the body's indent rather than
+            // sitting on the header's.
+            // An unterminated comment is error recovery — it swallowed the rest of the file, so
+            // there is no body for it to belong to.
+            if tok.kind() == S::LBRACE && !comment.is_line() && comment.text.ends_with("*/") {
+                let indent = self.style.indent();
+                self.forced_break(indent);
+                self.emit_comment(&comment);
+                self.ops.force_next_break();
+                continue;
+            }
             self.space();
             self.emit_comment(&comment);
             if comment.is_line() {
