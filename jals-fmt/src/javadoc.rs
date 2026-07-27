@@ -350,7 +350,7 @@ impl CommentFormatter {
                 space = false;
             }
             out.push(Word {
-                text: rest[at..end].into(),
+                text: Self::standardize_tag(&rest[at..end]),
                 space,
             });
             space = false;
@@ -362,6 +362,28 @@ impl CommentFormatter {
                 space,
             });
         }
+    }
+
+    /// `<BR/>` and `<P />` in their canonical spelling.
+    ///
+    /// Only these two: google-java-format standardizes the `br` and `p` *tokens*
+    /// (`standardizeBrToken`, `standardizePToken`) and leaves every other tag as the author wrote
+    /// it, `<CODE>` included.
+    fn standardize_tag(tag: &str) -> String {
+        let inner = tag
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .trim_end_matches('/')
+            .trim();
+        if inner.eq_ignore_ascii_case("br") || inner.eq_ignore_ascii_case("p") {
+            return alloc::format!("<{}>", inner.to_ascii_lowercase());
+        }
+        tag.into()
+    }
+
+    /// Whether a token is a `<br>`, which ends its line.
+    const fn is_break_tag(text: &str) -> bool {
+        text.eq_ignore_ascii_case("<br>")
     }
 
     /// Every whitespace-delimited run of `line`, tokenized.
@@ -890,6 +912,10 @@ impl CommentFormatter {
                 current.push(' ');
             }
             current.push_str(&word.text);
+            // `writeBr` requests a newline after the tag, so `<br>` always ends its line.
+            if Self::is_break_tag(&word.text) {
+                lines.push(core::mem::take(&mut current));
+            }
         }
         if !current.is_empty() {
             lines.push(current);
