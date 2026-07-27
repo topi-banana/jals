@@ -528,9 +528,37 @@ impl Ctx<'_> {
             self.list_indent = None;
             self.close();
         }
-        for element in &link.indices {
-            self.visit_element(element).await;
+        if link.indices.is_empty() {
+            return;
         }
+        // `formatArrayIndices`: an index may move onto its own line inside the brackets, and its
+        // own continuation one step further — a subscript computed from a long expression has
+        // nowhere else to go.
+        let continuation = self.style.continuation();
+        // The break stands where `[spacing] within-brackets` would put its space, so it carries
+        // that decision as its flat form.
+        let flat = Self::flat_space(self.style.cfg.spacing.within_brackets);
+        self.open_flat(Indent::ZERO);
+        for element in &link.indices {
+            match element.as_token().map(SyntaxToken::kind) {
+                Some(S::LBRACK) => {
+                    self.visit_element(element).await;
+                    self.ops
+                        .brk(FillMode::Independent, flat, Indent::ZERO, None);
+                    self.space_already_emitted();
+                    self.open(continuation.clone());
+                }
+                Some(S::RBRACK) => {
+                    self.close_indent(&continuation);
+                    self.ops
+                        .brk(FillMode::Independent, flat, Indent::ZERO, None);
+                    self.space_already_emitted();
+                    self.visit_element(element).await;
+                }
+                _ => self.visit_element(element).await,
+            }
+        }
+        self.close();
     }
 
     /// Emit the `.` or `::` with the break that may stand beside it.
@@ -572,7 +600,7 @@ impl Ctx<'_> {
         node.parent().is_some_and(|parent| {
             matches!(
                 parent.kind(),
-                S::CALL_EXPR | S::FIELD_ACCESS | S::METHOD_REF_EXPR
+                S::CALL_EXPR | S::FIELD_ACCESS | S::METHOD_REF_EXPR | S::INDEX_EXPR
             )
         })
     }

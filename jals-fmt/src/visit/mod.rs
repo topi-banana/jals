@@ -328,7 +328,9 @@ impl<'a> Ctx<'a> {
             S::TERNARY_EXPR => self.visit_ternary(node).await,
             S::LAMBDA_EXPR => self.visit_lambda(node).await,
             S::CAST_EXPR => self.visit_cast(node).await,
-            S::CALL_EXPR | S::FIELD_ACCESS | S::METHOD_REF_EXPR => self.visit_chain(node).await,
+            S::CALL_EXPR | S::FIELD_ACCESS | S::METHOD_REF_EXPR | S::INDEX_EXPR => {
+                self.visit_chain(node).await;
+            }
             S::NEW_EXPR => self.visit_new(node).await,
 
             // --- jals dialect ---
