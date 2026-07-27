@@ -272,6 +272,7 @@ impl<'a> Ctx<'a> {
             // but naming it here documents that the omission is deliberate.
             S::TYPE_PARAM => self.visit_children(node).await,
             S::PARAM | S::RECORD_COMPONENT => self.visit_param(node).await,
+            S::ANNOTATION_PAIR => self.visit_annotation_pair(node).await,
 
             // --- members ---
             S::CLASS_BODY => self.visit_class_body(node).await,

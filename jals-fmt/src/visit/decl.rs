@@ -228,6 +228,28 @@ impl Ctx<'_> {
             })
     }
 
+    /// One member-value pair of an annotation: `name = value`.
+    ///
+    /// `visitAnnotationArgument` breaks after the `=` all-or-nothing, and not at all when the
+    /// value is an array initializer — a `{` has nowhere better to go than the `=`'s line.
+    pub(super) async fn visit_annotation_pair(&mut self, node: &SyntaxNode) {
+        let array = node.children().any(|child| child.kind() == S::ARRAY_INIT);
+        let continuation = self.style.continuation();
+        let indent = if array {
+            Indent::ZERO
+        } else {
+            continuation.clone()
+        };
+        self.open(indent.clone());
+        for child in Self::children(node) {
+            self.visit_element(&child).await;
+            if child.as_token().is_some_and(|tok| tok.kind() == S::EQ) && !array {
+                self.list_break(WrapPolicy::IfLongPerItem, Indent::ZERO);
+            }
+        }
+        self.close_indent(&indent);
+    }
+
     /// One annotation use: `@Name` with an optional argument list.
     pub(super) async fn visit_annotation(&mut self, node: &SyntaxNode) {
         self.visit_children(node).await;

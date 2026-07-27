@@ -129,6 +129,19 @@ impl Ctx<'_> {
             self.emit_tabular_arguments(node).await;
             return;
         }
+        // `visitSingleMemberAnnotation`: an annotation whose one value is an array initializer
+        // writes the `{` against the `(`. The initializer is block-shaped and opens its own line,
+        // so a break between the two delimiters would only leave `(` dangling.
+        if matches!(node.kind(), S::ANNOTATION_ARG_LIST | S::ATTR_ARG_LIST)
+            && node.children().count() == 1
+            && node
+                .children()
+                .next()
+                .is_some_and(|value| value.kind() == S::ARRAY_INIT)
+        {
+            self.visit_children(node).await;
+            return;
+        }
         // A format call's policy is decided by the values it interpolates, not by the template:
         // the template is long by nature and would send every value onto a line of its own.
         let format = self.is_format_call(node);
