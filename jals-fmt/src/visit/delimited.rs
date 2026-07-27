@@ -539,6 +539,13 @@ impl Ctx<'_> {
         let trailing_comma = Self::has_trailing_comma(&children);
         let last_element = children.iter().rposition(|child| child.as_node().is_some());
         let base = self.initializer_base(node);
+        // `allowFilledElementsOnOwnLine`: an initializer written as an annotation's member value
+        // gets no packing level unless every element is short.
+        let filled = self.fills(node)
+            || !node
+                .ancestors()
+                .take(3)
+                .any(|owner| matches!(owner.kind(), S::ANNOTATION | S::ATTRIBUTE));
 
         self.open_flat(base.clone());
         let mut opened = false;
@@ -553,14 +560,20 @@ impl Ctx<'_> {
                         self.edge_break(trailing_comma);
                         // The elements get a level of their own inside the braces', so breaking
                         // after `{` and packing the elements are two decisions rather than one —
-                        // `visitArrayInitializer`'s `allowFilledElementsOnOwnLine`.
-                        self.open_flat(Indent::ZERO);
+                        // `visitArrayInitializer`'s `allowFilledElementsOnOwnLine`. Inside an
+                        // annotation's member-value pair that level is withheld unless every
+                        // element is short, so a list of class literals reads down the page.
+                        if filled {
+                            self.open_flat(Indent::ZERO);
+                        }
                     }
                     continue;
                 }
                 Some(S::RBRACE) => {
                     if opened {
-                        self.close();
+                        if filled {
+                            self.close();
+                        }
                         self.close_indent(&indent);
                         opened = false;
                         self.edge_break(trailing_comma);
@@ -583,7 +596,9 @@ impl Ctx<'_> {
             self.visit_element(child).await;
         }
         if opened {
-            self.close();
+            if filled {
+                self.close();
+            }
             self.close_indent(&indent);
         }
         self.close();
