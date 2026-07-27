@@ -511,11 +511,16 @@ impl Ctx<'_> {
                         self.open(indent.clone());
                         opened = true;
                         self.edge_break(trailing_comma);
+                        // The elements get a level of their own inside the braces', so breaking
+                        // after `{` and packing the elements are two decisions rather than one —
+                        // `visitArrayInitializer`'s `allowFilledElementsOnOwnLine`.
+                        self.open_flat(Indent::ZERO);
                     }
                     continue;
                 }
                 Some(S::RBRACE) => {
                     if opened {
+                        self.close();
                         self.close_indent(&indent);
                         opened = false;
                         self.edge_break(trailing_comma);
@@ -538,6 +543,7 @@ impl Ctx<'_> {
             self.visit_element(child).await;
         }
         if opened {
+            self.close();
             self.close_indent(&indent);
         }
         self.close();

@@ -135,6 +135,9 @@ impl Ctx<'_> {
         let mut links: Vec<Link> = Vec::new();
         let mut pending: Vec<SyntaxElement> = Vec::new();
         let mut indices: Vec<SyntaxElement> = Vec::new();
+        // A link's extent is the whole sub-expression that *ends* at it, arguments and subscripts
+        // included — `getLength(items.get(i))`.
+        let mut extent = 0usize;
         let mut base = None;
         let mut cursor = Some(node.clone());
 
@@ -146,12 +149,14 @@ impl Ctx<'_> {
                 // A call contributes its arguments to the link its callee names.
                 S::CALL_EXPR => {
                     pending = own;
+                    extent = extent.max(length);
                     cursor = receiver;
                 }
                 // So does an index, at the far end: `a[0][1].b()` dereferences `a`, and the two
                 // subscripts ride with it — `getArrayBase` / `formatArrayIndices`.
                 S::INDEX_EXPR => {
                     indices.splice(0..0, own);
+                    extent = extent.max(length);
                     cursor = receiver;
                 }
                 S::FIELD_ACCESS | S::METHOD_REF_EXPR => {
@@ -159,7 +164,7 @@ impl Ctx<'_> {
                         own,
                         core::mem::take(&mut pending),
                         core::mem::take(&mut indices),
-                        length,
+                        core::mem::replace(&mut extent, 0).max(length),
                     ));
                     let spine = receiver.as_ref().is_some_and(|receiver| {
                         matches!(
@@ -183,7 +188,7 @@ impl Ctx<'_> {
                         Self::children(&current),
                         core::mem::take(&mut pending),
                         core::mem::take(&mut indices),
-                        length,
+                        core::mem::replace(&mut extent, 0).max(length),
                     ));
                     cursor = None;
                 }
@@ -369,6 +374,28 @@ impl Ctx<'_> {
                 self.emit_selector(dot, selector);
                 length += 1;
             }
+            if trailing && Self::fills_first_argument(link) {
+                // `fillFirstArgument`: a short call at the head of a chain keeps its one argument
+                // on its own line, so the chain breaks at the *next* dot rather than inside the
+                // receiver — `when(something.happens()).thenReturn(result)`, not
+                // `when(\n    something\n        .happens())\n    .thenReturn(result)`.
+                self.open_flat(Indent::ZERO);
+                self.open_flat(Indent::ZERO);
+                for element in &link.name {
+                    self.visit_element(element).await;
+                }
+                let (open, rest) = link.args.split_at(1);
+                for element in open {
+                    self.visit_element(element).await;
+                }
+                for element in rest {
+                    self.visit_element(element).await;
+                }
+                self.close();
+                self.close();
+                length += link.length;
+                continue;
+            }
             let args_indent = if trailing || link.dot.is_some() {
                 continuation.clone()
             } else {
@@ -381,6 +408,32 @@ impl Ctx<'_> {
         if !based {
             self.close_indent(&continuation);
         }
+    }
+
+    /// Whether this link is a short call whose single argument is written out whole.
+    ///
+    /// `fillFirstArgument`: the receiver of `when(x).thenReturn(y)` reads as a unit, and letting
+    /// its argument wrap would indent the chain twice over for no gain. The shape is narrow on
+    /// purpose — a bare name of at most four characters, no type arguments, exactly one argument.
+    fn fills_first_argument(link: &Link) -> bool {
+        link.dot.is_none()
+            && link.indices.is_empty()
+            && link.is_call()
+            && link
+                .simple
+                .as_ref()
+                .is_some_and(|name| name.text().chars().count() <= 4)
+            && link.name.iter().all(|element| {
+                element
+                    .as_node()
+                    .is_none_or(|node| node.kind() != S::TYPE_ARGS)
+            })
+            && link.args.len() == 1
+            && link
+                .args
+                .first()
+                .and_then(SyntaxElement::as_node)
+                .is_some_and(|args| args.kind() == S::ARG_LIST && args.children().count() == 1)
     }
 
     /// `visitDotWithPrefix`: the links up to each prefix lay out as one unit.
