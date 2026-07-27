@@ -514,10 +514,19 @@ impl Ctx<'_> {
         let policy = self.style.cfg.wrapping.multi_catch_types;
         let continuation = self.style.continuation();
         let flat = Self::flat_space(self.style.cfg.spacing.around_type_bounds);
+        // The header is a level of its own. Sharing one with the body would put the body's forced
+        // breaks in the same split as the union's, and a split that can never fit takes every
+        // break before it — so `catch (A | B e)` broke at the `|` however short it was.
+        self.open_flat(Indent::ZERO);
+        let mut header_open = true;
         for child in Self::children(node) {
             if let Some(block) = child.as_node()
                 && block.kind() == S::BLOCK
             {
+                if header_open {
+                    self.close();
+                    header_open = false;
+                }
                 self.brace_before(self.style.cfg.braces.block);
             }
             // `catch (A | B | C e)` — the union is a list like any other, with `|` in the
@@ -528,6 +537,9 @@ impl Ctx<'_> {
                 continue;
             }
             self.visit_element(&child).await;
+        }
+        if header_open {
+            self.close();
         }
     }
 

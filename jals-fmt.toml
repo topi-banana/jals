@@ -25,8 +25,9 @@ ternary = "if-long-per-item"
 # `visitFormals` uses a UNIFIED break, so a parameter list goes one per line when it wraps.
 method-parameters = "if-long-per-item"
 case-labels = "if-long"
-# `visitEnumDeclaration` forces a break between enum constants.
+# `visitEnumDeclaration` forces a break between enum constants, and `visitTry` between resources.
 enum-constants = "always-per-item"
+resource-list = "always-per-item"
 # `hasOnlyShortItems`: an argument list fills only while every argument is under 10 columns of
 # source; one longer argument sends the whole list one-per-line.
 fill-item-width = 10
