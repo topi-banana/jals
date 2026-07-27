@@ -365,7 +365,15 @@ impl Ctx<'_> {
     }
 
     /// A field declaration: modifiers, a type, one or more declarators, `;`.
+    ///
+    /// The modifiers are emitted *outside* the continuation level. A vertical annotation run
+    /// breaks between the annotations and the declaration, and that break belongs to the
+    /// declaration's own indent — inside the continuation level it would push `private int x;`
+    /// four columns past the `@Deprecated` above it.
     pub(super) async fn visit_field(&mut self, node: &SyntaxNode) {
+        if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
+            self.visit(&modifiers).await;
+        }
         let continuation = self.style.continuation();
         self.open(continuation.clone());
         self.emit_declarators(node).await;
@@ -376,10 +384,20 @@ impl Ctx<'_> {
     ///
     /// The break falls *after* `=` (google-java-format's assignment rule), so the initializer
     /// starts the continuation line; `before-assignment-operator` moves it to the front instead.
+    ///
+    /// The `MODIFIERS` child is **not** emitted here: a vertical annotation run breaks at the
+    /// declaration's own indent, so the caller emits it before opening the continuation level.
     pub(super) async fn emit_declarators(&mut self, node: &SyntaxNode) {
         let policy = self.style.cfg.wrapping.assignment;
         let before = self.style.cfg.wrapping.before_assignment_operator;
-        let children = Self::children(node);
+        let children: Vec<SyntaxElement> = Self::children(node)
+            .into_iter()
+            .filter(|child| {
+                child
+                    .as_node()
+                    .is_none_or(|node| node.kind() != S::MODIFIERS)
+            })
+            .collect();
         for (nth, child) in children.iter().enumerate() {
             let kind = child.as_token().map(SyntaxToken::kind);
             if kind == Some(S::EQ) {

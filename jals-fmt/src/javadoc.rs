@@ -407,7 +407,11 @@ impl CommentFormatter {
             }
             if line.is_empty() {
                 Self::flush(&mut prose, &mut blocks);
-                blocks.push(Block::Blank);
+                // A run of blank lines is one paragraph break: `JavadocWriter.requestBlankLine`
+                // sets a flag, so asking twice still yields one.
+                if !matches!(blocks.last(), Some(Block::Blank)) {
+                    blocks.push(Block::Blank);
+                }
                 continue;
             }
             if let Some(tag) = Self::block_tag(line) {

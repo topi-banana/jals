@@ -140,6 +140,10 @@ impl Ctx<'_> {
     /// google-java-format never splits one declaration into several; the declarators wrap as a
     /// list and the initializer breaks after `=`.
     pub(super) async fn visit_local_var(&mut self, node: &SyntaxNode) {
+        // The modifiers go outside the continuation level, for the reason `visit_field` gives.
+        if let Some(modifiers) = Self::child_of(node, S::MODIFIERS) {
+            self.visit(&modifiers).await;
+        }
         let continuation = self.style.continuation();
         self.open(continuation.clone());
         self.emit_declarators(node).await;
