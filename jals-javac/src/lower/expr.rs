@@ -354,6 +354,13 @@ impl Expr {
         asm: &mut Assembler<'_>,
         slots: &Slots,
     ) -> Result<()> {
+        // `x = v` and `x += v` are the same node kind, so the operator has to be read: a compound
+        // assignment reads the target, applies an operator, and narrows the result back to the
+        // target's type, none of which this lowers. Emitting it as a plain store would be a silent
+        // miscompile — the one outcome this crate reports rather than produces.
+        if !assignment.is_simple() {
+            return Err(LowerError::Unsupported("a compound assignment"));
+        }
         let target = Self::inner(assignment.target())?;
         let value = Self::inner(assignment.value())?;
         let ast::Expr::NameRef(name) = &target else {

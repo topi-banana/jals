@@ -259,6 +259,26 @@ public class Greeter {
     );
 }
 
+/// `i += 1` shares its node kind with `i = 1`. Lowering it as a plain `local.set` produces a module
+/// that validates and runs, and computes the wrong number — which is why the operator is read.
+#[test]
+fn a_compound_assignment_is_reported_rather_than_mis_emitted() {
+    let source = r"
+public class Compound {
+    public static int run(int n) {
+        int i = n;
+        i += 5;
+        return i;
+    }
+}
+";
+    let error = compile(&[source]).expect_err("compound assignment is not lowered yet");
+    assert!(
+        matches!(error, WasmError::Unsupported("a compound assignment")),
+        "expected the compound-assignment report, got {error}"
+    );
+}
+
 /// Arrays are wasm array types, allocated by the host like every other object: `new int[n]` is one
 /// instruction whose elements start at their type's default, which is Java's own rule.
 #[test]

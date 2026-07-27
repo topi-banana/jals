@@ -869,6 +869,12 @@ impl Lowering<'_> {
         assignment: &ast::AssignmentExpr,
         insn: &mut Insn,
     ) -> Result<Option<ValType>> {
+        // `x = v` and `x += v` share a node kind, so the operator has to be read: a compound
+        // assignment reads the target and applies an operator before storing, which this does not
+        // lower. Treating it as a plain store would silently compute the wrong value.
+        if !assignment.is_simple() {
+            return Err(WasmError::Unsupported("a compound assignment"));
+        }
         let target = assignment
             .target()
             .ok_or(WasmError::Unsupported("an assignment with no target"))?;

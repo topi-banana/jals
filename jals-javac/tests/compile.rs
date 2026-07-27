@@ -153,6 +153,42 @@ public class Unsupported {
     );
 }
 
+/// `x += 1` is the same node kind as `x = 1`, so nothing in a kind-driven lowering distinguishes
+/// them. Lowering it as a plain store computes `x = 1` instead — a class file that verifies, runs,
+/// and produces the wrong number, which is worse than any error.
+#[test]
+fn a_compound_assignment_is_reported_rather_than_mis_emitted() {
+    for operator in ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="] {
+        let source = format!(
+            r"
+public class Compound {{
+    public static void main(String[] args) {{
+        int i = 5;
+        i {operator} 1;
+    }}
+}}
+"
+        );
+        let error = compile(&source).expect_err("compound assignment is not lowered yet");
+        assert!(
+            matches!(error, LowerError::Unsupported("a compound assignment")),
+            "`{operator}` should be reported, got {error}"
+        );
+    }
+    // The simple form still compiles: the check is on the operator, not on assignment as such.
+    compile(
+        r"
+public class Simple {
+    public static void main(String[] args) {
+        int i = 5;
+        i = 1;
+    }
+}
+",
+    )
+    .expect("a simple assignment still lowers");
+}
+
 /// A nested type is its own class file. Dropping it silently would produce an outer class that
 /// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
 /// compiler is in a position to report and the run time is not.
