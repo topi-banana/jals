@@ -374,11 +374,32 @@ impl<'a> Ctx<'a> {
         {
             self.ops.space();
         }
+        // A text block whose closing `\"\"\"` sits at column zero of its own content is written
+        // *at* column zero: its incidental whitespace is already none, and indenting the opener
+        // would change what the string says. `visitLiteral` spells this as a break with an
+        // effectively infinite dedent.
+        if tok.kind() == S::TEXT_BLOCK && Self::text_block_is_deindented(tok.text()) {
+            self.ops.brk(
+                crate::ir::FillMode::Unified,
+                "",
+                Indent::columns(-1024),
+                None,
+            );
+            self.spaced = true;
+        }
         let text = LiteralRewrite::apply(tok.text(), tok.kind(), self.style.cfg.literals);
         self.ops.token(&text);
         self.spaced = false;
         self.previous = Some(tok.clone());
         self.emit_trailing(tok);
+    }
+
+    /// Whether a text block's closing delimiter sits at column zero of its own content.
+    fn text_block_is_deindented(text: &str) -> bool {
+        text.rsplit('\n')
+            .next()
+            .is_some_and(|last| last.starts_with("\"\"\""))
+            && text.contains('\n')
     }
 
     /// Emit a token whose text the rule chose — a brace it is inserting, say.

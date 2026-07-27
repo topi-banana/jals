@@ -660,13 +660,16 @@ impl CommentFormatter {
                 // and leaves the prose on either side to reflow.
                 let lower = line.to_ascii_lowercase();
                 let mut trailing = "";
-                let mut split = false;
-                if Self::self_closing_fence(line)
+                let split = Self::self_closing_fence(line)
+                    && lower
+                        .find("<pre>")
+                        .zip(lower.rfind("</pre>"))
+                        // A line may close a region it did not open (`</pre> more <pre>`), in
+                        // which case there is no element on it to split out.
+                        .is_some_and(|(open, close)| close > open);
+                if split
                     && let Some(open) = lower.find("<pre>")
                     && let Some(close) = lower.rfind("</pre>")
-                    // A line may close a region it did not open (`</pre> more <pre>`), in which
-                    // case there is no element on it to split out.
-                    && close > open
                 {
                     let before = line[..open].trim_end();
                     trailing = line[close + "</pre>".len()..].trim_start();
@@ -674,7 +677,6 @@ impl CommentFormatter {
                         Self::tokens_of(before, &mut prose);
                     }
                     line = line[open..close + "</pre>".len()].trim_end();
-                    split = true;
                 }
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
