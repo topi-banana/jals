@@ -30,6 +30,19 @@ use jals_syntax::SyntaxKind;
 use crate::ir::Width;
 use crate::style::Style;
 
+/// One token of comment prose, and whether whitespace preceded it.
+///
+/// google-java-format's Javadoc lexer emits HTML tags as tokens of their own, and its writer
+/// starts a new line before *any* token that does not fit — not only before a space. That is what
+/// lets `<code>` end a line and its content begin the next with no space between, so the tokens
+/// have to carry the distinction rather than being joined into words.
+struct Word {
+    /// The token text.
+    text: String,
+    /// Whether a space separates it from the token before it.
+    space: bool,
+}
+
 /// One logical piece of a comment body.
 enum Block {
     /// Prose to be refilled, with the extra indent its first and continuation lines take.
@@ -38,8 +51,8 @@ enum Block {
     /// continue it one item level further, which is `JavadocWriter`'s `continuingListStack` plus
     /// `continuingListItemStack`.
     Prose {
-        /// The words to refill.
-        words: Vec<String>,
+        /// The tokens to refill.
+        words: Vec<Word>,
         /// Columns of extra indent on the first line.
         first: usize,
         /// Columns of extra indent on every line after it.
@@ -53,8 +66,8 @@ enum Block {
         name: String,
         /// The parameter or exception name, for the tags that take one.
         argument: Option<String>,
-        /// The description, as words to refill.
-        words: Vec<String>,
+        /// The description, as tokens to refill.
+        words: Vec<Word>,
     },
     /// A blank line the author wrote.
     Blank,
@@ -197,7 +210,7 @@ impl CommentFormatter {
             },
         ] = blocks.as_slice()
         {
-            let inline = words.join(" ");
+            let inline = Self::fill_two(words, usize::MAX, usize::MAX).join(" ");
             let width = indent + Width::utf16(opener) + Width::utf16(&inline) + 4;
             if width <= style.comment_width(indent) && !inline.is_empty() {
                 return alloc::format!("{opener} {inline} */");
@@ -306,6 +319,58 @@ impl CommentFormatter {
         out.push_str(text);
     }
 
+    /// Split a whitespace-delimited run into tokens at HTML tag boundaries.
+    ///
+    /// `space` says whether the run itself followed whitespace; the pieces after the first do not.
+    /// An inline `{@…}` tag is left whole — it is one token to google-java-format's lexer too.
+    fn tokenize(run: &str, space: bool, out: &mut Vec<Word>) {
+        if run.starts_with("{@") {
+            out.push(Word {
+                text: run.into(),
+                space,
+            });
+            return;
+        }
+        let mut rest = run;
+        let mut space = space;
+        while let Some(at) = rest.find('<') {
+            let Some(close) = rest[at..].find('>') else {
+                break;
+            };
+            let end = at + close + 1;
+            // A `<` that opens nothing (`a < b`, a generic in prose) is not a tag.
+            if !rest[at + 1..end - 1].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/') {
+                break;
+            }
+            if at > 0 {
+                out.push(Word {
+                    text: rest[..at].into(),
+                    space,
+                });
+                space = false;
+            }
+            out.push(Word {
+                text: rest[at..end].into(),
+                space,
+            });
+            space = false;
+            rest = &rest[end..];
+        }
+        if !rest.is_empty() {
+            out.push(Word {
+                text: rest.into(),
+                space,
+            });
+        }
+    }
+
+    /// Every whitespace-delimited run of `line`, tokenized.
+    fn tokens_of(line: &str, out: &mut Vec<Word>) {
+        for run in line.split_whitespace() {
+            Self::tokenize(run, true, out);
+        }
+    }
+
     /// Emit one body line with `pad` columns of extra indent.
     fn push_indented(out: &mut String, text: &str, pad: usize, asterisks: bool) {
         if pad == 0 {
@@ -325,7 +390,7 @@ impl CommentFormatter {
         out: &mut String,
         name: &str,
         argument: Option<&str>,
-        words: &[String],
+        words: &[Word],
         budget: usize,
         aligned: Option<usize>,
         style: &Style,
@@ -406,7 +471,7 @@ impl CommentFormatter {
     fn parse(body: &str, style: &Style) -> Vec<Block> {
         let cfg = style.comments();
         let mut blocks: Vec<Block> = Vec::new();
-        let mut prose: Vec<String> = Vec::new();
+        let mut prose: Vec<Word> = Vec::new();
         // `Some((lines, snippet))` — the region being collected verbatim, and whether it is a
         // `{@snippet …}` (which ends at a `}` rather than at a closing HTML tag).
         let mut fence: Option<(Vec<String>, bool)> = None;
@@ -502,7 +567,11 @@ impl CommentFormatter {
                     blocks.push(Block::Blank);
                 }
                 blocks.push(Block::Prose {
-                    words: line.split_whitespace().map(Into::into).collect(),
+                    words: {
+                        let mut heading = Vec::new();
+                        Self::tokens_of(line, &mut heading);
+                        heading
+                    },
                     first: 0,
                     rest: 0,
                 });
@@ -524,20 +593,20 @@ impl CommentFormatter {
             if let Some(Block::Tag { words, .. }) = blocks.last_mut()
                 && prose.is_empty()
             {
-                words.extend(line.split_whitespace().map(Into::into));
+                Self::tokens_of(line, words);
                 continue;
             }
-            for word in line.split_whitespace() {
+            for run in line.split_whitespace() {
                 if let Some(mut glued) = pending.take() {
-                    glued.push_str(word);
-                    prose.push(glued);
+                    glued.push_str(run);
+                    Self::tokenize(&glued, true, &mut prose);
                     continue;
                 }
-                prose.push(word.into());
+                Self::tokenize(run, true, &mut prose);
             }
         }
         if let Some(glued) = pending.take() {
-            prose.push(glued);
+            Self::tokenize(&glued, true, &mut prose);
         }
         if let Some((mut lines, _)) = fence {
             // The region never closed — an unbalanced `{@code`, a `<pre>` with no `</pre>`. Its
@@ -572,12 +641,10 @@ impl CommentFormatter {
             return false;
         };
         words.last().is_some_and(|word| {
-            word.to_ascii_lowercase().ends_with("</h1>")
-                || word.to_ascii_lowercase().ends_with("</h2>")
-                || word.to_ascii_lowercase().ends_with("</h3>")
-                || word.to_ascii_lowercase().ends_with("</h4>")
-                || word.to_ascii_lowercase().ends_with("</h5>")
-                || word.to_ascii_lowercase().ends_with("</h6>")
+            let lower = word.text.to_ascii_lowercase();
+            ["</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>"]
+                .iter()
+                .any(|tag| lower.ends_with(tag))
         })
     }
 
@@ -604,14 +671,14 @@ impl CommentFormatter {
             let Some(first) = words.first_mut() else {
                 continue;
             };
-            if !first.starts_with('<') {
-                first.insert_str(0, "<p>");
+            if !first.text.starts_with('<') {
+                first.text.insert_str(0, "<p>");
             }
         }
     }
 
     /// Move any accumulated prose into `blocks`, at `first` / `rest` columns of extra indent.
-    fn flush(prose: &mut Vec<String>, blocks: &mut Vec<Block>, first: usize, rest: usize) {
+    fn flush(prose: &mut Vec<Word>, blocks: &mut Vec<Block>, first: usize, rest: usize) {
         if !prose.is_empty() {
             blocks.push(Block::Prose {
                 words: core::mem::take(prose),
@@ -786,7 +853,13 @@ impl CommentFormatter {
         Some(Block::Tag {
             name: alloc::format!("@{name}"),
             argument,
-            words: parts.map(Into::into).collect(),
+            words: {
+                let mut description = Vec::new();
+                for run in parts {
+                    Self::tokenize(run, true, &mut description);
+                }
+                description
+            },
         })
     }
 
@@ -796,22 +869,23 @@ impl CommentFormatter {
     /// block tag, so refilling prose into that position would turn `… the @Override annotation`
     /// into a tag on the next run. Keeping it on the line it is already on costs a few columns of
     /// overflow and keeps the comment a fixed point.
-    fn fill_two(words: &[String], first: usize, rest: usize) -> Vec<String> {
+    fn fill_two(words: &[Word], first: usize, rest: usize) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut current = String::new();
         for word in words {
             let budget = if lines.is_empty() { first } else { rest };
-            let width = Width::utf16(word);
+            let width = Width::utf16(&word.text);
             if current.is_empty() {
-                current.push_str(word);
+                current.push_str(&word.text);
                 continue;
             }
-            if Width::utf16(&current) + 1 + width > budget && !word.starts_with('@') {
+            let gap = usize::from(word.space);
+            if Width::utf16(&current) + gap + width > budget && !word.text.starts_with('@') {
                 lines.push(core::mem::take(&mut current));
-            } else {
+            } else if word.space {
                 current.push(' ');
             }
-            current.push_str(word);
+            current.push_str(&word.text);
         }
         if !current.is_empty() {
             lines.push(current);
