@@ -21,14 +21,17 @@
 //! and calls (`static`, virtual, and interface). A constructor runs `super()` and the instance
 //! initialisers; a `<clinit>` runs the `static` ones.
 //!
+//! Exceptions too: `throw`, `try` / `catch` (including a multi-catch), `finally`,
+//! try-with-resources, `synchronized`, and `assert` — the last guarded by the synthetic
+//! `$assertionsDisabled` field, because assertions are off unless the JVM was started with `-ea`.
+//!
 //! One thing is narrower than it sounds, and it is *reported* where it stops rather than approximated:
 //! **a method needs a body** unless it is `abstract` or an interface method, because `native` has no
 //! body and no flag pair that could say so legally.
 //!
-//! Not yet at all: `switch`, exceptions (`throw` / `try` / `finally`), `synchronized`, `assert`,
-//! boxing, varargs, generics beyond erasure, lambdas, method references, `.class` literals, inner
-//! classes, and constructor delegation (`this(…)` / `super(args)`). Each arrives with the milestone
-//! that can test it.
+//! Not yet at all: `switch` (statement or expression), boxing, varargs, generics beyond erasure,
+//! lambdas, method references, `.class` literals, inner classes, and constructor delegation
+//! (`this(…)` / `super(args)`). Each arrives with the milestone that can test it.
 
 mod emit;
 mod expr;
@@ -253,11 +256,30 @@ impl Compile {
                 Self::access_level(node),
             )?);
         }
+        // An `assert` is guarded by a synthetic field the JVM's `-ea` flag decides, so a class
+        // containing one gains that field and the `<clinit>` code that reads the flag.
+        let asserts = node
+            .descendants()
+            .any(|child| child.kind() == jals_syntax::SyntaxKind::ASSERT_STMT);
+        if asserts {
+            fields.push(FieldInfo {
+                access_flags: FieldAccessFlags(
+                    FieldAccessFlags::STATIC
+                        | FieldAccessFlags::FINAL
+                        | FieldAccessFlags::SYNTHETIC,
+                ),
+                name_index: pool
+                    .utf8_index(stmt::ASSERTIONS_DISABLED)
+                    .ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool.utf8_index("Z").ok_or(AsmError::PoolFull)?,
+                attributes: Vec::new(),
+            });
+        }
         // A `static` field's initialiser and a `static { … }` block both run in `<clinit>`, once,
         // when the class is first used. Nothing else runs them — so dropping them produced a class
         // whose `static int n = 5;` read back as 0, which is a silent miscompile rather than a
         // missing feature.
-        if let Some(class_init) = Self::class_initializer(&context, &mut pool, &members)? {
+        if let Some(class_init) = Self::class_initializer(&context, &mut pool, &members, asserts)? {
             methods.push(class_init);
         }
 
@@ -570,10 +592,12 @@ impl Compile {
         context: &Context<'_>,
         pool: &mut ConstantPool,
         members: &[SyntaxNode],
+        asserts: bool,
     ) -> Result<Option<MethodInfo>> {
-        if !members
-            .iter()
-            .any(|member| Self::initializes(member, context.in_interface, true))
+        if !asserts
+            && !members
+                .iter()
+                .any(|member| Self::initializes(member, context.in_interface, true))
         {
             return Ok(None);
         }
@@ -582,6 +606,9 @@ impl Compile {
         let mut asm = Assembler::new(pool, Receiver::Static, "()V")?;
         let slots = Slots::new(context, None, true);
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, false);
+        if asserts {
+            Self::assertion_flag(context, &mut emit)?;
+        }
         Self::initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
             asm.return_(None)?;
@@ -592,6 +619,31 @@ impl Compile {
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
         }))
+    }
+
+    /// `$assertionsDisabled = !Foo.class.desiredAssertionStatus();`
+    ///
+    /// The first thing `<clinit>` does in a class containing an `assert`. The *negation* is what makes
+    /// the guard one branch at each assertion site rather than two — the field is read and the
+    /// assertion skipped when it is true.
+    fn assertion_flag(context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        let enabled = emit.asm.label();
+        let store = emit.asm.label();
+        emit.asm.const_class(&context.this_class)?;
+        emit.asm
+            .invoke_virtual("java/lang/Class", "desiredAssertionStatus", "()Z")?;
+        emit.asm.branch(
+            crate::jvm::Branch::IntZero(crate::jvm::Compare::Ne),
+            enabled,
+        )?;
+        emit.asm.const_int(1)?;
+        emit.asm.branch(crate::jvm::Branch::Always, store)?;
+        emit.asm.bind(enabled)?;
+        emit.asm.const_int(0)?;
+        emit.asm.bind(store)?;
+        Ok(emit
+            .asm
+            .put_static(&context.this_class, stmt::ASSERTIONS_DISABLED, "Z")?)
     }
 
     /// Whether `member` contributes to the class initialiser (`statics`) or to every constructor.
@@ -770,6 +822,51 @@ impl Context<'_> {
             ty = jals_hir::Ty::Array(alloc::boxed::Box::new(ty));
         }
         Ok(ty)
+    }
+
+    /// The nearest type every entry in `types` is assignable to.
+    ///
+    /// What a multi-catch's binding has. Walked over the *class* chain only, because a common
+    /// interface would not be a `catch` type; a set with no common ancestor the index holds falls back
+    /// to `Throwable`, which every catchable type is one of.
+    fn common_supertype(&self, types: &[jals_hir::Ty]) -> jals_hir::Ty {
+        let throwable = || jals_hir::Ty::Class(jals_hir::ClassTy::external("java.lang.Throwable"));
+        let ids: Option<Vec<ItemId>> = types
+            .iter()
+            .map(|ty| match ty {
+                jals_hir::Ty::Class(jals_hir::ClassTy::Project { id, .. }) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let Some(ids) = ids else { return throwable() };
+        let Some((&first, rest)) = ids.split_first() else {
+            return throwable();
+        };
+        let mut candidate = first;
+        loop {
+            if rest
+                .iter()
+                .all(|&other| self.index.is_subtype(other, candidate))
+            {
+                let fqn = self.index.item(candidate).fqn.as_str();
+                return jals_hir::Ty::Class(jals_hir::ClassTy::Project {
+                    id: candidate,
+                    name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
+                    args: Vec::new(),
+                });
+            }
+            let Some(next) = self
+                .index
+                .item(candidate)
+                .supertypes
+                .iter()
+                .map(|supertype| supertype.id)
+                .find(|&id| self.index.item(id).kind != DefKind::Interface)
+            else {
+                return throwable();
+            };
+            candidate = next;
+        }
     }
 
     /// The primitive a `TYPE` node's keyword names.

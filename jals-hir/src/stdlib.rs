@@ -41,6 +41,11 @@ public interface Comparable {
     public int compareTo(Object o);
 }
 
+// The interface a try-with-resources closes through.
+public interface AutoCloseable {
+    public void close();
+}
+
 public interface Iterable<T> {
     // Qualified because `java.lang` imports nothing: the return type has to name the `java.util`
     // stub outright or it resolves to an external `Iterator` with no descriptor.
@@ -138,57 +143,104 @@ public class System extends Object {
     public static long currentTimeMillis();
 }
 
+public class Class extends Object {
+    public String getName();
+    public boolean desiredAssertionStatus();
+}
+
 public class Throwable extends Object {
+    public Throwable();
+    public Throwable(String message);
     public String getMessage();
     public String toString();
+    // A try-with-resources whose `close()` throws suppresses that rather than losing the body's
+    // exception (JLS §14.20.3.1).
+    public void addSuppressed(Throwable exception);
+    public Throwable[] getSuppressed();
 }
 
 public class Exception extends Throwable {
+    public Exception();
+    public Exception(String message);
 }
 
 public class RuntimeException extends Exception {
+    public RuntimeException();
+    public RuntimeException(String message);
 }
 
 public class Error extends Throwable {
 }
 
+// `assert` throws one of these, and the two constructors are the two forms the statement has.
+public class AssertionError extends Error {
+    public AssertionError();
+    public AssertionError(Object detailMessage);
+}
+
 public class IllegalArgumentException extends RuntimeException {
+    public IllegalArgumentException();
+    public IllegalArgumentException(String message);
 }
 
 public class NumberFormatException extends IllegalArgumentException {
+    public NumberFormatException();
+    public NumberFormatException(String message);
 }
 
 public class IllegalStateException extends RuntimeException {
+    public IllegalStateException();
+    public IllegalStateException(String message);
 }
 
 public class NullPointerException extends RuntimeException {
+    public NullPointerException();
+    public NullPointerException(String message);
 }
 
 public class IndexOutOfBoundsException extends RuntimeException {
+    public IndexOutOfBoundsException();
+    public IndexOutOfBoundsException(String message);
 }
 
 public class ArrayIndexOutOfBoundsException extends IndexOutOfBoundsException {
+    public ArrayIndexOutOfBoundsException();
+    public ArrayIndexOutOfBoundsException(String message);
 }
 
 public class StringIndexOutOfBoundsException extends IndexOutOfBoundsException {
+    public StringIndexOutOfBoundsException();
+    public StringIndexOutOfBoundsException(String message);
 }
 
 public class UnsupportedOperationException extends RuntimeException {
+    public UnsupportedOperationException();
+    public UnsupportedOperationException(String message);
 }
 
 public class ClassCastException extends RuntimeException {
+    public ClassCastException();
+    public ClassCastException(String message);
 }
 
 public class ArithmeticException extends RuntimeException {
+    public ArithmeticException();
+    public ArithmeticException(String message);
 }
 
 public class NegativeArraySizeException extends RuntimeException {
+    public NegativeArraySizeException();
+    public NegativeArraySizeException(String message);
 }
 
 public class InterruptedException extends Exception {
+    public InterruptedException();
+    public InterruptedException(String message);
 }
 
 public class CloneNotSupportedException extends Exception {
+    public CloneNotSupportedException();
+    public CloneNotSupportedException(String message);
 }
 ";
 
@@ -292,6 +344,10 @@ public class PrintStream extends Object {
     public void print(String s);
     public void print(int i);
     public void print(Object o);
+}
+
+public interface Closeable extends AutoCloseable {
+    public void close();
 }
 
 public class IOException extends Exception {

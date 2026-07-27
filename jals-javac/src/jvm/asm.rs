@@ -774,6 +774,19 @@ impl<'pool> Assembler<'pool> {
         self.emit(Self::load_constant(index), &[], Some(ty))
     }
 
+    /// Push a `Class` object — what `Foo.class` evaluates to.
+    ///
+    /// A `Class` constant is `ldc` over a `Class` pool entry, which is the same entry a `checkcast`
+    /// names. Legal from major version 49 on (JVMS §4.4.1), which every version this crate emits is.
+    pub fn const_class(&mut self, internal_name: &str) -> Result<()> {
+        let index = self
+            .pool
+            .class_index(internal_name)
+            .ok_or(AsmError::PoolFull)?;
+        let ty = Self::object_type(self.pool, "java/lang/Class")?;
+        self.emit(Self::load_constant(index), &[], Some(ty))
+    }
+
     /// Push `null`.
     pub fn const_null(&mut self) -> Result<()> {
         self.emit(Instruction::AconstNull, &[], Some(VerificationType::Null))
@@ -1433,10 +1446,11 @@ impl<'pool> Assembler<'pool> {
         let mut out = Vec::with_capacity(self.handlers.len());
         for protected in &self.handlers {
             let (start, end) = (at(protected.start)?, at(protected.end)?);
-            // An empty range is not a handler, it is a table entry the JVM ignores while still
-            // paying for it. It also means the emitter thought it protected something.
+            // An empty range protects nothing, and the JVM would carry the entry anyway. It is not an
+            // emitter mistake either: a `finally` splits its range at every inlined copy, so a `try`
+            // whose last statement is a `return` closes one range exactly where the next opens.
             if start >= end {
-                return Err(AsmError::UnreachableLabel);
+                continue;
             }
             out.push(ExceptionTableEntry::new(
                 start,

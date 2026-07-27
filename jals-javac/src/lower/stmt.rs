@@ -25,9 +25,22 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::Descriptor;
 use crate::jvm::{Branch, Compare, Label};
+use crate::lower::emit::Cleanup;
 use crate::lower::expr::Expr;
 use crate::lower::slots::Slots;
 use crate::lower::{Context, Emit, LowerError, Result};
+
+/// The catch-all a `synchronized` block and a `finally` clause both need.
+const THROWABLE: &str = "java/lang/Throwable";
+
+/// What an `assert` throws.
+const ASSERTION_ERROR: &str = "java/lang/AssertionError";
+
+/// The synthetic field that makes an `assert` a no-op unless the JVM was started with `-ea`.
+///
+/// javac's own name for it, and the name matters: a class compiled by one and read by the other has
+/// to agree, and a debugger or a decompiler recognises it.
+pub(crate) const ASSERTIONS_DISABLED: &str = "$assertionsDisabled";
 
 /// Statement lowering.
 pub(crate) struct Stmt;
@@ -90,10 +103,439 @@ impl Stmt {
             ast::Stmt::Expr(expression) => Self::expression(expression, context, emit),
             ast::Stmt::Return(statement) => Self::ret(statement, context, emit),
             ast::Stmt::If(statement) => Self::conditional(statement, context, emit),
-            ast::Stmt::Break(statement) => Self::leave(statement.syntax(), true, emit),
-            ast::Stmt::Continue(statement) => Self::leave(statement.syntax(), false, emit),
+            ast::Stmt::Break(statement) => Self::leave(statement.syntax(), true, context, emit),
+            ast::Stmt::Continue(statement) => Self::leave(statement.syntax(), false, context, emit),
+            ast::Stmt::Throw(statement) => Self::throw(statement, context, emit),
+            ast::Stmt::Synchronized(statement) => Self::synchronized(statement, context, emit),
+            ast::Stmt::Try(statement) => Self::try_catch(statement, context, emit),
+            ast::Stmt::Assert(statement) => Self::assert(statement, context, emit),
             _ => Err(LowerError::Unsupported("this statement form")),
         }
+    }
+
+    /// `throw e;`
+    fn throw(
+        statement: &ast::ThrowStmt,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let value = statement
+            .expr()
+            .ok_or(LowerError::Unsupported("a `throw` with nothing to throw"))?;
+        Expr::lower(&value, context, emit)?;
+        Ok(emit.asm.throw()?)
+    }
+
+    /// One copy of what a guarded region runs on the way out.
+    fn cleanup(cleanup: &Cleanup, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        match cleanup {
+            Cleanup::Finally(block) => Self::block(block, context, emit),
+            Cleanup::Unlock(slot) => {
+                emit.asm.load(*slot)?;
+                Ok(emit.asm.monitor_exit()?)
+            }
+            Cleanup::Close {
+                slot,
+                owner,
+                interface,
+            } => Self::close(*slot, owner, *interface, emit),
+        }
+    }
+
+    /// `if (r != null) r.close();` — a resource is only closed if it was actually acquired.
+    fn close(slot: u16, owner: &str, interface: bool, emit: &mut Emit<'_, '_>) -> Result<()> {
+        let skip = emit.asm.label();
+        emit.asm.load(slot)?;
+        emit.asm.branch(Branch::RefNull(true), skip)?;
+        emit.asm.load(slot)?;
+        if interface {
+            emit.asm.invoke_interface(owner, "close", "()V")?;
+        } else {
+            emit.asm.invoke_virtual(owner, "close", "()V")?;
+        }
+        Ok(emit.asm.bind(skip)?)
+    }
+
+    /// `synchronized (lock) { … }`.
+    ///
+    /// The monitor has to be released however the block ends, which is what the catch-all handler is
+    /// for — and the lock expression has to be held in a slot rather than re-evaluated, because the
+    /// handler needs the *same* object the `monitorenter` took.
+    fn synchronized(
+        statement: &ast::SynchronizedStmt,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let lock = statement
+            .lock()
+            .ok_or(LowerError::Unsupported("a `synchronized` with no lock"))?;
+        let body = statement
+            .body()
+            .ok_or(LowerError::Unsupported("a `synchronized` with no body"))?;
+
+        let held = emit.slots.declare_temporary(1);
+        Expr::lower(&lock, context, emit)?;
+        emit.asm.store(held)?;
+        emit.asm.load(held)?;
+        emit.asm.monitor_enter()?;
+
+        let start = emit.asm.label();
+        let handler = emit.asm.label();
+        let after = emit.asm.label();
+
+        emit.asm.bind(start)?;
+        // A `return` or a `break` out of the body has to release the monitor too, which is the same
+        // problem a `finally` has — so it is the same machinery. Skipping it produced a method the JVM
+        // refuses to leave, with `IllegalMonitorStateException` at run time.
+        emit.guard(Cleanup::Unlock(held), start);
+        Self::block(&body, context, emit)?;
+        let end = emit.asm.label();
+        emit.asm.mark(end)?;
+        let ranges = emit.unguard(end);
+        if emit.asm.reachable() {
+            emit.asm.load(held)?;
+            emit.asm.monitor_exit()?;
+            emit.asm.branch(Branch::Always, after)?;
+        }
+
+        emit.asm.bind_handler(handler, start, THROWABLE)?;
+        for &(from, to) in &ranges {
+            emit.asm.protect(from, to, handler, None)?;
+        }
+        let thrown = emit.slots.declare_temporary(1);
+        emit.asm.store(thrown)?;
+        emit.asm.load(held)?;
+        emit.asm.monitor_exit()?;
+        emit.asm.load(thrown)?;
+        emit.asm.throw()?;
+
+        Self::join(after, emit)
+    }
+
+    /// `try { … } catch (E e) { … } …`.
+    ///
+    /// The handlers are recorded in source order, because the JVM takes the *first* entry whose range
+    /// covers the throwing instruction and whose type matches — so a `catch (Exception)` written before
+    /// a `catch (IOException)` would swallow it, exactly as the source says.
+    fn try_catch(
+        statement: &ast::TryStmt,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let body = statement
+            .block()
+            .ok_or(LowerError::Unsupported("a `try` with no block"))?;
+        let resources: Vec<ast::Resource> = statement
+            .resources()
+            .into_iter()
+            .flat_map(|list| list.resources())
+            .collect();
+        let clauses: Vec<ast::CatchClause> = statement.catches().collect();
+        let cleanup = statement
+            .finally()
+            .and_then(|clause| clause.syntax().children().find_map(ast::Block::cast));
+        if clauses.is_empty() && cleanup.is_none() && resources.is_empty() {
+            return Err(LowerError::Unsupported("a `try` with no `catch`"));
+        }
+
+        let after = emit.asm.label();
+        // The clause handlers exist before any body is emitted, because a `protect` entry has to be
+        // recorded in *source* order: the JVM takes the first whose range covers the throw and whose
+        // type matches, so a `catch (Exception)` written first swallows what follows it — exactly as
+        // the source says.
+        let handlers: Vec<Label> = clauses.iter().map(|_| emit.asm.label()).collect();
+        let mut protected: Vec<(Label, Label)> = Vec::new();
+
+        // --- the `try` block ---
+        let start = emit.asm.label();
+        emit.asm.bind(start)?;
+        if let Some(cleanup) = &cleanup {
+            emit.guard(Cleanup::Finally(cleanup.clone()), start);
+        }
+        // A `try` with both resources and a `catch` / `finally` is the nesting JLS §14.20.3.2 spells
+        // out: the resource-closing `try` sits *inside*, so a `catch` sees an exception `close()` threw.
+        Self::resource_chain(&resources, &body, context, emit)?;
+        let end = emit.asm.label();
+        emit.asm.mark(end)?;
+        let body_ranges = if cleanup.is_some() {
+            emit.unguard(end)
+        } else {
+            alloc::vec![(start, end)]
+        };
+        protected.extend(body_ranges.iter().copied());
+        if emit.asm.reachable() {
+            // Falling off the end of the `try` runs the cleanup like any other exit.
+            if let Some(cleanup) = &cleanup {
+                Self::block(cleanup, context, emit)?;
+            }
+            if emit.asm.reachable() {
+                emit.asm.branch(Branch::Always, after)?;
+            }
+        }
+
+        for (clause, &handler) in clauses.iter().zip(&handlers) {
+            for ty in clause.types() {
+                let caught = context.ty_of_type(&ty)?;
+                let entry = Descriptor::class_entry(&caught, context.index)?;
+                for &(from, to) in &body_ranges {
+                    emit.asm.protect(from, to, handler, Some(&entry))?;
+                }
+            }
+        }
+
+        // --- the `catch` clauses ---
+        for (clause, &handler) in clauses.iter().zip(&handlers) {
+            // A multi-catch binds its variable at the nearest type every arm shares, because that is
+            // all the source may call on it. Naming one arm would be a lie for the others, and naming
+            // `Throwable` would refuse a legal call on a common supertype below it.
+            let caught = Self::caught_type(clause, context)?;
+            emit.asm.bind_handler(
+                handler,
+                start,
+                &Descriptor::class_entry(&caught, context.index)?,
+            )?;
+            if let Some(cleanup) = &cleanup {
+                emit.guard(Cleanup::Finally(cleanup.clone()), handler);
+            }
+            match clause.binding() {
+                Some(name) => {
+                    let id = context
+                        .resolved
+                        .symbol_at(usize::from(name.text_range().start()))
+                        .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
+                    let slot = emit.slots.declare(id, 1);
+                    emit.asm.store(slot)?;
+                }
+                // An unnamed `_` binding still has to come off the stack.
+                None => emit.asm.pop()?,
+            }
+            if let Some(block) = clause.block() {
+                Self::block(&block, context, emit)?;
+            }
+            let clause_end = emit.asm.label();
+            emit.asm.mark(clause_end)?;
+            if cleanup.is_some() {
+                // A `catch` body is guarded by the `finally` too, so its ranges join the set the
+                // catch-all handler protects.
+                protected.extend(emit.unguard(clause_end));
+            }
+            if emit.asm.reachable() {
+                if let Some(cleanup) = &cleanup {
+                    Self::block(cleanup, context, emit)?;
+                }
+                if emit.asm.reachable() {
+                    emit.asm.branch(Branch::Always, after)?;
+                }
+            }
+        }
+
+        // --- the `finally`'s catch-all ---
+        if let Some(cleanup) = &cleanup {
+            let catch_all = emit.asm.label();
+            emit.asm.bind_handler(catch_all, start, THROWABLE)?;
+            for &(from, to) in &protected {
+                emit.asm.protect(from, to, catch_all, None)?;
+            }
+            let thrown = emit.slots.declare_temporary(1);
+            emit.asm.store(thrown)?;
+            Self::block(cleanup, context, emit)?;
+            if emit.asm.reachable() {
+                emit.asm.load(thrown)?;
+                emit.asm.throw()?;
+            }
+        }
+
+        Self::join(after, emit)
+    }
+
+    /// The `try`'s block, wrapped in one closing region per declared resource.
+    ///
+    /// JLS §14.20.3 defines a multi-resource `try` as nested single-resource ones, so this recurses —
+    /// which is also what makes the *last* resource declared the first one closed.
+    fn resource_chain(
+        resources: &[ast::Resource],
+        body: &ast::Block,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let Some((first, rest)) = resources.split_first() else {
+            return Self::block(body, context, emit);
+        };
+        let (slot, owner, interface) = Self::acquire(first, context, emit)?;
+        let close = Cleanup::Close {
+            slot,
+            owner: owner.clone(),
+            interface,
+        };
+
+        let start = emit.asm.label();
+        let handler = emit.asm.label();
+        let after = emit.asm.label();
+        emit.asm.bind(start)?;
+        emit.guard(close, start);
+        Self::resource_chain(rest, body, context, emit)?;
+        let end = emit.asm.label();
+        emit.asm.mark(end)?;
+        let ranges = emit.unguard(end);
+        if emit.asm.reachable() {
+            Self::close(slot, &owner, interface, emit)?;
+            emit.asm.branch(Branch::Always, after)?;
+        }
+
+        // On the exceptional path a failing `close()` is *suppressed* rather than replacing the
+        // exception the body threw (JLS §14.20.3.1). Losing the body's exception is the whole reason
+        // try-with-resources exists, so this is not an optional refinement.
+        emit.asm.bind_handler(handler, start, THROWABLE)?;
+        for &(from, to) in &ranges {
+            emit.asm.protect(from, to, handler, None)?;
+        }
+        let primary = emit.slots.declare_temporary(1);
+        emit.asm.store(primary)?;
+        Self::close_suppressing(slot, &owner, interface, primary, emit)?;
+        emit.asm.load(primary)?;
+        emit.asm.throw()?;
+
+        Self::join(after, emit)
+    }
+
+    /// Evaluate a resource into a slot, and work out what its `close()` is called on.
+    fn acquire(
+        resource: &ast::Resource,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<(u16, String, bool)> {
+        let value = resource
+            .syntax()
+            .children()
+            .find_map(ast::Expr::cast)
+            .ok_or(LowerError::Unsupported("a resource with no value"))?;
+        let ty = match resource.syntax().children().find_map(ast::Type::cast) {
+            // A declared resource takes its written type; one that names an existing variable takes
+            // the expression's.
+            Some(declared) => context.ty_of_type(&declared)?,
+            None => Expr::type_of(value.syntax(), context)?,
+        };
+        let Ty::Class(jals_hir::ClassTy::Project { id, .. }) = &ty else {
+            return Err(LowerError::Unsupported("a resource of an unindexed type"));
+        };
+        let closer = context
+            .index
+            .resolve_member(*id, "close", jals_hir::Namespace::Method)
+            .ok_or(LowerError::Unsupported("a resource with no `close()`"))?;
+        let declaring = context.index.member(closer).owner;
+        let owner = Descriptor::internal_name(context.index.item(declaring).fqn.as_str());
+        let interface = context.index.item(declaring).kind == jals_hir::DefKind::Interface;
+
+        // A declared resource is a local the body can read; one naming an existing variable still gets
+        // a slot, because the handler needs the value the acquisition produced rather than whatever
+        // the name holds later.
+        let slot = match resource.binding() {
+            Some(name) => {
+                let id = context
+                    .resolved
+                    .symbol_at(usize::from(name.text_range().start()))
+                    .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
+                emit.slots.declare(id, 1)
+            }
+            None => emit.slots.declare_temporary(1),
+        };
+        Expr::lower_as(&value, &ty, context, emit)?;
+        emit.asm.store(slot)?;
+        Ok((slot, owner, interface))
+    }
+
+    /// `try { r.close(); } catch (Throwable s) { primary.addSuppressed(s); }`, guarded by a null check.
+    fn close_suppressing(
+        slot: u16,
+        owner: &str,
+        interface: bool,
+        primary: u16,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let skip = emit.asm.label();
+        let start = emit.asm.label();
+        let handler = emit.asm.label();
+
+        emit.asm.load(slot)?;
+        emit.asm.branch(Branch::RefNull(true), skip)?;
+        emit.asm.bind(start)?;
+        emit.asm.load(slot)?;
+        if interface {
+            emit.asm.invoke_interface(owner, "close", "()V")?;
+        } else {
+            emit.asm.invoke_virtual(owner, "close", "()V")?;
+        }
+        let end = emit.asm.label();
+        emit.asm.mark(end)?;
+        emit.asm.branch(Branch::Always, skip)?;
+
+        emit.asm.bind_handler(handler, start, THROWABLE)?;
+        emit.asm.protect(start, end, handler, None)?;
+        emit.asm.load(primary)?;
+        emit.asm.swap()?;
+        emit.asm
+            .invoke_virtual(THROWABLE, "addSuppressed", "(Ljava/lang/Throwable;)V")?;
+        Ok(emit.asm.bind(skip)?)
+    }
+
+    /// The type a `catch` clause's binding has: its one arm, or the nearest type every arm shares.
+    fn caught_type(clause: &ast::CatchClause, context: &Context<'_>) -> Result<Ty> {
+        let arms: Vec<Ty> = clause
+            .types()
+            .map(|ty| context.ty_of_type(&ty))
+            .collect::<Result<_>>()?;
+        let (first, rest) = arms
+            .split_first()
+            .ok_or(LowerError::Unsupported("a `catch` with no type"))?;
+        if rest.is_empty() {
+            return Ok(first.clone());
+        }
+        Ok(context.common_supertype(&arms))
+    }
+
+    /// `assert c;` / `assert c : message;`
+    ///
+    /// Guarded by the synthetic `$assertionsDisabled` field, because assertions are *off* unless the
+    /// JVM was started with `-ea`. Emitting the check unguarded would change what the program does:
+    /// every `assert` would run, and one that a release build relies on being skipped would throw.
+    fn assert(
+        statement: &ast::AssertStmt,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let mut parts = statement.syntax().children().filter_map(ast::Expr::cast);
+        let condition = parts
+            .next()
+            .ok_or(LowerError::Unsupported("an `assert` with no condition"))?;
+        let message = parts.next();
+
+        let holds = emit.asm.label();
+        emit.asm
+            .get_static(&context.this_class, ASSERTIONS_DISABLED, "Z")?;
+        emit.asm.branch(Branch::IntZero(Compare::Ne), holds)?;
+        Expr::lower(&condition, context, emit)?;
+        emit.asm.branch(Branch::IntZero(Compare::Ne), holds)?;
+
+        emit.asm.new_object(ASSERTION_ERROR)?;
+        emit.asm.dup()?;
+        match &message {
+            // The one-argument form takes an `Object`, which is why a `String` message needs no
+            // conversion and an `int` one would need boxing.
+            Some(message) => {
+                Expr::lower(message, context, emit)?;
+                emit.asm.invoke_special(
+                    ASSERTION_ERROR,
+                    "<init>",
+                    "(Ljava/lang/Object;)V",
+                    false,
+                )?;
+            }
+            None => emit
+                .asm
+                .invoke_special(ASSERTION_ERROR, "<init>", "()V", false)?,
+        }
+        emit.asm.throw()?;
+        Ok(emit.asm.bind(holds)?)
     }
 
     /// `Type name = value;` — allocate the slot, then store the initialiser into it.
@@ -166,19 +608,63 @@ impl Stmt {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        match statement.expr() {
-            Some(value) => {
-                // Converted to the *declared* return type. Reading the opcode off the stack instead
-                // emitted `ireturn` for `long f() { return 1; }` — a class file whose descriptor
-                // promises a `long` and whose body returns an `int`.
-                let returns = emit.returns().clone();
-                Expr::lower_as(&value, &returns, context, emit)?;
-                let ty = emit.asm.stack_top().ok_or(LowerError::Unsupported(
-                    "a `return` whose value left nothing on the stack",
-                ))?;
-                emit.asm.return_(Some(&ty))?;
-            }
-            None => emit.asm.return_(None)?,
+        let crossed = emit.all_crossed();
+        let Some(value) = statement.expr() else {
+            Self::run_guards(&crossed, context, emit)?;
+            return Ok(emit.asm.return_(None)?);
+        };
+        // Converted to the *declared* return type. Reading the opcode off the stack instead emitted
+        // `ireturn` for `long f() { return 1; }` — a class file whose descriptor promises a `long` and
+        // whose body returns an `int`.
+        let returns = emit.returns().clone();
+        Expr::lower_as(&value, &returns, context, emit)?;
+        let ty = emit.asm.stack_top().ok_or(LowerError::Unsupported(
+            "a `return` whose value left nothing on the stack",
+        ))?;
+        if crossed.is_empty() {
+            return Ok(emit.asm.return_(Some(&ty))?);
+        }
+        // A `finally` runs *after* the value is computed and cannot change it (JLS §14.20.2), so the
+        // value goes into a slot of its own first. javac does the same.
+        let width = u16::from(matches!(
+            ty,
+            jals_classfile::VerificationType::Long | jals_classfile::VerificationType::Double
+        ));
+        let held = emit.slots.declare_temporary(width + 1);
+        emit.asm.store(held)?;
+        Self::run_guards(&crossed, context, emit)?;
+        emit.asm.load(held)?;
+        Ok(emit.asm.return_(Some(&ty))?)
+    }
+
+    /// Run the `finally` blocks `crossed` names, innermost first.
+    ///
+    /// Each copy is inlined rather than jumped to — `jsr` / `ret` is the alternative and no verifier
+    /// since Java 6 accepts it. Each copy also *interrupts* the protected range it sits in: an
+    /// exception thrown by a `finally` must not reach the handler whose job is to run that `finally`,
+    /// so the range closes before the copy and a fresh one opens after it. javac splits its ranges the
+    /// same way, which is how one finds out it is required at all.
+    fn run_guards(crossed: &[usize], context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        for &index in crossed {
+            let Some(cleanup) = emit.guard_cleanup(index) else {
+                continue;
+            };
+            let end = emit.asm.label();
+            emit.asm.mark(end)?;
+            emit.close_range(index, end);
+
+            // The copy runs outside its own guard and every guard inside it: those have already run,
+            // and re-entering this one would make a `return` inside a `finally` run it twice.
+            let inner = emit.split_guards(index);
+            let result = Self::cleanup(&cleanup, context, emit);
+            emit.rejoin_guards(inner);
+            result?;
+
+            // Whatever follows the exit this copy belongs to is protected again. `mark` rather than
+            // `bind`, because the exit's own transfer has already made this position unreachable.
+            let start = emit.asm.label();
+            emit.asm.mark(start)?;
+            emit.open_range(index, start);
         }
         Ok(())
     }
@@ -230,17 +716,25 @@ impl Stmt {
     ///
     /// The optional label is a bare `IDENT` token on the statement — the grammar has no slot for it,
     /// because there is nothing else it could be.
-    fn leave(node: &SyntaxNode, exit: bool, emit: &mut Emit<'_, '_>) -> Result<()> {
+    fn leave(
+        node: &SyntaxNode,
+        exit: bool,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
         let label = node
             .children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .find(|token| token.kind() == IDENT)
             .map(|token| String::from(token.text()));
-        let target = if exit {
+        let (target, depth) = if exit {
             emit.exit_of(label.as_deref())?
         } else {
             emit.next_of(label.as_deref())?
         };
+        // Leaving a region runs its `finally` first, however far out the jump goes.
+        let crossed = emit.crossed(depth);
+        Self::run_guards(&crossed, context, emit)?;
         Ok(emit.asm.branch(Branch::Always, target)?)
     }
 

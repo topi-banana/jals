@@ -1172,10 +1172,14 @@ public class Several {
 fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
         ("switch (1) { default: break; }", "this statement form"),
-        ("throw null;", "this statement form"),
-        ("synchronized (args) { }", "this statement form"),
-        ("try { } finally { }", "this statement form"),
         ("Runnable r = () -> {};", "this expression form"),
+        ("Runnable r = Later::main;", "this expression form"),
+        ("Object c = int.class;", "this expression form"),
+        ("Integer boxed = 1;", "a boxing conversion"),
+        (
+            "int v = switch (1) { default -> 2; };",
+            "this expression form",
+        ),
     ] {
         let program = format!(
             r"
@@ -1424,4 +1428,354 @@ public class Walked {
 }
 "#;
     assert_eq!(run(source, "Walked"), "one\ntwo\n6\nkept two\n");
+}
+
+/// `throw`, and the handler chain that catches it.
+///
+/// The clause order is what the exception table has to preserve: the JVM takes the *first* entry whose
+/// range covers the throw and whose type matches, so a `catch (Exception)` written first swallows what
+/// follows it — exactly as the source says.
+#[test]
+fn a_thrown_exception_reaches_the_first_matching_clause() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Caught {
+    static int classify(int n) {
+        try {
+            if (n == 0) { throw new IllegalStateException("zero"); }
+            if (n == 1) { return 100 / (n - 1); }
+            return n;
+        } catch (IllegalStateException e) {
+            System.out.println("state: " + e.getMessage());
+            return -1;
+        } catch (ArithmeticException e) {
+            System.out.println("math");
+            return -2;
+        }
+    }
+
+    static String multi(int n) {
+        try {
+            if (n == 0) { throw new IllegalArgumentException("arg"); }
+            throw new IllegalStateException("state");
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            // Both arms are `RuntimeException`s, so that is the type the binding has — and
+            // `getMessage()` is declared above it, on `Throwable`.
+            return e.getMessage();
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(classify(0));
+        System.out.println(classify(1));
+        System.out.println(classify(5));
+        System.out.println(multi(0));
+        System.out.println(multi(1));
+        // A local written before the `try` is still readable in the handler, because the handler's
+        // frame keeps the locals the protected range started with.
+        String before = "kept";
+        try {
+            throw new RuntimeException("x");
+        } catch (RuntimeException e) {
+            System.out.println(before);
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Caught"),
+        "state: zero\n-1\nmath\n-2\n5\narg\nstate\nkept\n"
+    );
+}
+
+/// A `finally` runs on *every* way out of the region it guards.
+///
+/// Falling off the end, each `return`, each `break` or `continue` that leaves it, and anything thrown
+/// — and it is duplicated at each of them, because `jsr` / `ret` is the alternative and no verifier
+/// since Java 6 accepts it. A `return`'s value is computed *before* the block runs and cannot be
+/// changed by it (JLS §14.20.2), which is why it goes into a slot of its own.
+#[test]
+fn a_finally_runs_on_every_exit() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Cleanup {
+    static void trace(String s) { System.out.println(s); }
+
+    static int returned() {
+        try { return 1; } finally { trace("f:returned"); }
+    }
+
+    static int caught(int n) {
+        try {
+            if (n == 0) { throw new IllegalStateException("zero"); }
+            return 10;
+        } catch (IllegalStateException e) {
+            return 20;
+        } finally {
+            trace("f:caught");
+        }
+    }
+
+    static int propagated() {
+        try {
+            trace("body");
+            throw new IllegalStateException("up");
+        } finally {
+            trace("f:propagated");
+        }
+    }
+
+    static int looped(int limit) {
+        int seen = 0;
+        for (int i = 0; i < limit; i++) {
+            try {
+                if (i == 2) { continue; }
+                if (i == 3) { break; }
+                seen += 1;
+            } finally {
+                trace("f:looped:" + i);
+            }
+        }
+        return seen;
+    }
+
+    static int nested() {
+        try {
+            try { return 7; } finally { trace("f:inner"); }
+        } finally {
+            trace("f:outer");
+        }
+    }
+
+    static long wide() {
+        // The held value takes two slots, which is the case a one-slot temporary would clobber.
+        try { return 4294967296L; } finally { trace("f:wide"); }
+    }
+
+    static int shadowed() {
+        int n = 1;
+        try { return n; } finally { n = 99; }
+    }
+
+    public static void main(String[] args) {
+        trace("returned=" + returned());
+        trace("caught0=" + caught(0));
+        trace("caught1=" + caught(1));
+        try { propagated(); } catch (IllegalStateException e) { trace("escaped:" + e.getMessage()); }
+        trace("looped=" + looped(5));
+        trace("nested=" + nested());
+        trace("wide=" + wide());
+        // The `finally` cannot change what was already computed.
+        trace("shadowed=" + shadowed());
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Cleanup"),
+        "f:returned\nreturned=1\n\
+         f:caught\ncaught0=20\n\
+         f:caught\ncaught1=10\n\
+         body\nf:propagated\nescaped:up\n\
+         f:looped:0\nf:looped:1\nf:looped:2\nf:looped:3\nlooped=2\n\
+         f:inner\nf:outer\nnested=7\n\
+         f:wide\nwide=4294967296\n\
+         shadowed=1\n"
+    );
+}
+
+/// `synchronized` releases its monitor however the block ends — the JVM refuses to return from a
+/// method still holding one it took, so a missing release fails at run time rather than at load.
+#[test]
+fn a_synchronized_block_releases_its_monitor() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Locked {
+    static int guarded(Object lock, int n) {
+        synchronized (lock) {
+            if (n == 0) { return -1; }
+            return n * 2;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(guarded(args, 0));
+        System.out.println(guarded(args, 3));
+        synchronized (args) {
+            System.out.println("inside");
+        }
+        try {
+            synchronized (args) {
+                throw new IllegalStateException("thrown while held");
+            }
+        } catch (IllegalStateException e) {
+            System.out.println(e.getMessage());
+        }
+        // Reaching here at all means the monitor was released on the exceptional path too.
+        synchronized (args) {
+            System.out.println("again");
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Locked"),
+        "-1\n6\ninside\nthrown while held\nagain\n"
+    );
+}
+
+/// An `assert` is a no-op unless the JVM was started with `-ea`.
+///
+/// That is the whole reason for the synthetic `$assertionsDisabled` field: emitting the check unguarded
+/// would change what the program does, because a release build relies on assertions being skipped.
+#[test]
+fn an_assert_fires_only_under_ea() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Checked {
+    public static void main(String[] args) {
+        System.out.println("before");
+        assert args.length == 99 : "message " + args.length;
+        assert args.length == 99;
+        System.out.println("after");
+    }
+}
+"#;
+    // The field is synthetic, `static final`, and named the way javac names it — a debugger and a
+    // decompiler both recognise it, and a class read by javac has to agree.
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let names: Vec<String> = class
+        .fields
+        .iter()
+        .map(|field| {
+            class
+                .constant_pool
+                .utf8(field.name_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, ["$assertionsDisabled"]);
+    // static | final | synthetic
+    assert_eq!(class.fields[0].access_flags.0, 0x0008 | 0x0010 | 0x1000);
+
+    // Off by default.
+    assert_eq!(run(source, "Checked"), "before\nafter\n");
+
+    // On with `-ea`, and the message is the concatenation the source wrote.
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Checked.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        .arg("-XX:-UsePerfData")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Checked")
+        .output()
+        .expect("run java");
+    assert!(!output.status.success(), "the assertion should have fired");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("java.lang.AssertionError: message 0"),
+        "{stderr}"
+    );
+}
+
+/// A try-with-resources closes what it acquired, in reverse order, on every way out.
+///
+/// The suppression is the part that is easy to get wrong and hard to notice. JLS §14.20.3.1 says an
+/// exception from `close()` is *added to* the one the body threw rather than replacing it — losing the
+/// body's exception is the whole reason the construct exists, so a lowering that lets `close()` win has
+/// undone it.
+#[test]
+fn a_try_with_resources_closes_and_suppresses() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Resourceful implements AutoCloseable {
+    String name;
+    boolean failOnClose;
+
+    Resourceful(String name) { this.name = name; }
+    Resourceful(String name, boolean failOnClose) {
+        this.name = name;
+        this.failOnClose = failOnClose;
+    }
+
+    public void close() {
+        System.out.println("close:" + name);
+        if (failOnClose) { throw new IllegalStateException("close:" + name); }
+    }
+
+    static void reverseOrder() {
+        try (Resourceful a = new Resourceful("a"); Resourceful b = new Resourceful("b")) {
+            System.out.println("body");
+        }
+    }
+
+    static int closedBeforeReturning() {
+        try (Resourceful a = new Resourceful("early")) { return 1; }
+    }
+
+    static void bodyThrows() {
+        try (Resourceful a = new Resourceful("s", true)) {
+            throw new IllegalArgumentException("body threw");
+        }
+    }
+
+    static void onlyCloseThrows() {
+        try (Resourceful a = new Resourceful("ct", true)) {
+            System.out.println("ran");
+        }
+    }
+
+    static void wrapped() {
+        try (Resourceful a = new Resourceful("c")) {
+            throw new IllegalArgumentException("inner");
+        } catch (IllegalArgumentException e) {
+            System.out.println("caught:" + e.getMessage());
+        } finally {
+            System.out.println("finally");
+        }
+    }
+
+    public static void main(String[] args) {
+        reverseOrder();
+        System.out.println("returned=" + closedBeforeReturning());
+        try {
+            bodyThrows();
+        } catch (IllegalArgumentException e) {
+            System.out.println("primary:" + e.getMessage());
+            System.out.println("suppressed=" + e.getSuppressed().length);
+        }
+        // With nothing thrown by the body, a failing `close()` is the exception.
+        try {
+            onlyCloseThrows();
+        } catch (IllegalStateException e) {
+            System.out.println("from close:" + e.getMessage());
+        }
+        wrapped();
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Resourceful"),
+        "body\nclose:b\nclose:a\n\
+         close:early\nreturned=1\n\
+         close:s\nprimary:body threw\nsuppressed=1\n\
+         ran\nclose:ct\nfrom close:close:ct\n\
+         close:c\ncaught:inner\nfinally\n"
+    );
 }

@@ -1066,10 +1066,13 @@ fn a_catch_all_handler_runs_for_any_throwable() {
     assert_eq!(run("Finally", &class), "cleaned up\n");
 }
 
-/// An empty protected range is a table entry the JVM would carry and never use, and it means the
-/// emitter believed it had protected something.
+/// An empty protected range is dropped rather than written.
+///
+/// It protects nothing, and the JVM would carry the entry anyway. It is also not an emitter mistake:
+/// a `finally` splits its protected range at every inlined copy of the block, so a `try` whose last
+/// statement is a `return` closes one range at exactly the offset the next one opens at.
 #[test]
-fn an_empty_protected_range_is_reported() {
+fn an_empty_protected_range_is_dropped() {
     let mut pool = ConstantPool::new();
     pool.class_index("java/lang/Object").expect("Object");
     pool.class_index("java/lang/Throwable").expect("Throwable");
@@ -1085,10 +1088,12 @@ fn an_empty_protected_range_is_reported() {
     asm.protect(start, end, handler, None).expect("protect");
     asm.pop().expect("pop");
     asm.return_(None).expect("return");
-    assert_eq!(
-        asm.finish(),
-        Err(AsmError::UnreachableLabel),
-        "the range covers no instruction"
+    let AttributeBody::Code(code) = asm.finish().expect("finish").body else {
+        panic!("a Code attribute");
+    };
+    assert!(
+        code.exception_table.is_empty(),
+        "the range covers no instruction, so there is nothing to protect"
     );
 }
 
