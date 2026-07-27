@@ -56,9 +56,9 @@ impl Ctx<'_> {
         })
     }
 
-    /// How many selector dots the chain rooted here holds.
-    fn count_dots(node: &SyntaxNode) -> usize {
-        let mut dots = 0usize;
+    /// The chain's spine, outermost first.
+    fn spine(node: &SyntaxNode) -> Vec<SyntaxNode> {
+        let mut spine = Vec::new();
         let mut cursor = Some(node.clone());
         while let Some(current) = cursor {
             if !matches!(
@@ -67,12 +67,47 @@ impl Ctx<'_> {
             ) {
                 break;
             }
-            dots += current
-                .children_with_tokens()
-                .filter_map(SyntaxElement::into_token)
-                .filter(|tok| matches!(tok.kind(), S::DOT | S::COLON_COLON))
-                .count();
             cursor = current.first_child();
+            spine.push(current);
+        }
+        spine
+    }
+
+    /// The selector dots a link owns.
+    fn dots_of(node: &SyntaxNode) -> usize {
+        node.children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| matches!(tok.kind(), S::DOT | S::COLON_COLON))
+            .count()
+    }
+
+    /// Whether the leading field selects of this chain are one unit rather than links.
+    ///
+    /// google-java-format: *"if there's only one invocation, treat leading field accesses as a
+    /// single unit"* — with no second call to align under, `myField.foo()` reads better whole
+    /// than split. With two or more the alignment matters and every dot is a link.
+    fn glues_prefix(node: &SyntaxNode) -> bool {
+        Self::spine(node)
+            .iter()
+            .filter(|link| matches!(link.kind(), S::CALL_EXPR | S::METHOD_REF_EXPR))
+            .count()
+            == 1
+    }
+
+    /// How many selector dots the chain rooted here holds, counting a glued prefix as none.
+    fn count_dots(node: &SyntaxNode) -> usize {
+        let spine = Self::spine(node);
+        let glue = Self::glues_prefix(node);
+        let mut dots = 0usize;
+        let mut seen_invocation = false;
+        for link in spine.iter().rev() {
+            if matches!(link.kind(), S::CALL_EXPR | S::METHOD_REF_EXPR) {
+                seen_invocation = true;
+            }
+            if glue && !seen_invocation {
+                continue;
+            }
+            dots += Self::dots_of(link);
         }
         dots
     }
@@ -86,12 +121,15 @@ impl Ctx<'_> {
             && Self::count_dots(&Self::chain_root(node)) >= 2
             && before_dot;
 
+        let glue = Self::glues_prefix(&Self::chain_root(node));
         let children: Vec<SyntaxElement> = Self::children(node);
         for (nth, child) in children.iter().enumerate() {
             let is_selector = child
                 .as_token()
                 .is_some_and(|tok| matches!(tok.kind(), S::DOT | S::COLON_COLON));
-            if is_selector && breakable {
+            // A dot inside a glued prefix is not a break point — see [`Ctx::glues_prefix`].
+            let glued = glue && !Self::invocation_at_or_below(node);
+            if is_selector && breakable && !glued {
                 // The receiver's own call keeps its dot on the receiver's line unless
                 // `wrap-first-method-in-chain` asks otherwise.
                 let first_link = nth == 1 && !Self::is_chain_link_receiver(node);
@@ -101,6 +139,13 @@ impl Ctx<'_> {
             }
             self.visit_element(child).await;
         }
+    }
+
+    /// Whether an invocation appears at `node` or anywhere down its receiver spine.
+    fn invocation_at_or_below(node: &SyntaxNode) -> bool {
+        Self::spine(node)
+            .iter()
+            .any(|link| matches!(link.kind(), S::CALL_EXPR | S::METHOD_REF_EXPR))
     }
 
     /// The outermost node of the chain `node` belongs to.
