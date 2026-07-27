@@ -125,24 +125,39 @@ impl Ctx<'_> {
             children.len()
         };
 
+        // The declaration's own annotations share a level — `visitModifiers`' `builder.open(ZERO)`
+        // — so the run packs onto one line while it fits and moves *as a run* when it does not.
+        // The break that separates the run from what it annotates lives outside that level.
         let mut leading_run = true;
         let mut previous_annotation = false;
+        let mut run_open = false;
         for (nth, child) in children.iter().enumerate() {
             let is_annotation = child
                 .as_node()
                 .is_some_and(|node| matches!(node.kind(), S::ANNOTATION | S::ATTRIBUTE));
+            if is_annotation && leading_run && !run_open && nth < types_start {
+                self.open_flat(Indent::ZERO);
+                run_open = true;
+            }
             if previous_annotation && leading_run {
                 // The break *before* the first type annotation still belongs to the declaration
                 // run — it is `visitModifiers`' trailing break, not one between type annotations.
                 if nth > types_start {
                     self.type_annotation_break();
                 } else {
+                    if run_open && nth >= types_start {
+                        self.close();
+                        run_open = false;
+                    }
                     self.annotation_break(policy);
                 }
             }
             self.visit_element(child).await;
             leading_run = leading_run && is_annotation;
             previous_annotation = is_annotation;
+        }
+        if run_open {
+            self.close();
         }
         // A declaration whose modifiers are *only* annotations still needs separating from the
         // `class` / `void` that follows, and that keyword is not part of this node.
