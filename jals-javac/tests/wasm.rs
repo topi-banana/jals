@@ -794,3 +794,100 @@ public class Sieve {
     // 0 + 2 + 4 + 6 + 8 = 20.
     assert_invoke(&[source], "total", &["5"], "20");
 }
+
+/// A `static` field is module state, which is what a wasm global is.
+///
+/// Its initialiser has to live in the global's *constant expression*, where the format allows only a
+/// handful of instructions — so a field with no initialiser gets its type's default (§4.12.5) and one
+/// that would need computing is reported rather than quietly initialised to zero. A `static` field also
+/// has no receiver: `Counter.total` reads the global whether it is written bare or qualified.
+#[test]
+fn a_static_field_is_a_global() {
+    let source = r"
+public class Counter {
+    static int total;
+    static int step = 3;
+    static long wide = 7L;
+    // No suffix: an `int` literal into a `long` field, which the constant expression *folds* rather
+    // than converting — there is no `i64.extend` to be had in one.
+    static long narrow = 2;
+    static double whole = 4;
+    static char sign = 'a';
+    static double scaled = 1.5;
+    static boolean on = true;
+
+    public static int bumped(int times) {
+        total = 0;
+        for (int i = 0; i < times; i++) {
+            total += step;
+        }
+        return total;
+    }
+
+    // Qualified by the class name rather than written bare: the same global, and the receiver is not
+    // a value at all.
+    public static int qualified(int n) {
+        Counter.total = n;
+        Counter.total++;
+        return Counter.total;
+    }
+
+    public static long widths(int n) {
+        return wide + narrow + n;
+    }
+
+    public static double folded() {
+        return whole;
+    }
+
+    public static int signed() {
+        return sign;
+    }
+
+    public static double scaled_by(int n) {
+        return scaled * n;
+    }
+
+    public static int flagged() {
+        return on ? 1 : 0;
+    }
+
+    // An instance method reads a `static` field with no `this` involved.
+    public int through_an_instance() {
+        return step;
+    }
+}
+";
+    assert_invoke(&[source], "bumped", &["4"], "12");
+    assert_invoke(&[source], "qualified", &["5"], "6");
+    assert_invoke(&[source], "widths", &["1"], "10");
+    assert_invoke(&[source], "folded", &[], "4");
+    assert_invoke(&[source], "signed", &[], "97");
+    assert_invoke(&[source], "scaled_by", &["4"], "6");
+    assert_invoke(&[source], "flagged", &[], "1");
+}
+
+/// A `static` initialiser a constant expression cannot hold is reported, not dropped.
+///
+/// wasm's constant expressions are a short list — no calls, no arithmetic, no conversions. Emitting the
+/// type's default instead would be the same defect as a missing `<clinit>` on the JVM side: a field
+/// holding the wrong value in a module that validates.
+#[test]
+fn a_computed_static_initialiser_is_reported() {
+    for (source, expected) in [
+        (
+            "public class C { static int n = 1 + 1; }",
+            "a `static` field initialiser that is no constant",
+        ),
+        (
+            "public class C { static int n = someMethod(); static int someMethod() { return 1; } }",
+            "a `static` field initialiser that is no constant",
+        ),
+    ] {
+        let error = compile(&[source]).expect_err("this initialiser is no constant expression");
+        assert!(
+            matches!(error, WasmError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
+}

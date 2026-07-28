@@ -45,12 +45,13 @@ use alloc::vec::Vec;
 use jals_hir::{
     DefId, DefKind, FileId, ItemId, MemberId, Primitive, ProjectIndex, Resolved, Ty, TypeInference,
 };
-use jals_syntax::SyntaxKind::{CLASS_DECL, CONSTRUCTOR_DECL, METHOD_DECL};
+use jals_syntax::SyntaxKind::{CLASS_DECL, CONSTRUCTOR_DECL, FIELD_DECL, METHOD_DECL};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::wasm::encode::{
-    CompType, ExportKind, FieldType, Func, HeapType, Module, RefType, StorageType, SubType, ValType,
+    CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
+    ValType,
 };
 use crate::wasm::insn::{Insn, Num, NumOp};
 
@@ -141,6 +142,11 @@ impl CompileWasm {
                 let ty = input.inference.type_of_def(def.id).clone();
                 layout.declare_array(&ty, &mut module)?;
             }
+        }
+        // Then every `static` field, which is module state rather than a struct slot. After the
+        // arrays, because a `static int[]` field's global needs its array type to exist.
+        for input in inputs {
+            layout.declare_statics(input, index, &mut module)?;
         }
 
         // Pass 2: every method gets a signature and a function index, so a call emitted in pass 3
@@ -309,6 +315,9 @@ struct Layout {
     fields: BTreeMap<ItemId, Vec<MemberId>>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
+    /// Each `static` field's global index. A Java `static` field is module state, which is what a
+    /// wasm global is; an instance field is a struct slot instead.
+    statics: BTreeMap<MemberId, u32>,
     /// `(element type, array type index)`. A `Vec` because `ValType` has no ordering and a program
     /// has a handful of distinct element types.
     arrays: Vec<(ValType, u32)>,
@@ -356,6 +365,145 @@ impl Layout {
         self.structs.insert(item, type_index);
         self.fields.insert(item, members);
         Ok(())
+    }
+
+    /// Give every `static` field a mutable global, initialised in place.
+    ///
+    /// A global's initialiser is a *constant expression*: the format allows only a handful of
+    /// instructions there, so anything a `<clinit>` would have to compute cannot live in one. A
+    /// non-constant initialiser is reported rather than replaced by the type's default — silently
+    /// dropping a `static` initialiser is a wrong value in a module that validates.
+    fn declare_statics(
+        &mut self,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+        module: &mut Module,
+    ) -> Result<()> {
+        for node in input.root.descendants() {
+            if node.kind() != FIELD_DECL {
+                continue;
+            }
+            let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
+                continue;
+            };
+            let names: Vec<SyntaxToken> = declaration.names().collect();
+            let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
+            for (position, name) in names.iter().enumerate() {
+                let Some(member) =
+                    index.member_by_decl(input.file, usize::from(name.text_range().start()))
+                else {
+                    continue;
+                };
+                if !index.member(member).modifiers.is_static {
+                    continue;
+                }
+                // A field whose type has no wasm representation gets no global, and no report either:
+                // an unrepresentable type is reported where it is *used*, so a generated
+                // `static final String` nothing reads stays inert — which is what keeps a project
+                // compiling for wasm alongside a class the user never wrote.
+                let Ok(ty) = self.val_type(&index.resolved_member_ty(member)) else {
+                    continue;
+                };
+                let init = Self::constant_init(values.get(position), ty)?;
+                module.globals.push(Global { ty, init });
+                let global =
+                    u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
+                self.statics.insert(member, global);
+            }
+        }
+        Ok(())
+    }
+
+    /// The constant expression a `static` field's global is initialised with.
+    ///
+    /// No initialiser is the type's default, which is exactly Java's rule (§4.12.5). A literal folds
+    /// into the same shape. Anything else — including a literal that would need a widening conversion,
+    /// since a constant expression cannot hold one — is reported rather than replaced by the default.
+    fn constant_init(value: Option<&ast::Expr>, ty: ValType) -> Result<Vec<u8>> {
+        use jals_syntax::SyntaxKind::{
+            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
+        };
+        let mut insn = Insn::new();
+        let Some(value) = value else {
+            Self::default_value(ty, &mut insn);
+            return Ok(insn.into_body());
+        };
+        let inconstant =
+            || WasmError::Unsupported("a `static` field initialiser that is no constant");
+        let ast::Expr::Literal(literal) = value else {
+            return Err(inconstant());
+        };
+        let token = literal
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| !token.kind().is_trivia())
+            .ok_or(WasmError::Unsupported("an empty literal"))?;
+        let text = token.text();
+        match (token.kind(), ty) {
+            (NULL_KW, ValType::Ref(_)) => {
+                insn.ref_null(HeapType::None);
+            }
+            (TRUE_KW, ValType::I32) => {
+                insn.i32_const(1);
+            }
+            (FALSE_KW, ValType::I32) => {
+                insn.i32_const(0);
+            }
+            (CHAR_LITERAL, ValType::I32) => {
+                let character = crate::lower::expr::Expr::literal_text(text)
+                    .ok()
+                    .and_then(|text| text.chars().next())
+                    .ok_or(WasmError::Unsupported(
+                        "a character literal this cannot read",
+                    ))?;
+                insn.i32_const(character as i32);
+            }
+            // An `int` literal into a wider field is an assignment conversion, and the *constant* form
+            // of one is folding: `static long n = 1` writes `i64.const 1`, not `i32.const` plus an
+            // extension no constant expression may hold.
+            (INT_LITERAL, _) => {
+                let value =
+                    crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
+                        .map_err(|_| {
+                            WasmError::Unsupported("an integer literal this cannot read")
+                        })?;
+                #[allow(clippy::cast_precision_loss)]
+                match ty {
+                    ValType::I64 => insn.i64_const(value),
+                    ValType::F32 => insn.f32_const(value as f32),
+                    ValType::F64 => insn.f64_const(value as f64),
+                    _ => insn
+                        .i32_const(i32::try_from(value).map_err(|_| {
+                            WasmError::Unsupported("an out-of-range `int` literal")
+                        })?),
+                };
+            }
+            (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
+                let text = text.trim_end_matches(['f', 'F', 'd', 'D']);
+                let unreadable = || WasmError::Unsupported("a floating literal this cannot read");
+                if ty == ValType::F32 {
+                    insn.f32_const(text.parse().map_err(|_| unreadable())?);
+                } else {
+                    insn.f64_const(text.parse().map_err(|_| unreadable())?);
+                }
+            }
+            // A literal whose type is not the field's and not foldable into it — a `double` literal
+            // in an `int` field, say, which is no Java program either.
+            _ => return Err(inconstant()),
+        }
+        Ok(insn.into_body())
+    }
+
+    /// A type's default value: what a `static` field with no initialiser holds (§4.12.5).
+    fn default_value(ty: ValType, insn: &mut Insn) {
+        match ty {
+            ValType::I32 => insn.i32_const(0),
+            ValType::I64 => insn.i64_const(0),
+            ValType::F32 => insn.f32_const(0.0),
+            ValType::F64 => insn.f64_const(0.0),
+            ValType::Ref(_) => insn.ref_null(HeapType::None),
+        };
     }
 
     /// Declare the array type `ty` needs, and any nested one inside it (`int[][]` is an array of
@@ -1455,13 +1603,22 @@ impl Lowering<'_> {
             insn.local_get(slot);
             return self.layout.val_type(self.input.inference.type_of_def(id));
         }
-        // Not a local: an unqualified field of the enclosing class, reached through `this`.
-        let owner = self.owner.ok_or_else(unresolved)?;
+        // Not a local: a field of the enclosing class. A `static` one is a global and needs no
+        // receiver; an instance one is reached through `this`, which is local 0.
         let declaration = self.input.resolved.def(id);
         let member = self
             .index
             .member_by_decl(self.input.file, declaration.name_range.start)
             .ok_or_else(unresolved)?;
+        if self.index.member(member).modifiers.is_static {
+            let ty = self
+                .layout
+                .val_type(&self.index.resolved_member_ty(member))?;
+            let global = self.layout.statics.get(&member).ok_or_else(unresolved)?;
+            insn.global_get(*global);
+            return Ok(ty);
+        }
+        let owner = self.owner.ok_or_else(unresolved)?;
         let slot = self
             .layout
             .field_slot(owner, member)
@@ -1507,8 +1664,21 @@ impl Lowering<'_> {
             return Ok(ValType::I32);
         }
         let (owner, member) = self.field_target(access)?;
+        // A `static` field is a global, so the receiver names only the *class*: it is not evaluated,
+        // exactly as `getstatic` ignores one on the JVM.
         if self.index.member(member).modifiers.is_static {
-            return Err(WasmError::Unsupported("a `static` field"));
+            // No global means the field's type has none either, so asking for its `ValType` is what
+            // produces the report — the same one a local of that type would get.
+            let ty = self
+                .layout
+                .val_type(&self.index.resolved_member_ty(member))?;
+            let global = self
+                .layout
+                .statics
+                .get(&member)
+                .ok_or_else(|| WasmError::Unresolved(access.field().unwrap_or_default()))?;
+            insn.global_get(*global);
+            return Ok(ty);
         }
         let receiver = access
             .receiver()
@@ -2063,7 +2233,11 @@ impl Lowering<'_> {
             ast::Expr::FieldAccess(access) => {
                 let (owner, member) = self.field_target(access)?;
                 if self.index.member(member).modifiers.is_static {
-                    return Err(WasmError::Unsupported("assignment to a `static` field"));
+                    let global =
+                        *self.layout.statics.get(&member).ok_or_else(|| {
+                            WasmError::Unresolved(access.field().unwrap_or_default())
+                        })?;
+                    return Ok(Place::Global { index: global, ty });
                 }
                 let slot = self
                     .layout
@@ -2091,17 +2265,18 @@ impl Lowering<'_> {
                 if let Some(slot) = self.slot_of(id) {
                     return Ok(Place::Local { slot, ty });
                 }
-                // A bare name that is no local is a field of `this`, which needs no spill: local 0
-                // is already a stable place to read the receiver from.
-                let owner = self.owner.ok_or_else(unresolved)?;
+                // A bare name that is no local is a field of the enclosing class. A `static` one is
+                // a global; an instance one needs no spill, local 0 being a stable receiver already.
                 let declaration = self.input.resolved.def(id);
                 let member = self
                     .index
                     .member_by_decl(self.input.file, declaration.name_range.start)
                     .ok_or_else(unresolved)?;
                 if self.index.member(member).modifiers.is_static {
-                    return Err(WasmError::Unsupported("assignment to a `static` field"));
+                    let global = *self.layout.statics.get(&member).ok_or_else(unresolved)?;
+                    return Ok(Place::Global { index: global, ty });
                 }
+                let owner = self.owner.ok_or_else(unresolved)?;
                 let slot = self
                     .layout
                     .field_slot(owner, member)
@@ -2347,6 +2522,11 @@ enum Place {
         slot: u32,
         ty: ValType,
     },
+    /// A `static` field, which is a module-level global.
+    Global {
+        index: u32,
+        ty: ValType,
+    },
     /// An element of the array in local `array` at the index in local `index`.
     Element {
         array: u32,
@@ -2359,14 +2539,17 @@ enum Place {
 impl Place {
     const fn ty(self) -> ValType {
         match self {
-            Self::Local { ty, .. } | Self::Field { ty, .. } | Self::Element { ty, .. } => ty,
+            Self::Local { ty, .. }
+            | Self::Global { ty, .. }
+            | Self::Field { ty, .. }
+            | Self::Element { ty, .. } => ty,
         }
     }
 
     /// Push the operands [`store`](Self::store) needs *below* the value.
     fn address(self, insn: &mut Insn) {
         match self {
-            Self::Local { .. } => {}
+            Self::Local { .. } | Self::Global { .. } => {}
             Self::Field { receiver, .. } => {
                 insn.local_get(receiver);
             }
@@ -2381,6 +2564,9 @@ impl Place {
         match self {
             Self::Local { slot, .. } => {
                 insn.local_get(slot);
+            }
+            Self::Global { index, .. } => {
+                insn.global_get(index);
             }
             Self::Field {
                 receiver,
@@ -2413,6 +2599,14 @@ impl Place {
                     insn.local_tee(slot);
                 } else {
                     insn.local_set(slot);
+                }
+            }
+            // No `global.tee`, so keeping the value is a read back — the same value, this backend
+            // having neither threads nor volatile fields.
+            Self::Global { index, .. } => {
+                insn.global_set(index);
+                if keep {
+                    self.read(insn);
                 }
             }
             Self::Field {

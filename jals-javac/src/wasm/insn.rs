@@ -219,6 +219,16 @@ impl Insn {
         self
     }
 
+    pub(crate) fn global_get(&mut self, index: u32) -> &mut Self {
+        self.out.byte(0x23).u32(index);
+        self
+    }
+
+    pub(crate) fn global_set(&mut self, index: u32) -> &mut Self {
+        self.out.byte(0x24).u32(index);
+        self
+    }
+
     // --- constants ----------------------------------------------------------
 
     pub(crate) fn i32_const(&mut self, value: i32) -> &mut Self {

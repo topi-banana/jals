@@ -326,7 +326,19 @@ pub(crate) struct Module {
     /// otherwise be unorderable.
     types: Vec<SubType>,
     pub(crate) funcs: Vec<Func>,
+    pub(crate) globals: Vec<Global>,
     pub(crate) exports: Vec<(String, ExportKind, u32)>,
+}
+
+/// A module-level mutable variable, which is what a Java `static` field is.
+///
+/// Its initialiser is a *constant expression* — the format allows only a handful of instructions
+/// there, so anything a `<clinit>` would have to compute cannot live here.
+#[derive(Debug)]
+pub(crate) struct Global {
+    pub(crate) ty: ValType,
+    /// The encoded constant expression, without its terminating `end`.
+    pub(crate) init: Vec<u8>,
 }
 
 impl Module {
@@ -334,6 +346,7 @@ impl Module {
         Self {
             types: Vec::new(),
             funcs: Vec::new(),
+            globals: Vec::new(),
             exports: Vec::new(),
         }
     }
@@ -379,6 +392,18 @@ impl Module {
                 section.u32(func.type_index);
             }
             Self::section(&mut out, 3, &section);
+        }
+
+        if !self.globals.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.globals.len());
+            for global in &self.globals {
+                global.ty.write(&mut section);
+                // Every Java `static` field is assignable, so every global is mutable.
+                section.byte(0x01);
+                section.raw(&global.init).byte(0x0B);
+            }
+            Self::section(&mut out, 6, &section);
         }
 
         if !self.exports.is_empty() {
