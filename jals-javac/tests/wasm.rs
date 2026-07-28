@@ -905,24 +905,196 @@ public class Setup {
 
 /// Every statement form is either compiled or reports *itself*.
 ///
-/// A catch-all report says only "this statement form", which sends a reader looking. `synchronized`
-/// needs its body `finally`-protected, which is the same thing `finally` itself waits on; the monitor
-/// this host does not have is the smaller half.
+/// `assert` compiles, and to nothing.
 ///
-/// `assert` compiles, and to nothing: Java evaluates one only when assertions are *enabled*, they are
-/// disabled by default, and a wasm host has no `-ea` to turn them on. So nothing is exactly what a JVM
-/// does with one by default, and a trap would be stricter than Java.
+/// Java evaluates one only when assertions are *enabled*, they are disabled by default, and a wasm host
+/// has no `-ea` to turn them on. So nothing is exactly what a JVM does with one by default — the
+/// condition is still parsed, resolved, and linted, it simply has no run-time effect. A trap would be
+/// stricter than Java rather than more faithful to it.
 #[test]
-fn each_uncompiled_statement_form_names_itself() {
-    let source = "public class S { public static int run(int n) \
-                  { synchronized (S.class) { n = 1; } return n; } }";
-    let error = compile(&[source]).expect_err("`synchronized` is not compiled yet");
-    assert!(
-        matches!(error, WasmError::Unsupported("a `synchronized` block")),
-        "got {error}"
-    );
+fn an_assert_compiles_to_nothing() {
     let source = "public class S { public static int run(int n) { assert n > 0; return n; } }";
     assert_invoke(&[source], "run", &["-5"], "-5");
+}
+
+/// `throw` and `try`/`catch`, on the exception-handling proposal's `tag` and `try_table`.
+///
+/// One tag carries every Java exception, because every one of them is a reference: what a `catch` tests
+/// is the *class* of the payload, not which tag raised it. `try_table` delivers that payload to one
+/// label, so the class tests happen after it — the caught reference is spilled into a local and each
+/// handler is a `ref.test` against its declared type, in source order, because §14.20 gives the first
+/// matching clause. A payload no clause accepts is re-thrown, which is what makes an unhandled exception
+/// leave the frame instead of vanishing.
+#[test]
+fn throw_and_catch_run() {
+    let source = r"
+public class Boom extends RuntimeException {
+    int code;
+    Boom(int code) { this.code = code; }
+}
+
+public class Other extends RuntimeException {
+    Other() {}
+}
+
+public class Risky {
+    static int raise(int n) {
+        if (n > 0) { throw new Boom(n); }
+        return 1;
+    }
+
+    // Thrown across a call boundary and caught here.
+    public static int caught(int n) {
+        try {
+            return raise(n);
+        } catch (Boom b) {
+            return b.code * 10;
+        }
+    }
+
+    // The first *matching* clause wins, not the first clause.
+    public static int firstMatch() {
+        try {
+            throw new Other();
+        } catch (Boom b) {
+            return 1;
+        } catch (Other o) {
+            return 2;
+        }
+    }
+
+    // A `try` whose body completes normally must skip every handler.
+    public static int fellThrough(int n) {
+        int total = 0;
+        try {
+            total = n;
+        } catch (Boom b) {
+            total = 99;
+        }
+        return total + 1;
+    }
+
+    // The caught variable has the type the source wrote, not the top of the hierarchy: reading
+    // `b.code` needs the narrowing the handler applies.
+    public static int narrowed(int n) {
+        try {
+            throw new Boom(n);
+        } catch (Boom b) {
+            return b.code + 1;
+        }
+    }
+}
+";
+    assert_invoke(&[source], "caught", &["3"], "30");
+    assert_invoke(&[source], "caught", &["0"], "1");
+    assert_invoke(&[source], "firstMatch", &[], "2");
+    assert_invoke(&[source], "fellThrough", &["7"], "8");
+    assert_invoke(&[source], "narrowed", &["4"], "5");
+}
+
+/// `finally`, and `synchronized`.
+///
+/// A structured cleanup costs a *duplicate*: the exceptional path runs it before re-throwing and the
+/// normal path runs it after the block, so the source's one `finally` becomes two copies. What it cannot
+/// intercept is a `return` / `break` / `continue` inside the protected code — that branches straight
+/// past the block the cleanup sits after — so one is reported rather than emitted with the cleanup
+/// skipped, which would be silent.
+///
+/// `synchronized` has no monitor to take: a module here is single-threaded, so there is nothing to
+/// exclude and nothing for a cleanup to release. Its two observable effects remain — the lock is
+/// evaluated, and a `null` one fails, by trapping rather than throwing, the same trade a failed
+/// `ref.cast` already makes.
+#[test]
+fn a_finally_and_a_synchronized_run() {
+    let source = r"
+public class Boom extends RuntimeException {
+    Boom() {}
+}
+
+public class Cleanly {
+    static int trace;
+
+    public static int normally(int n) {
+        trace = 0;
+        try {
+            trace = n;
+        } finally {
+            trace = trace + 100;
+        }
+        return trace;
+    }
+
+    // The cleanup has to run on the way out of the handler too.
+    public static int afterCatching(int n) {
+        trace = 0;
+        try {
+            throw new Boom();
+        } catch (Boom b) {
+            trace = n;
+        } finally {
+            trace = trace + 100;
+        }
+        return trace;
+    }
+
+    // Nothing catches it, so the cleanup runs and the exception carries on out of this frame.
+    static void uncaught() {
+        try {
+            throw new Boom();
+        } finally {
+            trace = 7;
+        }
+    }
+
+    public static int onTheWayOut() {
+        trace = 0;
+        try {
+            uncaught();
+        } catch (Boom b) {
+            return trace;
+        }
+        return -1;
+    }
+
+    static int shared;
+
+    public static int locked(int n) {
+        Cleanly it = new Cleanly();
+        synchronized (it) {
+            shared = n * 2;
+        }
+        return shared;
+    }
+}
+";
+    assert_invoke(&[source], "normally", &["5"], "105");
+    assert_invoke(&[source], "afterCatching", &["5"], "105");
+    assert_invoke(&[source], "onTheWayOut", &[], "7");
+    assert_invoke(&[source], "locked", &["4"], "8");
+}
+
+/// A `finally` over a jump, and try-with-resources, are reported.
+#[test]
+fn a_finally_over_a_jump_and_a_resource_are_reported() {
+    for (statement, expected) in [
+        (
+            "try { return 1; } finally { n = 2; }",
+            "a `finally` over a `return`, `break`, or `continue`",
+        ),
+        (
+            "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; }",
+            "a try-with-resources",
+        ),
+    ] {
+        let source = format!(
+            "public class T {{ public static int run(int n) {{ {statement} return n; }} }}"
+        );
+        let error = compile(&[&source]).expect_err("this form is not compiled yet");
+        assert!(
+            matches!(error, WasmError::Unsupported(what) if what == expected),
+            "`{statement}` should report {expected:?}, got {error}"
+        );
+    }
 }
 
 /// Constructor delegation, `this(…)` and `super(…)`.
@@ -1249,104 +1421,4 @@ public class Areas {
     assert_invoke(&[source], "the_other_one", &["4"], "12");
     assert_invoke(&[source], "as_a_parameter", &["3"], "15");
     assert_invoke(&[source], "through_a_field", &["2"], "10");
-}
-
-/// `throw` and `try`/`catch`, on the exception-handling proposal's `tag` and `try_table`.
-///
-/// One tag carries every Java exception, because every one of them is a reference: what a `catch` tests
-/// is the *class* of the payload, not which tag raised it. `try_table` delivers that payload to one
-/// label, so the class tests happen after it — the caught reference is spilled into a local and each
-/// handler is a `ref.test` against its declared type, in source order, because §14.20 gives the first
-/// matching clause. A payload no clause accepts is re-thrown, which is what makes an unhandled exception
-/// leave the frame instead of vanishing.
-#[test]
-fn throw_and_catch_run() {
-    let source = r"
-public class Boom extends RuntimeException {
-    int code;
-    Boom(int code) { this.code = code; }
-}
-
-public class Other extends RuntimeException {
-    Other() {}
-}
-
-public class Risky {
-    static int raise(int n) {
-        if (n > 0) { throw new Boom(n); }
-        return 1;
-    }
-
-    // Thrown across a call boundary and caught here.
-    public static int caught(int n) {
-        try {
-            return raise(n);
-        } catch (Boom b) {
-            return b.code * 10;
-        }
-    }
-
-    // The first *matching* clause wins, not the first clause.
-    public static int firstMatch() {
-        try {
-            throw new Other();
-        } catch (Boom b) {
-            return 1;
-        } catch (Other o) {
-            return 2;
-        }
-    }
-
-    // A `try` whose body completes normally must skip every handler.
-    public static int fellThrough(int n) {
-        int total = 0;
-        try {
-            total = n;
-        } catch (Boom b) {
-            total = 99;
-        }
-        return total + 1;
-    }
-
-    // The caught variable has the type the source wrote, not the top of the hierarchy: reading
-    // `b.code` needs the narrowing the handler applies.
-    public static int narrowed(int n) {
-        try {
-            throw new Boom(n);
-        } catch (Boom b) {
-            return b.code + 1;
-        }
-    }
-}
-";
-    assert_invoke(&[source], "caught", &["3"], "30");
-    assert_invoke(&[source], "caught", &["0"], "1");
-    assert_invoke(&[source], "firstMatch", &[], "2");
-    assert_invoke(&[source], "fellThrough", &["7"], "8");
-    assert_invoke(&[source], "narrowed", &["4"], "5");
-}
-
-/// `finally` and try-with-resources are reported.
-///
-/// Both need their block duplicated onto every exit path — the branch out of the `try`, each handler's
-/// own exit, and the re-throw — which is the same range-splitting the JVM backend does and is not
-/// emitted here yet.
-#[test]
-fn a_finally_and_a_resource_are_reported() {
-    for (statement, expected) in [
-        ("try { n = 1; } finally { n = 2; }", "a `finally` clause"),
-        (
-            "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; }",
-            "a try-with-resources",
-        ),
-    ] {
-        let source = format!(
-            "public class T {{ public static int run(int n) {{ {statement} return n; }} }}"
-        );
-        let error = compile(&[&source]).expect_err("this form is not compiled yet");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{statement}` should report {expected:?}, got {error}"
-        );
-    }
 }

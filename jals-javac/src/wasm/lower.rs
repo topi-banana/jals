@@ -1145,7 +1145,7 @@ impl Lowering<'_> {
             // smaller half of the problem.
             ast::Stmt::Throw(statement) => self.throw(statement, insn),
             ast::Stmt::Try(statement) => self.try_catch(statement, insn),
-            ast::Stmt::Synchronized(_) => Err(WasmError::Unsupported("a `synchronized` block")),
+            ast::Stmt::Synchronized(statement) => self.synchronized(statement, insn),
             ast::Stmt::Yield(_) => Err(WasmError::Unsupported("a `yield`")),
             ast::Stmt::Switch(statement) => {
                 let selector = statement
@@ -1469,6 +1469,30 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// `synchronized (lock) { … }`.
+    ///
+    /// There is no monitor on this host: a wasm module here is single-threaded, so there is nothing for
+    /// a lock to exclude and nothing for a `finally` to release. What remains of the statement is its
+    /// two observable effects — the lock expression is evaluated, and a `null` one fails. It *traps*
+    /// rather than throwing a `NullPointerException`, which is the same trade this backend already makes
+    /// for a failed `ref.cast` on a host with no exception model to throw into.
+    fn synchronized(&mut self, statement: &ast::SynchronizedStmt, insn: &mut Insn) -> Result<()> {
+        let lock = statement
+            .syntax()
+            .children()
+            .find_map(ast::Expr::cast)
+            .ok_or(WasmError::Unsupported("a `synchronized` with no lock"))?;
+        let body = statement
+            .syntax()
+            .children()
+            .find_map(ast::Block::cast)
+            .ok_or(WasmError::Unsupported("a `synchronized` with no body"))?;
+        self.expr(&lock, insn)?
+            .ok_or(WasmError::Unsupported("a `synchronized` on no value"))?;
+        insn.ref_as_non_null().drop();
+        self.block(&body, insn)
+    }
+
     /// `throw e`.
     ///
     /// One tag carries every Java exception, because every one of them is a reference: what a `catch`
@@ -1498,14 +1522,14 @@ impl Lowering<'_> {
     /// `finally` and try-with-resources are reported: both need their block duplicated onto every exit
     /// path, including the branch out of the `try` and the re-throw, and neither is emitted here yet.
     fn try_catch(&mut self, statement: &ast::TryStmt, insn: &mut Insn) -> Result<()> {
-        use jals_syntax::SyntaxKind::{FINALLY_CLAUSE, RESOURCE_LIST};
-        if statement
+        use jals_syntax::SyntaxKind::{
+            BREAK_STMT, CONTINUE_STMT, FINALLY_CLAUSE, RESOURCE_LIST, RETURN_STMT,
+        };
+        let finally = statement
             .syntax()
             .children()
-            .any(|child| child.kind() == FINALLY_CLAUSE)
-        {
-            return Err(WasmError::Unsupported("a `finally` clause"));
-        }
+            .find(|child| child.kind() == FINALLY_CLAUSE)
+            .and_then(|clause| clause.children().find_map(ast::Block::cast));
         if statement
             .syntax()
             .children()
@@ -1527,8 +1551,23 @@ impl Lowering<'_> {
             .children()
             .filter_map(ast::CatchClause::cast)
             .collect();
-        if clauses.is_empty() {
+        if clauses.is_empty() && finally.is_none() {
             return Err(WasmError::Unsupported("a `try` with no handler"));
+        }
+        // A `finally` has to run on *every* way out, and a `return` / `break` / `continue` inside the
+        // protected code is a way out this lowering does not intercept — it would branch straight past
+        // the block the cleanup sits after. Reported rather than emitted with the cleanup skipped, which
+        // would be a silent one.
+        if finally.is_some() {
+            let jumps = |node: &SyntaxNode| {
+                node.descendants()
+                    .any(|n| matches!(n.kind(), RETURN_STMT | BREAK_STMT | CONTINUE_STMT))
+            };
+            if jumps(body.syntax()) || clauses.iter().any(|c| jumps(c.syntax())) {
+                return Err(WasmError::Unsupported(
+                    "a `finally` over a `return`, `break`, or `continue`",
+                ));
+            }
         }
 
         insn.block();
@@ -1548,10 +1587,18 @@ impl Lowering<'_> {
         for clause in &clauses {
             self.catch_clause(clause, caught, out, insn)?;
         }
-        // Nothing matched: re-throw, so the exception leaves this frame rather than vanishing.
+        // Nothing matched: run the cleanup and re-throw, so the exception leaves this frame rather than
+        // vanishing. This is the copy of `finally` the *exceptional* path needs; the normal path gets
+        // its own below, which is the duplication a structured cleanup costs.
+        if let Some(cleanup) = &finally {
+            self.block(cleanup, insn)?;
+        }
         insn.local_get(caught);
         insn.throw(tag);
         insn.end();
+        if let Some(cleanup) = &finally {
+            self.block(cleanup, insn)?;
+        }
         Ok(())
     }
 

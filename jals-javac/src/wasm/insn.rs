@@ -187,6 +187,12 @@ impl Insn {
         self
     }
 
+    /// `ref.as_non_null` — trap when the reference on top is `null`, otherwise leave it.
+    pub(crate) fn ref_as_non_null(&mut self) -> &mut Self {
+        self.out.byte(0xD4);
+        self
+    }
+
     /// `throw` — raise `tag` with the value on the stack as its payload.
     pub(crate) fn throw(&mut self, tag: u32) -> &mut Self {
         self.out.byte(0x08).u32(tag);
