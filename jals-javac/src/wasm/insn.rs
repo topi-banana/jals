@@ -187,6 +187,27 @@ impl Insn {
         self
     }
 
+    /// `throw` — raise `tag` with the value on the stack as its payload.
+    pub(crate) fn throw(&mut self, tag: u32) -> &mut Self {
+        self.out.byte(0x08).u32(tag);
+        self
+    }
+
+    /// `try_table` with no result, whose `catches` are `(tag, label)` pairs.
+    ///
+    /// A catch's label is resolved in the context *enclosing* the `try_table`, not inside it — the
+    /// `try_table`'s own label is not in scope for its handlers — so the depth is taken before this
+    /// opens. Closed by [`end`](Self::end) like a block.
+    pub(crate) fn try_table(&mut self, catches: &[(u32, u32)]) -> &mut Self {
+        self.out.byte(0x1F).byte(0x40);
+        self.out.count(catches.len());
+        for &(tag, label) in catches {
+            self.out.byte(0x00).u32(tag).u32(label);
+        }
+        self.depth += 1;
+        self
+    }
+
     /// `unreachable` — a trap. What a path Java cannot reach lowers to: it satisfies the validator's
     /// demand for a value on every path without inventing one.
     pub(crate) fn unreachable(&mut self) -> &mut Self {

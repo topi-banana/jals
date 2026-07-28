@@ -905,38 +905,22 @@ public class Setup {
 
 /// Every statement form is either compiled or reports *itself*.
 ///
-/// A catch-all report says only "this statement form", which sends a reader looking. Each of these
-/// waits on the same thing — the exception-handling proposal's `tag` section and `try_table`, which the
-/// encoder does not write yet — and saying so is the difference between a compiler that is missing a
-/// feature and one that looks broken.
+/// A catch-all report says only "this statement form", which sends a reader looking. `synchronized`
+/// needs its body `finally`-protected, which is the same thing `finally` itself waits on; the monitor
+/// this host does not have is the smaller half.
 ///
-/// `assert` is the exception: Java evaluates one only when assertions are *enabled*, they are disabled
-/// by default, and a wasm host has no `-ea` to turn them on. So it compiles to nothing, which is
-/// exactly what a JVM does with one by default. A trap would be stricter than Java.
+/// `assert` compiles, and to nothing: Java evaluates one only when assertions are *enabled*, they are
+/// disabled by default, and a wasm host has no `-ea` to turn them on. So nothing is exactly what a JVM
+/// does with one by default, and a trap would be stricter than Java.
 #[test]
 fn each_uncompiled_statement_form_names_itself() {
-    let body = |statement: &str| {
-        format!(
-            "public class S {{ public static int run(int n) {{ {statement} return n; }} }}\n\
-             class Boom extends RuntimeException {{}}\n"
-        )
-    };
-    for (statement, expected) in [
-        ("throw new Boom();", "a `throw`"),
-        ("try { n = 1; } catch (Boom b) { n = 2; }", "a `try`"),
-        (
-            "synchronized (S.class) { n = 1; }",
-            "a `synchronized` block",
-        ),
-    ] {
-        let source = body(statement);
-        let error = compile(&[&source]).expect_err("this form is not compiled yet");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{statement}` should report {expected:?}, got {error}"
-        );
-    }
-    // An `assert` compiles, and to nothing: the module runs as if assertions were disabled.
+    let source = "public class S { public static int run(int n) \
+                  { synchronized (S.class) { n = 1; } return n; } }";
+    let error = compile(&[source]).expect_err("`synchronized` is not compiled yet");
+    assert!(
+        matches!(error, WasmError::Unsupported("a `synchronized` block")),
+        "got {error}"
+    );
     let source = "public class S { public static int run(int n) { assert n > 0; return n; } }";
     assert_invoke(&[source], "run", &["-5"], "-5");
 }
@@ -1265,4 +1249,104 @@ public class Areas {
     assert_invoke(&[source], "the_other_one", &["4"], "12");
     assert_invoke(&[source], "as_a_parameter", &["3"], "15");
     assert_invoke(&[source], "through_a_field", &["2"], "10");
+}
+
+/// `throw` and `try`/`catch`, on the exception-handling proposal's `tag` and `try_table`.
+///
+/// One tag carries every Java exception, because every one of them is a reference: what a `catch` tests
+/// is the *class* of the payload, not which tag raised it. `try_table` delivers that payload to one
+/// label, so the class tests happen after it — the caught reference is spilled into a local and each
+/// handler is a `ref.test` against its declared type, in source order, because §14.20 gives the first
+/// matching clause. A payload no clause accepts is re-thrown, which is what makes an unhandled exception
+/// leave the frame instead of vanishing.
+#[test]
+fn throw_and_catch_run() {
+    let source = r"
+public class Boom extends RuntimeException {
+    int code;
+    Boom(int code) { this.code = code; }
+}
+
+public class Other extends RuntimeException {
+    Other() {}
+}
+
+public class Risky {
+    static int raise(int n) {
+        if (n > 0) { throw new Boom(n); }
+        return 1;
+    }
+
+    // Thrown across a call boundary and caught here.
+    public static int caught(int n) {
+        try {
+            return raise(n);
+        } catch (Boom b) {
+            return b.code * 10;
+        }
+    }
+
+    // The first *matching* clause wins, not the first clause.
+    public static int firstMatch() {
+        try {
+            throw new Other();
+        } catch (Boom b) {
+            return 1;
+        } catch (Other o) {
+            return 2;
+        }
+    }
+
+    // A `try` whose body completes normally must skip every handler.
+    public static int fellThrough(int n) {
+        int total = 0;
+        try {
+            total = n;
+        } catch (Boom b) {
+            total = 99;
+        }
+        return total + 1;
+    }
+
+    // The caught variable has the type the source wrote, not the top of the hierarchy: reading
+    // `b.code` needs the narrowing the handler applies.
+    public static int narrowed(int n) {
+        try {
+            throw new Boom(n);
+        } catch (Boom b) {
+            return b.code + 1;
+        }
+    }
+}
+";
+    assert_invoke(&[source], "caught", &["3"], "30");
+    assert_invoke(&[source], "caught", &["0"], "1");
+    assert_invoke(&[source], "firstMatch", &[], "2");
+    assert_invoke(&[source], "fellThrough", &["7"], "8");
+    assert_invoke(&[source], "narrowed", &["4"], "5");
+}
+
+/// `finally` and try-with-resources are reported.
+///
+/// Both need their block duplicated onto every exit path — the branch out of the `try`, each handler's
+/// own exit, and the re-throw — which is the same range-splitting the JVM backend does and is not
+/// emitted here yet.
+#[test]
+fn a_finally_and_a_resource_are_reported() {
+    for (statement, expected) in [
+        ("try { n = 1; } finally { n = 2; }", "a `finally` clause"),
+        (
+            "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; }",
+            "a try-with-resources",
+        ),
+    ] {
+        let source = format!(
+            "public class T {{ public static int run(int n) {{ {statement} return n; }} }}"
+        );
+        let error = compile(&[&source]).expect_err("this form is not compiled yet");
+        assert!(
+            matches!(error, WasmError::Unsupported(what) if what == expected),
+            "`{statement}` should report {expected:?}, got {error}"
+        );
+    }
 }

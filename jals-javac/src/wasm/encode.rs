@@ -333,6 +333,10 @@ pub(crate) struct Module {
     /// otherwise be unorderable.
     types: Vec<SubType>,
     pub(crate) funcs: Vec<Func>,
+    /// Exception tags, by the index of the function type that gives each one's payload. One tag is
+    /// enough for Java: every thrown value is a reference, so the payload type is the same for all of
+    /// them and the *class* of the reference is what a `catch` tests.
+    pub(crate) tags: Vec<u32>,
     pub(crate) globals: Vec<Global>,
     pub(crate) exports: Vec<(String, ExportKind, u32)>,
     /// The function an engine runs before anything else, if the module has one. This is where a Java
@@ -357,6 +361,7 @@ impl Module {
         Self {
             types: Vec::new(),
             funcs: Vec::new(),
+            tags: Vec::new(),
             globals: Vec::new(),
             exports: Vec::new(),
             start: None,
@@ -424,6 +429,17 @@ impl Module {
                 section.u32(func.type_index);
             }
             Self::section(&mut out, 3, &section);
+        }
+
+        // The tag section comes before the global section, which is where the binary format puts it.
+        if !self.tags.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.tags.len());
+            for &ty in &self.tags {
+                // Attribute 0 is `exception`, the only one there is.
+                section.byte(0x00).u32(ty);
+            }
+            Self::section(&mut out, 13, &section);
         }
 
         if !self.globals.is_empty() {

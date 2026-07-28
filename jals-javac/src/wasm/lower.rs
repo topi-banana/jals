@@ -115,6 +115,9 @@ struct Method {
     export: Option<String>,
     /// A constructor initialises `this` rather than returning a value.
     is_constructor: bool,
+    /// Whether the function's signature has a result, which decides whether its body needs a trailing
+    /// `unreachable`.
+    has_result: bool,
 }
 
 /// Compiles a whole project to one WebAssembly module.
@@ -137,6 +140,14 @@ impl CompileWasm {
         for item in interface_items {
             layout.interfaces.insert(item);
         }
+        // One tag, declared whether or not anything throws: an unused tag costs three bytes and saves
+        // the lowering from having to know in advance whether a body will need one.
+        let payload = module.add_type(SubType::plain(CompType::Func {
+            params: alloc::vec![ValType::Ref(RefType::nullable(HeapType::Any))],
+            results: Vec::new(),
+        }));
+        module.tags.push(payload);
+        layout.tag = Some(u32::try_from(module.tags.len() - 1).map_err(|_| WasmError::TooLarge)?);
         for &item in &classes {
             layout.reserve_class(item, index, &mut module);
         }
@@ -453,6 +464,7 @@ impl CompileWasm {
                     }
                 };
 
+                let has_result = !results.is_empty();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
                 layout.functions.insert(member, function);
@@ -464,6 +476,7 @@ impl CompileWasm {
                     index: function,
                     // A `public static` method is the module's surface: a wasm host has no `main`
                     // convention, so every one of them is exported by name.
+                    has_result,
                     export: (is_static && !is_constructor)
                         .then(|| index.member(member).name.clone()),
                     is_constructor,
@@ -489,6 +502,10 @@ struct Layout {
     fields: BTreeMap<ItemId, Vec<MemberId>>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
+    /// The one exception tag, if the module throws anything. Every Java throw is a reference, so one
+    /// tag carrying one reference covers all of them and the *class* of that reference is what a
+    /// `catch` tests.
+    tag: Option<u32>,
     /// Every interface this module declares. An interface gets no struct type — wasm's declared
     /// subtyping is single-inheritance, so it could not be a supertype of two unrelated classes — so a
     /// value of interface type is held at the top of the reference hierarchy and narrowed at each use.
@@ -850,6 +867,13 @@ impl Body {
         if let Some(block) = &block {
             lowering.block(block, &mut insn)?;
         }
+        // A body that returns on every Java path can still *fall out* of a wasm block: a `br` sitting in
+        // unreachable code does not make its target reachable, so the validator sees control reach the
+        // end of the function with nothing on the stack. Java's definite-return rule is what makes this
+        // dead code; the instruction is here so the validator does not have to infer that.
+        if method.has_result {
+            insn.unreachable();
+        }
         Ok(Self {
             locals: lowering.locals,
             code: insn.into_body(),
@@ -1119,8 +1143,8 @@ impl Lowering<'_> {
             // `tag` section and `try_table`, which `encode.rs` does not write yet. `synchronized` waits
             // on it too — its body is `finally`-protected, and a monitor this host does not have is the
             // smaller half of the problem.
-            ast::Stmt::Throw(_) => Err(WasmError::Unsupported("a `throw`")),
-            ast::Stmt::Try(_) => Err(WasmError::Unsupported("a `try`")),
+            ast::Stmt::Throw(statement) => self.throw(statement, insn),
+            ast::Stmt::Try(statement) => self.try_catch(statement, insn),
             ast::Stmt::Synchronized(_) => Err(WasmError::Unsupported("a `synchronized` block")),
             ast::Stmt::Yield(_) => Err(WasmError::Unsupported("a `yield`")),
             ast::Stmt::Switch(statement) => {
@@ -1441,6 +1465,161 @@ impl Lowering<'_> {
         let lowered = self.stmt(&inner, insn);
         self.loops.pop();
         lowered?;
+        insn.end();
+        Ok(())
+    }
+
+    /// `throw e`.
+    ///
+    /// One tag carries every Java exception, because every one of them is a reference: what a `catch`
+    /// tests is the *class* of the payload, not which tag raised it.
+    fn throw(&mut self, statement: &ast::ThrowStmt, insn: &mut Insn) -> Result<()> {
+        let value = statement
+            .expr()
+            .ok_or(WasmError::Unsupported("a `throw` with nothing to throw"))?;
+        let tag = self
+            .layout
+            .tag
+            .ok_or(WasmError::Unsupported("a `throw` with no tag declared"))?;
+        self.expr(&value, insn)?
+            .ok_or(WasmError::Unsupported("a `throw` of no value"))?;
+        insn.throw(tag);
+        Ok(())
+    }
+
+    /// `try { … } catch (T v) { … }`, with as many handlers as the source wrote.
+    ///
+    /// `try_table` delivers the payload to *one* label, so the class tests happen after it rather than
+    /// in it: the caught reference is spilled into a local and each handler is a `ref.test` against its
+    /// declared type, in source order (§14.20 — the first matching clause wins). A payload no clause
+    /// accepts is re-thrown, which is what makes an unhandled exception leave the frame rather than
+    /// being swallowed.
+    ///
+    /// `finally` and try-with-resources are reported: both need their block duplicated onto every exit
+    /// path, including the branch out of the `try` and the re-throw, and neither is emitted here yet.
+    fn try_catch(&mut self, statement: &ast::TryStmt, insn: &mut Insn) -> Result<()> {
+        use jals_syntax::SyntaxKind::{FINALLY_CLAUSE, RESOURCE_LIST};
+        if statement
+            .syntax()
+            .children()
+            .any(|child| child.kind() == FINALLY_CLAUSE)
+        {
+            return Err(WasmError::Unsupported("a `finally` clause"));
+        }
+        if statement
+            .syntax()
+            .children()
+            .any(|child| child.kind() == RESOURCE_LIST)
+        {
+            return Err(WasmError::Unsupported("a try-with-resources"));
+        }
+        let tag = self
+            .layout
+            .tag
+            .ok_or(WasmError::Unsupported("a `try` with no tag declared"))?;
+        let body = statement
+            .syntax()
+            .children()
+            .find_map(ast::Block::cast)
+            .ok_or(WasmError::Unsupported("a `try` with no body"))?;
+        let clauses: Vec<ast::CatchClause> = statement
+            .syntax()
+            .children()
+            .filter_map(ast::CatchClause::cast)
+            .collect();
+        if clauses.is_empty() {
+            return Err(WasmError::Unsupported("a `try` with no handler"));
+        }
+
+        insn.block();
+        let out = insn.depth();
+        insn.block_typed(ValType::Ref(RefType::nullable(HeapType::Any)));
+        let handler = insn.depth();
+        insn.try_table(&[(tag, insn.depth() - handler)]);
+        self.block(&body, insn)?;
+        insn.end();
+        // The body completed, so nothing was caught: leave past every handler.
+        insn.br(insn.depth() - out);
+        insn.end();
+
+        // The caught reference, which each clause narrows in turn.
+        let caught = self.scratch(ValType::Ref(RefType::nullable(HeapType::Any)));
+        insn.local_set(caught);
+        for clause in &clauses {
+            self.catch_clause(clause, caught, out, insn)?;
+        }
+        // Nothing matched: re-throw, so the exception leaves this frame rather than vanishing.
+        insn.local_get(caught);
+        insn.throw(tag);
+        insn.end();
+        Ok(())
+    }
+
+    /// One `catch (T v) { … }`: test the payload's class, bind it, run the block, and leave.
+    ///
+    /// A multi-catch (`catch (A | B v)`) is several tests reaching one block, which is why the types
+    /// are a list here rather than one.
+    fn catch_clause(
+        &mut self,
+        clause: &ast::CatchClause,
+        caught: u32,
+        out: u32,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let types: Vec<ast::Type> = clause
+            .syntax()
+            .descendants()
+            .filter_map(ast::Type::cast)
+            .collect();
+        if types.is_empty() {
+            return Err(WasmError::Unsupported("a `catch` with no type"));
+        }
+        // The variable is a direct token of the clause, not wrapped in a parameter node.
+        let name = clause
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .ok_or(WasmError::Unsupported("a `catch` with no variable"))?;
+        let body = clause
+            .syntax()
+            .children()
+            .find_map(ast::Block::cast)
+            .ok_or(WasmError::Unsupported("a `catch` with no body"))?;
+
+        // Any of the declared types matching enters the handler, which is what a multi-catch means.
+        let mut heaps = Vec::with_capacity(types.len());
+        for ty in &types {
+            heaps.push(self.named_type(ty)?);
+        }
+        insn.i32_const(0);
+        for heap in heaps {
+            insn.local_get(caught);
+            insn.ref_test(heap, false);
+            insn.numeric(NumOp::Or, ValType::I32)
+                .ok_or(WasmError::Unsupported("a `catch` type test"))?;
+        }
+        insn.if_();
+        let id = self
+            .input
+            .resolved
+            .symbol_at(usize::from(name.text_range().start()))
+            .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+        let slot = self.declare_local(id)?;
+        insn.local_get(caught);
+        // The declared type narrows the payload, so the handler's variable has the type the source
+        // wrote rather than the top of the hierarchy. A multi-catch's variable is the *common*
+        // supertype, which this backend does not compute — so it is cast to the first declared type,
+        // which is right when there is one and reported when there is not.
+        if types.len() == 1 {
+            let heap = self.named_type(&types[0])?;
+            insn.ref_cast(heap, true);
+        } else {
+            return Err(WasmError::Unsupported("a multi-catch variable"));
+        }
+        insn.local_set(slot);
+        self.block(&body, insn)?;
+        insn.br(insn.depth() - out);
         insn.end();
         Ok(())
     }
