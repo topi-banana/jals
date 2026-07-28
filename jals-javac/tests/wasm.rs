@@ -1072,6 +1072,36 @@ public class Cleanly {
         return trace == 42 ? 1 : 0;
     }
 
+    // A `break` out of protected code leaves the cleanup behind, so the cleanup runs on the way.
+    public static int brokeOut(int n) {
+        trace = 0;
+        int seen = 0;
+        while (true) {
+            try {
+                seen = n;
+                break;
+            } finally {
+                trace = trace + 42;
+            }
+        }
+        // 42 once, not twice: the `break` jumped past the normal-path copy of the cleanup.
+        return trace + seen;
+    }
+
+    // A `continue` leaves it behind once per iteration, and a cleanup opened *outside* the loop must
+    // not run for a jump that stays inside it.
+    public static int continued(int n) {
+        trace = 0;
+        for (int i = 0; i < n; i++) {
+            try {
+                continue;
+            } finally {
+                trace = trace + 1;
+            }
+        }
+        return trace;
+    }
+
     static int shared;
 
     public static int locked(int n) {
@@ -1089,30 +1119,24 @@ public class Cleanly {
     assert_invoke(&[source], "locked", &["4"], "8");
     assert_invoke(&[source], "returnedThrough", &["5"], "5");
     assert_invoke(&[source], "cleanedFirst", &[], "1");
+    assert_invoke(&[source], "brokeOut", &["3"], "45");
+    assert_invoke(&[source], "continued", &["3"], "3");
 }
 
-/// A `finally` over a `break` or a `continue`, and try-with-resources, are reported.
+/// try-with-resources is reported: it is a `finally` plus a `close()` plus *suppression*, and leaving
+/// the suppression out would replace the body's exception with `close()`'s — a silently wrong exception
+/// rather than a missing feature.
 #[test]
-fn a_finally_over_a_jump_and_a_resource_are_reported() {
-    for (statement, expected) in [
-        (
-            "while (n > 0) { try { break; } finally { n = 2; } }",
-            "a `finally` over a `break` or a `continue`",
-        ),
-        (
-            "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; }",
-            "a try-with-resources",
-        ),
-    ] {
-        let source = format!(
-            "public class T {{ public static int run(int n) {{ {statement} return n; }} }}"
-        );
-        let error = compile(&[&source]).expect_err("this form is not compiled yet");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{statement}` should report {expected:?}, got {error}"
-        );
-    }
+fn a_resource_is_reported() {
+    let source = concat!(
+        "public class T { public static int run(int n) { ",
+        "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; } return n; } }"
+    );
+    let error = compile(&[source]).expect_err("try-with-resources is not compiled yet");
+    assert!(
+        matches!(error, WasmError::Unsupported("a try-with-resources")),
+        "got {error}"
+    );
 }
 
 /// Constructor delegation, `this(…)` and `super(…)`.

@@ -1154,6 +1154,9 @@ struct Loop {
     leave: u32,
     /// Where a `continue` lands, or `None` for a labelled statement that is no loop.
     repeat: Option<u32>,
+    /// How many `finally` blocks were open when this statement was entered. A jump out of it has to run
+    /// every cleanup opened *since* — those are the ones it leaves behind.
+    cleanups: usize,
 }
 
 impl Lowering<'_> {
@@ -1455,10 +1458,12 @@ impl Lowering<'_> {
         self.expr(&condition, insn)?;
         insn.i32_eqz();
         insn.br_if(insn.depth() - leave);
+        let cleanups = self.cleanups.len();
         self.loops.push(Loop {
             label,
             leave,
             repeat: Some(repeat),
+            cleanups,
         });
         if let Some(body) = statement.body() {
             self.stmt(&body, insn)?;
@@ -1483,10 +1488,12 @@ impl Lowering<'_> {
         let repeat = insn.depth();
         insn.block();
         let next = insn.depth();
+        let cleanups = self.cleanups.len();
         self.loops.push(Loop {
             label,
             leave,
             repeat: Some(next),
+            cleanups,
         });
         if let Some(body) = statement.body() {
             self.stmt(&body, insn)?;
@@ -1521,10 +1528,12 @@ impl Lowering<'_> {
         }
         insn.block();
         let next = insn.depth();
+        let cleanups = self.cleanups.len();
         self.loops.push(Loop {
             label,
             leave,
             repeat: Some(next),
+            cleanups,
         });
         if let Some(body) = &body {
             self.stmt(body, insn)?;
@@ -1650,10 +1659,12 @@ impl Lowering<'_> {
             .local_set(variable);
         insn.block();
         let next = insn.depth();
+        let cleanups = self.cleanups.len();
         self.loops.push(Loop {
             label,
             leave,
             repeat: Some(next),
+            cleanups,
         });
         if let Some(body) = statement.body() {
             self.stmt(&body, insn)?;
@@ -1694,6 +1705,7 @@ impl Lowering<'_> {
             label: Some(label),
             leave,
             repeat: None,
+            cleanups: self.cleanups.len(),
         });
         let lowered = self.stmt(&inner, insn);
         self.loops.pop();
@@ -1755,9 +1767,7 @@ impl Lowering<'_> {
     /// `finally` and try-with-resources are reported: both need their block duplicated onto every exit
     /// path, including the branch out of the `try` and the re-throw, and neither is emitted here yet.
     fn try_catch(&mut self, statement: &ast::TryStmt, insn: &mut Insn) -> Result<()> {
-        use jals_syntax::SyntaxKind::{
-            BREAK_STMT, CONTINUE_STMT, FINALLY_CLAUSE, RESOURCE_LIST, RETURN_STMT,
-        };
+        use jals_syntax::SyntaxKind::{FINALLY_CLAUSE, RESOURCE_LIST};
         let finally = statement
             .syntax()
             .children()
@@ -1791,22 +1801,6 @@ impl Lowering<'_> {
         // protected code is a way out this lowering does not intercept — it would branch straight past
         // the block the cleanup sits after. Reported rather than emitted with the cleanup skipped, which
         // would be a silent one.
-        // A `return` out of protected code runs the cleanup on its way (see `Stmt::Return`). A `break`
-        // or a `continue` does not: its target may be inside or outside the `try`, and only the one
-        // outside needs the cleanup — telling them apart needs the loop stack the JVM backend's guards
-        // carry, so one is reported rather than emitted with the cleanup skipped.
-        if finally.is_some() {
-            let jumps = |node: &SyntaxNode| {
-                node.descendants()
-                    .any(|n| matches!(n.kind(), BREAK_STMT | CONTINUE_STMT))
-            };
-            if jumps(body.syntax()) || clauses.iter().any(|c| jumps(c.syntax())) {
-                return Err(WasmError::Unsupported(
-                    "a `finally` over a `break` or a `continue`",
-                ));
-            }
-        }
-        let _ = RETURN_STMT;
 
         if let Some(cleanup) = &finally {
             self.cleanups.push(cleanup.clone());
@@ -1970,10 +1964,12 @@ impl Lowering<'_> {
         }
         self.dispatch(selector, &arms, fallback, insn)?;
 
+        let cleanups = self.cleanups.len();
         self.loops.push(Loop {
             label,
             leave,
             repeat: None,
+            cleanups,
         });
         if let Some(ty) = result {
             self.yields.push((leave, ty));
@@ -2219,7 +2215,7 @@ impl Lowering<'_> {
     ///
     /// The branch depth comes from the emitter, not from the source: an `if` between a loop header and
     /// the branch shifts every target, and only the emitter knows how many structures are open.
-    fn leave(&self, node: &SyntaxNode, continuing: bool, insn: &mut Insn) -> Result<()> {
+    fn leave(&mut self, node: &SyntaxNode, continuing: bool, insn: &mut Insn) -> Result<()> {
         let label = node
             .children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
@@ -2245,6 +2241,18 @@ impl Lowering<'_> {
         } else {
             target.leave
         };
+        // Every `finally` opened *since* the target statement was entered is one this jump leaves
+        // behind, so each runs on the way out, innermost first. A cleanup opened outside the target is
+        // not left behind and must not run.
+        let outer = target.cleanups;
+        let pending: Vec<ast::Block> = self.cleanups[outer.min(self.cleanups.len())..]
+            .iter()
+            .rev()
+            .cloned()
+            .collect();
+        for cleanup in &pending {
+            self.block(cleanup, insn)?;
+        }
         insn.br(insn.depth() - depth);
         Ok(())
     }
