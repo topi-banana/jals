@@ -75,7 +75,7 @@ impl Descriptor {
     /// two dotted names distinguishes them — so each boundary is decided by asking whether the prefix
     /// before it is itself a type. Getting this wrong produces a class that loads under one name and is
     /// referred to under another, which is a `NoClassDefFoundError` at the first use.
-    pub fn internal_name_of(id: ItemId, index: &ProjectIndex) -> String {
+    pub(crate) fn internal_name_of(id: ItemId, index: &ProjectIndex) -> String {
         let fqn = index.item(id).fqn.as_str();
         let mut out = String::with_capacity(fqn.len());
         let mut prefix = String::new();
@@ -145,7 +145,7 @@ impl Descriptor {
     /// reported rather than guessed at, which is right everywhere except here. The caller knows which
     /// names its declaration bound, so it says so, and each becomes the `Object` a type variable erases
     /// to. Passing an empty list is the ordinary case and changes nothing.
-    pub fn method_descriptor_erasing(
+    pub(crate) fn method_descriptor_erasing(
         id: MemberId,
         index: &ProjectIndex,
         constructor: bool,
@@ -195,7 +195,7 @@ impl Descriptor {
 
     /// The field descriptor of `ty` itself, for a value the index has no member for — an array's
     /// element, a local, or the target of a cast.
-    pub fn descriptor_of(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
+    pub(crate) fn descriptor_of(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
         Self::field_type(ty, index)
     }
 
@@ -204,7 +204,7 @@ impl Descriptor {
     /// Two spellings in one place, because the class file uses both: a class is named by its internal
     /// binary name (`java/lang/String`) and an array by its own *descriptor* (`[Ljava/lang/String;`),
     /// which JVMS §4.4.1 permits precisely so an array type can be named at all.
-    pub fn class_entry(ty: &Ty, index: &ProjectIndex) -> Result<String> {
+    pub(crate) fn class_entry(ty: &Ty, index: &ProjectIndex) -> Result<String> {
         match Self::field_type(ty, index)? {
             FieldType::Object(name) => Ok(name),
             array @ FieldType::Array(_) => {

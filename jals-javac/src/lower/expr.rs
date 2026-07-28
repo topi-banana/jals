@@ -588,10 +588,7 @@ impl Expr {
 
     /// The `(field, descriptor)` a captured local is read through, or `None` when `id` is not one of the
     /// current class's captures.
-    pub(crate) fn captured_read(
-        id: DefId,
-        context: &Context<'_>,
-    ) -> Result<Option<(String, String)>> {
+    fn captured_read(id: DefId, context: &Context<'_>) -> Result<Option<(String, String)>> {
         if !context.captures_local(id) {
             return Ok(None);
         }

@@ -236,7 +236,7 @@ impl BinOp {
     /// operators are not symmetric — and the reason `ladd`'s "two of the same" rule cannot simply be
     /// applied to every entry in this enum.
     #[must_use]
-    pub const fn is_shift(self) -> bool {
+    pub(crate) const fn is_shift(self) -> bool {
         matches!(self, Self::Shl | Self::Shr | Self::Ushr)
     }
 }
@@ -268,7 +268,7 @@ pub enum Numeric {
 impl Numeric {
     /// The verification type a value of this type has on the operand stack.
     #[must_use]
-    pub const fn stack(self) -> VerificationType {
+    pub(crate) const fn stack(self) -> VerificationType {
         match self {
             Self::Long => VerificationType::Long,
             Self::Float => VerificationType::Float,
@@ -421,7 +421,7 @@ impl<'pool> Assembler<'pool> {
     ///
     /// A lowering needs this to discard whatever an expression-statement left behind: the JVM has
     /// no "evaluate and drop" instruction, so the caller pops back down to the depth it started at.
-    pub const fn stack_depth(&self) -> usize {
+    pub(crate) const fn stack_depth(&self) -> usize {
         self.state.stack_len()
     }
 
@@ -436,7 +436,7 @@ impl<'pool> Assembler<'pool> {
     /// needs this because the *source* has statements a finished basic block does not: the jump
     /// over an `else` arm exists only when the `then` arm can fall out of it, and `if (c) { return;
     /// } …` is the ordinary shape where it cannot.
-    pub const fn reachable(&self) -> bool {
+    pub(crate) const fn reachable(&self) -> bool {
         self.reachable
     }
 
@@ -447,7 +447,7 @@ impl<'pool> Assembler<'pool> {
     /// there, and `for (;;) { return; }` is the ordinary shape where neither holds — binding the
     /// label then would report a position control cannot arrive at, which is true and not the
     /// caller's mistake.
-    pub fn is_targeted(&self, label: Label) -> Result<bool> {
+    pub(crate) fn is_targeted(&self, label: Label) -> Result<bool> {
         Ok(self.info(label)?.targeted)
     }
 
@@ -778,7 +778,7 @@ impl<'pool> Assembler<'pool> {
     ///
     /// A `Class` constant is `ldc` over a `Class` pool entry, which is the same entry a `checkcast`
     /// names. Legal from major version 49 on (JVMS §4.4.1), which every version this crate emits is.
-    pub fn const_class(&mut self, internal_name: &str) -> Result<()> {
+    pub(crate) fn const_class(&mut self, internal_name: &str) -> Result<()> {
         let index = self
             .pool
             .class_index(internal_name)
@@ -965,7 +965,7 @@ impl<'pool> Assembler<'pool> {
     }
 
     /// Negate the numeric value on top of the stack.
-    pub fn negate(&mut self, ty: &VerificationType) -> Result<()> {
+    pub(crate) fn negate(&mut self, ty: &VerificationType) -> Result<()> {
         let instruction = match ty {
             VerificationType::Integer => Instruction::Ineg,
             VerificationType::Long => Instruction::Lneg,
@@ -1120,7 +1120,7 @@ impl<'pool> Assembler<'pool> {
     }
 
     /// `getfield owner.name : descriptor`, with the receiver on top of the stack.
-    pub fn get_field(&mut self, owner: &str, name: &str, descriptor: &str) -> Result<()> {
+    pub(crate) fn get_field(&mut self, owner: &str, name: &str, descriptor: &str) -> Result<()> {
         let index = self.field_ref(owner, name, descriptor)?;
         let receiver = Self::object_type(self.pool, owner)?;
         let ty = Self::field_verification_type(self.pool, descriptor)?;
@@ -1128,7 +1128,7 @@ impl<'pool> Assembler<'pool> {
     }
 
     /// `putfield owner.name : descriptor`, with the receiver below the value.
-    pub fn put_field(&mut self, owner: &str, name: &str, descriptor: &str) -> Result<()> {
+    pub(crate) fn put_field(&mut self, owner: &str, name: &str, descriptor: &str) -> Result<()> {
         let index = self.field_ref(owner, name, descriptor)?;
         let receiver = Self::object_type(self.pool, owner)?;
         let ty = Self::field_verification_type(self.pool, descriptor)?;

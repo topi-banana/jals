@@ -206,22 +206,22 @@ pub(crate) struct Lambda {
 
 impl Lambda {
     /// The call site's name, which is the functional interface's method name.
-    pub(crate) fn interface_method(&self) -> &str {
+    fn interface_method(&self) -> &str {
         &self.interface_method
     }
 
     /// The call site's descriptor.
-    pub(crate) fn call_descriptor(&self) -> &str {
+    fn call_descriptor(&self) -> &str {
         &self.call_descriptor
     }
 
     /// Which `BootstrapMethods` entry links this call site.
-    pub(crate) const fn bootstrap(&self) -> u16 {
+    const fn bootstrap(&self) -> u16 {
         self.bootstrap
     }
 
     /// The locals the call site passes, in descriptor order.
-    pub(crate) fn captured(&self) -> &[jals_hir::DefId] {
+    fn captured(&self) -> &[jals_hir::DefId] {
         &self.captured
     }
 }
@@ -3355,20 +3355,17 @@ impl Compile {
 
 impl Context<'_> {
     /// What the lambda at `span` was compiled into, when this class has one there.
-    pub(crate) fn lambda_at(&self, span: &core::ops::Range<usize>) -> Option<&Lambda> {
+    fn lambda_at(&self, span: &core::ops::Range<usize>) -> Option<&Lambda> {
         self.lambdas.get(&(span.start, span.end))
     }
 
     /// The locals a local class in this file captures.
-    pub(crate) fn captures_of_item(
-        &self,
-        item: ItemId,
-    ) -> Option<alloc::vec::Vec<jals_hir::DefId>> {
+    fn captures_of_item(&self, item: ItemId) -> Option<alloc::vec::Vec<jals_hir::DefId>> {
         self.captures.get(&item).cloned()
     }
 
     /// Whether `id` is a local the class being compiled captures.
-    pub(crate) fn captures_local(&self, id: jals_hir::DefId) -> bool {
+    fn captures_local(&self, id: jals_hir::DefId) -> bool {
         self.captured_here().contains(&id)
     }
 

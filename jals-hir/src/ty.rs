@@ -139,7 +139,7 @@ impl Primitive {
     /// external name made `int` assignable to `String`, which made `append(String)` an *applicable*
     /// overload for `append(1)` — and overload selection, finding no candidate more specific than
     /// every other, then took the first declared one.
-    pub(crate) fn boxes_to(self, name: &str) -> bool {
+    fn boxes_to(self, name: &str) -> bool {
         let simple = Self::simple(name);
         simple == self.wrapper()
             || matches!(simple, "Object" | "Comparable" | "Serializable")
@@ -153,7 +153,7 @@ impl Primitive {
     /// usable where a `long` is due, and an `Object` is usable nowhere without a cast. A name that is
     /// not a wrapper at all cannot unbox — an unindexed external type is still a *reference*, and no
     /// spelling of one turns it into a number.
-    pub(crate) fn unboxes_from(self, name: &str) -> bool {
+    fn unboxes_from(self, name: &str) -> bool {
         Self::unwrap_name(Self::simple(name))
             .is_some_and(|source| source == self || source.widens_to(self))
     }
