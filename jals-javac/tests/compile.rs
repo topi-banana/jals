@@ -2965,3 +2965,70 @@ fn a_lambda_and_a_method_reference_each_name_themselves() {
         );
     }
 }
+
+/// A generic type declaration's `Signature`.
+///
+/// Type parameters survive erasure only in this attribute. Nothing at run time reads it — the JVM links
+/// on descriptors — but every reflective reader does, and a class whose `Signature` is missing reports
+/// `Box` where the source wrote `Box<T>`. A parameter with no `extends` is bounded by `Object`, and the
+/// bound is not optional in the encoding: `<T>` is written `<T:Ljava/lang/Object;>`.
+#[test]
+fn a_generic_declaration_carries_its_signature() {
+    let source = r"
+interface Named {}
+
+class Box<T> {}
+
+class Bounded<T extends Named> {}
+
+class Several<A, B extends Named> implements Named {}
+
+class Plain {}
+";
+    let classes = compile(source).expect("compile");
+    let signature = |name: &str| {
+        let compiled = classes
+            .iter()
+            .find(|class| class.internal_name == name)
+            .expect("the class");
+        let class =
+            jals_exec::block_on_inline(jals_classfile::ClassFile::read(compiled.bytes.as_slice()))
+                .expect("reparse");
+        class
+            .attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                    class
+                        .constant_pool
+                        .utf8(*signature_index)
+                        .expect("utf8")
+                        .into_owned(),
+                ),
+                _ => None,
+            })
+    };
+    assert_eq!(
+        signature("Box").as_deref(),
+        Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+    );
+    assert_eq!(
+        signature("Bounded").as_deref(),
+        Some("<T:LNamed;>Ljava/lang/Object;")
+    );
+    assert_eq!(
+        signature("Several").as_deref(),
+        Some("<A:Ljava/lang/Object;B:LNamed;>Ljava/lang/Object;LNamed;")
+    );
+    // A declaration with no type parameters carries no attribute at all, rather than an empty one.
+    assert_eq!(signature("Plain"), None);
+
+    if !java_available() {
+        return;
+    }
+    // The JVM has to load and verify every one of them.
+    let program = format!(
+        "{source}\npublic class Uses {{ public static void main(String[] a) {{ System.out.println(\"ok\"); }} }}\n"
+    );
+    assert_eq!(run(&program, "Uses"), "ok\n");
+}

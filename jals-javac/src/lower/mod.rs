@@ -289,12 +289,14 @@ impl Compile {
         // class the JVM loads and then refuses to dispatch through: an `invokeinterface` on a type whose
         // `interfaces` never mentioned it is `IncompatibleClassChangeError` at the first call.
         let mut interfaces = Vec::new();
+        let mut interface_names = Vec::new();
         for supertype in &index.item(item).supertypes {
             if index.item(supertype.id).kind != DefKind::Interface {
                 continue;
             }
             let name = Descriptor::internal_name_of(supertype.id, index);
             interfaces.push(pool.class_index(&name).ok_or(AsmError::PoolFull)?);
+            interface_names.push(name);
         }
         // Every annotation type extends `java.lang.annotation.Annotation`, and the source never writes
         // it. Without it `Class.isAnnotation` is false and no reflective reader recognises the type.
@@ -452,6 +454,19 @@ impl Compile {
         }
 
         let mut nesting = Self::inner_classes(node, &context, &mut pool)?;
+        // A generic declaration's type parameters survive erasure only in this attribute. Nothing at run
+        // time reads it — the JVM links on descriptors — but every reflective reader does, and a class
+        // whose `Signature` is missing reports `Box` where the source wrote `Box<T>`.
+        if let Some(signature) =
+            Self::class_signature(node, &context, &super_name, &interface_names)?
+        {
+            let name_index = pool.utf8_index("Signature").ok_or(AsmError::PoolFull)?;
+            let signature_index = pool.utf8_index(&signature).ok_or(AsmError::PoolFull)?;
+            nesting.push(jals_classfile::Attribute {
+                name_index,
+                body: jals_classfile::AttributeBody::Signature { signature_index },
+            });
+        }
         if let Some(components) = record_attribute {
             // The `Record` attribute is what makes `Class.isRecord` true and what every reflective
             // reader (and pattern matching) enumerates the components through. Without it the class is
@@ -968,6 +983,65 @@ impl Compile {
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
         })
+    }
+
+    /// The `Signature` a generic type declaration needs, or `None` when it declares no type parameters.
+    ///
+    /// JVMS §4.7.9.1's `ClassSignature`: the type parameters with their bounds, then the superclass, then
+    /// each superinterface. The supertypes are written in their *erased* form here — a generic supertype
+    /// (`class Box<T> extends Holder<T>`) would need the arguments the `extends` clause wrote, and
+    /// erasing them loses only what a reflective reader would see, never what the JVM links on.
+    fn class_signature(
+        node: &SyntaxNode,
+        context: &Context<'_>,
+        super_name: &str,
+        interface_names: &[String],
+    ) -> Result<Option<String>> {
+        let Some(params) = node.children().find_map(ast::TypeParams::cast) else {
+            return Ok(None);
+        };
+        let declared: Vec<ast::TypeParam> = params.params().collect();
+        if declared.is_empty() {
+            return Ok(None);
+        }
+        let mut out = String::from("<");
+        for param in &declared {
+            let name = param
+                .name()
+                .ok_or(LowerError::Unsupported("a type parameter with no name"))?;
+            out.push_str(&name);
+            // A parameter with no `extends` is bounded by `Object`, and the bound is not optional in the
+            // encoding: `<T>` is written `<T:Ljava/lang/Object;>`.
+            let bounds: Vec<ast::Type> = param
+                .syntax()
+                .children()
+                .filter_map(ast::Type::cast)
+                .collect();
+            if bounds.is_empty() {
+                out.push_str(":Ljava/lang/Object;");
+                continue;
+            }
+            for (position, bound) in bounds.iter().enumerate() {
+                // The first bound may be a class or an interface, and the encoding does not distinguish:
+                // `:` introduces the class bound and each further `:` an interface bound.
+                // `:` introduces the class bound and each further `:` an interface bound, so one per
+                // bound is the whole rule and the position does not change it.
+                let _ = position;
+                out.push(':');
+                let ty = context.ty_of_type(bound)?;
+                out.push_str(&Descriptor::descriptor_of(&ty, context.index)?.to_string());
+            }
+        }
+        out.push('>');
+        out.push('L');
+        out.push_str(super_name);
+        out.push(';');
+        for name in interface_names {
+            out.push('L');
+            out.push_str(name);
+            out.push(';');
+        }
+        Ok(Some(out))
     }
 
     /// A record's synthesised members: a `private final` field per component, the canonical
