@@ -2535,7 +2535,15 @@ impl Lowering<'_> {
             .filter(|child| child.kind() == RESOURCE_LIST)
             .flat_map(|list| list.children().filter_map(ast::Resource::cast))
             .collect();
-        if !resources.is_empty() {
+        let clauses: Vec<ast::CatchClause> = statement
+            .syntax()
+            .children()
+            .filter_map(ast::CatchClause::cast)
+            .collect();
+        // Resources alone are the whole statement. With a `catch` or a `finally` beside them, §14.20.3
+        // makes the resource `try` the *body* of an ordinary one — so the outer structure below wraps it
+        // rather than duplicating the close sequence into every handler.
+        if !resources.is_empty() && clauses.is_empty() && finally.is_none() {
             return self.try_resources(statement, &resources, insn);
         }
         let tag = self
@@ -2547,11 +2555,6 @@ impl Lowering<'_> {
             .children()
             .find_map(ast::Block::cast)
             .ok_or(WasmError::Unsupported("a `try` with no body"))?;
-        let clauses: Vec<ast::CatchClause> = statement
-            .syntax()
-            .children()
-            .filter_map(ast::CatchClause::cast)
-            .collect();
         if clauses.is_empty() && finally.is_none() {
             return Err(WasmError::Unsupported("a `try` with no handler"));
         }
@@ -2568,7 +2571,11 @@ impl Lowering<'_> {
         insn.block_typed(ValType::Ref(RefType::nullable(HeapType::Any)));
         let handler = insn.depth();
         insn.try_table(&[(tag, insn.depth() - handler)]);
-        self.block(&body, insn)?;
+        if resources.is_empty() {
+            self.block(&body, insn)?;
+        } else {
+            self.try_resources(statement, &resources, insn)?;
+        }
         insn.end();
         // The body completed, so nothing was caught: leave past every handler.
         insn.br(insn.depth() - out);
@@ -2609,28 +2616,14 @@ impl Lowering<'_> {
     /// one Java propagates and the one a `catch` sees — so the control flow is right and only the
     /// suppressed list is missing.
     ///
-    /// A `catch` or a `finally` alongside the resources is reported: each would need its own copy of the
-    /// close sequence, and the interleaving §14.20.3 gives is not something to guess at.
+    /// A `catch` or a `finally` beside the resources is not this function's business: §14.20.3 makes the
+    /// resource `try` the *body* of an ordinary one, so [`try_catch`](Self::try_catch) wraps this.
     fn try_resources(
         &mut self,
         statement: &ast::TryStmt,
         resources: &[ast::Resource],
         insn: &mut Insn,
     ) -> Result<()> {
-        use jals_syntax::SyntaxKind::FINALLY_CLAUSE;
-        if statement
-            .syntax()
-            .children()
-            .any(|child| child.kind() == FINALLY_CLAUSE)
-            || statement
-                .syntax()
-                .children()
-                .any(|child| ast::CatchClause::cast(child).is_some())
-        {
-            return Err(WasmError::Unsupported(
-                "a try-with-resources with a `catch` or a `finally`",
-            ));
-        }
         let tag = self
             .layout
             .tag
@@ -2701,6 +2694,51 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// Call a no-argument `void` method on a receiver already in a local, on its *runtime* type.
+    ///
+    /// The same `ref.test` chain a call site builds, without the call site: the overrides are a known,
+    /// closed set with the whole project in one module, so testing them most-derived first answers what a
+    /// vtable would. Used where there is no call expression to read a receiver out of — a resource's
+    /// `close`, which §14.20.3 calls and the source never writes.
+    fn dispatch_to(&self, receiver: u32, member: MemberId, insn: &mut Insn) -> Result<()> {
+        let overriders = self.overriders(member);
+        let fallback = self.layout.functions.get(&member).copied();
+        if overriders.is_empty() {
+            let function = fallback.ok_or(WasmError::Unsupported("a `close` with no body"))?;
+            insn.local_get(receiver).call(function);
+            return Ok(());
+        }
+        insn.block();
+        let leave = insn.depth();
+        for &(item, over) in &overriders {
+            let Some(&function) = self.layout.functions.get(&over) else {
+                continue;
+            };
+            let struct_type = self.layout.structs[&item];
+            insn.local_get(receiver);
+            insn.ref_test(HeapType::Concrete(struct_type), false);
+            insn.if_();
+            insn.local_get(receiver);
+            insn.ref_cast(HeapType::Concrete(struct_type), false);
+            insn.call(function);
+            insn.br(insn.depth() - leave);
+            insn.end();
+        }
+        // An interface's method is abstract: every class that could satisfy the call is already in the
+        // chain, so reaching here means a receiver of a type nothing implemented, which traps.
+        match fallback {
+            Some(function) => {
+                insn.local_get(receiver);
+                insn.call(function);
+            }
+            None => {
+                insn.unreachable();
+            }
+        }
+        insn.end();
+        Ok(())
+    }
+
     /// `if (r != null) r.close();` for each resource, in reverse declaration order.
     fn close_resources(&self, slots: &[(u32, Ty)], insn: &mut Insn) -> Result<()> {
         for (slot, declared) in slots.iter().rev() {
@@ -2718,25 +2756,14 @@ impl Lowering<'_> {
                         && member.params.is_empty()
                 })
                 .ok_or(WasmError::Unsupported("a resource with no `close`"))?;
-            // An overridden `close` would need the dispatch chain a call site builds, which needs a call
-            // expression this has not got — so one is reported rather than dispatched to the wrong body.
-            if !self.overriders(close).is_empty() {
-                return Err(WasmError::Unsupported(
-                    "an overridden `close` on a resource",
-                ));
-            }
-            let function = *self
-                .layout
-                .functions
-                .get(&close)
-                .ok_or(WasmError::Unsupported("a `close` with no body"))?;
             // `r != null`, which §14.20.3 checks before closing.
             insn.local_get(*slot);
             insn.ref_is_null();
             insn.i32_eqz();
             insn.if_();
-            insn.local_get(*slot);
-            insn.call(function);
+            // The runtime type decides which `close` runs, exactly as it does at a call site: the
+            // declared type is what named the method, and a subclass may have overridden it.
+            self.dispatch_to(*slot, close, insn)?;
             insn.end();
         }
         Ok(())

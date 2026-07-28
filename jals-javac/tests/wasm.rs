@@ -1961,21 +1961,6 @@ public class Uses {
     assert_invoke(&[source], "normally", &["3"], "3");
     assert_invoke(&[source], "both", &[], "11");
     assert_invoke(&[source], "onTheWayOut", &[], "4");
-
-    // A `catch` or a `finally` alongside the resources would need its own copy of the close sequence, and
-    // the interleaving §14.20.3 gives is not something to guess at.
-    let combined = concat!(
-        "public class T { public static int run(int n) { ",
-        "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; } return n; } }"
-    );
-    let error = compile(&[combined]).expect_err("the combination is not lowered yet");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a try-with-resources with a `catch` or a `finally`")
-        ),
-        "got {error}"
-    );
 }
 
 /// A local class that *captures* a local, which outlives the frame the local lived in.
@@ -2431,4 +2416,66 @@ public class Which {
     assert_invoke(&[source], "plain", &[], "-1");
     assert_invoke(&[source], "colonSquare", &[], "30");
     assert_invoke(&[source], "colonCircle", &[], "2");
+}
+
+/// try-with-resources beside a `catch` and a `finally`, and a `close` a subclass overrode.
+///
+/// §14.20.3 makes the resource `try` the *body* of an ordinary one, so the two compose rather than the
+/// close sequence being copied into every handler. The `close` that runs is chosen by the receiver's
+/// runtime type, the same `ref.test` chain a call site builds — the declared type only named the method.
+/// Both were reported before, the second on the ground that there was no call expression to read a
+/// receiver out of, which is a signature and not a design.
+#[test]
+fn a_resource_closes_beside_a_catch_and_on_its_runtime_type() {
+    let source = r"
+public class Boom extends RuntimeException { Boom() {} }
+
+public class Res implements AutoCloseable {
+    static int closed = 0;
+    int mark = 1;
+    public void close() { closed = closed + mark; }
+}
+
+public class Sub extends Res {
+    public void close() { closed = closed + 100; }
+}
+
+public class Using {
+    public static int caught() {
+        Res.closed = 0;
+        int seen = 0;
+        try (Res r = new Res()) {
+            throw new Boom();
+        } catch (Boom b) {
+            seen = 7;
+        } finally {
+            seen = seen + 30;
+        }
+        return Res.closed * 1000 + seen;
+    }
+
+    public static int overridden() {
+        Res.closed = 0;
+        try (Res r = new Sub()) {
+            Res.closed = Res.closed + 1;
+        }
+        return Res.closed;
+    }
+
+    public static int normal() {
+        Res.closed = 0;
+        int seen = 0;
+        try (Res r = new Res()) {
+            seen = 1;
+        } finally {
+            seen = seen + 4;
+        }
+        return Res.closed * 100 + seen;
+    }
+}
+";
+    // The same three answers a real JVM gives for this source.
+    assert_invoke(&[source], "caught", &[], "1037");
+    assert_invoke(&[source], "overridden", &[], "101");
+    assert_invoke(&[source], "normal", &[], "105");
 }
