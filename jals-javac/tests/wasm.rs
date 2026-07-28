@@ -1772,15 +1772,16 @@ public class Host {
 ";
     assert_invoke(&[source], "run", &["7"], "12");
 
+    // A capturing class with no declared constructor has no function to fill its capture fields in.
     let capturing = concat!(
         "public class H { public static int run(int n) { ",
         "class C { int read() { return n; } } return new C().read(); } }"
     );
-    let error = compile(&[capturing]).expect_err("a capture needs a synthetic parameter");
+    let error = compile(&[capturing]).expect_err("there is no constructor to fill the fields");
     assert!(
         matches!(
             error,
-            WasmError::Unsupported("a local class that captures a local")
+            WasmError::Unsupported("a capturing class with no declared constructor")
         ),
         "got {error}"
     );
@@ -1858,4 +1859,31 @@ public class Uses {
         ),
         "got {error}"
     );
+}
+
+/// A local class that *captures* a local, which outlives the frame the local lived in.
+///
+/// Each capture becomes a struct field and a *trailing* constructor parameter — trailing so a declared one
+/// keeps its slot — and every `new` passes the values from wherever they live at that point. Inside the
+/// class the name is not a local at all: it reads the field the constructor filled.
+#[test]
+fn a_local_class_captures_the_locals_it_reads() {
+    let source = r"
+public class Host {
+    public static int run(int n) {
+        int seen = n;
+        long wide = 40L;
+        class Reader {
+            int extra;
+            Reader(int extra) { this.extra = extra; }
+            int read() { return seen + extra; }
+            long widened() { return wide + seen; }
+        }
+        Reader r = new Reader(5);
+        return r.read() + (int) r.widened();
+    }
+}
+";
+    // 7 + 5, plus 40 + 7.
+    assert_invoke(&[source], "run", &["7"], "59");
 }

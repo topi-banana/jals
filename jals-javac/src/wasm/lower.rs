@@ -118,6 +118,8 @@ struct Method {
     is_constructor: bool,
     /// The class this constructor's extra first parameter holds, when it belongs to an inner class.
     encloses: Option<ItemId>,
+    /// How many trailing parameters hold captured locals.
+    captures: usize,
     /// Whether the function's signature has a result, which decides whether its body needs a trailing
     /// `unreachable`.
     has_result: bool,
@@ -138,10 +140,19 @@ impl CompileWasm {
         // array's element may be one of these classes.
         let mut interface_items = Vec::new();
         let mut inner_items = Vec::new();
-        let classes =
-            Self::classes_in_order(inputs, index, &mut interface_items, &mut inner_items)?;
+        let mut captured_items = Vec::new();
+        let classes = Self::classes_in_order(
+            inputs,
+            index,
+            &mut interface_items,
+            &mut inner_items,
+            &mut captured_items,
+        )?;
         for (item, enclosing) in inner_items {
             layout.inner.insert(item, enclosing);
+        }
+        for (item, captured) in captured_items {
+            layout.captures.insert(item, captured);
         }
         // A subclass's own fields start after its supertype's, and an inner class's synthetic field sits
         // after *its* own — so a subclass would place its first field on top of it. Reported rather than
@@ -440,6 +451,7 @@ impl CompileWasm {
         index: &ProjectIndex,
         interfaces: &mut Vec<ItemId>,
         inner: &mut Vec<(ItemId, ItemId)>,
+        captures: &mut Vec<(ItemId, Vec<(DefId, Ty)>)>,
     ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
@@ -459,16 +471,12 @@ impl CompileWasm {
                     interfaces.push(item);
                     continue;
                 }
-                // A non-`static` nested class holds its enclosing instance in a synthetic field and
-                // takes it as an extra constructor parameter. Neither exists here, so its constructor
-                // would be one parameter short of what a `new` passes — reported rather than emitted.
                 let item = index
                     .item_by_decl(input.file, usize::from(name.text_range().start()))
                     .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
-                if Self::captures_a_local(&node, input) {
-                    return Err(WasmError::Unsupported(
-                        "a local class that captures a local",
-                    ));
+                let captured = Self::captured_by(&node, input);
+                if !captured.is_empty() {
+                    captures.push((item, captured));
                 }
                 if Self::is_inner(&node) {
                     let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
@@ -522,35 +530,48 @@ impl CompileWasm {
         })
     }
 
-    /// Whether a class declared inside a block reads a local from the method that encloses it.
+    /// The locals a class declared inside a block captures, in source order and without repeats.
     ///
-    /// Each captured local needs a synthetic constructor parameter, which the index knows nothing about —
-    /// so its constructor would come out one parameter short of what a `new` passes. A capture is any
-    /// name inside the class that resolves to a definition *outside* it.
-    fn captures_a_local(node: &SyntaxNode, input: &WasmInput<'_>) -> bool {
+    /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
+    /// it. Each becomes a struct field and a trailing constructor parameter.
+    fn captured_by(node: &SyntaxNode, input: &WasmInput<'_>) -> Vec<(DefId, Ty)> {
+        let mut out = Vec::new();
         let inside_block = node
             .ancestors()
             .skip(1)
             .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK);
         if !inside_block {
-            return false;
+            return out;
         }
         let range = node.text_range();
-        node.descendants_with_tokens()
+        for token in node
+            .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .any(|token| {
-                input
-                    .resolved
-                    .reference_at(usize::from(token.text_range().start()))
-                    .and_then(|reference| reference.resolution.def_id())
-                    .and_then(|id| {
-                        let def = input.resolved.def(id);
-                        let start = u32::try_from(def.name_range.start).ok()?;
-                        Some(!range.contains(start.into()))
-                    })
-                    .unwrap_or(false)
-            })
+        {
+            let Some(id) = input
+                .resolved
+                .reference_at(usize::from(token.text_range().start()))
+                .and_then(|reference| reference.resolution.def_id())
+            else {
+                continue;
+            };
+            let def = input.resolved.def(id);
+            // Only a *local* is captured: a field is reached through an instance and a type name is not a
+            // value at all.
+            if !matches!(def.kind, DefKind::Local | DefKind::Param) {
+                continue;
+            }
+            let Ok(start) = u32::try_from(def.name_range.start) else {
+                continue;
+            };
+            if !range.contains(start.into()) && !out.iter().any(|(seen, _)| *seen == id) {
+                // The type is read from the *declaring* input's analysis, which is the only place it is
+                // known — the layout is built long before any body is lowered.
+                out.push((id, input.inference.type_of_def(id).clone()));
+            }
+        }
+        out
     }
 
     /// Whether a class declaration is a non-`static` nested one.
@@ -654,6 +675,14 @@ impl CompileWasm {
                 for ty in index.resolved_param_tys(member) {
                     params.push(layout.val_type(&ty)?);
                 }
+                // The captures come after every declared parameter, so a declared one keeps its slot.
+                let captured = is_constructor
+                    .then(|| layout.captures.get(&item).cloned())
+                    .flatten()
+                    .unwrap_or_default();
+                for (_, ty) in &captured {
+                    params.push(layout.val_type(ty)?);
+                }
                 let results = if is_constructor {
                     Vec::new()
                 } else {
@@ -677,6 +706,7 @@ impl CompileWasm {
                     // convention, so every one of them is exported by name.
                     has_result,
                     encloses,
+                    captures: captured.len(),
                     export: (is_static && !is_constructor)
                         .then(|| index.member(member).name.clone()),
                     is_constructor,
@@ -708,6 +738,11 @@ struct Layout {
     inner: BTreeMap<ItemId, ItemId>,
     /// The synthetic enclosing-instance field's index, for each inner class.
     outer: BTreeMap<ItemId, u32>,
+    /// Every local class and the locals it captures, in source order. Each becomes a struct field and a
+    /// *trailing* constructor parameter, which is how the class outlives the frame the local lived in.
+    captures: BTreeMap<ItemId, Vec<(DefId, Ty)>>,
+    /// The struct field index of the first capture, for each class that has any.
+    capture_slot: BTreeMap<ItemId, u32>,
     /// The one exception tag, if the module throws anything. Every Java throw is a reference, so one
     /// tag carrying one reference covers all of them and the *class* of that reference is what a
     /// `catch` tests.
@@ -784,6 +819,19 @@ impl Layout {
                 mutable: true,
             });
             self.outer.insert(item, slot);
+        }
+        // One field per captured local, after the enclosing instance: the class outlives the frame the
+        // local lived in, so the value has to be copied into it.
+        let captured = self.captures.get(&item).cloned().unwrap_or_default();
+        if !captured.is_empty() {
+            let first = u32::try_from(fields.len()).map_err(|_| WasmError::TooLarge)?;
+            self.capture_slot.insert(item, first);
+            for (_, ty) in &captured {
+                fields.push(FieldType {
+                    storage: StorageType::Val(self.val_type(ty)?),
+                    mutable: true,
+                });
+            }
         }
         let parent =
             CompileWasm::superclass(item, index).and_then(|id| self.structs.get(&id).copied());
@@ -1142,12 +1190,17 @@ impl Body {
         if method.encloses.is_some() {
             lowering.next += 1;
         }
+
         if let Some(params) = method.node.children().find_map(ast::ParamList::cast) {
             for param in params.params() {
                 let ty = lowering.declare_param(param.syntax())?;
                 let _ = ty;
             }
         }
+        // The captures are trailing *parameters*, so their slots follow the declared ones — reserved
+        // before any body-local claims them.
+        let first_capture = lowering.next;
+        lowering.next += u32::try_from(method.captures).unwrap_or(0);
 
         let mut insn = Insn::new();
         let block = method.node.children().find_map(ast::Block::cast);
@@ -1163,6 +1216,17 @@ impl Body {
             insn.local_get(0)
                 .local_get(1)
                 .struct_set(layout.structs[&owner], slot);
+        }
+        // Each capture's parameter goes into its field, before anything else can read it.
+        if let Some(owner) = method.owner
+            && method.captures > 0
+            && let Some(&first_field) = layout.capture_slot.get(&owner)
+        {
+            for offset in 0..u32::try_from(method.captures).unwrap_or(0) {
+                insn.local_get(0)
+                    .local_get(first_capture + offset)
+                    .struct_set(layout.structs[&owner], first_field + offset);
+            }
         }
         if method.is_constructor && !block.as_ref().is_some_and(Self::delegates_to_this) {
             // The constructor's parent *is* the class body, which is where the initialisers are and
@@ -2705,6 +2769,13 @@ impl Lowering<'_> {
             insn.local_get(slot);
             return self.layout.val_type(self.input.inference.type_of_def(id));
         }
+        // A captured local is not a local *here*: it lives in the field the constructor filled.
+        if let Some((field, ty)) = self.capture_field(id) {
+            let owner = self.owner.ok_or_else(unresolved)?;
+            insn.local_get(0)
+                .struct_get(self.layout.structs[&owner], field);
+            return self.layout.val_type(&ty);
+        }
         // Not a local: a field of the enclosing class. A `static` one is a global and needs no
         // receiver; an instance one is reached through `this`, which is local 0.
         let declaration = self.input.resolved.def(id);
@@ -3624,12 +3695,18 @@ impl Lowering<'_> {
                 for argument in &arguments {
                     self.expr(argument, insn)?;
                 }
+                self.push_captures(item, insn)?;
                 insn.call(function).local_get(slot);
             }
             // No declared constructor: the implicit default one initialises nothing, so the
             // allocation is already the finished object — except for an inner class, whose synthetic
             // field is written here because there is no constructor function to write it.
             None if !declares_constructor && arguments.is_empty() => {
+                if !self.layout.captures.get(&item).is_none_or(Vec::is_empty) {
+                    return Err(WasmError::Unsupported(
+                        "a capturing class with no declared constructor",
+                    ));
+                }
                 if encloses.is_some() {
                     let slot = self.scratch(ty);
                     let field = self
@@ -3804,6 +3881,40 @@ impl Lowering<'_> {
             }
             None => {
                 insn.local_get(0);
+            }
+        }
+        Ok(())
+    }
+
+    /// The `(struct field, type)` a captured local is read through, when `id` is one of the enclosing
+    /// class's captures.
+    fn capture_field(&self, id: DefId) -> Option<(u32, Ty)> {
+        let owner = self.owner?;
+        let captured = self.layout.captures.get(&owner)?;
+        let first = *self.layout.capture_slot.get(&owner)?;
+        let position = captured.iter().position(|(seen, _)| *seen == id)?;
+        Some((
+            first + u32::try_from(position).ok()?,
+            captured[position].1.clone(),
+        ))
+    }
+
+    /// Push the values a local class's constructor takes for its captures, read from wherever they live
+    /// here — a local of the enclosing method, or *this* class's own capture field when one local class
+    /// creates another.
+    fn push_captures(&self, item: ItemId, insn: &mut Insn) -> Result<()> {
+        let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
+        for (id, _) in &captured {
+            if let Some(slot) = self.slot_of(*id) {
+                insn.local_get(slot);
+            } else if let Some((field, _)) = self.capture_field(*id) {
+                let owner = self
+                    .owner
+                    .ok_or(WasmError::Unsupported("a capture with no enclosing class"))?;
+                insn.local_get(0)
+                    .struct_get(self.layout.structs[&owner], field);
+            } else {
+                return Err(WasmError::Unsupported("a capture with no value here"));
             }
         }
         Ok(())
