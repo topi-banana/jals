@@ -679,7 +679,10 @@ impl Expr {
             Self::lower(&Self::inner(access.receiver())?, context, emit)?;
             emit.asm.get_field(&owner, &name, &descriptor)?;
         }
-        Ok(())
+        // A field of a type variable is erased in its descriptor exactly as a return type is, so the
+        // read leaves an `Object` where the analysis has a `String` — and the next use of it is
+        // verified against `Object` and rejected.
+        Self::restore_erased(access.syntax(), member, context, emit)
     }
 
     /// The `(owner, name, descriptor)` triple a `Fieldref` names.
@@ -1192,8 +1195,13 @@ impl Expr {
         // Two different references merge to `Object`, because that is all a frame can say without a
         // class hierarchy to walk. The static type has to be put back, or the next instruction that
         // uses the value is verified against `Object` and rejected.
-        let arms_agree = Self::type_of(then.syntax(), context).ok()
-            == Self::type_of(otherwise.syntax(), context).ok();
+        // A `null` arm needs none: the frame joins `null` into any reference, so the merge already says
+        // the other arm's type — and that arm may be an external one this could not name anyway.
+        let (left, right) = (
+            Self::type_of(then.syntax(), context).ok(),
+            Self::type_of(otherwise.syntax(), context).ok(),
+        );
+        let arms_agree = left == right || left == Some(Ty::Null) || right == Some(Ty::Null);
         if matches!(Repr::of(&result)?, Repr::Reference) && !arms_agree {
             let entry = Descriptor::class_entry(&result, context.index)?;
             emit.asm.check_cast(&entry)?;
@@ -1216,6 +1224,40 @@ impl Expr {
     ) -> Result<Ty> {
         if let Ok(ty) = Self::type_of(node, context) {
             return Ok(ty);
+        }
+        // A `null` arm makes the conditional a *reference* one whatever the other arm is (§15.25): the
+        // other arm's type when that is a reference, and its boxed form when it is a primitive, which is
+        // the one case where the result type is written nowhere in the source.
+        let arms = (
+            Self::type_of(then.syntax(), context),
+            Self::type_of(otherwise.syntax(), context),
+        );
+        let boxed = |ty: &Ty| match ty {
+            Ty::Primitive(primitive) => {
+                let internal = Self::wrapper_of(*primitive);
+                let simple = internal.rsplit('/').next().unwrap_or(internal);
+                context
+                    .index
+                    .resolve_type_name(context.file, simple, Some(&internal.replace('/', ".")))
+                    .project_id()
+                    .map_or_else(
+                        || ty.clone(),
+                        |id| {
+                            Ty::Class(jals_hir::ClassTy::Project {
+                                id,
+                                name: simple.to_owned(),
+                                args: alloc::vec::Vec::new(),
+                            })
+                        },
+                    )
+            }
+            other => other.clone(),
+        };
+        match arms {
+            (Ok(Ty::Null), Ok(other)) | (Ok(other), Ok(Ty::Null)) if other != Ty::Null => {
+                return Ok(boxed(&other));
+            }
+            _ => {}
         }
         let left = Self::numeric_of(then.syntax(), context)?;
         let right = Self::numeric_of(otherwise.syntax(), context)?;

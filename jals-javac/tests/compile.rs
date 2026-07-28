@@ -4376,3 +4376,40 @@ public class P {
         println!("PROBE run {:?}", run(source, "P"));
     }
 }
+
+/// A field whose type is a type variable, and a conditional with a `null` arm.
+///
+/// Both were found by sweeping for reports that are *not* `Unsupported` — the first showed up as a
+/// `VerifyError` from a real JVM, the second as `Descriptor(Unknown)`.
+///
+/// A field of a type variable is erased in its descriptor exactly as a return type is, so the read
+/// leaves an `Object` where the analysis has a `String`, and the next use of it is verified against
+/// `Object` and rejected. The `checkcast` a generic *call* already got belongs here for the same reason.
+///
+/// A `null` arm makes a conditional a reference one whatever the other arm is (§15.25): the other arm's
+/// type when that is a reference, and its *boxed* form when it is a primitive — the one case where the
+/// result type is written nowhere in the source. It needs no `checkcast` either way, because the frame
+/// joins `null` into any reference and the merge already says the other arm's type.
+#[test]
+fn erasure_and_a_null_conditional_arm_keep_their_types() {
+    let source = r#"
+class Holder<T> {
+    T value;
+}
+
+public class Erased {
+    public static void main(String[] args) {
+        Holder<String> h = new Holder<>();
+        h.value = "z";
+        System.out.println(h.value.length());
+
+        Integer n = true ? 1 : null;
+        Integer m = false ? 2 : null;
+        Long wide = true ? 5L : null;
+        String s = args.length > 0 ? "x" : null;
+        System.out.println(n + " " + m + " " + wide + " " + s);
+    }
+}
+"#;
+    assert_eq!(run(source, "Erased"), "1\n1 null 5 null\n");
+}
