@@ -32,8 +32,8 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LBRACK, METHOD_DECL, MODIFIERS, PRIVATE_KW, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER,
-    STATIC_KW,
+    LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, RECORD_COMPONENT, RECORD_DECL,
+    RECORD_HEADER, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
@@ -1598,11 +1598,38 @@ impl ProjectIndex {
         // `RawType`s in exactly the recursion's pre-order (the ItemId assignment order) — a
         // `cfg`-disabled host contributes nothing and is simply not pushed, so the surviving
         // pre-order (and thus the ItemId assignment) stays deterministic.
+        //
+        // One counter per enclosing type, so two anonymous classes in the same class get 1 and 2.
+        let mut anonymous: alloc::collections::BTreeMap<alloc::string::String, usize> =
+            alloc::collections::BTreeMap::new();
         let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
         while let Some((node, enclosing)) = stack.pop() {
             yielder.tick().await;
             if cfg.disables_node(&node) {
                 continue;
+            }
+            // An anonymous class body is a type declaration with no name and no keyword. Nothing else
+            // indexes it, so `new I() { … }` had no item at all — and without an item there is no member
+            // resolution, no descriptor, and nothing a backend could emit.
+            if node.kind() == NEW_EXPR && node.children().any(|child| child.kind() == CLASS_BODY) {
+                let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
+                let ordinal = anonymous.entry(enclosing_key).or_insert(0_usize);
+                *ordinal += 1;
+                // Numbered per enclosing type, as javac numbers them. The *name* is the ordinal because
+                // there is nothing else to call it.
+                let simple = alloc::format!("{ordinal}");
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
+                // The `new` keyword's own position: unique per site, which is what `item_by_decl` needs,
+                // and the closest thing to a declaration the source offers.
+                let start = usize::from(node.text_range().start());
+                out.push(RawType {
+                    fqn,
+                    kind: DefKind::Class,
+                    name_range: start..start,
+                    type_params: Vec::new(),
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &simple, cfg),
+                    raw_supertypes: Self::raw_supertypes_of(&node),
+                });
             }
             let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
                 && let Some(name_tok) = Collect::first_ident_token(&node)
@@ -1950,6 +1977,15 @@ impl ProjectIndex {
     /// [`MemberType::Named`] for a well-formed clause. Pure.
     fn raw_supertypes_of(node: &SyntaxNode) -> Vec<MemberType> {
         let mut supertypes = Vec::new();
+        // An anonymous class writes neither clause: the type the `new` names *is* its supertype, and
+        // whether that becomes an `extends` or an `implements` is decided by what the name resolves to,
+        // which is not this function's business.
+        if node.kind() == NEW_EXPR {
+            if let Some(ty) = node.children().find_map(ast::Type::cast) {
+                supertypes.push(MemberType::of(Some(ty)));
+            }
+            return supertypes;
+        }
         for clause in node
             .children()
             .filter(|c| matches!(c.kind(), EXTENDS_CLAUSE | IMPLEMENTS_CLAUSE))
