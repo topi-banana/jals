@@ -866,6 +866,8 @@ impl<'a> Inferer<'a> {
     async fn run(mut self) -> TypeInference {
         let root = self.root.clone();
         self.collect_declared_types(&root).await;
+        // After the written types, because a lambda's target is one of them.
+        self.collect_lambda_params(&root).await;
         self.infer_in(&root).await;
         let project = self.project;
         let mut inference = TypeInference {
@@ -905,6 +907,60 @@ impl<'a> Inferer<'a> {
                         self.set_def_type(Collect::token_start(&tok), t.clone());
                     }
                 }
+            }
+        }
+    }
+
+    /// Type every lambda parameter from the interface the lambda is being converted to.
+    ///
+    /// `n -> n * 2` writes no type for `n`, and nothing else can supply one: the parameter's type *is* the
+    /// functional interface's, position by position (JLS §15.27.1). Without this the body cannot be typed at
+    /// all, which is what stopped a backend emitting one even with the target type known.
+    ///
+    /// Runs in pass 1, so it reads only what pass 1 has: a declaration's written type and a method's return
+    /// type. A lambda in an assignment or an argument keeps untyped parameters, for the same reason its own
+    /// type stays unknown there.
+    async fn collect_lambda_params(&mut self, root: &SyntaxNode) {
+        let Some((index, _)) = self.project else {
+            return;
+        };
+        let mut yielder = Yielder::new();
+        for lambda in root.descendants().filter(|n| n.kind() == LAMBDA_EXPR) {
+            yielder.tick().await;
+            let Some(item) = self.target_ty(&lambda).project_id() else {
+                continue;
+            };
+            // One method, or this is no functional interface and there is nothing to take a shape from.
+            let mut methods = index
+                .own_members(item)
+                .iter()
+                .copied()
+                .filter(|&id| index.member(id).kind == DefKind::Method);
+            let Some(method) = methods.next() else {
+                continue;
+            };
+            if methods.next().is_some() {
+                continue;
+            }
+            let params = index.member(method).params.clone();
+            let owner = index.member(method).owner;
+            let file = index.member(method).file;
+            let declared: Vec<SyntaxToken> = lambda
+                .descendants()
+                .filter(|node| node.kind() == PARAM)
+                .filter_map(|param| {
+                    param
+                        .children_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
+                        .find(|token| token.kind() == IDENT)
+                })
+                .collect();
+            for (position, name) in declared.iter().enumerate() {
+                let Some(param) = params.get(position) else {
+                    continue;
+                };
+                let ty = index.member_type_to_ty(file, owner, &param.ty);
+                self.set_def_type(usize::from(name.text_range().start()), ty);
             }
         }
     }
