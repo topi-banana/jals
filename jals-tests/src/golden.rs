@@ -22,8 +22,10 @@
 //!   impossibility. It is not reached yet.
 //! - **T2** (`palantir`, `eclipse`, `intellij`) — these three resolve layout with
 //!   algorithms jals deliberately does not port (`DESIGN.md` §11 conclusion 1),
-//!   so byte match is **not promised**. Their exact-match column sits near zero
-//!   by design; mean similarity is the number that tracks convergence.
+//!   so byte match is **not promised**. Where a T2 exact rate is nonetheless high
+//!   — Palantir is a google-java-format fork, so much of its layout coincides with
+//!   the ported engine's — that is incidental, not a contract. Mean similarity is
+//!   the number that tracks convergence.
 //!
 //! Because a byte-equal rate alone would hide progress — one space of difference
 //! sinks a whole file — every target reports a **similarity** metric (the mean
@@ -427,8 +429,8 @@ impl GoldenReport {
             "Similarity of `jals-fmt` output, configured for each target's style, to that \
              formatter's own output. Only **T1** (google-java-format) promises a byte match; \
              the **T2** targets resolve line breaks with algorithms jals does not port \
-             (`jals-fmt/DESIGN.md` §18), so their exact rate is near zero by design and mean \
-             similarity is the number that tracks convergence.\n\n",
+             (`jals-fmt/DESIGN.md` §18), so any exact match they show is incidental rather \
+             than contracted, and mean similarity is the number that tracks convergence.\n\n",
         );
         out.push_str(
             "| corpus | reference | tier | pairs | exact | exact rate | mean similarity |\n",

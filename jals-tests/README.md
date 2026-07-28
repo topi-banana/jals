@@ -45,10 +45,11 @@ given, and the accuracy tier `jals-fmt/DESIGN.md` §18.1 promises:
 
 > **It does not pass/fail.** Only `gjf` aims at a byte match. The other three resolve line
 > breaks with algorithms jals deliberately does not port (§11 conclusion 1: Palantir's
-> backtracking search, Eclipse's penalty minimization, IntelliJ's rewind), so their **exact
-> rate sits near zero by design** and the number that means something is mean similarity. A
-> byte-equal rate alone would also hide progress — one space of difference sinks a whole
-> file — which is why every target reports similarity.
+> backtracking search, Eclipse's penalty minimization, IntelliJ's rewind), so **any exact
+> match they show is incidental** — Palantir is a GJF fork, so much of its layout coincides
+> with the ported engine's, while Eclipse and IntelliJ sit near zero — and the number that
+> means something is mean similarity. A byte-equal rate alone would also hide progress — one
+> space of difference sinks a whole file — which is why every target reports similarity.
 
 > **What the numbers mean today.** The `gjf` byte match is the goal, not a reached state. The
 > harness exists so convergence is measured rather than asserted, and each of the four targets
