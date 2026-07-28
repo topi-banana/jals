@@ -2760,23 +2760,32 @@ impl Lowering<'_> {
     ) -> Result<()> {
         for rule in rules {
             insn.end();
+            // Three body forms: an expression, a block, or a `throw`. In an expression `switch` the
+            // first *is* the arm's value; in a statement one it is evaluated for its effect.
             if let Some(value) = rule.expr() {
                 match result {
-                    // In an expression `switch` the arm's expression *is* its value.
                     Some(ty) => self.arm_value(&value, ty, insn)?,
                     None => self.discard(&value, insn)?,
                 }
-            } else if let Some(block) = rule.syntax().children().find_map(ast::Block::cast) {
-                if result.is_some() {
-                    return Err(WasmError::Unsupported(
-                        "a `switch` expression arm with a block body",
-                    ));
-                }
+                insn.br(insn.depth() - leave);
+                continue;
+            }
+            if let Some(block) = rule.syntax().children().find_map(ast::Block::cast) {
                 self.block(&block, insn)?;
+            } else if let Some(thrown) = rule.syntax().children().find_map(ast::ThrowStmt::cast) {
+                self.stmt(&ast::Stmt::Throw(thrown), insn)?;
             } else {
                 return Err(WasmError::Unsupported("a `switch` arm of this form"));
             }
-            insn.br(insn.depth() - leave);
+            // A block arm of an expression `switch` leaves by `yield`, which has already branched to the
+            // same label carrying the value — so falling off the arm's own end is what Java's "every arm
+            // yields or throws" rule says cannot happen, and branching here would branch with no value.
+            // The instruction states that rule to the validator, exactly as the colon form's does.
+            if result.is_some() {
+                insn.unreachable();
+            } else {
+                insn.br(insn.depth() - leave);
+            }
         }
         Ok(())
     }

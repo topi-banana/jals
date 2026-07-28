@@ -1640,6 +1640,45 @@ public class Pick {
     assert_invoke(&[source], "layered", &["3"], "9");
 }
 
+/// An arrow arm whose body is a block, in a `switch` *expression*.
+///
+/// The arm leaves by `yield`, which has already branched to the `switch`'s block carrying the value —
+/// so the arm's own end must not branch again, having nothing to branch with. A `throw` arm is the other
+/// form that never reaches its end. Both stand for Java's rule that every arm yields or throws.
+#[test]
+fn an_arrow_arm_with_a_block_body_yields() {
+    let source = r"
+public class Unknown extends RuntimeException {
+    Unknown() {}
+}
+
+public class Grade {
+    public static int of(int n) {
+        return switch (n) {
+            case 0 -> {
+                int doubled = n + 40;
+                yield doubled + 2;
+            }
+            case 1 -> {
+                // A `yield` from inside an `if` reaches the same place: the depth comes from the
+                // emitter, not from how deeply the source nested it.
+                if (n > 0) {
+                    yield 7;
+                }
+                yield 8;
+            }
+            // An expression arm still branches with its own value, alongside the block ones.
+            case 2 -> 99;
+            default -> throw new Unknown();
+        };
+    }
+}
+";
+    assert_invoke(&[source], "of", &["0"], "42");
+    assert_invoke(&[source], "of", &["1"], "7");
+    assert_invoke(&[source], "of", &["2"], "99");
+}
+
 /// A multi-catch, lowered as one arm *per declared type*.
 ///
 /// The variable's type is the least upper bound of the declared types, which this backend does not
