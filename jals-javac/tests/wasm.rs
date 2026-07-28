@@ -2374,3 +2374,61 @@ public class Count {
     assert_invoke(&[source], "plain", &[], "4");
     assert_invoke(&[source], "negated", &[], "2");
 }
+
+/// A pattern `switch` on wasm, both syntaxes, with a guard.
+///
+/// A pattern is not a constant, so there is nothing for a `br_table` to index on: the arms' types are
+/// tested in source order with `ref.test` and the first match wins (§14.11.1). The guard runs after its
+/// pattern bound, because it is written in terms of the binding. A wasm local starts at its type's
+/// default, so unlike the JVM's there is nothing to arrange for the arms that did not match.
+#[test]
+fn a_case_pattern_dispatches_on_the_selector_type() {
+    let source = r"
+public class Shape { int area() { return 0; } }
+public class Square extends Shape { int side = 3; int area() { return side * side; } }
+public class Circle extends Shape { int r = 2; int area() { return r * r * 3; } }
+
+public class Which {
+    static int classify(Shape s) {
+        return switch (s) {
+            case Square q when q.side > 5 -> 999;
+            case Square q -> q.side;
+            case Circle c -> c.r * 100;
+            default -> -1;
+        };
+    }
+
+    // The colon form dispatches the same way; only what happens after the arm is entered differs.
+    static int colon(Shape s) {
+        switch (s) {
+            case Circle c:
+                return c.r;
+            case Square q:
+                return q.side * 10;
+            default:
+                return 0;
+        }
+    }
+
+    public static int square() { return classify(new Square()); }
+
+    // The guard is taken here and skipped above, on the same arm.
+    public static int guarded() {
+        Square q = new Square();
+        q.side = 9;
+        return classify(q);
+    }
+
+    public static int circle() { return classify(new Circle()); }
+    public static int plain() { return classify(new Shape()); }
+    public static int colonSquare() { return colon(new Square()); }
+    public static int colonCircle() { return colon(new Circle()); }
+}
+";
+    assert_invoke(&[source], "square", &[], "3");
+    assert_invoke(&[source], "guarded", &[], "999");
+    assert_invoke(&[source], "circle", &[], "200");
+    assert_invoke(&[source], "plain", &[], "-1");
+    assert_invoke(&[source], "colonSquare", &[], "30");
+    assert_invoke(&[source], "colonCircle", &[], "2");
+}

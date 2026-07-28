@@ -1819,6 +1819,13 @@ struct Lowering<'a> {
 struct Arm {
     /// The `case` keys that reach this arm. Empty for a bare `default`.
     keys: Vec<i32>,
+    /// The `case T t` patterns that reach this arm, in the order they are written.
+    ///
+    /// A pattern is not a constant, so it indexes no `br_table`: a `switch` with one dispatches by
+    /// testing each arm's type in source order, which is what §14.11.1 says a pattern `switch` does.
+    patterns: Vec<SyntaxNode>,
+    /// The arm's `when` clause, which runs after the pattern bound and before the arm is taken.
+    guard: Option<ast::Expr>,
     /// Whether one of this arm's labels is `default`.
     is_default: bool,
 }
@@ -2889,37 +2896,112 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// One arm's `case` keys. `default` contributes none.
+    /// One arm's `case` keys and patterns. `default` contributes neither.
     fn arm(labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
         let mut keys = Vec::new();
+        let mut patterns = Vec::new();
+        let mut guard = None;
         let mut is_default = false;
         for label in labels {
             if label.is_default() {
                 is_default = true;
             }
-            // A pattern label tests a *type* and binds a name; a guard is a condition. Neither is a
-            // constant a jump table can index on.
-            if label.syntax().children().any(|child| {
-                matches!(
-                    child.kind(),
-                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-                )
-            }) {
-                return Err(WasmError::Unsupported("a `case` pattern"));
-            }
+            // A *record* pattern deconstructs and an unnamed one binds nothing under a name this could
+            // find; both are a different lowering. A type pattern tests a type and binds one name.
             if label
                 .syntax()
                 .children()
-                .any(|child| ast::Guard::cast(child).is_some())
+                .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
             {
-                return Err(WasmError::Unsupported("a guarded `case`"));
+                return Err(WasmError::Unsupported("a `case` pattern"));
             }
-            for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                keys.push(Self::switch_key(&value)?);
+            patterns.extend(
+                label
+                    .syntax()
+                    .children()
+                    .filter(|child| child.kind() == TYPE_PATTERN),
+            );
+            if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
+                guard = clause.condition();
+                if guard.is_none() {
+                    return Err(WasmError::Unsupported("a guarded `case`"));
+                }
+            }
+            // A `Guard`'s condition is an expression child of the label too, so the keys are read only
+            // when there is no guard to have contributed one.
+            if guard.is_none() {
+                for value in label.syntax().children().filter_map(ast::Expr::cast) {
+                    keys.push(Self::switch_key(&value)?);
+                }
             }
         }
-        Ok(Arm { keys, is_default })
+        Ok(Arm {
+            keys,
+            patterns,
+            guard,
+            is_default,
+        })
+    }
+
+    /// A pattern `switch`: each arm's type is tested in source order, and the first match wins.
+    ///
+    /// No `br_table`, because a pattern is not a constant and there is nothing to index on. §14.11.1
+    /// gives the first *matching* label, so the tests are emitted in the order they are written and a
+    /// `default` is only reached by falling out of all of them — which is what `fallback` already is.
+    /// The binding is stored inside the test that matched; a wasm local starts at its type's default,
+    /// so the other arms need nothing.
+    fn dispatch_patterns(
+        &mut self,
+        selector: &ast::Expr,
+        arms: &[Arm],
+        fallback: u32,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        // A constant beside a pattern would need the jump table this does not build.
+        if arms.iter().any(|arm| !arm.keys.is_empty()) {
+            return Err(WasmError::Unsupported("a `switch` mixing key types"));
+        }
+        let selector_ty = self
+            .expr(selector, insn)?
+            .ok_or(WasmError::Unsupported("a `switch` with no selector"))?;
+        let scratch = self.scratch(selector_ty);
+        insn.local_set(scratch);
+        for (index, arm) in arms.iter().enumerate() {
+            // A bare `default` matches nothing here: it is where the chain lands when every test failed.
+            if arm.patterns.is_empty() && arm.guard.is_none() {
+                continue;
+            }
+            let target = u32::try_from(index).map_err(|_| WasmError::TooLarge)?;
+            for pattern in &arm.patterns {
+                let ty = pattern
+                    .children()
+                    .find_map(ast::Type::cast)
+                    .ok_or(WasmError::Unsupported("a `case` pattern with no type"))?;
+                let heap = self.named_type(&ty)?;
+                let bound = self
+                    .def_at(pattern)
+                    .ok_or(WasmError::Unsupported("a `case` pattern with no binding"))?;
+                let slot = self.declare_local(bound)?;
+                insn.local_get(scratch).ref_test(heap, false);
+                insn.if_();
+                // Bound before the guard runs, because the guard is written in terms of the binding.
+                insn.local_get(scratch).ref_cast(heap, false);
+                insn.local_set(slot);
+                if let Some(guard) = &arm.guard {
+                    self.expr(guard, insn)?
+                        .ok_or(WasmError::Unsupported("a guarded `case`"))?;
+                    // Inside the test's `if`, so the branch crosses one more structure than the depth
+                    // the arms' blocks were opened at — the same offset the unguarded `br` uses.
+                    insn.br_if(target + 1);
+                } else {
+                    insn.br(target + 1);
+                }
+                insn.end();
+            }
+        }
+        insn.br(fallback);
+        Ok(())
     }
 
     /// The integral constant a `case` label names.
@@ -2979,6 +3061,12 @@ impl Lowering<'_> {
         fallback: u32,
         insn: &mut Insn,
     ) -> Result<()> {
+        if arms
+            .iter()
+            .any(|arm| !arm.patterns.is_empty() || arm.guard.is_some())
+        {
+            return self.dispatch_patterns(selector, arms, fallback, insn);
+        }
         // The selector has to *already* be an `i32`. Converting one that is not would narrow it
         // silently: a `long` selector is not a Java program, but an `i32.wrap_i64` would turn it into
         // one that switches on the low 32 bits.
