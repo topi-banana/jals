@@ -4143,3 +4143,96 @@ public class Boxed {
         "true\ntrue\ntrue\nge\ntrue\ntrue\ntrue\nfalse\n"
     );
 }
+
+/// The three `AnnotationDefault` forms that are not a constant.
+///
+/// Each has its own encoding, and the tag is what tells a reader which one it is looking at. An enum
+/// constant carries the enum's *descriptor* and the constant's name; a class literal carries the
+/// descriptor rather than the internal name; an array carries one value per element, each at the
+/// *component* type — which is the only thing that says what tag each of them has.
+#[test]
+fn an_annotation_default_encodes_an_enum_a_class_and_an_array() {
+    let source = r"
+enum Colour { RED, GREEN }
+
+public @interface Wide {
+    Colour hue() default Colour.GREEN;
+    Class<?> kind() default String.class;
+    int[] sizes() default {1, 2, 3};
+    String[] names() default {};
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        // Something has to reference it for the JVM to load and verify the annotation class at all.
+        System.out.println(Wide.class.getName());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let wide = classes
+        .iter()
+        .find(|class| class.internal_name == "Wide")
+        .expect("the annotation type");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(wide.bytes.as_slice()))
+        .expect("reparse");
+    let utf8 = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let defaults: Vec<(String, String)> = class
+        .methods
+        .iter()
+        .filter_map(|method| {
+            let name = utf8(method.name_index);
+            let value = method
+                .attributes
+                .iter()
+                .find_map(|attribute| match &attribute.body {
+                    jals_classfile::AttributeBody::AnnotationDefault(value) => Some(value),
+                    _ => None,
+                })?;
+            let rendered = match value {
+                jals_classfile::ElementValue::Enum {
+                    type_name_index,
+                    const_name_index,
+                } => format!(
+                    "enum {} {}",
+                    utf8(*type_name_index),
+                    utf8(*const_name_index)
+                ),
+                jals_classfile::ElementValue::Class { class_info_index } => {
+                    format!("class {}", utf8(*class_info_index))
+                }
+                jals_classfile::ElementValue::Array(items) => format!(
+                    "array {}",
+                    items
+                        .iter()
+                        .map(|item| match item {
+                            jals_classfile::ElementValue::Const { tag, .. } =>
+                                char::from(*tag).to_string(),
+                            _ => "?".to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                jals_classfile::ElementValue::Const { tag, .. } => {
+                    format!("const {}", char::from(*tag))
+                }
+                jals_classfile::ElementValue::Annotation(_) => "annotation".to_owned(),
+            };
+            Some((name, rendered))
+        })
+        .collect();
+    assert_eq!(
+        defaults,
+        [
+            ("hue".to_owned(), "enum LColour; GREEN".to_owned()),
+            ("kind".to_owned(), "class Ljava/lang/String;".to_owned()),
+            ("sizes".to_owned(), "array I,I,I".to_owned()),
+            ("names".to_owned(), "array ".to_owned()),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "Wide\n");
+}

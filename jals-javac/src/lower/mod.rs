@@ -1745,8 +1745,8 @@ impl Compile {
     ///
     /// The tag comes from the element's *declared* type, not from the literal: `byte b() default 1`
     /// writes tag `B` over an `Integer` entry, and a reader that trusted the literal would see an `int`
-    /// where a `byte` belongs. A constant expression is the only form here — an enum constant, a class
-    /// literal, a nested annotation, and an array each have their own encoding and are reported.
+    /// where a `byte` belongs. An enum constant, a class literal, and an array each have their own
+    /// encoding, and the tag is what tells a reader which one it is looking at.
     fn element_value(
         value: &ast::Expr,
         declared: &jals_hir::Ty,
@@ -1761,6 +1761,47 @@ impl Compile {
                 .find(|token| !token.kind().is_trivia())
                 .map(|token| token.text().to_owned())
         };
+        match value {
+            // `{…}` — every element at the *component* type, which is the only thing that says what tag
+            // each of them carries. An empty one is legal and is what `default {}` means.
+            ast::Expr::ArrayInit(init) => {
+                let Ty::Array(element) = declared else {
+                    return Err(LowerError::Unsupported(
+                        "an annotation default array outside an array type",
+                    ));
+                };
+                let mut out = Vec::new();
+                for item in init.syntax().children().filter_map(ast::Expr::cast) {
+                    out.push(Self::element_value(&item, element, context, pool)?);
+                }
+                return Ok(jals_classfile::ElementValue::Array(out));
+            }
+            // `T.class` — the tag is `c` and the payload is the *descriptor*, not the internal name.
+            // The reference form's base is parsed as an expression, a bare `String` being a name
+            // reference, so it is resolved as a type name rather than read as a `TYPE` node.
+            ast::Expr::ClassLiteral(literal) => {
+                let named = match (literal.ty(), literal.expr()) {
+                    (Some(ty), _) => context.ty_of_type(&ty)?,
+                    (None, Some(base)) => context.ty_of_name(base.syntax())?,
+                    (None, None) => return Err(unsupported()),
+                };
+                let descriptor = Descriptor::descriptor_of(&named, context.index)?.to_string();
+                return Ok(jals_classfile::ElementValue::Class {
+                    class_info_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                });
+            }
+            // `Colour.RED` — an enum constant, named by the enum's descriptor and the constant's own
+            // name. The *declared* type says which enum, for the same reason it says which tag.
+            ast::Expr::FieldAccess(access) if matches!(declared, Ty::Class(_)) => {
+                let name = access.field().ok_or_else(unsupported)?;
+                let descriptor = Descriptor::descriptor_of(declared, context.index)?.to_string();
+                return Ok(jals_classfile::ElementValue::Enum {
+                    type_name_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                    const_name_index: pool.utf8_index(&name).ok_or(AsmError::PoolFull)?,
+                });
+            }
+            _ => {}
+        }
         let ast::Expr::Literal(literal) = value else {
             return Err(unsupported());
         };
