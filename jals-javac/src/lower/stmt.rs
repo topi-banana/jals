@@ -482,7 +482,8 @@ impl Stmt {
             None => emit.slots.declare_temporary(1),
         };
         Expr::lower_as(&value, &ty, context, emit)?;
-        emit.asm.store(slot)?;
+        let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
+        emit.asm.store_as(slot, &descriptor)?;
         Ok((slot, owner, interface))
     }
 
@@ -610,7 +611,8 @@ impl Stmt {
             };
             // Converted to the *declared* type, which is where `long n = 1;` gets its `i2l`.
             Expr::lower_as(value, &ty, context, emit)?;
-            emit.asm.store(slot)?;
+            let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
+            emit.asm.store_as(slot, &descriptor)?;
         }
         Ok(())
     }
@@ -996,7 +998,14 @@ impl Stmt {
         emit.asm.load(array)?;
         emit.asm.load(cursor)?;
         emit.asm.array_load(&descriptor)?;
-        emit.asm.store(variable)?;
+        // The element descriptor is the array's, and the binding's declared type may be wider than
+        // it (`for (Object o : strings)`), so the slot is typed by the declaration.
+        let declared = Descriptor::descriptor_of(
+            &context.inference.type_of_def(binding).clone(),
+            context.index,
+        )?
+        .to_string();
+        emit.asm.store_as(variable, &declared)?;
 
         Self::in_scope(labels, done, Some(next), emit, |emit| {
             Self::body(statement.body().as_ref(), context, emit)
@@ -1070,7 +1079,8 @@ impl Stmt {
             .invoke_interface(ITERATOR, "next", "()Ljava/lang/Object;")?;
         emit.asm
             .check_cast(&Descriptor::class_entry(&element, context.index)?)?;
-        emit.asm.store(variable)?;
+        let declared = Descriptor::descriptor_of(&element, context.index)?.to_string();
+        emit.asm.store_as(variable, &declared)?;
 
         Self::in_scope(labels, done, Some(next), emit, |emit| {
             Self::body(statement.body().as_ref(), context, emit)

@@ -4427,3 +4427,74 @@ public class Erased {
         "1\n1 null 5 null\ntrue true true true true true\n"
     );
 }
+
+/// A declared local keeps its *declared* type across a reassignment, so every frame that has to
+/// describe the slot agrees about it.
+///
+/// Three shapes, one defect. An exception handler's frame is the locals as they stood where its
+/// protected range began, so a range that reassigns `o` to an unrelated class described the slot as
+/// whatever was written first and the JVM answered `VerifyError: Stack map does not match the one at
+/// exception handler`. A `synchronized` block and a try-with-resources build the same kind of range.
+/// A loop is the same defect one step earlier: the back edge carries the reassigned type into a
+/// header that recorded the first one, which the assembler itself rejects as an incompatible frame.
+#[test]
+fn a_reassigned_local_keeps_its_declared_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Retyped {
+    interface Shape { String name(); }
+    static class Square implements Shape { public String name() { return "square"; } }
+    static class Circle implements Shape { public String name() { return "circle"; } }
+    static class Res implements AutoCloseable { public void close() {} }
+
+    public static void main(String[] args) {
+        Object o = "start";
+        try {
+            o = Integer.valueOf(7);
+            throw new RuntimeException("boom");
+        } catch (RuntimeException e) {
+            System.out.println("caught " + o.toString());
+        }
+
+        Shape s = new Square();
+        try {
+            s = new Circle();
+            throw new IllegalStateException("x");
+        } catch (IllegalStateException e) {
+            System.out.println(s.name());
+        }
+
+        Object guarded = "before";
+        Object lock = new Object();
+        synchronized (lock) {
+            guarded = Integer.valueOf(1);
+        }
+        System.out.println(guarded.toString());
+
+        Object held = "before";
+        try (Res r = new Res()) {
+            held = Integer.valueOf(2);
+        }
+        System.out.println(held.toString());
+
+        Object looped = "start";
+        for (int i = 0; i < 2; i++) {
+            System.out.println(looped.toString());
+            looped = Integer.valueOf(i);
+        }
+
+        // A for-each binding declared wider than the array it walks is the same slot question.
+        String[] names = { "a", "b" };
+        for (Object each : names) {
+            System.out.println(each.toString());
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Retyped"),
+        "caught 7\ncircle\n1\n2\nstart\n0\na\nb\n"
+    );
+}

@@ -24,7 +24,13 @@ use crate::lower::{Context, Emit, LowerError, Result};
 /// emitted.
 pub(crate) enum Place {
     /// A local variable or parameter.
-    Local { slot: u16, ty: Ty },
+    Local {
+        slot: u16,
+        /// The declaration's field descriptor, which is the type the slot keeps across a write —
+        /// see [`Assembler::store_as`].
+        descriptor: String,
+        ty: Ty,
+    },
     /// A `static` field, which needs no receiver.
     Static {
         owner: String,
@@ -80,9 +86,11 @@ impl Place {
         let member = match context.def_at(name.syntax()) {
             Some(id) => {
                 if let Some(slot) = emit.slots.slot_of(id) {
+                    let ty = context.inference.type_of_def(id).clone();
                     return Ok(Self::Local {
                         slot,
-                        ty: context.inference.type_of_def(id).clone(),
+                        descriptor: Descriptor::descriptor_of(&ty, context.index)?.to_string(),
+                        ty,
                     });
                 }
                 Expr::own_field(id, context)
@@ -245,7 +253,9 @@ impl Place {
             asm.dup_below(self.words())?;
         }
         match self {
-            Self::Local { slot, .. } => asm.store(*slot),
+            Self::Local {
+                slot, descriptor, ..
+            } => asm.store_as(*slot, descriptor),
             Self::Static {
                 owner,
                 name,

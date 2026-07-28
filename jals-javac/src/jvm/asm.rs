@@ -512,10 +512,11 @@ impl<'pool> Assembler<'pool> {
     /// stack.
     ///
     /// Those locals describe the whole range, which is what the verifier demands: the state at
-    /// every protected instruction has to be assignable to this frame.
-    /// [`Slots`](crate::lower) never reuses a local slot, so a local live where the range began
-    /// keeps its type throughout it, and one the range itself declares reads as `Top` here — which
-    /// every state is assignable to (JVMS §4.10.1.2).
+    /// every protected instruction has to be assignable to this frame. A local live where the range
+    /// began keeps its type throughout it — [`Slots`](crate::lower) never reuses a slot, and
+    /// [`store_as`](Self::store_as) types a declared one by its declaration, so neither a reuse nor a
+    /// reassignment can retype it. One the range itself declares reads as `Top` here, which every
+    /// state is assignable to (JVMS §4.10.1.2).
     ///
     /// The entry always carries a stack-map frame. Nothing in the item stream jumps here to say
     /// so, so it is marked as a target rather than discovered as one.
@@ -840,9 +841,45 @@ impl<'pool> Assembler<'pool> {
         self.emit(instruction, &[], Some(ty))
     }
 
-    /// Pop the top of the stack into local slot `index`.
+    /// Pop the top of the stack into local slot `index`, typing the slot by the value written.
+    ///
+    /// For a slot the source *declared*, use [`store_as`](Self::store_as) instead: a declared local
+    /// keeps its declared type however narrow the value written into it happens to be. This form is
+    /// for the slots a lowering takes for itself, where the value written *is* the type.
     pub fn store(&mut self, index: u16) -> Result<()> {
         let ty = self.state.peek().ok_or(AsmError::StackUnderflow)?.clone();
+        self.store_slot(index, ty)
+    }
+
+    /// Pop the top of the stack into local slot `index`, which the source declared as `descriptor`.
+    ///
+    /// The slot keeps the *declared* type rather than the written value's: a `String` assigned to an
+    /// `Object` local leaves an `Object` behind, which is what javac records. That is the property
+    /// [`Slots`](crate::lower) states — a slot's type is fixed for the whole method — and it is not
+    /// something monotonic allocation alone can give, because a reassignment retypes a slot the
+    /// allocator never reused.
+    ///
+    /// An exception handler is where the difference shows. It is entered from *any* instruction in
+    /// its protected range, so [`bind_handler`](Self::bind_handler) gives it the range's start state;
+    /// a range that reassigns a local to an unrelated type would otherwise describe that slot as
+    /// whatever happened to be written first, and the verifier rejects the merge. A backward jump
+    /// fails the same way earlier, as an [`IncompatibleFrame`](AsmError::IncompatibleFrame) at the
+    /// loop header.
+    pub fn store_as(&mut self, index: u16, descriptor: &str) -> Result<()> {
+        let declared = Self::field_verification_type(self.pool, descriptor)?;
+        // The value has to be *storable* in the slot, which the declared type alone cannot say: the
+        // hierarchy is not here. What it can catch is a lowering that left the wrong kind of value
+        // behind — an unboxed reference where an `int` is due, and the reverse.
+        let actual = self.state.peek().ok_or(AsmError::StackUnderflow)?;
+        if !Self::compatible(&declared, actual) {
+            return Err(AsmError::TypeMismatch);
+        }
+        self.store_slot(index, declared)
+    }
+
+    /// The shared body of [`store`](Self::store) and [`store_as`](Self::store_as): pick the opcode
+    /// from `ty`, pop the value, and record `ty` as what the slot now holds.
+    fn store_slot(&mut self, index: u16, ty: VerificationType) -> Result<()> {
         let instruction = match (&ty, index) {
             (VerificationType::Integer, 0) => Instruction::Istore0,
             (VerificationType::Integer, 1) => Instruction::Istore1,

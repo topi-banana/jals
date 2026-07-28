@@ -7,8 +7,14 @@
 //!
 //! Slots are never reused across disjoint scopes here. Doing so would shrink `max_locals`, and
 //! javac does it, but a reused slot changes type at the reuse point — which every stack-map frame
-//! covering it then has to describe. Allocating monotonically keeps a slot's type fixed for the
-//! whole method, which is the property that makes frame snapshots correct without a liveness pass.
+//! covering it then has to describe.
+//!
+//! What the frame snapshots actually need is a slot whose type is fixed for the whole method, and
+//! monotonic allocation is only half of that: a *reassignment* retypes a slot the allocator never
+//! reused. The other half is
+//! [`Assembler::store_as`](crate::jvm::Assembler::store_as), which types a declared slot by its
+//! declaration rather than by the value written into it. Together they are what makes a frame
+//! snapshot correct without a liveness pass.
 
 use alloc::vec::Vec;
 
