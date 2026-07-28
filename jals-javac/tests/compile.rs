@@ -4498,3 +4498,44 @@ public class Retyped {
         "caught 7\ncircle\n1\n2\nstart\n0\na\nb\n"
     );
 }
+
+/// A record's canonical constructor is the one whose parameters are its components — not merely one
+/// with as many of them.
+///
+/// `R(int a, String b)` is a legal second two-component constructor, and matching on arity alone
+/// took it for the canonical one. Nothing then synthesised the real canonical constructor, so both
+/// the `this(…)` delegation and `new R(…)` had nothing to resolve to.
+#[test]
+fn a_records_canonical_constructor_is_matched_by_component_types() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Records2 {
+    record Pair(int x, int y) {
+        // Same arity as the header, different types: a delegating constructor, not the canonical one.
+        Pair(int a, String b) {
+            this(a, b.length());
+        }
+    }
+
+    // An explicitly written canonical constructor must still replace the synthesised one, however
+    // it spells its parameter types — declaring `<init>` twice under one descriptor is not a class
+    // file a JVM loads.
+    record Named(java.lang.String label) {
+        Named(String label) {
+            this.label = label;
+        }
+    }
+
+    public static void main(String[] args) {
+        Pair viaCanonical = new Pair(1, 2);
+        Pair viaDelegate = new Pair(3, "abcd");
+        System.out.println(viaCanonical.x() + "," + viaCanonical.y());
+        System.out.println(viaDelegate.x() + "," + viaDelegate.y());
+        System.out.println(new Named("hi").label() + ".");
+    }
+}
+"#;
+    assert_eq!(run(source, "Records2"), "1,2\n3,4\nhi.\n");
+}

@@ -319,6 +319,40 @@ pub enum MemberType {
 }
 
 impl MemberType {
+    /// Whether two *written* types name the same erased one — the test for "is this constructor the
+    /// record's canonical one".
+    ///
+    /// Deliberately lenient about spelling: `String` and `java.lang.String` are one type here, and
+    /// generic arguments erase away. Lenient is the safe direction, because the two ways to be wrong
+    /// are not equally bad. Mistaking the canonical constructor for another one loses a synthesised
+    /// member and the record's own `new` stops resolving; mistaking another one for the canonical
+    /// constructor declares `<init>` twice under one descriptor, which no class file may hold.
+    fn same_erasure(&self, other: &Self) -> bool {
+        match (self.erasure_key(), other.erasure_key()) {
+            // A type that could not be read says nothing either way, so it does not rule the pair out.
+            (None, _) | (_, None) => true,
+            (Some(this), Some(that)) => this == that,
+        }
+    }
+
+    /// What erasure leaves of a written type: its own spelling and its array depth. `None` for a type
+    /// that could not be read.
+    ///
+    /// One namespace serves primitives and classes alike, because no class is spelled `int`. What is
+    /// deliberately absent is `qualified` — the spelling the source happened to use — and `args`,
+    /// which is exactly what erasure drops.
+    const fn erasure_key(&self) -> Option<(&str, u32)> {
+        match self {
+            Self::Primitive {
+                keyword: name,
+                dims,
+            }
+            | Self::Named { name, dims, .. } => Some((name.as_str(), *dims)),
+            Self::Void => Some(("void", 0)),
+            Self::Unknown => None,
+        }
+    }
+
     /// This type with one more array level.
     ///
     /// What `int... xs` needs: the `...` is the only thing saying the parameter is an `int[]`, and both
@@ -1899,13 +1933,20 @@ impl ProjectIndex {
                 .filter(|m| m.kind == DefKind::Method && m.params.is_empty())
                 .map(|m| m.name.clone())
                 .collect();
-            // Only an explicit *canonical* constructor replaces the synthesised one: arity is enough
-            // to tell them apart, and "some constructor exists" is not the same test —
-            // `record P(int x) { P() { this(0); } }` declares one and still needs the canonical one for
-            // `this(0)` to resolve.
-            let declared_canonical = members
-                .iter()
-                .any(|m| m.kind == DefKind::Constructor && m.params.len() == components.len());
+            // Only an explicit *canonical* constructor replaces the synthesised one. "Some constructor
+            // exists" is not the test — `record P(int x) { P() { this(0); } }` declares one and still
+            // needs the canonical one for `this(0)` to resolve — and neither is arity:
+            // `record P(int x, int y) { P(int a, String b) { this(a, 0); } }` is a legal second
+            // two-parameter constructor, and suppressing the canonical one on its account left both
+            // `this(a, 0)` and `new P(1, 2)` with nothing to resolve to.
+            let declared_canonical = members.iter().any(|m| {
+                m.kind == DefKind::Constructor
+                    && m.params.len() == components.len()
+                    && m.params
+                        .iter()
+                        .zip(&components)
+                        .all(|(param, (_, ty))| param.ty.same_erasure(ty))
+            });
             for (name, ty) in &components {
                 // The component's own name range: it *is* the field's declaration, which is what makes
                 // "go to definition" on the field land on the header rather than nowhere.

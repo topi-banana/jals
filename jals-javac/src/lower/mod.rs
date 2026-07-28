@@ -2361,17 +2361,8 @@ impl Compile {
         let compact = members
             .iter()
             .find(|member| Self::is_compact_constructor(member));
-        // Only an explicit *canonical* constructor replaces the synthesised one — "some constructor
-        // exists" is not the same thing. `record P(int x) { P() { this(0); } }` declares a
-        // no-argument one and still needs `<init>(I)V` for `this(0)` to have a target.
-        let declares_canonical = members.iter().any(|member| {
-            member.kind() == CONSTRUCTOR_DECL
-                && member
-                    .children()
-                    .find_map(ast::ParamList::cast)
-                    .map_or(0, |list| list.params().count())
-                    == components.len()
-        });
+        let declares_canonical =
+            Self::declares_canonical_constructor(context, members, &descriptors)?;
         if compact.is_some() || !declares_canonical {
             methods.push(Self::canonical_constructor(
                 context,
@@ -2651,6 +2642,59 @@ impl Compile {
             _ => "Ljava/lang/Object;",
         };
         alloc::format!("({parameter})Ljava/lang/StringBuilder;")
+    }
+
+    /// Whether the body writes the record's *canonical* constructor — the one whose parameters are
+    /// the header's components, which is the only one that replaces the synthesised one.
+    ///
+    /// "Some constructor exists" is not the test: `record P(int x) { P() { this(0); } }` declares a
+    /// no-argument one and still needs `<init>(I)V` for `this(0)` to have a target. Neither is arity:
+    /// `record P(int x, int y) { P(int a, String b) { … } }` is a legal second two-parameter
+    /// constructor, and taking it for the canonical one left the record with no `<init>(II)V` at all.
+    ///
+    /// Compared as *descriptors*, which is the erasure a class file records — a parameter written
+    /// `java.lang.String` and a component written `String` are one type, and a mismatch there would
+    /// emit `<init>` twice under one descriptor.
+    fn declares_canonical_constructor(
+        context: &Context<'_>,
+        members: &[SyntaxNode],
+        components: &[(String, String)],
+    ) -> Result<bool> {
+        for member in members {
+            if member.kind() != CONSTRUCTOR_DECL {
+                continue;
+            }
+            let params: Vec<_> = member
+                .children()
+                .find_map(ast::ParamList::cast)
+                .into_iter()
+                .flat_map(|list| list.params())
+                .collect();
+            if params.len() != components.len() {
+                continue;
+            }
+            let mut canonical = true;
+            for (param, (_, component)) in params.iter().zip(components) {
+                let written = match context.def_at(param.syntax()) {
+                    Some(id) => {
+                        Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
+                            .to_string()
+                    }
+                    // A parameter with nothing resolved says nothing either way, and the safe
+                    // direction is to leave the declared constructor in place: emitting a second
+                    // `<init>` under its descriptor is a class file no JVM loads.
+                    None => component.clone(),
+                };
+                if &written != component {
+                    canonical = false;
+                    break;
+                }
+            }
+            if canonical {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The name token of every component in a record's header, in order.
