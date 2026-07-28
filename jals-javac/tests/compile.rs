@@ -4408,8 +4408,22 @@ public class Erased {
         Long wide = true ? 5L : null;
         String s = args.length > 0 ? "x" : null;
         System.out.println(n + " " + m + " " + wide + " " + s);
+        // Every wrapper, because the boxed form is looked up by name and a missing stub would fall
+        // back to the primitive — which is the shape that stores a `null` into an `int`.
+        Boolean flag = args.length > 0 ? true : null;
+        Character ch = args.length > 0 ? 'x' : null;
+        Byte small = args.length > 0 ? (byte) 1 : null;
+        Short mid = args.length > 0 ? (short) 1 : null;
+        Float thin = args.length > 0 ? 1.5f : null;
+        Double fat = args.length > 0 ? 1.5 : null;
+        System.out.println(
+            (flag == null) + " " + (ch == null) + " " + (small == null) + " "
+                + (mid == null) + " " + (thin == null) + " " + (fat == null));
     }
 }
 "#;
-    assert_eq!(run(source, "Erased"), "1\n1 null 5 null\n");
+    assert_eq!(
+        run(source, "Erased"),
+        "1\n1 null 5 null\ntrue true true true true true\n"
+    );
 }
