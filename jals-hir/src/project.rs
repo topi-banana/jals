@@ -1963,14 +1963,18 @@ impl ProjectIndex {
                         name: name.text().to_owned(),
                         kind: DefKind::Method,
                         file,
-                        // Synthetic, so no range — the field above already owns the header's.
+                        // No *declaration* range: the field above owns the header's, and two members
+                        // sharing one would collide in the declaration-site map, where first wins.
                         name_range: 0..0,
                         ty: ty.clone(),
                         modifiers: MemberModifiers::default(),
                         params: Vec::new(),
                         varargs: false,
                         throws: Vec::new(),
-                        source_location: None,
+                        // Where it is *written*, though, is the component — so "go to definition" on
+                        // `p.x()` lands on the header. This is the same field the classpath uses to
+                        // point a `.class` member at real source, and it is what an editor prefers.
+                        source_location: Some((file, Collect::byte_range(name))),
                     });
                 }
             }
