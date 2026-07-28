@@ -2611,23 +2611,60 @@ public class Places {
     );
 }
 
-/// A `record` that leaves any of the three `Object` methods to the compiler is reported.
+/// A `record`'s `equals`, `hashCode`, and `toString`, all three synthesised.
 ///
-/// `java.lang.Record` declares `equals`, `hashCode`, and `toString` abstract. javac derives all three
-/// through `invokedynamic` to `ObjectMethods.bootstrap`, which needs constant-pool entries this
-/// compiler does not build yet — and a class file that simply omits them loads and then throws
-/// `AbstractMethodError` at the first call, which is a run-time failure a compiler can report instead.
+/// `java.lang.Record` declares them abstract, so a record without them loads perfectly and then throws
+/// `AbstractMethodError` at the first call. javac derives them through `invokedynamic`; written out they
+/// are the same three methods. Two of the three have real semantics to get wrong: a `double` component
+/// compares with `Double.compare(a, b) == 0`, which makes two `NaN`s equal and `0.0` and `-0.0`
+/// different, and its hash is its *bits*, so the two values `equals` calls equal also hash alike.
+/// `toString`'s format §8.10.3 specifies exactly.
 #[test]
-fn a_record_without_the_object_methods_is_reported() {
-    let error = compile("record P(int x) {}").expect_err("the three methods are required");
-    assert!(
-        matches!(
-            error,
-            LowerError::Unsupported(
-                "a `record` that does not declare `equals`, `hashCode`, and `toString`"
-            )
-        ),
-        "got {error}"
+fn a_record_synthesises_the_three_object_methods() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+record Full(int i, long l, double d, boolean b, char c, String s) {}
+
+record Empty() {}
+
+public class Records {
+    public static void main(String[] args) {
+        Full a = new Full(1, 2L, 3.5, true, 'x', "hi");
+        Full same = new Full(1, 2L, 3.5, true, 'x', "hi");
+        Full other = new Full(1, 2L, 3.5, true, 'x', "bye");
+        // `toString()` written out: `println(a)` selects `println(String)` over `println(Object)`,
+        // because a project class is conservatively assignable to an external name — a `jals-hir`
+        // leniency this test is not the place to change.
+        System.out.println(a.toString());
+        System.out.println(a.equals(same));
+        System.out.println(a.equals(other));
+        System.out.println(a.equals("not a record"));
+        System.out.println(a.hashCode() == same.hashCode());
+        // A `null` component has to be comparable and hashable, which is what `Objects.equals` and
+        // `Objects.hashCode` are for — `s.equals(...)` would throw and `s.hashCode()` too.
+        Full none = new Full(1, 2L, 3.5, true, 'x', null);
+        System.out.println(none.equals(new Full(1, 2L, 3.5, true, 'x', null)));
+        System.out.println(none.hashCode() == new Full(1, 2L, 3.5, true, 'x', null).hashCode());
+        System.out.println(none.toString());
+        // `Double.compare` calls two NaNs equal where `==` calls them different.
+        Full nan = new Full(1, 2L, 0.0 / 0.0, true, 'x', "hi");
+        System.out.println(nan.equals(new Full(1, 2L, 0.0 / 0.0, true, 'x', "hi")));
+        System.out.println(new Empty().equals(new Empty()));
+        System.out.println(new Empty().toString());
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Records"),
+        concat!(
+            "Full[i=1, l=2, d=3.5, b=true, c=x, s=hi]\n",
+            "true\nfalse\nfalse\ntrue\n",
+            "true\ntrue\n",
+            "Full[i=1, l=2, d=3.5, b=true, c=x, s=null]\n",
+            "true\ntrue\nEmpty[]\n",
+        )
     );
 }
 

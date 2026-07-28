@@ -69,7 +69,7 @@ use alloc::vec::Vec;
 
 use jals_classfile::{
     ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, FieldInfo, MethodAccessFlags,
-    MethodDescriptor, MethodInfo,
+    MethodDescriptor, MethodInfo, VerificationType,
 };
 use jals_hir::{DefKind, FileId, ItemId, ProjectIndex, Resolved, TypeInference};
 use jals_syntax::SyntaxKind::{
@@ -80,7 +80,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::{DescError, Descriptor};
-use crate::jvm::{AsmError, Assembler, Receiver};
+use crate::jvm::{AsmError, Assembler, BinOp, Branch, Compare, Numeric, Receiver};
 use crate::lower::slots::Slots;
 
 /// The supertype every `enum` has, and which its source never writes.
@@ -990,27 +990,6 @@ impl Compile {
         fields: &mut Vec<FieldInfo>,
         methods: &mut Vec<MethodInfo>,
     ) -> Result<Vec<jals_classfile::RecordComponentInfo>> {
-        // The three `Object` methods a record must have. Emitting the header's members without them
-        // produces a class the JVM loads and then cannot dispatch through.
-        for (name, arity) in [("equals", 1), ("hashCode", 0), ("toString", 0)] {
-            let declared = members.iter().any(|member| {
-                member.kind() == METHOD_DECL
-                    && ast::MethodDecl::cast(member.clone())
-                        .and_then(|decl| decl.name())
-                        .as_deref()
-                        == Some(name)
-                    && ast::MethodDecl::cast(member.clone())
-                        .and_then(|decl| decl.params())
-                        .map_or(0, |list| list.params().count())
-                        == arity
-            });
-            if !declared {
-                return Err(LowerError::Unsupported(
-                    "a `record` that does not declare `equals`, `hashCode`, and `toString`",
-                ));
-            }
-        }
-
         let components = Self::record_components(node);
         let mut infos = Vec::with_capacity(components.len());
         let mut descriptors = Vec::with_capacity(components.len());
@@ -1061,7 +1040,260 @@ impl Compile {
             }
             methods.push(Self::record_accessor(context, pool, name, descriptor)?);
         }
+        // `java.lang.Record` declares all three abstract, so a record without them loads perfectly and
+        // then throws `AbstractMethodError` at the first call. javac derives them through
+        // `invokedynamic` to `ObjectMethods.bootstrap`; written out by hand they are the same three
+        // methods, and §8.10.3 leaves `hashCode`'s algorithm unspecified so any consistent one is legal.
+        let declared = |name: &str| {
+            members.iter().any(|member| {
+                member.kind() == METHOD_DECL
+                    && ast::MethodDecl::cast(member.clone())
+                        .and_then(|decl| decl.name())
+                        .as_deref()
+                        == Some(name)
+            })
+        };
+        if !declared("equals") {
+            methods.push(Self::record_equals(context, pool, &descriptors)?);
+        }
+        if !declared("hashCode") {
+            methods.push(Self::record_hash(context, pool, &descriptors)?);
+        }
+        if !declared("toString") {
+            methods.push(Self::record_string(context, pool, &descriptors)?);
+        }
         Ok(infos)
+    }
+
+    /// `equals(Object)`: identity, then the type, then every component in header order.
+    ///
+    /// A `float` or `double` component compares with `Float.compare(a, b) == 0` rather than `==`, which
+    /// is what makes two `NaN` components equal and `0.0` and `-0.0` different (§8.10.3). A reference
+    /// component goes through `Objects.equals`, which is null-safe — `==` would be identity and a bare
+    /// `a.equals(b)` would throw on a `null` component.
+    fn record_equals(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        components: &[(String, String)],
+    ) -> Result<MethodInfo> {
+        const DESCRIPTOR: &str = "(Ljava/lang/Object;)Z";
+        let name_index = pool.utf8_index("equals").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(DESCRIPTOR).ok_or(AsmError::PoolFull)?;
+        let owner = context.this_class.clone();
+        let mut asm = Assembler::new(pool, Receiver::Instance(&owner), DESCRIPTOR)?;
+        let same = asm.label();
+        let different = asm.label();
+
+        // `this == other` short-circuits, which is both faster and what every hand-written `equals`
+        // starts with.
+        asm.load(0)?;
+        asm.load(1)?;
+        asm.branch(Branch::RefSame(true), same)?;
+        asm.load(1)?;
+        asm.instance_of(&owner)?;
+        asm.branch(Branch::IntZero(Compare::Eq), different)?;
+        // The cast is safe past the `instanceof`, and the local holds it so each component reads the
+        // narrowed reference rather than casting again.
+        let other = u16::try_from(components.len() + 2).unwrap_or(u16::MAX);
+        asm.load(1)?;
+        asm.check_cast(&owner)?;
+        asm.store(other)?;
+
+        for (name, descriptor) in components {
+            asm.load(0)?;
+            asm.get_field(&owner, name, descriptor)?;
+            asm.load(other)?;
+            asm.get_field(&owner, name, descriptor)?;
+            match descriptor.as_bytes() {
+                [b'Z' | b'B' | b'S' | b'C' | b'I'] => {
+                    asm.branch(Branch::IntCmp(Compare::Ne), different)?;
+                }
+                // `branch_compare` owns the `lcmp` and the branch together, which is also where the
+                // NaN direction rule lives for the floating types it is not used for here.
+                [b'J'] => {
+                    asm.branch_compare(&VerificationType::Long, Compare::Ne, different)?;
+                }
+                [b'F'] => {
+                    asm.invoke_static("java/lang/Float", "compare", "(FF)I", false)?;
+                    asm.branch(Branch::IntZero(Compare::Ne), different)?;
+                }
+                [b'D'] => {
+                    asm.invoke_static("java/lang/Double", "compare", "(DD)I", false)?;
+                    asm.branch(Branch::IntZero(Compare::Ne), different)?;
+                }
+                _ => {
+                    asm.invoke_static(
+                        "java/util/Objects",
+                        "equals",
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                        false,
+                    )?;
+                    asm.branch(Branch::IntZero(Compare::Eq), different)?;
+                }
+            }
+        }
+
+        asm.bind(same)?;
+        asm.const_int(1)?;
+        asm.return_(Some(&VerificationType::Integer))?;
+        asm.bind(different)?;
+        asm.const_int(0)?;
+        asm.return_(Some(&VerificationType::Integer))?;
+        Ok(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        })
+    }
+
+    /// `hashCode()`: `31 * h + component`, folded over the components in header order.
+    ///
+    /// §8.10.3 leaves the algorithm unspecified — only that it is derived from the components — so any
+    /// consistent one is legal, and this is the one every hand-written `hashCode` uses.
+    fn record_hash(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        components: &[(String, String)],
+    ) -> Result<MethodInfo> {
+        let name_index = pool.utf8_index("hashCode").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index("()I").ok_or(AsmError::PoolFull)?;
+        let owner = context.this_class.clone();
+        let mut asm = Assembler::new(pool, Receiver::Instance(&owner), "()I")?;
+        asm.const_int(0)?;
+        for (name, descriptor) in components {
+            asm.const_int(31)?;
+            asm.binary(BinOp::Mul, &VerificationType::Integer)?;
+            asm.load(0)?;
+            asm.get_field(&owner, name, descriptor)?;
+            Self::component_hash(&mut asm, descriptor)?;
+            asm.binary(BinOp::Add, &VerificationType::Integer)?;
+        }
+        asm.return_(Some(&VerificationType::Integer))?;
+        Ok(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        })
+    }
+
+    /// Reduce one component's value, already on the stack, to the `int` its hash contributes.
+    ///
+    /// Each primitive gets the reduction its wrapper's `hashCode` uses, because two values that are
+    /// `equals` must hash alike: a `long` folds its halves together, and a `float` hashes its *bits* so
+    /// that two `NaN`s — which a record's `equals` calls equal — agree.
+    fn component_hash(asm: &mut Assembler<'_>, descriptor: &str) -> Result<()> {
+        match descriptor.as_bytes() {
+            // A `boolean` is already 0 or 1 on the stack, and `Boolean.hashCode` maps those to
+            // 1237 and 1231. Multiplying is how the two constants are reached without a branch.
+            [b'Z'] => {
+                asm.const_int(-6)?;
+                asm.binary(BinOp::Mul, &VerificationType::Integer)?;
+                asm.const_int(1237)?;
+                asm.binary(BinOp::Add, &VerificationType::Integer)?;
+            }
+            [b'B' | b'S' | b'C' | b'I'] => {}
+            [b'J'] => Self::fold_long(asm)?,
+            [b'F'] => asm.invoke_static("java/lang/Float", "floatToIntBits", "(F)I", false)?,
+            [b'D'] => {
+                asm.invoke_static("java/lang/Double", "doubleToLongBits", "(D)J", false)?;
+                Self::fold_long(asm)?;
+            }
+            // Null-safe, unlike a bare `hashCode()` call on a component that may be `null`.
+            _ => asm.invoke_static(
+                "java/util/Objects",
+                "hashCode",
+                "(Ljava/lang/Object;)I",
+                false,
+            )?,
+        }
+        Ok(())
+    }
+
+    /// `(int) (value ^ (value >>> 32))` over the `long` on top: `Long.hashCode`'s own reduction.
+    fn fold_long(asm: &mut Assembler<'_>) -> Result<()> {
+        // `dup` on a `long` is `dup2`; `dup_pair` is for two *separate* one-word values.
+        asm.dup()?;
+        asm.const_int(32)?;
+        asm.binary(BinOp::Ushr, &VerificationType::Long)?;
+        asm.binary(BinOp::Xor, &VerificationType::Long)?;
+        asm.convert(Numeric::Long, Numeric::Int)?;
+        Ok(())
+    }
+
+    /// `toString()`: `Name[a=1, b=2]`, which §8.10.3 *does* specify exactly.
+    ///
+    /// A `StringBuilder` chain rather than `invokedynamic`, the same way `+` on a `String` lowers.
+    fn record_string(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        components: &[(String, String)],
+    ) -> Result<MethodInfo> {
+        const BUILDER: &str = "java/lang/StringBuilder";
+        const DESCRIPTOR: &str = "()Ljava/lang/String;";
+        let name_index = pool.utf8_index("toString").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(DESCRIPTOR).ok_or(AsmError::PoolFull)?;
+        let owner = context.this_class.clone();
+        // The *simple* name, which is what the specified format uses — `Outer$Inner` prints as `Inner`.
+        let simple = owner.rsplit(['/', '$']).next().unwrap_or(&owner).to_owned();
+        let mut asm = Assembler::new(pool, Receiver::Instance(&owner), DESCRIPTOR)?;
+        asm.new_object(BUILDER)?;
+        asm.dup()?;
+        asm.invoke_special(BUILDER, "<init>", "()V", false)?;
+        let mut literal = alloc::format!("{simple}[");
+        for (index, (name, descriptor)) in components.iter().enumerate() {
+            if index > 0 {
+                literal.push_str(", ");
+            }
+            literal.push_str(name);
+            literal.push('=');
+            asm.const_string(&literal)?;
+            asm.invoke_virtual(
+                BUILDER,
+                "append",
+                "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            )?;
+            literal.clear();
+            asm.load(0)?;
+            asm.get_field(&owner, name, descriptor)?;
+            asm.invoke_virtual(BUILDER, "append", &Self::append_descriptor(descriptor))?;
+        }
+        literal.push(']');
+        asm.const_string(&literal)?;
+        asm.invoke_virtual(
+            BUILDER,
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+        )?;
+        asm.invoke_virtual(BUILDER, "toString", DESCRIPTOR)?;
+        let top = asm
+            .stack_top()
+            .ok_or(LowerError::Unsupported("a `toString` that built nothing"))?;
+        asm.return_(Some(&top))?;
+        Ok(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        })
+    }
+
+    /// The `StringBuilder.append` overload a component of this descriptor selects.
+    ///
+    /// There is no `append(byte)` or `append(short)`: both widen to `int`, which is what the JVM's
+    /// stack already holds them as.
+    fn append_descriptor(descriptor: &str) -> alloc::string::String {
+        let parameter = match descriptor.as_bytes() {
+            [b'Z'] => "Z",
+            [b'C'] => "C",
+            [b'B' | b'S' | b'I'] => "I",
+            [b'J'] => "J",
+            [b'F'] => "F",
+            [b'D'] => "D",
+            _ => "Ljava/lang/Object;",
+        };
+        alloc::format!("({parameter})Ljava/lang/StringBuilder;")
     }
 
     /// The name token of every component in a record's header, in order.

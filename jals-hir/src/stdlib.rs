@@ -110,12 +110,18 @@ public class Double extends Number {
     public static Double valueOf(double d);
     public static double parseDouble(String s);
     public double doubleValue();
+    // A record's `equals` compares `double` components with `compare(a, b) == 0` rather than `==`,
+    // which is what makes two `NaN` components equal and `0.0` and `-0.0` different (JLS §8.10.3).
+    public static int compare(double a, double b);
+    public static long doubleToLongBits(double value);
 }
 
 public class Float extends Number {
     public static Class TYPE;
     public static Float valueOf(float f);
     public float floatValue();
+    public static int compare(float a, float b);
+    public static int floatToIntBits(float value);
 }
 
 public class Void extends Object {
@@ -292,6 +298,14 @@ public class CloneNotSupportedException extends Exception {
 /// via the implicit `java.lang` import.
 const JAVA_UTIL: &str = r"
 package java.util;
+
+// A record's synthesised `equals` and `hashCode` reach these for every reference component: both are
+// null-safe, which is what makes a record with a `null` component comparable and hashable.
+public class Objects extends Object {
+    public static boolean equals(Object a, Object b);
+    public static int hashCode(Object o);
+    public static String toString(Object o);
+}
 
 public interface Iterator<E> {
     public boolean hasNext();
