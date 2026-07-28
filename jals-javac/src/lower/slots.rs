@@ -72,6 +72,12 @@ impl Slots {
         slots
     }
 
+    /// The next free slot, which is where a *synthetic* trailing parameter starts: every declared one is
+    /// already accounted for, at its own width.
+    pub(crate) const fn next_free(&self) -> u16 {
+        self.next
+    }
+
     /// Give `id` the next free slot (or `width` of them), and return it.
     pub(crate) fn declare(&mut self, id: DefId, width: u16) -> u16 {
         let slot = self.next;

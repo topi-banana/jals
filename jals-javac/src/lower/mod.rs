@@ -164,6 +164,11 @@ pub(crate) struct Context<'a> {
     /// Every inner class in this file and the class it holds an instance of, so a `new` of one can pass
     /// the enclosing instance even when the creation is not inside the inner class itself.
     inner: alloc::collections::BTreeMap<ItemId, String>,
+    /// Every local class in this file and the locals it captures, in source order. A `new` of one reads
+    /// this to pass their values; the class itself reads it to turn a capture into a field.
+    captures: alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>>,
+    /// The class being compiled, so its own captures can be told from another's.
+    this_item: ItemId,
 }
 
 /// The source-to-class-file lowering.
@@ -198,11 +203,7 @@ impl Compile {
             // own class file like any other. What it may not do is capture a local: each capture needs a
             // synthetic constructor parameter the index knows nothing about, so its constructor would
             // come out one parameter short of what a `new` passes.
-            if Self::captures_a_local(&node, resolved) {
-                return Err(LowerError::Unsupported(
-                    "a local class that captures a local",
-                ));
-            }
+
             let name = node
                 .children_with_tokens()
                 .filter_map(jals_syntax::SyntaxElement::into_token)
@@ -268,6 +269,8 @@ impl Compile {
             in_interface: is_interface,
             encloses: encloses.clone(),
             inner: Self::inner_classes_of(node, index, file),
+            captures: Self::captures_of(node, resolved, index, file),
+            this_item: item,
         };
 
         let mut pool = ConstantPool::new();
@@ -448,6 +451,20 @@ impl Compile {
         }
         if let Some(enclosing) = &encloses {
             fields.push(Self::enclosing_field(enclosing, &mut pool)?);
+        }
+        // One `final synthetic` field per captured local, which is how the class outlives the frame the
+        // local lived in.
+        for &captured in context.captures.get(&item).into_iter().flatten() {
+            let name = Self::capture_field(captured, &context);
+            let descriptor = Self::capture_descriptor(captured, &context)?;
+            fields.push(FieldInfo {
+                access_flags: FieldAccessFlags(
+                    FieldAccessFlags::FINAL | FieldAccessFlags::SYNTHETIC,
+                ),
+                name_index: pool.utf8_index(&name).ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                attributes: Vec::new(),
+            });
         }
         // A `static` field's initialiser and a `static { … }` block both run in `<clinit>`, once,
         // when the class is first used. Nothing else runs them — so dropping them produced a class
@@ -670,33 +687,89 @@ impl Compile {
         flags
     }
 
-    /// Whether a class declared inside a block reads a local from the method that encloses it.
+    /// The locals a class declared inside a block captures, in source order and without repeats.
     ///
     /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
-    /// it. Each one needs a synthetic constructor parameter, which is why one is reported rather than
-    /// emitted as a class nothing can construct.
-    fn captures_a_local(node: &SyntaxNode, resolved: &Resolved) -> bool {
+    /// it. Each becomes a `final synthetic` field and a trailing constructor parameter, which is how a
+    /// class outlives the frame the local lived in.
+    fn captured_by(node: &SyntaxNode, resolved: &Resolved) -> alloc::vec::Vec<jals_hir::DefId> {
+        let mut out = alloc::vec::Vec::new();
         let inside_block = node
             .ancestors()
             .skip(1)
             .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK);
         if !inside_block {
-            return false;
+            return out;
         }
         let range = node.text_range();
-        node.descendants_with_tokens()
+        for token in node
+            .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .any(|token| {
-                resolved
-                    .reference_at(usize::from(token.text_range().start()))
-                    .and_then(|reference| reference.resolution.def_id())
-                    .and_then(|id| {
-                        let start = u32::try_from(resolved.def(id).name_range.start).ok()?;
-                        Some(!range.contains(start.into()))
-                    })
-                    .unwrap_or(false)
-            })
+        {
+            let Some(id) = resolved
+                .reference_at(usize::from(token.text_range().start()))
+                .and_then(|reference| reference.resolution.def_id())
+            else {
+                continue;
+            };
+            let def = resolved.def(id);
+            // Only a *local* is captured: a field of the enclosing class is reached through its instance,
+            // and a type name is not a value at all.
+            if !matches!(def.kind, DefKind::Local | DefKind::Param) {
+                continue;
+            }
+            let Ok(start) = u32::try_from(def.name_range.start) else {
+                continue;
+            };
+            if !range.contains(start.into()) && !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// Every local class in the file `node` belongs to, mapped to the locals it captures.
+    fn captures_of(
+        node: &SyntaxNode,
+        resolved: &Resolved,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>> {
+        let mut out = alloc::collections::BTreeMap::new();
+        let Some(root) = node.ancestors().last() else {
+            return out;
+        };
+        for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
+            let captured = Self::captured_by(&declaration, resolved);
+            if captured.is_empty() {
+                continue;
+            }
+            let Some(name) = declaration
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            else {
+                continue;
+            };
+            if let Some(item) = index.item_by_decl(file, usize::from(name.text_range().start())) {
+                out.insert(item, captured);
+            }
+        }
+        out
+    }
+
+    /// The synthetic field name a captured local gets, as javac names it.
+    fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
+        alloc::format!("val${}", context.resolved.def(id).name)
+    }
+
+    /// The descriptor of a captured local's type.
+    fn capture_descriptor(id: jals_hir::DefId, context: &Context<'_>) -> Result<String> {
+        Ok(
+            Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
+                .to_string(),
+        )
     }
 
     /// Every inner class declared in the file `node` belongs to, mapped to the internal name of the class
@@ -1223,6 +1296,13 @@ impl Compile {
             descriptor
                 .params
                 .insert(0, jals_classfile::FieldType::Object(enclosing.clone()));
+        }
+        // The captures go *after* every declared parameter, so a declared one keeps its slot.
+        for &captured in context.captured_here() {
+            descriptor.params.push(Descriptor::descriptor_of(
+                context.inference.type_of_def(captured),
+                context.index,
+            )?);
         }
         let text = MethodDescriptor::to_string(&descriptor);
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
@@ -2010,10 +2090,16 @@ impl Compile {
         members: &[SyntaxNode],
         access: u16,
     ) -> Result<MethodInfo> {
-        let text = context.encloses.as_ref().map_or_else(
-            || "()V".to_owned(),
-            |enclosing| alloc::format!("(L{enclosing};)V"),
-        );
+        let mut params = String::new();
+        if let Some(enclosing) = &context.encloses {
+            params.push('L');
+            params.push_str(enclosing);
+            params.push(';');
+        }
+        for &captured in context.captured_here() {
+            params.push_str(&Self::capture_descriptor(captured, context)?);
+        }
+        let text = alloc::format!("({params})V");
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
@@ -2449,11 +2535,42 @@ impl Compile {
             emit.asm
                 .put_field(&context.this_class, OUTER, &alloc::format!("L{enclosing};"))?;
         }
+        // Each capture's parameter sits after every declared one, and the widths are what say where.
+        let mut slot = emit.slots.next_free();
+        for &captured in context.captured_here() {
+            let name = Self::capture_field(captured, context);
+            let descriptor = Self::capture_descriptor(captured, context)?;
+            emit.asm.load(0)?;
+            emit.asm.load(slot)?;
+            emit.asm
+                .put_field(&context.this_class, &name, &descriptor)?;
+            slot += Slots::descriptor_width(&descriptor);
+        }
         Self::initializers(context, emit, members, false)
     }
 }
 
 impl Context<'_> {
+    /// The locals a local class in this file captures.
+    pub(crate) fn captures_of_item(
+        &self,
+        item: ItemId,
+    ) -> Option<alloc::vec::Vec<jals_hir::DefId>> {
+        self.captures.get(&item).cloned()
+    }
+
+    /// Whether `id` is a local the class being compiled captures.
+    pub(crate) fn captures_local(&self, id: jals_hir::DefId) -> bool {
+        self.captured_here().contains(&id)
+    }
+
+    /// The locals the class being compiled captures.
+    fn captured_here(&self) -> &[jals_hir::DefId] {
+        self.captures
+            .get(&self.this_item)
+            .map_or(&[], alloc::vec::Vec::as_slice)
+    }
+
     /// The indexed member the name token `token` declares.
     fn member_at(&self, token: &SyntaxToken) -> Result<jals_hir::MemberId> {
         self.index

@@ -506,6 +506,12 @@ impl Expr {
             emit.asm.load(slot)?;
             return Ok(());
         }
+        // A captured local is not a local *here*: it lives in a synthetic field the constructor filled.
+        if let Some(read) = Self::captured_read(id, context)? {
+            emit.load_this()?;
+            emit.asm.get_field(&context.this_class, &read.0, &read.1)?;
+            return Ok(());
+        }
         let member = Self::own_field(id, context).ok_or_else(unresolved)?;
         let (owner, field, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
@@ -528,6 +534,22 @@ impl Expr {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW)
+    }
+
+    /// The `(field, descriptor)` a captured local is read through, or `None` when `id` is not one of the
+    /// current class's captures.
+    pub(crate) fn captured_read(
+        id: DefId,
+        context: &Context<'_>,
+    ) -> Result<Option<(String, String)>> {
+        if !context.captures_local(id) {
+            return Ok(None);
+        }
+        Ok(Some((
+            alloc::format!("val${}", context.resolved.def(id).name),
+            Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
+                .to_string(),
+        )))
     }
 
     pub(crate) fn own_field(id: DefId, context: &Context<'_>) -> Option<MemberId> {
@@ -878,10 +900,24 @@ impl Expr {
                     .and_then(|ty| ty.project_id())
             });
         let enclosing = target.and_then(|item| context.inner.get(&item).cloned());
-        let descriptor = match &enclosing {
+        // A local class's captures are trailing parameters, appended in the order the class reads them.
+        let captured = target
+            .and_then(|item| context.captures_of_item(item))
+            .unwrap_or_default();
+        let mut descriptor = match &enclosing {
             Some(name) => alloc::format!("(L{name};{}", descriptor.trim_start_matches('(')),
             None => descriptor,
         };
+        if !captured.is_empty() {
+            let mut trailing = String::new();
+            for &id in &captured {
+                trailing.push_str(
+                    &Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
+                        .to_string(),
+                );
+            }
+            descriptor = descriptor.replace(')', &alloc::format!("{trailing})"));
+        }
 
         emit.asm.new_object(&owner)?;
         // The constructor consumes one reference and returns nothing, so the expression's own value
@@ -895,6 +931,19 @@ impl Expr {
         }
         let varargs = selected.is_some_and(|member| context.index.member(member).varargs);
         Self::arguments(&arguments, &params, varargs, context, emit)?;
+        // The captured values come last, read from wherever they live *here* — a local of the enclosing
+        // method, or this class's own capture field when one local class creates another.
+        for &id in &captured {
+            if let Some(slot) = emit.slots.slot_of(id) {
+                emit.asm.load(slot)?;
+            } else if let Some((field, field_descriptor)) = Self::captured_read(id, context)? {
+                emit.load_this()?;
+                emit.asm
+                    .get_field(&context.this_class, &field, &field_descriptor)?;
+            } else {
+                return Err(unresolved());
+            }
+        }
         Ok(emit
             .asm
             .invoke_special(&owner, "<init>", &descriptor, false)?)

@@ -3276,26 +3276,6 @@ public class Host {
             .collect::<Vec<_>>()
     );
 
-    let capturing = r"
-public class Host {
-    public static void main(String[] args) {
-        int seen = 1;
-        class Reader {
-            int read() { return seen; }
-        }
-        System.out.println(new Reader().read());
-    }
-}
-";
-    let error = compile(capturing).expect_err("a capture needs a synthetic parameter");
-    assert!(
-        matches!(
-            error,
-            LowerError::Unsupported("a local class that captures a local")
-        ),
-        "got {error}"
-    );
-
     if !java_available() {
         return;
     }
@@ -3372,4 +3352,86 @@ public class Uses {
     }
     // Dispatching through the *interface* is what the bridge exists for.
     assert_eq!(run(source, "Uses"), "kept\n");
+}
+
+/// A local class that *captures* a local, which outlives the frame the local lived in.
+///
+/// Each capture becomes a `final synthetic` field and a *trailing* constructor parameter — trailing so a
+/// declared parameter keeps its slot — and every `new` of the class passes the values from wherever they
+/// live at that point. Inside the class the name is not a local at all: it reads the field the constructor
+/// filled.
+#[test]
+fn a_local_class_captures_the_locals_it_reads() {
+    let source = r#"
+public class Host {
+    public static void main(String[] args) {
+        int seen = 7;
+        long wide = 40L;
+        String tag = "kept";
+        class Reader {
+            int extra;
+            Reader(int extra) { this.extra = extra; }
+            int read() { return seen + extra; }
+            long widened() { return wide + seen; }
+            String tagged() { return tag; }
+        }
+        Reader r = new Reader(5);
+        System.out.println(r.read());
+        System.out.println(r.widened());
+        System.out.println(r.tagged());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let reader = classes
+        .iter()
+        .find(|class| class.internal_name.ends_with("Reader"))
+        .expect("the local class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(reader.bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let fields: Vec<(String, String, u16)> = class
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                name_of(field.name_index),
+                name_of(field.descriptor_index),
+                field.access_flags.0,
+            )
+        })
+        .collect();
+    // final | synthetic, one per capture, in the order the class reads them.
+    assert_eq!(
+        fields,
+        [
+            ("extra".to_owned(), "I".to_owned(), 0x0000),
+            ("val$seen".to_owned(), "I".to_owned(), 0x0010 | 0x1000),
+            ("val$wide".to_owned(), "J".to_owned(), 0x0010 | 0x1000),
+            (
+                "val$tag".to_owned(),
+                "Ljava/lang/String;".to_owned(),
+                0x0010 | 0x1000
+            ),
+        ]
+    );
+    // The declared parameter comes first, the captures after it.
+    assert!(
+        class.methods.iter().any(|method| {
+            name_of(method.name_index) == "<init>"
+                && name_of(method.descriptor_index) == "(IIJLjava/lang/String;)V"
+        }),
+        "the captures are trailing parameters: {:?}",
+        class
+            .methods
+            .iter()
+            .map(|m| name_of(m.descriptor_index))
+            .collect::<Vec<_>>()
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Host"), "12\n47\nkept\n");
 }
