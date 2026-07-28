@@ -3052,9 +3052,9 @@ class Plain {}
 /// same field, and `T first(List<T> xs)` and `Object first(List xs)` the same method, without this. A
 /// member that mentions no variable and declares none carries no attribute at all.
 ///
-/// A method declaring type parameters *of its own* (`static <E> E pick(E a, E b)`) is not here: its
-/// erased descriptor needs `E`'s bound, which the descriptor path cannot resolve yet, so it fails before
-/// any signature is written. That is a separate gap from this one.
+/// A method declaring type parameters *of its own* is here too: the index resolves its `E` as an external
+/// name it has never heard of, so the descriptor is told which names the declaration bound and erases each
+/// to `Object`.
 #[test]
 fn a_generic_member_carries_its_signature() {
     let source = r"
@@ -3071,6 +3071,11 @@ class Holder<T> {
     int ungeneric(int n) { return n; }
 
     T[] many() { return null; }
+
+    // The method's own type parameter, which is not the class's.
+    static <E extends Named> E pick(E first, E second) { return first; }
+
+    static <U> U identity(U value) { return value; }
 
     // A written type argument survives here too, not just on the declaration.
     Holder<T> self() { return this; }
@@ -3150,6 +3155,11 @@ class Holder<T> {
             ("put".to_owned(), Some("(TT;)V".to_owned())),
             ("ungeneric".to_owned(), None),
             ("many".to_owned(), Some("()[TT;".to_owned())),
+            ("pick".to_owned(), Some("<E:LNamed;>(TE;TE;)TE;".to_owned())),
+            (
+                "identity".to_owned(),
+                Some("<U:Ljava/lang/Object;>(TU;)TU;".to_owned())
+            ),
             ("self".to_owned(), Some("()LHolder<TT;>;".to_owned())),
             ("any".to_owned(), Some("()LHolder<*>;".to_owned())),
             ("covariant".to_owned(), Some("()LHolder<+TT;>;".to_owned())),

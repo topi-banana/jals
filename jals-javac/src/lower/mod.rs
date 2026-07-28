@@ -785,7 +785,15 @@ impl Compile {
                 .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
                 .ok_or_else(|| LowerError::Unresolved(name.clone()))?,
         )?;
-        let descriptor = Descriptor::method_descriptor(member, context.index, false)?;
+        // The method's own type parameters are not the class's, so the index resolved each as an
+        // external name it has never heard of. Naming them here is what lets the descriptor erase them.
+        let own_vars: Vec<String> = node
+            .children()
+            .find_map(ast::TypeParams::cast)
+            .map(|params| params.params().filter_map(|param| param.name()).collect())
+            .unwrap_or_default();
+        let descriptor =
+            Descriptor::method_descriptor_erasing(member, context.index, false, &own_vars)?;
         let is_static = context.index.member(member).modifiers.is_static;
 
         let flags = Self::method_flags(node, context.in_interface);

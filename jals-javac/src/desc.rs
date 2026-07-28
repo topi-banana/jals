@@ -135,20 +135,57 @@ impl Descriptor {
         index: &ProjectIndex,
         constructor: bool,
     ) -> Result<MethodDescriptor> {
+        Self::method_descriptor_erasing(id, index, constructor, &[])
+    }
+
+    /// The method descriptor of `id`, treating each name in `vars` as a type *variable*.
+    ///
+    /// A method's own type parameters (`static <E> E pick(E a, E b)`) are not the *class's*, so the index
+    /// resolves them as external names it has never heard of — and an unresolved external name is
+    /// reported rather than guessed at, which is right everywhere except here. The caller knows which
+    /// names its declaration bound, so it says so, and each becomes the `Object` a type variable erases
+    /// to. Passing an empty list is the ordinary case and changes nothing.
+    pub fn method_descriptor_erasing(
+        id: MemberId,
+        index: &ProjectIndex,
+        constructor: bool,
+        vars: &[String],
+    ) -> Result<MethodDescriptor> {
+        let erase = |ty: &Ty| Self::erase_variables(ty, vars);
         let params = index
             .resolved_param_tys(id)
             .iter()
-            .map(|ty| Self::field_type(ty, index))
+            .map(|ty| Self::field_type(&erase(ty), index))
             .collect::<Result<Vec<_>>>()?;
         let return_type = if constructor {
             ReturnType::Void
         } else {
-            Self::return_type(&index.resolved_member_ty(id), index)?
+            Self::return_type(&erase(&index.resolved_member_ty(id)), index)?
         };
         Ok(MethodDescriptor {
             params,
             return_type,
         })
+    }
+
+    /// Replace every external-by-name type whose name is in `vars` with a type variable, recursively
+    /// through array element types. A type variable erases to `Object`, which is what a method's own
+    /// unbounded type parameter erases to.
+    fn erase_variables(ty: &Ty, vars: &[String]) -> Ty {
+        match ty {
+            Ty::Class(jals_hir::ClassTy::External { name, .. })
+                if vars.iter().any(|var| var == name) =>
+            {
+                // `Null` and `TypeVar` share one erasure here — `Object` — and `Null` needs no owning
+                // item to name, which a synthetic `TypeVar` would have to invent.
+                let _ = name;
+                Ty::Null
+            }
+            Ty::Array(element) => {
+                Ty::Array(alloc::boxed::Box::new(Self::erase_variables(element, vars)))
+            }
+            other => other.clone(),
+        }
     }
 
     /// The field descriptor of the member `id`.
