@@ -4539,3 +4539,84 @@ public class Records2 {
 "#;
     assert_eq!(run(source, "Records2"), "1,2\n3,4\nhi.\n");
 }
+
+/// A `finally` that completes abruptly replaces the exit it interrupted (JLS §14.20.2).
+///
+/// The cleanups a `return` or a `break` runs are emitted inline, so a jump inside one leaves the
+/// path unreachable — and everything the interrupted exit still had to emit (the outer cleanups, the
+/// held return value, the transfer itself) became code after an unconditional transfer, which the
+/// assembler reported rather than compiled. The answers here are `javac`'s.
+#[test]
+fn a_finally_that_jumps_replaces_the_exit_it_interrupted() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Unwind {
+    static int returnsFromFinally() {
+        try {
+            return 1;
+        } finally {
+            return 2;
+        }
+    }
+
+    static int breakDiscardsAReturn() {
+        for (int i = 0; i < 3; i++) {
+            try {
+                return 1;
+            } finally {
+                break;
+            }
+        }
+        return 0;
+    }
+
+    static int outerCleanupStillRuns() {
+        int n = 0;
+        try {
+            try {
+                n += 1;
+                return n;
+            } finally {
+                n += 10;
+                return n;
+            }
+        } finally {
+            n += 100;
+        }
+    }
+
+    static void voidReturnsFromFinally() {
+        try {
+            return;
+        } finally {
+            System.out.println("cleanup");
+            return;
+        }
+    }
+
+    static int continuesFromFinally() {
+        int n = 0;
+        for (int i = 0; i < 3; i++) {
+            try {
+                n += 1;
+                break;
+            } finally {
+                continue;
+            }
+        }
+        return n;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(returnsFromFinally());
+        System.out.println(breakDiscardsAReturn());
+        System.out.println(outerCleanupStillRuns());
+        voidReturnsFromFinally();
+        System.out.println(continuesFromFinally());
+    }
+}
+"#;
+    assert_eq!(run(source, "Unwind"), "2\n0\n11\ncleanup\n3\n");
+}

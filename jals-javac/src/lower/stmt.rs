@@ -150,6 +150,9 @@ impl Stmt {
             let held = emit.slots.declare_temporary(width + 1);
             emit.asm.store(held)?;
             Self::run_guards(&crossed, context, emit)?;
+            if !emit.asm.reachable() {
+                return Ok(());
+            }
             emit.asm.load(held)?;
         }
         Ok(emit.asm.branch(Branch::Always, done)?)
@@ -655,6 +658,10 @@ impl Stmt {
         let crossed = emit.all_crossed();
         let Some(value) = statement.expr() else {
             Self::run_guards(&crossed, context, emit)?;
+            // A cleanup that took its own exit *is* the exit taken; this `return` was discarded.
+            if !emit.asm.reachable() {
+                return Ok(());
+            }
             return Ok(emit.asm.return_(None)?);
         };
         // Converted to the *declared* return type. Reading the opcode off the stack instead emitted
@@ -677,6 +684,9 @@ impl Stmt {
         let held = emit.slots.declare_temporary(width + 1);
         emit.asm.store(held)?;
         Self::run_guards(&crossed, context, emit)?;
+        if !emit.asm.reachable() {
+            return Ok(());
+        }
         emit.asm.load(held)?;
         Ok(emit.asm.return_(Some(&ty))?)
     }
@@ -709,6 +719,15 @@ impl Stmt {
             let start = emit.asm.label();
             emit.asm.mark(start)?;
             emit.open_range(index, start);
+
+            // The cleanup completed abruptly — a `return`, `break`, or `continue` of its own — and
+            // §14.20.2 gives that priority over the exit it interrupted: the original one is
+            // discarded, so neither the cleanups outside this one nor the exit itself happen.
+            // Emitting them anyway is code after an unconditional transfer, which is what the
+            // assembler reported instead of compiling `try { return 1; } finally { return 2; }`.
+            if !emit.asm.reachable() {
+                break;
+            }
         }
         Ok(())
     }
@@ -779,6 +798,10 @@ impl Stmt {
         // Leaving a region runs its `finally` first, however far out the jump goes.
         let crossed = emit.crossed(depth);
         Self::run_guards(&crossed, context, emit)?;
+        // A cleanup that took its own exit replaced this one, so there is nothing left to jump to.
+        if !emit.asm.reachable() {
+            return Ok(());
+        }
         Ok(emit.asm.branch(Branch::Always, target)?)
     }
 
