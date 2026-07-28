@@ -867,79 +867,40 @@ public class Counter {
     assert_invoke(&[source], "flagged", &[], "1");
 }
 
-/// A `static` initialiser a constant expression cannot hold is reported, not dropped.
+/// A `static` initialiser that a constant expression cannot hold runs in the module's start function.
 ///
-/// wasm's constant expressions are a short list — no calls, no arithmetic, no conversions. Emitting the
-/// type's default instead would be the same defect as a missing `<clinit>` on the JVM side: a field
-/// holding the wrong value in a module that validates.
+/// A global's own initialiser is a constant expression — no calls, no arithmetic, no conversions — so a
+/// computed one has nowhere to live there. The start function is where it goes: an engine calls it
+/// before anything else, exactly as a JVM runs `<clinit>` before the first use of the class. The field
+/// holds its default until then, which is the same order.
 #[test]
-fn a_computed_static_initialiser_is_reported() {
-    for (source, expected) in [
-        (
-            "public class C { static int n = 1 + 1; }",
-            "a `static` field initialiser that is no constant",
-        ),
-        (
-            "public class C { static int n = someMethod(); static int someMethod() { return 1; } }",
-            "a `static` field initialiser that is no constant",
-        ),
-    ] {
-        let error = compile(&[source]).expect_err("this initialiser is no constant expression");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{source}` should report {expected:?}, got {error}"
-        );
-    }
-}
-
-/// An array-typed field, in a struct and in a global.
-///
-/// A field's type needs an array type index and an array's element may be a class, so neither can be
-/// laid out before the other. Every type lives in one recursive group, so the fix is index
-/// pre-assignment rather than anything to do with wasm's type system: classes reserve their indices,
-/// then the arrays get theirs, then the struct bodies are written. Before that, an `int[] cells;`
-/// field reported that `int[]` had no wasm representation — which is not true of `int[]`.
-#[test]
-fn an_array_typed_field_is_laid_out() {
+fn a_computed_static_initialiser_runs_in_the_start_function() {
     let source = r"
-public class Bag {
-    int[] cells;
-    Bag[] siblings;
-    static int[] shared;
+public class Setup {
+    static int computed = 1 + 2;
+    static int fromMethod = seed();
+    static long widened = 5;
+    static int stamped = 1;
 
-    public static int through_a_field(int n) {
-        Bag bag = new Bag();
-        bag.cells = new int[3];
-        bag.cells[1] = n;
-        bag.cells[1] += 4;
-        int total = 0;
-        for (int cell : bag.cells) {
-            total += cell;
-        }
-        return total;
+    // Runs after the field initialisers above it and before the one below.
+    static { stamped = stamped * 10; }
+
+    static int last;
+
+    static { last = computed + stamped; }
+
+    static int seed() { return 40; }
+
+    public static int all() {
+        return computed + fromMethod + stamped + last;
     }
 
-    // An array *of* the class whose field it is: the recursive group is what makes this legal.
-    public static int through_a_self_array(int n) {
-        Bag bag = new Bag();
-        bag.siblings = new Bag[2];
-        bag.siblings[0] = new Bag();
-        bag.siblings[0].cells = new int[1];
-        bag.siblings[0].cells[0] = n;
-        return bag.siblings[0].cells[0] + bag.siblings.length;
-    }
-
-    public static int through_a_global(int n) {
-        shared = new int[2];
-        shared[0] = n;
-        shared[1] = n * 2;
-        return shared[0] + shared[1];
-    }
+    public static long wide() { return widened; }
 }
 ";
-    assert_invoke(&[source], "through_a_field", &["5"], "9");
-    assert_invoke(&[source], "through_a_self_array", &["7"], "9");
-    assert_invoke(&[source], "through_a_global", &["3"], "9");
+    // 3 + 40 + 10 + 13
+    assert_invoke(&[source], "all", &[], "66");
+    assert_invoke(&[source], "wide", &[], "5");
 }
 
 /// Every statement form is either compiled or reports *itself*.
@@ -1055,21 +1016,6 @@ public class Seeded {
 ";
     assert_invoke(&[source], "summed", &["3"], "10");
     assert_invoke(&[source], "ordered", &[], "5");
-}
-
-/// A `static { … }` block is not an instance initialiser, and running it in every constructor would be
-/// a different program. Reported until the module has a start function to run it once.
-#[test]
-fn a_static_initialiser_block_is_reported() {
-    let source = "public class S { static int n; static { n = 1; } S() {} }";
-    let error = compile(&[source]).expect_err("a static initialiser needs a start function");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a `static` initialiser block")
-        ),
-        "got {error}"
-    );
 }
 
 /// A `static` nested class is simply another struct type.

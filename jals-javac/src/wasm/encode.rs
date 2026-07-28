@@ -328,6 +328,10 @@ pub(crate) struct Module {
     pub(crate) funcs: Vec<Func>,
     pub(crate) globals: Vec<Global>,
     pub(crate) exports: Vec<(String, ExportKind, u32)>,
+    /// The function an engine runs before anything else, if the module has one. This is where a Java
+    /// `static` initialiser lives: a global's own initialiser is a constant expression and cannot
+    /// compute anything.
+    pub(crate) start: Option<u32>,
 }
 
 /// A module-level mutable variable, which is what a Java `static` field is.
@@ -348,6 +352,7 @@ impl Module {
             funcs: Vec::new(),
             globals: Vec::new(),
             exports: Vec::new(),
+            start: None,
         }
     }
 
@@ -438,6 +443,12 @@ impl Module {
                     .u32(*index);
             }
             Self::section(&mut out, 7, &section);
+        }
+
+        if let Some(start) = self.start {
+            let mut section = Bytes::new();
+            section.u32(start);
+            Self::section(&mut out, 8, &section);
         }
 
         if !self.funcs.is_empty() {

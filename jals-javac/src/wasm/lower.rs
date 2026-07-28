@@ -154,8 +154,11 @@ impl CompileWasm {
         }
         // Then every `static` field, which is module state rather than a struct slot. After the
         // arrays, because a `static int[]` field's global needs its array type to exist.
+        // `(field, initialiser)` for every `static` field whose value has to be *computed*, plus the
+        // `static { … }` blocks, all of which run in the start function.
+        let mut deferred = Vec::new();
         for input in inputs {
-            layout.declare_statics(input, index, &mut module)?;
+            layout.declare_statics(input, index, &mut module, &mut deferred)?;
         }
 
         // Pass 2: every method gets a signature and a function index, so a call emitted in pass 3
@@ -187,7 +190,81 @@ impl CompileWasm {
                     .push((name.clone(), ExportKind::Func, method.index));
             }
         }
+        // A `static` initialiser cannot live in a global's constant expression, so it runs in the
+        // module's start function — which an engine calls before anything else, exactly as a JVM runs
+        // `<clinit>` before the first use of the class.
+        Self::class_initializer(inputs, index, &layout, &deferred, &mut module)?;
         module.finish().ok_or(WasmError::TooLarge)
+    }
+
+    /// Synthesise the start function: every computed `static` field initialiser and every
+    /// `static { … }` block, in source order, or nothing when there are none.
+    fn class_initializer(
+        inputs: &[WasmInput<'_>],
+        index: &ProjectIndex,
+        layout: &Layout,
+        deferred: &[(MemberId, ast::Expr)],
+        module: &mut Module,
+    ) -> Result<()> {
+        let blocks: Vec<(usize, ast::Block)> = inputs
+            .iter()
+            .enumerate()
+            .flat_map(|(position, input)| {
+                Self::static_initializers(input.root).map(move |block| (position, block))
+            })
+            .collect();
+        if deferred.is_empty() && blocks.is_empty() {
+            return Ok(());
+        }
+        let mut insn = Insn::new();
+        let mut locals = Vec::new();
+        for (position, input) in inputs.iter().enumerate() {
+            let mut lowering = Lowering::for_static(input, index, layout, locals);
+            for (member, value) in deferred {
+                if index.member(*member).file != input.file {
+                    continue;
+                }
+                let global = *layout
+                    .statics
+                    .get(member)
+                    .ok_or(WasmError::Unsupported("a `static` field with no global"))?;
+                let ty = layout.val_type(&index.resolved_member_ty(*member))?;
+                lowering.assign_static(value, ty, global, &mut insn)?;
+            }
+            for (owner, block) in &blocks {
+                if *owner != position {
+                    continue;
+                }
+                lowering.block(block, &mut insn)?;
+            }
+            locals = lowering.locals;
+        }
+        let signature = module.add_type(SubType::plain(CompType::Func {
+            params: Vec::new(),
+            results: Vec::new(),
+        }));
+        let start = Module::func_index(module.funcs.len());
+        module.funcs.push(Func {
+            type_index: signature,
+            locals,
+            body: insn.into_body(),
+        });
+        module.start = Some(start);
+        Ok(())
+    }
+
+    /// Every `static { … }` block in `root`, in source order.
+    fn static_initializers(root: &SyntaxNode) -> impl Iterator<Item = ast::Block> + '_ {
+        root.descendants()
+            .filter(|node| node.kind() == INITIALIZER)
+            .filter(|node| {
+                node.children()
+                    .filter(|child| child.kind() == MODIFIERS)
+                    .flat_map(|modifiers| modifiers.children_with_tokens())
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
+            })
+            .filter_map(|node| node.children().find_map(ast::Block::cast))
     }
 
     /// Every project class, supertypes first.
@@ -470,6 +547,7 @@ impl Layout {
         input: &WasmInput<'_>,
         index: &ProjectIndex,
         module: &mut Module,
+        out: &mut Vec<(MemberId, ast::Expr)>,
     ) -> Result<()> {
         for node in input.root.descendants() {
             if node.kind() != FIELD_DECL {
@@ -496,11 +574,17 @@ impl Layout {
                 let Ok(ty) = self.val_type(&index.resolved_member_ty(member)) else {
                     continue;
                 };
-                let init = Self::constant_init(values.get(position), ty)?;
+                let (init, deferred) = Self::constant_init(values.get(position), ty);
                 module.globals.push(Global { ty, init });
                 let global =
                     u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
                 self.statics.insert(member, global);
+                // A global's own initialiser is a constant expression, so anything that has to be
+                // *computed* runs in the start function instead — over the global the default already
+                // holds, which is exactly the order a `<clinit>` gives.
+                if deferred && let Some(value) = values.get(position) {
+                    out.push((member, value.clone()));
+                }
             }
         }
         Ok(())
@@ -511,27 +595,36 @@ impl Layout {
     /// No initialiser is the type's default, which is exactly Java's rule (§4.12.5). A literal folds
     /// into the same shape. Anything else — including a literal that would need a widening conversion,
     /// since a constant expression cannot hold one — is reported rather than replaced by the default.
-    fn constant_init(value: Option<&ast::Expr>, ty: ValType) -> Result<Vec<u8>> {
+    fn constant_init(value: Option<&ast::Expr>, ty: ValType) -> (Vec<u8>, bool) {
         use jals_syntax::SyntaxKind::{
             CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
         };
-        let mut insn = Insn::new();
-        let Some(value) = value else {
+        // Anything a constant expression cannot hold falls back to the type's default *and* asks for a
+        // start-function assignment, which is the order a `<clinit>` gives: the field holds its default
+        // until the initialiser runs.
+        let default = || {
+            let mut insn = Insn::new();
             Self::default_value(ty, &mut insn);
-            return Ok(insn.into_body());
+            (insn.into_body(), true)
         };
-        let inconstant =
-            || WasmError::Unsupported("a `static` field initialiser that is no constant");
+        let Some(value) = value else {
+            let mut insn = Insn::new();
+            Self::default_value(ty, &mut insn);
+            return (insn.into_body(), false);
+        };
         let ast::Expr::Literal(literal) = value else {
-            return Err(inconstant());
+            return default();
         };
-        let token = literal
+        let Some(token) = literal
             .syntax()
             .children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .find(|token| !token.kind().is_trivia())
-            .ok_or(WasmError::Unsupported("an empty literal"))?;
+        else {
+            return default();
+        };
         let text = token.text();
+        let mut insn = Insn::new();
         match (token.kind(), ty) {
             (NULL_KW, ValType::Ref(_)) => {
                 insn.ref_null(HeapType::None);
@@ -543,48 +636,51 @@ impl Layout {
                 insn.i32_const(0);
             }
             (CHAR_LITERAL, ValType::I32) => {
-                let character = crate::lower::expr::Expr::literal_text(text)
+                let Some(character) = crate::lower::expr::Expr::literal_text(text)
                     .ok()
                     .and_then(|text| text.chars().next())
-                    .ok_or(WasmError::Unsupported(
-                        "a character literal this cannot read",
-                    ))?;
+                else {
+                    return default();
+                };
                 insn.i32_const(character as i32);
             }
             // An `int` literal into a wider field is an assignment conversion, and the *constant* form
             // of one is folding: `static long n = 1` writes `i64.const 1`, not `i32.const` plus an
             // extension no constant expression may hold.
             (INT_LITERAL, _) => {
-                let value =
+                let Ok(value) =
                     crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
-                        .map_err(|_| {
-                            WasmError::Unsupported("an integer literal this cannot read")
-                        })?;
+                else {
+                    return default();
+                };
                 #[allow(clippy::cast_precision_loss)]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     ValType::F32 => insn.f32_const(value as f32),
                     ValType::F64 => insn.f64_const(value as f64),
-                    _ => insn
-                        .i32_const(i32::try_from(value).map_err(|_| {
-                            WasmError::Unsupported("an out-of-range `int` literal")
-                        })?),
+                    _ => match i32::try_from(value) {
+                        Ok(value) => insn.i32_const(value),
+                        Err(_) => return default(),
+                    },
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
                 let text = text.trim_end_matches(['f', 'F', 'd', 'D']);
-                let unreadable = || WasmError::Unsupported("a floating literal this cannot read");
+                let Ok(value) = text.parse::<f64>() else {
+                    return default();
+                };
+                #[allow(clippy::cast_possible_truncation)]
                 if ty == ValType::F32 {
-                    insn.f32_const(text.parse().map_err(|_| unreadable())?);
+                    insn.f32_const(value as f32);
                 } else {
-                    insn.f64_const(text.parse().map_err(|_| unreadable())?);
+                    insn.f64_const(value);
                 }
             }
-            // A literal whose type is not the field's and not foldable into it — a `double` literal
-            // in an `int` field, say, which is no Java program either.
-            _ => return Err(inconstant()),
+            // A literal whose type is not the field's and not foldable into it — the start function
+            // lowers it with the conversion the expression path already knows how to emit.
+            _ => return default(),
         }
-        Ok(insn.into_body())
+        (insn.into_body(), false)
     }
 
     /// A type's default value: what a `static` field with no initialiser holds (§4.12.5).
@@ -796,6 +892,52 @@ struct Loop {
 }
 
 impl Lowering<'_> {
+    /// A lowering with no receiver, for the start function: it has no `this`, no parameters, and no
+    /// enclosing loop, and it carries the locals a previous input's share of the body already used so
+    /// two inputs never claim the same index.
+    fn for_static<'a>(
+        input: &'a WasmInput<'a>,
+        index: &'a ProjectIndex,
+        layout: &'a Layout,
+        locals: Vec<ValType>,
+    ) -> Lowering<'a> {
+        let next = u32::try_from(locals.len()).unwrap_or(u32::MAX);
+        Lowering {
+            input,
+            index,
+            layout,
+            slots: Vec::new(),
+            locals,
+            next,
+            owner: None,
+            loops: Vec::new(),
+            pending_label: None,
+        }
+    }
+
+    /// `<global> = <value>` in the start function, with the assignment conversion the constant
+    /// expression could not hold.
+    fn assign_static(
+        &mut self,
+        value: &ast::Expr,
+        ty: ValType,
+        global: u32,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let source = self.num_of(value.syntax()).ok();
+        self.expr(value, insn)?.ok_or(WasmError::Unsupported(
+            "a `static` initialiser with no value",
+        ))?;
+        if let (Some(source), Ok(target)) = (source, Self::num_for(ty))
+            && source != target
+        {
+            insn.convert(source, target)
+                .ok_or(WasmError::Unsupported("this assignment conversion"))?;
+        }
+        insn.global_set(global);
+        Ok(())
+    }
+
     /// Every instance initialiser the enclosing class declares, in source order.
     ///
     /// Two forms interleave: a field's `= …`, and a bare `{ … }` block. JLS §12.5 runs them in the
@@ -814,6 +956,7 @@ impl Lowering<'_> {
                 // itself. A `static { … }` runs once at class initialisation rather than per instance,
                 // and this backend has no start function to run it in — so it is reported rather than
                 // run in every constructor, which would be a different program.
+                // A `static { … }` runs once in the module's start function, not per instance.
                 if node
                     .children()
                     .filter(|child| child.kind() == MODIFIERS)
@@ -821,7 +964,7 @@ impl Lowering<'_> {
                     .filter_map(jals_syntax::SyntaxElement::into_token)
                     .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
                 {
-                    return Err(WasmError::Unsupported("a `static` initialiser block"));
+                    continue;
                 }
                 if let Some(block) = node.children().find_map(ast::Block::cast) {
                     self.block(&block, insn)?;
