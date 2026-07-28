@@ -194,15 +194,14 @@ impl Compile {
             ) {
                 continue;
             }
-            // A *local* or anonymous class is nested inside a method body rather than a class body,
-            // and its captured locals need a synthetic constructor parameter each. `Stmt::block`
-            // reports it where it appears, and skipping it here keeps that the report.
-            if node
-                .ancestors()
-                .skip(1)
-                .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK)
-            {
-                continue;
+            // A *local* class is nested inside a method body rather than a class body, and it is its
+            // own class file like any other. What it may not do is capture a local: each capture needs a
+            // synthetic constructor parameter the index knows nothing about, so its constructor would
+            // come out one parameter short of what a `new` passes.
+            if Self::captures_a_local(&node, resolved) {
+                return Err(LowerError::Unsupported(
+                    "a local class that captures a local",
+                ));
             }
             let name = node
                 .children_with_tokens()
@@ -664,6 +663,35 @@ impl Compile {
             flags |= ClassAccessFlags::ABSTRACT;
         }
         flags
+    }
+
+    /// Whether a class declared inside a block reads a local from the method that encloses it.
+    ///
+    /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
+    /// it. Each one needs a synthetic constructor parameter, which is why one is reported rather than
+    /// emitted as a class nothing can construct.
+    fn captures_a_local(node: &SyntaxNode, resolved: &Resolved) -> bool {
+        let inside_block = node
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK);
+        if !inside_block {
+            return false;
+        }
+        let range = node.text_range();
+        node.descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .any(|token| {
+                resolved
+                    .reference_at(usize::from(token.text_range().start()))
+                    .and_then(|reference| reference.resolution.def_id())
+                    .and_then(|id| {
+                        let start = u32::try_from(resolved.def(id).name_range.start).ok()?;
+                        Some(!range.contains(start.into()))
+                    })
+                    .unwrap_or(false)
+            })
     }
 
     /// Every inner class declared in the file `node` belongs to, mapped to the internal name of the class

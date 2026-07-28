@@ -55,29 +55,12 @@ impl Stmt {
         // A *local* type declaration is a child of the block that is not a statement, so iterating
         // `stmts()` walks straight past it — and a class that vanished would be a `NoClassDefFoundError`
         // at the first use, which is exactly the failure a compiler is in a position to report.
-        if let Some(local) = block
-            .syntax()
-            .children()
-            .find(|child| Self::declares_a_type(child.kind()))
-        {
-            let _ = local;
-            return Err(LowerError::Unsupported("a local type declaration"));
-        }
+        // A local type declaration is not a statement to emit: `Compile::file` compiles it as its own
+        // class file, the same way it does every other declaration in the file.
         for statement in block.stmts() {
             Self::lower(&statement, context, emit)?;
         }
         Ok(())
-    }
-
-    /// Whether a node kind declares a type, which a block may contain and this cannot emit.
-    const fn declares_a_type(kind: jals_syntax::SyntaxKind) -> bool {
-        use jals_syntax::SyntaxKind::{
-            ANNOTATION_TYPE_DECL, CLASS_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
-        };
-        matches!(
-            kind,
-            CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
-        )
     }
 
     /// Emit one statement.

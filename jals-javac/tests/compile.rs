@@ -1324,7 +1324,6 @@ fn the_features_after_this_milestone_are_still_reported() {
         ("Runnable r = () -> {};", "a lambda"),
         ("Runnable r = Later::main;", "a method reference"),
         ("Object o = new Later() { };", "an anonymous class"),
-        ("class Inner {}", "a local type declaration"),
     ] {
         let program = format!(
             r"
@@ -3243,4 +3242,62 @@ public class Uses {
         return;
     }
     assert_eq!(run(source, "Uses"), "13\n5\n2\n");
+}
+
+/// A local class — one declared inside a method body — is its own class file.
+///
+/// It was reported where it appeared, because a captured local needs a synthetic constructor parameter the
+/// index knows nothing about. One that captures nothing needs none, and is a class like any other; only the
+/// capture is reported now, and as what it is.
+#[test]
+fn a_local_class_is_its_own_class_file() {
+    let source = r"
+public class Host {
+    public static void main(String[] args) {
+        class Counter {
+            int total;
+            Counter(int start) { total = start; }
+            int bumped(int by) { return total + by; }
+        }
+        Counter c = new Counter(7);
+        System.out.println(c.bumped(5));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    assert!(
+        classes
+            .iter()
+            .any(|class| class.internal_name.ends_with("Counter")),
+        "the local class is emitted: {:?}",
+        classes
+            .iter()
+            .map(|class| class.internal_name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let capturing = r"
+public class Host {
+    public static void main(String[] args) {
+        int seen = 1;
+        class Reader {
+            int read() { return seen; }
+        }
+        System.out.println(new Reader().read());
+    }
+}
+";
+    let error = compile(capturing).expect_err("a capture needs a synthetic parameter");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a local class that captures a local")
+        ),
+        "got {error}"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Host"), "12\n");
 }
