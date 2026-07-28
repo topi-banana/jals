@@ -7,6 +7,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use jals_classfile::{
     Attribute, AttributeBody, BaseType, CodeAttribute, ConstantPool, ConstantPoolEntry, FieldInfo,
@@ -315,6 +316,30 @@ impl Attrs {
             }
         }
         resolved
+    }
+
+    /// Whether every `LocalVariableTable` entry for `slot` lies inside `range` (and there is at
+    /// least one) — that is, the variable is both born and dead within that byte range.
+    ///
+    /// Used to decide whether a loop may declare its own counter (`for (int i = 0; …)`) instead of
+    /// assigning to a hoisted one. Requiring *every* entry rather than just the one covering the
+    /// loop is what keeps two sequential loops that reuse one slot honest: they share a single
+    /// hoisted declaration, so if either loop has an entry outside its own range then neither may
+    /// absorb it, and both render as `for (i = 0; …)` with the declaration left in place.
+    pub(crate) fn slot_confined_to(
+        table: &[LocalVariableEntry],
+        slot: u16,
+        range: &Range<usize>,
+    ) -> bool {
+        let mut seen = false;
+        for entry in table.iter().filter(|e| e.index == slot) {
+            seen = true;
+            let start = usize::from(entry.start_pc);
+            if start < range.start || start + usize::from(entry.length) > range.end {
+                return false;
+            }
+        }
+        seen
     }
 
     /// A conservative Java-identifier check, so a recovered name can never break the parse: the

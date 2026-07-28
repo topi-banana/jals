@@ -116,6 +116,34 @@ fn code_and_nested_attributes_are_decoded() {
 }
 
 #[test]
+fn line_number_entries_carry_offsets_and_lines() {
+    // `jals-decompile` reads these two fields to tell a source `for` from the byte-identical
+    // `while`, so it is not enough that the table decodes — the entries have to mean something.
+    let cf = load("Sample.class");
+    let table = cf
+        .methods
+        .iter()
+        .flat_map(|m| &m.attributes)
+        .find_map(|a| match &a.body {
+            AttributeBody::Code(c) => Some(&c.attributes),
+            _ => None,
+        })
+        .expect("a method with a Code attribute")
+        .iter()
+        .find_map(|a| match &a.body {
+            AttributeBody::LineNumberTable(table) => Some(table),
+            _ => None,
+        })
+        .expect("a LineNumberTable");
+    assert!(!table.is_empty(), "the table should carry entries");
+    // A method's code always starts at offset 0, and `javac` maps that offset to a real line.
+    assert_eq!(table.iter().map(|e| e.start_pc).min(), Some(0));
+    for entry in table {
+        assert!(entry.line_number > 0, "line numbers are 1-based: {entry:?}");
+    }
+}
+
+#[test]
 fn class_signature_is_decoded() {
     let cf = load("Iface.class");
     assert!(

@@ -145,6 +145,7 @@ fn preserves_rich_members_and_recovered_control_flow() {
         class(include_bytes!("fixtures/Branchy.class")),
         class(include_bytes!("fixtures/Locals.class")),
         class(include_bytes!("fixtures/Loops.class")),
+        class(include_bytes!("fixtures/Fors.class")),
     ];
     let (sources, warnings) = synthesize(&classes);
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -158,6 +159,8 @@ fn preserves_rich_members_and_recovered_control_flow() {
     assert!(joined.contains("} else {"));
     assert!(joined.contains("int doubled;"));
     assert!(joined.contains("do {"));
+    // A `for` recovered from the line table, counter declared in the header.
+    assert!(joined.contains("for (int i = 0; i < n; i++) {"));
 }
 
 #[test]
@@ -296,6 +299,7 @@ fn every_generated_fixture_is_valid_java() {
         include_bytes!("fixtures/Branchy.class"),
         include_bytes!("fixtures/Locals.class"),
         include_bytes!("fixtures/Loops.class"),
+        include_bytes!("fixtures/Fors.class"),
         include_bytes!("fixtures/Arrays.class"),
         include_bytes!("fixtures/Concat.class"),
         include_bytes!("fixtures/Sb.class"),
@@ -327,4 +331,42 @@ fn every_generated_fixture_is_valid_java() {
             parse.errors()
         );
     }
+}
+
+#[test]
+fn javac_accepts_recovered_for_loops() {
+    // `javac` is the only oracle that can catch what `for` recovery risks getting wrong. Moving a
+    // counter's declaration into the header while leaving the hoisted one in place produces
+    // `int i; for (int i = 0; …)`, which *parses* — it is a scope error, not a syntax one — so the
+    // valid-Java property test above would pass it. Skipped when `javac` is not installed.
+    let classes = [class(include_bytes!("fixtures/Fors.class"))];
+    let (sources, warnings) = synthesize(&classes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let source = generated_source(&sources, "demo/Fors.java");
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let package = temp.path().join("demo");
+    let output = temp.path().join("output");
+    fs::create_dir_all(&package).expect("package dir");
+    fs::create_dir_all(&output).expect("javac output dir");
+    let source_path = package.join("Fors.java");
+    fs::write(&source_path, source).expect("write generated source");
+
+    let javac = std::env::var_os("JAVAC").unwrap_or_else(|| OsString::from("javac"));
+    let result = Command::new(javac)
+        .arg("-d")
+        .arg(&output)
+        .arg(&source_path)
+        .output();
+    let output = match result {
+        Ok(output) => output,
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => panic!("failed to run javac: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "javac rejected the recovered `for` loops\nstdout:\n{}\nstderr:\n{}\nsource:\n{source}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }

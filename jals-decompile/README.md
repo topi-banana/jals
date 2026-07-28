@@ -92,6 +92,7 @@ impl JavaType {
 | `hierarchy.rs` | A deterministic immutable index over loaded class files. It validates complete, cycle-free supertype closures and the JLS 15.12.1/15.12.3 conditions before permitting `Interface.super.m()`. |
 | `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators (including the multi-way `switch`, with both table encodings normalized to `(key, target)` pairs). Bails on `jsr` / a malformed or implausibly large switch table / a branch to a non-instruction offset. |
 | `switch.rs` | What a `switch` was written *on*: reads `javac`'s selector lowerings back, so `case` labels render as `'a'` / `RED` rather than the code units and ordinals the bytecode carries. |
+| `lines.rs` | The `LineNumberTable` reader — the one piece of *advisory* metadata the structurer consults, used only to tell a source `for` from the byte-identical `while` (M9). Never decides a structure on its own. |
 | `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`, `switch`) from the CFG. `MethodBody::decompile` is the entry point. |
 
 ## How a method body is reconstructed
@@ -115,7 +116,11 @@ impl JavaType {
    once, a `break`/`continue` edge, or any other non-tree/irreducible shape bails. A final check
    requires **every block to be emitted exactly once** — a strong guard that the recovered tree
    matches the real control flow.
-5. **Render** the statement tree to indented Java lines, dropping a trailing implicit `return;`.
+5. **Fold a `for`** (see M9): a top-test `while` whose latch's last instruction shares the header's
+   source line was written as a `for`, so its update — and, when the counter's live range proves it
+   safe, its declaration — move into the header. This is the only advisory step; it re-renders an
+   already-recovered structure and never changes what was recovered.
+6. **Render** the statement tree to indented Java lines, dropping a trailing implicit `return;`.
 
 The stack machine (`Sim`) models: `this` / local (parameter and declared-local) loads and stores,
 `iinc`, constants, field get/put, `invokevirtual` / `invokeinterface` / `invokestatic` /
@@ -222,7 +227,9 @@ Recovers natural loops from back-edges (via `Instruction::encoded_len` offsets) 
 loop layout) and a **`do`-`while`** (a conditional back-branch at the bottom). The loop body reuses
 the M3 local machinery, so a counter (`istore` + `iinc` + `iload`) reconstructs cleanly. A
 `break`/`continue`, a nested/irreducible shape, or a side-effecting loop header falls back to the M0
-placeholder. `for` is rendered as `while` for now.
+placeholder. A top-test `while` that was written as a `for` is folded back into one by M9; the
+example below is a real `while`, and its `i = i + 1` stays spelled out (the `for` header is the only
+place `++` sugar is applied).
 
 ```java
 public int sum(int n) {
@@ -401,12 +408,76 @@ is not a clean region.
 
 Still falling back to the M0 placeholder (see roadmap): `try`/`catch`.
 
+### M9 — `for` loops &nbsp;✅ done
+
+Folds a recovered top-test `while` back into the `for` it was written as. This is the one place the
+decompiler consults metadata it cannot verify, because there is nothing else to consult: a `for` and
+the equivalent hand-written `while` compile to **byte-identical** code.
+
+```
+for (int i = 0; i < n; i++) { g(i); }   |   int i = 0; while (i < n) { g(i); i++; }
+
+0: iconst_0  1: istore_1  2: iload_1  3: iload_0  4: if_icmpge 17
+7: iload_1   8: invokestatic  11: iinc 1,1  14: goto 2  17: return     ← both, to the byte
+```
+
+The `LineNumberTable` is what separates them: `javac` puts a `for`'s update on the **header's**
+source line, while a `while`'s trailing statement gets its own.
+
+| pc | `for` | `while` |
+| --- | --- | --- |
+| 0 (init) | line 3 — the header's line | line 8 |
+| 2 (condition) | line 3 | line 9 |
+| 7 (body) | line 4 | line 10 |
+| 11 (`iinc`) | **line 3 — the header's line** | line 11 |
+
+So the fold is gated on **the update instruction's line equalling the header's**, where the update is
+the last statement the latch block replays. Everything that does not line up — no line table
+(`-g:none`), a `while` whose update has its own line, a latch that replays nothing (a bare `goto`), a
+trailing statement Java's *ForUpdate* does not admit — leaves the `while` standing. The fold can
+never bail a method M4 already decompiled; it only picks between two renderings of one structure.
+
+Only the latch's *last* statement becomes the update clause, so a header carrying two of them
+(`for (int i = 0, j = n; i < j; i++, j--)`) keeps the other where the bytecode put it, at the end of
+the body: `for (int j = n; i < j; j--) { …; i = i + 1; }`. A different shape from the source, but the
+same operations in the same order.
+
+Absorbing the **initializer** needs a second, *structural* proof. `for (int i = …)` scopes the
+counter to the loop, so the declaration may only move into the header when the `LocalVariableTable`
+shows every live range of that slot lying inside the loop's byte range. Otherwise the code after the
+loop would name a variable that no longer exists. Failing that proof the hoisted declaration stays
+and the header takes a bare assignment, which is equally correct:
+
+```java
+// counter dies with the loop          // `i` is read after the loop
+public int sum(int n) {                public int inlineWhile(int n) {
+    int total;                             int total;
+    total = 0;                             int i;
+    for (int i = 0; i < n; i++) {          total = 0;
+        total = total + i;                 for (i = 0; i < n; i++) {
+    }                                          total = total + i;
+    return total;                          }
+}                                          return total + i;
+                                       }
+```
+
+Requiring *every* range rather than just the one covering the loop is what keeps two sequential
+loops that reuse a slot consistent: they share one hoisted declaration, so neither may absorb it.
+
+`++` / `--` / `+=` sugar is applied in the `for` header only, where a reader expects the compound
+form; a body `iinc` still renders as `i = i + 1` (general compound-assignment recovery is a separate
+roadmap item).
+
+Verified against `javac`'s top-test layout. ECJ emits the same line-table pattern but lays loops out
+bottom-test (a `goto` to the condition, which sits at the end), so those reach the `do`-`while` arm
+and are left alone.
+
 ## Supported vs. not (yet)
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
 | Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static, same-owner private `invokespecial`, direct `super.m()`, hierarchy-proven direct `Interface.super.m()`), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored comparison), `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a non-constructor `invokespecial` outside the current/direct hierarchy or with a non-`this` super receiver, an interface-super call with missing/duplicate/cyclic/evolved/conflicting hierarchy facts or generic method-selection uncertainty, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
-| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean), `switch` (`tableswitch` / `lookupswitch` → colon-form arms with stacked labels, fall-through, and `char` / `enum` label recovery) | loop `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a NaN-inexact fused `*cmp` (`!(a < b)`), a `String` switch or an `enum` switch whose enum class is absent or uses the `$SwitchMap$` lowering, a switch whose join no arm names or that is reached by a back-edge, `try`/`catch`/`finally`, any other non-tree shape |
+| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean), `for` (a top-test `while` whose `LineNumberTable` puts the update on the header's line, with the counter's declaration absorbed when its live range proves it dies with the loop), `switch` (`tableswitch` / `lookupswitch` → colon-form arms with stacked labels, fall-through, and `char` / `enum` label recovery) | loop `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a `for` whose header spans several source lines or whose update is not a *StatementExpression* (both render as `while`), a NaN-inexact fused `*cmp` (`!(a < b)`), a `String` switch or an `enum` switch whose enum class is absent or uses the `$SwitchMap$` lowering, a switch whose join no arm names or that is reached by a back-edge, `try`/`catch`/`finally`, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
 Java, just not (yet) a real body.
@@ -418,8 +489,8 @@ safe-fallback invariant. (Local variables — the old first roadmap entry — sh
 M4 on top of it, since a loop's induction variable is itself a local.)
 
 - **`try` / `catch` / `finally`** — structure the exception table.
-- **Richer loops** — `break` / `continue` (labeled), nested loops, and `for`-loop recovery (folding
-  the init / update back into a `for` header instead of rendering as `while`).
+- **Richer loops** — `break` / `continue` (labeled) and nested loops (`for`-loop recovery shipped as
+  M9).
 - **Richer `switch`** — the `String` two-stage lowering and the older `$SwitchMap$` enum lowering
   (both still fall back), and arrow-form arms where no arm falls through.
 - **Expression polish** — ternary (`?:`) and short-circuit (`&&` / `||`) from small diamonds
@@ -431,7 +502,8 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - `cargo test -p jals-decompile` — unit tests (`literal.rs`, `attrs.rs`, the `Instruction::encoded_len`
   round-trip lives in `jals-classfile`) and integration tests (`tests/body.rs`) that run
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
-  `Loops.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`, `Switches.class` +
+  `Loops.class`, `Fors.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`,
+  `Switches.class` +
   `Switches$Color.class`, `IntCarried.class`,
   `InvokeSpecialCalls.class`, hierarchy-evolution fixtures) and assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
@@ -439,5 +511,8 @@ M4 on top of it, since a loop's induction variable is itself a local.)
   and asserts zero syntax errors. Its staged hierarchy-evolution test additionally compiles generated
   clients with `javac`, both against the original supertypes and against evolved supertypes that force
   safe method-body fallback.
+- `Fors.class` gets its own `javac` check there, because parsing is not a strong enough oracle for
+  M9: leaving a hoisted `int i;` in front of a `for (int i = …)` that absorbed the same declaration
+  is a *scope* error, which parses cleanly. Only a real compiler rejects it.
 - Fixtures are pre-compiled `.class` files committed under `jals-classpath/tests/fixtures/` (see its
   `README.md` for provenance / how to regenerate with `javac`).

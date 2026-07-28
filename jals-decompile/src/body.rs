@@ -18,17 +18,20 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use core::ops::Range;
+
 use jals_classfile::{
     AttributeBody, BaseType, BootstrapMethod, ClassFile, CodeAttribute, ConstantPool,
-    ConstantPoolEntry, FieldType, Instruction, MethodDescriptor, MethodInfo, ReturnType,
-    WideInstruction,
+    ConstantPoolEntry, FieldType, Instruction, LineNumberEntry, LocalVariableEntry,
+    MethodDescriptor, MethodInfo, ReturnType, WideInstruction,
 };
 use jals_exec::{LocalBoxFuture, Yielder};
 
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
-use crate::expr::{ArrayForm, ConcatPart, Expr, Stmt, SwitchArm};
+use crate::expr::{ArrayForm, ConcatPart, Expr, ForInit, ForUpdate, Stmt, SwitchArm};
 use crate::hierarchy::ClassHierarchy;
+use crate::lines::Lines;
 use crate::literal::Literal;
 use crate::switch::Subject;
 use crate::types::JavaType;
@@ -105,9 +108,20 @@ impl MethodBody {
             is_static,
             locals,
             return_type: method_descriptor.return_type,
+            lines: Lines::table(code).unwrap_or_default(),
+            lvt: Attrs::local_variable_table(code).unwrap_or_default(),
         };
-        let mut stmts = decls;
-        stmts.extend(structurer.structure().await?);
+        let body = structurer.structure().await?;
+        // A `for` that absorbed its counter's declaration now declares it itself, so the hoisted one
+        // must go: keeping both is a duplicate declaration, which a parser accepts (it is a scope
+        // error, not a syntax one) but `javac` rejects.
+        let mut declared = BTreeSet::new();
+        Stmt::for_declared_names(&body, &mut declared);
+        let mut stmts: Vec<Stmt> = decls
+            .into_iter()
+            .filter(|decl| !matches!(decl, Stmt::Declare { name, .. } if declared.contains(name)))
+            .collect();
+        stmts.extend(body);
         Some(Self::render_body(&stmts))
     }
 
@@ -1716,6 +1730,13 @@ struct Structurer<'a, 'classes> {
     is_static: bool,
     locals: BTreeMap<u16, Local>,
     return_type: ReturnType,
+    /// The method's `LineNumberTable`, empty when the class carries none. Advisory: it is only ever
+    /// consulted to decide whether a recovered `while` was a source `for`, and an empty table just
+    /// means every loop keeps its structural `while` form.
+    lines: &'a [LineNumberEntry],
+    /// The method's `LocalVariableTable`, empty when the class carries none. Used to prove a loop
+    /// counter dies with its loop before letting the `for` declare it.
+    lvt: &'a [LocalVariableEntry],
 }
 
 impl Structurer<'_, '_> {
@@ -1771,7 +1792,8 @@ impl Structurer<'_, '_> {
             // resume past its exit. (Checked before marking `b` visited; the loop's blocks are
             // visited inside `structure_loop`.)
             if let Some(latch) = self.loop_latch(b) {
-                let (loop_stmt, cont) = self.structure_loop(b, latch, hi, visited).await?;
+                let (loop_stmt, cont) =
+                    self.structure_loop(b, latch, hi, &mut out, visited).await?;
                 out.push(loop_stmt);
                 b = cont;
                 continue;
@@ -1960,11 +1982,16 @@ impl Structurer<'_, '_> {
     /// `javac` emits — a top-test `while` (the header's branch exits the loop, the latch's `goto`
     /// jumps back) and a `do`-`while` (the latch's conditional branch is itself the back-edge) — and
     /// bails on anything else (a `break`/`continue` edge, an irregular exit, a side-effecting header).
+    ///
+    /// A top-test `while` may additionally fold into a [`Stmt::For`], which is why `preceding` — the
+    /// statements the enclosing region has already emitted — is passed in: the `for`'s initializer
+    /// is the last of them, and folding it into the header means taking it back off.
     async fn structure_loop(
         &self,
         header: usize,
         latch: usize,
         hi: usize,
+        preceding: &mut Vec<Stmt>,
         visited: &mut [bool],
     ) -> Option<(Stmt, usize)> {
         match &self.cfg.blocks[latch].term {
@@ -2014,15 +2041,147 @@ impl Structurer<'_, '_> {
                     return None;
                 }
                 let cond = Self::branch_condition(&self.code[instr], true, cmp, cond_stack)?;
-                // The body `[body_start, latch]` exits back to the header (the latch's goto-back).
-                // `None` for the same reason as the `do`-`while` arm above.
-                let body = self
-                    .emit_region_boxed(body_start, latch + 1, header, None, visited)
+                // Body: the forward region `[body_start, latch)` that flows into the latch, then the
+                // latch's own statements finish it — the same split as the `do`-`while` arm above.
+                // `None` for the same reason as that arm.
+                let mut body = self
+                    .emit_region_boxed(body_start, latch, latch, None, visited)
                     .await?;
-                Some((Stmt::While { cond, body }, exit))
+                Self::claim(visited, latch)?;
+                let (mut tail, latch_stack, _) = self.run_block(latch).await?;
+                // The latch ends in the `goto` back-edge, which pops nothing, so a leftover operand
+                // means we mis-read the block. `emit_region` enforced this while it still emitted
+                // the latch itself; splitting it out moves the check here.
+                if !latch_stack.is_empty() {
+                    return None;
+                }
+                // The line table may show this `while` was a source `for` — identical bytecode, but
+                // the update sits on the header's line. Folding is advisory and never structural:
+                // whatever does not line up simply leaves the `while` standing.
+                let folded = self.fold_for(header, latch, &mut tail, preceding);
+                body.append(&mut tail);
+                match folded {
+                    Some((init, update)) => Some((
+                        Stmt::For {
+                            init,
+                            cond,
+                            update,
+                            body,
+                        },
+                        exit,
+                    )),
+                    None => Some((Stmt::While { cond, body }, exit)),
+                }
             }
             _ => None,
         }
+    }
+
+    /// Decide whether the top-test loop just structured was a source `for`, taking its update
+    /// statement off `latch_stmts` (and its initializer off `preceding`) when it was.
+    ///
+    /// The evidence is advisory and unverifiable: a `for` and the equivalent hand-written `while`
+    /// compile to byte-identical code, and the only thing that separates them is that `javac` puts a
+    /// `for`'s update on the *header's* source line while a `while`'s trailing statement gets its
+    /// own. So this never decides a structure — it only picks between two renderings of one — and
+    /// every failure path leaves the caller's `while` untouched.
+    fn fold_for(
+        &self,
+        header: usize,
+        latch: usize,
+        latch_stmts: &mut Vec<Stmt>,
+        preceding: &mut Vec<Stmt>,
+    ) -> Option<(Option<ForInit>, ForUpdate)> {
+        let header_line = Lines::line_at(self.lines, self.block_first_pc(header)?)?;
+        // The update is the last instruction the latch replays; a latch that replays none (a bare
+        // `goto`) has no update to lift.
+        if Lines::line_at(self.lines, self.block_last_pc(latch)?)? != header_line {
+            return None;
+        }
+        let update = match ForUpdate::from_stmt(latch_stmts.pop()?) {
+            Ok(update) => update,
+            // Not a *StatementExpression* — put it back and keep the `while`.
+            Err(stmt) => {
+                latch_stmts.push(*stmt);
+                return None;
+            }
+        };
+        let init = self.fold_for_init(header, latch, header_line, preceding);
+        Some((init, update))
+    }
+
+    /// The `for`'s init clause, lifted off the end of `preceding`, or `None` to leave the
+    /// initializer where it is and render `for (; cond; update)`.
+    fn fold_for_init(
+        &self,
+        header: usize,
+        latch: usize,
+        header_line: u16,
+        preceding: &mut Vec<Stmt>,
+    ) -> Option<ForInit> {
+        // Only the block that falls straight into the header can hold the initializer, and it has to
+        // sit on the header's line like the update does.
+        if header == 0
+            || !matches!(self.cfg.blocks[header - 1].term, Term::Fall(next) if next == header)
+        {
+            return None;
+        }
+        if Lines::line_at(self.lines, self.block_last_pc(header - 1)?)? != header_line {
+            return None;
+        }
+        let Some(Stmt::Assign {
+            target: Expr::Local(name),
+            ..
+        }) = preceding.last()
+        else {
+            return None;
+        };
+        let name = name.clone();
+        // Absorbing the *declaration* too needs proof the variable dies with the loop. Without it
+        // the hoisted declaration stays and the clause is a bare assignment, which is still correct
+        // — just not `for (int i = …)`. This also covers a *parameter* used as the counter, whose
+        // slot is live from offset 0 to the end of the method and so can never be confined.
+        let ty = self.slot_of_name(&name).and_then(|slot| {
+            let local = self.locals.get(&slot)?;
+            let range = self.loop_pc_range(header, latch)?;
+            Attrs::slot_confined_to(self.lvt, slot, &range)
+                .then(|| JavaType::render_field_type(&local.ty))
+        });
+        let Some(Stmt::Assign { value, .. }) = preceding.pop() else {
+            return None;
+        };
+        Some(ForInit { ty, name, value })
+    }
+
+    /// The byte offset of a block's first instruction.
+    fn block_first_pc(&self, b: usize) -> Option<usize> {
+        self.cfg.pcs.get(self.cfg.blocks[b].start).copied()
+    }
+
+    /// The byte offset of the last instruction the simulator replays for a block, or `None` when it
+    /// replays none — [`crate::cfg::Block::body`] drops an explicit terminator, so a block that is
+    /// nothing but its own `goto` has an empty range.
+    fn block_last_pc(&self, b: usize) -> Option<usize> {
+        let body = self.cfg.blocks[b].body();
+        let last = body.end.checked_sub(1).filter(|last| *last >= body.start)?;
+        self.cfg.pcs.get(last).copied()
+    }
+
+    /// The loop's byte range: its header's first instruction up to the first instruction past the
+    /// latch. A local a `for` may declare has to live and die inside it.
+    fn loop_pc_range(&self, header: usize, latch: usize) -> Option<Range<usize>> {
+        let start = self.block_first_pc(header)?;
+        let end = self.cfg.pcs.get(self.cfg.blocks[latch].end).copied()?;
+        (start < end).then_some(start..end)
+    }
+
+    /// The local slot whose source name is `name`. Names are unique across a method's locals —
+    /// [`MethodBody::local_declarations`] bails on a collision — so at most one slot matches.
+    fn slot_of_name(&self, name: &str) -> Option<u16> {
+        self.locals
+            .iter()
+            .find(|(_, local)| local.name == name)
+            .map(|(slot, _)| *slot)
     }
 
     /// Structure the multi-way branch terminating block `b` into a [`Stmt::Switch`], returning the

@@ -22,6 +22,10 @@ const MAX_SWITCH_CASES: usize = 1 << 16;
 /// A method's basic blocks, in instruction order (block 0 is the entry).
 pub(crate) struct Cfg {
     pub blocks: Vec<Block>,
+    /// Byte offset (pc) of each instruction, parallel to the method's `code` and strictly
+    /// increasing. Built here to resolve branch targets; kept so the structurer can look an
+    /// instruction up in the `LineNumberTable`, which is keyed by pc rather than by index.
+    pub pcs: Vec<usize>,
 }
 
 /// A basic block: a maximal run of instructions `code[start..end]` with a single entry, ending in a
@@ -248,6 +252,6 @@ impl Cfg {
             };
             blocks.push(Block { start, end, term });
         }
-        Some(Self { blocks })
+        Some(Self { blocks, pcs })
     }
 }
