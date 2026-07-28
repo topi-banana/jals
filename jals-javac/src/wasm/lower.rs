@@ -1874,12 +1874,16 @@ impl Lowering<'_> {
             .children()
             .find(|child| child.kind() == FINALLY_CLAUSE)
             .and_then(|clause| clause.children().find_map(ast::Block::cast));
-        if statement
+        // A resource is declared, used, and closed: the declaration becomes a local here and the close
+        // becomes part of the cleanup, so the rest of this function needs to know only that there is one.
+        let resources: Vec<ast::Resource> = statement
             .syntax()
             .children()
-            .any(|child| child.kind() == RESOURCE_LIST)
-        {
-            return Err(WasmError::Unsupported("a try-with-resources"));
+            .filter(|child| child.kind() == RESOURCE_LIST)
+            .flat_map(|list| list.children().filter_map(ast::Resource::cast))
+            .collect();
+        if !resources.is_empty() {
+            return self.try_resources(statement, &resources, insn);
         }
         let tag = self
             .layout
@@ -1939,6 +1943,148 @@ impl Lowering<'_> {
         insn.end();
         if let Some(cleanup) = &finally {
             self.block(cleanup, insn)?;
+        }
+        Ok(())
+    }
+
+    /// `try (R r = …) { … }`.
+    ///
+    /// §14.20.3 closes each resource in reverse declaration order, on both the normal and the exceptional
+    /// path, skipping a `null` one. What this does *not* do is record a suppressed exception: a `close()`
+    /// that throws while the body is already throwing is swallowed, because `Throwable.addSuppressed`
+    /// needs a type with no wasm representation. The *primary* exception is still the body's, which is the
+    /// one Java propagates and the one a `catch` sees — so the control flow is right and only the
+    /// suppressed list is missing.
+    ///
+    /// A `catch` or a `finally` alongside the resources is reported: each would need its own copy of the
+    /// close sequence, and the interleaving §14.20.3 gives is not something to guess at.
+    fn try_resources(
+        &mut self,
+        statement: &ast::TryStmt,
+        resources: &[ast::Resource],
+        insn: &mut Insn,
+    ) -> Result<()> {
+        use jals_syntax::SyntaxKind::FINALLY_CLAUSE;
+        if statement
+            .syntax()
+            .children()
+            .any(|child| child.kind() == FINALLY_CLAUSE)
+            || statement
+                .syntax()
+                .children()
+                .any(|child| ast::CatchClause::cast(child).is_some())
+        {
+            return Err(WasmError::Unsupported(
+                "a try-with-resources with a `catch` or a `finally`",
+            ));
+        }
+        let tag = self
+            .layout
+            .tag
+            .ok_or(WasmError::Unsupported("a `try` with no tag declared"))?;
+        let body = statement
+            .syntax()
+            .children()
+            .find_map(ast::Block::cast)
+            .ok_or(WasmError::Unsupported("a `try` with no body"))?;
+
+        // Each resource is a local of its declared type, initialised in order.
+        let mut slots = Vec::with_capacity(resources.len());
+        for resource in resources {
+            let name = resource
+                .syntax()
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                .ok_or(WasmError::Unsupported("a resource with no name"))?;
+            let value = resource
+                .syntax()
+                .children()
+                .find_map(ast::Expr::cast)
+                .ok_or(WasmError::Unsupported("a resource with no initialiser"))?;
+            let id = self
+                .input
+                .resolved
+                .symbol_at(usize::from(name.text_range().start()))
+                .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+            let slot = self.declare_local(id)?;
+            let declared = self.input.inference.type_of_def(id).clone();
+            self.value_as(&value, &declared, insn)?;
+            insn.local_set(slot);
+            slots.push((slot, declared));
+        }
+
+        insn.block();
+        let out = insn.depth();
+        insn.block_typed(ValType::Ref(RefType::nullable(HeapType::Any)));
+        let handler = insn.depth();
+        insn.try_table(&[(tag, insn.depth() - handler)]);
+        self.block(&body, insn)?;
+        insn.end();
+        // The body completed: close normally, so a `close()` that throws propagates.
+        self.close_resources(&slots, insn)?;
+        insn.br(insn.depth() - out);
+        insn.end();
+
+        let caught = self.scratch(ValType::Ref(RefType::nullable(HeapType::Any)));
+        insn.local_set(caught);
+        insn.block();
+        let closed = insn.depth();
+        insn.block_typed(ValType::Ref(RefType::nullable(HeapType::Any)));
+        let threw = insn.depth();
+        insn.try_table(&[(tag, insn.depth() - threw)]);
+        self.close_resources(&slots, insn)?;
+        insn.br(insn.depth() - closed);
+        insn.end();
+        // Only reachable if `close()` completed without branching, which it cannot.
+        insn.unreachable();
+        insn.end();
+        // The suppressed exception, dropped rather than attached: see this function's own note.
+        insn.drop();
+        insn.end();
+        insn.local_get(caught);
+        insn.throw(tag);
+        insn.end();
+        Ok(())
+    }
+
+    /// `if (r != null) r.close();` for each resource, in reverse declaration order.
+    fn close_resources(&self, slots: &[(u32, Ty)], insn: &mut Insn) -> Result<()> {
+        for (slot, declared) in slots.iter().rev() {
+            let item = declared
+                .project_id()
+                .ok_or(WasmError::Unsupported("a resource of an unindexed type"))?;
+            let close = self
+                .index
+                .members_of(item)
+                .into_iter()
+                .find(|&id| {
+                    let member = self.index.member(id);
+                    member.kind == DefKind::Method
+                        && member.name == "close"
+                        && member.params.is_empty()
+                })
+                .ok_or(WasmError::Unsupported("a resource with no `close`"))?;
+            // An overridden `close` would need the dispatch chain a call site builds, which needs a call
+            // expression this has not got — so one is reported rather than dispatched to the wrong body.
+            if !self.overriders(close).is_empty() {
+                return Err(WasmError::Unsupported(
+                    "an overridden `close` on a resource",
+                ));
+            }
+            let function = *self
+                .layout
+                .functions
+                .get(&close)
+                .ok_or(WasmError::Unsupported("a `close` with no body"))?;
+            // `r != null`, which §14.20.3 checks before closing.
+            insn.local_get(*slot);
+            insn.ref_is_null();
+            insn.i32_eqz();
+            insn.if_();
+            insn.local_get(*slot);
+            insn.call(function);
+            insn.end();
         }
         Ok(())
     }

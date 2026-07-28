@@ -1123,22 +1123,6 @@ public class Cleanly {
     assert_invoke(&[source], "continued", &["3"], "3");
 }
 
-/// try-with-resources is reported: it is a `finally` plus a `close()` plus *suppression*, and leaving
-/// the suppression out would replace the body's exception with `close()`'s — a silently wrong exception
-/// rather than a missing feature.
-#[test]
-fn a_resource_is_reported() {
-    let source = concat!(
-        "public class T { public static int run(int n) { ",
-        "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; } return n; } }"
-    );
-    let error = compile(&[source]).expect_err("try-with-resources is not compiled yet");
-    assert!(
-        matches!(error, WasmError::Unsupported("a try-with-resources")),
-        "got {error}"
-    );
-}
-
 /// Constructor delegation, `this(…)` and `super(…)`.
 ///
 /// Both are calls to a constructor, and a constructor has no return type at all — `resolved_member_ty`
@@ -1797,6 +1781,80 @@ public class Host {
         matches!(
             error,
             WasmError::Unsupported("a local class that captures a local")
+        ),
+        "got {error}"
+    );
+}
+
+/// try-with-resources: each resource closed in reverse declaration order, on both paths.
+///
+/// What this does *not* do is record a suppressed exception. A `close()` that throws while the body is
+/// already throwing is swallowed, because `Throwable.addSuppressed` needs a type with no wasm
+/// representation. The *primary* exception is still the body's — the one Java propagates and the one a
+/// `catch` sees — so the control flow is right and only the suppressed list is missing.
+#[test]
+fn a_try_with_resources_closes_each_one() {
+    let source = r"
+public class Handle {
+    static int closes;
+    int id;
+    Handle(int id) { this.id = id; }
+    public void close() { closes = closes + id; }
+}
+
+public class Boom extends RuntimeException {
+    Boom() {}
+}
+
+public class Uses {
+    public static int normally(int n) {
+        try (Handle a = new Handle(n)) {
+            Handle.closes = 0;
+        }
+        return Handle.closes;
+    }
+
+    // Two resources: both closed, in reverse declaration order.
+    public static int both() {
+        try (Handle a = new Handle(1); Handle b = new Handle(10)) {
+            Handle.closes = 0;
+        }
+        return Handle.closes;
+    }
+
+    static void raising() {
+        try (Handle a = new Handle(4)) {
+            Handle.closes = 0;
+            throw new Boom();
+        }
+    }
+
+    // The resource is closed on the way out, and the body's exception carries on past this frame.
+    public static int onTheWayOut() {
+        try {
+            raising();
+        } catch (Boom b) {
+            return Handle.closes;
+        }
+        return -1;
+    }
+}
+";
+    assert_invoke(&[source], "normally", &["3"], "3");
+    assert_invoke(&[source], "both", &[], "11");
+    assert_invoke(&[source], "onTheWayOut", &[], "4");
+
+    // A `catch` or a `finally` alongside the resources would need its own copy of the close sequence, and
+    // the interleaving §14.20.3 gives is not something to guess at.
+    let combined = concat!(
+        "public class T { public static int run(int n) { ",
+        "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; } return n; } }"
+    );
+    let error = compile(&[combined]).expect_err("the combination is not lowered yet");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a try-with-resources with a `catch` or a `finally`")
         ),
         "got {error}"
     );
