@@ -78,11 +78,26 @@ impl Num {
 #[derive(Debug, Default)]
 pub(crate) struct Insn {
     out: Bytes,
+    /// How many structured control instructions are currently open.
+    ///
+    /// A `br` names a *relative* depth, so the target of a `continue` shifts every time an `if` opens
+    /// between the loop header and the branch. Nothing in the source says how deep that is; only the
+    /// emitter knows, so it counts. A lowering records this at the point it opens a loop and takes the
+    /// difference at the branch.
+    depth: u32,
 }
 
 impl Insn {
     pub(crate) const fn new() -> Self {
-        Self { out: Bytes::new() }
+        Self {
+            out: Bytes::new(),
+            depth: 0,
+        }
+    }
+
+    /// How many structured control instructions are open here.
+    pub(crate) const fn depth(&self) -> u32 {
+        self.depth
     }
 
     pub(crate) fn into_body(self) -> Vec<u8> {
@@ -94,6 +109,16 @@ impl Insn {
     /// `block` with no result. Closed by [`end`](Self::end); `br 0` inside jumps *past* it.
     pub(crate) fn block(&mut self) -> &mut Self {
         self.out.byte(0x02).byte(0x40);
+        self.depth += 1;
+        self
+    }
+
+    /// `block` leaving one value of type `ty`. `br 0` out of it must carry that value, which is what
+    /// makes a `switch` *expression* a block rather than a statement wrapped in one.
+    pub(crate) fn block_typed(&mut self, ty: ValType) -> &mut Self {
+        self.out.byte(0x02);
+        ty.write(&mut self.out);
+        self.depth += 1;
         self
     }
 
@@ -101,12 +126,26 @@ impl Insn {
     /// difference between the two and what makes a `while` two nested labels rather than one.
     pub(crate) fn loop_(&mut self) -> &mut Self {
         self.out.byte(0x03).byte(0x40);
+        self.depth += 1;
         self
     }
 
     /// `if` with no result, taking an `i32` condition.
     pub(crate) fn if_(&mut self) -> &mut Self {
         self.out.byte(0x04).byte(0x40);
+        self.depth += 1;
+        self
+    }
+
+    /// `if` leaving one value of type `ty`, which both arms must produce.
+    ///
+    /// This — not `select` — is how Java's `?:` and `&&` / `||` lower. `select` pops *both* value
+    /// operands, so both arms would already have run: `c ? f() : g()` would call both, and a trapping
+    /// arm would trap whether or not it was taken. §15.25 evaluates exactly one arm.
+    pub(crate) fn if_typed(&mut self, ty: ValType) -> &mut Self {
+        self.out.byte(0x04);
+        ty.write(&mut self.out);
+        self.depth += 1;
         self
     }
 
@@ -117,6 +156,7 @@ impl Insn {
 
     pub(crate) fn end(&mut self) -> &mut Self {
         self.out.byte(0x0B);
+        self.depth = self.depth.saturating_sub(1);
         self
     }
 
@@ -129,6 +169,21 @@ impl Insn {
     /// Branch when the `i32` on top is non-zero.
     pub(crate) fn br_if(&mut self, depth: u32) -> &mut Self {
         self.out.byte(0x0D).u32(depth);
+        self
+    }
+
+    /// Branch to `targets[i]` for the `i32` index `i` on top, or to `default` when it is out of range.
+    ///
+    /// The index is read as **unsigned**, so one `i32.sub` by the lowest key is the whole bounds check
+    /// a `switch` needs: a key below the minimum wraps past 2³¹ and lands on the default with it.
+    pub(crate) fn br_table(&mut self, targets: &[u32], default: u32) -> &mut Self {
+        self.out.byte(0x0E);
+        self.out
+            .u32(u32::try_from(targets.len()).unwrap_or(u32::MAX));
+        for &target in targets {
+            self.out.u32(target);
+        }
+        self.out.u32(default);
         self
     }
 

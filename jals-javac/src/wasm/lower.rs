@@ -457,6 +457,8 @@ impl Body {
             locals: Vec::new(),
             next: 0,
             owner: method.owner,
+            loops: Vec::new(),
+            pending_label: None,
         };
         // `this` is parameter 0 of an instance method or a constructor.
         if method.owner.is_some() || method.is_constructor {
@@ -492,6 +494,35 @@ struct Lowering<'a> {
     /// The next free local index. Unlike the JVM's, a wasm local is one slot whatever its width.
     next: u32,
     owner: Option<ItemId>,
+    /// Enclosing `break` / `continue` targets, innermost last.
+    loops: Vec<Loop>,
+    /// A label read off a `LabeledStmt`, waiting for the loop it labels to claim it.
+    pending_label: Option<String>,
+}
+
+/// One arm of a lowered `switch`: which keys reach it, in the order the arms are written.
+///
+/// It carries no entry label, unlike the JVM backend's: an arm's entry is a *position* in the block
+/// nesting rather than a name, and the position is the arm's index.
+struct Arm {
+    /// The `case` keys that reach this arm. Empty for a bare `default`.
+    keys: Vec<i32>,
+    /// Whether one of this arm's labels is `default`.
+    is_default: bool,
+}
+
+/// One enclosing statement a `break` or a `continue` can name.
+///
+/// Both depths are `Insn::depth()` values taken just after the structure opened, so a branch is the
+/// *difference* against the depth at the branch — the only way to get it right when an `if` may have
+/// opened in between.
+struct Loop {
+    /// The Java label on this statement, if it has one.
+    label: Option<String>,
+    /// Where a `break` lands: past the whole statement.
+    leave: u32,
+    /// Where a `continue` lands, or `None` for a labelled statement that is no loop.
+    repeat: Option<u32>,
 }
 
 impl Lowering<'_> {
@@ -568,11 +599,7 @@ impl Lowering<'_> {
                 let Some(value) = expression.expr() else {
                     return Ok(());
                 };
-                let dropped = self.expr(&value, insn)?;
-                if dropped.is_some() {
-                    insn.drop();
-                }
-                Ok(())
+                self.discard(&value, insn)
             }
             ast::Stmt::Return(statement) => {
                 if let Some(value) = statement.expr() {
@@ -583,6 +610,21 @@ impl Lowering<'_> {
             }
             ast::Stmt::If(statement) => self.conditional(statement, insn),
             ast::Stmt::While(statement) => self.while_loop(statement, insn),
+            ast::Stmt::DoWhile(statement) => self.do_while(statement, insn),
+            ast::Stmt::For(statement) => self.for_loop(statement, insn),
+            ast::Stmt::ForEach(statement) => self.for_each(statement, insn),
+            ast::Stmt::Break(statement) => self.leave(statement.syntax(), false, insn),
+            ast::Stmt::Continue(statement) => self.leave(statement.syntax(), true, insn),
+            ast::Stmt::Labeled(statement) => self.labelled(statement, insn),
+            ast::Stmt::Switch(statement) => {
+                let selector = statement
+                    .selector()
+                    .ok_or(WasmError::Unsupported("a `switch` with no selector"))?;
+                let body = statement
+                    .body()
+                    .ok_or(WasmError::Unsupported("a `switch` with no body"))?;
+                self.switch(&selector, &body, None, insn)
+            }
             _ => Err(WasmError::Unsupported("this statement form")),
         }
     }
@@ -631,20 +673,595 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// `while` is a `block` around a `loop`: `br 1` leaves, `br 0` repeats. The two labels are why
-    /// wasm needs both instructions — a `loop` alone can only jump backwards.
+    /// `while` is a `block` around a `loop`: leaving branches out of the block, repeating branches to
+    /// the loop. The two labels are why wasm needs both instructions — a `loop` alone can only jump
+    /// backwards, and a `block` alone only forwards.
+    ///
+    /// A `continue` re-tests the condition, so the loop *is* its target here; the other two loop forms
+    /// need a third structure because their continuation point is not the top.
     fn while_loop(&mut self, statement: &ast::WhileStmt, insn: &mut Insn) -> Result<()> {
         let condition = statement
             .condition()
             .ok_or(WasmError::Unsupported("a `while` with no condition"))?;
-        insn.block().loop_();
+        let label = self.pending_label.take();
+        insn.block();
+        let leave = insn.depth();
+        insn.loop_();
+        let repeat = insn.depth();
         self.expr(&condition, insn)?;
-        // Leave when the condition is false: negate, then branch out of both structures.
-        insn.i32_eqz().br_if(1);
+        insn.i32_eqz();
+        insn.br_if(insn.depth() - leave);
+        self.loops.push(Loop {
+            label,
+            leave,
+            repeat: Some(repeat),
+        });
         if let Some(body) = statement.body() {
             self.stmt(&body, insn)?;
         }
-        insn.br(0).end().end();
+        self.loops.pop();
+        insn.br(insn.depth() - repeat).end().end();
+        Ok(())
+    }
+
+    /// `do body while (cond)`.
+    ///
+    /// Three structures, not two: a `continue` reaches the *bottom* test, which is neither the top of
+    /// the loop nor past the end of it. The inner block is that point.
+    fn do_while(&mut self, statement: &ast::DoWhileStmt, insn: &mut Insn) -> Result<()> {
+        let condition = statement
+            .condition()
+            .ok_or(WasmError::Unsupported("a `do` with no condition"))?;
+        let label = self.pending_label.take();
+        insn.block();
+        let leave = insn.depth();
+        insn.loop_();
+        let repeat = insn.depth();
+        insn.block();
+        let next = insn.depth();
+        self.loops.push(Loop {
+            label,
+            leave,
+            repeat: Some(next),
+        });
+        if let Some(body) = statement.body() {
+            self.stmt(&body, insn)?;
+        }
+        self.loops.pop();
+        insn.end();
+        self.expr(&condition, insn)?;
+        insn.br_if(insn.depth() - repeat).end().end();
+        Ok(())
+    }
+
+    /// `for (init; condition; update) body`.
+    ///
+    /// A `continue` runs the update before re-testing (JLS §14.14.1.3), so the update sits *between*
+    /// the inner block's end and the branch back — which is exactly what makes the inner block the
+    /// continue target rather than the loop.
+    fn for_loop(&mut self, statement: &ast::ForStmt, insn: &mut Insn) -> Result<()> {
+        let (init, condition, update, body) = Self::for_sections(statement.syntax());
+        let label = self.pending_label.take();
+        for node in &init {
+            self.for_section(node, insn)?;
+        }
+        insn.block();
+        let leave = insn.depth();
+        insn.loop_();
+        let repeat = insn.depth();
+        // No condition means `for (;;)`, which never leaves by itself.
+        if let Some(condition) = &condition {
+            self.expr(condition, insn)?;
+            insn.i32_eqz();
+            insn.br_if(insn.depth() - leave);
+        }
+        insn.block();
+        let next = insn.depth();
+        self.loops.push(Loop {
+            label,
+            leave,
+            repeat: Some(next),
+        });
+        if let Some(body) = &body {
+            self.stmt(body, insn)?;
+        }
+        self.loops.pop();
+        insn.end();
+        for node in &update {
+            self.for_section(node, insn)?;
+        }
+        insn.br(insn.depth() - repeat).end().end();
+        Ok(())
+    }
+
+    /// One node of a `for` header's initialiser or update list: a declaration, or an expression run for
+    /// its effect.
+    fn for_section(&mut self, node: &SyntaxNode, insn: &mut Insn) -> Result<()> {
+        if let Some(declaration) = ast::LocalVarDecl::cast(node.clone()) {
+            return self.local(&declaration, insn);
+        }
+        let expression =
+            ast::Expr::cast(node.clone()).ok_or(WasmError::Unsupported("this `for` header"))?;
+        self.discard(&expression, insn)
+    }
+
+    /// Split a `FOR_STMT` into its three header sections and its body.
+    fn for_sections(
+        node: &SyntaxNode,
+    ) -> (
+        Vec<SyntaxNode>,
+        Option<ast::Expr>,
+        Vec<SyntaxNode>,
+        Option<ast::Stmt>,
+    ) {
+        use jals_syntax::SyntaxKind::{RPAREN, SEMICOLON};
+        let (mut init, mut update) = (Vec::new(), Vec::new());
+        let (mut condition, mut body) = (None, None);
+        // 0 = initialiser, 1 = condition, 2 = update; past the `)`, the body.
+        let mut section = 0;
+        let mut in_header = true;
+        for child in node.children_with_tokens() {
+            match child {
+                jals_syntax::SyntaxElement::Token(token) => match token.kind() {
+                    SEMICOLON if in_header => section += 1,
+                    RPAREN => in_header = false,
+                    _ => {}
+                },
+                jals_syntax::SyntaxElement::Node(child) => {
+                    if !in_header {
+                        body = ast::Stmt::cast(child);
+                    } else if section == 0 {
+                        init.push(child);
+                    } else if section == 1 {
+                        condition = ast::Expr::cast(child);
+                    } else {
+                        update.push(child);
+                    }
+                }
+            }
+        }
+        (init, condition, update, body)
+    }
+
+    /// `for (T v : array) body`, over an array.
+    ///
+    /// JLS §14.14.2 defines it as an indexed loop, and this is that loop: the array and the index live
+    /// in scratch locals so neither the iterable expression nor `array.len` is re-evaluated per step.
+    /// An `Iterable` would need `java.lang.Iterable`, which this host does not have.
+    fn for_each(&mut self, statement: &ast::ForEachStmt, insn: &mut Insn) -> Result<()> {
+        let iterable = statement
+            .iterable()
+            .ok_or(WasmError::Unsupported("a `for`-each over nothing"))?;
+        let name: SyntaxToken = statement
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .ok_or(WasmError::Unsupported("a `for`-each with no variable"))?;
+        let Some(Ty::Array(element)) = self
+            .input
+            .inference
+            .type_of_expr(Self::span(iterable.syntax()))
+        else {
+            return Err(WasmError::Unsupported("a `for`-each over this type"));
+        };
+        let element = self.layout.val_type(element)?;
+        let array_type = self
+            .layout
+            .array_type(element)
+            .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
+        let label = self.pending_label.take();
+
+        let array_ty = self
+            .expr(&iterable, insn)?
+            .ok_or(WasmError::Unsupported("a `for`-each over no value"))?;
+        let array = self.scratch(array_ty);
+        insn.local_set(array);
+        let index = self.scratch(ValType::I32);
+        insn.i32_const(0).local_set(index);
+
+        let id = self
+            .input
+            .resolved
+            .symbol_at(usize::from(name.text_range().start()))
+            .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+        let variable = self.declare_local(id)?;
+
+        insn.block();
+        let leave = insn.depth();
+        insn.loop_();
+        let repeat = insn.depth();
+        // `index < array.length`, then leave when it is not.
+        insn.local_get(index)
+            .local_get(array)
+            .array_len()
+            .numeric(NumOp::Lt, ValType::I32)
+            .ok_or(WasmError::Unsupported("an array length comparison"))?;
+        insn.i32_eqz();
+        insn.br_if(insn.depth() - leave);
+        // The variable is bound before the continue target, so a `continue` cannot skip the binding.
+        insn.local_get(array)
+            .local_get(index)
+            .array_get(array_type)
+            .local_set(variable);
+        insn.block();
+        let next = insn.depth();
+        self.loops.push(Loop {
+            label,
+            leave,
+            repeat: Some(next),
+        });
+        if let Some(body) = statement.body() {
+            self.stmt(&body, insn)?;
+        }
+        self.loops.pop();
+        insn.end();
+        insn.local_get(index)
+            .i32_const(1)
+            .numeric(NumOp::Add, ValType::I32)
+            .ok_or(WasmError::Unsupported("an index increment"))?;
+        insn.local_set(index);
+        insn.br(insn.depth() - repeat).end().end();
+        Ok(())
+    }
+
+    /// `label: statement`.
+    ///
+    /// A labelled *loop* takes the label into its own entry, so `continue label` reaches its update
+    /// rather than merely leaving it. Anything else gets a block of its own, which only `break label`
+    /// can target — the label of a non-loop is a forward jump and nothing else (JLS §14.7).
+    fn labelled(&mut self, statement: &ast::LabeledStmt, insn: &mut Insn) -> Result<()> {
+        let label = statement
+            .label()
+            .ok_or(WasmError::Unsupported("a label with no name"))?;
+        let inner = statement
+            .stmt()
+            .ok_or(WasmError::Unsupported("a label with no statement"))?;
+        if matches!(
+            inner,
+            ast::Stmt::While(_) | ast::Stmt::DoWhile(_) | ast::Stmt::For(_) | ast::Stmt::ForEach(_)
+        ) {
+            self.pending_label = Some(label);
+            return self.stmt(&inner, insn);
+        }
+        insn.block();
+        let leave = insn.depth();
+        self.loops.push(Loop {
+            label: Some(label),
+            leave,
+            repeat: None,
+        });
+        let lowered = self.stmt(&inner, insn);
+        self.loops.pop();
+        lowered?;
+        insn.end();
+        Ok(())
+    }
+
+    /// `switch (selector) { … }`, statement or expression.
+    ///
+    /// The shape is one `block` per arm, nested inside a `block` for the whole `switch`: a `br i` from
+    /// the dispatch lands just past arm `i`'s block, which is where arm `i`'s body starts. Falling out
+    /// of arm `i`'s block end then runs arm `i+1` — so the colon form's fallthrough is what the nesting
+    /// *already does*, with no branch of its own.
+    fn switch(
+        &mut self,
+        selector: &ast::Expr,
+        body: &ast::SwitchBlock,
+        result: Option<ValType>,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let rules: Vec<ast::SwitchRule> = body.rules().collect();
+        let groups: Vec<ast::SwitchGroup> = body.groups().collect();
+        if !rules.is_empty() && !groups.is_empty() {
+            // JLS §14.11.1 forbids mixing them, so this is not a program.
+            return Err(WasmError::Unsupported("a `switch` mixing both forms"));
+        }
+        let arms: Vec<Arm> = if rules.is_empty() {
+            groups
+                .iter()
+                .map(|group| Self::arm(group.labels()))
+                .collect::<Result<_>>()?
+        } else {
+            rules
+                .iter()
+                .map(|rule| Self::arm(rule.label().into_iter()))
+                .collect::<Result<_>>()?
+        };
+        let count = u32::try_from(arms.len()).map_err(|_| WasmError::TooLarge)?;
+        // An unmatched key has to reach *some* label, and for an expression that label cannot be the
+        // end of the block: the block owes a value. Exhaustiveness over an `enum` is the other way to
+        // satisfy §14.11.2 and is not lowered, so a `default` is required rather than assumed.
+        let default = arms.iter().position(|arm| arm.is_default);
+        if result.is_some() && default.is_none() {
+            return Err(WasmError::Unsupported(
+                "a `switch` expression with no `default`",
+            ));
+        }
+        let fallback = default.map_or(count, |index| u32::try_from(index).unwrap_or(count));
+        let label = self.pending_label.take();
+
+        match result {
+            Some(ty) => insn.block_typed(ty),
+            None => insn.block(),
+        };
+        let leave = insn.depth();
+        for _ in 0..count {
+            insn.block();
+        }
+        self.dispatch(selector, &arms, fallback, insn)?;
+
+        self.loops.push(Loop {
+            label,
+            leave,
+            repeat: None,
+        });
+        let lowered = if rules.is_empty() {
+            self.switch_groups(&groups, result, insn)
+        } else {
+            self.switch_rules(&rules, result, leave, insn)
+        };
+        self.loops.pop();
+        lowered?;
+        insn.end();
+        Ok(())
+    }
+
+    /// One arm's `case` keys. `default` contributes none.
+    fn arm(labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        let mut keys = Vec::new();
+        let mut is_default = false;
+        for label in labels {
+            if label.is_default() {
+                is_default = true;
+            }
+            // A pattern label tests a *type* and binds a name; a guard is a condition. Neither is a
+            // constant a jump table can index on.
+            if label.syntax().children().any(|child| {
+                matches!(
+                    child.kind(),
+                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                )
+            }) {
+                return Err(WasmError::Unsupported("a `case` pattern"));
+            }
+            if label
+                .syntax()
+                .children()
+                .any(|child| ast::Guard::cast(child).is_some())
+            {
+                return Err(WasmError::Unsupported("a guarded `case`"));
+            }
+            for value in label.syntax().children().filter_map(ast::Expr::cast) {
+                keys.push(Self::switch_key(&value)?);
+            }
+        }
+        Ok(Arm { keys, is_default })
+    }
+
+    /// The integral constant a `case` label names.
+    ///
+    /// Only a literal or a negated literal: a named constant would have to be folded, and `String`
+    /// has no representation in this module at all.
+    fn switch_key(value: &ast::Expr) -> Result<i32> {
+        use jals_syntax::SyntaxKind::{CHAR_LITERAL, INT_LITERAL, MINUS};
+        match value {
+            ast::Expr::Paren(paren) => {
+                let inner = paren
+                    .expr()
+                    .ok_or(WasmError::Unsupported("an empty parenthesis"))?;
+                Self::switch_key(&inner)
+            }
+            ast::Expr::Unary(unary) => {
+                let negated = unary
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .any(|token| token.kind() == MINUS);
+                let operand = unary
+                    .operand()
+                    .ok_or(WasmError::Unsupported("a `case` with no value"))?;
+                let key = Self::switch_key(&operand)?;
+                if negated { Ok(-key) } else { Ok(key) }
+            }
+            ast::Expr::Literal(literal) => {
+                let token = literal
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .find(|token| !token.kind().is_trivia())
+                    .ok_or(WasmError::Unsupported("an empty literal"))?;
+                match token.kind() {
+                    INT_LITERAL => crate::lower::expr::Expr::integer_literal(token.text())
+                        .ok()
+                        .and_then(|value| i32::try_from(value).ok())
+                        .ok_or(WasmError::Unsupported("an out-of-range `case` key")),
+                    CHAR_LITERAL => crate::lower::expr::Expr::literal_text(token.text())
+                        .ok()
+                        .and_then(|text| text.chars().next())
+                        .map(|value| value as i32)
+                        .ok_or(WasmError::Unsupported("a `case` key this cannot read")),
+                    _ => Err(WasmError::Unsupported("a `case` key of this kind")),
+                }
+            }
+            _ => Err(WasmError::Unsupported("a `case` key that is no constant")),
+        }
+    }
+
+    /// Emit the selector and the jump into the arms.
+    fn dispatch(
+        &mut self,
+        selector: &ast::Expr,
+        arms: &[Arm],
+        fallback: u32,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        // The selector has to *already* be an `i32`. Converting one that is not would narrow it
+        // silently: a `long` selector is not a Java program, but an `i32.wrap_i64` would turn it into
+        // one that switches on the low 32 bits.
+        if !matches!(
+            self.input
+                .inference
+                .type_of_expr(Self::span(selector.syntax())),
+            Some(Ty::Primitive(
+                Primitive::Byte | Primitive::Short | Primitive::Char | Primitive::Int
+            ))
+        ) {
+            return Err(WasmError::Unsupported("a `switch` on this selector type"));
+        }
+        let mut cases: Vec<(i32, u32)> = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            let target = u32::try_from(index).map_err(|_| WasmError::TooLarge)?;
+            for &key in &arm.keys {
+                cases.push((key, target));
+            }
+        }
+        self.expr(selector, insn)?;
+        let Some((&(first, _), rest)) = cases.split_first() else {
+            // No `case` at all: the selector is still evaluated, and every key is the default.
+            insn.drop().br(fallback);
+            return Ok(());
+        };
+        let (min, max) = rest.iter().fold((first, first), |(low, high), &(key, _)| {
+            (low.min(key), high.max(key))
+        });
+        // A table costs one entry per key in its range, present or not; the comparison chain costs
+        // four instructions per key. Past a spread of a few empty slots per key the chain is smaller.
+        let span = i64::from(max) - i64::from(min) + 1;
+        if span <= 2 * i64::try_from(cases.len()).unwrap_or(i64::MAX) + 8 {
+            let mut targets = alloc::vec![fallback; usize::try_from(span).unwrap_or(0)];
+            for &(key, target) in &cases {
+                let slot = usize::try_from(i64::from(key) - i64::from(min)).unwrap_or(0);
+                // The first label wins, which is what a duplicate `case` would mean if it were legal.
+                if targets[slot] == fallback {
+                    targets[slot] = target;
+                }
+            }
+            // `br_table` reads its index as *unsigned*, so subtracting the lowest key is the whole
+            // bounds check: a key below it wraps past 2³¹ and lands on the default with the rest.
+            if min != 0 {
+                insn.i32_const(min);
+                insn.numeric(NumOp::Sub, ValType::I32)
+                    .ok_or(WasmError::Unsupported("a `switch` offset"))?;
+            }
+            insn.br_table(&targets, fallback);
+            return Ok(());
+        }
+        // Sparse: wasm has no `lookupswitch`, so the keys are compared one at a time. The selector
+        // lives in a local because each comparison consumes a copy of it.
+        let slot = self.scratch(ValType::I32);
+        insn.local_set(slot);
+        for &(key, target) in &cases {
+            insn.local_get(slot).i32_const(key);
+            insn.numeric(NumOp::Eq, ValType::I32)
+                .ok_or(WasmError::Unsupported("a `switch` comparison"))?;
+            insn.br_if(target);
+        }
+        insn.br(fallback);
+        Ok(())
+    }
+
+    /// The colon form's arms, which fall through into one another.
+    fn switch_groups(
+        &mut self,
+        groups: &[ast::SwitchGroup],
+        result: Option<ValType>,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        if result.is_some() {
+            // A colon-form expression arm ends in `yield`, whose value would have to reach the block's
+            // end from an arbitrary statement position. Reported rather than emitted as a module the
+            // validator rejects for a missing value.
+            return Err(WasmError::Unsupported(
+                "a `switch` expression in the colon form",
+            ));
+        }
+        for group in groups {
+            insn.end();
+            for statement in group.stmts() {
+                self.stmt(&statement, insn)?;
+            }
+            // No branch: falling into the next group is what the colon form means, and a group that
+            // wanted to stop said `break`.
+        }
+        Ok(())
+    }
+
+    /// The arrow form, where each arm stands alone and leaves the `switch` when it finishes.
+    fn switch_rules(
+        &mut self,
+        rules: &[ast::SwitchRule],
+        result: Option<ValType>,
+        leave: u32,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        for rule in rules {
+            insn.end();
+            if let Some(value) = rule.expr() {
+                match result {
+                    // In an expression `switch` the arm's expression *is* its value.
+                    Some(ty) => self.arm_value(&value, ty, insn)?,
+                    None => self.discard(&value, insn)?,
+                }
+            } else if let Some(block) = rule.syntax().children().find_map(ast::Block::cast) {
+                if result.is_some() {
+                    return Err(WasmError::Unsupported(
+                        "a `switch` expression arm with a block body",
+                    ));
+                }
+                self.block(&block, insn)?;
+            } else {
+                return Err(WasmError::Unsupported("a `switch` arm of this form"));
+            }
+            insn.br(insn.depth() - leave);
+        }
+        Ok(())
+    }
+
+    /// One arrow arm's value, converted to the type the whole `switch` expression has.
+    fn arm_value(&mut self, value: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
+        if self.num_of(value.syntax()).is_ok()
+            && let Ok(target) = Self::num_for(ty)
+        {
+            return self.operand(value, target, insn);
+        }
+        self.expr(value, insn)?
+            .ok_or(WasmError::Unsupported("a `switch` arm with no value"))?;
+        Ok(())
+    }
+
+    /// `break` / `break label` / `continue` / `continue label`.
+    ///
+    /// The branch depth comes from the emitter, not from the source: an `if` between a loop header and
+    /// the branch shifts every target, and only the emitter knows how many structures are open.
+    fn leave(&self, node: &SyntaxNode, continuing: bool, insn: &mut Insn) -> Result<()> {
+        let label = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .map(|token| token.text().to_owned());
+        let target = self
+            .loops
+            .iter()
+            .rev()
+            .find(|entry| {
+                let named = label
+                    .as_ref()
+                    .is_none_or(|wanted| entry.label.as_deref() == Some(wanted.as_str()));
+                named && (!continuing || entry.repeat.is_some())
+            })
+            .ok_or(WasmError::Unsupported(
+                "a `break` or `continue` with no enclosing target",
+            ))?;
+        let depth = if continuing {
+            target.repeat.ok_or(WasmError::Unsupported(
+                "a `continue` naming something that is no loop",
+            ))?
+        } else {
+            target.leave
+        };
+        insn.br(insn.depth() - depth);
         Ok(())
     }
 
@@ -671,15 +1288,78 @@ impl Lowering<'_> {
             }
             ast::Expr::NameRef(name) => self.name(name, insn).map(Some),
             ast::Expr::Binary(binary) => self.binary(binary, insn).map(Some),
-            ast::Expr::Assignment(assignment) => self.assignment(assignment, insn),
+            ast::Expr::Assignment(assignment) => self.assignment(assignment, true, insn),
             ast::Expr::New(new) => self.new_object(new, insn).map(Some),
             ast::Expr::Call(call) => self.call(call, insn),
             ast::Expr::Index(index) => self.index(index, insn).map(Some),
             ast::Expr::FieldAccess(access) => self.field(access, insn).map(Some),
-            ast::Expr::Unary(unary) => self.unary(unary, insn).map(Some),
+            ast::Expr::Unary(unary) => self.unary(unary, true, insn),
+            ast::Expr::Postfix(postfix) => {
+                let (target, delta) = Self::postfix(postfix)?;
+                self.update(&target, delta, false, true, insn)
+            }
+            ast::Expr::Ternary(ternary) => self.ternary(ternary, insn).map(Some),
+            ast::Expr::Switch(switch) => {
+                let selector = switch
+                    .selector()
+                    .ok_or(WasmError::Unsupported("a `switch` with no selector"))?;
+                let body = switch
+                    .body()
+                    .ok_or(WasmError::Unsupported("a `switch` with no body"))?;
+                let ty = self.ty_of(switch.syntax())?;
+                self.switch(&selector, &body, Some(ty), insn)?;
+                Ok(Some(ty))
+            }
             ast::Expr::Cast(cast) => self.cast(cast, insn).map(Some),
             _ => Err(WasmError::Unsupported("this expression form")),
         }
+    }
+
+    /// Emit `expr` for its effect, dropping any value it leaves.
+    ///
+    /// An assignment and an increment are asked *not* to produce one rather than having it dropped
+    /// afterwards: with no `dup`, producing it means a second load of a field or an array element, and
+    /// an expression statement never wanted it.
+    fn discard(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<()> {
+        match expr {
+            ast::Expr::Assignment(assignment) => {
+                self.assignment(assignment, false, insn)?;
+            }
+            ast::Expr::Unary(unary) => {
+                if self.unary(unary, false, insn)?.is_some() {
+                    insn.drop();
+                }
+            }
+            ast::Expr::Postfix(postfix) => {
+                let (target, delta) = Self::postfix(postfix)?;
+                self.update(&target, delta, false, false, insn)?;
+            }
+            other => {
+                if self.expr(other, insn)?.is_some() {
+                    insn.drop();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The target and step of a postfix `++` / `--`.
+    fn postfix(postfix: &ast::PostfixExpr) -> Result<(ast::Expr, i8)> {
+        use jals_syntax::SyntaxKind::{MINUS_MINUS, PLUS_PLUS};
+        let target = postfix
+            .operand()
+            .ok_or(WasmError::Unsupported("an increment of nothing"))?;
+        let delta = postfix
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find_map(|token| match token.kind() {
+                PLUS_PLUS => Some(1),
+                MINUS_MINUS => Some(-1),
+                _ => None,
+            })
+            .ok_or(WasmError::Unsupported("this postfix operator"))?;
+        Ok((target, delta))
     }
 
     /// Whether `node` is the `this` expression. It carries no identifier token, so nothing
@@ -842,8 +1522,13 @@ impl Lowering<'_> {
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
 
-    fn unary(&mut self, unary: &ast::UnaryExpr, insn: &mut Insn) -> Result<ValType> {
-        use jals_syntax::SyntaxKind::{BANG, MINUS, PLUS, TILDE};
+    fn unary(
+        &mut self,
+        unary: &ast::UnaryExpr,
+        keep: bool,
+        insn: &mut Insn,
+    ) -> Result<Option<ValType>> {
+        use jals_syntax::SyntaxKind::{BANG, MINUS, MINUS_MINUS, PLUS, PLUS_PLUS, TILDE};
         let operand = unary
             .operand()
             .ok_or(WasmError::Unsupported("a unary with no operand"))?;
@@ -855,18 +1540,24 @@ impl Lowering<'_> {
             .filter(|kind| !kind.is_trivia())
             .collect();
         match operator.as_slice() {
+            // A prefix `++` / `--` is an assignment, not an operator on a value.
+            [PLUS_PLUS] => return self.update(&operand, 1, true, keep, insn),
+            [MINUS_MINUS] => return self.update(&operand, -1, true, keep, insn),
+            _ => {}
+        }
+        let ty = match operator.as_slice() {
             // `!b` flips a `boolean`, which is an `i32` that is 0 or 1 — so `i32.eqz` *is* the flip.
             [BANG] => {
                 self.expr(&operand, insn)?
                     .ok_or(WasmError::Unsupported("a `!` on nothing"))?;
                 insn.i32_eqz();
-                Ok(ValType::I32)
+                ValType::I32
             }
             // `+` is not a no-op: unary numeric promotion still applies.
             [PLUS] => {
                 let promoted = Self::promote_one(self.num_of(operand.syntax())?);
                 self.operand(&operand, promoted, insn)?;
-                Ok(promoted.val())
+                promoted.val()
             }
             [MINUS] => {
                 let promoted = Self::promote_one(self.num_of(operand.syntax())?);
@@ -889,7 +1580,7 @@ impl Lowering<'_> {
                     insn.numeric(NumOp::Sub, promoted.val())
                         .ok_or(WasmError::Unsupported("this negation"))?;
                 }
-                Ok(promoted.val())
+                promoted.val()
             }
             // `~n` is `n ^ -1`, at the promoted width.
             [TILDE] => {
@@ -901,10 +1592,11 @@ impl Lowering<'_> {
                 };
                 insn.numeric(NumOp::Xor, promoted.val())
                     .ok_or(WasmError::Unsupported("this complement"))?;
-                Ok(promoted.val())
+                promoted.val()
             }
-            _ => Err(WasmError::Unsupported("this unary operator")),
-        }
+            _ => return Err(WasmError::Unsupported("this unary operator")),
+        };
+        Ok(Some(ty))
     }
 
     /// `(T) e`.
@@ -933,8 +1625,8 @@ impl Lowering<'_> {
 
     fn binary(&mut self, binary: &ast::BinaryExpr, insn: &mut Insn) -> Result<ValType> {
         use jals_syntax::SyntaxKind::{
-            AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS, PERCENT,
-            PIPE, PLUS, SLASH, STAR,
+            AMP, AMP_AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
+            PERCENT, PIPE, PIPE_PIPE, PLUS, SLASH, STAR,
         };
         let left = binary
             .lhs()
@@ -954,6 +1646,12 @@ impl Lowering<'_> {
             return self.instance_of(binary, insn);
         }
 
+        // `&&` and `||` are not operators over two values: the right operand may not run at all.
+        match operator.as_slice() {
+            [AMP_AMP] => return self.short_circuit(&left, &right, true, insn),
+            [PIPE_PIPE] => return self.short_circuit(&left, &right, false, insn),
+            _ => {}
+        }
         let op = match operator.as_slice() {
             [PLUS] => NumOp::Add,
             [MINUS] => NumOp::Sub,
@@ -1151,116 +1849,349 @@ impl Lowering<'_> {
         Ok(HeapType::Concrete(*index))
     }
 
-    /// An assignment. Returns the assigned type when the value survives on the stack, and `None`
-    /// when it does not: `struct.set` consumes both operands, so a field assignment is a statement
-    /// unless the value is duplicated, which nothing needs yet.
+    /// An assignment, simple or compound. Returns the assigned type when `keep` asked for the value.
     fn assignment(
         &mut self,
         assignment: &ast::AssignmentExpr,
+        keep: bool,
         insn: &mut Insn,
     ) -> Result<Option<ValType>> {
-        // `x = v` and `x += v` share a node kind, so the operator has to be read: a compound
-        // assignment reads the target and applies an operator before storing, which this does not
-        // lower. Treating it as a plain store would silently compute the wrong value.
-        if !assignment.is_simple() {
-            return Err(WasmError::Unsupported("a compound assignment"));
-        }
         let target = assignment
             .target()
             .ok_or(WasmError::Unsupported("an assignment with no target"))?;
         let value = assignment
             .value()
             .ok_or(WasmError::Unsupported("an assignment with no value"))?;
-        if let ast::Expr::FieldAccess(access) = &target {
-            self.assign_field(access, &value, insn)?;
-            return Ok(None);
+        let place = self.place(&target, insn)?;
+
+        if assignment.is_simple() {
+            place.address(insn);
+            let source = self.num_of(value.syntax()).ok();
+            self.expr(&value, insn)?
+                .ok_or(WasmError::Unsupported("an assignment of no value"))?;
+            // Assignment conversion (JLS §5.2): `long n = 1` stores a `long`, and the literal is an
+            // `int` until something widens it. Only a numeric target needs it; a reference one is
+            // already the right type or the analysis would not have typed the assignment.
+            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax()))
+                && source != declared
+            {
+                insn.convert(source, declared)
+                    .ok_or(WasmError::Unsupported("this assignment conversion"))?;
+            }
+            place.store(insn, keep);
+        } else {
+            let operation = Self::compound_operator(assignment.syntax())?;
+            self.compound(&place, &target, &value, operation, keep, insn)?;
         }
-        if let ast::Expr::Index(subscript) = &target {
-            self.assign_element(subscript, &value, insn)?;
-            return Ok(None);
-        }
-        let ast::Expr::NameRef(name) = &target else {
-            return Err(WasmError::Unsupported("assignment to this target"));
+
+        if keep { Ok(Some(place.ty())) } else { Ok(None) }
+    }
+
+    /// The operator a compound assignment applies. `=` is not one of them.
+    fn compound_operator(node: &SyntaxNode) -> Result<NumOp> {
+        use jals_syntax::SyntaxKind::{
+            AMP_EQ, CARET_EQ, EQ, GT, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
+            STAR_EQ,
         };
-        let text = name.syntax().text().to_string();
-        let unresolved = || WasmError::Unresolved(text.trim().into());
-        let id = self.def_at(name.syntax()).ok_or_else(unresolved)?;
-
-        if let Some(slot) = self.slot_of(id) {
-            let ty = self.expr(&value, insn)?.ok_or_else(unresolved)?;
-            // `local.tee` writes *and* leaves the value, which is what makes an assignment an
-            // expression without a second instruction.
-            insn.local_tee(slot);
-            return Ok(Some(ty));
-        }
-
-        let owner = self.owner.ok_or_else(unresolved)?;
-        let declaration = self.input.resolved.def(id);
-        let member = self
-            .index
-            .member_by_decl(self.input.file, declaration.name_range.start)
-            .ok_or_else(unresolved)?;
-        let slot = self
-            .layout
-            .field_slot(owner, member)
-            .ok_or_else(unresolved)?;
-        let struct_type = self.layout.structs[&owner];
-        insn.local_get(0);
-        self.expr(&value, insn)?.ok_or_else(unresolved)?;
-        insn.struct_set(struct_type, slot);
-        Ok(None)
+        let operator: Vec<_> = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .map(|token| token.kind())
+            .filter(|kind| !kind.is_trivia())
+            .collect();
+        Ok(match operator.as_slice() {
+            [PLUS_EQ] => NumOp::Add,
+            [MINUS_EQ] => NumOp::Sub,
+            [STAR_EQ] => NumOp::Mul,
+            [SLASH_EQ] => NumOp::Div,
+            [PERCENT_EQ] => NumOp::Rem,
+            [AMP_EQ] => NumOp::And,
+            [PIPE_EQ] => NumOp::Or,
+            [CARET_EQ] => NumOp::Xor,
+            [LSHIFT_EQ] => NumOp::Shl,
+            // `>>=` and `>>>=` are separate `>` tokens, so that `List<List<T>>` still closes.
+            [GT, GT, EQ] => NumOp::Shr,
+            [GT, GT, GT, EQ] => NumOp::Ushr,
+            _ => return Err(WasmError::Unsupported("this compound assignment operator")),
+        })
     }
 
-    /// `receiver.field = value`: the receiver goes below the value, and `struct.set` takes both.
-    fn assign_field(
+    /// `E1 op= E2`, which JLS §15.26.2 defines as `E1 = (T)((E1) op (E2))` for `E1`'s type `T`.
+    ///
+    /// Both conversions carry weight: the operator runs at the *promoted* type, so `int i; i += 1L`
+    /// widens `i` to `i64` and wraps the sum back, and `byte b; b += 1` adds as `i32` and sign-extends
+    /// the low byte. Dropping either stores a value outside the variable's range in a module that
+    /// validates.
+    fn compound(
         &mut self,
-        access: &ast::FieldAccess,
+        place: &Place,
+        target: &ast::Expr,
         value: &ast::Expr,
+        operation: NumOp,
+        keep: bool,
         insn: &mut Insn,
     ) -> Result<()> {
-        let (owner, member) = self.field_target(access)?;
-        if self.index.member(member).modifiers.is_static {
-            return Err(WasmError::Unsupported("assignment to a `static` field"));
+        let declared = self.num_of(target.syntax())?;
+        place.address(insn);
+        place.read(insn);
+        let promoted = if operation.is_shift() {
+            Self::promote_one(declared)
+        } else {
+            Self::promote(declared, self.num_of(value.syntax())?)
+        };
+        if declared != promoted {
+            insn.convert(declared, promoted)
+                .ok_or(WasmError::Unsupported("this conversion"))?;
         }
-        let receiver = access.receiver().ok_or(WasmError::Unsupported(
-            "a field assignment with no receiver",
-        ))?;
-        let slot = self
-            .layout
-            .field_slot(owner, member)
-            .ok_or_else(|| WasmError::Unresolved(access.field().unwrap_or_default()))?;
-
-        self.expr(&receiver, insn)?;
-        self.expr(value, insn)?
-            .ok_or(WasmError::Unsupported("an assignment of no value"))?;
-        insn.struct_set(self.layout.structs[&owner], slot);
+        self.operand(value, promoted, insn)?;
+        insn.numeric(operation, promoted.val())
+            .ok_or(WasmError::Unsupported("this operator on this type"))?;
+        if promoted != declared {
+            insn.convert(promoted, declared)
+                .ok_or(WasmError::Unsupported("this narrowing"))?;
+        }
+        place.store(insn, keep);
         Ok(())
     }
 
-    /// `array[index] = value`.
-    fn assign_element(
+    /// `++e` / `--e` / `e++` / `e--`.
+    ///
+    /// The postfix and prefix forms differ only in *when* the place is read for the result, and with no
+    /// `dup` that difference is a read before the write rather than after it.
+    fn update(
         &mut self,
-        expr: &ast::IndexExpr,
-        value: &ast::Expr,
+        target: &ast::Expr,
+        delta: i8,
+        prefix: bool,
+        keep: bool,
         insn: &mut Insn,
-    ) -> Result<()> {
+    ) -> Result<Option<ValType>> {
+        let declared = self.num_of(target.syntax())?;
+        let place = self.place(target, insn)?;
+        // The postfix form yields the value the variable *had*, so it is spilled before the store.
+        let previous = if keep && !prefix {
+            let slot = self.scratch(place.ty());
+            place.read(insn);
+            insn.local_set(slot);
+            Some(slot)
+        } else {
+            None
+        };
+
+        // `++` is `+= 1` with the same promotion and narrowing (§15.14.2), so a `char c; c++` adds as
+        // `i32` and truncates back into a `char`.
+        let promoted = Self::promote_one(declared);
+        place.address(insn);
+        place.read(insn);
+        if declared != promoted {
+            insn.convert(declared, promoted)
+                .ok_or(WasmError::Unsupported("this conversion"))?;
+        }
+        Self::one(delta, promoted, insn);
+        insn.numeric(NumOp::Add, promoted.val())
+            .ok_or(WasmError::Unsupported("an increment of this type"))?;
+        if promoted != declared {
+            insn.convert(promoted, declared)
+                .ok_or(WasmError::Unsupported("this narrowing"))?;
+        }
+        // The prefix form's result is the *new* value, which `store` can keep on the way past.
+        place.store(insn, keep && prefix);
+
+        match (keep, previous) {
+            (false, _) => Ok(None),
+            (true, Some(slot)) => {
+                insn.local_get(slot);
+                Ok(Some(place.ty()))
+            }
+            (true, None) => Ok(Some(place.ty())),
+        }
+    }
+
+    /// The `1` (or `-1`) an increment adds, at the promoted type.
+    fn one(delta: i8, promoted: Num, insn: &mut Insn) {
+        match promoted {
+            Num::Long => insn.i64_const(i64::from(delta)),
+            Num::Float => insn.f32_const(f32::from(delta)),
+            Num::Double => insn.f64_const(f64::from(delta)),
+            Num::Byte | Num::Short | Num::Char | Num::Int => insn.i32_const(i32::from(delta)),
+        };
+    }
+
+    /// Where an assignment's target lives, with its subexpressions already evaluated.
+    ///
+    /// This is the point of the type: a compound assignment reads its target *and* writes it, and
+    /// §15.26.2 evaluates the target's subexpressions exactly once. With no `dup` to duplicate an
+    /// address, the receiver of a field access and the array and index of a subscript are spilled into
+    /// scratch locals here, and each access reads them back. The scratch locals are fresh per site, so
+    /// `a[i++] += b[j++]` nests two of these without either clobbering the other.
+    fn place(&mut self, target: &ast::Expr, insn: &mut Insn) -> Result<Place> {
+        let ty = self.ty_of(target.syntax())?;
+        match target {
+            ast::Expr::Paren(paren) => {
+                let inner = paren
+                    .expr()
+                    .ok_or(WasmError::Unsupported("an empty parenthesis"))?;
+                self.place(&inner, insn)
+            }
+            ast::Expr::Index(subscript) => {
+                let mut parts = subscript.parts();
+                let array = parts
+                    .next()
+                    .ok_or(WasmError::Unsupported("an index with no array"))?;
+                let index = parts
+                    .next()
+                    .ok_or(WasmError::Unsupported("an index with no subscript"))?;
+                let array_type = self
+                    .layout
+                    .array_type(ty)
+                    .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
+                let array_value = self.expr(&array, insn)?.ok_or(WasmError::Unsupported(
+                    "an index into something with no value",
+                ))?;
+                let array_slot = self.scratch(array_value);
+                insn.local_set(array_slot);
+                self.operand(&index, Num::Int, insn)?;
+                let index_slot = self.scratch(ValType::I32);
+                insn.local_set(index_slot);
+                Ok(Place::Element {
+                    array: array_slot,
+                    index: index_slot,
+                    array_type,
+                    ty,
+                })
+            }
+            ast::Expr::FieldAccess(access) => {
+                let (owner, member) = self.field_target(access)?;
+                if self.index.member(member).modifiers.is_static {
+                    return Err(WasmError::Unsupported("assignment to a `static` field"));
+                }
+                let slot = self
+                    .layout
+                    .field_slot(owner, member)
+                    .ok_or_else(|| WasmError::Unresolved(access.field().unwrap_or_default()))?;
+                let receiver = access.receiver().ok_or(WasmError::Unsupported(
+                    "a field assignment with no receiver",
+                ))?;
+                let receiver_ty = self
+                    .expr(&receiver, insn)?
+                    .ok_or(WasmError::Unsupported("a field of something with no value"))?;
+                let receiver_slot = self.scratch(receiver_ty);
+                insn.local_set(receiver_slot);
+                Ok(Place::Field {
+                    receiver: receiver_slot,
+                    struct_type: self.layout.structs[&owner],
+                    slot,
+                    ty,
+                })
+            }
+            ast::Expr::NameRef(name) => {
+                let text = name.syntax().text().to_string();
+                let unresolved = || WasmError::Unresolved(text.trim().into());
+                let id = self.def_at(name.syntax()).ok_or_else(unresolved)?;
+                if let Some(slot) = self.slot_of(id) {
+                    return Ok(Place::Local { slot, ty });
+                }
+                // A bare name that is no local is a field of `this`, which needs no spill: local 0
+                // is already a stable place to read the receiver from.
+                let owner = self.owner.ok_or_else(unresolved)?;
+                let declaration = self.input.resolved.def(id);
+                let member = self
+                    .index
+                    .member_by_decl(self.input.file, declaration.name_range.start)
+                    .ok_or_else(unresolved)?;
+                if self.index.member(member).modifiers.is_static {
+                    return Err(WasmError::Unsupported("assignment to a `static` field"));
+                }
+                let slot = self
+                    .layout
+                    .field_slot(owner, member)
+                    .ok_or_else(unresolved)?;
+                Ok(Place::Field {
+                    receiver: 0,
+                    struct_type: self.layout.structs[&owner],
+                    slot,
+                    ty,
+                })
+            }
+            _ => Err(WasmError::Unsupported("assignment to this target")),
+        }
+    }
+
+    /// `c ? a : b`.
+    ///
+    /// A typed `if` rather than `select`, because `select` pops both value operands: both arms would
+    /// already have run, and a trapping one would trap whether or not it was taken. §15.25 evaluates
+    /// exactly one arm.
+    fn ternary(&mut self, expr: &ast::TernaryExpr, insn: &mut Insn) -> Result<ValType> {
         let mut parts = expr.parts();
-        let array = parts
+        let condition = parts
             .next()
-            .ok_or(WasmError::Unsupported("an index with no array"))?;
-        let subscript = parts
+            .ok_or(WasmError::Unsupported("a `?:` with no condition"))?;
+        let then_arm = parts
             .next()
-            .ok_or(WasmError::Unsupported("an index with no subscript"))?;
-        let element = self.ty_of(expr.syntax())?;
-        let array_type = self
-            .layout
-            .array_type(element)
-            .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
-        self.expr(&array, insn)?;
-        self.expr(&subscript, insn)?;
-        self.expr(value, insn)?;
-        insn.array_set(array_type);
+            .ok_or(WasmError::Unsupported("a `?:` with no then arm"))?;
+        let else_arm = parts
+            .next()
+            .ok_or(WasmError::Unsupported("a `?:` with no else arm"))?;
+        let ty = self.ty_of(expr.syntax())?;
+
+        self.expr(&condition, insn)?;
+        insn.if_typed(ty);
+        self.ternary_arm(&then_arm, ty, insn)?;
+        insn.else_();
+        self.ternary_arm(&else_arm, ty, insn)?;
+        insn.end();
+        Ok(ty)
+    }
+
+    /// One arm of a `?:`, converted to the type the whole conditional has.
+    ///
+    /// The conversion is what makes `flag ? 1 : 2L` one `i64` block rather than a module the validator
+    /// rejects for arms of different types.
+    fn ternary_arm(&mut self, arm: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
+        if self.num_of(arm.syntax()).is_ok()
+            && let Ok(target) = Self::num_for(ty)
+        {
+            return self.operand(arm, target, insn);
+        }
+        self.expr(arm, insn)?
+            .ok_or(WasmError::Unsupported("a `?:` arm with no value"))?;
         Ok(())
+    }
+
+    /// The numeric type a `ValType` is, for converting into a type an expression already has.
+    const fn num_for(ty: ValType) -> Result<Num> {
+        Ok(match ty {
+            ValType::I32 => Num::Int,
+            ValType::I64 => Num::Long,
+            ValType::F32 => Num::Float,
+            ValType::F64 => Num::Double,
+            ValType::Ref(_) => return Err(WasmError::Unsupported("a numeric reference")),
+        })
+    }
+
+    /// `a && b` / `a || b`, which evaluate `b` only when `a` did not already decide the answer.
+    ///
+    /// A typed `if` again, and for the same reason: the whole point of the operators is that the right
+    /// operand may not run.
+    fn short_circuit(
+        &mut self,
+        left: &ast::Expr,
+        right: &ast::Expr,
+        and: bool,
+        insn: &mut Insn,
+    ) -> Result<ValType> {
+        self.expr(left, insn)?;
+        insn.if_typed(ValType::I32);
+        if and {
+            self.expr(right, insn)?;
+            insn.else_().i32_const(0);
+        } else {
+            insn.i32_const(1).else_();
+            self.expr(right, insn)?;
+        }
+        insn.end();
+        Ok(ValType::I32)
     }
 
     /// `new C(args)`: allocate with every field at its default, then run the constructor on it.
@@ -1393,6 +2324,111 @@ impl Lowering<'_> {
         match self.index.resolved_member_ty(member) {
             Ty::Void => Ok(None),
             ty => Ok(Some(self.layout.val_type(&ty)?)),
+        }
+    }
+}
+
+/// Where an assignable value lives, once its subexpressions have been evaluated.
+///
+/// The JVM backend's equivalent duplicates an address under a value with `dup_x1`; wasm has no such
+/// instruction, so every operand a store needs is held in a local and pushed again for each access.
+/// That is the whole difference between the two protocols: here an address is *re-emitted*, not
+/// duplicated.
+#[derive(Debug, Clone, Copy)]
+enum Place {
+    Local {
+        slot: u32,
+        ty: ValType,
+    },
+    /// A field of an object whose reference is in local `receiver`.
+    Field {
+        receiver: u32,
+        struct_type: u32,
+        slot: u32,
+        ty: ValType,
+    },
+    /// An element of the array in local `array` at the index in local `index`.
+    Element {
+        array: u32,
+        index: u32,
+        array_type: u32,
+        ty: ValType,
+    },
+}
+
+impl Place {
+    const fn ty(self) -> ValType {
+        match self {
+            Self::Local { ty, .. } | Self::Field { ty, .. } | Self::Element { ty, .. } => ty,
+        }
+    }
+
+    /// Push the operands [`store`](Self::store) needs *below* the value.
+    fn address(self, insn: &mut Insn) {
+        match self {
+            Self::Local { .. } => {}
+            Self::Field { receiver, .. } => {
+                insn.local_get(receiver);
+            }
+            Self::Element { array, index, .. } => {
+                insn.local_get(array).local_get(index);
+            }
+        }
+    }
+
+    /// Push the value currently held here.
+    fn read(self, insn: &mut Insn) {
+        match self {
+            Self::Local { slot, .. } => {
+                insn.local_get(slot);
+            }
+            Self::Field {
+                receiver,
+                struct_type,
+                slot,
+                ..
+            } => {
+                insn.local_get(receiver).struct_get(struct_type, slot);
+            }
+            Self::Element {
+                array,
+                index,
+                array_type,
+                ..
+            } => {
+                insn.local_get(array).local_get(index).array_get(array_type);
+            }
+        }
+    }
+
+    /// Consume the value on top of the stack, storing it here. `keep` leaves it behind.
+    ///
+    /// wasm has no `dup`, so nothing can duplicate a value under a `struct.set`: keeping one means
+    /// `local.tee` for a local, and for a field or an element a second load of what was just written —
+    /// which is the same value, this backend having no volatile fields and no threads.
+    fn store(self, insn: &mut Insn, keep: bool) {
+        match self {
+            Self::Local { slot, .. } => {
+                if keep {
+                    insn.local_tee(slot);
+                } else {
+                    insn.local_set(slot);
+                }
+            }
+            Self::Field {
+                struct_type, slot, ..
+            } => {
+                insn.struct_set(struct_type, slot);
+                if keep {
+                    self.read(insn);
+                }
+            }
+            Self::Element { array_type, .. } => {
+                insn.array_set(array_type);
+                if keep {
+                    self.read(insn);
+                }
+            }
         }
     }
 }

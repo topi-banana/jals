@@ -331,22 +331,372 @@ public class Greeter {
 
 /// `i += 1` shares its node kind with `i = 1`. Lowering it as a plain `local.set` produces a module
 /// that validates and runs, and computes the wrong number — which is why the operator is read.
+/// Read-modify-write, which has no `dup` to lean on.
+///
+/// The JVM backend duplicates an address under a value with `dup_x1`; wasm has no such instruction, so
+/// a field's receiver and an array's index are spilled into scratch locals and pushed again for the
+/// store. Both of §15.26.2's conversions still apply — the operator runs at the promoted type and the
+/// result is narrowed back — which is why `byte b; b += 200` wraps rather than storing 200.
 #[test]
-fn a_compound_assignment_is_reported_rather_than_mis_emitted() {
+fn compound_assignment_and_the_increments_run() {
     let source = r"
 public class Compound {
-    public static int run(int n) {
+    int field;
+
+    public static int local(int n) {
         int i = n;
         i += 5;
+        i *= 2;
+        i -= 1;
+        i /= 3;
+        i %= 7;
+        i <<= 2;
+        i >>= 1;
+        i |= 8;
+        i &= 30;
+        i ^= 3;
+        return i;
+    }
+
+    // `int i; i += 1L` widens to `i64`, adds, and wraps back; `byte b; b += 200` adds as `i32` and
+    // keeps the low byte, sign-extended. Dropping either conversion stores an out-of-range value.
+    public static int widened(int n) {
+        int i = n;
+        i += 4294967296L;
+        i += 3L;
+        return i;
+    }
+
+    public static int narrowed(int n) {
+        byte b = (byte) n;
+        b += 200;
+        return b;
+    }
+
+    public static int stepped(int n) {
+        int i = n;
+        int a = i++;
+        int b = i--;
+        int c = ++i;
+        int d = --i;
+        return a * 1000 + b * 100 + c * 10 + d;
+    }
+
+    // A field and an array element go through the same protocol: the receiver is spilled to a local
+    // once, and both the read and the write take it from there.
+    public static int through_a_field(int n) {
+        Compound it = new Compound();
+        it.field = n;
+        it.field += 10;
+        it.field++;
+        return it.field;
+    }
+
+    public static int through_an_element(int n) {
+        int[] cells = new int[3];
+        cells[1] = n;
+        cells[1] += 10;
+        cells[1]++;
+        int taken = cells[1]--;
+        return taken * 100 + cells[1];
+    }
+
+    // An assignment is an expression: its value is what was stored, after conversion.
+    public static long chained(int n) {
+        long a;
+        int b;
+        a = b = n;
+        return a;
+    }
+}
+";
+    assert_invoke(&[source], "local", &["9"], "15");
+    assert_invoke(&[source], "widened", &["1"], "4");
+    assert_invoke(&[source], "narrowed", &["0"], "-56");
+    assert_invoke(&[source], "stepped", &["5"], "5665");
+    assert_invoke(&[source], "through_a_field", &["1"], "12");
+    assert_invoke(&[source], "through_an_element", &["5"], "1615");
+    assert_invoke(&[source], "chained", &["7"], "7");
+}
+
+/// `?:`, `&&`, and `||` all evaluate one side conditionally, so all three are a typed `if`.
+///
+/// Not `select`: it pops *both* value operands, so both arms would already have run. The test is a
+/// guarded division — under `select` it runs whatever the guard said and traps on a zero divisor.
+#[test]
+fn the_conditional_operators_evaluate_one_side() {
+    let source = r"
+public class Choose {
+    public static int pick(int n) {
+        return n > 0 ? n : -n;
+    }
+
+    // The arms have different types, so the whole conditional is one `i64` block.
+    public static long widened(int n) {
+        return n > 0 ? 1 : 2L;
+    }
+
+    public static int guarded(int n) {
+        return (n != 0 && 10 / n > 1) ? 1 : 0;
+    }
+
+    public static int shorted(int n) {
+        return (n == 0 || 10 / n > 1) ? 1 : 0;
+    }
+
+    public static int nested(int n) {
+        return n < 0 ? -1 : n == 0 ? 0 : 1;
+    }
+}
+";
+    assert_invoke(&[source], "pick", &["-4"], "4");
+    assert_invoke(&[source], "widened", &["0"], "2");
+    // Zero would trap the division if the right operand ran unconditionally.
+    assert_invoke(&[source], "guarded", &["0"], "0");
+    assert_invoke(&[source], "guarded", &["3"], "1");
+    assert_invoke(&[source], "shorted", &["0"], "1");
+    assert_invoke(&[source], "nested", &["-9"], "-1");
+    assert_invoke(&[source], "nested", &["9"], "1");
+}
+
+/// Every loop form, and both jumps out of them.
+///
+/// A branch names a *relative* depth, and an `if` between a loop's header and a `continue` shifts that
+/// depth — so the target comes from the emitter's count of open structures, never from the source. The
+/// three-structure shape is the other half: a `continue` in a `for` runs the update first (§14.14.1.3)
+/// and one in a `do` reaches the bottom test, and neither point is the top of the loop.
+#[test]
+fn every_loop_form_and_both_jumps_run() {
+    let source = r"
+public class Loops {
+    public static int summed(int n) {
+        int total = 0;
+        for (int i = 0; i < n; i++) {
+            total += i;
+        }
+        return total;
+    }
+
+    // `continue` has to reach the update, or this never terminates.
+    public static int odds(int n) {
+        int total = 0;
+        for (int i = 0; i < n; i++) {
+            if (i % 2 == 0) {
+                continue;
+            }
+            total += i;
+        }
+        return total;
+    }
+
+    public static int counted(int n) {
+        int i = 0;
+        int total = 0;
+        do {
+            if (i == 2) {
+                i++;
+                continue;
+            }
+            total += i;
+            i++;
+        } while (i < n);
+        return total;
+    }
+
+    public static int over_an_array(int n) {
+        int[] cells = new int[4];
+        for (int i = 0; i < 4; i++) {
+            cells[i] = i * n;
+        }
+        int total = 0;
+        for (int cell : cells) {
+            if (cell == 2 * n) {
+                continue;
+            }
+            total += cell;
+        }
+        return total;
+    }
+
+    // A labelled `break` leaves the *outer* loop from inside the inner one.
+    public static int labelled(int n) {
+        int found = -1;
+        outer:
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                if (i * j > 6) {
+                    found = i * 100 + j;
+                    break outer;
+                }
+            }
+        }
+        return found;
+    }
+
+    // A labelled `continue` restarts the outer loop, update included.
+    public static int labelled_continue(int n) {
+        int total = 0;
+        outer:
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                if (j == 1) {
+                    continue outer;
+                }
+                total += 1;
+            }
+            total += 100;
+        }
+        return total;
+    }
+
+    // A label on a plain block is a forward jump and nothing else (§14.7).
+    public static int out_of_a_block(int n) {
+        int result = 0;
+        done: {
+            result = n;
+            if (n > 0) {
+                break done;
+            }
+            result = -1;
+        }
+        return result;
+    }
+
+    public static int whiled(int n) {
+        int i = 0;
+        while (true) {
+            i++;
+            if (i >= n) {
+                break;
+            }
+        }
         return i;
     }
 }
 ";
-    let error = compile(&[source]).expect_err("compound assignment is not lowered yet");
-    assert!(
-        matches!(error, WasmError::Unsupported("a compound assignment")),
-        "expected the compound-assignment report, got {error}"
-    );
+    assert_invoke(&[source], "summed", &["5"], "10");
+    assert_invoke(&[source], "odds", &["6"], "9");
+    assert_invoke(&[source], "counted", &["5"], "8");
+    assert_invoke(&[source], "over_an_array", &["3"], "12");
+    // i = 2, j = 4 is the first product over six.
+    assert_invoke(&[source], "labelled", &["5"], "204");
+    assert_invoke(&[source], "labelled_continue", &["3"], "3");
+    assert_invoke(&[source], "out_of_a_block", &["7"], "7");
+    assert_invoke(&[source], "out_of_a_block", &["-7"], "-1");
+    assert_invoke(&[source], "whiled", &["4"], "4");
+}
+
+/// `switch`, both syntaxes, statement and expression.
+///
+/// One `block` per arm nested inside a `block` for the whole `switch`, so `br i` lands where arm `i`'s
+/// body starts — and falling out of arm `i`'s block end runs arm `i+1`, which *is* the colon form's
+/// fallthrough with no branch of its own. `br_table` reads its index unsigned, so subtracting the
+/// lowest key is the whole bounds check: a key below it wraps past 2³¹ onto the default.
+#[test]
+fn a_switch_dispatches_both_densely_and_sparsely() {
+    let source = r"
+public class Pick {
+    // Dense and zero-based: a straight `br_table`.
+    public static int arrowed(int n) {
+        return switch (n) {
+            case 0 -> 10;
+            case 1 -> 11;
+            case 2 -> 12;
+            default -> -1;
+        };
+    }
+
+    // Negative and offset keys, still dense: the subtraction is what makes them indexable, and a key
+    // below the lowest one has to reach the default rather than an arm.
+    public static int offset(int n) {
+        return switch (n) {
+            case -2 -> 1;
+            case -1 -> 2;
+            case 0 -> 3;
+            default -> 9;
+        };
+    }
+
+    // Far apart: a comparison chain, wasm having no `lookupswitch`.
+    public static int sparse(int n) {
+        return switch (n) {
+            case 1 -> 1;
+            case 1000 -> 2;
+            case 1000000 -> 3;
+            default -> 0;
+        };
+    }
+
+    // Several keys on one arm.
+    public static int grouped(int n) {
+        return switch (n) {
+            case 1, 2, 3 -> 100;
+            case 4 -> 200;
+            default -> 0;
+        };
+    }
+
+    // The colon form, whose arms fall through until one says `break`.
+    public static int fallen(int n) {
+        int total = 0;
+        switch (n) {
+            case 0:
+                total += 1;
+            case 1:
+                total += 10;
+                break;
+            case 2:
+                total += 100;
+                break;
+            default:
+                total += 1000;
+        }
+        return total;
+    }
+
+    // A `switch` inside a loop: `break` leaves the `switch`, and `continue` looks straight past it.
+    public static int inside_a_loop(int n) {
+        int total = 0;
+        for (int i = 0; i < n; i++) {
+            switch (i) {
+                case 0:
+                    break;
+                case 1:
+                    total += 10;
+                    break;
+                default:
+                    continue;
+            }
+            total += 1;
+        }
+        return total;
+    }
+
+    // A `char` selector is an `i32`, like every integral type narrower than `long`.
+    public static int chars(int n) {
+        char c = (char) n;
+        return switch (c) {
+            case 'a' -> 1;
+            case 'b' -> 2;
+            default -> 0;
+        };
+    }
+}
+";
+    assert_invoke(&[source], "arrowed", &["1"], "11");
+    assert_invoke(&[source], "arrowed", &["7"], "-1");
+    assert_invoke(&[source], "offset", &["-1"], "2");
+    assert_invoke(&[source], "offset", &["-3"], "9");
+    assert_invoke(&[source], "offset", &["4"], "9");
+    assert_invoke(&[source], "sparse", &["1000"], "2");
+    assert_invoke(&[source], "sparse", &["999"], "0");
+    assert_invoke(&[source], "grouped", &["3"], "100");
+    assert_invoke(&[source], "grouped", &["4"], "200");
+    assert_invoke(&[source], "fallen", &["0"], "11");
+    assert_invoke(&[source], "fallen", &["1"], "10");
+    assert_invoke(&[source], "fallen", &["9"], "1000");
+    assert_invoke(&[source], "inside_a_loop", &["4"], "12");
+    assert_invoke(&[source], "chars", &["98"], "2");
 }
 
 /// One opcode names one operand type, and wasm converts nothing implicitly.
