@@ -179,7 +179,10 @@ impl Compile {
         // rather than inside its enclosing one. Which is also why the enclosing class skips it as a
         // member — it would otherwise be emitted twice.
         for node in root.descendants() {
-            if !matches!(node.kind(), CLASS_DECL | INTERFACE_DECL | ENUM_DECL) {
+            if !matches!(
+                node.kind(),
+                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL
+            ) {
                 continue;
             }
             // A *local* or anonymous class is nested inside a method body rather than a class body,
@@ -233,14 +236,19 @@ impl Compile {
         // of its constructors takes that instance as an extra first parameter. The index computed its
         // descriptors from the declaration, so all of them would be one parameter short — which is a
         // `NoSuchMethodError` at the first `new`, not a missing convenience.
+        // A nested interface, `@interface`, and `enum` are implicitly `static` and hold no enclosing
+        // instance, so only a nested *class* can be an inner one.
         if Self::is_nested(node)
             && !Self::has_modifier(node, jals_syntax::SyntaxKind::STATIC_KW)
-            && index.item(item).kind != DefKind::Interface
+            && matches!(index.item(item).kind, DefKind::Class)
         {
             return Err(LowerError::Unsupported("a non-`static` inner class"));
         }
         let internal_name = Descriptor::internal_name_of(item, index);
-        let is_interface = index.item(item).kind == DefKind::Interface;
+        // An `@interface` *is* an interface: its members are implicitly `public abstract`, it has no
+        // constructor, and `ACC_INTERFACE` is set. `ACC_ANNOTATION` is the only thing on top.
+        let is_annotation = index.item(item).kind == DefKind::AnnotationType;
+        let is_interface = is_annotation || index.item(item).kind == DefKind::Interface;
         let is_enum = index.item(item).kind == DefKind::Enum;
         let context = Context {
             index,
@@ -283,6 +291,14 @@ impl Compile {
             let name = Descriptor::internal_name_of(supertype.id, index);
             interfaces.push(pool.class_index(&name).ok_or(AsmError::PoolFull)?);
         }
+        // Every annotation type extends `java.lang.annotation.Annotation`, and the source never writes
+        // it. Without it `Class.isAnnotation` is false and no reflective reader recognises the type.
+        if is_annotation {
+            let name = pool
+                .class_index("java/lang/annotation/Annotation")
+                .ok_or(AsmError::PoolFull)?;
+            interfaces.push(name);
+        }
 
         // An `enum`'s members live under an `EnumBody`, after the constants and the `;`.
         let members: Vec<SyntaxNode> = if is_enum {
@@ -320,10 +336,8 @@ impl Compile {
             // would produce a class that loads and then throws `NoClassDefFoundError` at the first use
             // — the exact failure a compiler that reports nothing has to avoid.
             match member.kind() {
-                CLASS_DECL | INTERFACE_DECL | ENUM_DECL => continue,
-                RECORD_DECL | ANNOTATION_TYPE_DECL => {
-                    return Err(LowerError::Unsupported("a `record` or `@interface`"));
-                }
+                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL => continue,
+                RECORD_DECL => return Err(LowerError::Unsupported("a `record`")),
                 _ => {}
             }
             // A non-`static` nested class holds a reference to its enclosing instance, which means a
@@ -419,7 +433,7 @@ impl Compile {
         let nesting = Self::inner_classes(node, &context, &mut pool)?;
 
         let mut class = ClassFile::new(class_version, 0, pool);
-        let mut flags = Self::class_flags(node, is_interface);
+        let mut flags = Self::class_flags(node, is_interface, is_annotation);
         if is_enum {
             // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time,
             // and `ACC_FINAL` is what an enum with no constant bodies is.
@@ -457,7 +471,12 @@ impl Compile {
             .unwrap_or_default();
         let inner: Vec<&SyntaxNode> = own_body
             .iter()
-            .filter(|child| matches!(child.kind(), CLASS_DECL | INTERFACE_DECL | ENUM_DECL))
+            .filter(|child| {
+                matches!(
+                    child.kind(),
+                    CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL
+                )
+            })
             .collect();
         nested.extend(inner);
         if Self::is_nested(node) {
@@ -481,7 +500,12 @@ impl Compile {
             let enclosing = declaration
                 .ancestors()
                 .skip(1)
-                .find(|ancestor| matches!(ancestor.kind(), CLASS_DECL | INTERFACE_DECL | ENUM_DECL))
+                .find(|ancestor| {
+                    matches!(
+                        ancestor.kind(),
+                        CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL
+                    )
+                })
                 .and_then(|outer| {
                     let token = outer
                         .children_with_tokens()
@@ -503,8 +527,11 @@ impl Compile {
                 .ok_or(AsmError::PoolFull)?;
             let name_index = pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?;
             // The flags the *source* wrote, which is where a nested type's `private` and `static` go.
-            let is_interface = context.index.item(item).kind == DefKind::Interface;
-            let mut flags = Self::class_flags(declaration, is_interface) & !ClassAccessFlags::SUPER;
+            let kind = context.index.item(item).kind;
+            let is_annotation = kind == DefKind::AnnotationType;
+            let is_interface = is_annotation || kind == DefKind::Interface;
+            let mut flags = Self::class_flags(declaration, is_interface, is_annotation)
+                & !ClassAccessFlags::SUPER;
             flags |= Self::access_level(declaration);
             if Self::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
                 // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
@@ -549,13 +576,16 @@ impl Compile {
         }
     }
 
-    fn class_flags(node: &SyntaxNode, is_interface: bool) -> u16 {
+    fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
         // Only `public` is expressible on a top-level type. `private` / `protected` are nested-type
         // modifiers, and a nested type is reported rather than emitted.
         let mut flags = Self::access_level(node) & ClassAccessFlags::PUBLIC;
         if is_interface {
             // An interface is implicitly abstract and never has the `super`-call semantics bit.
             flags |= ClassAccessFlags::INTERFACE | ClassAccessFlags::ABSTRACT;
+            if is_annotation {
+                flags |= ClassAccessFlags::ANNOTATION;
+            }
         } else {
             // `ACC_SUPER` selects the modern `invokespecial` semantics; every class emitted today
             // wants it, and the JVM ignores it from version 52 on.
@@ -689,7 +719,7 @@ impl Compile {
         let text = MethodDescriptor::to_string(&descriptor);
         let name_index = pool.utf8_index(&name).ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
-        let attributes = match decl.body() {
+        let mut attributes = match decl.body() {
             Some(body) => {
                 let receiver = if is_static {
                     Receiver::Static
@@ -714,12 +744,40 @@ impl Compile {
             // An abstract or interface method has no `Code` attribute at all.
             None => Vec::new(),
         };
+        // `int count() default 3` is an annotation element's default, and the *only* place it lives in
+        // the class file is this attribute. Dropping it compiles `@Marker` — an omitted element with a
+        // default — into a use no reader can resolve.
+        if let Some(default) = node
+            .children()
+            .find(|child| child.kind() == jals_syntax::SyntaxKind::ANNOTATION_DEFAULT)
+        {
+            let value =
+                default
+                    .children()
+                    .find_map(ast::Expr::cast)
+                    .ok_or(LowerError::Unsupported(
+                        "an annotation default with no value",
+                    ))?;
+            let element = Self::element_value(
+                &value,
+                &context.index.resolved_member_ty(member),
+                context,
+                pool,
+            )?;
+            let name_index = pool
+                .utf8_index("AnnotationDefault")
+                .ok_or(AsmError::PoolFull)?;
+            attributes.push(jals_classfile::Attribute {
+                name_index,
+                body: jals_classfile::AttributeBody::AnnotationDefault(element),
+            });
+        }
         // No body means no `Code` attribute, and the JVM accepts that only from a method whose flags
         // say why it has none. `native` says so with its own flag — already set above — and
         // `ACC_NATIVE | ACC_ABSTRACT` is a pair JVMS §4.6 forbids, which a JVM rejects with "illegal
         // modifiers: 0x500". `abstract` says so directly, and an interface method says so implicitly
         // (JLS §9.4). Anything else with no body is a declaration the JVM would refuse.
-        let flags = if attributes.is_empty() && flags & MethodAccessFlags::NATIVE == 0 {
+        let flags = if decl.body().is_none() && flags & MethodAccessFlags::NATIVE == 0 {
             if context.in_interface
                 || Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
             {
@@ -737,6 +795,80 @@ impl Compile {
             descriptor_index,
             attributes,
         })
+    }
+
+    /// One `element_value` (JVMS §4.7.16.1) for an annotation element's default.
+    ///
+    /// The tag comes from the element's *declared* type, not from the literal: `byte b() default 1`
+    /// writes tag `B` over an `Integer` entry, and a reader that trusted the literal would see an `int`
+    /// where a `byte` belongs. A constant expression is the only form here — an enum constant, a class
+    /// literal, a nested annotation, and an array each have their own encoding and are reported.
+    fn element_value(
+        value: &ast::Expr,
+        declared: &jals_hir::Ty,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+    ) -> Result<jals_classfile::ElementValue> {
+        use jals_hir::{Primitive, Ty};
+        let unsupported = || LowerError::Unsupported("an annotation default of this form");
+        let text = |node: &SyntaxNode| {
+            node.children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .find(|token| !token.kind().is_trivia())
+                .map(|token| token.text().to_owned())
+        };
+        let ast::Expr::Literal(literal) = value else {
+            return Err(unsupported());
+        };
+        let literal = text(literal.syntax()).ok_or_else(unsupported)?;
+        let integer = || {
+            expr::Expr::integer_literal(literal.trim_end_matches(['l', 'L']))
+                .map_err(|_| unsupported())
+        };
+        let floating = || {
+            literal
+                .trim_end_matches(['f', 'F', 'd', 'D'])
+                .parse::<f64>()
+                .map_err(|_| unsupported())
+        };
+        let (tag, const_value_index) = match declared {
+            Ty::Primitive(Primitive::Boolean) => {
+                let one = literal == "true";
+                (b'Z', pool.integer_index(i32::from(one)))
+            }
+            Ty::Primitive(Primitive::Byte) => (b'B', pool.integer_index(Self::narrow(integer()?))),
+            Ty::Primitive(Primitive::Short) => (b'S', pool.integer_index(Self::narrow(integer()?))),
+            Ty::Primitive(Primitive::Char) => {
+                let character = expr::Expr::literal_text(&literal)
+                    .ok()
+                    .and_then(|text| text.chars().next())
+                    .ok_or_else(unsupported)?;
+                (b'C', pool.integer_index(character as i32))
+            }
+            Ty::Primitive(Primitive::Int) => (b'I', pool.integer_index(Self::narrow(integer()?))),
+            Ty::Primitive(Primitive::Long) => (b'J', pool.long_index(integer()?)),
+            #[allow(clippy::cast_possible_truncation)]
+            Ty::Primitive(Primitive::Float) => (b'F', pool.float_index(floating()? as f32)),
+            Ty::Primitive(Primitive::Double) => (b'D', pool.double_index(floating()?)),
+            Ty::Class(_) if expr::Expr::is_string(declared, context) => {
+                let text = expr::Expr::literal_text(&literal).map_err(|_| unsupported())?;
+                (b's', pool.utf8_index(&text))
+            }
+            _ => return Err(unsupported()),
+        };
+        Ok(jals_classfile::ElementValue::Const {
+            tag,
+            const_value_index: const_value_index.ok_or(AsmError::PoolFull)?,
+        })
+    }
+
+    /// An `i64` literal as the `i32` a `B` / `S` / `C` / `I` element value holds.
+    ///
+    /// Out of range wraps, which is what a narrowing constant conversion does (JLS §5.2) — and what
+    /// `jals-lint` reports, this crate not being the one that checks.
+    #[allow(clippy::cast_possible_truncation)]
+    const fn narrow(value: i64) -> i32 {
+        value as i32
     }
 
     fn constructor(

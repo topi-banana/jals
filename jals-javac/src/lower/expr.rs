@@ -1314,7 +1314,7 @@ impl Expr {
     /// Both spellings count. A concatenation's own type comes out of inference as an *external*
     /// `String` rather than as the indexed stub, because the operator synthesises it rather than
     /// reading it off a declaration.
-    fn is_string(ty: &Ty, context: &Context<'_>) -> bool {
+    pub(crate) fn is_string(ty: &Ty, context: &Context<'_>) -> bool {
         match ty {
             Ty::Class(jals_hir::ClassTy::Project { id, .. }) => {
                 context.index.item(*id).fqn.as_str() == "java.lang.String"

@@ -2559,3 +2559,132 @@ public class Sums {
         "each varargs call site"
     );
 }
+
+/// An `@interface` is an interface with one extra flag and one extra supertype.
+///
+/// `ACC_ANNOTATION` is what makes `Class.isAnnotation` true, and `java.lang.annotation.Annotation` is
+/// what every reflective reader dispatches through — neither is written in the source, and a class file
+/// missing either loads perfectly and is then invisible to every annotation processor. Its elements are
+/// interface methods: implicitly `public abstract`, with no body.
+#[test]
+fn an_annotation_type_is_an_interface_with_the_annotation_flag() {
+    let source = r#"
+public @interface Marker {
+    String value();
+    int count() default 3;
+    boolean on() default true;
+    char sign() default 'x';
+    byte small() default 7;
+    long wide() default 9L;
+    double wider() default 1.5;
+    String text() default "hi";
+}
+
+public class Holder {
+    // A nested one, to pin the `InnerClasses` entry as well.
+    @interface Inner {}
+
+    public static void main(String[] args) {
+        System.out.println("ran");
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(names, ["Marker", "Holder", "Holder$Inner"]);
+
+    let marker = classes
+        .iter()
+        .find(|c| c.internal_name == "Marker")
+        .unwrap();
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(marker.bytes.as_slice()))
+            .expect("reparse");
+    assert_eq!(
+        class.access_flags.0,
+        // public | interface | abstract | annotation
+        0x0001 | 0x0200 | 0x0400 | 0x2000,
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        class
+            .interfaces
+            .iter()
+            .map(|&index| class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry"))
+            .collect::<Vec<_>>(),
+        ["java/lang/annotation/Annotation"]
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                method.access_flags.0
+            ))
+            .collect::<Vec<_>>(),
+        [
+            // public | abstract
+            ("value".to_owned(), 0x0001 | 0x0400),
+            ("count".to_owned(), 0x0001 | 0x0400),
+            ("on".to_owned(), 0x0001 | 0x0400),
+            ("sign".to_owned(), 0x0001 | 0x0400),
+            ("small".to_owned(), 0x0001 | 0x0400),
+            ("wide".to_owned(), 0x0001 | 0x0400),
+            ("wider".to_owned(), 0x0001 | 0x0400),
+            ("text".to_owned(), 0x0001 | 0x0400),
+        ]
+    );
+    // The tag comes from the element's declared type, not from the literal: `byte small() default 7`
+    // is tag `B` over an `Integer` entry, and a reader that trusted the literal would see an `int`.
+    let tags: Vec<Option<u8>> = class
+        .methods
+        .iter()
+        .map(|method| {
+            method
+                .attributes
+                .iter()
+                .find_map(|attribute| match &attribute.body {
+                    jals_classfile::AttributeBody::AnnotationDefault(
+                        jals_classfile::ElementValue::Const { tag, .. },
+                    ) => Some(*tag),
+                    _ => None,
+                })
+        })
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            None,
+            Some(b'I'),
+            Some(b'Z'),
+            Some(b'C'),
+            Some(b'B'),
+            Some(b'J'),
+            Some(b'D'),
+            Some(b's'),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    // The JVM has to load and verify all three, `Marker` included.
+    assert_eq!(run(source, "Holder"), "ran\n");
+}
