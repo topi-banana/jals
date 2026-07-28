@@ -821,9 +821,7 @@ impl Expr {
         if new.body().is_some() {
             return Err(LowerError::Unsupported("an anonymous class"));
         }
-        if new.qualifier().is_some() {
-            return Err(LowerError::Unsupported("a qualified inner-class creation"));
-        }
+
         let unresolved = || LowerError::Unresolved(new.syntax().text().to_string().trim().into());
         let arguments: alloc::vec::Vec<ast::Expr> = new
             .args()
@@ -869,10 +867,32 @@ impl Expr {
             )
         };
 
+        // An inner class's constructor takes the enclosing instance first, and the descriptor the index
+        // computed does not carry it — the declaration never wrote it. The qualifier names it when the
+        // source wrote one (`outer.new Inner()`); otherwise it is `this`.
+        let target = selected
+            .map(|member| context.index.member(member).owner)
+            .or_else(|| {
+                Self::type_of(new.syntax(), context)
+                    .ok()
+                    .and_then(|ty| ty.project_id())
+            });
+        let enclosing = target.and_then(|item| context.inner.get(&item).cloned());
+        let descriptor = match &enclosing {
+            Some(name) => alloc::format!("(L{name};{}", descriptor.trim_start_matches('(')),
+            None => descriptor,
+        };
+
         emit.asm.new_object(&owner)?;
         // The constructor consumes one reference and returns nothing, so the expression's own value
         // has to be a second copy — made *before* the arguments go on top of it.
         emit.asm.dup()?;
+        if enclosing.is_some() {
+            match new.qualifier() {
+                Some(qualifier) => Self::lower(&qualifier, context, emit)?,
+                None => emit.asm.load(0)?,
+            }
+        }
         let varargs = selected.is_some_and(|member| context.index.member(member).varargs);
         Self::arguments(&arguments, &params, varargs, context, emit)?;
         Ok(emit

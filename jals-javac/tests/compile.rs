@@ -704,30 +704,6 @@ public class Outer {
     );
 }
 
-/// A non-`static` nested class holds its enclosing instance in a synthetic field, and every one of its
-/// constructors takes that instance as an extra first parameter — so the descriptors the index computed
-/// from the declaration would all be one parameter short. That is a `NoSuchMethodError` at the first
-/// `new`, not a missing convenience, so it is reported.
-#[test]
-fn a_non_static_inner_class_is_reported() {
-    let error = compile(
-        r"
-public class Enclosing {
-    class Inner {
-        int value;
-    }
-
-    public static void main(String[] args) {}
-}
-",
-    )
-    .expect_err("an inner class needs its enclosing instance threaded through");
-    assert!(
-        matches!(error, LowerError::Unsupported("a non-`static` inner class")),
-        "expected the inner-class report, got {error}"
-    );
-}
-
 /// `this(…)` and `super(args)` each replace part of what a constructor's prologue emits.
 ///
 /// `super(args)` stands in for the no-argument `super()`; `this(…)` stands in for the field
@@ -3180,4 +3156,91 @@ class Holder<T> {
          {{ System.out.println(new Holder<String>().get()); }} }}\n"
     );
     assert_eq!(run(&program, "Uses"), "null\n");
+}
+
+/// A non-`static` inner class, which holds its enclosing instance in a synthetic field.
+///
+/// `this$0` is `final synthetic` and the source never writes it; every constructor takes the enclosing
+/// instance as an extra *first* parameter, so the descriptor the index computed from the declaration is
+/// one parameter short without this. The store happens after `super()` — before it, `this` is still
+/// `UninitializedThis` and a `putfield` on it is not something the verifier accepts — and before the field
+/// initialisers, so one of them can already read it.
+#[test]
+fn an_inner_class_holds_its_enclosing_instance() {
+    let source = r"
+public class Outer {
+    int base;
+
+    Outer(int base) { this.base = base; }
+
+    class Inner {
+        int extra;
+        Inner(int extra) { this.extra = extra; }
+        int total() { return extra; }
+    }
+
+    class Plain {
+        int flag = 5;
+    }
+
+    int build(int n) {
+        Inner i = new Inner(n);
+        return i.total() + base;
+    }
+
+    int defaulted() { return new Plain().flag; }
+
+    // A *qualified* creation names an enclosing instance that is not `this`.
+    int fromAnother(Outer other, int n) {
+        Inner i = other.new Inner(n);
+        return i.total();
+    }
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        Outer o = new Outer(10);
+        System.out.println(o.build(3));
+        System.out.println(o.defaulted());
+        System.out.println(o.fromAnother(new Outer(70), 2));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let inner = classes
+        .iter()
+        .find(|class| class.internal_name == "Outer$Inner")
+        .expect("the inner class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(inner.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|field| (
+                name_of(field.name_index),
+                name_of(field.descriptor_index),
+                field.access_flags.0
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("extra".to_owned(), "I".to_owned(), 0x0000),
+            // final | synthetic
+            ("this$0".to_owned(), "LOuter;".to_owned(), 0x0010 | 0x1000),
+        ]
+    );
+    // The enclosing instance comes first, before the parameter the source wrote.
+    assert!(
+        class.methods.iter().any(|method| {
+            name_of(method.name_index) == "<init>"
+                && name_of(method.descriptor_index) == "(LOuter;I)V"
+        }),
+        "the constructor takes the enclosing instance first"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "13\n5\n2\n");
 }

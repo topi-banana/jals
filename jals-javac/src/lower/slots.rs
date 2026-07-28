@@ -48,6 +48,30 @@ impl Slots {
         slots
     }
 
+    /// The slots of a constructor whose first parameter may be synthetic.
+    ///
+    /// An inner class's constructor takes the enclosing instance at slot 1, before any parameter the
+    /// source wrote — so every declared one shifts up by one, and reading them at the unshifted offsets
+    /// would read the enclosing instance as the first argument.
+    pub(crate) fn for_constructor(
+        context: &Context<'_>,
+        params: Option<&ast::ParamList>,
+        synthetic_first: bool,
+    ) -> Self {
+        let mut slots = Self {
+            entries: Vec::new(),
+            next: 1 + u16::from(synthetic_first),
+        };
+        for param in params.into_iter().flat_map(ast::ParamList::params) {
+            let width = Self::width(context, param.syntax());
+            if let Some(id) = context.def_at(param.syntax()) {
+                slots.entries.push((id, slots.next));
+            }
+            slots.next += width;
+        }
+        slots
+    }
+
     /// Give `id` the next free slot (or `width` of them), and return it.
     pub(crate) fn declare(&mut self, id: DefId, width: u16) -> u16 {
         let slot = self.next;

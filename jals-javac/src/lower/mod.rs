@@ -87,6 +87,8 @@ use crate::lower::slots::Slots;
 const ENUM: &str = "java/lang/Enum";
 /// Every `record`'s superclass, which the source never writes.
 const RECORD: &str = "java/lang/Record";
+/// The synthetic field an inner class holds its enclosing instance in, named as javac names it.
+const OUTER: &str = "this$0";
 
 /// The synthetic array holding an `enum`'s constants, in declaration order.
 ///
@@ -157,6 +159,11 @@ pub(crate) struct Context<'a> {
     /// Whether the type being emitted is an interface, which decides the access levels JLS §9.3
     /// and §9.4 let a declaration leave unwritten.
     in_interface: bool,
+    /// The internal name of the class an inner class holds an instance of. `None` for every other class.
+    encloses: Option<String>,
+    /// Every inner class in this file and the class it holds an instance of, so a `new` of one can pass
+    /// the enclosing instance even when the creation is not inside the inner class itself.
+    inner: alloc::collections::BTreeMap<ItemId, String>,
 }
 
 /// The source-to-class-file lowering.
@@ -239,13 +246,13 @@ impl Compile {
         // descriptors from the declaration, so all of them would be one parameter short — which is a
         // `NoSuchMethodError` at the first `new`, not a missing convenience.
         // A nested interface, `@interface`, and `enum` are implicitly `static` and hold no enclosing
-        // instance, so only a nested *class* can be an inner one.
-        if Self::is_nested(node)
+        // instance, so only a nested *class* can be an inner one. One that is holds its enclosing
+        // instance in a synthetic field, and every constructor takes it as an extra first parameter.
+        let encloses = (Self::is_nested(node)
             && !Self::has_modifier(node, jals_syntax::SyntaxKind::STATIC_KW)
-            && matches!(index.item(item).kind, DefKind::Class)
-        {
-            return Err(LowerError::Unsupported("a non-`static` inner class"));
-        }
+            && matches!(index.item(item).kind, DefKind::Class))
+        .then(|| Self::enclosing_name(node, index, file))
+        .transpose()?;
         let internal_name = Descriptor::internal_name_of(item, index);
         // An `@interface` *is* an interface: its members are implicitly `public abstract`, it has no
         // constructor, and `ACC_INTERFACE` is set. `ACC_ANNOTATION` is the only thing on top.
@@ -260,6 +267,8 @@ impl Compile {
             file,
             this_class: internal_name.clone(),
             in_interface: is_interface,
+            encloses: encloses.clone(),
+            inner: Self::inner_classes_of(node, index, file),
         };
 
         let mut pool = ConstantPool::new();
@@ -437,6 +446,9 @@ impl Compile {
                 descriptor_index: pool.utf8_index("Z").ok_or(AsmError::PoolFull)?,
                 attributes: Vec::new(),
             });
+        }
+        if let Some(enclosing) = &encloses {
+            fields.push(Self::enclosing_field(enclosing, &mut pool)?);
         }
         // A `static` field's initialiser and a `static { … }` block both run in `<clinit>`, once,
         // when the class is first used. Nothing else runs them — so dropping them produced a class
@@ -652,6 +664,78 @@ impl Compile {
             flags |= ClassAccessFlags::ABSTRACT;
         }
         flags
+    }
+
+    /// Every inner class declared in the file `node` belongs to, mapped to the internal name of the class
+    /// it holds an instance of.
+    ///
+    /// Walked from the file root rather than passed in, because a `new Inner()` may sit in any class in
+    /// the file and each is compiled on its own — the creation needs the *target's* shape, not its own.
+    fn inner_classes_of(
+        node: &SyntaxNode,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> alloc::collections::BTreeMap<ItemId, String> {
+        let mut out = alloc::collections::BTreeMap::new();
+        let Some(root) = node.ancestors().last() else {
+            return out;
+        };
+        for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
+            if !Self::is_nested(&declaration)
+                || Self::has_modifier(&declaration, jals_syntax::SyntaxKind::STATIC_KW)
+            {
+                continue;
+            }
+            let Some(name) = declaration
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            else {
+                continue;
+            };
+            let Some(item) = index.item_by_decl(file, usize::from(name.text_range().start()))
+            else {
+                continue;
+            };
+            if let Ok(enclosing) = Self::enclosing_name(&declaration, index, file) {
+                out.insert(item, enclosing);
+            }
+        }
+        out
+    }
+
+    /// The internal name of the class a nested declaration sits inside.
+    fn enclosing_name(node: &SyntaxNode, index: &ProjectIndex, file: FileId) -> Result<String> {
+        let declaration =
+            node.parent()
+                .and_then(|body| body.parent())
+                .ok_or(LowerError::Unsupported(
+                    "an inner class with no enclosing type",
+                ))?;
+        let name = declaration
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
+        let enclosing = index
+            .item_by_decl(file, usize::from(name.text_range().start()))
+            .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
+        Ok(Descriptor::internal_name_of(enclosing, index))
+    }
+
+    /// The synthetic field an inner class holds its enclosing instance in.
+    ///
+    /// `final` so nothing can rebind it and `synthetic` because the source never wrote it — which is also
+    /// what keeps a reflective reader from listing it among the class's declared fields.
+    fn enclosing_field(enclosing: &str, pool: &mut ConstantPool) -> Result<FieldInfo> {
+        Ok(FieldInfo {
+            access_flags: FieldAccessFlags(FieldAccessFlags::FINAL | FieldAccessFlags::SYNTHETIC),
+            name_index: pool.utf8_index(OUTER).ok_or(AsmError::PoolFull)?,
+            descriptor_index: pool
+                .utf8_index(&alloc::format!("L{enclosing};"))
+                .ok_or(AsmError::PoolFull)?,
+            attributes: Vec::new(),
+        })
     }
 
     /// Whether a declaration's `MODIFIERS` child carries `keyword`.
@@ -976,7 +1060,14 @@ impl Compile {
             .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
             .ok_or(LowerError::Unsupported("a malformed constructor"))?;
         let member = context.member_at(&name_token)?;
-        let descriptor = Descriptor::method_descriptor(member, context.index, true)?;
+        let mut descriptor = Descriptor::method_descriptor(member, context.index, true)?;
+        // An inner class's constructor takes the enclosing instance first: the index computed the
+        // descriptor from the declaration, which does not write it.
+        if let Some(enclosing) = &context.encloses {
+            descriptor
+                .params
+                .insert(0, jals_classfile::FieldType::Object(enclosing.clone()));
+        }
         let text = MethodDescriptor::to_string(&descriptor);
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
@@ -988,7 +1079,7 @@ impl Compile {
 
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
-        let slots = Slots::new(context, params.as_ref(), false);
+        let slots = Slots::for_constructor(context, params.as_ref(), context.encloses.is_some());
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
         match &delegation {
             // `this(…)` and `super(…)` each replace part of what the prologue emits, and running
@@ -1763,10 +1854,14 @@ impl Compile {
         members: &[SyntaxNode],
         access: u16,
     ) -> Result<MethodInfo> {
+        let text = context.encloses.as_ref().map_or_else(
+            || "()V".to_owned(),
+            |enclosing| alloc::format!("(L{enclosing};)V"),
+        );
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
-        let descriptor_index = pool.utf8_index("()V").ok_or(AsmError::PoolFull)?;
-        let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), "()V")?;
-        let slots = Slots::new(context, None, false);
+        let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
+        let slots = Slots::for_constructor(context, None, context.encloses.is_some());
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
         Self::prologue(context, &mut emit, super_name, super_item, members)?;
         asm.return_(None)?;
@@ -2189,6 +2284,15 @@ impl Compile {
         emit.asm.load(0)?;
         emit.asm
             .invoke_special(super_name, "<init>", "()V", false)?;
+        // The enclosing instance is stored after `super()` — before it, `this` is still
+        // `UninitializedThis` and a `putfield` on it is not something the verifier accepts here. Before
+        // the field initialisers, so one of them can already read it.
+        if let Some(enclosing) = &context.encloses {
+            emit.asm.load(0)?;
+            emit.asm.load(1)?;
+            emit.asm
+                .put_field(&context.this_class, OUTER, &alloc::format!("L{enclosing};"))?;
+        }
         Self::initializers(context, emit, members, false)
     }
 }
