@@ -2966,21 +2966,12 @@ impl Lowering<'_> {
             if label.is_default() {
                 is_default = true;
             }
-            // A *record* pattern deconstructs and an unnamed one binds nothing under a name this could
-            // find; both are a different lowering. A type pattern tests a type and binds one name.
-            if label
-                .syntax()
-                .children()
-                .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
-            {
-                return Err(WasmError::Unsupported("a `case` pattern"));
-            }
-            patterns.extend(
-                label
-                    .syntax()
-                    .children()
-                    .filter(|child| child.kind() == TYPE_PATTERN),
-            );
+            patterns.extend(label.syntax().children().filter(|child| {
+                matches!(
+                    child.kind(),
+                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                )
+            }));
             if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
                 guard = clause.condition();
                 if guard.is_none() {
@@ -3032,32 +3023,21 @@ impl Lowering<'_> {
                 continue;
             }
             let target = u32::try_from(index).map_err(|_| WasmError::TooLarge)?;
+            insn.block();
+            let next = insn.depth();
             for pattern in &arm.patterns {
-                let ty = pattern
-                    .children()
-                    .find_map(ast::Type::cast)
-                    .ok_or(WasmError::Unsupported("a `case` pattern with no type"))?;
-                let heap = self.named_type(&ty)?;
-                let bound = self
-                    .def_at(pattern)
-                    .ok_or(WasmError::Unsupported("a `case` pattern with no binding"))?;
-                let slot = self.declare_local(bound)?;
-                insn.local_get(scratch).ref_test(heap, false);
-                insn.if_();
-                // Bound before the guard runs, because the guard is written in terms of the binding.
-                insn.local_get(scratch).ref_cast(heap, false);
-                insn.local_set(slot);
-                if let Some(guard) = &arm.guard {
-                    self.expr(guard, insn)?
-                        .ok_or(WasmError::Unsupported("a guarded `case`"))?;
-                    // Inside the test's `if`, so the branch crosses one more structure than the depth
-                    // the arms' blocks were opened at — the same offset the unguarded `br` uses.
-                    insn.br_if(target + 1);
-                } else {
-                    insn.br(target + 1);
-                }
-                insn.end();
+                self.match_pattern(pattern, scratch, next, insn)?;
             }
+            // The guard runs after the patterns bound, because it is written in terms of the bindings.
+            if let Some(guard) = &arm.guard {
+                self.expr(guard, insn)?
+                    .ok_or(WasmError::Unsupported("a guarded `case`"))?;
+                insn.i32_eqz();
+                insn.br_if(insn.depth() - next);
+            }
+            // One block deeper than the depth the arms' blocks were opened at.
+            insn.br(target + 1);
+            insn.end();
         }
         insn.br(fallback);
         Ok(())
@@ -4081,53 +4061,165 @@ impl Lowering<'_> {
     /// which is exactly the question Java asks.
     fn instance_of(&mut self, binary: &ast::BinaryExpr, insn: &mut Insn) -> Result<ValType> {
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
-        // A *record* pattern deconstructs, which is a different lowering, and an unnamed one binds
-        // nothing under a name this could find. A type pattern binds one name to the narrowed value.
-        if binary
-            .syntax()
-            .children()
-            .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
-        {
-            return Err(WasmError::Unsupported("an `instanceof` pattern"));
-        }
         let operand = binary
             .lhs()
             .ok_or(WasmError::Unsupported("an `instanceof` with no operand"))?;
-        let pattern = binary
-            .syntax()
-            .children()
-            .find(|child| child.kind() == TYPE_PATTERN);
-        let ty = pattern
-            .as_ref()
-            .unwrap_or_else(|| binary.syntax())
-            .children()
-            .find_map(ast::Type::cast)
-            .ok_or(WasmError::Unsupported("an `instanceof` with no type"))?;
-        let target = self.named_type(&ty)?;
-        let operand_ty = self
-            .expr(&operand, insn)?
-            .ok_or(WasmError::Unsupported("an `instanceof` on nothing"))?;
+        let pattern = binary.syntax().children().find(|child| {
+            matches!(
+                child.kind(),
+                TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+            )
+        });
+        // A plain type test binds nothing, so it is the test and nothing else.
         let Some(pattern) = pattern else {
+            let ty = binary
+                .syntax()
+                .children()
+                .find_map(ast::Type::cast)
+                .ok_or(WasmError::Unsupported("an `instanceof` with no type"))?;
+            let target = self.named_type(&ty)?;
+            self.expr(&operand, insn)?
+                .ok_or(WasmError::Unsupported("an `instanceof` on nothing"))?;
             insn.ref_test(target, false);
             return Ok(ValType::I32);
         };
-        // `x instanceof T t` binds only where the test succeeded, and a wasm local starts at its type's
-        // default — so the store goes inside the `if` and the other path needs nothing at all.
-        let bound = self.def_at(&pattern).ok_or(WasmError::Unsupported(
-            "an `instanceof` pattern with no binding",
-        ))?;
-        let slot = self.declare_local(bound)?;
+        let operand_ty = self
+            .expr(&operand, insn)?
+            .ok_or(WasmError::Unsupported("an `instanceof` on nothing"))?;
         let scratch = self.scratch(operand_ty);
         let answer = self.scratch(ValType::I32);
-        insn.local_set(scratch).local_get(scratch);
-        insn.ref_test(target, false);
-        insn.local_tee(answer);
-        insn.if_();
-        insn.local_get(scratch).ref_cast(target, false);
-        insn.local_set(slot);
+        insn.local_set(scratch);
+        // A wasm local starts at its type's default, so a binding the match did not reach needs nothing
+        // arranged for it — unlike the JVM's, where the verifier merges both paths at the join.
+        insn.i32_const(0).local_set(answer);
+        insn.block();
+        let fail = insn.depth();
+        self.match_pattern(&pattern, scratch, fail, insn)?;
+        insn.i32_const(1).local_set(answer);
         insn.end();
         insn.local_get(answer);
         Ok(ValType::I32)
+    }
+
+    /// Match `pattern` against the value in `value`, branching out to `fail` when it does not.
+    ///
+    /// Falls through on a match, with every binding written. A *record* pattern is the recursive case:
+    /// it tests the type, then reads each component through its *accessor* — which is what a
+    /// deconstruction calls (§14.30.1), a record being free to declare one by hand — and matches the
+    /// component pattern against that.
+    fn match_pattern(
+        &mut self,
+        pattern: &SyntaxNode,
+        value: u32,
+        fail: u32,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        match pattern.kind() {
+            // `_` matches anything and binds nothing, so there is nothing to emit.
+            UNNAMED_PATTERN => Ok(()),
+            TYPE_PATTERN => {
+                let bound = self
+                    .def_at(pattern)
+                    .ok_or(WasmError::Unsupported("a pattern with no binding"))?;
+                let declared = self.input.inference.type_of_def(bound).clone();
+                let slot = self.declare_local(bound)?;
+                // A primitive component carries no test: its type is the component's, and a `ref`
+                // instruction over it is not a program. A reference one narrows, which is the test.
+                if matches!(declared, Ty::Primitive(_)) {
+                    insn.local_get(value).local_set(slot);
+                    return Ok(());
+                }
+                let ty = pattern
+                    .children()
+                    .find_map(ast::Type::cast)
+                    .ok_or(WasmError::Unsupported("a pattern with no type"))?;
+                let target = self.named_type(&ty)?;
+                insn.local_get(value).ref_test(target, false).i32_eqz();
+                insn.br_if(insn.depth() - fail);
+                insn.local_get(value).ref_cast(target, false);
+                insn.local_set(slot);
+                Ok(())
+            }
+            RECORD_PATTERN => {
+                let ty = pattern
+                    .children()
+                    .find_map(ast::Type::cast)
+                    .ok_or(WasmError::Unsupported("a `record` pattern with no type"))?;
+                let target = self.named_type(&ty)?;
+                let item = self
+                    .index
+                    .resolve_type_name(
+                        self.input.file,
+                        &ty.simple_name()
+                            .ok_or(WasmError::Unsupported("a type with no name"))?,
+                        None,
+                    )
+                    .project_id()
+                    .ok_or(WasmError::Unsupported("a `record` pattern on no record"))?;
+                insn.local_get(value).ref_test(target, false).i32_eqz();
+                insn.br_if(insn.depth() - fail);
+                let narrowed = self.scratch(self.layout.class_ref(item)?);
+                insn.local_get(value).ref_cast(target, false);
+                insn.local_set(narrowed);
+                // The components in header order, which is the order the sub-patterns are written in.
+                let components: Vec<MemberId> = self
+                    .index
+                    .own_members(item)
+                    .iter()
+                    .copied()
+                    .filter(|&member| {
+                        let info = self.index.member(member);
+                        info.kind == DefKind::Field && !info.modifiers.is_static
+                    })
+                    .collect();
+                let subs: Vec<SyntaxNode> = pattern
+                    .children()
+                    .filter(|child| {
+                        matches!(
+                            child.kind(),
+                            TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                        )
+                    })
+                    .collect();
+                if subs.len() != components.len() {
+                    return Err(WasmError::Unsupported(
+                        "a `record` pattern of the wrong arity",
+                    ));
+                }
+                for (component, sub) in components.iter().zip(&subs) {
+                    let name = self.index.member(*component).name.clone();
+                    let accessor = self
+                        .index
+                        .own_members(item)
+                        .iter()
+                        .copied()
+                        .find(|&member| {
+                            let info = self.index.member(member);
+                            info.kind == DefKind::Method
+                                && info.name == name
+                                && info.params.is_empty()
+                        })
+                        .ok_or(WasmError::Unsupported(
+                            "a record component with no accessor",
+                        ))?;
+                    let function = *self
+                        .layout
+                        .functions
+                        .get(&accessor)
+                        .ok_or(WasmError::Unsupported("a record accessor with no body"))?;
+                    let held = self.scratch(
+                        self.layout
+                            .val_type(&self.index.resolved_member_ty(*component))?,
+                    );
+                    insn.local_get(narrowed).call(function);
+                    insn.local_set(held);
+                    self.match_pattern(sub, held, fail, insn)?;
+                }
+                Ok(())
+            }
+            _ => Err(WasmError::Unsupported("an `instanceof` pattern")),
+        }
     }
 
     /// The declared heap type a `TYPE` node names.

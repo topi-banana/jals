@@ -2516,3 +2516,48 @@ public class Reader {
     assert_invoke(&[source], "twiceMul", &[], "39");
     assert_invoke(&[source], "same", &[], "1");
 }
+
+/// A `record` pattern on wasm, which deconstructs.
+///
+/// The recursive case: test the type, then read each component through its *accessor* — which is what a
+/// deconstruction calls (§14.30.1), a record being free to declare one by hand — and match the component
+/// pattern against that. `_` matches anything and binds nothing, so it emits nothing at all, and a
+/// primitive component carries no test because its type *is* the component's.
+///
+/// The selector is an interface rather than `Object`: a wasm host has no `java.base`, and an interface
+/// type is held at the top of the reference hierarchy, which is exactly what a pattern narrows from.
+#[test]
+fn a_record_pattern_deconstructs() {
+    let source = r"
+public interface Node {}
+public record Point(int x, int y) implements Node {}
+public record Line(Point a, Point b) implements Node {}
+public class Shape implements Node { int tag = 0; }
+
+public class Deconstruct {
+    static int total(Node o) {
+        return switch (o) {
+            case Line(Point(int x, int y), Point a) -> x + y + a.x() + a.y();
+            case Point(int x, _) -> x;
+            default -> -1;
+        };
+    }
+
+    public static int line() { return total(new Line(new Point(1, 2), new Point(3, 4))); }
+    public static int point() { return total(new Point(9, 8)); }
+    public static int other() { return total(new Shape()); }
+
+    public static int tested() {
+        Node o = new Point(5, 6);
+        if (o instanceof Point(int x, int y)) {
+            return x * 10 + y;
+        }
+        return 0;
+    }
+}
+";
+    assert_invoke(&[source], "line", &[], "10");
+    assert_invoke(&[source], "point", &[], "9");
+    assert_invoke(&[source], "other", &[], "-1");
+    assert_invoke(&[source], "tested", &[], "56");
+}
